@@ -1304,9 +1304,15 @@ pub fn node(guest: &str) -> Option<Node> {
             "stat" => Node::File(proc_stat().into_bytes()),
             "uptime" => Node::File(uptime().into_bytes()),
             "loadavg" => Node::File(loadavg().into_bytes()),
-            "version" => {
-                Node::File(b"Linux version 6.6.0-darwin (aim-linux-abi) #1 SMP PREEMPT\n".to_vec())
-            }
+            // linux_banner: `Linux version <release> (<builder>) <version>`.
+            "version" => Node::File(
+                format!(
+                    "Linux version {} (aim-linux-abi) {}\n",
+                    super::pstate::kernel_release(),
+                    super::pstate::KERNEL_VERSION
+                )
+                .into_bytes(),
+            ),
             "filesystems" => {
                 Node::File(b"nodev\tsysfs\nnodev\tproc\nnodev\ttmpfs\n\text4\n".to_vec())
             }
@@ -1436,7 +1442,9 @@ fn sys_node(tail: &str) -> Option<Node> {
         "kernel/random/uuid" => Node::File(random_uuid().into_bytes()),
         "kernel/pid_max" => Node::File(b"99999\n".to_vec()),
         "kernel/ostype" => Node::File(b"Linux\n".to_vec()),
-        "kernel/osrelease" => Node::File(b"6.6.0-darwin\n".to_vec()),
+        "kernel/osrelease" => {
+            Node::File(format!("{}\n", super::pstate::kernel_release()).into_bytes())
+        }
         "kernel/hostname" => {
             Node::File(format!("{}\n", sysctl_string("kern.hostname")).into_bytes())
         }
