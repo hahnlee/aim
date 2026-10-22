@@ -514,6 +514,22 @@ pub(super) fn managed_profiles(host: &AppHost, user: i32) -> Result<Vec<i32>, Ex
 /// The users the package boot scan installs for (`Settings.getAllUsers`:
 /// `getUsers(true, false, false)`, no partial user), with each one's
 /// `isAdbInstallDisallowed` (`hasUserRestriction(DISALLOW_DEBUGGING_FEATURES)`).
+/// `UserManagerService.getUsers(excludePartial=true, excludeDying,
+/// excludePreCreated)`'s ids: the system user unless it is partial, or a
+/// pre-created one when those are excluded; it is never dying.
+pub(super) fn user_ids(host: &AppHost, include_pre_created: bool) -> Result<Vec<i32>, Exception> {
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    Ok(
+        if info.partial || (info.pre_created && !include_pre_created) {
+            Vec::new()
+        } else {
+            vec![info.id]
+        },
+    )
+}
+
 pub(super) fn scan_users(host: &AppHost) -> Result<Vec<crate::package::scan::User>, Exception> {
     if host.device_policies()?.owned() {
         return Err(host.unimplemented_named(

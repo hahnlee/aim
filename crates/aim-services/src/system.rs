@@ -3379,7 +3379,7 @@ impl System {
     ) -> Result<ServiceOwner> {
         self.package_bootstrap_node_with(bridge, code, |_| {})
     }
-    fn package_bootstrap_node_with(
+    pub(crate) fn package_bootstrap_node_with(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         code: u32,
@@ -7679,7 +7679,7 @@ impl System {
                 )
             })?;
         let properties = initial.runtime_properties(area);
-        let configuration_leaf = self.package_bootstrap_binder_leaf_with(
+        let configuration_leaf = self.package_bootstrap_node_with(
             bridge,
             api::GET_PACKAGE_BOOT_CONFIGURATION_LEAF,
             |parcel| parcel.write_bool(factory_test),

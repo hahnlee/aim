@@ -286,7 +286,7 @@ pub struct Late {
 /// Concrete independent typed leaf adapter. Its resource configuration is the
 /// actual applied resource-owner value passed by the parent boot callback.
 pub struct Source {
-    node: Arc<aim_binder_host::local::Strong>,
+    node: Arc<crate::system::ServiceOwner>,
     data: PathBuf,
     configuration: Config,
     check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
@@ -328,7 +328,7 @@ impl Source {
         })
     }
     pub fn capture(
-        node: Arc<aim_binder_host::local::Strong>,
+        node: Arc<crate::system::ServiceOwner>,
         data: &Path,
         check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     ) -> Result<Self, String> {
@@ -490,7 +490,7 @@ fn original_root_inventory(image: &Path, supplied: &[PathBuf]) -> Result<Vec<Pat
     }
     Ok(roots)
 }
-fn decode_resources(bytes: &[u8]) -> Result<Config, String> {
+pub(crate) fn decode_resources(bytes: &[u8]) -> Result<Config, String> {
     let mut reader = aim_binder_host::parcel::Reader::new(bytes, &[]);
     let bad = |error| format!("original resource configuration record: {error}");
     if reader.read_i32().map_err(bad)? != 1 || reader.read_i32().map_err(bad)? != 24 {
@@ -531,7 +531,7 @@ fn decode_resources(bytes: &[u8]) -> Result<Config, String> {
     })
 }
 struct Rpc {
-    node: Arc<aim_binder_host::local::Strong>,
+    node: Arc<crate::system::ServiceOwner>,
     check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
 }
 impl Rpc {

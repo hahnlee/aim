@@ -60,7 +60,7 @@ impl System {
                         })?;
                     factory
                 };
-                let node = self.package_bootstrap_binder_leaf_with(
+                let node = self.package_bootstrap_node_with(
                     bridge,
                     bootstrap::GET_PACKAGE_BOOT_CONFIGURATION_LEAF,
                     |parcel| parcel.write_bool(factory),

@@ -94,6 +94,7 @@ mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod overlay_service;
+pub mod package_boot_configuration;
 mod package_checksums;
 pub mod package_initial_context;
 pub mod package_installer;

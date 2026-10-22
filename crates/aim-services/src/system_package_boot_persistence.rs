@@ -8,7 +8,7 @@ use aim_service_aidl::{
 pub(crate) struct BootPersistenceUsers {
     pub all: Vec<i32>,
     pub active: Vec<i32>,
-    leaf: Strong,
+    leaf: crate::system::ServiceOwner,
 }
 impl BootPersistenceUsers {
     pub(crate) fn revalidate(
@@ -42,7 +42,7 @@ impl System {
             .as_ref()
             .map(|(policy, _)| policy.factory_test)
             .ok_or_else(|| boot_write_error("original boot invocation unavailable"))?;
-        let node = self.package_bootstrap_binder_leaf_with(
+        let node = self.package_bootstrap_node_with(
             bridge,
             bootstrap::GET_PACKAGE_BOOT_CONFIGURATION_LEAF,
             |parcel| parcel.write_bool(factory),
@@ -56,7 +56,7 @@ impl System {
         })
     }
 }
-fn read_users(node: &Strong) -> Result<(Vec<i32>, Vec<i32>)> {
+fn read_users(node: &crate::system::ServiceOwner) -> Result<(Vec<i32>, Vec<i32>)> {
     let mut request = Parcel::new();
     request.write_interface_token(leaf::DESCRIPTOR);
     leaf::GetRuntimePermissionUserIds {}.write(&mut request);
