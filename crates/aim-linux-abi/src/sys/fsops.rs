@@ -2396,10 +2396,14 @@ mod tests {
             0,
         ]);
         assert!(fd >= 0);
-        unsafe {
-            libc::close(fd as i32);
-            libc::close(directory as i32);
-        }
+        // Closed through the layer, which forgets their descriptions: a raw
+        // close would leave them for another test's descriptor of the
+        // same number (#2113).
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(
+            super::super::fs::close([directory as u64, 0, 0, 0, 0, 0]),
+            0
+        );
         assert_eq!(owner(&format!("{base}/relative")).1, inherited);
         let alias = format!("{base}-symlink");
         let alias_name = c(&alias);
