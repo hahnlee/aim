@@ -40,6 +40,9 @@ fn resolve_w_bytes(dirfd: u64, p: &[u8], follow: bool) -> Result<Resolved, i64> 
 pub fn mkdirat(a: [u64; 6]) -> i64 {
     match resolve_w(a[0], a[1], false) {
         Ok(r) => {
+            if let Some(result) = devpts_make(&r) {
+                return result;
+            }
             if let Some(route) = vfs::fuse_route(&r.guest) {
                 return super::fuse_client::mkdir(&route, a[2] as u32)
                     .map(|_| 0)
@@ -94,6 +97,9 @@ pub fn mknodat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
+    if let Some(result) = devpts_make(&r) {
+        return result;
+    }
     if let Some(route) = vfs::fuse_route(&r.guest) {
         return super::fuse_client::mknod(&route, mode, a[3] as u32)
             .map(|_| 0)
@@ -151,6 +157,55 @@ fn directory_permits(st: &libc::stat, want: u32, id: &super::cred::Identity) -> 
         || id.cap_eff & (1 << 1) != 0
         || (want & 2 == 0 && id.cap_eff & (1 << 2) != 0)
 }
+/// Whether `r` names an entry of the guest's devpts, and whether it
+/// exists: the guest's own pairs (#2112), or a node already in the
+/// directory.
+fn devpts_entry(r: &Resolved) -> Option<bool> {
+    let name = r.guest.strip_prefix("/dev/pts/")?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(super::tty::pts_host(&r.guest).is_some() || !attrs::absent(&r.host))
+}
+
+/// `may_create` / `may_delete` on the guest's `/dev/pts` (write and
+/// search).
+fn devpts_dac() -> Result<(), i64> {
+    if !attrs::recording() {
+        return Ok(());
+    }
+    let dir = super::fs::stat_at(crate::vfs::LINUX_AT_FDCWD, b"/dev/pts", 0)?;
+    if directory_permits(&dir, 3, &super::cred::current()) {
+        Ok(())
+    } else {
+        Err(-(crate::errno::EACCES as i64))
+    }
+}
+
+/// What devpts answers a call making `r` in it (mkdir, mknod, symlink, a
+/// link's new name): EEXIST for an entry there, then the directory's DAC,
+/// then EPERM, as it has no such inode operation; `None` outside it.
+fn devpts_make(r: &Resolved) -> Option<i64> {
+    if devpts_entry(r)? {
+        return Some(-(crate::errno::EEXIST as i64));
+    }
+    Some(devpts_dac().err().unwrap_or(-EPERM))
+}
+
+/// What devpts answers removing `r` (unlink, rmdir, a rename's source):
+/// ENOENT for no entry, then the directory's DAC, then ENOTDIR for an
+/// rmdir of its device nodes, else EPERM; `None` outside it.
+fn devpts_remove(r: &Resolved, rmdir: bool) -> Option<i64> {
+    if !devpts_entry(r)? {
+        return Some(-(ENOENT as i64));
+    }
+    Some(match devpts_dac() {
+        Err(error) => error,
+        Ok(()) if rmdir => -(crate::errno::ENOTDIR as i64),
+        Ok(()) => -EPERM,
+    })
+}
+
 fn sticky_permits(parent: &libc::stat, target: &libc::stat, id: &super::cred::Identity) -> bool {
     parent.st_mode as u32 & libc::S_ISVTX as u32 == 0
         || id.uid[3] == parent.st_uid
@@ -254,6 +309,9 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
                 }
                 _ => (),
             }
+            if let Some(result) = devpts_remove(&r, a[2] & AT_REMOVEDIR != 0) {
+                return result;
+            }
             let parent = std::path::Path::new(&r.guest).parent().unwrap();
             let parent = match vfs::resolve(
                 crate::vfs::LINUX_AT_FDCWD,
@@ -343,6 +401,9 @@ pub fn symlinkat(a: [u64; 6]) -> i64 {
     };
     match resolve_w(a[1], a[2], false) {
         Ok(r) => {
+            if let Some(result) = devpts_make(&r) {
+                return result;
+            }
             if let Some(route) = vfs::fuse_route(&r.guest) {
                 return super::fuse_client::symlink(&route, target)
                     .map(|_| 0)
@@ -415,6 +476,16 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
+    // devpts is its own mount: a link into or out of it crosses mounts.
+    let old_devpts = old.as_ref().is_some_and(|old| devpts_entry(old).is_some());
+    // An existing new name is EEXIST before the mounts are compared
+    // (`filename_create`).
+    match (old_devpts, devpts_make(&new)) {
+        (false, None) => {}
+        (true, Some(result)) => return result,
+        (_, Some(result)) if result == -(crate::errno::EEXIST as i64) => return result,
+        _ => return -EXDEV,
+    }
     let old_route = old.as_ref().and_then(|old| vfs::fuse_route(&old.guest));
     let new_route = vfs::fuse_route(&new.guest);
     match (old_route, new_route) {
@@ -468,6 +539,12 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
+    // devpts is its own mount and has no rename.
+    match (devpts_entry(&old).is_some(), devpts_entry(&new).is_some()) {
+        (false, false) => {}
+        (true, true) => return devpts_remove(&old, false).unwrap(),
+        _ => return -EXDEV,
+    }
     match (vfs::fuse_route(&old.guest), vfs::fuse_route(&new.guest)) {
         (Some(old), Some(new)) => {
             return super::fuse_client::rename(&old, &new, flags as u32)

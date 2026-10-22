@@ -425,6 +425,47 @@ static void devpts_instance(void) {
   CHECK(lists(0));
 }
 
+// devpts has no create, mkdir, mknod, symlink, link, rename or unlink: an
+// existing name is EEXIST (or ENOENT for a missing one to remove), then
+// EPERM; a link or rename across its mount EXDEV.
+static void devpts_makes_no_node(void) {
+  char name[64];
+  int master = open_master(name, sizeof(name));
+  CHECK(master >= 0);
+  const char* missing = "/dev/pts/aim-node";
+  errno = 0;
+  CHECK(open(missing, O_RDWR | O_CREAT, 0600) == -1 && errno == EACCES);
+  errno = 0;
+  CHECK(mkdir(missing, 0700) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(mkdir(name, 0700) == -1 && errno == EEXIST);
+  errno = 0;
+  CHECK(mknod(missing, S_IFIFO | 0600, 0) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(mknod(name, S_IFIFO | 0600, 0) == -1 && errno == EEXIST);
+  errno = 0;
+  CHECK(symlink("/dev/null", missing) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(link(name, missing) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(link("/dev/null", missing) == -1 && errno == EXDEV);
+  errno = 0;
+  CHECK(rename(name, missing) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(rename(name, "/data/local/tmp/aim-pts") == -1 && errno == EXDEV);
+  errno = 0;
+  CHECK(unlink(name) == -1 && errno == EPERM);
+  errno = 0;
+  CHECK(rmdir(name) == -1 && errno == ENOTDIR);
+  errno = 0;
+  CHECK(unlink(missing) == -1 && errno == ENOENT);
+  struct stat st;
+  errno = 0;
+  CHECK(lstat(missing, &st) == -1 && errno == ENOENT);
+  CHECK(stat(name, &st) == 0 && S_ISCHR(st.st_mode));
+  CHECK(close(master) == 0);
+}
+
 static void allocate_and_close(void) {
   char name[64];
   int master = open_master(name, sizeof(name));
@@ -451,6 +492,7 @@ int main(int argc, char** argv) {
     DONE();
   }
   RUN(devpts_instance);
+  RUN(devpts_makes_no_node);
   RUN(master_and_slave);
   RUN(locked_slave_metadata);
   RUN(not_a_terminal);

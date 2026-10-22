@@ -258,9 +258,18 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if cgroup.is_some() && flags & O_CREAT != 0 && attrs::absent(&r.host) {
         return -(EACCES as i64);
     }
-    // devpts makes no node: a name no guest pair holds cannot be created.
+    // devpts makes no node (it has no `create`): a name no guest pair
+    // holds cannot be created, whatever the name.
     let pts = super::tty::pts_index(&r.guest);
-    if pts.is_some() && flags & O_CREAT != 0 && attrs::absent(&r.host) {
+    let in_devpts = r
+        .guest
+        .strip_prefix("/dev/pts/")
+        .is_some_and(|name| !name.is_empty() && !name.contains('/'));
+    if in_devpts
+        && flags & O_CREAT != 0
+        && super::tty::pts_host(&r.guest).is_none()
+        && attrs::absent(&r.host)
+    {
         return -(EACCES as i64);
     }
     let flags = if r.guest == "/dev/kmsg" || cgroup.is_some() {
