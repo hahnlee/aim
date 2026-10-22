@@ -123,6 +123,10 @@ impl Description {
     pub fn detach_tty(&self) -> Result<(), Errno> {
         self.client.detach_tty(&self.endpoint).map_err(failure)
     }
+    /// The pair's index in the guest's devpts instance.
+    pub fn index(&self) -> Result<u32, Errno> {
+        self.client.index(&self.endpoint).map_err(failure)
+    }
     pub fn watch(&self) -> Result<Watch, Errno> {
         self.endpoint
             .capability
@@ -433,35 +437,60 @@ fn configured_client() -> Result<Option<Arc<Client>>, Errno> {
         .map(|owner| Some(owner.client.clone()))
         .map_err(|error| *error)
 }
-fn start_owner() -> Result<Owner, Errno> {
+/// The owner of the guest's devpts instance if there is one already: a
+/// guest with no owner has no pairs, and naming one starts none.
+fn existing_client() -> Result<Option<Arc<Client>>, Errno> {
+    if let Some(owner) = OWNER.get() {
+        return owner
+            .as_ref()
+            .map(|owner| Some(owner.client.clone()))
+            .map_err(|error| *error);
+    }
+    let Some(owner) = existing_owner()? else {
+        return Ok(None);
+    };
+    let _ = OWNER.set(Ok(owner));
+    configured_client()
+}
+fn existing_owner() -> Result<Option<Owner>, Errno> {
     let Some(runtime) = crate::vfs::runtime_dir() else {
-        return Err(errno::ENODEV);
+        return Ok(None);
     };
     let locator = runtime.join("pty-control-owner");
     if let Some(init) = super::pidns::init_registration().map_err(|error| -error as Errno)? {
         let config = OwnerConfig::read(&locator, init.process).map_err(failure)?;
-        return Ok(Owner {
+        return Ok(Some(Owner {
             client: Arc::new(Client::lookup(&config.endpoint, config.process).map_err(failure)?),
             _child: None,
-        });
+        }));
     }
-    let table = super::cred::publish_current_for_owner(&runtime.join("identity/by-pid"))?;
     if crate::vfs::guest_path_of_host(&locator).is_some() {
         return Err(errno::EPERM);
     }
     match std::fs::symlink_metadata(&locator) {
         Ok(_) => {
+            super::cred::publish_current_for_owner(&runtime.join("identity/by-pid"))?;
             let config = OwnerConfig::read_standalone(&locator).map_err(failure)?;
-            return Ok(Owner {
+            Ok(Some(Owner {
                 client: Arc::new(
                     Client::lookup(&config.endpoint, config.process).map_err(failure)?,
                 ),
                 _child: None,
-            });
+            }))
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(failure(error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(failure(error)),
     }
+}
+fn start_owner() -> Result<Owner, Errno> {
+    if let Some(owner) = existing_owner()? {
+        return Ok(owner);
+    }
+    let Some(runtime) = crate::vfs::runtime_dir() else {
+        return Err(errno::ENODEV);
+    };
+    let locator = runtime.join("pty-control-owner");
+    let table = super::cred::publish_current_for_owner(&runtime.join("identity/by-pid"))?;
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let pairs = runtime.join("pty-pairs");
     match std::fs::DirBuilder::new().mode(0o700).create(&pairs) {
@@ -557,14 +586,27 @@ pub(super) fn allocate(flags: u64) -> Result<Option<Arc<Description>>, Errno> {
     client.slave_lock(&endpoint, Some(true)).map_err(failure)?;
     Ok(Some(Arc::new(Description { client, endpoint })))
 }
-pub(super) fn open_slave(path: &[u8], flags: u64) -> Result<Option<Arc<Description>>, Errno> {
-    let Some(client) = configured_client()? else {
-        return Ok(None);
-    };
-    match client.open_slave_path(path, flags) {
-        Ok(endpoint) => Ok(Some(Arc::new(Description { client, endpoint }))),
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
-        Err(error) => Err(failure(error)),
+/// `/dev/pts/<index>` of the guest's devpts instance; ENOENT for an index
+/// no guest pair holds, as devpts has no node for it.
+pub(super) fn open_slave(index: u32, flags: u64) -> Result<Arc<Description>, Errno> {
+    let client = existing_client()?.ok_or(errno::ENOENT)?;
+    let endpoint = client.open_slave_index(index, flags).map_err(failure)?;
+    Ok(Arc::new(Description { client, endpoint }))
+}
+/// The host slave of the guest's `/dev/pts/<index>`, if a guest pair holds
+/// that index.
+pub(super) fn slave_of_index(index: u32) -> Option<Vec<u8>> {
+    existing_client().ok()??.slave_of_index(index).ok()
+}
+/// The guest's devpts index of host slave `host`, if it is a guest pair's.
+pub(super) fn index_of_slave(host: &[u8]) -> Option<u32> {
+    existing_client().ok()??.index_of_slave(host).ok()
+}
+/// The indices of the guest's devpts instance, ascending.
+pub(super) fn indices() -> Result<Vec<u32>, Errno> {
+    match existing_client()? {
+        Some(client) => client.indices().map_err(failure),
+        None => Ok(Vec::new()),
     }
 }
 pub(super) fn publish(description: Arc<Description>, flags: u64) -> Result<i32, Errno> {

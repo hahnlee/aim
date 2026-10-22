@@ -93,7 +93,12 @@ kernfs	/proc	<runtime>/kernfs/proc
 `<runtime>` defaults to `<data>.run`, beside the data directory and not
 in its image (docs/storage.md), and is recreated on every boot. Runtime
 preparation creates `/dev/pts` as an actual directory for ancestor permission
-checks; numeric slave paths are resolved by the PTY owner to real host terminals. An
+checks. Its numeric entries are the guest's own devpts instance (`sys/tty.rs`):
+the PTY owner numbers the guest's pairs, the lowest free index first, and
+`/dev/pts/N` opens, stats and lists only the guest pair with index N, whatever
+Darwin slave is behind it. A number no guest pair holds is no node (ENOENT),
+never the Mac's `/dev/ttysN`; an index is free again once the owner has retired
+its pair's last close, a moment after the close where devpts frees it at once. An
 init bind mount rewrites the file, so processes started afterwards see it
 (the data mirrors zygote binds app data from); running processes do not.
 vold's bind of `/data/data` onto `/data/user/0` (`prepare_special_dirs`)

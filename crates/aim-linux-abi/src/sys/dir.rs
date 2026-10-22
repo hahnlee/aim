@@ -187,6 +187,12 @@ pub fn getdents64(a: [u64; 6]) -> i64 {
                 if super::evdev::is_device_dir(fd) {
                     super::evdev::fix_types(&mut e);
                 }
+                if super::tty::is_pts_dir(fd) {
+                    match super::tty::pts_entries() {
+                        Ok(pts) => e.extend(pts),
+                        Err(error) => return -(error as i64),
+                    }
+                }
                 d.entries = Some(e)
             }
             Err(e) => return e,

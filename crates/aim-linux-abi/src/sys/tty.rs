@@ -2,13 +2,21 @@
 //!
 //! The native PTY owner retains the physical pair and completed output after
 //! the final guest slave closes (#1259). Logical locks, open-description flags
-//! and controlling sessions belong to that owner; `/dev/pts/N` names its real
-//! Darwin slave. termios flags, characters and speeds are translated here.
+//! and controlling sessions belong to that owner. The guest has its own devpts
+//! instance, as a Linux container does: the owner numbers the guest's pairs,
+//! the lowest free index first (`devpts_new_index`), and `/dev/pts/N` names
+//! only the guest pair with index N, whatever the Darwin slave behind it.
+//! A number no guest pair holds has no node, and the Mac's own terminals
+//! (`/dev/ttysNNN`) have no name in the guest: an inherited one is reached
+//! only through the descriptor it was given, and `/proc/self/fd` shows its
+//! path outside the guest's devpts, as Linux shows a tty of another devpts
+//! instance. termios flags, characters and speeds are translated here.
 //!
 //! Legacy inherited terminals retain their existing native drain behavior.
 
 use crate::errno::{self, EINVAL, ENOTTY};
 use crate::sys::pidns;
+use aim_storage::pty_owner::Side;
 
 const TCGETS: u64 = 0x5401;
 const TCSETS: u64 = 0x5402;
@@ -25,22 +33,78 @@ const TIOCNOTTY: u64 = 0x5422;
 const TIOCGSID: u64 = 0x5429;
 /// `_IOR('T', 0x30, unsigned int)`.
 const TIOCGPTN: u64 = 0x8004_5430;
+/// `_IO('T', 0x41)`.
+const TIOCGPTPEER: u64 = 0x5441;
+/// Linux's `O_NOCTTY`.
+const O_NOCTTY: u64 = 0o400;
 /// `_IOW('T', 0x31, int)`.
 const TIOCSPTLCK: u64 = 0x4004_5431;
 const TIOCGPTLCK: u64 = 0x8004_5439;
 /// Darwin's `TIOCPTYGNAME`, `_IOR('t', 83, char[128])`: a master's slave.
 const DARWIN_TIOCPTYGNAME: libc::c_ulong = 0x4080_7453;
 
-/// The host's name of slave `n` (`ptsname`'s `/dev/ttys%03d`).
-pub fn pts_host(guest: &str) -> Option<String> {
-    let n: u32 = guest.strip_prefix("/dev/pts/")?.parse().ok()?;
-    Some(format!("/dev/ttys{n:03}"))
+/// The devpts index a guest path `/dev/pts/N` names.
+pub fn pts_index(guest: &str) -> Option<u32> {
+    let n = guest.strip_prefix("/dev/pts/")?;
+    // devpts names are the decimal index alone.
+    if n.is_empty() || n.starts_with('+') || (n.len() > 1 && n.starts_with('0')) {
+        return None;
+    }
+    n.parse().ok()
 }
 
-/// The guest's name of host slave `host`.
+/// The Darwin slave behind the guest's `/dev/pts/N`, if a guest pair holds
+/// index N.
+pub fn pts_host(guest: &str) -> Option<String> {
+    let host = super::pty_owner::slave_of_index(pts_index(guest)?)?;
+    String::from_utf8(host).ok()
+}
+
+/// The guest's name of Darwin slave `host`, if it is a guest pair's.
 pub fn pts_guest(host: &str) -> Option<String> {
-    let n: u32 = host.strip_prefix("/dev/ttys")?.parse().ok()?;
-    Some(format!("/dev/pts/{n}"))
+    host_index(host)?;
+    let index = super::pty_owner::index_of_slave(host.as_bytes())?;
+    Some(format!("/dev/pts/{index}"))
+}
+
+/// Whether directory `fd` is the guest's `/dev/pts`.
+pub(super) fn is_pts_dir(fd: i32) -> bool {
+    let (host, _) = crate::vfs::lookup("/dev/pts");
+    let Ok(path) = std::ffi::CString::new(host.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    let (mut a, mut b): (libc::stat, libc::stat) = unsafe { std::mem::zeroed() };
+    // SAFETY: stats into local buffers.
+    let both = unsafe { libc::fstat(fd, &mut a) == 0 && libc::stat(path.as_ptr(), &mut b) == 0 };
+    both && (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+}
+
+/// devpts' entries for the guest's pairs: each index, a character device
+/// with its node's inode.
+pub(super) fn pts_entries() -> Result<Vec<super::dir::Entry>, crate::errno::Errno> {
+    const DT_CHR: u8 = 2;
+    let mut entries = Vec::new();
+    for index in super::pty_owner::indices()? {
+        let Some(host) = super::pty_owner::slave_of_index(index) else {
+            // Released since the listing.
+            continue;
+        };
+        let Ok(host) = std::ffi::CString::new(host) else {
+            continue;
+        };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: stat into a local buffer.
+        if unsafe { libc::stat(host.as_ptr(), &mut st) } < 0 {
+            continue;
+        }
+        entries.push(super::dir::Entry::new(st.st_ino, DT_CHR, index.to_string()));
+    }
+    Ok(entries)
+}
+
+/// The number of a Darwin slave name (`ptsname`'s `/dev/ttys%03d`).
+fn host_index(host: &str) -> Option<u32> {
+    host.strip_prefix("/dev/ttys")?.parse().ok()
 }
 
 /// Linux devpts_new_index uses the allocating filesystem identity. Pinned
@@ -75,7 +139,7 @@ fn allocated_attributes(
         return Err(errno::last());
     }
     let host = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
-    pts_guest(host.to_str().map_err(|_| EINVAL)?).ok_or(EINVAL)?;
+    host_index(host.to_str().map_err(|_| EINVAL)?).ok_or(EINVAL)?;
     super::attrs::allocated_character(
         super::attrs::Host::Path(host),
         super::attrs::Attr {
@@ -114,6 +178,24 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                     pidns::syscall_pid(pgrp).map_err(|error| -error as crate::errno::Errno)?;
                 description.set_foreground(pgrp).map(|_| 0)
             })),
+            TIOCGPTN => Some(if description.side() == Side::Master {
+                description.index().and_then(|index| {
+                    super::user_memory::write_exact(arg, &index.to_le_bytes()).map(|_| 0)
+                })
+            } else {
+                Err(ENOTTY)
+            }),
+            // ptm_open_peer: the slave of this master, as an open of its
+            // devpts node with O_NOCTTY.
+            TIOCGPTPEER => Some(if description.side() == Side::Master {
+                let flags = arg | O_NOCTTY;
+                description
+                    .open_slave(flags)
+                    .and_then(|slave| super::pty_owner::publish(slave, flags))
+                    .map(i64::from)
+            } else {
+                Err(errno::EIO)
+            }),
             TIOCGPTLCK => Some(description.slave_lock(None).and_then(|locked| {
                 super::user_memory::write_exact(arg, &i32::from(locked).to_le_bytes()).map(|_| 0)
             })),
@@ -259,10 +341,10 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                     // Not a master.
                     return Some(-(ENOTTY as i64));
                 }
+                // A Darwin master the owner does not hold is another devpts
+                // instance's; its index is that instance's.
                 let name = std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy();
-                let Some(n) =
-                    pts_guest(&name).and_then(|g| g["/dev/pts/".len()..].parse::<u32>().ok())
-                else {
+                let Some(n) = host_index(&name) else {
                     return Some(-(ENOTTY as i64));
                 };
                 super::user_memory::write_exact(arg, &n.to_le_bytes())
@@ -531,13 +613,77 @@ mod tests {
         }
     }
     #[test]
-    fn pts_names_round_trip() {
-        assert_eq!(pts_host("/dev/pts/7").as_deref(), Some("/dev/ttys007"));
-        assert_eq!(pts_host("/dev/pts/1234").as_deref(), Some("/dev/ttys1234"));
-        assert_eq!(pts_guest("/dev/ttys007").as_deref(), Some("/dev/pts/7"));
-        assert_eq!(pts_host("/dev/pts/x"), None);
-        assert_eq!(pts_host("/dev/ptmx"), None);
-        assert_eq!(pts_guest("/dev/ttyp0"), None);
+    fn devpts_names_are_decimal_indices() {
+        assert_eq!(pts_index("/dev/pts/0"), Some(0));
+        assert_eq!(pts_index("/dev/pts/1234"), Some(1234));
+        for name in [
+            "/dev/pts/x",
+            "/dev/pts/",
+            "/dev/pts/07",
+            "/dev/pts/+7",
+            "/dev/ptmx",
+        ] {
+            assert_eq!(pts_index(name), None, "{name}");
+        }
+        assert_eq!(host_index("/dev/ttys007"), Some(7));
+        assert_eq!(host_index("/dev/ttyp0"), None);
+    }
+
+    /// #2112: the Mac's own terminals are no guest devpts node. A Darwin
+    /// pty made outside the guest (as a Terminal window's is) cannot be
+    /// opened by its number, and its slave has no guest name.
+    #[test]
+    fn host_terminals_have_no_guest_devpts_name() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::tty::tests::host_terminals_have_no_guest_devpts_name",
+        ) {
+            return;
+        }
+        use std::ffi::CString;
+        let (_guard, root) = crate::vfs::test_view();
+        let _owner = native_owner_fixture();
+        let device = root.join("host-tty-dev");
+        std::fs::create_dir_all(device.join("pts")).unwrap();
+        crate::vfs::add_mount(
+            "/dev",
+            device.clone(),
+            crate::vfs::Area::Writable,
+            "host-tty-dev",
+            "tmpfs",
+        )
+        .unwrap();
+        // SAFETY: a host pty pair made and closed here.
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0);
+            assert_eq!(libc::grantpt(master), 0);
+            assert_eq!(libc::unlockpt(master), 0);
+            let mut name = [0 as libc::c_char; 128];
+            assert_eq!(
+                libc::ioctl(master, DARWIN_TIOCPTYGNAME, name.as_mut_ptr()),
+                0
+            );
+            let host = std::ffi::CStr::from_ptr(name.as_ptr())
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let number = host_index(&host).unwrap();
+            let guest = CString::new(format!("/dev/pts/{number}")).unwrap();
+            let opened = crate::sys::fs::openat([
+                crate::vfs::LINUX_AT_FDCWD as u64,
+                guest.as_ptr() as u64,
+                2 | 0x100,
+                0,
+                0,
+                0,
+            ]);
+            assert_eq!(opened, -(crate::errno::ENOENT as i64));
+            assert!(crate::sys::attrs::path_stat(guest.to_str().unwrap()).is_err());
+            assert_eq!(pts_guest(&host), None);
+            libc::close(master);
+        }
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        std::fs::remove_dir_all(device).unwrap();
     }
 
     #[test]
@@ -694,8 +840,9 @@ mod tests {
         drop(master);
         let mut held = Vec::new();
         let mut reused = None;
-        // Retain lower-numbered allocations while searching so unrelated host
-        // PTYs cannot make an immediate-global-reuse assumption flaky.
+        // devpts hands the lowest free index out: the freed one once the
+        // owner has released its pair, and a later one while it has not
+        // yet (those are held so they stay in use).
         for _ in 0..64 {
             let allocation = allocate(&foreign);
             if allocation.1 == number {
@@ -763,18 +910,33 @@ mod tests {
         )
         .unwrap();
         unsafe {
-            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-            assert!(master >= 0);
+            let master = crate::sys::fs::openat([
+                crate::vfs::LINUX_AT_FDCWD as u64,
+                c"/dev/ptmx".as_ptr() as u64,
+                2 | 0x100,
+                0,
+                0,
+                0,
+            ]);
+            assert!(master >= 0, "PTY allocation: {master}");
+            let master = GuestFd(master as i32);
+            use std::os::fd::AsRawFd;
             let mut unlock = 0i32;
             assert_eq!(
-                ioctl(master, TIOCSPTLCK, &mut unlock as *mut i32 as u64),
+                ioctl(
+                    master.as_raw_fd(),
+                    TIOCSPTLCK,
+                    &mut unlock as *mut i32 as u64
+                ),
                 Some(0)
             );
             let mut number = u32::MAX;
             assert_eq!(
-                ioctl(master, TIOCGPTN, &mut number as *mut u32 as u64),
+                ioctl(master.as_raw_fd(), TIOCGPTN, &mut number as *mut u32 as u64),
                 Some(0)
             );
+            // The guest's first pair.
+            assert_eq!(number, 0);
             let slave = CString::new(format!("/dev/pts/{number}")).unwrap();
             let open = || {
                 crate::sys::fs::openat([
@@ -800,7 +962,7 @@ mod tests {
                 assert_eq!(libc::ioctl(fd as i32, libc::TIOCGWINSZ, &mut size), 0);
                 assert_eq!(crate::sys::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
             }
-            libc::close(master);
+            drop(master);
         }
         assert!(crate::vfs::remove_mount("/dev").unwrap());
         // Importing the same live namespace retains its one mount object.
@@ -819,9 +981,11 @@ mod tests {
                 ioctl(master, TIOCSPTLCK, &mut unlock as *mut i32 as u64),
                 Some(0)
             );
+            // A Darwin master the guest's owner does not hold: its index is
+            // its own instance's, the Darwin slave number.
             let mut n = u32::MAX;
             assert_eq!(ioctl(master, TIOCGPTN, &mut n as *mut u32 as u64), Some(0));
-            let host = pts_host(&format!("/dev/pts/{n}")).unwrap();
+            let host = format!("/dev/ttys{n:03}");
             let slave = libc::open(
                 std::ffi::CString::new(host).unwrap().as_ptr(),
                 libc::O_RDWR | libc::O_NOCTTY,

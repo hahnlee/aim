@@ -258,6 +258,11 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if cgroup.is_some() && flags & O_CREAT != 0 && attrs::absent(&r.host) {
         return -(EACCES as i64);
     }
+    // devpts makes no node: a name no guest pair holds cannot be created.
+    let pts = super::tty::pts_index(&r.guest);
+    if pts.is_some() && flags & O_CREAT != 0 && attrs::absent(&r.host) {
+        return -(EACCES as i64);
+    }
     let flags = if r.guest == "/dev/kmsg" || cgroup.is_some() {
         flags & !O_TRUNC
     } else {
@@ -285,7 +290,7 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if let Some(fd) = crate::xrt::open_translated(&r.host, &r.guest, hflags) {
         return fd as i64;
     }
-    if flags & O_PATH == 0 && (r.guest == "/dev/ptmx" || super::tty::pts_host(&r.guest).is_some()) {
+    if flags & O_PATH == 0 && (r.guest == "/dev/ptmx" || pts.is_some()) {
         if flags & O_DIRECTORY != 0 {
             return -(errno::ENOTDIR as i64);
         }
@@ -309,16 +314,13 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             .map(|fd| fd as i64)
             .unwrap_or_else(|error| -(error as i64));
     }
-    if flags & O_PATH == 0 && super::tty::pts_host(&r.guest).is_some() {
-        match super::pty_owner::open_slave(r.host.as_bytes(), flags) {
-            Ok(Some(description)) => {
-                return super::pty_owner::publish(description, flags)
-                    .map(|fd| fd as i64)
-                    .unwrap_or_else(|error| -(error as i64));
-            }
-            Ok(None) => {}
-            Err(error) => return -(error as i64),
-        }
+    // The guest's devpts node: its owner's pair, never the Darwin slave of
+    // the same number (the Mac's own terminals are none of the guest's).
+    if let (Some(index), 0) = (pts, flags & O_PATH) {
+        return super::pty_owner::open_slave(index, flags)
+            .and_then(|description| super::pty_owner::publish(description, flags))
+            .map(|fd| fd as i64)
+            .unwrap_or_else(|error| -(error as i64));
     }
     // A file the guest creates keeps its owner's access on the host, as
     // mkdirat's does (fsops::host_mode), so its recorded metadata stays
