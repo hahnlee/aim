@@ -231,7 +231,28 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                     Err(_) => POLLERR,
                 };
             }
-            g.revents = from_host(h.revents, g.events);
+            g.revents = match (h.revents & POLLHUP != 0)
+                .then(|| super::tcp_shutdown::polled_hangup(h.fd))
+                .flatten()
+            {
+                // A TCP socket's shutdown, which Darwin reports as HUP
+                // alone, as tcp_poll reports it.
+                Some(tcp) => {
+                    let mut revents = h.revents & !POLLHUP;
+                    if tcp.receive {
+                        revents |= POLLIN | POLLRDNORM;
+                    }
+                    if tcp.send || super::tcp_shutdown::writable(h.fd) {
+                        revents |= libc::POLLOUT;
+                    }
+                    if tcp.hangup() {
+                        revents |= POLLHUP;
+                    }
+                    from_host(revents, g.events)
+                        | if tcp.receive { g.events & POLLRDHUP } else { 0 }
+                }
+                None => from_host(h.revents, g.events),
+            };
             if g.revents != 0 {
                 ready += 1;
             }

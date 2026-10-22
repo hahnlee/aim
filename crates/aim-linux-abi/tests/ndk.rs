@@ -500,6 +500,12 @@ fn vectored_positional_flags() {
     check("t_rwf", &["/data/local/tmp"]);
 }
 
+/// A TCP connection's shutdowns as tcp_poll reports them (#1333).
+#[test]
+fn tcp_shutdown_readiness() {
+    check("t_tcphup", &[]);
+}
+
 /// Anonymous mapping names in maps and smaps (#1993).
 #[test]
 fn anonymous_mapping_names() {
