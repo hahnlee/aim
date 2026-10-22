@@ -961,7 +961,12 @@ mod namespace_receipt_tests {
             crate::vfs::mount_namespace_id().as_deref(),
             Some("prebound-child")
         );
-        std::fs::write(&fields[3], b"ACTUAL_PARENT_EXIT_CHILD_EXECUTED").unwrap();
+        // Written whole and renamed into place: the test waits for the
+        // marker to exist and then reads it.
+        let output = PathBuf::from(&fields[3]);
+        let partial = output.with_extension("partial");
+        std::fs::write(&partial, b"ACTUAL_PARENT_EXIT_CHILD_EXECUTED").unwrap();
+        std::fs::rename(&partial, &output).unwrap();
     }
     #[test]
     #[ignore = "physical parent publishes actual suspended child namespace then exits"]
