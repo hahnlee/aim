@@ -958,7 +958,13 @@ mod tests {
         fail: Arc<AtomicBool>,
         writes: Arc<AtomicU64>,
         released: Arc<AtomicBool>,
+        _exclusive: std::sync::MutexGuard<'static, ()>,
     }
+    /// The process's writeback (`MAPPINGS`, the worker, `FAILED`) is one
+    /// per process, and `shutdown_writeback` reports every mapping's error:
+    /// one actual server at a time, or one fixture's failing writes fail
+    /// another's shutdown.
+    static EXCLUSIVE: Mutex<()> = Mutex::new(());
     fn respond(fd: i32, request: &[u8], error: i32, body: &[u8]) {
         let mut out = Vec::new();
         out.extend(((16 + body.len()) as u32).to_le_bytes());
@@ -1045,13 +1051,22 @@ mod tests {
     }
     impl Server {
         fn new() -> Self {
+            let exclusive = EXCLUSIVE.lock().unwrap_or_else(|e| e.into_inner());
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!(
-                "fc-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            fs::create_dir(&dir).unwrap();
+            // A directory a killed earlier run of the same pid left is
+            // another run's; take the next name, as #1917's fixtures do.
+            let dir = loop {
+                let dir = std::env::temp_dir().join(format!(
+                    "fc-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::SeqCst)
+                ));
+                match fs::create_dir(&dir) {
+                    Ok(()) => break dir,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => panic!("{}: {error}", dir.display()),
+                }
+            };
             let key = SessionKey::from_transport(dir.join("c.sock"));
             let path = key.transport().to_owned();
             let broker = std::thread::spawn(move || super::super::fuse::serve_broker(&path));
@@ -1137,6 +1152,7 @@ mod tests {
                 fail,
                 writes,
                 released,
+                _exclusive: exclusive,
             }
         }
         fn file(&self) -> (OwnedFd, Arc<Open>) {
@@ -1177,6 +1193,21 @@ mod tests {
     impl Drop for Server {
         fn drop(&mut self) {
             let _ = shutdown_writeback();
+            if std::thread::panicking() {
+                // A failed test never reached its forgets: its session's
+                // mappings and retained writebacks go, as with the
+                // process's exit, so their descriptions close and the
+                // broker ends instead of waiting for them.
+                let session = self.key.transport();
+                MAPPINGS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|m| m.cache.source.route.session != session);
+                FAILED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|(owner, _), _| owner != session);
+            }
             super::super::fuse::abort(&self.key).unwrap();
             self.device.take();
             self.daemon.take().unwrap().join().unwrap();
