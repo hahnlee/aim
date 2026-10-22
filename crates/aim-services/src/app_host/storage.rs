@@ -1613,6 +1613,40 @@ impl Service for TrimListener {
 mod tests {
     use super::*;
 
+    /// A listener of this process is told each volume's change, until it
+    /// is unregistered.
+    #[test]
+    fn native_listeners_are_told_volume_changes() {
+        let process = aim_binder_host::local::LocalProcess::open(
+            &aim_binder_driver::Driver::new(),
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: std::process::id() as i32,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let host = AppHost::new(process);
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let seen = told.clone();
+        let id = host.register_native_storage_listener(Arc::new(move |kind, state, uuid| {
+            seen.lock()
+                .unwrap()
+                .push((kind, state, uuid.map(String::from)));
+        }));
+        let mut info = VolumeInfo::created(TYPE_PRIVATE, None, -1);
+        info.state = STATE_MOUNTED;
+        info.fs_uuid = Some("1234-5678".into());
+        info.mount_flags = 0;
+        host.volume_state_changed(&info, STATE_UNMOUNTED);
+        host.unregister_native_storage_listener(id);
+        host.volume_state_changed(&info, STATE_UNMOUNTED);
+        assert_eq!(
+            *told.lock().unwrap(),
+            [(TYPE_PRIVATE, STATE_MOUNTED, Some("1234-5678".into()))]
+        );
+    }
+
     /// A volume of another UUID is not found, as `findPathForUuid`
     /// throws, in the envelope `ParcelableException` writes.
     #[test]

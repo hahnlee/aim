@@ -136,7 +136,6 @@ impl BootLifecycle {
                     return;
                 };
                 let mut data = Parcel::new();
-                data.write_interface_token(events::DESCRIPTOR);
                 events::VolumeReady {
                     volume_uuid: uuid.map(Into::into),
                 }
