@@ -988,6 +988,7 @@ impl Boot {
                         image.root(),
                         &layout.data.join("data"),
                         &layout.bpf_dir(),
+                        &layout.net_dir(),
                         Box::new(move |name| read_property(&properties_dir, name)),
                         Box::new(move |name, value| {
                             drop(

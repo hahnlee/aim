@@ -460,6 +460,10 @@ impl Layout {
     pub fn bpf_dir(&self) -> PathBuf {
         self.runtime.join("bpf")
     }
+    /// The layer's network state and its test hook (`kernel_dir("net")`).
+    pub fn net_dir(&self) -> PathBuf {
+        self.runtime.join("net")
+    }
     pub fn identity_dir(&self) -> PathBuf {
         self.runtime.join("identity")
     }

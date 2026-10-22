@@ -297,6 +297,8 @@ struct Configured {
     root: PathBuf,
     data: PathBuf,
     bpf: PathBuf,
+    /// The boot's runtime network directory, with its test hook.
+    net: PathBuf,
     properties: Properties,
     set_property: SetProperty,
     connect: Connect,
@@ -647,15 +649,17 @@ impl AppHost {
         *self.published.lock().unwrap() = services.to_vec();
     }
 
-    /// The image below `root`, the guest's `/data` at `data` and its bpffs
-    /// at `bpf`, the device's properties (read once the first process
-    /// starts, when init has set them), and how the zygote relay is
-    /// reached.
+    /// The image below `root`, the guest's `/data` at `data`, its bpffs
+    /// at `bpf` and its runtime's network directory at `net`, the
+    /// device's properties (read once the first process starts, when init
+    /// has set them), and how the zygote relay is reached.
+    #[allow(clippy::too_many_arguments)]
     pub fn configure(
         &self,
         root: &Path,
         data: &Path,
         bpf: &Path,
+        net: &Path,
         properties: Properties,
         set_property: SetProperty,
         connect: Connect,
@@ -665,6 +669,7 @@ impl AppHost {
                 root: root.to_path_buf(),
                 data: data.to_path_buf(),
                 bpf: bpf.to_path_buf(),
+                net: net.to_path_buf(),
                 properties,
                 set_property,
                 connect,
@@ -2947,6 +2952,15 @@ impl AppHost {
             .get()
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?
             .data)
+    }
+
+    /// The boot's network test hook (`aim_uplink::hook`), which the
+    /// guest's layer applies too; empty before the app host is configured.
+    pub(super) fn network_hook(&self) -> String {
+        self.configured
+            .get()
+            .map(|c| aim_uplink::hook(&c.net))
+            .unwrap_or_default()
     }
 
     /// The guest's `/sys/fs/bpf`.

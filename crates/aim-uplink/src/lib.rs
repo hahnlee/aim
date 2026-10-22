@@ -455,6 +455,57 @@ fn parse_nameservers<T: std::str::FromStr>(text: &str) -> Vec<T> {
         .collect()
 }
 
+/// What a guest's `eth0` stands for: the Mac's network, its DNS servers
+/// and the lease time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lease {
+    pub up: Uplink,
+    pub dns: Vec<Ipv4Addr>,
+    pub secs: u32,
+}
+
+/// The test hook of a boot whose runtime's network directory is `net`
+/// (`<runtime>/net/simulate`, docs/network.md); empty without one. The
+/// guest's layer and the app host both apply it, so a simulated network
+/// is the one every part of the guest sees.
+pub fn hook(net: &std::path::Path) -> String {
+    std::fs::read_to_string(net.join("simulate")).unwrap_or_default()
+}
+
+/// `up` and `dns`, leased for `secs`, with the test hook's `text`
+/// applied: `down` takes the network away; `addr A/P`, `gateway G`,
+/// `dns S...` and `lease SECONDS` replace those values, and
+/// `interface NAME` puts the host interface NAME behind it.
+pub fn simulate(text: &str, up: Uplink, dns: Vec<Ipv4Addr>, secs: u32) -> Option<Lease> {
+    let mut l = Lease { up, dns, secs };
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        match (w.next(), w.next()) {
+            (Some("down"), _) => return None,
+            (Some("addr"), Some(a)) => {
+                let (ip, p) = a.split_once('/').unwrap_or((a, "24"));
+                if let (Ok(ip), Ok(p @ 0..=32)) = (ip.parse(), p.parse()) {
+                    (l.up.addr, l.up.prefix) = (ip, p);
+                }
+            }
+            (Some("gateway"), Some(g)) => l.up.gateway = g.parse().unwrap_or(l.up.gateway),
+            (Some("dns"), Some(d)) => {
+                l.dns = std::iter::once(d)
+                    .chain(w)
+                    .filter_map(|d| d.parse().ok())
+                    .collect()
+            }
+            (Some("lease"), Some(s)) => l.secs = s.parse().unwrap_or(l.secs),
+            (Some("interface"), Some(n)) => match host_index(n) {
+                0 => {}
+                i => l.up.index = i,
+            },
+            _ => {}
+        }
+    }
+    Some(l)
+}
+
 /// A host interface's index by name (0 when there is none).
 pub fn host_index(name: &str) -> u32 {
     let Ok(c) = std::ffi::CString::new(name) else {
@@ -467,6 +518,50 @@ pub fn host_index(name: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_test_hook_changes_the_lease() {
+        let up = Uplink {
+            index: 4,
+            addr: Ipv4Addr::new(192, 168, 1, 20),
+            prefix: 24,
+            gateway: Ipv4Addr::new(192, 168, 1, 1),
+            mtu: 1500,
+        };
+        let dns = vec![Ipv4Addr::new(192, 168, 1, 1)];
+        let plain = simulate("", up.clone(), dns.clone(), 3600).unwrap();
+        assert_eq!((&plain.up, &plain.dns, plain.secs), (&up, &dns, 3600));
+        assert!(simulate("lease 60\ndown\n", up.clone(), dns.clone(), 3600).is_none());
+        let l = simulate(
+            "addr 10.1.2.3/16\ngateway 10.1.0.1\ndns 9.9.9.9 1.1.1.1\nlease 120\nbogus\n",
+            up.clone(),
+            dns,
+            3600,
+        )
+        .unwrap();
+        assert_eq!((l.up.addr, l.up.prefix), (Ipv4Addr::new(10, 1, 2, 3), 16));
+        assert_eq!(l.up.gateway, Ipv4Addr::new(10, 1, 0, 1));
+        assert_eq!(
+            l.dns,
+            [Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(1, 1, 1, 1)]
+        );
+        assert_eq!((l.secs, l.up.index), (120, 4));
+        let moved = simulate("interface lo0\n", up.clone(), Vec::new(), 3600).unwrap();
+        assert_eq!(moved.up.index, host_index("lo0"));
+        let unknown = simulate("interface no-such-if\n", up, Vec::new(), 3600).unwrap();
+        assert_eq!(unknown.up.index, 4);
+    }
+
+    #[test]
+    fn the_hook_is_read_from_the_runtime_net_directory() {
+        let dir = std::env::temp_dir().join(format!("aim-uplink-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(hook(&dir), "");
+        std::fs::write(dir.join("simulate"), "down\n").unwrap();
+        assert_eq!(hook(&dir), "down\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn sin(a: [u8; 4]) -> Vec<u8> {
         let mut v = vec![16, libc::AF_INET as u8, 0, 0];
