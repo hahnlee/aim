@@ -211,15 +211,7 @@ mod tests {
     };
     #[test]
     fn protected_kernel_reads_keep_buffer_unchanged_on_actual_corruption() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-verified-source-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-verified-source");
         fs::write(root.join("data"), vec![37; 8192]).unwrap();
         let file = File::open(root.join("data")).unwrap();
         let store = Arc::new(

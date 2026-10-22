@@ -208,15 +208,7 @@ mod tests {
             os::unix::fs::FileExt,
             sync::Arc,
         };
-        let root = std::env::temp_dir().join(format!(
-            "aim-user-copy-proof-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-user-copy-proof");
         let mut bytes = vec![0; (2 * PAGE) as usize];
         bytes[128..141].copy_from_slice(b"cold-rodata!\0");
         bytes[PAGE as usize - 4..PAGE as usize].copy_from_slice(b"tail");

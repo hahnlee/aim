@@ -487,15 +487,7 @@ mod offset_tests {
 
     #[test]
     fn scratch_without_verity_owner_is_optional_but_declared_stores_are_strict() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-verity-config-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-verity-config");
         struct Directory(PathBuf);
         impl Drop for Directory {
             fn drop(&mut self) {
