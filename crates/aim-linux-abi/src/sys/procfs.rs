@@ -1305,7 +1305,13 @@ pub fn node(guest: &str) -> Option<Node> {
             ("kernel", dir::DT_DIR),
         ])),
         "fs" => Node::Dir(entries(&[("selinux", dir::DT_DIR)])),
-        "kernel" => Node::Dir(entries(&[("debug", dir::DT_DIR), ("tracing", dir::DT_DIR)])),
+        "kernel" => Node::Dir(entries(&[
+            ("debug", dir::DT_DIR),
+            ("tracing", dir::DT_DIR),
+            ("uevent_seqnum", dir::DT_REG),
+        ])),
+        // `uevent_seqnum_show`.
+        "kernel/uevent_seqnum" => Node::File(format!("{}\n", super::uevent::seqnum()).into_bytes()),
         "kernel/debug" => Node::Dir(entries(&[("tracing", dir::DT_DIR)])),
         "kernel/tracing" | "kernel/debug/tracing" => Node::Dir(entries(&[
             ("trace_marker", dir::DT_REG),
@@ -1860,8 +1866,8 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
             }
         }
         Some(Node::File(data)) => {
-            if write && device_tree(&canon) {
-                // A device attribute with no store method.
+            if write && (device_tree(&canon) || READ_ONLY.contains(&canon.as_str())) {
+                // An attribute with no store method (`kernfs_fop_open`).
                 return Some(-(EACCES as i64));
             }
             if write {
@@ -1929,6 +1935,10 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         None => -(ENOENT as i64),
     })
 }
+
+/// sysfs attributes outside the device trees that have no store method
+/// (mode 0444).
+const READ_ONLY: &[&str] = &["/sys/kernel/uevent_seqnum"];
 
 /// Whether `guest` is in sysfs's device trees, which hold only the devices
 /// the layer models and their attributes. Values init wrote there are not
