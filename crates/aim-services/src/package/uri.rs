@@ -72,6 +72,14 @@ impl Uri {
         }
     }
 
+    /// `Uri.EMPTY`: a `HierarchicalUri` of no parts.
+    pub fn empty() -> Uri {
+        Uri {
+            kind: Kind::Hierarchical,
+            string: String::new(),
+        }
+    }
+
     /// `Uri.CREATOR.createFromParcel`; `None` for `Uri.NULL_TYPE_ID`.
     pub fn read(r: &mut Reader<'_>, strings: &mut dyn Strings) -> Result<Option<Uri>> {
         let kind = match r.read_i32()? {
