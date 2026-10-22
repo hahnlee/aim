@@ -126,6 +126,9 @@ struct State {
 
 type Job = Box<dyn FnOnce() + Send>;
 
+/// `android.permission.DUMP`.
+const DUMP: &str = "android.permission.DUMP";
+
 pub struct CountryDetector {
     host: Arc<AppHost>,
     settings: Arc<SettingsProvider>,
@@ -752,6 +755,33 @@ impl Service for CountryDetector {
                         "Attempt to invoke interface method 'android.os.IBinder android.location.ICountryListener.asBinder()' on a null object reference",
                     )),
                 }
+            }
+            // `CountryDetectorService.dump`: DumpUtils' DUMP check, then
+            // nothing (its DEBUG is off).
+            aim_binder_host::local::DUMP_TRANSACTION => {
+                let out = call
+                    .data
+                    .read_fd()
+                    .ok()
+                    .and_then(|fd| self.host.process.file(fd))
+                    .and_then(|f| aim_binder_host::server::file_fd(&f));
+                let uid = call.sender_euid as i32;
+                if let Some(mut out) = out
+                    && self
+                        .host
+                        .check_permission(Some(DUMP), uid)
+                        .map_or(true, |r| r != 0)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        out,
+                        "Permission Denial: can't dump CountryDetector from from pid={}, uid={uid} \
+                         due to missing android.permission.DUMP permission",
+                        call.sender_pid
+                    );
+                }
+                p.write_no_exception();
+                Ok(())
             }
             _ => return Err(UNKNOWN_TRANSACTION),
         };
