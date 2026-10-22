@@ -213,7 +213,9 @@ fn scoped_output(
 
 #[track_caller]
 pub fn run(command: &mut Command) -> Output {
-    let output = command.output().unwrap();
+    let output = aim_storage::inherited::stdio_only(command)
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{:?}: {}: {}",
@@ -432,7 +434,7 @@ impl Boot {
             .ok_or("original boot has no retained input owner")?;
         inputs.revalidate(false)?;
         let mut command = Command::new(&inputs.runtime["linux-run"].path);
-        command
+        aim_storage::inherited::stdio_only(&mut command)
             .env_clear()
             .envs(environ.lines().filter_map(|line| line.split_once('=')))
             .arg("--inherit-env")
@@ -567,7 +569,7 @@ impl Boot {
                 let stdout = build.join("compiler.stdout");
                 let stderr = build.join("compiler.stderr");
                 let mut command = Command::new(&compiler.path);
-                command
+                aim_storage::inherited::stdio_only(&mut command)
                     .args(["-Wall", "-Wextra", "-Werror", "-O2"])
                     .arg(&source)
                     .arg("-o")
@@ -696,7 +698,9 @@ impl Boot {
     }
     fn retained_command(&self, inputs: &cohort::Cohort) -> Command {
         let mut cmd = Command::new(&inputs.tools["aimctl"].path);
-        cmd.arg("--data").arg(&self.data);
+        aim_storage::inherited::stdio_only(&mut cmd)
+            .arg("--data")
+            .arg(&self.data);
         cmd
     }
 }

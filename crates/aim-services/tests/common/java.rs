@@ -36,9 +36,9 @@ fn private_aidl(dir: &Path, interface: &str) -> PathBuf {
     let out = dir.join("aidl");
     fs::create_dir_all(&out).unwrap();
     let input = aim_paths::root().join("java/device-services/aidl");
-    let output = std::process::Command::new(
+    let output = aim_storage::inherited::stdio_only(&mut std::process::Command::new(
         aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"),
-    )
+    ))
     .args(["--lang=java", "--min_sdk_version", "36"])
     .arg(format!("-I{}", input.display()))
     .arg(format!("-o{}", out.display()))

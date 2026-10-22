@@ -2384,17 +2384,18 @@ fn recovery_first_write_crash_child() {
 fn recovery_claim_survives_an_actual_first_write_process_exit() {
     use std::process::{Command, Stdio};
     let data = Data::new();
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "package::owner::tests::recovery_first_write_crash_child",
-            "--ignored",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child =
+        aim_storage::inherited::stdio_only(&mut Command::new(std::env::current_exe().unwrap()))
+            .args([
+                "--exact",
+                "package::owner::tests::recovery_first_write_crash_child",
+                "--ignored",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
     let write = child
         .stdin
         .take()

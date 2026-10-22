@@ -1571,7 +1571,7 @@ pub(crate) mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let mut command = Command::new(std::env::current_exe().unwrap());
-        command.args([
+        aim_storage::inherited::stdio_only(&mut command).args([
             "--exact",
             "socket_scm::tests::socket_scm_queued_lease_sigkill_child",
             "--ignored",

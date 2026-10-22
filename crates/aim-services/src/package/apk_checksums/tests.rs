@@ -91,7 +91,7 @@ fn whole_file_digests_are_the_files() {
         ]
     );
     let tool = |program: &str, args: &[&str]| {
-        let out = Command::new(program)
+        let out = aim_storage::inherited::stdio_only(&mut Command::new(program))
             .args(args)
             .arg(&path)
             .output()
