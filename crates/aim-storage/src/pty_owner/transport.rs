@@ -506,6 +506,14 @@ const SET_FOREGROUND: u32 = 16;
 const DETACH_TTY: u32 = 17;
 const OPEN_SLAVE_NODE: u32 = 18;
 const INHERIT_PROCESS: u32 = 19;
+/// The guest's devpts index of an endpoint's pair.
+const PAIR_INDEX: u32 = 20;
+/// The host slave of the pair with a devpts index.
+const SLAVE_OF_INDEX: u32 = 21;
+/// The devpts index of the pair with a host slave.
+const INDEX_OF_SLAVE: u32 = 22;
+/// The devpts indices in use, ascending.
+const LIST_INDICES: u32 = 23;
 pub const CLASS: u32 = 7;
 const MAX_DATA: usize = 4096;
 #[derive(Default)]
@@ -709,6 +717,10 @@ pub struct Server {
     stopping: bool,
     parent_controller: bool,
     sessions: super::session::Sessions,
+    /// The guest's devpts instance: each live pair's index, as
+    /// `devpts_new_index` hands them out (the lowest free first); an index
+    /// is free again once its pair is released.
+    indices: Vec<(u32, std::sync::Weak<Pair>)>,
 }
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -891,7 +903,39 @@ impl Server {
             stopping: false,
             parent_controller: false,
             sessions: super::session::Sessions::new(),
+            indices: Vec::new(),
         })
+    }
+    /// The live pairs by devpts index, ascending: a pair is released, and
+    /// its index free, once the owner has retired its last description
+    /// (its last close's no-senders notice and carriers), shortly after the
+    /// close itself where devpts frees it at the close.
+    fn live(&mut self) -> Vec<(u32, Arc<Pair>)> {
+        self.indices.retain(|(_, pair)| pair.strong_count() > 0);
+        let mut live: Vec<_> = self
+            .indices
+            .iter()
+            .filter_map(|(index, pair)| Some((*index, pair.upgrade()?)))
+            .collect();
+        live.sort_by_key(|(index, _)| *index);
+        live
+    }
+    /// `devpts_new_index`: the lowest index no live pair holds.
+    fn new_index(&mut self) -> u32 {
+        let mut next = 0;
+        for (index, _) in self.live() {
+            if index != next {
+                break;
+            }
+            next += 1;
+        }
+        next
+    }
+    fn index_frame(index: u32) -> Frame {
+        Frame {
+            flags: u64::from(index),
+            ..Default::default()
+        }
     }
     pub fn with_parent_controller(mut self) -> io::Result<Self> {
         self.controller = ProcessIdentity::running(unsafe { libc::getppid() })?;
@@ -1061,21 +1105,63 @@ impl Server {
                     &[],
                 );
         }
-        if request.frame.op == OPEN_SLAVE_NODE {
-            if !request.ports.is_empty() || request.frame.data.contains(&0) {
+        if matches!(
+            request.frame.op,
+            OPEN_SLAVE_NODE | SLAVE_OF_INDEX | INDEX_OF_SLAVE | LIST_INDICES
+        ) {
+            if !request.ports.is_empty() {
                 return Err(error(libc::EPROTO));
             }
-            let pair = self
-                .registry
-                .descriptions
-                .values()
-                .find(|description| description.pair.slave_path() == request.frame.data)
-                .map(|description| description.pair.clone())
-                .ok_or_else(|| error(libc::ENOENT))?;
-            if pair.slave_lock() {
-                return Err(error(libc::EIO));
-            }
-            return self.grant_slave(pair, request);
+            let live = self.live();
+            let data = &request.frame.data;
+            let by_index = || -> io::Result<Arc<Pair>> {
+                let index = u32::from_le_bytes(
+                    data.as_slice()
+                        .try_into()
+                        .map_err(|_| error(libc::EPROTO))?,
+                );
+                live.iter()
+                    .find(|(i, _)| *i == index)
+                    .map(|(_, pair)| pair.clone())
+                    .ok_or_else(|| error(libc::ENOENT))
+            };
+            let frame = match request.frame.op {
+                OPEN_SLAVE_NODE => {
+                    let pair = by_index()?;
+                    if pair.slave_lock() {
+                        return Err(error(libc::EIO));
+                    }
+                    return self.grant_slave(pair, request);
+                }
+                SLAVE_OF_INDEX => Frame {
+                    data: by_index()?.slave_path().to_vec(),
+                    ..Default::default()
+                },
+                INDEX_OF_SLAVE => live
+                    .iter()
+                    .find(|(_, pair)| pair.slave_path() == data.as_slice())
+                    .map(|(index, _)| Self::index_frame(*index))
+                    .ok_or_else(|| error(libc::ENOENT))?,
+                _ => Frame {
+                    data: live
+                        .iter()
+                        .flat_map(|(index, _)| index.to_le_bytes())
+                        .collect(),
+                    ..Default::default()
+                },
+            };
+            return request
+                .reply
+                .as_ref()
+                .ok_or_else(|| error(libc::EPROTO))?
+                .send(
+                    &Frame {
+                        op: request.frame.op,
+                        serial: request.frame.serial,
+                        ..frame
+                    },
+                    &[],
+                );
         }
         if request.frame.op == SHUTDOWN {
             if request.actor != self.controller {
@@ -1100,7 +1186,9 @@ impl Server {
             if !request.ports.is_empty() {
                 return Err(error(libc::EPROTO));
             }
+            let index = self.new_index();
             let pair = Arc::new(Pair::allocate(&self.runtime)?);
+            self.indices.push((index, Arc::downgrade(&pair)));
             return self
                 .registry
                 .grant_reply(pair, Side::Master, request.frame.flags, request);
@@ -1165,6 +1253,12 @@ impl Server {
             return self.grant_slave(pair, request);
         }
         let frame = match request.frame.op {
+            PAIR_INDEX => self
+                .live()
+                .iter()
+                .find(|(_, live)| Arc::ptr_eq(live, &pair))
+                .map(|(index, _)| Self::index_frame(*index))
+                .ok_or_else(|| error(libc::ENOENT))?,
             GET_LOCK | SET_LOCK => {
                 if side != Side::Master {
                     return Err(error(libc::ENOTTY));
@@ -1498,16 +1592,71 @@ impl Client {
     pub fn open_slave(&self, master: &RemoteEndpoint, flags: u64) -> io::Result<RemoteEndpoint> {
         self.slave_from_right(master.capability.right(), flags)
     }
-    pub fn open_slave_path(&self, path: &[u8], flags: u64) -> io::Result<RemoteEndpoint> {
+    /// The slave of the guest's devpts index `index` (`/dev/pts/<index>`).
+    pub fn open_slave_index(&self, index: u32, flags: u64) -> io::Result<RemoteEndpoint> {
         self.with_carrier(self.import(self.call(
             Frame {
                 op: OPEN_SLAVE_NODE,
-                data: path.to_vec(),
+                data: index.to_le_bytes().to_vec(),
                 flags,
                 ..Default::default()
             },
             None,
         )?)?)
+    }
+    /// The devpts index of an endpoint's pair.
+    pub fn index(&self, endpoint: &RemoteEndpoint) -> io::Result<u32> {
+        self.call(
+            Frame {
+                op: PAIR_INDEX,
+                ..Default::default()
+            },
+            Some(endpoint.capability.right()),
+        )
+        .map(|reply| reply.frame.flags as u32)
+    }
+    /// The host slave of devpts index `index`; ENOENT when no pair has it.
+    pub fn slave_of_index(&self, index: u32) -> io::Result<Vec<u8>> {
+        self.call(
+            Frame {
+                op: SLAVE_OF_INDEX,
+                data: index.to_le_bytes().to_vec(),
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|reply| reply.frame.data)
+    }
+    /// The devpts index of host slave `path`; ENOENT when it is no pair's.
+    pub fn index_of_slave(&self, path: &[u8]) -> io::Result<u32> {
+        self.call(
+            Frame {
+                op: INDEX_OF_SLAVE,
+                data: path.to_vec(),
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|reply| reply.frame.flags as u32)
+    }
+    /// The devpts indices in use, ascending.
+    pub fn indices(&self) -> io::Result<Vec<u32>> {
+        let reply = self.call(
+            Frame {
+                op: LIST_INDICES,
+                ..Default::default()
+            },
+            None,
+        )?;
+        if reply.frame.data.len() % 4 != 0 {
+            return Err(error(libc::EPROTO));
+        }
+        Ok(reply
+            .frame
+            .data
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect())
     }
     pub fn slave_from_right(&self, master: &SendRight, flags: u64) -> io::Result<RemoteEndpoint> {
         self.with_carrier(self.import(self.call(
@@ -2109,7 +2258,10 @@ mod tests {
             0
         );
         let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_bytes();
-        let slave = client.open_slave_path(path, 2 | 0x100 | 0x800).unwrap();
+        let index = client.index(&master).unwrap();
+        assert_eq!(client.index_of_slave(path).unwrap(), index);
+        assert_eq!(client.slave_of_index(index).unwrap(), path);
+        let slave = client.open_slave_index(index, 2 | 0x100 | 0x800).unwrap();
         let duplicate = slave.try_clone().unwrap();
         let bytes = [b'x'; 268];
         assert_eq!(client.write(&slave, &bytes).unwrap(), 268);
@@ -2171,6 +2323,70 @@ mod tests {
         worker.join().unwrap();
         assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
         fs::remove_dir(runtime).unwrap();
+    }
+    /// devpts numbering: each guest pair gets the lowest free index, an
+    /// index is handed out again only once its pair is released, and the
+    /// host's slave numbers are not names the guest can open.
+    #[test]
+    fn indices_are_the_guests_own_lowest_free_first() {
+        if super::super::tests::isolated(
+            "pty_owner::transport::tests::indices_are_the_guests_own_lowest_free_first",
+        ) {
+            return;
+        }
+        let runtime = runtime();
+        let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
+        let name = format!("dev.aim.pty-index-test.{}", actual.host_pid);
+        let mut server = Server::register(&name, &runtime).unwrap();
+        let worker = std::thread::spawn(move || server.run().unwrap());
+        let client = Client::lookup(&name, actual).unwrap();
+        let masters: Vec<_> = (0..3)
+            .map(|_| client.allocate(2 | 0x800).unwrap())
+            .collect();
+        let indices: Vec<_> = masters.iter().map(|m| client.index(m).unwrap()).collect();
+        assert_eq!(indices, [0, 1, 2]);
+        assert_eq!(client.indices().unwrap(), [0, 1, 2]);
+        let mut masters = masters.into_iter();
+        let (first, second, third) = (
+            masters.next().unwrap(),
+            masters.next().unwrap(),
+            masters.next().unwrap(),
+        );
+        // Released once the owner has retired its last close.
+        drop(second);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while client.indices().unwrap() != [0, 2] {
+            assert!(std::time::Instant::now() < deadline, "index 1 not released");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            client
+                .open_slave_index(1, 2)
+                .err()
+                .and_then(|e| e.raw_os_error()),
+            Some(libc::ENOENT)
+        );
+        assert_eq!(
+            client
+                .slave_of_index(7)
+                .err()
+                .and_then(|e| e.raw_os_error()),
+            Some(libc::ENOENT)
+        );
+        assert_eq!(
+            client
+                .index_of_slave(b"/dev/ttys999")
+                .err()
+                .and_then(|e| e.raw_os_error()),
+            Some(libc::ENOENT)
+        );
+        let reused = client.allocate(2 | 0x800).unwrap();
+        assert_eq!(client.index(&reused).unwrap(), 1);
+        let next = client.allocate(2 | 0x800).unwrap();
+        assert_eq!(client.index(&next).unwrap(), 3);
+        drop((first, third, reused, next));
+        client.shutdown().unwrap();
+        worker.join().unwrap();
     }
     #[test]
     fn master_final_close_wakes_slave_without_observer_retention() {

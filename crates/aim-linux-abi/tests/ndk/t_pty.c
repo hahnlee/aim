@@ -1,6 +1,7 @@
 // Pseudo-terminals (pty(7), posix_openpt(3), tty_ioctl(4)): what adbd's
 // subprocesses do with them (a master, a slave in a new session as its
 // controlling terminal, raw mode, the window size).
+#include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -346,6 +347,84 @@ static void locked_slave_metadata(void) {
   CHECK(close(slave) == 0 && close(master) == 0);
 }
 
+#ifndef TIOCGPTPEER
+#define TIOCGPTPEER 0x5441
+#endif
+
+// The indices /dev/pts lists, as a bit set of the first 64.
+static unsigned long long listed(void) {
+  unsigned long long set = 0;
+  DIR* dir = opendir("/dev/pts");
+  if (dir == NULL) return ~0ULL;
+  struct dirent* e;
+  while ((e = readdir(dir)) != NULL) {
+    if (e->d_name[0] >= '0' && e->d_name[0] <= '9' && e->d_type == DT_CHR) {
+      int n = atoi(e->d_name);
+      if (n < 64) set |= 1ULL << n;
+    }
+  }
+  closedir(dir);
+  return set;
+}
+
+// Waits (at most 5 s) until /dev/pts lists exactly `set`: an index is free
+// again once its pair is released, just after its last close.
+static int lists(unsigned long long set) {
+  for (int i = 0; i < 500; i++) {
+    if (listed() == set) return 1;
+    usleep(10000);
+  }
+  return 0;
+}
+
+// The guest's own devpts instance (#2110, #2112): its pairs numbered from
+// 0, the lowest free index first, listed in /dev/pts, named by ptsname,
+// ttyname and TIOCGPTN alike; the peer of a master by TIOCGPTPEER.
+static void devpts_instance(void) {
+  CHECK(lists(0));
+  char name[3][64];
+  int master[3];
+  for (int i = 0; i < 3; i++) {
+    master[i] = open_master(name[i], sizeof(name[i]));
+    CHECK(master[i] >= 0);
+    unsigned int n = 99;
+    CHECK(ioctl(master[i], TIOCGPTN, &n) == 0 && n == (unsigned int)i);
+    char expect[64];
+    snprintf(expect, sizeof(expect), "/dev/pts/%d", i);
+    CHECK(strcmp(name[i], expect) == 0);
+  }
+  CHECK(listed() == 7);
+  struct stat st;
+  CHECK(stat("/dev/pts/1", &st) == 0 && S_ISCHR(st.st_mode));
+  int slave = open(name[1], O_RDWR | O_NOCTTY);
+  CHECK(slave >= 0);
+  char tty[64];
+  CHECK(ttyname_r(slave, tty, sizeof(tty)) == 0 && strcmp(tty, "/dev/pts/1") == 0);
+  unsigned int n;
+  errno = 0;
+  CHECK(ioctl(slave, TIOCGPTN, &n) == -1 && errno == ENOTTY);
+  CHECK(close(slave) == 0 && close(master[1]) == 0);
+  CHECK(lists(5));
+  errno = 0;
+  CHECK(open("/dev/pts/1", O_RDWR | O_NOCTTY) == -1 && errno == ENOENT);
+  errno = 0;
+  CHECK(open("/dev/pts/1", O_RDWR | O_CREAT, 0600) == -1 && errno == EACCES);
+  // The lowest free index again.
+  master[1] = open_master(name[1], sizeof(name[1]));
+  CHECK(master[1] >= 0 && strcmp(name[1], "/dev/pts/1") == 0);
+  int peer = ioctl(master[1], TIOCGPTPEER, O_RDWR | O_CLOEXEC);
+  CHECK(peer >= 0 && (fcntl(peer, F_GETFD) & FD_CLOEXEC));
+  CHECK(ttyname_r(peer, tty, sizeof(tty)) == 0 && strcmp(tty, "/dev/pts/1") == 0);
+  CHECK(write(peer, "p", 1) == 1);
+  char c;
+  CHECK(read(master[1], &c, 1) == 1 && c == 'p');
+  errno = 0;
+  CHECK(ioctl(peer, TIOCGPTPEER, O_RDWR) == -1 && errno == EIO);
+  CHECK(close(peer) == 0);
+  for (int i = 0; i < 3; i++) CHECK(close(master[i]) == 0);
+  CHECK(lists(0));
+}
+
 static void allocate_and_close(void) {
   char name[64];
   int master = open_master(name, sizeof(name));
@@ -371,6 +450,7 @@ int main(int argc, char** argv) {
     RUN(allocate_and_close);
     DONE();
   }
+  RUN(devpts_instance);
   RUN(master_and_slave);
   RUN(locked_slave_metadata);
   RUN(not_a_terminal);
