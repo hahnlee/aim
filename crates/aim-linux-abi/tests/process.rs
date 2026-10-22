@@ -169,6 +169,11 @@ fn xattrs_and_selinux_labels() {
 }
 
 #[test]
+fn oom_score_adj_belongs_to_the_process() {
+    check("oom_score_adj");
+}
+
+#[test]
 fn any_process_writes_the_random_devices() {
     check("random_writes");
 }

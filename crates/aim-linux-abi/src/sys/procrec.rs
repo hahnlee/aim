@@ -9,6 +9,10 @@
 //!   times), `comm` and tracer, written as they change, with the threads
 //!   that run as processes of their own (`fork`'s own-files threads);
 //! - the thread group id, for such a process;
+//! - the process's `oom_score_adj` and `oom_score_adj_min` (Linux keeps
+//!   them in its signal struct), which another process writes there
+//!   through `/proc/<pid>/oom_score_adj` and this one reads from its
+//!   mapping;
 //! - the pages of the main thread's stack that hold its argument and
 //!   environment strings. The process maps those pages from the record,
 //!   shared: the record is that memory, so a program that rewrites its
@@ -41,7 +45,8 @@ struct Header {
     env: [AtomicU64; 2],
     /// The thread group of a process that is another's thread, else 0.
     tgid: AtomicU64,
-    _pad: u64,
+    oom_score_adj: AtomicI32,
+    oom_score_adj_min: AtomicI32,
 }
 
 #[repr(C)]
@@ -67,6 +72,13 @@ const _: () = assert!(TABLE as u64 <= STRINGS && STRINGS % PAGE == 0);
 
 /// This process's table, mapped from its record.
 static OWN: AtomicPtr<Table> = AtomicPtr::new(std::ptr::null_mut());
+/// This process's `oom_score_adj` and `oom_score_adj_min` while it has no
+/// record (outside a pid namespace, or before its first stack is noted).
+static OOM: [AtomicI32; 2] = [const { AtomicI32::new(0) }; 2];
+/// Offset of `oom_score_adj` in the header; `oom_score_adj_min` follows.
+const OOM_AT: u64 = 56;
+const _: () = assert!(std::mem::offset_of!(Header, oom_score_adj) as u64 == OOM_AT);
+
 /// The string pages mapped from the record: start and end.
 static MAPPED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
@@ -134,6 +146,11 @@ pub fn init(s: &StackInfo) {
     // SAFETY: just mapped, for the life of the record.
     let t = unsafe { &*(table as *const Table) };
     let h = &t.header;
+    // The values the process had (Linux keeps the signal struct across
+    // execve).
+    let [adj, min] = oom();
+    h.oom_score_adj.store(adj, Relaxed);
+    h.oom_score_adj_min.store(min, Relaxed);
     for (slot, v) in [&h.lo, &h.len, &h.args[0], &h.args[1], &h.env[0], &h.env[1]]
         .into_iter()
         .zip([lo, hi - lo, s.args.0, s.args.1, s.env.0, s.env.1])
@@ -164,6 +181,59 @@ pub fn init(s: &StackInfo) {
         MAPPED[1].store(hi, Relaxed);
     }
     let _ = std::fs::rename(&tmp, dir.join(format!("{pid}.proc")));
+}
+
+/// This process's `oom_score_adj` and `oom_score_adj_min`: from its record
+/// (where another process's write lands), else as last set here.
+pub fn oom() -> [i32; 2] {
+    let t = OWN.load(Acquire);
+    if t.is_null() {
+        return [OOM[0].load(Relaxed), OOM[1].load(Relaxed)];
+    }
+    // SAFETY: our own table, mapped for the life of the record.
+    let h = unsafe { &(*t).header };
+    [
+        h.oom_score_adj.load(Relaxed),
+        h.oom_score_adj_min.load(Relaxed),
+    ]
+}
+
+/// Set this process's `oom_score_adj` and `oom_score_adj_min` (start-up,
+/// fork, or a write of its own).
+pub fn set_oom(values: [i32; 2]) {
+    OOM[0].store(values[0], Relaxed);
+    OOM[1].store(values[1], Relaxed);
+    let t = OWN.load(Acquire);
+    if !t.is_null() {
+        // SAFETY: our own table, mapped for the life of the record.
+        let h = unsafe { &(*t).header };
+        h.oom_score_adj.store(values[0], Relaxed);
+        h.oom_score_adj_min.store(values[1], Relaxed);
+    }
+}
+
+/// The `oom_score_adj` and `oom_score_adj_min` of process `pid`; none
+/// without a record.
+pub fn oom_of(pid: i32) -> Option<[i32; 2]> {
+    let b = read_at(&open(pid)?, OOM_AT, 8);
+    let at = |i: usize| {
+        b.get(i..i + 4)
+            .map(|w| i32::from_le_bytes(w.try_into().unwrap()))
+    };
+    Some([at(0)?, at(4)?])
+}
+
+/// Write the `oom_score_adj` and `oom_score_adj_min` of process `pid` into
+/// its record, which it maps shared; false without a record.
+pub fn set_oom_of(pid: i32, values: [i32; 2]) -> bool {
+    let Some(f) = path(pid).and_then(|p| std::fs::OpenOptions::new().write(true).open(p).ok())
+    else {
+        return false;
+    };
+    let mut b = [0u8; 8];
+    b[..4].copy_from_slice(&values[0].to_le_bytes());
+    b[4..].copy_from_slice(&values[1].to_le_bytes());
+    f.write_all_at(&b, OOM_AT).is_ok()
 }
 
 /// Whether the mapping at `addr` is the string pages, which a fork copies.
