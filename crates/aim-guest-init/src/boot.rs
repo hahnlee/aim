@@ -1805,14 +1805,7 @@ mod capability_boot_tests {
     #[test]
     fn failed_capability_query_returns_before_data_and_service_creation() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!(
-            "aim-capability-boot-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = aim_paths::scratch_dir("aim-capability-boot");
         let image = root.join("image");
         let rc = image.join("system/etc/init/hw/init.rc");
         std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
