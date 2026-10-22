@@ -15,6 +15,9 @@ use crate::res::{Element, Value};
 /// How deep drawables may nest (a drawable referring to itself ends).
 const MAX_DEPTH: u32 = 16;
 
+/// A drawable's intrinsic width and height, in canvas pixels.
+type Size = (Option<f64>, Option<f64>);
+
 /// A drawable's highest level (`Drawable.MAX_LEVEL`).
 const MAX_LEVEL: f64 = 10000.0;
 
@@ -95,6 +98,144 @@ impl Drawer<'_> {
             .is_some_and(|c| self.draw_xml(c, apk, r, depth + 1, level))
     }
 
+    /// `Drawable.getIntrinsicWidth` and `getIntrinsicHeight` of drawable
+    /// `v`, in canvas pixels; `None` where Android answers -1.
+    fn intrinsic(&self, v: &Value, depth: u32) -> Size {
+        if depth > MAX_DEPTH {
+            return (None, None);
+        }
+        let Some((v, apk)) = self.res.resolve(v) else {
+            return (None, None);
+        };
+        match v {
+            Value::String(path) if path.ends_with(".xml") => apk
+                .file(&path)
+                .ok()
+                .and_then(|b| crate::res::xml(&b).ok())
+                .map_or((None, None), |e| self.intrinsic_xml(&e, apk, depth + 1)),
+            // A bitmap's pixels at its directory's density, in dp.
+            Value::String(path) => match (
+                apk.file(&path).ok().and_then(|b| Image::decode(&b)),
+                density(&path),
+            ) {
+                (Some(img), Some(density)) => {
+                    let (w, h) = img.size();
+                    let px = self.dp * 160.0 / density;
+                    (Some(w as f64 * px), Some(h as f64 * px))
+                }
+                _ => (None, None),
+            },
+            _ => (None, None),
+        }
+    }
+
+    /// The intrinsic size of the drawable an element names or holds.
+    fn intrinsic_inner(&self, e: &Element, apk: &Apk, depth: u32) -> Size {
+        if let Some(v) = e.named("drawable") {
+            return self.intrinsic(v, depth);
+        }
+        e.children
+            .first()
+            .map_or((None, None), |c| self.intrinsic_xml(c, apk, depth + 1))
+    }
+
+    fn intrinsic_xml(&self, e: &Element, apk: &Apk, depth: u32) -> Size {
+        if depth > MAX_DEPTH {
+            return (None, None);
+        }
+        let attr = |e: &Element, name: &str| e.named(name).and_then(|v| self.length(v, 0.0));
+        match e.name.as_str() {
+            "vector" => (attr(e, "width"), attr(e, "height")),
+            "bitmap" | "nine-patch" => e
+                .named("src")
+                .map_or((None, None), |v| self.intrinsic(v, depth)),
+            "shape" => e
+                .children
+                .iter()
+                .find(|c| c.name == "size")
+                .map_or((None, None), |size| {
+                    (attr(size, "width"), attr(size, "height"))
+                }),
+            "inset" => {
+                // InsetDrawable: the child's size grown by the insets
+                // (fractions of the size, then dimensions).
+                let (cw, ch) = self.intrinsic_inner(e, apk, depth);
+                let all = e.named("inset");
+                let inset = |name: &str| match e.named(name).or(all) {
+                    Some(v) => match self.res.resolve(v) {
+                        Some((Value::Fraction(f), _)) => (f64::from(f), 0.0),
+                        _ => (0.0, self.length(v, 0.0).unwrap_or(0.0)),
+                    },
+                    None => (0.0, 0.0),
+                };
+                let axis = |child: Option<f64>, a: &str, b: &str| {
+                    let ((fa, da), (fb, db)) = (inset(a), inset(b));
+                    let child = child?;
+                    (fa + fb < 1.0).then(|| child / (1.0 - (fa + fb)) + da + db)
+                };
+                (
+                    axis(cw, "insetLeft", "insetRight"),
+                    axis(ch, "insetTop", "insetBottom"),
+                )
+            }
+            "layer-list" | "ripple" => {
+                // LayerDrawable: the largest of the layers with a size,
+                // each with its insets.
+                let mut size: Size = (None, None);
+                for item in e.children.iter().filter(|c| c.name == "item") {
+                    if e.name == "ripple" && item.named("id").is_some() {
+                        continue;
+                    }
+                    let (cw, ch) = self.intrinsic_inner(item, apk, depth);
+                    let side = |name: &str| attr(item, name).unwrap_or(0.0);
+                    let w = attr(item, "width")
+                        .or(cw)
+                        .map(|w| w + side("left") + side("right"));
+                    let h = attr(item, "height")
+                        .or(ch)
+                        .map(|h| h + side("top") + side("bottom"));
+                    let larger = |a: Option<f64>, b: Option<f64>| match (a, b) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (a, b) => a.or(b),
+                    };
+                    size = (larger(size.0, w), larger(size.1, h));
+                }
+                size
+            }
+            "selector" => {
+                selector_item(e).map_or((None, None), |i| self.intrinsic_inner(i, apk, depth))
+            }
+            "animation-list" => e
+                .children
+                .iter()
+                .find(|c| c.name == "item")
+                .map_or((None, None), |i| self.intrinsic_inner(i, apk, depth)),
+            "level-list" => self
+                .level_item(e, 0)
+                .map_or((None, None), |i| self.intrinsic_inner(i, apk, depth)),
+            // DrawableWrapper: its child's.
+            "rotate" | "scale" | "clip" | "animated-vector" => self.intrinsic_inner(e, apk, depth),
+            _ => (None, None),
+        }
+    }
+
+    /// The first item of a `level-list` whose level range holds `level`.
+    fn level_item<'e>(&self, e: &'e Element, level: u32) -> Option<&'e Element> {
+        let level = level as i32;
+        e.children
+            .iter()
+            .filter(|c| c.name == "item")
+            .find(|i| (self.int(i, "minLevel", 0)..=self.int(i, "maxLevel", 0)).contains(&level))
+    }
+
+    /// A boolean attribute (false unless set).
+    fn boolean(&self, e: &Element, name: &str) -> bool {
+        matches!(
+            e.named(name).and_then(|v| self.res.resolve(v)),
+            Some((Value::Bool(true), _))
+        )
+    }
+
     /// An integer attribute.
     fn int(&self, e: &Element, name: &str, default: i32) -> i32 {
         match e.named(name).and_then(|v| self.res.resolve(v)) {
@@ -149,16 +290,7 @@ impl Drawer<'_> {
                 }
                 drew
             }
-            "selector" => {
-                // The item for no state: the last without state attributes.
-                let items: Vec<&Element> = e.children.iter().filter(|c| c.name == "item").collect();
-                let plain = items
-                    .iter()
-                    .rev()
-                    .find(|i| !i.attrs.iter().any(|a| a.name.starts_with("state_")))
-                    .or(items.first());
-                plain.is_some_and(|i| self.inner(i, apk, r, depth, level))
-            }
+            "selector" => selector_item(e).is_some_and(|i| self.inner(i, apk, r, depth, level)),
             "animation-list" => {
                 // An AnimationDrawable not running shows its first frame
                 // (a status icon such as the download arrow).
@@ -167,17 +299,9 @@ impl Drawer<'_> {
                     .find(|c| c.name == "item")
                     .is_some_and(|i| self.inner(i, apk, r, depth, level))
             }
-            "level-list" => {
-                // The first item whose level range holds the level.
-                let level = level as i32;
-                e.children
-                    .iter()
-                    .filter(|c| c.name == "item")
-                    .find(|i| {
-                        (self.int(i, "minLevel", 0)..=self.int(i, "maxLevel", 0)).contains(&level)
-                    })
-                    .is_some_and(|i| self.inner(i, apk, r, depth, level as u32))
-            }
+            "level-list" => self
+                .level_item(e, level)
+                .is_some_and(|i| self.inner(i, apk, r, depth, level)),
             "rotate" => {
                 // It stands between `fromDegrees` and `toDegrees` by its
                 // level, about its pivot (50 % by default).
@@ -209,11 +333,19 @@ impl Drawer<'_> {
                 if level == 0 {
                     return false;
                 }
-                let scale = |name: &str, extent: f64| match self.percent(e, name) {
-                    Some(s) if s > 0.0 => at_level(extent, level, s),
-                    _ => extent,
+                // With `useIntrinsicSizeAsMinimum`, the child shrinks down
+                // to its intrinsic size, not to nothing (`onBoundsChange`).
+                let (iw, ih) = if self.boolean(e, "useIntrinsicSizeAsMinimum") {
+                    self.intrinsic_inner(e, apk, depth)
+                } else {
+                    (None, None)
                 };
-                let (w, h) = (scale("scaleWidth", r.w), scale("scaleHeight", r.h));
+                let scale =
+                    |name: &str, extent: f64, minimum: Option<f64>| match self.percent(e, name) {
+                        Some(s) if s > 0.0 => scaled(extent, minimum.unwrap_or(0.0), level, s),
+                        _ => extent,
+                    };
+                let (w, h) = (scale("scaleWidth", r.w, iw), scale("scaleHeight", r.h, ih));
                 if w <= 0.0 || h <= 0.0 {
                     return false;
                 }
@@ -514,6 +646,49 @@ impl Drawer<'_> {
     }
 }
 
+/// A `selector`'s item for no state: the last without state attributes.
+fn selector_item(e: &Element) -> Option<&Element> {
+    let items: Vec<&Element> = e.children.iter().filter(|c| c.name == "item").collect();
+    items
+        .iter()
+        .rev()
+        .find(|i| !i.attrs.iter().any(|a| a.name.starts_with("state_")))
+        .or(items.first())
+        .copied()
+}
+
+/// A `ScaleDrawable`'s extent: shrunk from `extent` towards `minimum` by
+/// `scale` of the difference at level 0, whole at 10000.
+fn scaled(extent: f64, minimum: f64, level: u32, scale: f64) -> f64 {
+    extent - (extent - minimum) * (1.0 - f64::from(level) / MAX_LEVEL) * scale
+}
+
+/// The density of a bitmap's resource directory (`res/drawable-xhdpi`):
+/// 160 without a density qualifier; none for `nodpi`, whose pixels are
+/// the device's, which the drawer does not know.
+fn density(path: &str) -> Option<f64> {
+    let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let dir = dir.rsplit('/').next().unwrap_or(dir);
+    for q in dir.split('-').skip(1) {
+        let dpi = match q {
+            "ldpi" => 120.0,
+            "mdpi" => 160.0,
+            "tvdpi" => 213.0,
+            "hdpi" => 240.0,
+            "xhdpi" => 320.0,
+            "xxhdpi" => 480.0,
+            "xxxhdpi" => 640.0,
+            "nodpi" => return None,
+            q => match q.strip_suffix("dpi").and_then(|n| n.parse::<f64>().ok()) {
+                Some(dpi) => dpi,
+                None => continue,
+            },
+        };
+        return Some(dpi);
+    }
+    Some(160.0)
+}
+
 /// An extent scaled down by `scale` of it at level 0, whole at 10000.
 fn at_level(extent: f64, level: u32, scale: f64) -> f64 {
     extent - extent * (1.0 - f64::from(level) / MAX_LEVEL) * scale
@@ -589,6 +764,26 @@ mod tests {
         assert_eq!(at_level(108.0, 10000, 1.0), 108.0);
         assert_eq!(at_level(108.0, 0, 0.5), 54.0);
         assert_eq!(at_level(108.0, 5000, 0.5), 81.0);
+    }
+
+    #[test]
+    fn scale_keeps_the_intrinsic_size_as_its_minimum() {
+        // A 50 % scale of 108 with a 48 intrinsic: 78 at level 0, half way
+        // between at 5000, whole at 10000; without a minimum, as at_level.
+        assert_eq!(scaled(108.0, 48.0, 0, 0.5), 78.0);
+        assert_eq!(scaled(108.0, 48.0, 5000, 0.5), 93.0);
+        assert_eq!(scaled(108.0, 48.0, 10000, 0.5), 108.0);
+        assert_eq!(scaled(108.0, 0.0, 5000, 0.5), at_level(108.0, 5000, 0.5));
+    }
+
+    #[test]
+    fn bitmap_density_from_its_directory() {
+        assert_eq!(density("res/drawable-xxhdpi-v4/icon.png"), Some(480.0));
+        assert_eq!(density("res/mipmap-hdpi/ic.webp"), Some(240.0));
+        assert_eq!(density("res/drawable/icon.png"), Some(160.0));
+        assert_eq!(density("res/drawable-560dpi/icon.png"), Some(560.0));
+        assert_eq!(density("res/drawable-nodpi/icon.png"), None);
+        assert_eq!(density("res/drawable-night-xhdpi/icon.png"), Some(320.0));
     }
 
     #[test]
