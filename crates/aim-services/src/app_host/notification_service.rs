@@ -626,7 +626,31 @@ impl NotificationManager {
 
     /// `getAutomaticZenRules`.
     fn automatic_zen_rules(&self, uid: i32) -> Result<Vec<zen_config::AzrWithId>, Exception> {
-        zen_config::automatic_zen_rules(self.manageable_zen_rules(uid, "getAutomaticZenRules")?)
+        zen_config::automatic_zen_rules(
+            self.manageable_zen_rules(uid, "getAutomaticZenRules")?,
+            |package, name| self.zen_rule_icon(package, name),
+        )
+    }
+
+    /// `ZenModeHelper.drawableResNameToResId`: `getIdentifier(name, null,
+    /// null)` in the resources of `package` for the system user, 0 when
+    /// it is not installed there.
+    fn zen_rule_icon(&self, package: &str, name: &str) -> Result<u32, Exception> {
+        let (state, _) = self.host.packages()?;
+        let Some(pkg) = state
+            .packages
+            .get(package)
+            .filter(|ps| ps.users.get(&0).is_some_and(|u| u.installed))
+            .and_then(|ps| ps.pkg.as_deref())
+        else {
+            eprintln!("app host: cannot load package for icon:{package} res:{name}");
+            return Ok(0);
+        };
+        let inputs = self.host.inputs()?;
+        inputs
+            .packages
+            .named_identifier(self.host.root()?, &inputs.data, pkg, name)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("notification: {e}")))
     }
 
     /// `getAutomaticZenRule`: the rule of `id`, if `uid` may manage it.
@@ -639,7 +663,7 @@ impl NotificationManager {
         self.manageable_zen_rules(uid, "getAutomaticZenRule")?
             .into_iter()
             .find(|r| r.id.as_deref() == Some(id))
-            .map(zen_config::automatic_zen_rule)
+            .map(|r| zen_config::automatic_zen_rule(r, |p, n| self.zen_rule_icon(p, n)))
             .transpose()
     }
 

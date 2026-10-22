@@ -316,27 +316,31 @@ impl WriteParcelable for ConfigParcel {
 }
 
 /// `AutomaticZenRule.AzrWithId` of a rule.
-pub struct AzrWithId(ZenRule);
+pub struct AzrWithId(AutomaticZenRule);
 
 impl WriteParcelable for AzrWithId {
     fn write_to(&self, p: &mut Parcel) {
-        p.write_string8(self.0.id.as_deref());
+        p.write_string8(self.0.rule.id.as_deref());
         p.write_string16(Some("android.app.AutomaticZenRule"));
-        write_automatic_zen_rule(&self.0, p);
+        self.0.write_to(p);
     }
 }
 
-/// The `AutomaticZenRule` of a rule (`zenRuleToAutomaticZenRule`).
-pub struct AutomaticZenRule(ZenRule);
+/// The `AutomaticZenRule` of a rule (`zenRuleToAutomaticZenRule`), with
+/// its icon's id (`drawableResNameToResId`).
+pub struct AutomaticZenRule {
+    rule: ZenRule,
+    icon: u32,
+}
 
 impl WriteParcelable for AutomaticZenRule {
     fn write_to(&self, p: &mut Parcel) {
-        write_automatic_zen_rule(&self.0, p);
+        write_automatic_zen_rule(&self.rule, self.icon, p);
     }
 }
 
 /// `AutomaticZenRule.writeToParcel` of a rule.
-fn write_automatic_zen_rule(rule: &ZenRule, p: &mut Parcel) {
+fn write_automatic_zen_rule(rule: &ZenRule, icon: u32, p: &mut Parcel) {
     p.write_i32(i32::from(rule.enabled));
     // The constructor's trimmed name, a `Uri.parse` of the trimmed
     // condition id, and trimmed components.
@@ -374,8 +378,7 @@ fn write_automatic_zen_rule(rule: &ZenRule, p: &mut Parcel) {
         rule.effects.as_ref(),
     );
     p.write_bool(rule.allow_manual_invocation);
-    // `drawableResNameToResId`: none without a name.
-    p.write_i32(0);
+    p.write_i32(icon as i32);
     p.write_string8(rule.trigger_description.as_deref());
     p.write_i32(rule.kind);
 }
@@ -688,35 +691,33 @@ impl ZenModeConfig {
 
 /// `getAutomaticZenRules` of `rules` a caller may manage: each as an
 /// `AutomaticZenRule` with its id, in the order of the `HashMap` that
-/// collects them.
-pub fn automatic_zen_rules(rules: Vec<ZenRule>) -> Result<Vec<AzrWithId>, Exception> {
-    rules.iter().try_for_each(convertible)?;
-    Ok(hash_order(rules, |r| r.id.as_deref().unwrap_or_default())
+/// collects them. `icon` is `drawableResNameToResId` of a package and
+/// an icon's resource name.
+pub fn automatic_zen_rules(
+    rules: Vec<ZenRule>,
+    icon: impl Fn(&str, &str) -> Result<u32, Exception>,
+) -> Result<Vec<AzrWithId>, Exception> {
+    hash_order(rules, |r| r.id.as_deref().unwrap_or_default())
         .into_iter()
-        .map(AzrWithId)
-        .collect())
+        .map(|r| automatic_zen_rule(r, &icon).map(AzrWithId))
+        .collect()
 }
 
 /// `zenRuleToAutomaticZenRule` of one rule.
-pub fn automatic_zen_rule(rule: ZenRule) -> Result<AutomaticZenRule, Exception> {
-    convertible(&rule)?;
-    Ok(AutomaticZenRule(rule))
-}
-
-/// Whether `zenRuleToAutomaticZenRule` makes an `AutomaticZenRule` of
-/// `rule` as the app host can.
-fn convertible(rule: &ZenRule) -> Result<(), Exception> {
+pub fn automatic_zen_rule(
+    rule: ZenRule,
+    icon: impl Fn(&str, &str) -> Result<u32, Exception>,
+) -> Result<AutomaticZenRule, Exception> {
     // `AutomaticZenRule.Builder` takes a name and condition id.
     if rule.name.is_none() || rule.condition_id.is_none() {
         return Err(Exception::new(EX_NULL_POINTER, "AutomaticZenRule.Builder"));
     }
-    if rule.icon_res_name.as_deref().is_some_and(|n| !n.is_empty()) {
-        return Err(Exception::new(
-            EX_UNSUPPORTED_OPERATION,
-            "notification: a zen rule's icon by name (#1646)",
-        ));
-    }
-    Ok(())
+    // `drawableResNameToResId`: none without a name.
+    let icon = match rule.icon_res_name.as_deref() {
+        Some(name) if !name.is_empty() => icon(rule.pkg.as_deref().unwrap_or_default(), name)?,
+        _ => 0,
+    };
+    Ok(AutomaticZenRule { rule, icon })
 }
 
 /// `ConditionProviders.isPackageOrComponentAllowed`: whether `<dnd_apps>`
@@ -827,16 +828,23 @@ mod tests {
     fn a_rule_parcels_as_its_azr_with_id_does() {
         let xml = br#"<notification-policy version="1"><zen version="12" user="0">
 <manual enabled="false" zen="0" pkg="android" conditionId="" creationTime="0" callsFrom="3" alarms="1" type="0" />
-<automatic ruleId="r2" name="n" pkg="p" conditionId="c" id="c" />
+<automatic ruleId="r2" name="n" pkg="p" conditionId="c" id="c" rule_icon="p:drawable/ic" />
 </zen></notification-policy>"#;
         let rule = read(&aim_android_xml::read(xml).unwrap())
             .unwrap()
             .rules()
             .remove(0);
+        // `drawableResNameToResId` of the rule's package and icon name.
+        let icon = |package: &str, name: &str| {
+            assert_eq!((package, name), ("p", "p:drawable/ic"));
+            Ok(0x7f02_0001)
+        };
         let mut with_id = Parcel::new();
-        automatic_zen_rules(vec![rule.clone()]).unwrap()[0].write_to(&mut with_id);
+        automatic_zen_rules(vec![rule.clone()], icon).unwrap()[0].write_to(&mut with_id);
         let mut alone = Parcel::new();
-        automatic_zen_rule(rule).unwrap().write_to(&mut alone);
+        let azr = automatic_zen_rule(rule, icon).unwrap();
+        assert_eq!(azr.icon, 0x7f02_0001);
+        azr.write_to(&mut alone);
         let mut r = with_id.reader();
         assert_eq!(r.read_string8().unwrap().as_deref(), Some("r2"));
         assert_eq!(

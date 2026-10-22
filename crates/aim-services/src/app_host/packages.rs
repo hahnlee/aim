@@ -534,6 +534,20 @@ impl Packages {
         })
     }
 
+    /// `getResourcesForApplication`'s `getIdentifier(name, null, null)` in
+    /// `pkg`'s resources: 0 when there is none.
+    pub fn named_identifier(
+        &self,
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        name: &str,
+    ) -> Result<u32, String> {
+        self.with_resources(root, data, pkg, |resources, _, _| {
+            Ok(full_name_identifier(resources, name).unwrap_or(0))
+        })
+    }
+
     /// `ActivityRecord.WindowStyle` of the theme `theme` of `pkg`, an app
     /// targeting `target_sdk` (`getThemeResource`, else `Theme` or
     /// `Theme_Holo`): the `R.styleable.Window` attributes
@@ -747,6 +761,47 @@ pub(super) fn host_path(root: &Path, data: &Path, path: &str) -> Result<PathBuf,
     })
 }
 
+/// `ResourcesImpl.getIdentifier(name, null, null)`: a decimal id as is,
+/// else `AssetManager2::GetResourceId` of `@?package:type/entry`
+/// (`ExtractResourceName`) with neither part to fall back on, a private
+/// attribute found under `^attr-private`.
+fn full_name_identifier(resources: &parse::resources::Resources<'_>, name: &str) -> Option<u32> {
+    if let Ok(id) = name.parse::<i32>() {
+        return Some(id as u32);
+    }
+    let (package, kind, entry) = full_name(name)?;
+    resources.identifier(package, kind, entry).or_else(|| {
+        (kind == "attr")
+            .then(|| resources.identifier(package, "^attr-private", entry))
+            .flatten()
+    })
+}
+
+/// `ExtractResourceName` of `@?package:type/entry`, with no default
+/// package or type: none unless both are named.
+fn full_name(name: &str) -> Option<(&str, &str, &str)> {
+    let name = name.strip_prefix('@').unwrap_or(name);
+    let (mut package, mut kind) = ("", "");
+    let (mut has_package, mut has_kind) = (false, false);
+    let mut start = 0;
+    for (i, c) in name.char_indices() {
+        if kind.is_empty() && c == '/' {
+            has_kind = true;
+            kind = &name[start..i];
+            start = i + 1;
+        } else if package.is_empty() && c == ':' {
+            has_package = true;
+            package = &name[start..i];
+            start = i + 1;
+        }
+    }
+    if (has_package && package.is_empty()) || (has_kind && kind.is_empty()) {
+        return None;
+    }
+    // `GetResourceId` takes neither from a fallback.
+    (!package.is_empty() && !kind.is_empty()).then(|| (package, kind, &name[start..]))
+}
+
 /// One package as the scan leaves it: parsed, with the setting's
 /// identity, ABI and partition applied.
 fn join(
@@ -930,6 +985,24 @@ fn join_apex(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `getIdentifier(name, null, null)` takes only a full name, as
+    /// `ExtractResourceName` splits it.
+    #[test]
+    fn full_resource_names_split_as_extract_resource_name() {
+        assert_eq!(full_name("p:drawable/ic"), Some(("p", "drawable", "ic")));
+        assert_eq!(
+            full_name("@android:drawable/ic_lock"),
+            Some(("android", "drawable", "ic_lock"))
+        );
+        // Without a default to fall back on, a missing part finds none.
+        assert_eq!(full_name("drawable/ic"), None);
+        assert_eq!(full_name("p:ic"), None);
+        assert_eq!(full_name("ic"), None);
+        // An empty part given by its separator is refused.
+        assert_eq!(full_name(":drawable/ic"), None);
+        assert_eq!(full_name("p:/ic"), None);
+    }
 
     #[test]
     fn grants_follow_permission_flags() {
