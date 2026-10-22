@@ -54,8 +54,9 @@ fn reboot_arguments(args: impl IntoIterator<Item = OsString>, captures: &[usize]
 }
 
 fn main() {
-    // SIGINT/SIGTERM stop the services before exiting, as a timeout does.
-    for signal in [libc::SIGINT, libc::SIGTERM] {
+    // SIGINT, SIGTERM and SIGHUP (the terminal it runs in gone) stop the
+    // services before exiting, as a timeout does.
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: the handler only stores to an atomic.
         unsafe {
             libc::signal(

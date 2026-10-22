@@ -10,6 +10,7 @@
 //! identifiers scoped to the data directory, apart from other guests'.
 
 use crate::graph::Ctx;
+use crate::stop;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,39 +23,36 @@ pub fn run(
     windows: bool,
     extra: &[String],
 ) -> Result<ExitCode, String> {
+    stop::on_signals("boot");
     let dir = aim_paths::out().join("boot");
     let data = data.map_or(dir.join("data"), PathBuf::from);
     fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
-    let mut display = start_display(ctx, &dir, windows)?;
-    let mut apps = if windows {
-        Some(
-            Command::new(ctx.workspace.host_bin("aim-apps"))
-                .args(shims_args(ctx, &dir, &data))
-                .spawn()
-                .map_err(|e| format!("aim-apps: {e}"))?,
-        )
-    } else {
-        None
+    let display = start_display(ctx, &dir, windows)?;
+    let mut now = stop::Running {
+        display: Some(display.id()),
+        ..Default::default()
     };
-    let status = guest_init(ctx, &data, &dir.join("display"))
-        .args(extra)
-        .status()
-        .map_err(|e| format!("guest-init: {e}"))?;
-    // SAFETY: signals the children we started.
-    unsafe { libc::kill(display.id() as i32, libc::SIGTERM) };
-    let _ = display.wait();
-    if let Some(apps) = &mut apps {
-        let _ = apps.kill();
-        let _ = apps.wait();
-        // The shims go with the boot, and out of Launch Services.
-        let cleaned = Command::new(ctx.workspace.host_bin("aim-apps"))
-            .args(["clean", "--into"])
-            .arg(dir.join("apps"))
-            .status();
-        if !cleaned.is_ok_and(|s| s.success()) {
-            eprintln!("aim-apps clean {}: failed", dir.join("apps").display());
-        }
+    stop::running(now.clone());
+    if windows {
+        let binary = ctx.workspace.host_bin("aim-apps");
+        let apps = Command::new(&binary)
+            .args(shims_args(ctx, &dir, &data))
+            .spawn()
+            .map_err(|e| format!("aim-apps: {e}"))?;
+        now.apps = Some((apps.id(), binary, dir.join("apps")));
+        stop::running(now.clone());
     }
+    let mut init = guest_init(ctx, &data, &dir.join("display"))
+        .args(extra)
+        .spawn()
+        .map_err(|e| format!("guest-init: {e}"))?;
+    now.init = Some(init.id());
+    stop::running(now.clone());
+    let status = init.wait().map_err(|e| format!("guest-init: {e}"))?;
+    // A signal from here on finds nothing to stop; guest-init is reaped.
+    stop::forget();
+    now.init = None;
+    stop::stop(now);
     Ok(if status.success() {
         ExitCode::SUCCESS
     } else {
