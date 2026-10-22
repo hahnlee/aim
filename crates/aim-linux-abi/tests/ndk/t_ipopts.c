@@ -1,6 +1,6 @@
 // IP and socket receive options iputils and DnsResolver use: IP_RECVTTL,
 // IP_RECVTOS and SO_TIMESTAMP(NS) control messages (on UDP and ping
-// sockets), and TCP_MAXSEG before a connection.
+// sockets), the IP_RETOPTS flag, and TCP_MAXSEG before a connection.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -102,6 +102,12 @@ static void ping_ttl(void) {
   CHECK(s >= 0);
   CHECK(setsockopt(s, IPPROTO_IP, IP_RECVTTL, &on, sizeof on) == 0);
   CHECK(setsockopt(s, SOL_SOCKET, SO_TIMESTAMP, &on, sizeof on) == 0);
+  // iputils ping asks for the options of each reply's reply, a flag; a
+  // packet without IP options gives none.
+  CHECK(setsockopt(s, IPPROTO_IP, IP_RETOPTS, &on, sizeof on) == 0);
+  int v = 0;
+  socklen_t l = sizeof v;
+  CHECK(getsockopt(s, IPPROTO_IP, IP_RETOPTS, &v, &l) == 0 && v == 1);
   unsigned char echo[16] = {8, 0, 0, 0, 0x12, 0x34, 0, 1, 'a', 'i', 'm'};
   unsigned sum = 0;
   for (int i = 0; i < 16; i += 2) sum += echo[i] << 8 | echo[i + 1];
