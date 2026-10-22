@@ -1129,6 +1129,8 @@ mod tests {
 
     #[test]
     fn seal_rules() {
+        // memfd_create reaches the guest's view.
+        let _view = crate::vfs::test_view();
         let fd = create("t", MFD_ALLOW_SEALING);
         assert!(fd >= 0);
         let st = stat_fd(fd).unwrap();
@@ -1157,6 +1159,8 @@ mod tests {
     /// MFD_NOEXEC_SEAL memfd is not executable and sealable.
     #[test]
     fn executable_view_keeps_what_was_written_through_a_mapping() {
+        // memfd_create reaches the guest's view.
+        let _view = crate::vfs::test_view();
         let fd = create("jit", 0);
         let size = 8 << 20;
         // SAFETY: our test fd, sparse.
@@ -1199,6 +1203,8 @@ mod tests {
 
     #[test]
     fn exec_seal() {
+        // memfd_create reaches the guest's view.
+        let _view = crate::vfs::test_view();
         let fd = create("x", MFD_ALLOW_SEALING);
         assert_eq!(add_seals(fd, F_SEAL_EXEC), 0);
         assert_eq!(
@@ -1217,6 +1223,8 @@ mod tests {
     /// never saw (as one received from another process) is still one.
     #[test]
     fn reopen_and_foreign_fds() {
+        // memfd_create reaches the guest's view.
+        let _view = crate::vfs::test_view();
         let fd = create("chromium-ashmem", MFD_ALLOW_SEALING);
         // SAFETY: our test fd.
         assert_eq!(unsafe { libc::write(fd, b"shared".as_ptr().cast(), 6) }, 6);
@@ -1331,6 +1339,11 @@ mod tests {
     /// A sweep removes the names only of files no description holds.
     #[test]
     fn sweep_keeps_held_files() {
+        // A sweep sees every lock on its files, so no other test of this
+        // process may spawn a child holding copies of their descriptions.
+        if fdtab::isolated_kernel_test("sys::memfd::tests::sweep_keeps_held_files") {
+            return;
+        }
         let d = std::env::temp_dir().join(format!("aim-memfd-test-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let held = std::fs::File::create(d.join("held")).unwrap();
@@ -1343,13 +1356,17 @@ mod tests {
         drop(free);
         use std::os::fd::AsRawFd;
         hold(held.as_raw_fd());
-        assert_eq!(sweep(&d, 5), 0);
+        // Younger than a day: an age no run of the test can reach, however
+        // loaded the host.
+        assert_eq!(sweep(&d, 86_400), 0);
         assert!(d.join("free").exists());
         assert_eq!(sweep(&d, 0), 1);
         assert!(d.join("held").exists());
         assert!(!d.join("free").exists());
         assert!(d.join("unrelated").exists());
-        let reopened = reopen(held.as_raw_fd(), libc::O_RDONLY).unwrap();
+        // Close-on-exec: a child another test spawns meanwhile must not keep
+        // this description's lock.
+        let reopened = reopen(held.as_raw_fd(), libc::O_RDONLY | libc::O_CLOEXEC).unwrap();
         assert!(reopened >= 0);
         unsafe { libc::close(reopened as i32) };
         // Unlocking the description rather than closing it: a child another
