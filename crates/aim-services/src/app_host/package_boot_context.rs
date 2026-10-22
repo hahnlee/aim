@@ -112,7 +112,7 @@ impl BootContext {
     fn global_int(&self, name: &str, default: i32) -> Result<i32, Exception> {
         Ok(self
             .host
-            .inputs()?
+            .platform()?
             .settings
             .get(Table::Global, name)
             .and_then(|v| v.parse().ok())
@@ -124,7 +124,7 @@ impl BootContext {
     fn query_disabled_setting(&self) -> Result<bool, Exception> {
         let value = self
             .host
-            .inputs()?
+            .platform()?
             .settings
             .get(Table::Config, &format!("{NAMESPACE}/{QUERY_FILTERING}"));
         Ok(!value.map_or(APP_ENUMERATION_ENABLED_BY_DEFAULT, |v| {

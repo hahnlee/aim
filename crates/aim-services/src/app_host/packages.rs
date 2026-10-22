@@ -33,12 +33,116 @@ const APP_LIB32_INSTALL_DIR: &str = "/data/app-lib";
 
 pub struct Packages {
     state: model::State,
-    platform: Platform,
+    framework: Framework,
     /// User 0's permission and app op state (`access.abx`).
     access: Option<package::permissions::AccessUser>,
     /// The permissions defined (`access.abx`'s system part).
     permissions: Vec<package::permissions::Permission>,
     domains: DomainInputs,
+}
+
+/// The framework's resources as the device configures them
+/// (`Resources.getSystem`: framework-res.apk with its static overlays, at
+/// the device's density and locale).
+pub struct Framework(pub Platform);
+
+impl Framework {
+    /// The device's framework resources, read below the image `root`.
+    pub fn load(root: &Path, density_dpi: i32, locale: &str) -> Result<Self, String> {
+        device_platform(root, density_dpi, locale).map(Framework)
+    }
+
+    fn framework_resources(&self) -> crate::package::parse::resources::Resources<'_> {
+        crate::package::parse::resources::Resources {
+            tables: vec![&self.0.framework],
+            overlays: &self.0.framework_overlays,
+            config: self.0.config(),
+        }
+    }
+
+    /// The framework's resource `kind/name`, resolved as its overlays and
+    /// the device's locale leave it.
+    fn framework_value(
+        &self,
+        kind: &str,
+        name: &str,
+    ) -> Option<crate::package::parse::resources::Selected> {
+        use crate::package::parse::resources::{Selected, TYPE_REFERENCE};
+        let id = self.0.framework.id(kind, name)?;
+        let mut value = Selected {
+            kind: TYPE_REFERENCE,
+            data: id,
+            table: None,
+            resid: 0,
+            flags: 0,
+        };
+        self.framework_resources().resolve(&mut value);
+        Some(value)
+    }
+
+    /// The id of the framework's resource `kind/name`: its `R` constant.
+    pub fn framework_id(&self, kind: &str, name: &str) -> Option<u32> {
+        self.0.framework.id(kind, name)
+    }
+
+    /// The framework's integer resource `name`.
+    pub fn framework_integer(&self, name: &str) -> Option<i32> {
+        let value = self.framework_value("integer", name)?;
+        (value.kind >= crate::package::parse::resources::TYPE_FIRST_INT)
+            .then_some(value.data as i32)
+    }
+
+    /// The framework's boolean resource `name` (`Resources.getBoolean`:
+    /// any integer, nonzero is true).
+    pub fn framework_bool(&self, name: &str) -> Option<bool> {
+        let value = self.framework_value("bool", name)?;
+        (value.kind >= crate::package::parse::resources::TYPE_FIRST_INT).then_some(value.data != 0)
+    }
+
+    /// The framework's float resource `name` (`<item format="float"
+    /// type="dimen">`).
+    pub fn framework_float(&self, name: &str) -> Option<f32> {
+        let value = self.framework_value("dimen", name)?;
+        (value.kind == crate::package::parse::resources::TYPE_FLOAT)
+            .then_some(f32::from_bits(value.data))
+    }
+
+    /// The framework's dimension resource `name` given in dp
+    /// (`TypedValue.complexToFloat` of a `COMPLEX_UNIT_DIP` dimension).
+    pub fn framework_dimension_dp(&self, name: &str) -> Option<f32> {
+        const COMPLEX_UNIT_DIP: u32 = 1;
+        const RADIX_MULTS: [f32; 4] = [
+            1.0 / 256.0,
+            1.0 / 32768.0,
+            1.0 / 8388608.0,
+            1.0 / 2147483648.0,
+        ];
+        let value = self.framework_value("dimen", name)?;
+        (value.kind == crate::package::parse::resources::TYPE_DIMENSION
+            && value.data & 0xf == COMPLEX_UNIT_DIP)
+            .then(|| {
+                (value.data & 0xffff_ff00) as i32 as f32
+                    * RADIX_MULTS[((value.data >> 4) & 3) as usize]
+            })
+    }
+
+    /// The file of the framework's resource `kind/name` (`openRawResource`,
+    /// `getXml`'s compiled XML) in the image whose root is `root`.
+    pub fn framework_file(&self, root: &Path, kind: &str, name: &str) -> Option<Vec<u8>> {
+        self.0.framework_file(root, kind, name)
+    }
+
+    /// The framework's string resource `name` in the device's locale.
+    pub fn framework_string(&self, name: &str) -> Option<String> {
+        let id = self.0.framework.id("string", name)?;
+        self.framework_resources().resource_string(id)
+    }
+
+    /// The framework's string array resource `name` (`getStringArray`).
+    pub fn framework_string_array(&self, name: &str) -> Option<Vec<Option<String>>> {
+        let id = self.0.framework.id("array", name)?;
+        self.framework_resources().string_array(id)
+    }
 }
 
 /// What DomainVerificationService attaches the packages with at boot
@@ -287,7 +391,7 @@ impl Packages {
             Some(package::scan_snapshot::query_state::select_permission_controller(&state)?);
         Ok(Packages {
             state,
-            platform,
+            framework: Framework(platform),
             access: Some(access),
             permissions,
             domains: DomainInputs {
@@ -319,7 +423,7 @@ impl Packages {
 
     /// What the APK signature verifier depends on of the platform.
     pub fn signing_build(&self) -> package::sign::Build {
-        package::sign::Build::of(&self.platform)
+        package::sign::Build::of(&self.framework.0)
     }
 
     /// A package context's resources (`createPackageContext`): the
@@ -330,102 +434,48 @@ impl Packages {
         table: &'a crate::package::parse::resources::Table,
     ) -> crate::package::parse::resources::Resources<'a> {
         crate::package::parse::resources::Resources {
-            tables: vec![&self.platform.framework, table],
-            overlays: &self.platform.framework_overlays,
-            config: self.platform.config(),
+            tables: vec![&self.framework.0.framework, table],
+            overlays: &self.framework.0.framework_overlays,
+            config: self.framework.0.config(),
         }
     }
 
-    fn framework_resources(&self) -> crate::package::parse::resources::Resources<'_> {
-        crate::package::parse::resources::Resources {
-            tables: vec![&self.platform.framework],
-            overlays: &self.platform.framework_overlays,
-            config: self.platform.config(),
-        }
+    /// The framework's resources (`Resources.getSystem`), as the device
+    /// configures them.
+    pub fn framework(&self) -> &Framework {
+        &self.framework
     }
 
-    /// The framework's resource `kind/name`, resolved as its overlays and
-    /// the device's locale leave it.
-    fn framework_value(
-        &self,
-        kind: &str,
-        name: &str,
-    ) -> Option<crate::package::parse::resources::Selected> {
-        use crate::package::parse::resources::{Selected, TYPE_REFERENCE};
-        let id = self.platform.framework.id(kind, name)?;
-        let mut value = Selected {
-            kind: TYPE_REFERENCE,
-            data: id,
-            table: None,
-            resid: 0,
-            flags: 0,
-        };
-        self.framework_resources().resolve(&mut value);
-        Some(value)
-    }
-
-    /// The id of the framework's resource `kind/name`: its `R` constant.
     pub fn framework_id(&self, kind: &str, name: &str) -> Option<u32> {
-        self.platform.framework.id(kind, name)
+        self.framework.framework_id(kind, name)
     }
 
-    /// The framework's integer resource `name`.
     pub fn framework_integer(&self, name: &str) -> Option<i32> {
-        let value = self.framework_value("integer", name)?;
-        (value.kind >= crate::package::parse::resources::TYPE_FIRST_INT)
-            .then_some(value.data as i32)
+        self.framework.framework_integer(name)
     }
 
-    /// The framework's boolean resource `name` (`Resources.getBoolean`:
-    /// any integer, nonzero is true).
     pub fn framework_bool(&self, name: &str) -> Option<bool> {
-        let value = self.framework_value("bool", name)?;
-        (value.kind >= crate::package::parse::resources::TYPE_FIRST_INT).then_some(value.data != 0)
+        self.framework.framework_bool(name)
     }
 
-    /// The framework's float resource `name` (`<item format="float"
-    /// type="dimen">`).
     pub fn framework_float(&self, name: &str) -> Option<f32> {
-        let value = self.framework_value("dimen", name)?;
-        (value.kind == crate::package::parse::resources::TYPE_FLOAT)
-            .then_some(f32::from_bits(value.data))
+        self.framework.framework_float(name)
     }
 
-    /// The framework's dimension resource `name` given in dp
-    /// (`TypedValue.complexToFloat` of a `COMPLEX_UNIT_DIP` dimension).
     pub fn framework_dimension_dp(&self, name: &str) -> Option<f32> {
-        const COMPLEX_UNIT_DIP: u32 = 1;
-        const RADIX_MULTS: [f32; 4] = [
-            1.0 / 256.0,
-            1.0 / 32768.0,
-            1.0 / 8388608.0,
-            1.0 / 2147483648.0,
-        ];
-        let value = self.framework_value("dimen", name)?;
-        (value.kind == crate::package::parse::resources::TYPE_DIMENSION
-            && value.data & 0xf == COMPLEX_UNIT_DIP)
-            .then(|| {
-                (value.data & 0xffff_ff00) as i32 as f32
-                    * RADIX_MULTS[((value.data >> 4) & 3) as usize]
-            })
+        self.framework.framework_dimension_dp(name)
     }
 
-    /// The file of the framework's resource `kind/name` (`openRawResource`,
-    /// `getXml`'s compiled XML) in the image whose root is `root`.
     pub fn framework_file(&self, root: &Path, kind: &str, name: &str) -> Option<Vec<u8>> {
-        self.platform.framework_file(root, kind, name)
+        self.framework.framework_file(root, kind, name)
     }
 
-    /// The framework's string resource `name` in the device's locale.
     pub fn framework_string(&self, name: &str) -> Option<String> {
-        let id = self.platform.framework.id("string", name)?;
-        self.framework_resources().resource_string(id)
+        self.framework.framework_string(name)
     }
 
-    /// The framework's string array resource `name` (`getStringArray`).
     pub fn framework_string_array(&self, name: &str) -> Option<Vec<Option<String>>> {
-        let id = self.platform.framework.id("array", name)?;
-        self.framework_resources().string_array(id)
+        self.framework.framework_string_array(name)
     }
 
     /// The permissions defined.
@@ -440,7 +490,7 @@ impl Packages {
 
     /// SystemConfig's split permissions.
     pub fn split_permissions(&self) -> &[parse::SplitPermission] {
-        &self.platform.split_permissions
+        &self.framework.0.split_permissions
     }
 
     /// `ComponentInfo.loadXmlMetaData`'s parser and the attributes of
@@ -473,7 +523,7 @@ impl Packages {
             let document = aim_apps::res::xml(&bytes).map_err(|e| e.to_string())?;
             let ctx = parse::attrs::Ctx {
                 res: resources,
-                attrs: &self.platform.framework_attrs,
+                attrs: &self.framework.0.framework_attrs,
                 error: Default::default(),
             };
             let value = read(&document, &ctx);
@@ -555,7 +605,8 @@ impl Packages {
         const ICE_CREAM_SANDWICH: i32 = 14;
         const N: i32 = 24;
         let style = |name: &str| {
-            self.platform
+            self.framework
+                .0
                 .framework
                 .id("style", name)
                 .ok_or_else(|| format!("no framework style {name}"))
@@ -581,7 +632,8 @@ impl Packages {
             // `TypedArray.getBoolean`: an integer's, else false.
             let flag = |name: &str| -> Result<bool, String> {
                 let attr = self
-                    .platform
+                    .framework
+                    .0
                     .framework
                     .id("attr", name)
                     .ok_or_else(|| format!("no attribute {name}"))?;
@@ -637,7 +689,7 @@ impl Packages {
             .collect::<Result<Vec<_>, _>>()?;
         // Each table's APK: the framework's first, then the package's.
         let mut table_apks = vec![None];
-        let mut resources = vec![&self.platform.framework];
+        let mut resources = vec![&self.framework.0.framework];
         for (i, table) in tables.iter().enumerate() {
             if let Some(table) = table {
                 resources.push(table);
@@ -646,8 +698,8 @@ impl Packages {
         }
         let resources = parse::resources::Resources {
             tables: resources,
-            overlays: &self.platform.framework_overlays,
-            config: self.platform.config(),
+            overlays: &self.framework.0.framework_overlays,
+            config: self.framework.0.config(),
         };
         f(&resources, &apks, &table_apks)
     }

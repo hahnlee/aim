@@ -308,12 +308,12 @@ struct Configured {
     connect: Connect,
 }
 
-/// What the app host reads, loaded when the first process starts.
-struct Inputs {
+/// What the app host reads of the platform, apart from its packages:
+/// loaded on first use, before or without the package model.
+struct Platform {
     /// The guest's `/data`.
     data: PathBuf,
     compat: compat::CompatConfig,
-    packages: packages::Packages,
     settings: settings::Settings,
     /// `persist.sys.locale`.
     locales: String,
@@ -322,6 +322,20 @@ struct Inputs {
     /// `ro.sf.lcd_density`, the processes' `DisplayMetrics.DENSITY_DEVICE`.
     device_density: i32,
     shared_memory: bind::ApplicationSharedMemory,
+}
+
+/// What the app host reads, loaded when the first process starts: the
+/// platform and the packages.
+struct Inputs {
+    platform: Arc<Platform>,
+    packages: packages::Packages,
+}
+
+impl std::ops::Deref for Inputs {
+    type Target = Platform;
+    fn deref(&self) -> &Platform {
+        &self.platform
+    }
 }
 
 /// A start's app data isolation (`zygote::Start`'s).
@@ -466,6 +480,9 @@ pub struct AppHost {
     me: Weak<AppHost>,
     process: Arc<LocalProcess>,
     configured: OnceLock<Configured>,
+    platform: OnceLock<Arc<Platform>>,
+    /// The framework's resources read before the packages were.
+    framework: OnceLock<packages::Framework>,
     inputs: OnceLock<Inputs>,
     loading: Mutex<()>,
     zygote: Mutex<Option<zygote::Session>>,
@@ -485,6 +502,9 @@ pub struct AppHost {
     /// Held by each change of the package model from reading it to
     /// storing the changed model, so that no change is lost to another.
     model_writer: Mutex<()>,
+    /// The users unlocking or unlocked (`UserController`'s user states at
+    /// `STATE_RUNNING_UNLOCKING` or later).
+    unlocked_users: Mutex<std::collections::BTreeSet<i32>>,
     /// The owner of PackageManager's persisted state, opened by its
     /// first write (the package service's, the app data's inodes);
     /// holding it serializes writes (`mLock`).
@@ -580,6 +600,8 @@ impl AppHost {
             me: me.clone(),
             process,
             configured: OnceLock::new(),
+            platform: OnceLock::new(),
+            framework: OnceLock::new(),
             inputs: OnceLock::new(),
             loading: Mutex::new(()),
             zygote: Mutex::new(None),
@@ -591,6 +613,7 @@ impl AppHost {
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             model: Mutex::new(None),
             model_writer: Mutex::new(()),
+            unlocked_users: Mutex::new(Default::default()),
             package_store: Mutex::new(None),
             resolver: Default::default(),
             activities: Default::default(),
@@ -1054,21 +1077,21 @@ impl AppHost {
         ]
     }
 
-    /// What starts read, loaded by the first.
-    fn inputs(&self) -> Result<&Inputs, Exception> {
+    /// What the services read of the platform, loaded by the first,
+    /// without the packages.
+    fn platform(&self) -> Result<&Arc<Platform>, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let configured = self
             .configured
             .get()
             .ok_or_else(|| state("app host not configured".into()))?;
-        if let Some(inputs) = self.inputs.get() {
-            return Ok(inputs);
+        if let Some(platform) = self.platform.get() {
+            return Ok(platform);
         }
         let _loading = self.loading.lock().unwrap();
-        if let Some(inputs) = self.inputs.get() {
-            return Ok(inputs);
+        if let Some(platform) = self.platform.get() {
+            return Ok(platform);
         }
-        let started = Instant::now();
         let property = |name: &str| {
             (configured.properties)(name).ok_or_else(|| state(format!("no property {name}")))
         };
@@ -1084,38 +1107,72 @@ impl AppHost {
             &property("ro.build.version.codename")?,
         )
         .map_err(state)?;
-        let device_density = number("ro.sf.lcd_density")?;
+        let settings =
+            settings::Settings::load(&configured.data, &configured.root).map_err(state)?;
+        let shared_memory = bind::ApplicationSharedMemory::new()
+            .map_err(|e| state(format!("application shared memory: {e}")))?;
+        let platform = Platform {
+            data: configured.data.clone(),
+            compat,
+            settings,
+            locales: property("persist.sys.locale")?,
+            serial: property("ro.serialno").unwrap_or_else(|_| "unknown".into()),
+            device_density: number("ro.sf.lcd_density")?,
+            shared_memory,
+        };
+        Ok(self.platform.get_or_init(|| Arc::new(platform)))
+    }
+
+    /// The framework's resources as the device configures them: the
+    /// packages', once read, else read on their own.
+    fn framework(&self) -> Result<&packages::Framework, Exception> {
+        if let Some(inputs) = self.inputs.get() {
+            return Ok(inputs.packages.framework());
+        }
+        if let Some(framework) = self.framework.get() {
+            return Ok(framework);
+        }
+        let platform = self.platform()?;
+        let framework =
+            packages::Framework::load(self.root()?, platform.device_density, &platform.locales)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        Ok(self.framework.get_or_init(|| framework))
+    }
+
+    /// What starts read, loaded by the first.
+    fn inputs(&self) -> Result<&Inputs, Exception> {
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        if let Some(inputs) = self.inputs.get() {
+            return Ok(inputs);
+        }
+        let platform = self.platform()?.clone();
+        let configured = self
+            .configured
+            .get()
+            .ok_or_else(|| state("app host not configured".into()))?;
+        let _loading = self.loading.lock().unwrap();
+        if let Some(inputs) = self.inputs.get() {
+            return Ok(inputs);
+        }
+        let started = Instant::now();
+        let compat = &platform.compat;
         let packages = packages::Packages::load(
             &configured.root,
             &configured.data,
-            device_density,
-            &property("persist.sys.locale")?,
+            platform.device_density,
+            &platform.locales,
             &|name| (configured.properties)(name),
             // `SharedLibrariesImpl.ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES`.
             &|name, target_sdk| compat.is_enabled(142_191_088, Some(name), target_sdk),
             &apex_manager::inventory(&self.process).map_err(state)?,
         )
         .map_err(state)?;
-        let settings =
-            settings::Settings::load(&configured.data, &configured.root).map_err(state)?;
-        let shared_memory = bind::ApplicationSharedMemory::new()
-            .map_err(|e| state(format!("application shared memory: {e}")))?;
         eprintln!(
             "app host: {} packages loaded in {:?}",
             packages.state().packages.len(),
             started.elapsed()
         );
-        let inputs = Inputs {
-            data: configured.data.clone(),
-            compat,
-            packages,
-            settings,
-            locales: property("persist.sys.locale")?,
-            serial: property("ro.serialno").unwrap_or_else(|_| "unknown".into()),
-            device_density,
-            shared_memory,
-        };
-        Ok(self.inputs.get_or_init(|| inputs))
+        Ok(self.inputs.get_or_init(|| Inputs { platform, packages }))
     }
 
     /// The launcher's start of package `name`'s activity `class`, user
@@ -2980,9 +3037,8 @@ impl AppHost {
             return Ok(display.clone());
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let inputs = self.inputs()?;
         let display = display::Display::query(&self.process).map_err(state)?;
-        let packages = &inputs.packages;
+        let packages = self.framework()?;
         let integer = |name: &str| {
             packages
                 .framework_integer(name)
@@ -3298,6 +3354,7 @@ impl AppHost {
     /// storage is prepared, so it is unlocking and its components that are
     /// not direct-boot aware resolve.
     fn user_unlocking(&self, user: i32) -> Result<(), Exception> {
+        self.unlocked_users.lock().unwrap().insert(user);
         let _writer = self.model_writer.lock().unwrap();
         let (before, _) = self.packages()?;
         let mut state = (*before).clone();
@@ -3309,11 +3366,7 @@ impl AppHost {
 
     /// `UserManagerInternal.isUserUnlockingOrUnlocked`.
     pub(super) fn user_unlocking_or_unlocked(&self, user: i32) -> Result<bool, Exception> {
-        let (state, _) = self.packages()?;
-        Ok(state
-            .users
-            .get(&user)
-            .is_some_and(|u| u.unlocking_or_unlocked))
+        Ok(self.unlocked_users.lock().unwrap().contains(&user))
     }
 
     /// `PackageManagerInternal.grantImplicitAccess(user, null,
@@ -3723,7 +3776,7 @@ impl AppHost {
     /// settings hold, night as the Mac's appearance, at the current
     /// sequence number.
     fn global_configuration(&self) -> Result<config::Configuration, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let display = self.display()?.0.clone();
         Ok(config::Configuration::of(
             &display,

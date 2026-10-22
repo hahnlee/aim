@@ -117,7 +117,7 @@ impl InitialContext {
     fn install_location(&self) -> Result<i32, Exception> {
         Ok(self
             .host
-            .inputs()?
+            .platform()?
             .settings
             .get(super::settings::Table::Global, "default_install_location")
             .and_then(|v| v.parse().ok())

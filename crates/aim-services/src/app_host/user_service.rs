@@ -342,14 +342,13 @@ pub(super) fn ensure_system_user(host: &AppHost) -> Result<(), String> {
     if users.join("userlist.xml").exists() {
         return Ok(());
     }
-    let inputs = host.inputs().map_err(|e| e.message)?;
-    let packages = &inputs.packages;
-    let (state, _) = host.packages().map_err(|e| e.message)?;
-    let save_on_system_user = state
-        .system
+    let packages = host.framework().map_err(|e| e.message)?;
+    let save_on_system_user = packages
+        .0
         .flags
-        .iter()
-        .any(|(n, on)| n == SAVE_ON_SYSTEM_USER_XML && *on);
+        .get(SAVE_ON_SYSTEM_USER_XML)
+        .copied()
+        .unwrap_or(false);
     // `isDefaultHeadlessSystemUserMode` of a user build:
     // `ro.fw.mu.headless_system_user`.
     let headless = super::system_boolean(
