@@ -161,7 +161,7 @@ pub unsafe extern "C" fn vkGetAndroidHardwareBufferPropertiesANDROID(
         return VK_ERROR_INITIALIZATION_FAILED;
     };
     // SAFETY: the buffer's own handle.
-    let Some((_, h)) =
+    let Some((fd, h)) =
         (unsafe { aim_gralloc::handle::parse(AHardwareBuffer_getNativeHandle(buffer)) })
     else {
         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
@@ -207,9 +207,7 @@ pub unsafe extern "C" fn vkGetAndroidHardwareBufferPropertiesANDROID(
             suggested.components[2] = SWIZZLE_R;
         }
         if yuv {
-            // BT.601, narrow range: what video and cameras produce unless
-            // a dataspace says otherwise.
-            (suggested.model, suggested.range) = (YCBCR_601, RANGE_ITU_NARROW);
+            (suggested.model, suggested.range) = ycbcr(dataspace(fd, h.metadata_offset));
         }
         if let Some(f) = find::<VkAndroidHardwareBufferFormatPropertiesANDROID<u32>>(
             (*props).pNext,
@@ -228,9 +226,43 @@ pub unsafe extern "C" fn vkGetAndroidHardwareBufferPropertiesANDROID(
 }
 
 // VkSamplerYcbcrModelConversion, VkSamplerYcbcrRange, VkChromaLocation.
+const YCBCR_709: i32 = 2;
 const YCBCR_601: i32 = 3;
+const YCBCR_2020: i32 = 4;
+const RANGE_ITU_FULL: i32 = 0;
 const RANGE_ITU_NARROW: i32 = 1;
 const MIDPOINT: i32 = 1;
+
+/// The DATASPACE in buffer `fd`'s metadata at `offset`, 0 (unknown) when it
+/// cannot be read.
+fn dataspace(fd: i32, offset: u64) -> i32 {
+    let mut prefix = [0u8; aim_gralloc::metadata::DATASPACE_PREFIX];
+    // SAFETY: a read of the buffer's own fd into a local array.
+    let n = unsafe { libc::pread(fd, prefix.as_mut_ptr().cast(), prefix.len(), offset as i64) };
+    if n != prefix.len() as isize {
+        return 0;
+    }
+    aim_gralloc::metadata::dataspace(&prefix).unwrap_or(0)
+}
+
+/// The Y'CbCr model and range a buffer of `dataspace` is suggested with.
+fn ycbcr(dataspace: i32) -> (i32, i32) {
+    use aim_gralloc::metadata::{YcbcrStandard, ycbcr};
+    let (standard, full) = ycbcr(dataspace);
+    let model = match standard {
+        YcbcrStandard::Bt601 => YCBCR_601,
+        YcbcrStandard::Bt709 => YCBCR_709,
+        YcbcrStandard::Bt2020 => YCBCR_2020,
+    };
+    (
+        model,
+        if full {
+            RANGE_ITU_FULL
+        } else {
+            RANGE_ITU_NARROW
+        },
+    )
+}
 
 /// What `VkAndroidHardwareBufferFormatProperties(2)ANDROID` reports.
 struct Suggested {
