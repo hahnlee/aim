@@ -489,6 +489,13 @@ fn socket_buffer_sizes() {
     check("t_sockbuf", &[]);
 }
 
+/// FIONREAD on framed AF_UNIX and netlink sockets, as Linux answers it
+/// (#371).
+#[test]
+fn socket_queued_bytes() {
+    check("t_fionread", &[]);
+}
+
 /// The derived image's lmkd answers ActivityManager's protocol, with the
 /// host-call module `memory` as its pressure source.
 #[test]

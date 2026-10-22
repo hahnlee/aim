@@ -146,6 +146,9 @@ pub struct Sock {
     stamp: std::sync::atomic::AtomicU8,
     /// Serializes framed receives, so one message is read whole.
     recv: Mutex<()>,
+    /// Listening (`TCP_LISTEN`): what SO_ACCEPTCONN reports, which Darwin
+    /// does not answer for AF_UNIX.
+    listening: AtomicBool,
     /// Linux sockaddr of the local and peer names, when known.
     local: Mutex<Option<Vec<u8>>>,
     peer: Mutex<Option<Vec<u8>>>,
@@ -165,6 +168,7 @@ impl Sock {
             passcred: AtomicBool::new(false),
             stamp: std::sync::atomic::AtomicU8::new(0),
             recv: Mutex::new(()),
+            listening: AtomicBool::new(false),
             local: Mutex::new(None),
             peer: Mutex::new(None),
         })
@@ -190,6 +194,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
     });
     w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
     w.u32(s.stamp.load(Ordering::Relaxed) as u32);
+    w.bool(s.listening.load(Ordering::Relaxed));
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     match &s.family {
@@ -239,6 +244,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     });
     let passcred = r.bool();
     let stamp = r.u32() as u8;
+    let listening = r.bool();
     let local = r.opt(|r| r.bytes());
     let peer = r.opt(|r| r.bytes());
     let family = match r.u32() {
@@ -263,6 +269,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     *s.inet_owner.lock().unwrap() = inet_owner;
     s.passcred.store(passcred, Ordering::Relaxed);
     s.stamp.store(stamp, Ordering::Relaxed);
+    s.listening.store(listening, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     *s.peer.lock().unwrap() = peer;
     s
@@ -1402,7 +1409,13 @@ pub fn listen(a: [u64; 6]) -> i64 {
         Err(error) => return error,
     };
     // SAFETY: plain listen.
-    errno::check(unsafe { libc::listen(input.fd(), a[1] as i32) } as i64)
+    let result = errno::check(unsafe { libc::listen(input.fd(), a[1] as i32) } as i64);
+    if result == 0 {
+        if let Some(s) = any_sock(&input) {
+            s.listening.store(true, Ordering::Relaxed);
+        }
+    }
+    result
 }
 
 pub fn accept4(a: [u64; 6]) -> i64 {
@@ -2417,6 +2430,93 @@ fn recvmsg_host(
         .then(|| linux_addr_of_host(&sa, m.msg_namelen))
         .flatten();
     Ok((r as usize, m.msg_flags, m.msg_controllen as usize, addr))
+}
+
+/// FIONREAD (SIOCINQ) of a socket the layer frames or speaks for, as
+/// Linux answers it; `None` for the host's answer (a stream).
+/// - netlink has no ioctl of its own and 0x541b is no socket ioctl
+///   (`sock_do_ioctl`): ENOTTY.
+/// - AF_UNIX (`unix_inq_len`): EINVAL while listening; for SOCK_DGRAM the
+///   next datagram's length, for SOCK_SEQPACKET every queued record's,
+///   without the layer's header; for SOCK_STREAM the host's count.
+pub(super) fn fionread(fd: i32) -> Option<Result<i32, i64>> {
+    let Some(Kind::Sock(s)) = fdtab::get(fd) else {
+        return None;
+    };
+    match (&s.family, s.ty) {
+        (Family::Netlink(_), _) => Some(Err(-(crate::errno::ENOTTY as i64))),
+        (Family::Unix, _) if s.listening.load(Ordering::Relaxed) => Some(Err(-(EINVAL as i64))),
+        (Family::Unix, SockType::Dgram) => Some(next_datagram(fd)),
+        (Family::Unix, SockType::SeqPacket) => {
+            let _g = s.recv.lock().unwrap();
+            Some(queued_records(fd))
+        }
+        _ => None,
+    }
+}
+
+/// The first queued datagram's payload: Darwin's SO_NREAD (the first
+/// record's data), less the header of a framed one.
+fn next_datagram(fd: i32) -> Result<i32, i64> {
+    let Some(n) = get_int(fd, libc::SOL_SOCKET, libc::SO_NREAD) else {
+        return Err(-(errno::last() as i64));
+    };
+    if (n as usize) < FRAME {
+        return Ok(n);
+    }
+    let mut hdr = [0u8; FRAME];
+    // SAFETY: peeking a header into local storage.
+    let got = unsafe {
+        libc::recv(
+            fd,
+            hdr.as_mut_ptr().cast(),
+            FRAME,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if got == FRAME as isize && parse_header(&hdr).0 == DGRAM_MAGIC {
+        Ok(n - FRAME as i32)
+    } else {
+        Ok(n)
+    }
+}
+
+/// The payloads of the complete records queued on a SOCK_SEQPACKET's host
+/// stream (each its header, then its length of data); a record whose rest
+/// has not arrived is not queued yet.
+fn queued_records(fd: i32) -> Result<i32, i64> {
+    let mut n = 0i32;
+    // SAFETY: FIONREAD into a local int.
+    if unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) } < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    if n <= 0 {
+        return Ok(0);
+    }
+    let mut buf = vec![0u8; n as usize];
+    // SAFETY: peeking into a local buffer of its length.
+    let got = unsafe {
+        libc::recv(
+            fd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if got < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    let (mut at, mut total) = (0usize, 0i64);
+    while at + FRAME <= got as usize {
+        let (len, _) = parse_header(buf[at..at + FRAME].try_into().unwrap());
+        let end = at + FRAME + len as usize;
+        if end > got as usize {
+            break;
+        }
+        total += len as i64;
+        at = end;
+    }
+    Ok(total.min(i32::MAX as i64) as i32)
 }
 
 /// Receive exactly the bytes of `iov`, waiting as needed (the rest of a
@@ -3452,6 +3552,7 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
     if let Some(s) = any_sock(&input) {
         let int = |v: i32| put_opt(&v.to_le_bytes(), val, len);
         match (level, opt, &s.family) {
+            (1, L_SO_ACCEPTCONN, _) => return int(s.listening.load(Ordering::Relaxed) as i32),
             (1, L_SO_MARK, Family::Inet(o)) => return int(o.mark.load(Ordering::Relaxed) as i32),
             (IPPROTO_IP, L_IP_MULTICAST_ALL, Family::Inet(o)) => {
                 return int(!o.multicast_own.load(Ordering::Relaxed) as i32);
