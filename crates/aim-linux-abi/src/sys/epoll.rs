@@ -505,7 +505,28 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
     if k.flags & libc::EV_ERROR != 0 {
         return EPOLLERR;
     }
-    if k.filter == libc::EVFILT_READ {
+    let tcp = eof
+        .then(|| {
+            super::tcp_shutdown::shutdown(
+                k.ident as i32,
+                k.filter == libc::EVFILT_READ,
+                k.filter == libc::EVFILT_WRITE,
+            )
+        })
+        .flatten();
+    if let Some(tcp) = tcp {
+        if k.filter == libc::EVFILT_READ {
+            b |= i.events & (EPOLLIN | EPOLLRDNORM | EPOLLRDHUP);
+        } else if k.filter == libc::EVFILT_WRITE {
+            b |= i.events & (EPOLLOUT | EPOLLWRNORM);
+        }
+        if tcp.hangup() {
+            b |= EPOLLHUP;
+        }
+        if k.fflags != 0 {
+            b |= EPOLLERR;
+        }
+    } else if k.filter == libc::EVFILT_READ {
         b |= i.events & (EPOLLIN | EPOLLRDNORM);
         if eof {
             b |= EPOLLHUP | (i.events & EPOLLRDHUP);

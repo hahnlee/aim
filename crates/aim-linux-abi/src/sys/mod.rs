@@ -83,6 +83,7 @@ pub(crate) use signal::initialize_verity_fault_slot;
 pub(crate) mod close_effects;
 pub(crate) mod space;
 mod sync_file;
+mod tcp_shutdown;
 mod thread;
 mod tmpfile;
 pub(crate) mod tty;
