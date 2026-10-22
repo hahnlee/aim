@@ -1201,7 +1201,7 @@ mod retained_install_file_tests {
         // The writer lease's release is observed through flock, which a
         // concurrent test's spawn delays while its child holds copies of this
         // process's descriptors (until exec); the fixture runs alone.
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = aim_storage::inherited::stdio_only(&mut std::process::Command::new(std::env::current_exe().unwrap()))
             .args(["--exact", "package::shell_install::retained_install_file_tests::real_install_leaf_reexport_fixture",
                 "--ignored", "--nocapture"])
             .output().unwrap();

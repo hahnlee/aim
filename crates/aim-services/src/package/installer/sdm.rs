@@ -129,31 +129,33 @@ mod tests {
         fs::write(&input, unsigned(root)).unwrap();
         let jdk =
             aim_paths::fetched().join("java/temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
-        let result = std::process::Command::new(jdk.join("bin/java"))
-            .arg("-jar")
-            .arg(root.join("apksigner.jar"))
-            .arg("sign")
-            .arg("--key")
-            .arg(root.join(format!("{key}.pk8")))
-            .arg("--cert")
-            .arg(root.join(format!("{key}.x509.pem")))
-            .args([
-                "--min-sdk-version",
-                "36",
-                "--v1-signing-enabled",
-                "false",
-                "--v2-signing-enabled",
-                "false",
-                "--v3-signing-enabled",
-                "true",
-                "--v4-signing-enabled",
-                "false",
-            ])
-            .arg("--out")
-            .arg(output)
-            .arg(&input)
-            .output()
-            .unwrap();
+        let result = aim_storage::inherited::stdio_only(&mut std::process::Command::new(
+            jdk.join("bin/java"),
+        ))
+        .arg("-jar")
+        .arg(root.join("apksigner.jar"))
+        .arg("sign")
+        .arg("--key")
+        .arg(root.join(format!("{key}.pk8")))
+        .arg("--cert")
+        .arg(root.join(format!("{key}.x509.pem")))
+        .args([
+            "--min-sdk-version",
+            "36",
+            "--v1-signing-enabled",
+            "false",
+            "--v2-signing-enabled",
+            "false",
+            "--v3-signing-enabled",
+            "true",
+            "--v4-signing-enabled",
+            "false",
+        ])
+        .arg("--out")
+        .arg(output)
+        .arg(&input)
+        .output()
+        .unwrap();
         assert!(
             result.status.success(),
             "Pinned signing tool failed: {}",

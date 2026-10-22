@@ -1174,15 +1174,17 @@ mod tests {
     #[test]
     fn shutdown_releases_service_files_and_does_not_close_reused_fd() {
         // Isolate the numeric FD reuse from other tests opening files.
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "local::tests::shutdown_file_fixture",
-                "--ignored",
-                "--nocapture",
-            ])
-            .output()
-            .unwrap();
+        let result = aim_storage::inherited::stdio_only(&mut std::process::Command::new(
+            std::env::current_exe().unwrap(),
+        ))
+        .args([
+            "--exact",
+            "local::tests::shutdown_file_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
         assert!(
             result.status.success(),
             "{}{}",
