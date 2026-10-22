@@ -35,6 +35,8 @@ const FLAG_INITIALIZED: i32 = 0x10;
 /// `UserManager.USER_TYPE_FULL_GUEST`, `USER_TYPE_FULL_RESTRICTED`.
 const USER_TYPE_FULL_GUEST: &str = "android.os.usertype.full.GUEST";
 const USER_TYPE_FULL_RESTRICTED: &str = "android.os.usertype.full.RESTRICTED";
+/// `UserManager.USER_TYPE_PROFILE_MANAGED`.
+const USER_TYPE_PROFILE_MANAGED: &str = "android.os.usertype.profile.MANAGED";
 
 /// `UserInfo.FLAG_SYSTEM`.
 const FLAG_SYSTEM: i32 = 0x800;
@@ -464,15 +466,35 @@ pub(super) fn is_admin(host: &AppHost, user: i32) -> Result<bool, Exception> {
     Ok(user_flags(host, user)?.is_some_and(|f| f & FLAG_ADMIN != 0))
 }
 
+/// The managed profiles among `UserManager.getProfiles(user)`: the user's
+/// profiles that exist and are not partial, of the managed profile type
+/// (`UserInfo.isManagedProfile`).
+pub(super) fn managed_profiles(host: &AppHost, user: i32) -> Result<Vec<i32>, Exception> {
+    let mut managed = Vec::new();
+    for id in profile_ids(user) {
+        if user_info(host, id)?
+            .is_some_and(|u| u.user_type.as_deref() == Some(USER_TYPE_PROFILE_MANAGED))
+        {
+            managed.push(id);
+        }
+    }
+    Ok(managed)
+}
+
 /// The flags of a user that exists and is not partial.
 fn user_flags(host: &AppHost, user: i32) -> Result<Option<i32>, Exception> {
+    Ok(user_info(host, user)?.map(|u| u.flags))
+}
+
+/// A user that exists and is not partial, as its file holds it.
+fn user_info(host: &AppHost, user: i32) -> Result<Option<UserInfo>, Exception> {
     if user != SYSTEM_USER {
         return Ok(None);
     }
     let (path, bytes) = host.user_file()?;
     let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
-    Ok((!info.partial).then_some(info.flags))
+    Ok((!info.partial).then_some(info))
 }
 
 /// What `UserDataPreparer` and `reconcileAppsData` read of a user's
