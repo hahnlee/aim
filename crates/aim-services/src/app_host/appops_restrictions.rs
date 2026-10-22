@@ -20,8 +20,11 @@ const VAL_NULL: i32 = -1;
 const VAL_STRING: i32 = 0;
 /// `ModeCallback.ALL_OPS`.
 pub(super) const ALL_OPS: i32 = -2;
-/// `AppOpsManager.CALL_BACK_ON_SWITCHED_OP`.
+/// `AppOpsManager.WATCH_FOREGROUND_CHANGES`, `CALL_BACK_ON_SWITCHED_OP`.
+const WATCH_FOREGROUND_CHANGES: i32 = 1 << 0;
 pub(super) const CALL_BACK_ON_SWITCHED_OP: i32 = 1 << 1;
+/// `AppOpsService.UID_ANY`.
+const UID_ANY: i32 = -2;
 
 /// `PackageTagsList`: packages, each with its attribution tags (empty: all
 /// of them; none: a null set, as its parcel may carry one).
@@ -266,13 +269,48 @@ struct ModeCallback<L> {
     link: L,
     watching_uid: i32,
     watched_op: i32,
+    flags: i32,
     calling_uid: i32,
     calling_pid: i32,
 }
 
+impl<L> ModeCallback<L> {
+    /// `isWatchingUid`.
+    fn watches(&self, uid: i32) -> bool {
+        uid == UID_ANY || self.watching_uid < 0 || self.watching_uid == uid
+    }
+
+    /// `WATCH_FOREGROUND_CHANGES`.
+    fn foreground(&self) -> bool {
+        self.flags & WATCH_FOREGROUND_CHANGES != 0
+    }
+
+    /// The ops `notifyOpChanged` tells it of a change of `code`.
+    fn told(&self, code: i32) -> Vec<i32> {
+        match self.watched_op {
+            ALL_OPS => APP_OP_INFOS
+                .iter()
+                .filter(|i| i.switch_code == code)
+                .map(|i| i.code)
+                .collect(),
+            OP_NONE => vec![code],
+            op => vec![op],
+        }
+    }
+
+    fn change(&self, binder: Binder, op: i32) -> ModeChange {
+        ModeChange {
+            binder,
+            op,
+            calling_uid: self.calling_uid,
+            calling_pid: self.calling_pid,
+        }
+    }
+}
+
 /// A watcher to tell `opChanged` of `op`: its binder and the uid and pid
 /// that registered it.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ModeChange {
     pub binder: Binder,
     pub op: i32,
@@ -329,6 +367,7 @@ impl<L> ModeWatchers<L> {
                 link: link(),
                 watching_uid: -1,
                 watched_op: notified,
+                flags,
                 calling_uid,
                 calling_pid,
             });
@@ -361,28 +400,85 @@ impl<L> ModeWatchers<L> {
     /// watcher of `code` that watches `uid` (`UID_ANY` for any), for the
     /// ops it is told of: those whose switch is `code` for `ALL_OPS`, else
     /// `code` or its own op.
-    pub(super) fn changes(&self, code: i32, uid: i32, uid_any: i32) -> Vec<ModeChange> {
+    pub(super) fn changes(&self, code: i32, uid: i32) -> Vec<ModeChange> {
         let mut changes = Vec::new();
         for binder in self.ops.get(&code).into_iter().flatten() {
             let callback = &self.callbacks[binder];
-            if uid != uid_any && callback.watching_uid >= 0 && callback.watching_uid != uid {
-                continue;
+            if callback.watches(uid) {
+                changes.extend(
+                    callback
+                        .told(code)
+                        .into_iter()
+                        .map(|op| callback.change(*binder, op)),
+                );
             }
-            let ops: Vec<i32> = match callback.watched_op {
-                ALL_OPS => APP_OP_INFOS
-                    .iter()
-                    .filter(|i| i.switch_code == code)
-                    .map(|i| i.code)
-                    .collect(),
-                OP_NONE => vec![code],
-                op => vec![op],
-            };
-            changes.extend(ops.into_iter().map(|op| ModeChange {
-                binder: *binder,
-                op,
-                calling_uid: callback.calling_uid,
-                calling_pid: callback.calling_pid,
-            }));
+        }
+        changes
+    }
+
+    /// Whether the op has a watcher (`evalForegroundOps`'s
+    /// `hasForegroundWatchers`).
+    pub(super) fn op_watched(&self, code: i32) -> bool {
+        self.ops.get(&code).is_some_and(|b| !b.is_empty())
+    }
+
+    /// `notifyOpChangedForAllPkgsInUid(code, uid, onlyForeground)`: the
+    /// changes to tell, each with the package it is told of: every
+    /// package of `uid` to the op's watchers of the uid, and each package
+    /// to its own watchers.
+    pub(super) fn uid_packages_changes(
+        &self,
+        code: i32,
+        uid: i32,
+        packages: &[String],
+        only_foreground: bool,
+    ) -> Vec<(ModeChange, String)> {
+        let mut told: BTreeMap<Binder, BTreeSet<&str>> = BTreeMap::new();
+        for binder in self.ops.get(&code).into_iter().flatten() {
+            let callback = &self.callbacks[binder];
+            if !only_foreground || callback.foreground() {
+                told.entry(*binder)
+                    .or_default()
+                    .extend(packages.iter().map(String::as_str));
+            }
+        }
+        for package in packages {
+            for binder in self.packages.get(package).into_iter().flatten() {
+                if !only_foreground || self.callbacks[binder].foreground() {
+                    told.entry(*binder).or_default().insert(package);
+                }
+            }
+        }
+        told.into_iter()
+            .flat_map(|(binder, packages)| {
+                let callback = &self.callbacks[&binder];
+                packages.into_iter().flat_map(move |package| {
+                    // `notifyOpChanged`'s own uid check.
+                    callback
+                        .watches(uid)
+                        .then(|| callback.told(code))
+                        .into_iter()
+                        .flatten()
+                        .map(move |op| (callback.change(binder, op), package.to_string()))
+                })
+            })
+            .collect()
+    }
+
+    /// `onUidStateChanged`'s other branch: the op's watchers of `uid` that
+    /// asked for its foreground changes.
+    pub(super) fn foreground_changes(&self, code: i32, uid: i32) -> Vec<ModeChange> {
+        let mut changes = Vec::new();
+        for binder in self.ops.get(&code).into_iter().flatten() {
+            let callback = &self.callbacks[binder];
+            if callback.foreground() && callback.watches(uid) {
+                changes.extend(
+                    callback
+                        .told(code)
+                        .into_iter()
+                        .map(|op| callback.change(*binder, op)),
+                );
+            }
         }
         changes
     }
@@ -478,16 +574,77 @@ mod tests {
         w.watch(b, 2, None, CALL_BACK_ON_SWITCHED_OP, 10_101, 6, || ());
         w.watch(c, OP_NONE, Some("p"), 0, 1000, 7, || ());
         let mut heard: Vec<(Binder, i32)> = w
-            .changes(0, -2, -2)
+            .changes(0, -2)
             .into_iter()
             .map(|c| (c.binder, c.op))
             .collect();
         heard.sort();
         assert_eq!(heard, [(a, 2), (b, 0)]);
-        assert!(w.changes(2, -2, -2).is_empty());
+        assert!(w.changes(2, -2).is_empty());
         assert!(w.unwatch(a).is_some() && w.unwatch(a).is_none());
-        assert_eq!(w.changes(0, -2, -2).len(), 1);
+        assert_eq!(w.changes(0, -2).len(), 1);
         assert!(w.unwatch(c).is_some());
         assert!(w.packages.is_empty());
+    }
+
+    /// `onUidStateChanged`'s watchers: only WATCH_FOREGROUND_CHANGES ones,
+    /// an op's told of each package of the uid, a package's (`OP_NONE`)
+    /// of its own.
+    #[test]
+    fn foreground_watchers_hear_a_uid_cross_the_foreground() {
+        // OP_CAMERA (26) is its own switch.
+        let mut w = ModeWatchers::<()>::default();
+        let (a, b, c, d) = (
+            Binder::Handle(1),
+            Binder::Handle(2),
+            Binder::Handle(3),
+            Binder::Handle(4),
+        );
+        w.watch(a, 26, None, WATCH_FOREGROUND_CHANGES, 1000, 5, || ());
+        w.watch(b, 26, None, 0, 1000, 6, || ());
+        w.watch(
+            c,
+            OP_NONE,
+            Some("q"),
+            WATCH_FOREGROUND_CHANGES,
+            1000,
+            7,
+            || (),
+        );
+        w.watch(
+            d,
+            OP_NONE,
+            Some("r"),
+            WATCH_FOREGROUND_CHANGES,
+            1000,
+            8,
+            || (),
+        );
+        assert!(w.op_watched(26) && !w.op_watched(27));
+        let packages = ["p".to_string(), "q".to_string()];
+        let mut heard: Vec<(Binder, i32, String)> = w
+            .uid_packages_changes(26, 10_100, &packages, true)
+            .into_iter()
+            .map(|(c, package)| (c.binder, c.op, package))
+            .collect();
+        heard.sort();
+        assert_eq!(
+            heard,
+            [
+                (a, 26, "p".into()),
+                (a, 26, "q".into()),
+                (c, 26, "q".into())
+            ]
+        );
+        assert_eq!(
+            w.uid_packages_changes(26, 10_100, &packages, false).len(),
+            5
+        );
+        let fg: Vec<Binder> = w
+            .foreground_changes(26, 10_100)
+            .into_iter()
+            .map(|c| c.binder)
+            .collect();
+        assert_eq!(fg, [a]);
     }
 }

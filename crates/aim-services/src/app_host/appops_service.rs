@@ -64,7 +64,7 @@ use super::app_op_infos::{
 use super::appops_history::{
     self as history, AttributedEntry, Events, NoteEvent, OpEntry, PackageOps, ProxyInfo,
 };
-use super::appops_restrictions::{ModeWatchers, PackageTags, UserRestrictions};
+use super::appops_restrictions::{ModeChange, ModeWatchers, PackageTags, UserRestrictions};
 use super::permission_checker::AttributionSourceState;
 use super::permission_manager::PermissionManager;
 use super::{AppHost, reply};
@@ -2460,48 +2460,149 @@ fn link_restriction_client(host: &AppHost, token: u32) -> Link {
 }
 
 /// `notifyWatchersOnDefaultDevice(code, UID_ANY)`: `opChanged` to each
-/// mode watcher of the op (a restricted-read op's only with MANAGE_APPOPS,
-/// `shouldIgnoreCallback`), one-way.
+/// mode watcher of the op.
 fn notify_mode_watchers(host: &AppHost, code: i32) {
     let changes = host
         .app_ops
         .mode_watchers
         .lock()
         .unwrap()
-        .changes(code, UID_ANY, UID_ANY);
+        .changes(code, UID_ANY);
     for change in changes {
-        if APP_OP_INFOS[change.op as usize].restrict_read {
-            match host.check_permission(Some(MANAGE_APPOPS), change.calling_uid) {
-                Ok(0) => {}
-                Ok(_) => continue,
-                Err(e) => {
-                    eprintln!("app host: appops mode watcher of op {}: {e:?}", change.op);
-                    continue;
+        notify_op_changed(host, change, UID_ANY, "");
+    }
+}
+
+/// `onUidStateChanged(uid, state, foregroundModeMayChange)` as a uid
+/// comes to the top or leaves it: `opChanged` to the watchers of the
+/// foreground changes of its ops at MODE_FOREGROUND.
+pub(super) fn uid_state_changed(host: &AppHost, uid: i32) {
+    if let Err(e) = foreground_changed(host, uid) {
+        eprintln!("app host: appops foreground change of uid {uid}: {e:?}");
+    }
+}
+
+fn foreground_changed(host: &AppHost, uid: i32) -> Result<(), Exception> {
+    let sys = Host(host);
+    // `pkgOps`: the uid's packages with an op, and their ops.
+    let pkg_ops: Vec<(String, i32)> = {
+        let started = host.app_ops.started.lock().unwrap();
+        let mut ops: Vec<_> = started
+            .ops
+            .keys()
+            .filter(|(op_uid, _, _)| *op_uid == uid)
+            .map(|(_, package, code)| (package.clone(), *code))
+            .collect();
+        ops.sort();
+        ops
+    };
+    let mut packages: Vec<&str> = pkg_ops.iter().map(|(p, _)| p.as_str()).collect();
+    packages.dedup();
+    // `evalForegroundOps`: the ops the uid or one of its packages has at
+    // MODE_FOREGROUND.
+    let mut foreground = Vec::new();
+    for info in APP_OP_INFOS.iter() {
+        let uid_mode = sys.uid_mode(app_id(uid), info.name)?;
+        let mut package_modes = Vec::new();
+        for &package in &packages {
+            package_modes.push((package, sys.package_mode(package, info.name)?));
+        }
+        if uid_mode == Some(MODE_FOREGROUND)
+            || package_modes
+                .iter()
+                .any(|(_, m)| *m == Some(MODE_FOREGROUND))
+        {
+            foreground.push((info, uid_mode, package_modes));
+        }
+    }
+    // `hasForegroundWatchers`.
+    {
+        let watchers = host.app_ops.mode_watchers.lock().unwrap();
+        if !foreground
+            .iter()
+            .any(|(info, ..)| watchers.op_watched(info.code))
+        {
+            return Ok(());
+        }
+    }
+    let mut told = Vec::new();
+    for (info, uid_mode, package_modes) in foreground {
+        if uid_mode == Some(MODE_FOREGROUND) && default_mode(&sys, info)? != MODE_FOREGROUND {
+            let all = packages_for_uid(host, uid)?;
+            let watchers = host.app_ops.mode_watchers.lock().unwrap();
+            told.extend(watchers.uid_packages_changes(info.code, uid, &all, true));
+        } else {
+            let changes = host
+                .app_ops
+                .mode_watchers
+                .lock()
+                .unwrap()
+                .foreground_changes(info.code, uid);
+            for (package, mode) in package_modes {
+                let has_op = pkg_ops
+                    .iter()
+                    .any(|(p, code)| p == package && *code == info.code);
+                if has_op && mode == Some(MODE_FOREGROUND) {
+                    told.extend(changes.iter().map(|c| (c.clone(), package.to_string())));
                 }
             }
         }
-        let mut p = Parcel::new();
-        mode_callback::OpChanged {
-            op: change.op,
-            uid: UID_ANY,
-            package_name: Some(String::new()),
-            persistent_device_id: Some(PERSISTENT_DEVICE_ID_DEFAULT.into()),
-        }
-        .write(&mut p);
-        // One-way; a watcher that died is not called.
-        let _ = match change.binder {
-            Binder::Handle(handle) => host
-                .process
-                .transact(handle, mode_callback::OP_CHANGED, &p, true)
-                .map(drop),
-            Binder::Local(ptr) => match host.process.local_service(ptr) {
-                Some(service) => service
-                    .transact(mode_callback::OP_CHANGED, &p, true)
-                    .map(drop),
-                None => Ok(()),
-            },
-        };
     }
+    for (change, package) in told {
+        notify_op_changed(host, change, uid, &package);
+    }
+    Ok(())
+}
+
+/// `getPackagesForUid`.
+fn packages_for_uid(host: &AppHost, uid: i32) -> Result<Vec<String>, Exception> {
+    let (state, resolution) = host.packages()?;
+    let query = crate::package::query::Query {
+        state: &state,
+        filter: &resolution.apps_filter,
+        calling_uid: 1000,
+    };
+    let packages = query
+        .packages_for_uid(uid)
+        .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("appops: {}", e.0)))?;
+    Ok(packages.into_iter().flatten().flatten().collect())
+}
+
+/// `notifyOpChanged`: `opChanged` of `uid` and `package` to a watcher (of
+/// a restricted-read op only with MANAGE_APPOPS, `shouldIgnoreCallback`),
+/// one-way.
+fn notify_op_changed(host: &AppHost, change: ModeChange, uid: i32, package: &str) {
+    if APP_OP_INFOS[change.op as usize].restrict_read {
+        match host.check_permission(Some(MANAGE_APPOPS), change.calling_uid) {
+            Ok(0) => {}
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("app host: appops mode watcher of op {}: {e:?}", change.op);
+                return;
+            }
+        }
+    }
+    let mut p = Parcel::new();
+    mode_callback::OpChanged {
+        op: change.op,
+        uid,
+        package_name: Some(package.into()),
+        persistent_device_id: Some(PERSISTENT_DEVICE_ID_DEFAULT.into()),
+    }
+    .write(&mut p);
+    // One-way; a watcher that died is not called.
+    let _ = match change.binder {
+        Binder::Handle(handle) => host
+            .process
+            .transact(handle, mode_callback::OP_CHANGED, &p, true)
+            .map(drop),
+        Binder::Local(ptr) => match host.process.local_service(ptr) {
+            Some(service) => service
+                .transact(mode_callback::OP_CHANGED, &p, true)
+                .map(drop),
+            None => Ok(()),
+        },
+    };
 }
 
 /// Runs `f` over the app host's appops as `caller`, then unlinks the
