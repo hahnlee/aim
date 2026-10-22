@@ -3,13 +3,14 @@
 //! `onUserUnlocked` reads it from `system_ce/<user>/grammatical_inflection/user_settings.xml`
 //! (here when it is first asked), to a caller holding
 //! `READ_SYSTEM_GRAMMATICAL_GENDER` (`checkPermissionForDataDelivery`)
-//! while the `system_terms_of_address_enabled` flag is on. A persisted
-//! gender, which the original applies to the global configuration, and
-//! the writes are not implemented (#1758).
+//! while the `system_terms_of_address_enabled` flag is on, and
+//! `setSystemWideGrammaticalGender`, which writes the file and updates
+//! the global configuration, whose gender is
+//! `mergedFinalSystemGrammaticalGender`'s. An app's own gender
+//! (`setRequestedApplicationGrammaticalGender`) is not implemented (#1758).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, Exception, Parcel};
@@ -46,18 +47,95 @@ fn gender_from_xml(element: &aim_android_xml::Element) -> Result<Option<i32>, St
     Ok(None)
 }
 
+/// `GRAMMATICAL_GENDER_PROPERTY`, the developer setting.
+const GRAMMATICAL_GENDER_PROPERTY: &str = "persist.sys.grammatical_gender";
+/// `Configuration.GRAMMATICAL_GENDER_UNDEFINED`.
+const UNDEFINED: i32 = -1;
+
+/// `checkSystemTermsOfAddressIsEnabled`.
+fn enabled(host: &AppHost) -> Result<bool, Exception> {
+    let (state, _) = host.packages()?;
+    Ok(state
+        .system
+        .flags
+        .iter()
+        .any(|(n, on)| n == SYSTEM_TERMS_OF_ADDRESS_ENABLED && *on))
+}
+
+fn gender_dir(host: &AppHost, user: i32) -> Result<std::path::PathBuf, Exception> {
+    Ok(host
+        .data()?
+        .join(format!("system_ce/{user}/{TAG_GRAMMATICAL_INFLECTION}")))
+}
+
+/// `getSystemGrammaticalGender(userId)`: the user's file read once
+/// (`mGrammaticalGenderCache`), as `onUserUnlocked` reads it; one
+/// unreadable is logged and not kept.
+fn system_gender(host: &AppHost, user: i32) -> Result<i32, Exception> {
+    let mut cache = host.grammatical_genders.lock().unwrap();
+    if let Some(&gender) = cache.get(&user) {
+        return Ok(gender.max(NOT_SPECIFIED));
+    }
+    let file = gender_dir(host, user)?.join("user_settings.xml");
+    let read = match super::device_policy::read_atomic_bytes(&file) {
+        Ok(None) => return Ok(NOT_SPECIFIED),
+        Ok(Some(bytes)) => {
+            aim_android_xml::read_next(&bytes).and_then(|root| gender_from_xml(&root))
+        }
+        Err(e) => Err(e),
+    };
+    let gender = match read {
+        Ok(gender) => gender.unwrap_or(NOT_SPECIFIED),
+        Err(e) => {
+            eprintln!(
+                "app host: grammatical_inflection: Failed to parse XML configuration from {}: {e}",
+                file.display()
+            );
+            return Ok(NOT_SPECIFIED);
+        }
+    };
+    cache.insert(user, gender);
+    Ok(gender.max(NOT_SPECIFIED))
+}
+
+/// `mergedFinalSystemGrammaticalGender`, the global configuration's
+/// gender: the system's of user 0 while the flag is on, else the
+/// developer setting, undefined taken as not specified.
+pub(super) fn merged_final(host: &AppHost) -> Result<i32, Exception> {
+    let mut gender = if enabled(host)? {
+        system_gender(host, 0)?
+    } else {
+        NOT_SPECIFIED
+    };
+    if gender == NOT_SPECIFIED {
+        gender = host
+            .property(GRAMMATICAL_GENDER_PROPERTY)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(NOT_SPECIFIED);
+    }
+    Ok(if gender == UNDEFINED {
+        NOT_SPECIFIED
+    } else {
+        gender
+    })
+}
+
+/// `toXmlByteArray`: the gender as the service writes it.
+fn gender_document(gender: i32) -> Result<Vec<u8>, String> {
+    aim_android_xml::abx::write(&aim_android_xml::Element {
+        name: TAG_GRAMMATICAL_INFLECTION.into(),
+        attrs: vec![(ATTR_NAME.into(), aim_android_xml::Value::Int(gender))],
+        content: Vec::new(),
+    })
+}
+
 pub struct GrammaticalInflection {
     host: Arc<AppHost>,
-    /// `mGrammaticalGenderCache`: each user's gender read from its file.
-    cache: Mutex<HashMap<i32, i32>>,
 }
 
 impl GrammaticalInflection {
     pub fn new(host: Arc<AppHost>) -> Self {
-        GrammaticalInflection {
-            host,
-            cache: Default::default(),
-        }
+        GrammaticalInflection { host }
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
@@ -65,53 +143,30 @@ impl GrammaticalInflection {
             .unimplemented_named("grammatical_inflection", &format!("{what} (#1758)"))
     }
 
-    /// `checkSystemTermsOfAddressIsEnabled`.
     fn enabled(&self) -> Result<bool, Exception> {
-        let (state, _) = self.host.packages()?;
-        Ok(state
-            .system
-            .flags
-            .iter()
-            .any(|(n, on)| n == SYSTEM_TERMS_OF_ADDRESS_ENABLED && *on))
+        enabled(&self.host)
+    }
+
+    /// `setSystemWideGrammaticalGender` once the flag and the gender are
+    /// checked: the user's file written as an `AtomicFile`, kept, and the
+    /// global configuration updated (`updateConfiguration`).
+    fn set_system_gender(&self, gender: i32, user: i32) -> Result<(), Exception> {
+        let state = |e: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, e);
+        let bytes = gender_document(gender).map_err(state)?;
+        let dir = gender_dir(&self.host, user)?;
+        super::slice::write_atomic(&dir, "user_settings.xml", &bytes)
+            .map_err(|e| state(format!("Failed to write file {}: {e}", dir.display())))?;
+        self.host
+            .grammatical_genders
+            .lock()
+            .unwrap()
+            .insert(user, gender);
+        self.host.update_global_configuration()
     }
 
     /// `checkSystemGrammaticalGenderPermission`.
     fn permitted(&self, source: &AttributionSourceState) -> Result<bool, Exception> {
         permission_checker::data_delivery(&self.host, READ_SYSTEM_GRAMMATICAL_GENDER, source, None)
-    }
-
-    /// `getSystemGrammaticalGender(userId)`: the user's file read once, as
-    /// `onUserUnlocked` reads it; one unreadable is logged and not kept.
-    fn system_gender(&self, user: i32) -> Result<i32, Exception> {
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(&gender) = cache.get(&user) {
-            return Ok(gender);
-        }
-        let file = self.host.data()?.join(format!(
-            "system_ce/{user}/{TAG_GRAMMATICAL_INFLECTION}/user_settings.xml"
-        ));
-        let read = match super::device_policy::read_atomic_bytes(&file) {
-            Ok(None) => return Ok(NOT_SPECIFIED),
-            Ok(Some(bytes)) => {
-                aim_android_xml::read_next(&bytes).and_then(|root| gender_from_xml(&root))
-            }
-            Err(e) => Err(e),
-        };
-        let gender = match read {
-            Ok(gender) => gender.unwrap_or(NOT_SPECIFIED),
-            Err(e) => {
-                eprintln!(
-                    "app host: grammatical_inflection: Failed to parse XML configuration from {}: {e}",
-                    file.display()
-                );
-                return Ok(NOT_SPECIFIED);
-            }
-        };
-        if gender != NOT_SPECIFIED {
-            return Err(self.unimplemented("a persisted system grammatical gender"));
-        }
-        cache.insert(user, gender);
-        Ok(gender)
     }
 
     /// `enforceCallerPermissions`.
@@ -156,7 +211,7 @@ impl Service for GrammaticalInflection {
                         )));
                     }
                     let gender = if self.enabled()? {
-                        self.system_gender(a.user_id)?
+                        system_gender(&self.host, a.user_id)?
                     } else {
                         NOT_SPECIFIED
                     };
@@ -175,7 +230,7 @@ impl Service for GrammaticalInflection {
                         .as_ref()
                         .ok_or_else(|| Exception::new(EX_NULL_POINTER, "attributionSource"))?;
                     let gender = if self.enabled()? && self.permitted(source)? {
-                        self.system_gender(a.user_id)?
+                        system_gender(&self.host, a.user_id)?
                     } else {
                         NOT_SPECIFIED
                     };
@@ -195,7 +250,9 @@ impl Service for GrammaticalInflection {
                     if !VALID_GENDERS.contains(&a.gender) {
                         return Err(Exception::illegal_argument("Unknown grammatical gender"));
                     }
-                    Err(self.unimplemented("setSystemWideGrammaticalGender"))
+                    self.set_system_gender(a.gender, a.user_id)?;
+                    gi::write_set_system_wide_grammatical_gender_reply(&mut p);
+                    Ok(())
                 })()
             }
             code => {
@@ -230,5 +287,17 @@ mod tests {
         );
         assert_eq!(gender("<a />"), Ok(None));
         assert!(gender("<grammatical_inflection />").is_err());
+    }
+
+    /// `toXmlByteArray`: binary XML (`Xml.resolveSerializer`) that the
+    /// service reads back.
+    #[test]
+    fn a_written_gender_reads_back() {
+        for g in VALID_GENDERS {
+            let bytes = gender_document(g).unwrap();
+            assert!(bytes.starts_with(aim_android_xml::abx::MAGIC));
+            let root = aim_android_xml::read_next(&bytes).unwrap();
+            assert_eq!(gender_from_xml(&root), Ok(Some(g)));
+        }
     }
 }
