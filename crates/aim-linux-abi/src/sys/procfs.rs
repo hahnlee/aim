@@ -1010,50 +1010,75 @@ const BLOCK_MOUNTS: &[&str] = &["/data", "/metadata", "/cache"];
 /// The mount table: the read-only image at `/` and the path map's areas.
 /// Each is `(source, target, fstype, options)`.
 fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, String)> {
-    let mut out = Vec::new();
-    for mp in points {
-        let guest = mp.guest;
-        // A cgroup v1 hierarchy: a `cgroup` filesystem with its controller
-        // (`cgroup1_show_options`).
-        if let Some(c) = mp
-            .fstype
-            .as_deref()
-            .and_then(aim_storage::cgroup_v1::Controller::from_map_kind)
-        {
-            let options = format!("rw,nosuid,nodev,noexec,relatime,{}", c.mount_options());
-            out.push(("none".into(), guest, "cgroup".into(), options));
-            continue;
-        }
-        // A kernel filesystem of the path map (cgroup2, bpf) or a mount the
-        // process made.
-        if let (Some(source), Some(fstype)) = (mp.source, mp.fstype) {
-            let options = if mp.area == vfs::Area::Image {
-                "ro,relatime"
-            } else {
-                "rw,nosuid,nodev,noexec,relatime"
-            };
-            out.push((source, guest, fstype, options.to_string()));
-            continue;
-        }
-        let (source, fstype, options) = match (mp.area, guest.as_str()) {
-            (vfs::Area::Image, _) => ("/dev/root".into(), "erofs", "ro,relatime"),
-            (vfs::Area::Kernfs, "/proc") => {
-                ("proc".into(), "proc", "rw,nosuid,nodev,noexec,relatime")
-            }
-            (vfs::Area::Kernfs, "/sys") => {
-                ("sysfs".into(), "sysfs", "rw,nosuid,nodev,noexec,relatime")
-            }
-            (vfs::Area::Writable, g) if BLOCK_MOUNTS.contains(&g) => (
-                format!("/dev/block/by-name{g}"),
-                "ext4",
-                "rw,nosuid,nodev,noatime",
-            ),
-            (vfs::Area::Writable, _) => ("tmpfs".into(), "tmpfs", "rw,nosuid,relatime"),
-            _ => continue,
-        };
-        out.push((source, guest, fstype.to_string(), options.to_string()));
+    let blocks = block_hosts(&points);
+    points
+        .into_iter()
+        .filter_map(|mp| mount_entry(mp, &blocks))
+        .collect()
+}
+
+/// The hosts of the block areas, with their guest paths.
+fn block_hosts(points: &[vfs::MountPoint]) -> Vec<(std::path::PathBuf, String)> {
+    points
+        .iter()
+        .filter(|mp| {
+            mp.area == vfs::Area::Writable
+                && mp.source.is_none()
+                && BLOCK_MOUNTS.contains(&mp.guest.as_str())
+        })
+        .map(|mp| (mp.host.clone(), mp.guest.clone()))
+        .collect()
+}
+
+fn mount_entry(
+    mp: vfs::MountPoint,
+    blocks: &[(std::path::PathBuf, String)],
+) -> Option<(String, String, String, String)> {
+    let guest = mp.guest;
+    // A cgroup v1 hierarchy: a `cgroup` filesystem with its controller
+    // (`cgroup1_show_options`).
+    if let Some(c) = mp
+        .fstype
+        .as_deref()
+        .and_then(aim_storage::cgroup_v1::Controller::from_map_kind)
+    {
+        let options = format!("rw,nosuid,nodev,noexec,relatime,{}", c.mount_options());
+        return Some(("none".into(), guest, "cgroup".into(), options));
     }
-    out
+    // A kernel filesystem of the path map (cgroup2, bpf) or a mount the
+    // process made.
+    if let (Some(source), Some(fstype)) = (mp.source, mp.fstype) {
+        let options = if mp.area == vfs::Area::Image {
+            "ro,relatime"
+        } else {
+            "rw,nosuid,nodev,noexec,relatime"
+        };
+        return Some((source, guest, fstype, options.to_string()));
+    }
+    // A bind of a block area's directory (the `/data_mirror` binds of
+    // `/data`) is that filesystem, as `show_vfsmnt` shows a bind mount's
+    // superblock: its device, type and options.
+    let block = blocks
+        .iter()
+        .find(|(host, _)| mp.area == vfs::Area::Writable && mp.host.starts_with(host))
+        .map(|(_, block)| block.as_str());
+    let (source, fstype, options) = match (mp.area, guest.as_str(), block) {
+        (vfs::Area::Image, _, _) => ("/dev/root".into(), "erofs", "ro,relatime"),
+        (vfs::Area::Kernfs, "/proc", _) => {
+            ("proc".into(), "proc", "rw,nosuid,nodev,noexec,relatime")
+        }
+        (vfs::Area::Kernfs, "/sys", _) => {
+            ("sysfs".into(), "sysfs", "rw,nosuid,nodev,noexec,relatime")
+        }
+        (vfs::Area::Writable, _, Some(block)) => (
+            format!("/dev/block/by-name{block}"),
+            "ext4",
+            "rw,nosuid,nodev,noatime",
+        ),
+        (vfs::Area::Writable, _, None) => ("tmpfs".into(), "tmpfs", "rw,nosuid,relatime"),
+        _ => return None,
+    };
+    Some((source, guest, fstype.to_string(), options.to_string()))
 }
 
 /// `/proc/<pid>/mounts`, as fstab(5) lines.
@@ -1069,11 +1094,12 @@ fn mounts(points: Vec<vfs::MountPoint>) -> String {
 /// The actual mount objects of the target process, including cloned IDs.
 fn mountinfo(points: Vec<vfs::MountPoint>) -> String {
     use std::os::unix::fs::MetadataExt;
+    let blocks = block_hosts(&points);
     points.into_iter().filter_map(|point|{
         let id=point.id;let parent=point.parent;let root=point.root.clone();
         let mut propagation=String::new();if point.shared!=0{propagation.push_str(&format!(" shared:{}",point.shared));}if point.master!=0{propagation.push_str(&format!(" master:{}",point.master));}
         let device=std::fs::metadata(&point.host).map(|stat|stat.dev()).unwrap_or(0);
-        mount_table(vec![point]).into_iter().next().map(|(source,target,fstype,options)|{
+        mount_entry(point, &blocks).map(|(source,target,fstype,options)|{
             let rw=options.split(',').next().unwrap_or("rw");
             format!("{id} {parent} {}:{} {root} {target} {options}{propagation} - {fstype} {source} {rw}\n",(device>>24)&0xff,device&0xffffff)
         })
@@ -2273,6 +2299,26 @@ mod tests {
     }
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    /// A bind of `/data`'s directories (`/data_mirror`) shows `/data`'s
+    /// filesystem, not a tmpfs (#455); `/data_mirror` itself is a tmpfs.
+    #[test]
+    fn binds_of_a_block_area_show_its_filesystem() {
+        let (_view, _) = crate::vfs::test_view();
+        let table = super::mount_table(crate::vfs::mount_points().unwrap());
+        let entry = |target: &str| {
+            table
+                .iter()
+                .find(|(_, t, _, _)| t == target)
+                .map(|(source, _, fstype, _)| (source.as_str(), fstype.as_str()))
+        };
+        assert_eq!(entry("/data"), Some(("/dev/block/by-name/data", "ext4")));
+        assert_eq!(
+            entry("/data_mirror/data_ce/null/0"),
+            Some(("/dev/block/by-name/data", "ext4"))
+        );
+        assert_eq!(entry("/data_mirror"), Some(("tmpfs", "tmpfs")));
+    }
 
     #[test]
     fn mounts_symlink_opens_the_same_live_namespace_as_self_mounts() {
