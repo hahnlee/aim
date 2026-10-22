@@ -823,7 +823,7 @@ impl LocationManagerService {
                 m.put(env, key, reg, effects);
             }
         });
-        let signal = self.env.process.add_service(Arc::new(CancelCurrent {
+        let signal = self.env.process.add_callback(Arc::new(CancelCurrent {
             service: self.this.clone(),
             provider: name,
             key,
@@ -968,7 +968,7 @@ impl LocationManagerService {
         key: Key,
     ) -> Option<Box<dyn FnOnce() + Send>> {
         use aim_service_aidl::android_app_iactivitymanager as am;
-        let receiver = self.env.process.add_service(Arc::new(CancelReceiver {
+        let receiver = self.env.process.add_callback(Arc::new(CancelReceiver {
             service: self.this.clone(),
             provider: name.into(),
             key,
