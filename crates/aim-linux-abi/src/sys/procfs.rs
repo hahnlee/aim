@@ -116,7 +116,7 @@ pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
 
 /// Target of `/proc/self/fd/N`.
 pub(super) fn fd_link(fd: i32) -> Option<String> {
-    if fdtab::is_hidden(fd) {
+    if !fdtab::visible(fd) {
         return None;
     }
     if let Some((inode, _)) = super::net::proc_socket_identity(fd) {
@@ -1216,9 +1216,8 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         "cwd" if me => Node::Link(vfs::cwd()),
         "root" => Node::Link("/".into()),
         "fd" if me => Node::Dir(
-            fdtab::open_fds()
+            super::fd_visibility::visible()
                 .into_iter()
-                .filter(|&fd| !fdtab::is_hidden(fd))
                 .map(|fd| Entry::new(fd as u64 + 1, dir::DT_LNK, fd.to_string()))
                 .collect(),
         ),
@@ -1752,7 +1751,7 @@ pub(super) fn current_fd_link(guest: &str) -> Option<Result<i32, Errno>> {
             ))
         })?;
     let fd: i32 = tail.parse().ok()?;
-    if fd < 0 || fdtab::is_hidden(fd) {
+    if !fdtab::visible(fd) {
         return Some(Err(ENOENT));
     }
     if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
@@ -1889,7 +1888,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         .strip_prefix(&format!("/proc/{}/fd/", pid()))
         .and_then(|n| n.parse::<i32>().ok())
     {
-        if fdtab::is_hidden(n) {
+        if !fdtab::visible(n) {
             return Some(-(ENOENT as i64));
         }
         if let Some(r) = super::memfd::reopen(n, host_flags) {
