@@ -18,6 +18,7 @@ mod log;
 mod n2db;
 mod nodes;
 mod stamp;
+mod stop;
 mod storage;
 mod test;
 mod tools;
