@@ -3,15 +3,16 @@
 //! The runtime directory can be deep (a temp or data directory), so the
 //! socket is bound or connected by its short name relative to the socket
 //! directory, which is made this thread's working directory with
-//! `pthread_fchdir_np` for the duration of the call. The syscall layer can
-//! use the same technique for guest `bind`/`connect` on mapped paths
-//! (`docs/guest-init-contract.md`, "Unix sockets").
+//! `pthread_fchdir_np` for the duration of the call. guest-init's sockets,
+//! the display server's and its input devices' all go this way; the
+//! syscall layer can use the same technique for guest `bind`/`connect` on
+//! mapped paths (`docs/guest-init-contract.md`, "Unix sockets").
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
 unsafe extern "C" {
@@ -97,7 +98,6 @@ pub fn bind_at(dir: &Path, name: &str, socket_type: libc::c_int) -> io::Result<O
 
 /// Connects a stream socket to `dir/name`.
 pub fn connect_at(dir: &Path, name: &str) -> io::Result<UnixStream> {
-    let (addr, len) = short_address(name)?;
     // SAFETY: fresh socket fd.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
     if fd < 0 {
@@ -105,21 +105,62 @@ pub fn connect_at(dir: &Path, name: &str) -> io::Result<UnixStream> {
     }
     // SAFETY: fd is ours.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: fcntl on our fd.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    connect_fd_at(owned.as_raw_fd(), dir, name)?;
+    Ok(UnixStream::from(owned))
+}
+
+/// Connects the caller's socket `fd` to `dir/name`.
+pub fn connect_fd_at(fd: RawFd, dir: &Path, name: &str) -> io::Result<()> {
+    let (addr, len) = short_address(name)?;
     in_directory(dir, || {
         // SAFETY: connect with a valid sockaddr_un.
-        if unsafe {
-            libc::connect(
-                owned.as_raw_fd(),
-                (&addr as *const libc::sockaddr_un).cast(),
-                len,
-            )
-        } != 0
-        {
+        if unsafe { libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
-    })?;
-    Ok(UnixStream::from(owned))
+    })
+}
+
+/// The directory and file name of a socket path.
+fn split(path: &Path) -> io::Result<(&Path, &str)> {
+    let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    Ok((
+        if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        },
+        name,
+    ))
+}
+
+/// A stream socket listening at `path`, whatever the path's length.
+pub fn listen(path: &Path, backlog: libc::c_int) -> io::Result<UnixListener> {
+    let (dir, name) = split(path)?;
+    let fd = bind_at(dir, name, libc::SOCK_STREAM)?;
+    // SAFETY: listen on our fd.
+    if unsafe { libc::listen(fd.as_raw_fd(), backlog) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(UnixListener::from(fd))
+}
+
+/// A stream socket connected to `path`, whatever the path's length.
+pub fn connect(path: &Path) -> io::Result<UnixStream> {
+    let (dir, name) = split(path)?;
+    connect_at(dir, name)
+}
+
+/// Connects the caller's socket `fd` to `path`, whatever its length.
+pub fn connect_fd(fd: RawFd, path: &Path) -> io::Result<()> {
+    let (dir, name) = split(path)?;
+    connect_fd_at(fd, dir, name)
 }
 
 #[cfg(test)]
@@ -145,6 +186,18 @@ mod tests {
         let mut buf = [0u8; 4];
         server.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"ping");
+        // By the whole path, as the display server and its clients go.
+        let path = dir.join("display");
+        let listener = listen(&path, 8).unwrap();
+        let mut client = connect(&path).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client.write_all(b"pong").unwrap();
+        server.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"pong");
+        // SAFETY: a fresh socket of ours.
+        let fd = unsafe { OwnedFd::from_raw_fd(libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0)) };
+        connect_fd(fd.as_raw_fd(), &path).unwrap();
+        assert!(listener.accept().is_ok());
         let mut root = std::env::temp_dir().join(format!("dgi-unixsock-{}", std::process::id()));
         std::fs::remove_dir_all(&root).unwrap();
         root.pop();

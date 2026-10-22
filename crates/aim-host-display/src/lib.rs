@@ -22,6 +22,7 @@ pub mod notify;
 pub mod screen;
 pub mod shell;
 pub mod text_input;
+pub mod unixsock;
 pub mod windows;
 pub mod wire;
 
@@ -111,17 +112,6 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
 }
 
 fn private_connect(path: &Path) -> std::io::Result<PrivateFd> {
-    use std::os::unix::ffi::OsStrExt;
-    let bytes = path.as_os_str().as_bytes();
-    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    if bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
-        return Err(std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
-    }
-    address.sun_family = libc::AF_UNIX as u8;
-    address.sun_len = (2 + bytes.len() + 1) as u8;
-    for (out, byte) in address.sun_path.iter_mut().zip(bytes) {
-        *out = *byte as libc::c_char;
-    }
     let descriptor = PrivateFd::allocate(|| {
         let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
         if fd < 0 {
@@ -134,16 +124,7 @@ fn private_connect(path: &Path) -> std::io::Result<PrivateFd> {
         Ok(fd)
     })?;
     // Only allocation/adoption holds the descriptor lifecycle admission.
-    if unsafe {
-        libc::connect(
-            descriptor.as_raw_fd(),
-            (&address as *const libc::sockaddr_un).cast(),
-            address.sun_len as libc::socklen_t,
-        )
-    } < 0
-    {
-        return Err(std::io::Error::last_os_error());
-    }
+    unixsock::connect_fd(descriptor.as_raw_fd(), path)?;
     Ok(descriptor)
 }
 

@@ -34,7 +34,6 @@ pub mod translate;
 
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -480,76 +479,13 @@ pub fn is_masked(masks: &[Option<Mask>], kind: u16, code: u16) -> bool {
     matches!(masks.get(kind as usize), Some(Some(m)) if !test_bit(&m.0, code))
 }
 
-unsafe extern "C" {
-    /// Darwin: this thread's own working directory (-1: the process's).
-    fn pthread_fchdir_np(fd: libc::c_int) -> libc::c_int;
-}
-
-/// A Unix stream socket and the address `name`, for [`in_dir`].
-fn unix_socket(name: &str) -> io::Result<(OwnedFd, libc::sockaddr_un)> {
-    // SAFETY: a new socket; the address is zeroed, then filled in bounds.
-    unsafe {
-        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = OwnedFd::from_raw_fd(fd);
-        libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
-        let mut a: libc::sockaddr_un = std::mem::zeroed();
-        a.sun_family = libc::AF_UNIX as u8;
-        if name.len() >= a.sun_path.len() {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        for (i, b) in name.bytes().enumerate() {
-            a.sun_path[i] = b as libc::c_char;
-        }
-        Ok((fd, a))
-    }
-}
-
-/// Bind (`listen == true`, then listen) or connect a Unix stream socket to
-/// `name` in `dir`, by the name alone from `dir` as this thread's working
-/// directory: the directory's path may be longer than a socket address
-/// holds.
-fn in_dir(dir: &Path, name: &str, listen: bool) -> io::Result<OwnedFd> {
-    let d = std::fs::File::open(dir)?;
-    let (fd, a) = unix_socket(name)?;
-    let len = size_of::<libc::sockaddr_un>() as u32;
-    let p = (&a as *const libc::sockaddr_un).cast();
-    // SAFETY: our socket, a local address and an open directory fd; the
-    // thread's directory is restored before returning.
-    let r = unsafe {
-        if pthread_fchdir_np(d.as_raw_fd()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let r = if listen {
-            let r = libc::bind(fd.as_raw_fd(), p, len);
-            if r == 0 {
-                libc::listen(fd.as_raw_fd(), 16)
-            } else {
-                r
-            }
-        } else {
-            libc::connect(fd.as_raw_fd(), p, len)
-        };
-        let e = io::Error::last_os_error();
-        pthread_fchdir_np(-1);
-        if r < 0 {
-            return Err(e);
-        }
-        r
-    };
-    debug_assert_eq!(r, 0);
-    Ok(fd)
-}
-
 /// Connect to device node `name` in `dir`.
 pub fn connect_in(dir: &Path, name: &str) -> io::Result<UnixStream> {
-    in_dir(dir, name, false).map(UnixStream::from)
+    crate::unixsock::connect_at(dir, name)
 }
 
 fn listen_in(dir: &Path, name: &str) -> io::Result<UnixListener> {
-    in_dir(dir, name, true).map(UnixListener::from)
+    crate::unixsock::listen(&dir.join(name), 16)
 }
 
 /// Records as bytes.
