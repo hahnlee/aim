@@ -574,6 +574,18 @@ mod tests {
             namespace.id(),
         )
         .unwrap();
+        // The registration is in the shared test view: whatever way the
+        // test leaves, the next test's processes must not find this init.
+        struct Registered<'a>(
+            &'a aim_storage::process_namespace::InitRegistration,
+            &'a std::path::Path,
+        );
+        impl Drop for Registered<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.remove(self.1);
+            }
+        }
+        let _registered = Registered(&registration, &table);
         let Some(holder) = aim_paths::input(
             aim_paths::host_bin("aim-lock-holder"),
             "host/aim-lock-holder",
@@ -670,6 +682,5 @@ mod tests {
             })
             .unwrap();
         controller.shutdown().unwrap();
-        registration.remove(&table).unwrap();
     }
 }
