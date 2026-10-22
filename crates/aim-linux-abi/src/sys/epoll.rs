@@ -5,7 +5,9 @@
 //!   EVFILT_WRITE knotes with the fd as ident. Level-triggered is kqueue's
 //!   default, EPOLLET maps to EV_CLEAR and EPOLLONESHOT to EV_DISPATCH (the
 //!   sibling filter is disabled on delivery, as epoll disables the whole
-//!   interest). EPOLLEXCLUSIVE is accepted and has no effect.
+//!   interest). EPOLLEXCLUSIVE is checked as epoll_ctl(2) checks it; each
+//!   attached epoll then still receives the wakeup, which is the "one or
+//!   more" the flag allows.
 //! - A kqueue is itself pollable, so epoll fds nest and work in poll().
 //! - The interest list is kept here too: Darwin does not inherit kqueues
 //!   across fork, so a fork child rebuilds each one on the same fd number.
@@ -84,6 +86,8 @@ const EPOLLHUP: u32 = 0x10;
 const EPOLLRDNORM: u32 = 0x40;
 const EPOLLWRNORM: u32 = 0x100;
 const EPOLLRDHUP: u32 = 0x2000;
+const EPOLLEXCLUSIVE: u32 = 1 << 28;
+const EPOLLWAKEUP: u32 = 1 << 29;
 const EPOLLONESHOT: u32 = 1 << 30;
 const EPOLLET: u32 = 1 << 31;
 
@@ -91,6 +95,21 @@ const EPOLL_CTL_ADD: u64 = 1;
 const EPOLL_CTL_DEL: u64 = 2;
 const EPOLL_CTL_MOD: u64 = 3;
 const EPOLL_CLOEXEC: u64 = 0o2000000;
+/// `EPOLLEXCLUSIVE_OK_BITS` (`fs/eventpoll.c`).
+const EPOLLEXCLUSIVE_OK_BITS: u32 =
+    EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLWAKEUP | EPOLLET | EPOLLEXCLUSIVE;
+
+/// do_epoll_ctl's EINVAL for EPOLLEXCLUSIVE: only ADD takes it, not for an
+/// epoll target, and with no events beyond EPOLLEXCLUSIVE_OK_BITS; and an
+/// exclusive attachment is never modified.
+fn exclusive_invalid(op: u64, new: Option<&Interest>, old: Option<&Interest>, epoll: bool) -> bool {
+    let asked = new.is_some_and(|n| n.events & EPOLLEXCLUSIVE != 0);
+    (asked
+        && (op == EPOLL_CTL_MOD
+            || epoll
+            || new.is_some_and(|n| n.events & !EPOLLEXCLUSIVE_OK_BITS != 0)))
+        || op == EPOLL_CTL_MOD && old.is_some_and(|o| o.events & EPOLLEXCLUSIVE != 0)
+}
 
 #[derive(Clone, Copy)]
 struct Interest {
@@ -153,6 +172,14 @@ fn pty_ctl(
     let index = interests
         .iter()
         .position(|interest| interest.fd == fd && interest.identity == identity);
+    if exclusive_invalid(
+        op,
+        new.as_ref(),
+        index.map(|index| &interests[index].interest),
+        false,
+    ) {
+        return -(EINVAL as i64);
+    }
     match op {
         EPOLL_CTL_ADD if index.is_some() => return -(EEXIST as i64),
         EPOLL_CTL_MOD | EPOLL_CTL_DEL if index.is_none() => return -(ENOENT as i64),
@@ -428,11 +455,20 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
             disabled: false,
         }
     });
+    // The flag's own rules precede the interest list's EEXIST and ENOENT;
+    // refusing to modify an exclusive attachment needs the attachment.
+    let epoll = matches!(fdtab::get(fd), Some(Kind::Epoll(_)));
+    if exclusive_invalid(op, new.as_ref(), None, epoll) {
+        return -(EINVAL as i64);
+    }
     let mut interest = ep.interest.lock().unwrap();
     let old = interest
         .get(&fd)
         .copied()
         .filter(|i| registered(epfd, fd, i));
+    if old.is_some() && exclusive_invalid(op, new.as_ref(), old.as_ref(), epoll) {
+        return -(EINVAL as i64);
+    }
     match op {
         EPOLL_CTL_ADD if old.is_some() => return -(EEXIST as i64),
         EPOLL_CTL_MOD | EPOLL_CTL_DEL if old.is_none() => return -(ENOENT as i64),

@@ -71,6 +71,37 @@ static void eventfd_blocking_wakeup(void) {
   close(fd);
 }
 
+// EPOLLEXCLUSIVE as epoll_ctl(2) has it: ADD only, events within
+// EPOLLEXCLUSIVE_OK_BITS, no epoll target, and never modified once set.
+static void epoll_exclusive(void) {
+  int ep = epoll_create1(EPOLL_CLOEXEC);
+  int inner = epoll_create1(EPOLL_CLOEXEC);
+  int efd = eventfd(0, EFD_CLOEXEC);
+  CHECK(ep >= 0 && inner >= 0 && efd >= 0);
+  struct epoll_event ev = {.events = EPOLLIN | EPOLLEXCLUSIVE | EPOLLONESHOT};
+  errno = 0;
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, efd, &ev) == -1 && errno == EINVAL);
+  ev.events = EPOLLIN | EPOLLEXCLUSIVE;
+  errno = 0;
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, inner, &ev) == -1 && errno == EINVAL);
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, efd, &ev) == 0);
+  ev.events = EPOLLIN;
+  errno = 0;
+  CHECK(epoll_ctl(ep, EPOLL_CTL_MOD, efd, &ev) == -1 && errno == EINVAL);
+  ev.events = EPOLLIN | EPOLLEXCLUSIVE;
+  errno = 0;
+  CHECK(epoll_ctl(ep, EPOLL_CTL_MOD, efd, &ev) == -1 && errno == EINVAL);
+  // The attachment still delivers.
+  uint64_t one = 1;
+  CHECK(write(efd, &one, sizeof one) == sizeof one);
+  struct epoll_event out[2];
+  CHECK(epoll_wait(ep, out, 2, 0) == 1 && (out[0].events & EPOLLIN));
+  CHECK(epoll_ctl(ep, EPOLL_CTL_DEL, efd, NULL) == 0);
+  close(efd);
+  close(inner);
+  close(ep);
+}
+
 static void epoll_level_edge_oneshot(void) {
   int ep = epoll_create1(EPOLL_CLOEXEC);
   CHECK(ep >= 0);
@@ -307,6 +338,7 @@ int main(void) {
   RUN(eventfd_counter);
   RUN(eventfd_semaphore);
   RUN(eventfd_blocking_wakeup);
+  RUN(epoll_exclusive);
   RUN(epoll_level_edge_oneshot);
   RUN(epoll_hup_and_out);
   RUN(epoll_nested_and_poll);
