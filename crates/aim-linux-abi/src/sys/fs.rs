@@ -649,7 +649,12 @@ fn close_inner(a: [u64; 6], capture: &mut Option<CloseEvidence>) -> i64 {
     *capture = Some(CloseEvidence::capture(fd));
     let evidence = capture.as_ref().unwrap();
     if let Err(error) = fdtab::require_guest_visible(fd) {
-        evidence.failure("pre-visibility", -(error as i64), i32::MIN, 0);
+        // An fd that is not open at all is close(2)'s EBADF, as a process
+        // closing every descriptor before exec sees it; one the layer
+        // holds hidden is the fault the record is for.
+        if evidence.hidden || evidence.fd_flags >= 0 {
+            evidence.failure("pre-visibility", -(error as i64), i32::MIN, 0);
+        }
         return -(error as i64);
     }
     let retained = fdtab::get(fd);
