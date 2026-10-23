@@ -25,6 +25,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 use super::boot_policy;
+use super::settings::Table;
 use super::{AppHost, reply};
 use crate::package::bootstrap::ScanUsers;
 use crate::package::pkg::AndroidPackage;
@@ -650,6 +651,27 @@ impl Service for PackageBootstrap {
                 });
                 bridge::write_get_installer_preparation_bridge_reply(&mut p, Some(preparation));
                 Ok(())
+            }
+            // `Settings.Global.getInt(ephemeral_cookie_max_size_bytes,
+            // 16384)`.
+            bridge::GET_INSTANT_APP_COOKIE_LIMIT => {
+                bridge::GetInstantAppCookieLimit::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                host.platform().map(|platform| {
+                    let limit = platform
+                        .settings
+                        .get(Table::Global, "ephemeral_cookie_max_size_bytes")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(16384);
+                    bridge::write_get_instant_app_cookie_limit_reply(&mut p, limit);
+                })
+            }
+            // A new Bitmap's density: `Bitmap.getDefaultDensity`, the
+            // process's `DisplayMetrics.DENSITY_DEVICE`.
+            bridge::GET_INSTANT_APP_ICON_DENSITY => {
+                bridge::GetInstantAppIconDensity::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                host.inputs().map(|inputs| {
+                    bridge::write_get_instant_app_icon_density_reply(&mut p, inputs.device_density);
+                })
             }
             bridge::GET_INSTALLER_REMOVAL_BRIDGE => {
                 bridge::GetInstallerRemovalBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
