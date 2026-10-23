@@ -37,7 +37,7 @@ const ENFORCE_SERIAL_NUMBER: u32 = 14;
 /// `Installer.FLAG_STORAGE_SDK`.
 pub(super) const FLAG_STORAGE_DE: i32 = 1;
 pub(super) const FLAG_STORAGE_CE: i32 = 2;
-const FLAG_STORAGE_SDK: i32 = 8;
+pub(super) const FLAG_STORAGE_SDK: i32 = 8;
 /// `Installer.Batch.CREATE_APP_DATA_BATCH_SIZE`.
 const CREATE_APP_DATA_BATCH_SIZE: usize = 256;
 /// `PackageManager.PROPERTY_NO_APP_DATA_STORAGE`.
@@ -45,15 +45,15 @@ const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE
 
 /// `android.os.CreateAppDataArgs`.
 #[derive(Clone, Debug, PartialEq)]
-struct CreateAppDataArgs {
-    uuid: Option<String>,
-    package_name: String,
-    user_id: i32,
-    flags: i32,
-    app_id: i32,
-    previous_app_id: i32,
-    se_info: String,
-    target_sdk_version: i32,
+pub(super) struct CreateAppDataArgs {
+    pub(super) uuid: Option<String>,
+    pub(super) package_name: String,
+    pub(super) user_id: i32,
+    pub(super) flags: i32,
+    pub(super) app_id: i32,
+    pub(super) previous_app_id: i32,
+    pub(super) se_info: String,
+    pub(super) target_sdk_version: i32,
 }
 
 impl WriteParcelable for CreateAppDataArgs {
@@ -75,11 +75,11 @@ impl WriteParcelable for CreateAppDataArgs {
 /// `android.os.CreateAppDataResult`, as its structured parcelable reads:
 /// the fields its size covers, the rest skipped.
 #[derive(Debug, Default, PartialEq)]
-struct CreateAppDataResult {
-    ce_data_inode: i64,
-    de_data_inode: i64,
-    exception_code: i32,
-    exception_message: Option<String>,
+pub(super) struct CreateAppDataResult {
+    pub(super) ce_data_inode: i64,
+    pub(super) de_data_inode: i64,
+    pub(super) exception_code: i32,
+    pub(super) exception_message: Option<String>,
 }
 
 impl ReadParcelable for CreateAppDataResult {
@@ -130,7 +130,7 @@ pub(super) fn fingerprint(property: impl Fn(&str) -> Option<String>) -> String {
 }
 
 /// `VMRuntime.is64BitAbi`.
-fn is_64_bit_abi(abi: &str) -> Result<bool, String> {
+pub(super) fn is_64_bit_abi(abi: &str) -> Result<bool, String> {
     match abi {
         "arm64-v8a" | "x86_64" | "riscv64" => Ok(true),
         "armeabi" | "armeabi-v7a" | "x86" => Ok(false),
