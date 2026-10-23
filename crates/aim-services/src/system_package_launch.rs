@@ -23,14 +23,16 @@ impl System {
                 "launch bridge reply tail",
             ));
         }
-        let node = reply
-            .retain_remote_binder(binder.ok_or_else(|| {
+        let node = ServiceOwner::retain(
+            &reply,
+            binder.ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "launch bridge unavailable",
                 )
-            })?)
-            .map_err(|status| unreachable_service("package launch bridge", status))?;
+            })?,
+        )
+        .map_err(|status| unreachable_service("package launch bridge", status))?;
         let node = Arc::new(node);
         let retained = bridge.clone();
         let system = Arc::downgrade(self);
