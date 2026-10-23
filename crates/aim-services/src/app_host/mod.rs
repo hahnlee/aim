@@ -105,6 +105,7 @@ pub mod package_boot_context;
 pub mod package_boot_lifecycle;
 pub mod package_bootstrap;
 mod package_checksums;
+mod package_domain_settings;
 mod package_effects;
 pub mod package_initial_context;
 pub mod package_installer;

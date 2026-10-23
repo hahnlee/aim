@@ -8,7 +8,7 @@
 //! with the sub-bridges its construction takes: the package writer's
 //! effects, the maintenance owner, and the native installer's build flags,
 //! session icon decoder, confirmation leaves, external owners, staging
-//! input and file owner. The bridge's other owners, its other sub-bridges
+//! input and file owner, and the domain verification settings. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -55,6 +55,9 @@ pub struct PackageBootstrap {
     installer_external: OnceLock<aim_binder_host::parcel::Binder>,
     /// The installer's file owner, made once (`installerFiles`).
     installer_files: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The domain verification settings, made once
+    /// (`installPackageDomainSettings`).
+    domain_settings: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -125,6 +128,7 @@ impl PackageBootstrap {
             config: OnceLock::new(),
             installer_external: OnceLock::new(),
             installer_files: OnceLock::new(),
+            domain_settings: OnceLock::new(),
         }
     }
 
@@ -553,6 +557,16 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_confirmation_bridge_reply(&mut p, Some(confirmation));
                 Ok(())
             }
+            bridge::GET_PACKAGE_DOMAIN_SETTINGS => {
+                bridge::GetPackageDomainSettings::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let settings = *self.domain_settings.get_or_init(|| {
+                    self.leaf(Arc::new(
+                        super::package_domain_settings::DomainSettings::new(host.clone()),
+                    ))
+                });
+                bridge::write_get_package_domain_settings_reply(&mut p, Some(settings));
+                Ok(())
+            }
             bridge::GET_PACKAGE_INSTALLER_FILES => {
                 bridge::GetPackageInstallerFiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let files = *self.installer_files.get_or_init(|| {
@@ -820,6 +834,7 @@ mod tests {
             bridge::GET_INSTALLER_CONFIRMATION_BRIDGE,
             bridge::GET_NATIVE_STAGING_BRIDGE,
             bridge::GET_PACKAGE_INSTALLER_FILES,
+            bridge::GET_PACKAGE_DOMAIN_SETTINGS,
         ] {
             let reply = call(code);
             let mut r = reply.reader();
