@@ -3,10 +3,7 @@
 use super::{
     CrossProfileIntentFilter, PersistentPreferredActivity, PreferredActivity, registry::Identity,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{Binder, Parcel},
-};
+use aim_binder_host::parcel::{Binder, Parcel};
 use std::sync::Arc;
 
 pub const FORMAT: i32 = 1;
@@ -75,23 +72,32 @@ impl Record<'_> {
 /// Concrete capability retained by native records and captured views. A typed
 /// producer must construct this after obtaining getIdentityHash from the lease.
 pub struct RecordLease {
-    strong: Arc<Strong>,
+    /// The lease: another process's node, or this process's own where it
+    /// serves the bootstrap bridge.
+    owner: crate::system::ServiceOwner,
+    binder: Binder,
     pub hash: i32,
     pub kind: i32,
 }
 impl RecordLease {
-    pub fn new(strong: Strong, hash: i32, kind: i32) -> Result<Self, String> {
+    pub fn new(
+        owner: crate::system::ServiceOwner,
+        binder: Binder,
+        hash: i32,
+        kind: i32,
+    ) -> Result<Self, String> {
         if !matches!(kind, PREFERRED | PERSISTENT | CROSS_PROFILE) {
             return Err("unknown preferred record lease kind".into());
         }
         Ok(Self {
-            strong: Arc::new(strong),
+            owner,
+            binder,
             hash,
             kind,
         })
     }
     pub fn binder(&self) -> Binder {
-        self.strong.binder()
+        self.binder
     }
     pub fn identity(self: &Arc<Self>) -> Identity {
         Identity {
@@ -150,12 +156,15 @@ impl Producer for BridgeProducer {
         if reader.remaining() != 0 {
             return Err("trailing preferred record reply".into());
         }
-        let strong = reply
-            .retain_remote_binder(binder)
+        let owner = crate::system::ServiceOwner::retain(&reply, binder)
             .map_err(|error| format!("preferred record retention {error}"))?;
+        let binder = match &owner {
+            crate::system::ServiceOwner::Remote(strong) => strong.binder(),
+            crate::system::ServiceOwner::Local(_) => binder,
+        };
         let mut data = Parcel::new();
         identity::GetIdentityHash {}.write(&mut data);
-        let reply = strong
+        let reply = owner
             .transact(identity::GET_IDENTITY_HASH, &data, false)
             .map_err(|error| format!("preferred record hash transport {error}"))?;
         let mut reader = reply.reader();
@@ -166,7 +175,7 @@ impl Producer for BridgeProducer {
             return Err("trailing preferred record hash".into());
         }
         (self.current)()?;
-        Ok(Arc::new(RecordLease::new(strong, hash, kind)?))
+        Ok(Arc::new(RecordLease::new(owner, binder, hash, kind)?))
     }
 }
 
