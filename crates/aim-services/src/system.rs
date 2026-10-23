@@ -5150,13 +5150,13 @@ impl System {
                 "install preparation trailing bytes",
             ));
         }
-        let staged = reply.retain_remote_binder(binder).map_err(|status| {
+        let staged = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("staged owner lifetime: {status}"),
             )
         })?;
-        let stream = reply.retain_remote_binder(binder).map_err(|status| {
+        let stream = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("stream owner lifetime: {status}"),

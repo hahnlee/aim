@@ -1,8 +1,5 @@
 //! Original image LauncherApps/AppOps/graphics leaves for native archive queries.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::{
     ReadParcelable, WriteParcelable, dev_aim_server_iinstallerarchivequerybridge as api,
 };

@@ -6,7 +6,7 @@ use crate::package::{
     scan_snapshot::{Store, endpoint::Endpoint},
 };
 use aim_binder_host::{
-    local::{LocalProcess, Strong},
+    local::LocalProcess,
     parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
 };
 use aim_service_aidl::dev_aim_server_iinstallerpermissionbridge as api;

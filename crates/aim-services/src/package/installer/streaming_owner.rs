@@ -6,7 +6,7 @@ use super::{
     storage,
 };
 use aim_binder_host::{
-    local::{Call, LocalProcess, Reply, Service, Strong},
+    local::{Call, LocalProcess, Reply, Service},
     parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
 };
 use aim_service_aidl::{
@@ -34,7 +34,7 @@ struct State {
     connector_node: Option<Binder>,
 }
 pub struct Owner {
-    bridge: Strong,
+    bridge: crate::system::ServiceOwner,
     process: Arc<LocalProcess>,
     disk: Arc<Mutex<storage::Store>>,
     publisher: Publisher,
@@ -54,7 +54,7 @@ fn transport(code: i32) -> Exception {
 }
 impl Owner {
     pub fn new(
-        bridge: Strong,
+        bridge: crate::system::ServiceOwner,
         process: Arc<LocalProcess>,
         disk: Arc<Mutex<storage::Store>>,
         publisher: Publisher,
@@ -82,7 +82,7 @@ impl Owner {
         Arc::new(move |session, record, path| owner.prepare(session, record, path))
     }
     pub fn production(
-        bridge: Strong,
+        bridge: crate::system::ServiceOwner,
         process: Arc<LocalProcess>,
         disk: Arc<Mutex<storage::Store>>,
         publisher: Publisher,

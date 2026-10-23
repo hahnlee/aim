@@ -821,8 +821,8 @@ impl NativeOwners {
     }
     pub fn configure_production_preparation(
         self: &Arc<Self>,
-        staged_bridge: aim_binder_host::local::Strong,
-        stream_bridge: aim_binder_host::local::Strong,
+        staged_bridge: crate::system::ServiceOwner,
+        stream_bridge: crate::system::ServiceOwner,
         native: Arc<super::pipeline::Native>,
     ) -> Result<(), Exception> {
         let lite = self

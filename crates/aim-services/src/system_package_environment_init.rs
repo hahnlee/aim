@@ -403,7 +403,7 @@ impl System {
             return Err(environment_error("completion bridge trailing data"));
         }
         let art =
-            Arc::new(reply.retain_remote_binder(binder).map_err(|code| {
+            Arc::new(ServiceOwner::retain(&reply, binder).map_err(|code| {
                 environment_error(format!("completion bridge retention {code}"))
             })?);
         let weak = Arc::downgrade(self);

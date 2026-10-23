@@ -13,7 +13,7 @@ use super::{
     scan_snapshot::Snapshot,
 };
 use aim_binder_host::{
-    local::{LocalProcess, Service, Strong},
+    local::{LocalProcess, Service},
     parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel},
 };
 use aim_service_aidl::{
