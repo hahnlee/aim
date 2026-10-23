@@ -121,6 +121,7 @@ mod package_installer_policy;
 mod package_internal_leaves;
 mod package_launch;
 mod package_maintenance;
+mod package_moves;
 pub mod package_resolution_policy;
 pub mod package_service;
 pub mod package_shell;

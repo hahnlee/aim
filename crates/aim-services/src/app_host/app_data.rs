@@ -245,7 +245,7 @@ impl AppHost {
     }
 
     /// `StorageManager.isFileEncrypted`: `ro.crypto.type` is `file`.
-    fn file_encrypted(&self) -> bool {
+    pub(super) fn file_encrypted(&self) -> bool {
         self.property("ro.crypto.type").as_deref() == Some("file")
     }
 
