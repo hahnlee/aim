@@ -9,8 +9,8 @@
 //! effects, the maintenance owner, and the native installer's build flags,
 //! session icon decoder, confirmation leaves, external owners, staging
 //! input and file owner, the domain verification settings, the
-//! preferred resolver records' leases, and the package caches'
-//! invalidation. The bridge's other owners, its other sub-bridges
+//! preferred resolver records' leases, the package caches' invalidation
+//! and the install environment's app-data owner. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -60,6 +60,9 @@ pub struct PackageBootstrap {
     /// The domain verification settings, made once
     /// (`installPackageDomainSettings`).
     domain_settings: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The install environment's app-data owner, made once
+    /// (`packageAppData`).
+    app_data: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -131,6 +134,7 @@ impl PackageBootstrap {
             installer_external: OnceLock::new(),
             installer_files: OnceLock::new(),
             domain_settings: OnceLock::new(),
+            app_data: OnceLock::new(),
         }
     }
 
@@ -590,6 +594,16 @@ impl Service for PackageBootstrap {
                     bridge::write_allocate_preferred_resolver_record_reply(&mut p, Some(lease));
                 })
             }
+            bridge::GET_PACKAGE_APP_DATA_BRIDGE => {
+                bridge::GetPackageAppDataBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let app_data = *self.app_data.get_or_init(|| {
+                    self.leaf(Arc::new(super::package_app_data::PackageAppData::new(
+                        host.clone(),
+                    )))
+                });
+                bridge::write_get_package_app_data_bridge_reply(&mut p, Some(app_data));
+                Ok(())
+            }
             bridge::GET_PACKAGE_DOMAIN_SETTINGS => {
                 bridge::GetPackageDomainSettings::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let settings = *self.domain_settings.get_or_init(|| {
@@ -868,6 +882,7 @@ mod tests {
             bridge::GET_NATIVE_STAGING_BRIDGE,
             bridge::GET_PACKAGE_INSTALLER_FILES,
             bridge::GET_PACKAGE_DOMAIN_SETTINGS,
+            bridge::GET_PACKAGE_APP_DATA_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

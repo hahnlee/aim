@@ -99,6 +99,7 @@ mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod overlay_service;
+mod package_app_data;
 pub mod package_boot;
 pub mod package_boot_configuration;
 pub mod package_boot_context;
