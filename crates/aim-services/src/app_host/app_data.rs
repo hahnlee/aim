@@ -195,7 +195,7 @@ fn call<T>(
 
 /// Deletes what `dir` holds (`FileUtils.deleteContents`), and the
 /// directory too with `itself`, logging what cannot go.
-fn delete_contents(dir: &Path, itself: bool) {
+pub(super) fn delete_contents(dir: &Path, itself: bool) {
     let result = if itself {
         std::fs::remove_dir_all(dir)
     } else {

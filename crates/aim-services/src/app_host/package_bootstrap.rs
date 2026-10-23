@@ -12,7 +12,8 @@
 //! preferred resolver records' leases, the package caches' invalidation
 //! the install environment's app-data, permission and completion owners,
 //! the installer's preparation, removal and archive queries, the enable
-//! bridge and the launch Intent's serialization. The bridge's other owners, its other sub-bridges
+//! bridge, the launch Intent's serialization and the application data
+//! owners. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -76,6 +77,8 @@ pub struct PackageBootstrap {
     installer_removal: OnceLock<aim_binder_host::parcel::Binder>,
     /// The archive queries, made once (`installerArchiveQueries`).
     installer_archive_queries: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The application data owners, made once (`applicationData`).
+    application_data: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -152,6 +155,7 @@ impl PackageBootstrap {
             installer_preparation: OnceLock::new(),
             installer_removal: OnceLock::new(),
             installer_archive_queries: OnceLock::new(),
+            application_data: OnceLock::new(),
         }
     }
 
@@ -673,6 +677,16 @@ impl Service for PackageBootstrap {
                     bridge::write_get_instant_app_icon_density_reply(&mut p, inputs.device_density);
                 })
             }
+            bridge::GET_APPLICATION_DATA_BRIDGE => {
+                bridge::GetApplicationDataBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let data = *self.application_data.get_or_init(|| {
+                    self.leaf(Arc::new(super::application_data::ApplicationData::new(
+                        host.clone(),
+                    )))
+                });
+                bridge::write_get_application_data_bridge_reply(&mut p, Some(data));
+                Ok(())
+            }
             bridge::GET_PACKAGE_LAUNCH_BRIDGE => {
                 bridge::GetPackageLaunchBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let launch = self.leaf(Arc::new(super::package_launch::PackageLaunch));
@@ -996,6 +1010,7 @@ mod tests {
             bridge::GET_INSTALLER_REMOVAL_BRIDGE,
             bridge::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE,
             bridge::GET_PACKAGE_LAUNCH_BRIDGE,
+            bridge::GET_APPLICATION_DATA_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();
