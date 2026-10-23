@@ -251,9 +251,9 @@ impl System {
             self.configure_native_install_pipeline(bridge, &persistence.installer, environment)?;
         let removal_store = self.native_removal_store(bridge, persistence.disk.clone())?;
         let removal_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_REMOVAL_BRIDGE)?;
+            self.package_bootstrap_node(bridge, api::GET_INSTALLER_REMOVAL_BRIDGE)?;
         let query_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE)?;
+            self.package_bootstrap_node(bridge, api::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE)?;
         let archive = self.configure_installer_archive(
             bridge,
             removal_store,

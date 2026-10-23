@@ -2451,7 +2451,10 @@ mod tests {
         );
         client.start();
         let _client_shutdown = Shutdown(client.clone());
-        let external = removal::External::new(client.strong(0), process.clone());
+        let external = removal::External::new(
+            crate::system::ServiceOwner::Remote(Arc::new(client.strong(0))),
+            process.clone(),
+        );
         let policy_owner = Arc::downgrade(&owner);
         let admission = Arc::new(
             move |_: &crate::package::query::Query<'_>, request: &removal::Request| {

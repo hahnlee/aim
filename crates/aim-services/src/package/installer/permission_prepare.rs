@@ -22,7 +22,9 @@ struct Install {
     name: String,
 }
 pub struct Owner {
-    bridge: Strong,
+    /// The permission bridge: another process's node, or this process's
+    /// own where it serves the bootstrap bridge.
+    bridge: crate::system::ServiceOwner,
     process: Arc<LocalProcess>,
     snapshots: Arc<Store>,
     cross_user_suspensions: bool,
@@ -144,7 +146,7 @@ pub(in crate::package) fn complete_candidate_runtime(
 }
 impl Owner {
     pub fn new(
-        bridge: Strong,
+        bridge: crate::system::ServiceOwner,
         process: Arc<LocalProcess>,
         snapshots: Arc<Store>,
         cross_user_suspensions: bool,

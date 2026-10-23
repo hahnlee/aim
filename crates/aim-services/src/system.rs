@@ -3299,7 +3299,7 @@ impl System {
                 "enable owner trailing bytes",
             ));
         }
-        let transport = reply.retain_remote_binder(binder).map_err(|status| {
+        let transport = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("enable owner lifetime: {status}"),

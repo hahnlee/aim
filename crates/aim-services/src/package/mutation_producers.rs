@@ -33,10 +33,12 @@ use std::{
 };
 
 pub struct Bridge {
-    node: Strong,
+    /// The enable bridge: another process's node, or this process's own
+    /// where it serves the bootstrap bridge.
+    node: crate::system::ServiceOwner,
 }
 impl Bridge {
-    pub fn new(node: Strong) -> Arc<Self> {
+    pub fn new(node: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self { node })
     }
     pub fn quarantine_enabled(&self) -> Result<bool, Exception> {

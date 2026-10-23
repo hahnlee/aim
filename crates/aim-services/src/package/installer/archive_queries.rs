@@ -11,12 +11,14 @@ fn error(message: impl Into<String>) -> Exception {
     Exception::new(EX_ILLEGAL_STATE, message)
 }
 pub struct Leaf {
-    owner: Strong,
+    /// The archive query bridge: another process's node, or this
+    /// process's own where it serves the bootstrap bridge.
+    owner: crate::system::ServiceOwner,
     current: Arc<dyn Fn() -> Result<(), Exception> + Send + Sync>,
 }
 impl Leaf {
     pub fn new(
-        owner: Strong,
+        owner: crate::system::ServiceOwner,
         current: Arc<dyn Fn() -> Result<(), Exception> + Send + Sync>,
     ) -> Arc<Self> {
         Arc::new(Self { owner, current })

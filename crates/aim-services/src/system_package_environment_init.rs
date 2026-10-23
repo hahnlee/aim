@@ -143,11 +143,10 @@ impl System {
             self.environment_bridge_capability(bridge, EnvironmentLeaf::AppData)?,
         );
         let (create, flags, rollback, commit) = app.callbacks();
-        let cache =
-            crate::package::mutation_producers::Bridge::new(self.package_bootstrap_binder_leaf(
-                bridge,
-                aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::GET_PACKAGE_ENABLE_BRIDGE,
-            )?);
+        let cache = crate::package::mutation_producers::Bridge::new(self.package_bootstrap_node(
+            bridge,
+            aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::GET_PACKAGE_ENABLE_BRIDGE,
+        )?);
         let cache_system = Arc::downgrade(self);
         let cache_bridge = bridge.clone();
         let clear_code_cache: environment::CodeCacheClear = Arc::new(move |name, _users| {
@@ -268,7 +267,7 @@ impl System {
         &self,
         bridge: &Arc<Bridge>,
         leaf: EnvironmentLeaf,
-    ) -> Result<Strong> {
+    ) -> Result<ServiceOwner> {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as api;
         self.check_package_bootstrap(bridge)?;
         let mut request = Parcel::new();
@@ -297,8 +296,7 @@ impl System {
         if reader.remaining() != 0 {
             return Err(environment_error("environment leaf trailing bytes"));
         }
-        let strong = reply
-            .retain_remote_binder(binder)
+        let strong = ServiceOwner::retain(&reply, binder)
             .map_err(|code| environment_error(format!("environment leaf lifetime {code}")))?;
         self.check_package_bootstrap(bridge)?;
         Ok(strong)

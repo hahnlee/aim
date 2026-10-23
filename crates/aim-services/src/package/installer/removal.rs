@@ -55,7 +55,9 @@ impl WriteParcelable for UserHandle {
 }
 
 pub struct External {
-    owner: Strong,
+    /// The removal bridge: another process's node, or this process's own
+    /// where it serves the bootstrap bridge.
+    owner: crate::system::ServiceOwner,
     process: Arc<LocalProcess>,
     revoked: std::sync::atomic::AtomicBool,
 }
@@ -84,7 +86,7 @@ impl External {
             )),
         }
     }
-    pub fn new(owner: Strong, process: Arc<LocalProcess>) -> Arc<Self> {
+    pub fn new(owner: crate::system::ServiceOwner, process: Arc<LocalProcess>) -> Arc<Self> {
         Arc::new(Self {
             owner,
             process,
