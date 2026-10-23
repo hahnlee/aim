@@ -336,6 +336,18 @@ impl AppHost {
             .collect()
     }
 
+    /// The file system UUIDs of the private volumes mounted writable
+    /// (`getWritablePrivateVolumes`: `TYPE_PRIVATE`, `isMountedWritable`),
+    /// none for internal storage.
+    pub(super) fn writable_private_volume_uuids(&self) -> Vec<Option<String>> {
+        self.volume_infos()
+            .into_iter()
+            .flatten()
+            .filter(|v| v.kind == TYPE_PRIVATE && v.state == STATE_MOUNTED)
+            .map(|v| v.fs_uuid)
+            .collect()
+    }
+
     /// The data volume's total and usable bytes (`File.getTotalSpace`,
     /// `getUsableSpace` of `/data`).
     pub(super) fn data_space(&self) -> Result<(i64, i64), Exception> {

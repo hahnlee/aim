@@ -13,8 +13,8 @@
 //! the install environment's app-data, permission and completion owners,
 //! the installer's preparation, removal and archive queries, the enable
 //! bridge, the launch Intent's serialization, the application data
-//! owners, the internal persistence and install leaves, and the move's
-//! storage leaves. The bridge's other owners, its other sub-bridges
+//! owners, the internal persistence, install and storage leaves, and the
+//! move's storage leaves. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -84,6 +84,8 @@ pub struct PackageBootstrap {
     /// `packageRelocation`).
     package_moves: OnceLock<aim_binder_host::parcel::Binder>,
     package_relocation: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The internal storage, made once (`internalStorage`).
+    internal_storage: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -163,6 +165,7 @@ impl PackageBootstrap {
             application_data: OnceLock::new(),
             package_moves: OnceLock::new(),
             package_relocation: OnceLock::new(),
+            internal_storage: OnceLock::new(),
         }
     }
 
@@ -712,6 +715,17 @@ impl Service for PackageBootstrap {
                 bridge::write_get_permission_persistence_bridge_reply(&mut p, Some(permission));
                 Ok(())
             }
+            bridge::GET_PACKAGE_INTERNAL_STORAGE_BRIDGE => {
+                bridge::GetPackageInternalStorageBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let storage = *self.internal_storage.get_or_init(|| {
+                    self.leaf(Arc::new(
+                        super::package_internal_storage::PackageInternalStorage::new(host.clone()),
+                    ))
+                });
+                bridge::write_get_package_internal_storage_bridge_reply(&mut p, Some(storage));
+                Ok(())
+            }
             bridge::GET_PACKAGE_MOVE_BRIDGE => {
                 bridge::GetPackageMoveBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let moves = *self.package_moves.get_or_init(|| {
@@ -1060,6 +1074,7 @@ mod tests {
             bridge::GET_PERMISSION_PERSISTENCE_BRIDGE,
             bridge::GET_PACKAGE_MOVE_BRIDGE,
             bridge::GET_PACKAGE_RELOCATION_BRIDGE,
+            bridge::GET_PACKAGE_INTERNAL_STORAGE_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

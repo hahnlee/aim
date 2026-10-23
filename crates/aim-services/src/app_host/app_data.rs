@@ -549,7 +549,7 @@ impl AppHost {
 
     /// `create_data_user_ce_path` on the host: user 0's is `/data/data`
     /// where that is a directory (`/data/user/0` binds it in the guest).
-    fn ce_dir(&self, root: &Path, user: i32) -> PathBuf {
+    pub(super) fn ce_dir(&self, root: &Path, user: i32) -> PathBuf {
         let data = root.join("data");
         if user == 0 && data.symlink_metadata().is_ok_and(|m| m.is_dir()) {
             return data;
