@@ -10,8 +10,8 @@
 //! session icon decoder, confirmation leaves, external owners, staging
 //! input and file owner, the domain verification settings, the
 //! preferred resolver records' leases, the package caches' invalidation
-//! and the install environment's app-data and permission owners. The
-//! bridge's other owners, its other sub-bridges
+//! the install environment's app-data and permission owners, and the
+//! enable bridge. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -620,6 +620,14 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_permission_bridge_reply(&mut p, Some(permissions));
                 Ok(())
             }
+            bridge::GET_PACKAGE_ENABLE_BRIDGE => {
+                bridge::GetPackageEnableBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let enable = self.leaf(Arc::new(super::package_enable::PackageEnable::new(
+                    host.clone(),
+                )));
+                bridge::write_get_package_enable_bridge_reply(&mut p, Some(enable));
+                Ok(())
+            }
             bridge::GET_PACKAGE_DOMAIN_SETTINGS => {
                 bridge::GetPackageDomainSettings::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let settings = *self.domain_settings.get_or_init(|| {
@@ -900,6 +908,7 @@ mod tests {
             bridge::GET_PACKAGE_DOMAIN_SETTINGS,
             bridge::GET_PACKAGE_APP_DATA_BRIDGE,
             bridge::GET_INSTALLER_PERMISSION_BRIDGE,
+            bridge::GET_PACKAGE_ENABLE_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

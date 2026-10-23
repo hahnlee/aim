@@ -109,6 +109,7 @@ pub mod package_bootstrap;
 mod package_checksums;
 mod package_domain_settings;
 mod package_effects;
+mod package_enable;
 pub mod package_initial_context;
 pub mod package_installer;
 mod package_installer_policy;
