@@ -7,10 +7,9 @@
 //! of a uid) for the native package boot it runs (served as its own node),
 //! with the sub-bridges its construction takes: the package writer's
 //! effects, the maintenance owner, and the native installer's build flags,
-//! session icon decoder, confirmation leaves, external owners and staging
-//! input. The
-//! bridge's other owners, its other sub-bridges among them, are not
-//! implemented (#2022).
+//! session icon decoder, confirmation leaves, external owners, staging
+//! input and file owner. The bridge's other owners, its other sub-bridges
+//! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -54,6 +53,8 @@ pub struct PackageBootstrap {
     config: OnceLock<SystemConfig>,
     /// The installer's external owner, made once (`installerExternal`).
     installer_external: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The installer's file owner, made once (`installerFiles`).
+    installer_files: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -123,6 +124,7 @@ impl PackageBootstrap {
             apex_system_services: Mutex::new(Vec::new()),
             config: OnceLock::new(),
             installer_external: OnceLock::new(),
+            installer_files: OnceLock::new(),
         }
     }
 
@@ -551,6 +553,16 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_confirmation_bridge_reply(&mut p, Some(confirmation));
                 Ok(())
             }
+            bridge::GET_PACKAGE_INSTALLER_FILES => {
+                bridge::GetPackageInstallerFiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let files = *self.installer_files.get_or_init(|| {
+                    self.leaf(Arc::new(super::installer_files::InstallerFiles::new(
+                        host.clone(),
+                    )))
+                });
+                bridge::write_get_package_installer_files_reply(&mut p, Some(files));
+                Ok(())
+            }
             bridge::GET_NATIVE_STAGING_BRIDGE => {
                 bridge::GetNativeStagingBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let staging = self.leaf(Arc::new(super::native_staging::NativeStaging::new(
@@ -807,6 +819,7 @@ mod tests {
             bridge::GET_INSTALLER_EXTERNAL_BRIDGE,
             bridge::GET_INSTALLER_CONFIRMATION_BRIDGE,
             bridge::GET_NATIVE_STAGING_BRIDGE,
+            bridge::GET_PACKAGE_INSTALLER_FILES,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

@@ -73,6 +73,7 @@ pub mod input_method;
 pub mod input_shell;
 mod installer_confirmation;
 mod installer_external;
+mod installer_files;
 mod installer_recovery;
 pub mod job_content;
 pub mod job_info;
