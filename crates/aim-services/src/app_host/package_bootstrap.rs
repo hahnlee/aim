@@ -11,7 +11,8 @@
 //! input and file owner, the domain verification settings, the
 //! preferred resolver records' leases, the package caches' invalidation
 //! the install environment's app-data, permission and completion owners,
-//! the installer's preparation, and the enable bridge. The bridge's other owners, its other sub-bridges
+//! the installer's preparation, removal and archive queries, and the
+//! enable bridge. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -69,6 +70,11 @@ pub struct PackageBootstrap {
     installer_permissions: OnceLock<aim_binder_host::parcel::Binder>,
     /// The installer's preparation, made once (`installerPreparation`).
     installer_preparation: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The installer's removal owners, made once (the external bridge's
+    /// `removal`).
+    installer_removal: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The archive queries, made once (`installerArchiveQueries`).
+    installer_archive_queries: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -143,6 +149,8 @@ impl PackageBootstrap {
             app_data: OnceLock::new(),
             installer_permissions: OnceLock::new(),
             installer_preparation: OnceLock::new(),
+            installer_removal: OnceLock::new(),
+            installer_archive_queries: OnceLock::new(),
         }
     }
 
@@ -643,6 +651,29 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_preparation_bridge_reply(&mut p, Some(preparation));
                 Ok(())
             }
+            bridge::GET_INSTALLER_REMOVAL_BRIDGE => {
+                bridge::GetInstallerRemovalBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let removal = *self.installer_removal.get_or_init(|| {
+                    self.leaf(Arc::new(super::installer_removal::InstallerRemoval::new(
+                        host.clone(),
+                    )))
+                });
+                bridge::write_get_installer_removal_bridge_reply(&mut p, Some(removal));
+                Ok(())
+            }
+            bridge::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE => {
+                bridge::GetInstallerArchiveQueryBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let queries = *self.installer_archive_queries.get_or_init(|| {
+                    self.leaf(Arc::new(
+                        super::installer_archive_queries::InstallerArchiveQueries::new(
+                            host.clone(),
+                        ),
+                    ))
+                });
+                bridge::write_get_installer_archive_query_bridge_reply(&mut p, Some(queries));
+                Ok(())
+            }
             bridge::GET_PACKAGE_ENABLE_BRIDGE => {
                 bridge::GetPackageEnableBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let enable = self.leaf(Arc::new(super::package_enable::PackageEnable::new(
@@ -934,6 +965,8 @@ mod tests {
             bridge::GET_PACKAGE_ENABLE_BRIDGE,
             bridge::GET_INSTALLER_COMPLETION_BRIDGE,
             bridge::GET_INSTALLER_PREPARATION_BRIDGE,
+            bridge::GET_INSTALLER_REMOVAL_BRIDGE,
+            bridge::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();
