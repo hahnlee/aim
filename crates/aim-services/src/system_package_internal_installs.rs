@@ -7,7 +7,7 @@ impl System {
     pub fn initialize_package_internal_installs(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
-        apex: Strong,
+        apex: ServiceOwner,
     ) -> Result<Worker> {
         self.check_package_bootstrap(bridge)?;
         let (owner, worker) = Owner::start(apex);

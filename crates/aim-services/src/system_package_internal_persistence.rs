@@ -10,7 +10,9 @@ use std::{
 
 pub struct Runtime {
     bridge: Arc<crate::package::bootstrap::Bridge>,
-    permission: Strong,
+    /// The permission persistence leaf: another process's node, or this
+    /// process's own where it serves the bootstrap bridge.
+    permission: ServiceOwner,
     kernel: Arc<crate::package::kernel_mappings::Owner>,
     signal: Arc<(Mutex<(bool, Option<Instant>)>, Condvar)>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -38,7 +40,7 @@ impl Runtime {
     pub fn start(
         system: &Arc<System>,
         bridge: Arc<crate::package::bootstrap::Bridge>,
-        permission: Strong,
+        permission: ServiceOwner,
         kernel: Arc<crate::package::kernel_mappings::Owner>,
     ) -> Result<Arc<Self>> {
         system.check_package_bootstrap(&bridge)?;

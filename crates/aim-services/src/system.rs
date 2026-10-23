@@ -3531,13 +3531,13 @@ impl System {
         kernel: Arc<crate::package::kernel_mappings::Owner>,
     ) -> Result<crate::package::installer::internal_installs::Worker> {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bootstrap;
-        let permission = self
-            .package_bootstrap_binder_leaf(bridge, bootstrap::GET_PERMISSION_PERSISTENCE_BRIDGE)?;
+        let permission =
+            self.package_bootstrap_node(bridge, bootstrap::GET_PERMISSION_PERSISTENCE_BRIDGE)?;
         let persistence =
             internal_persistence::Runtime::start(self, bridge.clone(), permission, kernel)?;
         self.install_internal_persistence(persistence)?;
-        let apex = self
-            .package_bootstrap_binder_leaf(bridge, bootstrap::GET_PACKAGE_APEX_UNINSTALL_BRIDGE)?;
+        let apex =
+            self.package_bootstrap_node(bridge, bootstrap::GET_PACKAGE_APEX_UNINSTALL_BRIDGE)?;
         self.initialize_package_internal_installs(bridge, apex)
     }
 
