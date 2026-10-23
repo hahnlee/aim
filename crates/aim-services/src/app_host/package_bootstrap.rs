@@ -10,8 +10,8 @@
 //! session icon decoder, confirmation leaves, external owners, staging
 //! input and file owner, the domain verification settings, the
 //! preferred resolver records' leases, the package caches' invalidation
-//! the install environment's app-data and permission owners, and the
-//! enable bridge. The bridge's other owners, its other sub-bridges
+//! the install environment's app-data, permission and completion owners,
+//! the installer's preparation, and the enable bridge. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -67,6 +67,8 @@ pub struct PackageBootstrap {
     /// The install environment's permission owner, made once
     /// (`installerPermissions`).
     installer_permissions: OnceLock<aim_binder_host::parcel::Binder>,
+    /// The installer's preparation, made once (`installerPreparation`).
+    installer_preparation: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -140,6 +142,7 @@ impl PackageBootstrap {
             domain_settings: OnceLock::new(),
             app_data: OnceLock::new(),
             installer_permissions: OnceLock::new(),
+            installer_preparation: OnceLock::new(),
         }
     }
 
@@ -620,6 +623,26 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_permission_bridge_reply(&mut p, Some(permissions));
                 Ok(())
             }
+            bridge::GET_INSTALLER_COMPLETION_BRIDGE => {
+                bridge::GetInstallerCompletionBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let completion = self.leaf(Arc::new(
+                    super::installer_completion::InstallerCompletion::new(host.clone()),
+                ));
+                bridge::write_get_installer_completion_bridge_reply(&mut p, Some(completion));
+                Ok(())
+            }
+            bridge::GET_INSTALLER_PREPARATION_BRIDGE => {
+                bridge::GetInstallerPreparationBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let preparation = *self.installer_preparation.get_or_init(|| {
+                    self.leaf(Arc::new(
+                        super::installer_preparation::InstallerPreparation::new(host.clone()),
+                    ))
+                });
+                bridge::write_get_installer_preparation_bridge_reply(&mut p, Some(preparation));
+                Ok(())
+            }
             bridge::GET_PACKAGE_ENABLE_BRIDGE => {
                 bridge::GetPackageEnableBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let enable = self.leaf(Arc::new(super::package_enable::PackageEnable::new(
@@ -909,6 +932,8 @@ mod tests {
             bridge::GET_PACKAGE_APP_DATA_BRIDGE,
             bridge::GET_INSTALLER_PERMISSION_BRIDGE,
             bridge::GET_PACKAGE_ENABLE_BRIDGE,
+            bridge::GET_INSTALLER_COMPLETION_BRIDGE,
+            bridge::GET_INSTALLER_PREPARATION_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

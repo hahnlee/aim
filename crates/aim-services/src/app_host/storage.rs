@@ -34,6 +34,7 @@ const SETUP_APP_DIR: u32 = 23;
 const FIXUP_APP_DIR: u32 = 24;
 const FSTRIM: u32 = 28;
 const NEEDS_CHECKPOINT: u32 = 53;
+const SUPPORTS_CHECKPOINT: u32 = 62;
 const SUPPORTS_BLOCK_CHECKPOINT: u32 = 63;
 /// `IVoldTaskListener`'s descriptor and calls.
 const TASK_LISTENER_DESCRIPTOR: &str = "android.os.IVoldTaskListener";
@@ -1077,6 +1078,23 @@ impl AppHost {
             }
         });
         Ok(())
+    }
+
+    /// `StorageManagerService.supportsCheckpoint`: vold's answer.
+    pub(super) fn supports_checkpoint(&self) -> Result<bool, Exception> {
+        let vold = self.storage.vold.lock().unwrap();
+        let vold = vold
+            .as_ref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "vold not connected"))?;
+        let fail = |s| Exception::new(EX_ILLEGAL_STATE, format!("vold supportsCheckpoint: {s}"));
+        let mut data = Parcel::new();
+        data.write_interface_token(VOLD_DESCRIPTOR);
+        let reply = vold
+            .transact(SUPPORTS_CHECKPOINT, &data, false)
+            .map_err(fail)?;
+        let mut r = reply.reader();
+        r.read_exception().map_err(fail)??;
+        r.read_bool().map_err(fail)
     }
 
     /// `fstrim(0, null)`: vold's trim unless a block checkpoint is in
