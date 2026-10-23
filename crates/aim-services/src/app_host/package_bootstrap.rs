@@ -8,7 +8,8 @@
 //! with the sub-bridges its construction takes: the package writer's
 //! effects, the maintenance owner, and the native installer's build flags,
 //! session icon decoder, confirmation leaves, external owners, staging
-//! input and file owner, and the domain verification settings. The bridge's other owners, its other sub-bridges
+//! input and file owner, the domain verification settings, and the
+//! preferred resolver records' leases. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -556,6 +557,21 @@ impl Service for PackageBootstrap {
                 ));
                 bridge::write_get_installer_confirmation_bridge_reply(&mut p, Some(confirmation));
                 Ok(())
+            }
+            bridge::ALLOCATE_PREFERRED_RESOLVER_IDENTITY => {
+                bridge::AllocatePreferredResolverIdentity::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let lease = self.leaf(Arc::new(super::preferred_records::Lease::identity()));
+                bridge::write_allocate_preferred_resolver_identity_reply(&mut p, Some(lease));
+                Ok(())
+            }
+            bridge::ALLOCATE_PREFERRED_RESOLVER_RECORD => {
+                let a = bridge::AllocatePreferredResolverRecord::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                super::preferred_records::allocate(a.record).map(|lease| {
+                    let lease = self.leaf(Arc::new(lease));
+                    bridge::write_allocate_preferred_resolver_record_reply(&mut p, Some(lease));
+                })
             }
             bridge::GET_PACKAGE_DOMAIN_SETTINGS => {
                 bridge::GetPackageDomainSettings::read(&mut call.data).map_err(|_| BAD_VALUE)?;

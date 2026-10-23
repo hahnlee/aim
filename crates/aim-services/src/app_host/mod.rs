@@ -123,6 +123,7 @@ pub mod permission_manager;
 pub mod platform_compat;
 pub mod playback;
 pub mod power_service;
+mod preferred_records;
 pub mod providers;
 mod recovery_certificates;
 pub mod restrictions_service;
