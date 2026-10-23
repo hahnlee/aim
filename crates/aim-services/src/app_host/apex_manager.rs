@@ -18,6 +18,7 @@ const DESCRIPTOR: &str = "android.apex.IApexService";
 const GET_STAGED_SESSION_INFO: u32 = 5;
 const GET_ACTIVE_PACKAGES: u32 = 7;
 const GET_ALL_PACKAGES: u32 = 8;
+const UNSTAGE_PACKAGES: u32 = 16;
 /// How long `waitForApexService` waits for apexd to register.
 const PATIENCE: Duration = Duration::from_secs(30);
 
@@ -84,6 +85,27 @@ fn service(process: &LocalProcess) -> Result<Strong, String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// `uninstallApex`: apexd's `unstagePackages` of the one package, false
+/// on any failure.
+pub fn uninstall_apex(process: &LocalProcess, path: &str) -> bool {
+    let unstage = || -> Result<(), String> {
+        let service = service(process)?;
+        let mut data = Parcel::new();
+        data.write_interface_token(DESCRIPTOR);
+        data.write_i32(1);
+        data.write_string16(Some(path));
+        let reply = service
+            .transact(UNSTAGE_PACKAGES, &data, false)
+            .map_err(|s| format!("unstagePackages: {s}"))?;
+        match reply.reader().read_exception() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(format!("unstagePackages: {e:?}")),
+            Err(s) => Err(format!("unstagePackages reply: {s}")),
+        }
+    };
+    unstage().is_ok()
 }
 
 /// `android.apex.ApexSessionInfo`'s states, as far as a session's state

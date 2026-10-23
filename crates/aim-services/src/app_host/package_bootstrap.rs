@@ -12,8 +12,8 @@
 //! preferred resolver records' leases, the package caches' invalidation
 //! the install environment's app-data, permission and completion owners,
 //! the installer's preparation, removal and archive queries, the enable
-//! bridge, the launch Intent's serialization and the application data
-//! owners. The bridge's other owners, its other sub-bridges
+//! bridge, the launch Intent's serialization, the application data
+//! owners and the internal persistence and install leaves. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -687,6 +687,24 @@ impl Service for PackageBootstrap {
                 bridge::write_get_application_data_bridge_reply(&mut p, Some(data));
                 Ok(())
             }
+            bridge::GET_PACKAGE_APEX_UNINSTALL_BRIDGE => {
+                bridge::GetPackageApexUninstallBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let apex = self.leaf(Arc::new(
+                    super::package_internal_leaves::ApexUninstall::new(host.clone()),
+                ));
+                bridge::write_get_package_apex_uninstall_bridge_reply(&mut p, Some(apex));
+                Ok(())
+            }
+            bridge::GET_PERMISSION_PERSISTENCE_BRIDGE => {
+                bridge::GetPermissionPersistenceBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let permission = self.leaf(Arc::new(
+                    super::package_internal_leaves::PermissionPersistence::new(host.clone()),
+                ));
+                bridge::write_get_permission_persistence_bridge_reply(&mut p, Some(permission));
+                Ok(())
+            }
             bridge::GET_PACKAGE_LAUNCH_BRIDGE => {
                 bridge::GetPackageLaunchBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let launch = self.leaf(Arc::new(super::package_launch::PackageLaunch));
@@ -1011,6 +1029,8 @@ mod tests {
             bridge::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE,
             bridge::GET_PACKAGE_LAUNCH_BRIDGE,
             bridge::GET_APPLICATION_DATA_BRIDGE,
+            bridge::GET_PACKAGE_APEX_UNINSTALL_BRIDGE,
+            bridge::GET_PERMISSION_PERSISTENCE_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();
