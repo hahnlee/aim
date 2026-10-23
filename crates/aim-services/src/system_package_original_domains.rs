@@ -16,7 +16,9 @@ struct State {
 pub struct Runtime {
     system: Weak<System>,
     bridge: Arc<crate::package::bootstrap::Bridge>,
-    leaf: Strong,
+    /// The original domain settings: another process's node, or this
+    /// process's own where it serves the bootstrap bridge.
+    leaf: ServiceOwner,
     state: Mutex<State>,
     lifecycle: Mutex<()>,
     lifecycle_done: std::sync::Condvar,
@@ -272,8 +274,7 @@ impl System {
             .owner()
             .xml_projection();
         let record = original_bridge::encode(&before).map_err(failure)?;
-        let owner =
-            self.package_bootstrap_binder_leaf(bridge, bootstrap::GET_PACKAGE_DOMAIN_SETTINGS)?;
+        let owner = self.package_bootstrap_node(bridge, bootstrap::GET_PACKAGE_DOMAIN_SETTINGS)?;
         let runtime = Arc::new(Runtime {
             system: Arc::downgrade(self),
             bridge: bridge.clone(),
