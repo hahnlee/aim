@@ -8,8 +8,9 @@
 //! with the sub-bridges its construction takes: the package writer's
 //! effects, the maintenance owner, and the native installer's build flags,
 //! session icon decoder, confirmation leaves, external owners, staging
-//! input and file owner, the domain verification settings, and the
-//! preferred resolver records' leases. The bridge's other owners, its other sub-bridges
+//! input and file owner, the domain verification settings, the
+//! preferred resolver records' leases, and the package caches'
+//! invalidation. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -558,6 +559,22 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_confirmation_bridge_reply(&mut p, Some(confirmation));
                 Ok(())
             }
+            // `PackageManager.invalidatePackageInfoCache` and
+            // `ApplicationPackageManager.invalidateGetPackagesForUidCache`:
+            // the app host publishes no nonce for these caches, in its
+            // nonce store or as a `cache_key` property, so no process keeps
+            // a value they would invalidate.
+            bridge::INVALIDATE_PACKAGE_INFO_CACHE => {
+                bridge::InvalidatePackageInfoCache::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                bridge::write_invalidate_package_info_cache_reply(&mut p);
+                Ok(())
+            }
+            bridge::INVALIDATE_PACKAGES_FOR_UID_CACHE => {
+                bridge::InvalidatePackagesForUidCache::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                bridge::write_invalidate_packages_for_uid_cache_reply(&mut p);
+                Ok(())
+            }
             bridge::ALLOCATE_PREFERRED_RESOLVER_IDENTITY => {
                 bridge::AllocatePreferredResolverIdentity::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -1034,5 +1051,41 @@ mod tests {
         let e = reply.reader().read_exception().unwrap().unwrap_err();
         assert!(e.message.contains("#2022"), "{}", e.message);
         std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// The package caches' invalidation is answered, the system's only.
+    #[test]
+    fn package_caches_are_invalidated() {
+        let node = |euid: u32| {
+            let process = aim_binder_host::local::LocalProcess::open(
+                &aim_binder_driver::Driver::new(),
+                aim_binder_driver::Device::Binder,
+                aim_binder_driver::Credentials {
+                    pid: std::process::id() as i32,
+                    euid,
+                    security_context: None,
+                },
+            );
+            let host = AppHost::new(process.clone());
+            let aim_binder_host::parcel::Binder::Local(ptr) =
+                process.add_service(Arc::new(PackageBootstrap::new(host)))
+            else {
+                unreachable!()
+            };
+            process.local_service(ptr).unwrap()
+        };
+        let invalidate = |euid: u32| {
+            let mut p = Parcel::new();
+            bridge::InvalidatePackageInfoCache {}.write(&mut p);
+            let reply = node(euid)
+                .transact(bridge::INVALIDATE_PACKAGE_INFO_CACHE, &p, false)
+                .unwrap();
+            bridge::read_invalidate_package_info_cache_reply(&mut reply.reader()).unwrap()
+        };
+        assert!(invalidate(SYSTEM_UID as u32).is_ok());
+        assert_eq!(
+            invalidate(10000).unwrap_err().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
     }
 }
