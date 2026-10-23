@@ -11,8 +11,8 @@
 //! input and file owner, the domain verification settings, the
 //! preferred resolver records' leases, the package caches' invalidation
 //! the install environment's app-data, permission and completion owners,
-//! the installer's preparation, removal and archive queries, and the
-//! enable bridge. The bridge's other owners, its other sub-bridges
+//! the installer's preparation, removal and archive queries, the enable
+//! bridge and the launch Intent's serialization. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -673,6 +673,12 @@ impl Service for PackageBootstrap {
                     bridge::write_get_instant_app_icon_density_reply(&mut p, inputs.device_density);
                 })
             }
+            bridge::GET_PACKAGE_LAUNCH_BRIDGE => {
+                bridge::GetPackageLaunchBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let launch = self.leaf(Arc::new(super::package_launch::PackageLaunch));
+                bridge::write_get_package_launch_bridge_reply(&mut p, Some(launch));
+                Ok(())
+            }
             bridge::GET_INSTALLER_REMOVAL_BRIDGE => {
                 bridge::GetInstallerRemovalBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let removal = *self.installer_removal.get_or_init(|| {
@@ -989,6 +995,7 @@ mod tests {
             bridge::GET_INSTALLER_PREPARATION_BRIDGE,
             bridge::GET_INSTALLER_REMOVAL_BRIDGE,
             bridge::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE,
+            bridge::GET_PACKAGE_LAUNCH_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();
