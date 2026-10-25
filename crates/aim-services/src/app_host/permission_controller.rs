@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::android_os_ipermissioncontroller as pc;
 
 use super::{AppHost, reply};
@@ -63,14 +63,19 @@ impl Service for PermissionController {
             }
             pc::IS_RUNTIME_PERMISSION => {
                 let args = pc::IsRuntimePermission::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let runtime = match host.inputs() {
-                    Ok(inputs) => args.permission.is_some_and(|name| {
-                        inputs.packages.permissions().iter().any(|perm| {
-                            perm.name == name
-                                && perm.protection_level & PROTECTION_MASK_BASE
-                                    == PROTECTION_DANGEROUS
-                        })
-                    }),
+                let level = (|| {
+                    let owner = host.permission_manager.get().ok_or_else(|| {
+                        Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable")
+                    })?;
+                    args.permission
+                        .as_deref()
+                        .map(|name| owner.protection_level(name))
+                        .transpose()
+                        .map(Option::flatten)
+                })();
+                let runtime = match level {
+                    Ok(level) => level
+                        .is_some_and(|level| level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS),
                     Err(e) => return reply(Err(e)),
                 };
                 pc::write_is_runtime_permission_reply(&mut p, runtime);

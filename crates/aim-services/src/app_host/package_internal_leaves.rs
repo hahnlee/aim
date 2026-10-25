@@ -2,8 +2,7 @@
 //! the app host, to the system uid only: `IPackageApexUninstallBridge`,
 //! an APEX unstaged by apexd as `NativePackageApexUninstallBridge` asks
 //! `ApexManager.uninstallApex`; and `IPermissionPersistenceBridge`, the
-//! permission registry's definitions and the permission state's import,
-//! not implemented (#2165).
+//! permission manager's definitions and the modern backend's state import.
 
 use std::sync::Arc;
 
@@ -61,6 +60,21 @@ impl PermissionPersistence {
     pub fn new(host: Arc<AppHost>) -> Self {
         PermissionPersistence { host }
     }
+
+    fn owner(
+        &self,
+        uid: u32,
+    ) -> Result<&Arc<super::permission_manager::PermissionManager>, Exception> {
+        // `Bridge.enforceSystemUid`.
+        if uid != SYSTEM_UID {
+            return Err(Exception::security(
+                "native package leaf requires system UID",
+            ));
+        }
+        self.host.permission_manager.get().ok_or_else(|| {
+            Exception::new(EX_NULL_POINTER, "permission persistence owner unavailable")
+        })
+    }
 }
 
 impl Service for PermissionPersistence {
@@ -69,23 +83,35 @@ impl Service for PermissionPersistence {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        let Some(name) = aim_service_aidl::method_name(permission::DESCRIPTOR, call.code) else {
-            return Err(UNKNOWN_TRANSACTION);
-        };
-        // `Bridge.enforceSystemUid`.
-        reply(Err(if call.sender_euid != SYSTEM_UID {
-            Exception::security("native package leaf requires system UID")
-        } else {
-            self.host
-                .unimplemented_named("permission persistence", &format!("{name} (#2165)"))
-        }))
+        match call.code {
+            permission::CAPTURE_DEFINITIONS => {
+                permission::CaptureDefinitions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.owner(call.sender_euid).and_then(|owner| {
+                    owner.capture_definitions().map(|bytes| {
+                        let mut p = Parcel::new();
+                        permission::write_capture_definitions_reply(&mut p, &Some(bytes));
+                        p
+                    })
+                }))
+            }
+            permission::IMPORT_NATIVE_MIGRATION => {
+                permission::ImportNativeMigration::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.owner(call.sender_euid).map(|_| {
+                    // AOSP android-16.0.0_r1 PermissionService.readLegacyPermissionStateTEMP() {}.
+                    let mut p = Parcel::new();
+                    permission::write_import_native_migration_reply(&mut p);
+                    p
+                }))
+            }
+            _ => Err(UNKNOWN_TRANSACTION),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+    use aim_binder_host::parcel::EX_SECURITY;
 
     fn node(
         euid: u32,
@@ -107,8 +133,8 @@ mod tests {
         process.local_service(ptr).unwrap()
     }
 
-    /// Only the system uid is served: a null path is refused, and the
-    /// permission state names its issue.
+    /// Only the system uid is served: a null path is refused, and a
+    /// permission manager must be present even for the empty migration.
     #[test]
     fn internal_leaves_are_the_systems() {
         let mut unstage = Parcel::new();
@@ -121,14 +147,84 @@ mod tests {
         };
         assert_eq!(apex_code(10000), EX_SECURITY);
         assert_eq!(apex_code(SYSTEM_UID), EX_NULL_POINTER);
-        let mut capture = Parcel::new();
-        permission::CaptureDefinitions {}.write(&mut capture);
-        let reply = node(SYSTEM_UID, |h| Arc::new(PermissionPersistence::new(h)))
-            .transact(permission::CAPTURE_DEFINITIONS, &capture, false)
+        for code in [
+            permission::CAPTURE_DEFINITIONS,
+            permission::IMPORT_NATIVE_MIGRATION,
+        ] {
+            let mut request = Parcel::new();
+            request.write_interface_token(permission::DESCRIPTOR);
+            for (uid, expected) in [(10000, EX_SECURITY), (SYSTEM_UID, EX_NULL_POINTER)] {
+                let reply = node(uid, |h| Arc::new(PermissionPersistence::new(h)))
+                    .transact(code, &request, false)
+                    .unwrap();
+                let e = reply.reader().read_exception().unwrap().unwrap_err();
+                assert_eq!(e.code, expected);
+                if uid == SYSTEM_UID {
+                    assert_eq!(e.message, "permission persistence owner unavailable");
+                }
+            }
+            let leaf = node(SYSTEM_UID, |h| Arc::new(PermissionPersistence::new(h)));
+            assert!(matches!(
+                leaf.transact(code, &Parcel::new(), false),
+                Err(BAD_VALUE)
+            ));
+            assert!(matches!(
+                leaf.transact(u32::MAX, &request, false),
+                Err(UNKNOWN_TRANSACTION)
+            ));
+        }
+    }
+
+    #[test]
+    fn permission_persistence_captures_the_owners_definitions() {
+        use super::super::permission_manager::PermissionManager;
+        use crate::package::permissions::{AccessSystem, Permission};
+
+        let leaf = node(SYSTEM_UID, |host| {
+            let owner = PermissionManager::with_system(
+                host.clone(),
+                AccessSystem {
+                    permissions: vec![Permission {
+                        name: "permission".into(),
+                        package: "owner".into(),
+                        protection_level: 2,
+                        dynamic: None,
+                    }],
+                    ..Default::default()
+                },
+            );
+            assert!(host.permission_manager.set(Arc::new(owner)).is_ok());
+            Arc::new(PermissionPersistence::new(host))
+        });
+        let capture = || {
+            let mut request = Parcel::new();
+            permission::CaptureDefinitions {}.write(&mut request);
+            let reply = leaf
+                .transact(permission::CAPTURE_DEFINITIONS, &request, false)
+                .unwrap();
+            let mut reader = reply.reader();
+            let bytes = permission::read_capture_definitions_reply(&mut reader)
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(reader.remaining(), 0);
+            bytes
+        };
+        let bytes = capture();
+        let root = aim_android_xml::abx::read(&bytes).unwrap();
+        let settings = crate::package::settings::Settings::parse(&root).unwrap();
+        assert_eq!(settings.permissions.len(), 1);
+        assert_eq!(settings.permissions[0].name, "permission");
+        let mut request = Parcel::new();
+        permission::ImportNativeMigration {}.write(&mut request);
+        let reply = leaf
+            .transact(permission::IMPORT_NATIVE_MIGRATION, &request, false)
             .unwrap();
-        assert_eq!(
-            reply.reader().read_exception().unwrap().unwrap_err().code,
-            EX_UNSUPPORTED_OPERATION
-        );
+        let mut reader = reply.reader();
+        permission::read_import_native_migration_reply(&mut reader)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reader.remaining(), 0);
+        assert_eq!(capture(), bytes);
     }
 }

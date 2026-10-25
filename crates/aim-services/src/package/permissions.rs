@@ -186,9 +186,16 @@ impl AccessSystem {
                         .ok_or("a permission without a protection level")?,
                     dynamic,
                 };
-                list.retain(|q| q.name != permission.name);
-                list.push(permission);
+                if let Some(old) = list.iter_mut().find(|q| q.name == permission.name) {
+                    *old = permission;
+                } else {
+                    list.push(permission);
+                }
             }
+        }
+        // `MutableIndexedMap` is an ArrayMap: stable within a hash collision.
+        for list in [&mut s.permissions, &mut s.permission_trees] {
+            list.sort_by_key(|p| super::info::java_hash(&p.name));
         }
         Ok(s)
     }

@@ -5,19 +5,20 @@
 //! the access state the permission service last persisted (`access.abx`:
 //! each app id's permission flags, granted among them), through shared
 //! uids, with the fuller permissions that imply others and only `instant`
-//! permissions for instant apps; the definitions, as the caller may see
-//! the packages that declare them (`PermissionInfo` from the declaring
-//! package's parse, the permission groups as `AppIdPermissionPolicy` adds
-//! them); a package's permission flags, whether policy revoked one,
-//! whether to show a rationale, the restricted permissions' allowlists and
-//! SystemConfig's split permissions. The app host has no
-//! VirtualDeviceManager, so every device id is the default device's, as
-//! the original decides without one. Runtime and role permissions are
-//! granted and revoked and their flags updated as `PermissionService`
-//! mutates the state: user 0's `access.abx` written back
-//! (`AccessPersistence`), the package model's grants with it, the
-//! listeners told of a runtime permission's change and a uid that lost
-//! one killed. Development permissions' changes (their gids are not
+//! permissions for instant apps; the system access state's definitions
+//! and trees, also exported as `writeLegacyPermissionsTEMP` exports them;
+//! the definitions as the caller may see the packages that declare them
+//! (`PermissionInfo` from the declaring package's parse, the permission
+//! groups as `AppIdPermissionPolicy` adds them); a package's permission
+//! flags, whether policy revoked one, whether to show a rationale, the
+//! restricted permissions' allowlists and SystemConfig's split permissions.
+//! The app host has no VirtualDeviceManager, so every device id is the
+//! default device's, as the original decides without one. Runtime and role
+//! permissions are granted and revoked and their flags updated as
+//! `PermissionService` mutates the state: user 0's `access.abx` written back
+//! (`AccessPersistence`), the package model's grants with it, the listeners
+//! told of a runtime permission's change and a uid that lost one killed.
+//! Development permissions' changes (their gids are not
 //! modelled, #1857), allowlist changes, a virtual device's permissions,
 //! one-time sessions, auto-revoke, attribution sources and the permission
 //! states are not implemented (#1508).
@@ -46,7 +47,7 @@ use crate::package::info::{
 use crate::package::list_slice::Slice;
 use crate::package::model::{PackageState, State};
 use crate::package::parse::SplitPermission;
-use crate::package::permissions::{self, AccessUser, Permission};
+use crate::package::permissions::{self, AccessSystem, AccessUser, Permission};
 use crate::package::query::Query;
 
 /// `PackageManager.PERMISSION_GRANTED`, `PERMISSION_DENIED`.
@@ -421,6 +422,46 @@ fn tree_order(mut names: Vec<String>) -> Vec<String> {
     names.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
     names.dedup();
     names
+}
+
+/// `PermissionPersistenceBridge.captureDefinitions`: `LegacyPermissionSettings`
+/// replaces its two ArrayMaps with `toLegacyPermissions` (UID/GIDs unused),
+/// then `LegacyPermission.write` writes each definition, Android 16 r1.
+fn legacy_definitions(system: &AccessSystem) -> Result<Vec<u8>, String> {
+    use aim_android_xml::{Element, Node, Value};
+    let element = |name: &str, attrs, content| Element {
+        name: name.into(),
+        attrs,
+        content,
+    };
+    let mut sections = Vec::new();
+    for (tag, values) in [
+        ("permissions", &system.permissions),
+        ("permission-trees", &system.permission_trees),
+    ] {
+        let mut items = Vec::new();
+        for value in values {
+            let mut attrs = vec![
+                ("name".into(), Value::String(value.name.clone())),
+                ("package".into(), Value::String(value.package.clone())),
+            ];
+            if value.protection_level != 0 {
+                attrs.push(("protection".into(), Value::Int(value.protection_level)));
+            }
+            if let Some((icon, label)) = &value.dynamic {
+                attrs.push(("type".into(), Value::String("dynamic".into())));
+                if *icon != 0 {
+                    attrs.push(("icon".into(), Value::Int(*icon)));
+                }
+                if let Some(label) = label {
+                    attrs.push(("label".into(), Value::String(label.clone())));
+                }
+            }
+            items.push(Node::Element(element("item", attrs, Vec::new())));
+        }
+        sections.push(Node::Element(element(tag, Vec::new(), items)));
+    }
+    aim_android_xml::abx::write(&element("packages", Vec::new(), sections))
 }
 
 /// `PackageLegacyPermissions.validate`: an app id and a user inventory
@@ -1330,6 +1371,8 @@ impl Access<'_> {
 
 pub struct PermissionManager {
     host: Arc<AppHost>,
+    /// `AccessState.systemState`: the definitions and trees last persisted.
+    system: OnceLock<AccessSystem>,
     groups: OnceLock<Vec<PermissionGroupInfo>>,
     listeners: Mutex<Vec<Binder>>,
     /// User 0's access state as the service last changed it; the
@@ -1341,10 +1384,41 @@ impl PermissionManager {
     pub fn new(host: Arc<AppHost>) -> Self {
         PermissionManager {
             host,
+            system: OnceLock::new(),
             groups: OnceLock::new(),
             listeners: Mutex::new(Vec::new()),
             user0: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_system(host: Arc<AppHost>, system: AccessSystem) -> Self {
+        let manager = Self::new(host);
+        manager.system.set(system).unwrap();
+        manager
+    }
+
+    fn system(&self) -> Result<&AccessSystem, Exception> {
+        if let Some(system) = self.system.get() {
+            return Ok(system);
+        }
+        let system = self
+            .host
+            .inputs()?
+            .packages
+            .access_system()
+            .ok_or_else(|| {
+                self.host.unimplemented_named(
+                    "permissionmgr",
+                    "system access state migration without access.abx (#2168)",
+                )
+            })?;
+        Ok(self.system.get_or_init(|| system.clone()))
+    }
+
+    /// `PermissionService.writeLegacyPermissionsTEMP` / `toLegacyPermissions`.
+    pub(super) fn capture_definitions(&self) -> Result<Vec<u8>, Exception> {
+        legacy_definitions(self.system()?).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 
     /// User 0's access state, from `access.abx` until it changes.
@@ -1496,7 +1570,7 @@ impl PermissionManager {
         f(&Access {
             state: &state,
             filter: &resolution.apps_filter,
-            defined: inputs.packages.permissions(),
+            defined: &self.system()?.permissions,
             groups: self.groups.get_or_init(|| permission_groups(&state)),
             user0,
             compat: &inputs.compat,
@@ -1736,8 +1810,12 @@ impl PermissionManager {
     /// The protection level of `permission` as `getPermissionInfo` gives
     /// it to the system server; none for one not defined.
     pub(super) fn protection_level(&self, permission: &str) -> Result<Option<i32>, Exception> {
-        self.access(|access| access.get_permission_info(SYSTEM_UID, permission, "android", 0))
-            .map(|info| info.map(|info| info.protection_level))
+        Ok(self
+            .system()?
+            .permissions
+            .iter()
+            .find(|p| p.name == permission)
+            .map(|p| p.protection_level))
     }
 
     /// A persistent device id: the app host has no virtual devices, and
@@ -2072,6 +2150,88 @@ mod tests {
     use super::*;
     use crate::package::model::{PackageUserState, SharedUser, User};
     use crate::package::pkg::{self, AndroidPackage, Component};
+
+    /// `AppIdPermissionPersistence.parsePermission`, `toLegacyPermissions`
+    /// and `LegacyPermissionSettings.writePermissions` / `writePermissionTrees`:
+    /// both maps, their ArrayMap order (including a collision and replacement),
+    /// typed decimal attributes and only dynamic permissions' icon and label.
+    #[test]
+    fn legacy_definitions_from_the_permission_manager() {
+        let root = aim_android_xml::read(br#"<access>
+            <permissions>
+                <permission name="z" packageName="android" protectionLevel="2" type="0" icon="9" label="ignored"/>
+                <permission name="Aa" packageName="old" protectionLevel="1" type="2"/>
+                <permission name="BB" packageName="owner" protectionLevel="0" type="2" label=""/>
+                <permission name="a" packageName="owner" protectionLevel="0" type="0"/>
+                <permission name="Aa" packageName="owner" protectionLevel="1002" type="2" icon="-edcba99" label="&lt;dynamic&gt; &amp; label"/>
+                <permission name="unknown" packageName="owner" protectionLevel="2" type="99"/>
+            </permissions>
+            <permission-trees>
+                <permission name="tree" packageName="owner" protectionLevel="2" type="0"/>
+            </permission-trees>
+        </access>"#).unwrap();
+        let system = AccessSystem::parse(&root).unwrap();
+        let process = aim_binder_host::local::LocalProcess::open(
+            &aim_binder_driver::Driver::new(),
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: std::process::id() as i32,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let manager = PermissionManager::with_system(AppHost::new(process), system.clone());
+        let bytes = manager.capture_definitions().unwrap();
+        assert_eq!(bytes, legacy_definitions(&system).unwrap());
+        assert_eq!(manager.protection_level("Aa").unwrap(), Some(0x1002));
+        assert_eq!(manager.protection_level("a").unwrap(), Some(0));
+        assert_eq!(manager.protection_level("tree").unwrap(), None);
+        let document = aim_android_xml::abx::read(&bytes).unwrap();
+        assert_eq!(document.name, "packages");
+        let sections = document.children().collect::<Vec<_>>();
+        assert_eq!(
+            sections.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["permissions", "permission-trees"]
+        );
+        let items = sections[0].children().collect::<Vec<_>>();
+        assert_eq!(
+            items
+                .iter()
+                .map(|e| e.string("name").unwrap().into_owned())
+                .collect::<Vec<_>>(),
+            ["a", "z", "Aa", "BB"]
+        );
+        assert_eq!(items[0].attrs.len(), 2);
+        assert_eq!(items[1].attrs.len(), 3);
+        assert_eq!(items[1].int("protection").unwrap(), Some(2));
+        assert_eq!(items[2].int("protection").unwrap(), Some(0x1002));
+        assert_eq!(items[2].int("icon").unwrap(), Some(0xf1234567u32 as i32));
+        assert_eq!(items[2].string("package").as_deref(), Some("owner"));
+        assert_eq!(
+            items[2].string("label").as_deref(),
+            Some("<dynamic> & label")
+        );
+        assert_eq!(items[3].attrs.len(), 4);
+        assert_eq!(items[3].string("type").as_deref(), Some("dynamic"));
+        assert_eq!(items[3].string("label").as_deref(), Some(""));
+        let settings = crate::package::settings::Settings::parse(&document).unwrap();
+        assert_eq!(settings.permissions.len(), system.permissions.len());
+        assert_eq!(settings.permission_trees[0].name, "tree");
+        assert_eq!(
+            settings.permissions[2].dynamic,
+            Some((0xf1234567u32 as i32, Some("<dynamic> & label".into())))
+        );
+        assert_eq!(manager.system.get().unwrap(), &system);
+    }
+
+    #[test]
+    fn empty_legacy_definition_maps_are_written() {
+        let root =
+            aim_android_xml::abx::read(&legacy_definitions(&AccessSystem::default()).unwrap())
+                .unwrap();
+        assert_eq!(root.children().count(), 2);
+        assert!(root.children().all(|e| e.content.is_empty()));
+    }
 
     const CAMERA: &str = "android.permission.CAMERA";
     const INTERNET: &str = "android.permission.INTERNET";

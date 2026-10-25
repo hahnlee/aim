@@ -1815,20 +1815,21 @@ impl Broadcasts {
         intent: &Intent,
         s: &Sender,
     ) -> Result<bool, Exception> {
-        let signature = !s.required_null
-            && s.required_permissions.iter().all(|name| {
-                host.inputs().is_ok_and(|inputs| {
-                    inputs
-                        .packages
-                        .permissions()
-                        .iter()
-                        .find(|p| p.name == *name)
-                        .is_some_and(|p| {
-                            p.protection_level & (PROTECTION_MASK_BASE | PROTECTION_FLAG_PRIVILEGED)
-                                == PROTECTION_SIGNATURE
-                        })
-                })
-            });
+        let mut signature = !s.required_null;
+        if signature && !s.required_permissions.is_empty() {
+            let permissions = host.permission_manager.get().ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable")
+            })?;
+            for name in &s.required_permissions {
+                if !permissions.protection_level(name)?.is_some_and(|level| {
+                    level & (PROTECTION_MASK_BASE | PROTECTION_FLAG_PRIVILEGED)
+                        == PROTECTION_SIGNATURE
+                }) {
+                    signature = false;
+                    break;
+                }
+            }
+        }
         Ok(intent.flags & FLAG_RECEIVER_EXCLUDE_BACKGROUND != 0
             || intent.component.is_none()
                 && intent.package.is_none()

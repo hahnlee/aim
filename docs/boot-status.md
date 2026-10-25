@@ -173,7 +173,14 @@ clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list 
 PackageManager remains original in the default image. Controlled slice C images
 redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
-planned methods are implemented; this is not conformance acceptance.
+planned methods are implemented; this is not conformance acceptance. In the
+app host, construction's permission definitions come from the permission
+manager's system access state (#2165), exported as modern
+`writeLegacyPermissionsTEMP` / `toLegacyPermissions` and `LegacyPermission.write`
+write them; import follows the empty modern `readLegacyPermissionStateTEMP`.
+The boot's admissions into the modern policy are #2169, the state without
+`access.abx` is #2168, and publication and the switch to the session's state
+remain #2022.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
