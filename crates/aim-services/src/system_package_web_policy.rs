@@ -25,7 +25,7 @@ impl Runtime {
         leaf::Stop {}.write(&mut request);
         let reply = self
             .owner
-            .transact(leaf::STOP, &request, false)
+            .transact_as_owner(leaf::STOP, &request, false)
             .map_err(|status| error(format!("web watcher stop: {status}")))?;
         let mut reader = reply.reader();
         leaf::read_stop_reply(&mut reader)
@@ -86,7 +86,7 @@ impl System {
             // Original systemReady registers both observers, then co.onChange.
             let reply = runtime
                 .owner
-                .transact(leaf::START, &request, false)
+                .transact_as_owner(leaf::START, &request, false)
                 .map_err(|status| error(format!("web watcher start: {status}")))?;
             let mut reader = reply.reader();
             leaf::read_start_reply(&mut reader)
@@ -119,7 +119,7 @@ impl System {
         let mut request = Parcel::new();
         leaf::Capture {}.write(&mut request);
         let reply = node
-            .transact(leaf::CAPTURE, &request, false)
+            .transact_as_owner(leaf::CAPTURE, &request, false)
             .map_err(|status| error(format!("web policy capture: {status}")))?;
         let mut reader = reply.reader();
         let bytes = leaf::read_capture_reply(&mut reader)

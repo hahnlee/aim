@@ -26,7 +26,7 @@ impl StorageLeaf {
         write(&mut request);
         let reply = self
             .owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|status| storage_error(format!("Internal storage owner: {status}")))?;
         let mut reader = reply.reader();
         reader
@@ -48,7 +48,7 @@ impl System {
         request.write_interface_token(bootstrap_api::DESCRIPTOR);
         let reply = bridge
             .owner
-            .transact(
+            .transact_as_owner(
                 bootstrap_api::GET_PACKAGE_INTERNAL_STORAGE_BRIDGE,
                 &request,
                 false,

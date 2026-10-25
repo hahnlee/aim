@@ -175,7 +175,7 @@ impl Owner {
             .write(&mut request);
             let reply = self
                 .bridge
-                .transact(aidl::GET_STAGED_APEX_INFOS, &request, false)
+                .transact_as_owner(aidl::GET_STAGED_APEX_INFOS, &request, false)
                 .map_err(|status| {
                     Exception::new(
                         aim_binder_host::parcel::EX_ILLEGAL_STATE,

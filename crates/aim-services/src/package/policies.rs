@@ -25,7 +25,7 @@ impl Owner {
         let mut p = Parcel::new();
         bootstrap::GetPackagePolicyBridge {}.write(&mut p);
         let reply = bootstrap_owner
-            .transact(bootstrap::GET_PACKAGE_POLICY_BRIDGE, &p, false)
+            .transact_as_owner(bootstrap::GET_PACKAGE_POLICY_BRIDGE, &p, false)
             .map_err(|error| {
                 Exception::new(
                     EX_ILLEGAL_STATE,
@@ -62,12 +62,15 @@ impl Owner {
         data: &Parcel,
         decode: impl FnOnce(&mut Reader<'_>) -> ParcelResult<Result<T, Exception>>,
     ) -> Result<T, Exception> {
-        let reply = self.bridge.transact(code, data, false).map_err(|error| {
-            Exception::new(
-                EX_ILLEGAL_STATE,
-                format!("Package policy transport: {error}"),
-            )
-        })?;
+        let reply = self
+            .bridge
+            .transact_as_owner(code, data, false)
+            .map_err(|error| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("Package policy transport: {error}"),
+                )
+            })?;
         let mut reader = reply.reader();
         let result = decode(&mut reader).map_err(|error| {
             Exception::new(EX_ILLEGAL_STATE, format!("Package policy parcel: {error}"))

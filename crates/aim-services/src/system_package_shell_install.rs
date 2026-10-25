@@ -31,10 +31,10 @@ impl System {
     ) -> Result<aim_binder_host::local::Received> {
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner = self
-            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_INSTALL_POLICY)?;
+        let owner =
+            self.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_SHELL_INSTALL_POLICY)?;
         let reply = owner
-            .transact(code, request, false)
+            .transact_as_owner(code, request, false)
             .map_err(shell_install_transport)?;
         self.check_package_bootstrap(&bridge)?;
         Ok(reply)

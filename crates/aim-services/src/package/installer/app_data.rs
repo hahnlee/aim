@@ -26,7 +26,7 @@ impl Owner {
         write(&mut request);
         let reply = self
             .bridge
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(transport)?;
         let mut reader = reply.reader();
         let value = read(&mut reader).map_err(transport)??;

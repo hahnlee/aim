@@ -78,7 +78,7 @@ impl StorageOwner {
         write(&mut data);
         let reply = self
             .binder
-            .transact(code, &data, false)
+            .transact_as_owner(code, &data, false)
             .map_err(|code| illegal(format!("Move storage transport: {code}")))?;
         let mut reader = reply.reader();
         reader

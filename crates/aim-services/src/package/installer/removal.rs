@@ -133,7 +133,7 @@ impl External {
         write(&mut request);
         let reply = self
             .owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|code| illegal(format!("Removal {stage} owner transport: {code}")))?;
         let mut reader = reply.reader();
         reader

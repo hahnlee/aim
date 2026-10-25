@@ -431,6 +431,7 @@ mod tests {
             process: Weak<LocalProcess>,
             owner: ServiceOwner,
             boot: ServiceOwner,
+            host: Arc<crate::app_host::AppHost>,
         }
         impl Service for Forward {
             fn descriptor(&self) -> &str {
@@ -477,6 +478,9 @@ mod tests {
                 );
                 let settings =
                     crate::package::resolve::settings::Owner::new(Arc::new(owner), false);
+                self.host.set_user_unlocked_for_package_test(0, false);
+                assert!(!settings.unlocked(0).unwrap());
+                self.host.set_user_unlocked_for_package_test(0, true);
                 assert!(settings.unlocked(0).unwrap());
                 assert!(!settings.unlocked(10).unwrap());
                 // Owner transport restores the shell before user execution.
@@ -547,9 +551,8 @@ mod tests {
             aim_binder_host::parcel::EX_SECURITY
         );
         let app_host = crate::app_host::AppHost::new(native.clone());
-        app_host.mark_user_unlocked_for_package_test(0);
         let boot = native.add_service(Arc::new(
-            crate::app_host::package_bootstrap::PackageBootstrap::new(app_host),
+            crate::app_host::package_bootstrap::PackageBootstrap::new(app_host.clone()),
         ));
         let Binder::Local(boot) = boot else {
             unreachable!()
@@ -565,6 +568,7 @@ mod tests {
                 process: Arc::downgrade(&native),
                 owner,
                 boot: ServiceOwner::Local(native.local_service(boot).unwrap()),
+                host: app_host.clone(),
             }));
             let ingress = publish(&native, &shell, "ingress", ingress);
             let reply = ingress

@@ -283,7 +283,7 @@ impl System {
         };
         let reply = bridge
             .owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|code| environment_error(format!("environment leaf transport {code}")))?;
         let mut reader = reply.reader();
         reader

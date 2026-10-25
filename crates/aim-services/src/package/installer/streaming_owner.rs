@@ -110,7 +110,7 @@ impl Owner {
                     request.write_i32(session.user as i32);
                     let reply = owner
                         .bridge
-                        .transact(api::GET_INCREMENTAL_INPUTS, &request, false)
+                        .transact_as_owner(api::GET_INCREMENTAL_INPUTS, &request, false)
                         .map_err(transport)?;
                     let mut reader = reply.reader();
                     reader.read_exception().map_err(transport)??;
@@ -253,7 +253,7 @@ impl Owner {
         }
         let reply = self
             .bridge
-            .transact(
+            .transact_as_owner(
                 if incremental {
                     api::PREPARE_INCREMENTAL
                 } else {
@@ -337,7 +337,7 @@ impl Owner {
         request.write_i32(id);
         let reply = self
             .bridge
-            .transact(api::DESTROY_STREAMING, &request, false)
+            .transact_as_owner(api::DESTROY_STREAMING, &request, false)
             .map_err(transport)?;
         reply.reader().read_exception().map_err(transport)??;
         Ok(())

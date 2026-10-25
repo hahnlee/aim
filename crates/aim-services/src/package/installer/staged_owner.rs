@@ -70,7 +70,7 @@ impl Owner {
         fill(&mut data);
         let reply = self
             .bridge
-            .transact(code, &data, false)
+            .transact_as_owner(code, &data, false)
             .map_err(transport)?;
         let mut reader = reply.reader();
         reader.read_exception().map_err(transport)??;

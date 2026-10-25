@@ -46,7 +46,7 @@ impl Bridge {
         request.write_interface_token(api::DESCRIPTOR);
         let reply = self
             .node
-            .transact(api::QUARANTINE_ENABLED, &request, false)
+            .transact_as_owner(api::QUARANTINE_ENABLED, &request, false)
             .map_err(|code| illegal(format!("Quarantine flag owner: {code}")))?;
         let mut reader = reply.reader();
         reader
@@ -67,7 +67,7 @@ impl Bridge {
         aim_service_aidl::write_int_array(&mut request, Some(users));
         let reply = self
             .node
-            .transact(api::CLEAR_CODE_CACHE, &request, false)
+            .transact_as_owner(api::CLEAR_CODE_CACHE, &request, false)
             .map_err(|code| illegal(format!("Package code cache owner: {code}")))?;
         let mut reader = reply.reader();
         reader

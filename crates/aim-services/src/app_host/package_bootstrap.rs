@@ -339,6 +339,12 @@ impl Service for PackageBootstrap {
                         .map_err(|_| BAD_VALUE)?;
                     (a.role, a.user_id)
                 };
+                if call.code == bridge::GET_PREFERRED_ROLE_HOLDER
+                    && host.role_service.get().is_none()
+                {
+                    bridge::write_get_preferred_role_holder_reply(&mut p, &None);
+                    return reply(Ok(p));
+                }
                 host.role_service
                     .get()
                     .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "role owner unavailable"))

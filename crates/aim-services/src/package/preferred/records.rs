@@ -146,7 +146,7 @@ impl Producer for BridgeProducer {
         let reply = self
             .bridge
             .owner
-            .transact(bootstrap::ALLOCATE_PREFERRED_RESOLVER_RECORD, &data, false)
+            .transact_as_owner(bootstrap::ALLOCATE_PREFERRED_RESOLVER_RECORD, &data, false)
             .map_err(|error| format!("preferred record allocation transport {error}"))?;
         let mut reader = reply.reader();
         let binder = bootstrap::read_allocate_preferred_resolver_record_reply(&mut reader)
@@ -165,7 +165,7 @@ impl Producer for BridgeProducer {
         let mut data = Parcel::new();
         identity::GetIdentityHash {}.write(&mut data);
         let reply = owner
-            .transact(identity::GET_IDENTITY_HASH, &data, false)
+            .transact_as_owner(identity::GET_IDENTITY_HASH, &data, false)
             .map_err(|error| format!("preferred record hash transport {error}"))?;
         let mut reader = reply.reader();
         let hash = identity::read_get_identity_hash_reply(&mut reader)

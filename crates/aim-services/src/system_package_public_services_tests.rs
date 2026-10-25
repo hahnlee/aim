@@ -71,6 +71,49 @@ impl Service for Registry {
         Ok(reply)
     }
 }
+struct PermissionReads(std::sync::atomic::AtomicI32);
+impl Service for PermissionReads {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::android_permission_ipermissionmanager::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_permission_ipermissionmanager as permission;
+        assert_eq!((call.sender_pid, call.sender_euid), (98240, 2000));
+        match call.code {
+            permission::CHECK_PERMISSION => {
+                let args = permission::CheckPermission::read(&mut call.data)?;
+                assert_eq!(
+                    (
+                        args.package_name.as_deref(),
+                        args.permission_name.as_deref(),
+                        args.persistent_device_id.as_deref(),
+                        args.user_id
+                    ),
+                    (Some("a.b"), Some("p.camera"), Some("default:0"), 0)
+                );
+            }
+            permission::CHECK_UID_PERMISSION => {
+                let args = permission::CheckUidPermission::read(&mut call.data)?;
+                assert_eq!(
+                    (args.uid, args.permission_name.as_deref(), args.device_id),
+                    (99001, Some("p.camera"), 0)
+                );
+            }
+            _ => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
+        }
+        assert_eq!(call.data.remaining(), 0);
+        let mut reply = Parcel::new();
+        let value = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        if value == -2 {
+            reply.write_exception(&Exception::security("owner denied"));
+        } else {
+            reply.write_no_exception();
+            reply.write_i32(value);
+        }
+        Ok(reply)
+    }
+}
+
 struct Original;
 impl Service for Original {
     fn descriptor(&self) -> &str {
@@ -310,6 +353,98 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
 
     let one = system.register_public_package_fronts(&first).unwrap();
     assert!(feature(&native, one.public, "epoch.first").unwrap());
+    let shell = LocalProcess::open(
+        &driver,
+        Device::Binder,
+        Credentials {
+            pid: 98240,
+            euid: 2000,
+            security_context: None,
+        },
+    );
+    shell.start();
+    let permissions = LocalProcess::open(
+        &driver,
+        Device::Binder,
+        Credentials {
+            pid: 98241,
+            euid: 1000,
+            security_context: None,
+        },
+    );
+    permissions.start();
+    for process in [&native, &permissions] {
+        let access = Arc::new(PermissionReads(std::sync::atomic::AtomicI32::new(-1)));
+        let mut registration = Parcel::new();
+        sm::AddService {
+            name: Some("permissionmgr".into()),
+            service: Some(process.add_service(access.clone())),
+            allow_isolated: false,
+            dump_priority: 8,
+        }
+        .write(&mut registration);
+        let registered = process
+            .transact(0, sm::ADD_SERVICE, &registration, false)
+            .unwrap();
+        registered.reader().read_exception().unwrap().unwrap();
+        let mut lookup = Parcel::new();
+        sm::CheckService {
+            name: Some("package".into()),
+        }
+        .write(&mut lookup);
+        let found = shell
+            .transact(0, sm::CHECK_SERVICE, &lookup, false)
+            .unwrap();
+        let Some(Binder::Handle(handle)) = sm::read_check_service_reply(&mut found.reader())
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("remote package front")
+        };
+        let front = shell.strong(handle);
+        let capture = system.capture_package_queries().unwrap();
+        for value in [-1, 0, -2] {
+            access.0.store(value, std::sync::atomic::Ordering::Relaxed);
+            let mut request = Parcel::new();
+            pm::CheckPermission {
+                perm_name: Some("p.camera".into()),
+                pkg_name: Some("a.b".into()),
+                user_id: 0,
+            }
+            .write(&mut request);
+            let reply = front
+                .transact(pm::CHECK_PERMISSION, &request, false)
+                .unwrap();
+            let read = pm::read_check_permission_reply(&mut reply.reader()).unwrap();
+            if value == -2 {
+                assert_eq!(read.unwrap_err().message, "owner denied");
+            } else {
+                assert_eq!(read.unwrap(), value);
+            }
+            let mut request = Parcel::new();
+            pm::CheckUidPermission {
+                perm_name: Some("p.camera".into()),
+                uid: 99001,
+            }
+            .write(&mut request);
+            let reply = front
+                .transact(pm::CHECK_UID_PERMISSION, &request, false)
+                .unwrap();
+            let read = pm::read_check_uid_permission_reply(&mut reply.reader()).unwrap();
+            if value == -2 {
+                assert_eq!(read.unwrap_err().message, "owner denied");
+            } else {
+                assert_eq!(read.unwrap(), value);
+            }
+            assert!(Arc::ptr_eq(
+                &capture,
+                &system.capture_package_queries().unwrap()
+            ));
+        }
+    }
+    driver.release(permissions.proc_handle());
+    driver.release(shell.proc_handle());
+
     let (private, _) = crate::package::service::PackageQueries::from_bootstrap(&system, &first);
     let private = native.add_service(private);
     let second = attach();

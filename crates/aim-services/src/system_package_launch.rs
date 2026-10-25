@@ -12,7 +12,7 @@ impl System {
         bootstrap::GetPackageLaunchBridge {}.write(&mut request);
         let reply = bridge
             .owner
-            .transact(bootstrap::GET_PACKAGE_LAUNCH_BRIDGE, &request, false)
+            .transact_as_owner(bootstrap::GET_PACKAGE_LAUNCH_BRIDGE, &request, false)
             .map_err(|status| unreachable_service("package launch bridge", status))?;
         let mut reader = reply.reader();
         let binder = bootstrap::read_get_package_launch_bridge_reply(&mut reader)
@@ -64,7 +64,7 @@ impl System {
                 }
                 .write(&mut payload);
                 let serialized = node
-                    .transact(intent::BUILD_LAUNCH_INTENT, &payload, false)
+                    .transact_as_owner(intent::BUILD_LAUNCH_INTENT, &payload, false)
                     .map_err(|status| unreachable_service("launch intent serializer", status))?;
                 let mut reader = serialized.reader();
                 let bytes = intent::read_build_launch_intent_reply(&mut reader)

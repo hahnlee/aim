@@ -1903,3 +1903,45 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    #[test]
+    fn package_user_listing_reads_the_user_owner_and_excludes_partial_or_precreated() {
+        let data = std::env::temp_dir().join(format!("aim-package-users-{}", std::process::id()));
+        let users = data.join("system/users");
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(users.join("userlist.xml"), "<users/>").unwrap();
+        let process = aim_binder_host::local::LocalProcess::open(
+            &aim_binder_driver::Driver::new(),
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: 98260,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let host = AppHost::new(process);
+        host.configure(
+            &data,
+            &data,
+            &data,
+            Box::new(|_| None),
+            Box::new(|_, _| {}),
+            Box::new(|| Err(std::io::Error::other("no zygote"))),
+        )
+        .unwrap();
+        for (extra, expected) in [
+            ("", "Users:\n\tUserInfo{0:Kim:4c13} running\n"),
+            ("partial=\"true\"", "Users:\n"),
+            ("preCreated=\"true\"", "Users:\n"),
+        ] {
+            std::fs::write(users.join("0.xml"), format!("<user id=\"0\" serialNumber=\"0\" flags=\"19475\" type=\"android.os.usertype.full.SYSTEM\" {extra}><name>Kim</name><restrictions/></user>")).unwrap();
+            let mut output = Vec::new();
+            assert_eq!(list_shell(host.clone(), 0, &mut output).unwrap(), 0);
+            assert_eq!(String::from_utf8(output).unwrap(), expected);
+        }
+        std::fs::remove_dir_all(data).unwrap();
+    }
+}

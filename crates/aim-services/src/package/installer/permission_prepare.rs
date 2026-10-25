@@ -244,7 +244,7 @@ impl Owner {
             .write(&mut request);
             let reply = self
                 .bridge
-                .transact(api::ROLLBACK, &request, false)
+                .transact_as_owner(api::ROLLBACK, &request, false)
                 .map_err(|error| {
                     illegal(format!("original permission rollback transport: {error}"))
                 })?;
@@ -472,7 +472,7 @@ impl Owner {
         request.write_bool(self.cross_user_suspensions);
         let reply = self
             .bridge
-            .transact(api::PREPARE, &request, false)
+            .transact_as_owner(api::PREPARE, &request, false)
             .map_err(|error| illegal(format!("permission prepare transport: {error}")))?;
         let mut reader = reply.reader();
         reader

@@ -21,7 +21,7 @@ impl Owner {
     pub fn new(binder: crate::system::ServiceOwner) -> Result<Arc<Self>, Exception> {
         let code = u32::from_be_bytes(*b"_NTF");
         let reply = binder
-            .transact(code, &Parcel::new(), false)
+            .transact_as_owner(code, &Parcel::new(), false)
             .map_err(|status| diagnostic(transport(status), code, &binder, "transact"))?;
         let mut reader = reply.reader();
         if reader
@@ -64,7 +64,7 @@ impl Owner {
         write(&mut request);
         let reply = self
             .binder
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|status| diagnostic(transport(status), code, &self.binder, "transact"))?;
         let mut reader = reply.reader();
         let value = read_reply(code, &self.binder, &mut reader, read)?;

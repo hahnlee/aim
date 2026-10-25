@@ -29,7 +29,7 @@ impl Leaf {
         (self.current)()?;
         let reply = self
             .owner
-            .transact(code, parcel, false)
+            .transact_as_owner(code, parcel, false)
             .map_err(|code| error(format!("archive query transport {code}")))?;
         let mut reader = reply.reader();
         reader

@@ -117,7 +117,7 @@ impl Owner {
         }
         .write(&mut request);
         let reply = bridge
-            .transact(api::MOVE_PRIMARY_STORAGE, &request, false)
+            .transact_as_owner(api::MOVE_PRIMARY_STORAGE, &request, false)
             .map_err(|status| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,

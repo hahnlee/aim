@@ -3422,8 +3422,13 @@ impl AppHost {
     }
 
     #[cfg(test)]
-    pub(crate) fn mark_user_unlocked_for_package_test(&self, user: i32) {
-        self.unlocked_users.lock().unwrap().insert(user);
+    pub(crate) fn set_user_unlocked_for_package_test(&self, user: i32, unlocked: bool) {
+        let mut users = self.unlocked_users.lock().unwrap();
+        if unlocked {
+            users.insert(user);
+        } else {
+            users.remove(&user);
+        }
     }
 
     /// `UserManagerInternal.isUserUnlockingOrUnlocked`.

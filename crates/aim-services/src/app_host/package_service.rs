@@ -373,7 +373,7 @@ impl Service for PackageService {
             pm::write_get_package_installer_reply(&mut reply, Some(self.installer));
             return Ok(reply);
         }
-        // Constructor selections and usage belong to the native session,
+        // Constructor selections, usage and live permission calls belong to the session,
         // including for clients that retained this pre-construction Binder.
         if matches!(
             call.code,

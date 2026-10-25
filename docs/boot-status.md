@@ -180,7 +180,9 @@ use the service process identity even when the bridge is local; the boot-context
 leaf reads the app host's live unlocking state. Package shell intent-filter
 syntax and user listing have native leaves, with the shell identity retained for
 UserManager authorization. Retained app-host package Binders delegate configured
-package selections and usage to the session owner. Internal event delivery and
+package selections and usage to the session owner. Public permission reads use
+PermissionManager's live access state with the original caller. Instrumentation
+shell listing reads the session's capture. Internal event delivery and
 shutdown statistics remain #2167, permission state without `access.abx` #2168,
 boot admissions #2169, remaining package bootstrap owners #2022 and the query
 projection switch #2023.

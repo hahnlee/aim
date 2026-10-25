@@ -67,7 +67,7 @@ impl Runtime {
                 .write(&mut request);
                 let reply = self
                     .leaf
-                    .transact(leaf::RECONCILE_PACKAGES, &request, false)
+                    .transact_as_owner(leaf::RECONCILE_PACKAGES, &request, false)
                     .map_err(|status| failure(format!("domain lifecycle transport: {status}")))?;
                 leaf::read_reconcile_packages_reply(&mut reply.reader())
                     .map_err(|status| failure(format!("domain lifecycle reply: {status}")))?
@@ -99,7 +99,7 @@ impl Runtime {
         leaf::Close {}.write(&mut request);
         let reply = self
             .leaf
-            .transact(leaf::CLOSE, &request, false)
+            .transact_as_owner(leaf::CLOSE, &request, false)
             .map_err(|status| failure(format!("domain close transport: {status}")))?;
         leaf::read_close_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain close reply: {status}")))?
@@ -304,7 +304,7 @@ impl System {
         .write(&mut request);
         let reply = runtime
             .leaf
-            .transact(leaf::SEED, &request, false)
+            .transact_as_owner(leaf::SEED, &request, false)
             .map_err(|status| failure(format!("domain seed transport: {status}")))?;
         leaf::read_seed_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain seed reply: {status}")))??;
@@ -312,7 +312,7 @@ impl System {
         leaf::Capture {}.write(&mut request);
         let reply = runtime
             .leaf
-            .transact(leaf::CAPTURE, &request, false)
+            .transact_as_owner(leaf::CAPTURE, &request, false)
             .map_err(|status| failure(format!("domain export transport: {status}")))?;
         let record = leaf::read_capture_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain export reply: {status}")))??

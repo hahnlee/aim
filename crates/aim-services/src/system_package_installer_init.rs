@@ -52,7 +52,7 @@ impl DeviceOwner {
         request.write_interface_token(api::DESCRIPTOR);
         let reply = self
             .leaf
-            .transact(api::GET_POLICY_FLAGS, &request, false)
+            .transact_as_owner(api::GET_POLICY_FLAGS, &request, false)
             .map_err(|status| illegal(format!("installer flag owner transport: {status}")))?;
         let mut reader = reply.reader();
         reader
@@ -169,7 +169,7 @@ pub fn permission_source(
         error => illegal(format!("installer permission bridge owner: {error:?}")),
     })?;
     let reply = leaf
-        .transact(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
+        .transact_as_owner(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
         .map_err(|status| {
             illegal(format!(
                 "installer permission descriptor transport: {status}"
@@ -201,7 +201,7 @@ pub fn permission_source(
         }
         .write(&mut request);
         let reply = leaf
-            .transact(maintenance::CHECK_PERMISSION, &request, false)
+            .transact_as_owner(maintenance::CHECK_PERMISSION, &request, false)
             .map_err(|status| illegal(format!("installer permission owner transport: {status}")))?;
         let mut reader = reply.reader();
         let granted = maintenance::read_check_permission_reply(&mut reader)
