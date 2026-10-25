@@ -2910,39 +2910,68 @@ impl AppHost {
     /// restarted) and its transient URI grants removed. Its activities,
     /// services, providers and receivers are not stopped (#1570).
     fn force_stop_package(&self, package: &str, app_id: i32, user: i32, reason: &str) {
+        if let Err(error) = self.kill_application(
+            package,
+            app_id,
+            user,
+            reason,
+            exit_info::REASON_USER_REQUESTED,
+        ) {
+            eprintln!("app host: force stopping {package}: {}", error.message);
+        }
+    }
+
+    /// `IActivityManager.killApplication` shares the force-stop path, carrying
+    /// the caller's exit reason. USER_ALL spans the activity owner's users.
+    fn kill_application(
+        &self,
+        package: &str,
+        app_id: i32,
+        user: i32,
+        reason: &str,
+        exit_reason: i32,
+    ) -> Result<(), Exception> {
+        if app_id < 0 {
+            return Ok(());
+        }
         eprintln!("app host: Force stopping {package} appid={app_id} user={user}: {reason}");
-        let uid = (user * PER_USER_RANGE as i32 + app_id) as u32;
+        let matches_uid = |uid: u32| {
+            (user == USER_ALL || uid / PER_USER_RANGE == user as u32)
+                && uid % PER_USER_RANGE == app_id as u32
+        };
         {
             let mut errors = self.app_errors.lock().unwrap();
-            errors.crash_times.retain(|(_, u), _| *u != uid);
-            errors.crash_counts.retain(|(_, u), _| *u != uid);
+            errors.crash_times.retain(|(_, uid), _| !matches_uid(*uid));
+            errors.crash_counts.retain(|(_, uid), _| !matches_uid(*uid));
         }
-        let starts: Vec<i64> = self
+        let starts: Vec<_> = self
             .apps
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, a)| {
-                a.uid / PER_USER_RANGE == uid / PER_USER_RANGE
-                    && (a.package == package && a.uid == uid
-                        || a.package_deps.iter().any(|d| d == package))
+            .filter(|(_, app)| {
+                (user == USER_ALL || app.uid / PER_USER_RANGE == user as u32)
+                    && (app.uid % PER_USER_RANGE == app_id as u32
+                        || app.package_deps.iter().any(|name| name == package))
             })
             .map(|(seq, _)| *seq)
             .collect();
+        let mut failure = None;
+        let subreason = if exit_reason == exit_info::REASON_USER_REQUESTED {
+            exit_info::SUBREASON_FORCE_STOP
+        } else {
+            exit_info::SUBREASON_UNKNOWN
+        };
         let description = format!("stop {package} due to {reason}");
         for seq in starts {
-            if let Err(e) = self.kill_process(
-                seq,
-                exit_info::REASON_USER_REQUESTED,
-                exit_info::SUBREASON_FORCE_STOP,
-                &description,
-            ) {
-                eprintln!("app host: killing {package}'s process of start {seq}: {e}");
+            if let Err(error) = self.kill_process(seq, exit_reason, subreason, &description) {
+                failure.get_or_insert_with(|| Exception::new(EX_ILLEGAL_STATE, error));
             }
         }
-        if let Err(e) = self.remove_uri_permissions_for_package(package, user, false, false) {
-            eprintln!("app host: {package}'s URI grants: {}", e.message);
+        if let Err(error) = self.remove_uri_permissions_for_package(package, user, false, false) {
+            failure.get_or_insert(error);
         }
+        failure.map_or(Ok(()), Err)
     }
 
     /// `killUidForPermissionChange`: the processes of `uid`

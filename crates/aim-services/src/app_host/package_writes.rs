@@ -499,7 +499,7 @@ impl Writes {
     }
 
     /// All public handles register with the session's native event registry.
-    fn invoke_callbacks(
+    pub(super) fn invoke_callbacks(
         &self,
         intent: &RawIntent,
         user: i32,

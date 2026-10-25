@@ -79,6 +79,13 @@ impl Owner {
             browser_source: None,
         })
     }
+    #[cfg(test)]
+    pub(crate) fn known_packages_fixture(known: BTreeMap<i32, Vec<Option<String>>>) -> Arc<Self> {
+        let mut owner = (*Self::priority_fixture(None)).clone();
+        owner.known = Some(known);
+        Arc::new(owner)
+    }
+
     pub(crate) fn setup_wizard_priority_owner(&self) -> Option<Option<&str>> {
         self.frozen
             .get(&Role::SetupWizard)

@@ -1426,6 +1426,27 @@ impl Broadcasts {
         self.send_with(host, intent, user, None, Sender::system(&[]), None, None)
     }
 
+    /// Package effects retain AppsFilter restrictions and BroadcastOptions.
+    pub(super) fn try_send_package_effect(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        allow_list: Option<&[i32]>,
+        permissions: &[String],
+        temp_allowlist: Option<TempAllowlist>,
+    ) -> Result<(), Exception> {
+        self.send_with(
+            host,
+            intent,
+            user,
+            allow_list,
+            Sender::system(permissions),
+            temp_allowlist,
+            None,
+        )
+    }
+
     fn send_as_system(
         &self,
         host: &AppHost,
