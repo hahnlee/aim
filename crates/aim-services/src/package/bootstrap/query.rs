@@ -25,7 +25,7 @@ impl Bridge {
         bridge::IsDomainVerifierUid { uid }.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::IS_DOMAIN_VERIFIER_UID, &request, false)
+            .transact_as_owner(bridge::IS_DOMAIN_VERIFIER_UID, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let verified = bridge::read_is_domain_verifier_uid_reply(&mut reader)
@@ -42,7 +42,7 @@ impl Bridge {
         bridge::InvalidatePackageInfoCache {}.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::INVALIDATE_PACKAGE_INFO_CACHE, &request, false)
+            .transact_as_owner(bridge::INVALIDATE_PACKAGE_INFO_CACHE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         bridge::read_invalidate_package_info_cache_reply(&mut reader)
@@ -116,7 +116,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(
+            .transact_as_owner(
                 bridge::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED,
                 &request,
                 false,
@@ -137,7 +137,7 @@ impl Bridge {
         bridge::IsDomainSetUuidStrictValidationEnabled {}.write(&mut request);
         let reply = self
             .owner
-            .transact(
+            .transact_as_owner(
                 bridge::IS_DOMAIN_SET_UUID_STRICT_VALIDATION_ENABLED,
                 &request,
                 false,

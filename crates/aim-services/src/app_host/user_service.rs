@@ -484,6 +484,76 @@ pub(super) fn serial_number(host: &AppHost, user: i32) -> Result<Option<i32>, Ex
     Ok(Some(info.serial_number))
 }
 
+/// UserManager.getMaxSupportedUsers, shared by its limits and package shell.
+pub(super) fn max_supported_users(host: &AppHost) -> Result<i32, Exception> {
+    if host
+        .property("ro.build.id")
+        .is_some_and(|id| id.starts_with("JVP"))
+    {
+        return Ok(1);
+    }
+    let config = host
+        .inputs()?
+        .packages
+        .framework_integer("config_multiuserMaximumUsers")
+        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "missing config_multiuserMaximumUsers"))?;
+    Ok(host
+        .property("fw.max_users")
+        .and_then(|v| v.trim_start().parse().ok())
+        .unwrap_or(config)
+        .max(1))
+}
+
+/// UserManagerServiceShellCommand.runList, invoked by pm list users with
+/// exactly the original `list` arguments and the shell's identity.
+pub(super) fn list_shell(
+    host: Arc<AppHost>,
+    uid: i32,
+    output: &mut impl std::io::Write,
+) -> Result<i32, Exception> {
+    let owner = UserManager::new(host);
+    if !owner.manage_or(uid, Some(CREATE_USERS))? {
+        return Err(Exception::security(
+            "You either need MANAGE_USERS or CREATE_USERS permission to: query users",
+        ));
+    }
+    let (user, _) = owner.user_data()?;
+    let mut users = Vec::new();
+    if !user.partial && !user.pre_created {
+        users.extend(owner.with_name(Some(user))?);
+    }
+    let write_error =
+        |e: std::io::Error| Exception::new(EX_ILLEGAL_STATE, format!("user shell output: {e}"));
+    writeln!(output, "Users:").map_err(write_error)?;
+    for user in users {
+        writeln!(
+            output,
+            "\tUserInfo{{{}:{}:{:x}}}{}",
+            user.id,
+            user.name.as_deref().unwrap_or("null"),
+            user.flags,
+            if user.id == SYSTEM_USER {
+                " running"
+            } else {
+                ""
+            }
+        )
+        .map_err(write_error)?;
+    }
+    Ok(0)
+}
+
+/// UserManagerService.getProfileParent: a full user has no profile parent.
+pub(super) fn profile_parent(host: &AppHost, user: i32) -> Result<Option<i32>, Exception> {
+    let Some(info) = user_info(host, user)? else {
+        return Ok(None);
+    };
+    if info.profile_group_id == USER_NULL || info.profile_group_id == info.id {
+        return Ok(None);
+    }
+    Ok(user_info(host, info.profile_group_id)?.map(|parent| parent.id))
+}
+
 /// `UserInfo.isDemo` of the user; false for one that does not exist.
 pub(super) fn is_demo(host: &AppHost, user: i32) -> Result<bool, Exception> {
     Ok(user_flags(host, user)?.is_some_and(|f| f & FLAG_DEMO != 0))
@@ -790,18 +860,7 @@ impl UserManager {
     /// `isCreationOverrideEnabled`, FEATURE_MANAGED_USERS and
     /// `Flags.profilesForAll`.
     fn limits(&self) -> Result<user_types::Limits, Exception> {
-        let build_id = self.host.property("ro.build.id").unwrap_or_default();
-        let max_users = if build_id.starts_with("JVP") {
-            1
-        } else {
-            let config = self
-                .host
-                .inputs()?
-                .packages
-                .framework_integer("config_multiuserMaximumUsers")
-                .unwrap_or(0);
-            self.int_property("fw.max_users", config).max(1)
-        };
+        let max_users = max_supported_users(&self.host)?;
         Ok(user_types::Limits {
             max_users,
             creation_override: self.debuggable()

@@ -80,10 +80,9 @@ impl System {
         self.check_package_bootstrap(&bridge)?;
         // Java installs and retains this helper against the actual full native
         // Store. No callback or remote transaction occurs under bootstrap lock.
-        let owner =
-            self.package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_READ_LEAF)?;
+        let owner = self.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_SHELL_READ_LEAF)?;
         let reply = owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(shell_read_transport)?;
         self.check_package_bootstrap(&bridge)?;
         let reply = reply.into_parcel();

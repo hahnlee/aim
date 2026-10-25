@@ -15,7 +15,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(
+            .transact_as_owner(
                 bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL,
                 &data,
                 false,
@@ -43,7 +43,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_PREFERRED_ROLE_HOLDER, &data, false)
+            .transact_as_owner(bridge::GET_PREFERRED_ROLE_HOLDER, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let value = bridge::read_get_preferred_role_holder_reply(&mut reader)
@@ -112,7 +112,7 @@ impl Bridge {
     ) -> Result<(), OwnerError> {
         let reply = self
             .owner
-            .transact(code, data, false)
+            .transact_as_owner(code, data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         decode(&mut reader)

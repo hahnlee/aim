@@ -74,35 +74,9 @@ impl System {
         i32::try_from(uid)
             .map_err(|_| Exception::illegal_argument("Package shell UID exceeds Android range"))
     }
-    fn package_shell_policy(&self) -> Result<Strong> {
+    fn package_shell_policy(&self) -> Result<ServiceOwner> {
         let bridge = self.package_bootstrap()?;
-        self.check_package_bootstrap(&bridge)?;
-        let mut request = Parcel::new();
-        request.write_interface_token(bootstrap_api::DESCRIPTOR);
-        let reply = bridge
-            .owner
-            .transact(
-                bootstrap_api::GET_PACKAGE_SHELL_POLICY_BRIDGE,
-                &request,
-                false,
-            )
-            .map_err(|status| failure(format!("Shell policy attachment: {status}")))?;
-        let mut reader = reply.reader();
-        reader
-            .read_exception()
-            .map_err(|status| failure(status.to_string()))??;
-        let binder = reader
-            .read_binder()
-            .map_err(|status| failure(status.to_string()))?
-            .ok_or_else(|| failure("Shell policy owner unavailable"))?;
-        if reader.remaining() != 0 {
-            return Err(failure("Shell policy attachment trailing data"));
-        }
-        let owner = reply
-            .retain_remote_binder(binder)
-            .map_err(|status| failure(status.to_string()))?;
-        self.check_package_bootstrap(&bridge)?;
-        Ok(owner)
+        self.package_bootstrap_node(&bridge, bootstrap_api::GET_PACKAGE_SHELL_POLICY_BRIDGE)
     }
     fn shell_policy_call(&self, code: u32, fill: impl FnOnce(&mut Parcel)) -> Result<Received> {
         let owner = self.package_shell_policy()?;
@@ -110,7 +84,7 @@ impl System {
         request.write_interface_token(policy_api::DESCRIPTOR);
         fill(&mut request);
         owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|status| failure(format!("Shell policy transport: {status}")))
     }
     pub fn shell_handle_incoming_user(

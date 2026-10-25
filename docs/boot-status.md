@@ -175,7 +175,12 @@ redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance. On the
 app host image, the native package boot runs its scans, construction and
-publication, and the guest reaches BOOT_COMPLETED. Internal event delivery and
+publication, and the guest reaches BOOT_COMPLETED. Private package bridge calls
+use the service process identity even when the bridge is local; the boot-context
+leaf reads the app host's live unlocking state. Package shell intent-filter
+syntax and user listing have native leaves, with the shell identity retained for
+UserManager authorization. Retained app-host package Binders delegate configured
+package selections and usage to the session owner. Internal event delivery and
 shutdown statistics remain #2167, permission state without `access.abx` #2168,
 boot admissions #2169, remaining package bootstrap owners #2022 and the query
 projection switch #2023.

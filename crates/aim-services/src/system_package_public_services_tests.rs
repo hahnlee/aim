@@ -147,6 +147,7 @@ fn publish(system: &Arc<System>, bridge: &Arc<crate::package::bootstrap::Bridge>
         nonce: Some(17),
         system: model::System {
             sdk_sandbox_package: Some(None),
+            roles: Some(crate::package::roles::Owner::priority_fixture(None)),
             features: vec![(name.into(), 1)],
             ..Default::default()
         },
@@ -280,6 +281,33 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
     };
     let first = attach();
     publish(&system, &first, "epoch.first");
+    // A retained app-host adapter reads constructor role selections from
+    // this session without loading its old joined package model.
+    let app_host = crate::app_host::AppHost::new(native.clone());
+    app_host.set_system(system.clone());
+    let adapter = crate::app_host::package_service::PackageService::new(app_host);
+    let mut request = Parcel::new();
+    pm::GetSetupWizardPackageName {}.write(&mut request);
+    let mut call = Call {
+        code: pm::GET_SETUP_WIZARD_PACKAGE_NAME,
+        flags: 0,
+        sender_pid: 98221,
+        sender_euid: 1000,
+        data: request.reader(),
+    };
+    let reply = adapter.transact(&mut call).unwrap();
+    assert_eq!(
+        pm::read_get_setup_wizard_package_name_reply(&mut reply.reader()).unwrap(),
+        Ok(None)
+    );
+    call.sender_euid = 2000;
+    call.data = request.reader();
+    let reply = adapter.transact(&mut call).unwrap();
+    assert_eq!(
+        reply.reader().read_exception().unwrap().unwrap_err().code,
+        aim_binder_host::parcel::EX_SECURITY
+    );
+
     let one = system.register_public_package_fronts(&first).unwrap();
     assert!(feature(&native, one.public, "epoch.first").unwrap());
     let (private, _) = crate::package::service::PackageQueries::from_bootstrap(&system, &first);

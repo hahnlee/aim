@@ -129,6 +129,8 @@ pub mod package_observers;
 pub mod package_resolution_policy;
 pub mod package_service;
 pub mod package_shell;
+mod package_shell_policy;
+mod package_shell_read;
 mod package_writes;
 pub mod packages;
 pub mod pending_intents;
@@ -3417,6 +3419,11 @@ impl AppHost {
             u.unlocking_or_unlocked = true;
         }
         self.user_states_changed(&before, Arc::new(state))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_user_unlocked_for_package_test(&self, user: i32) {
+        self.unlocked_users.lock().unwrap().insert(user);
     }
 
     /// `UserManagerInternal.isUserUnlockingOrUnlocked`.

@@ -19,7 +19,7 @@ impl Owner {
         api::IsKnownIsolatedComputeApp { uid }.write(&mut request);
         let reply = self
             .owner
-            .transact(api::IS_KNOWN_ISOLATED_COMPUTE_APP, &request, false)
+            .transact_as_owner(api::IS_KNOWN_ISOLATED_COMPUTE_APP, &request, false)
             .map_err(|status| {
                 Exception::new(
                     EX_ILLEGAL_STATE,
@@ -43,7 +43,7 @@ impl Owner {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(api::PROFILE_PERMISSION, &request, false)
+            .transact_as_owner(api::PROFILE_PERMISSION, &request, false)
             .map_err(|status| {
                 Exception::new(
                     EX_ILLEGAL_STATE,

@@ -231,7 +231,7 @@ impl RoleManager {
     }
 
     /// `getRoleHoldersAsUser`.
-    fn role_holders(
+    pub(super) fn role_holders(
         &self,
         uid: i32,
         role: Option<String>,

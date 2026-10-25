@@ -304,6 +304,73 @@ impl Service for PackageBootstrap {
         let mut p = Parcel::new();
         let host = &self.host;
         let result: Result<(), Exception> = match call.code {
+            bridge::IS_SHELL_DEBUGGING_RESTRICTED => {
+                let a = bridge::IsShellDebuggingRestricted::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                if a.user_id < 0 {
+                    return reply(Err(Exception::illegal_argument(format!(
+                        "Invalid userId {}",
+                        a.user_id
+                    ))));
+                }
+                host.has_user_restriction("no_debugging_features", a.user_id)
+                    .map(|v| bridge::write_is_shell_debugging_restricted_reply(&mut p, v))
+            }
+            bridge::GET_PACKAGE_PROFILE_PARENT => {
+                let a =
+                    bridge::GetPackageProfileParent::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                super::user_service::profile_parent(host, a.user_id).map(|v| {
+                    bridge::write_get_package_profile_parent_reply(&mut p, v.unwrap_or(-10000))
+                })
+            }
+            bridge::IS_PARENT_PROFILE_APP_LINKING_ALLOWED => {
+                let a = bridge::IsParentProfileAppLinkingAllowed::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                host.has_user_restriction("allow_parent_profile_app_linking", a.user_id)
+                    .map(|v| bridge::write_is_parent_profile_app_linking_allowed_reply(&mut p, v))
+            }
+            bridge::GET_PACKAGE_ROLE_HOLDERS | bridge::GET_PREFERRED_ROLE_HOLDER => {
+                let (role, user) = if call.code == bridge::GET_PACKAGE_ROLE_HOLDERS {
+                    let a = bridge::GetPackageRoleHolders::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    (a.role, a.user_id)
+                } else {
+                    let a = bridge::GetPreferredRoleHolder::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    (a.role, a.user_id)
+                };
+                host.role_service
+                    .get()
+                    .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "role owner unavailable"))
+                    .and_then(|owner| owner.role_holders(SYSTEM_UID, role, user))
+                    .map(|holders| {
+                        if call.code == bridge::GET_PACKAGE_ROLE_HOLDERS {
+                            bridge::write_get_package_role_holders_reply(
+                                &mut p,
+                                &Some(holders.into_iter().map(Some).collect()),
+                            );
+                        } else {
+                            bridge::write_get_preferred_role_holder_reply(
+                                &mut p,
+                                &holders.first().cloned(),
+                            );
+                        }
+                    })
+            }
+            bridge::GET_PACKAGE_SHELL_READ_LEAF => {
+                bridge::GetPackageShellReadLeaf::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let owner = self.leaf(Arc::new(super::package_shell_read::ShellRead(host.clone())));
+                bridge::write_get_package_shell_read_leaf_reply(&mut p, Some(owner));
+                Ok(())
+            }
+            bridge::GET_PACKAGE_SHELL_POLICY_BRIDGE => {
+                bridge::GetPackageShellPolicyBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let owner = self.leaf(Arc::new(super::package_shell_policy::ShellPolicy(
+                    host.clone(),
+                )));
+                bridge::write_get_package_shell_policy_bridge_reply(&mut p, Some(owner));
+                Ok(())
+            }
             bridge::GET_PACKAGE_OBSERVER_EVENTS_BRIDGE => {
                 bridge::GetPackageObserverEventsBridge::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

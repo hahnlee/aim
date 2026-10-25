@@ -373,6 +373,31 @@ impl Service for PackageService {
             pm::write_get_package_installer_reply(&mut reply, Some(self.installer));
             return Ok(reply);
         }
+        // Constructor selections and usage belong to the native session,
+        // including for clients that retained this pre-construction Binder.
+        if matches!(
+            call.code,
+            pm::NOTIFY_PACKAGE_USE
+                | pm::GET_SYSTEM_TEXT_CLASSIFIER_PACKAGE_NAME
+                | pm::GET_ATTENTION_SERVICE_PACKAGE_NAME
+                | pm::GET_DEFAULT_TEXT_CLASSIFIER_PACKAGE_NAME
+                | pm::GET_APP_PREDICTION_SERVICE_PACKAGE_NAME
+                | pm::GET_INCIDENT_REPORT_APPROVER_PACKAGE_NAME
+                | pm::GET_ROTATION_RESOLVER_PACKAGE_NAME
+                | pm::GET_SYSTEM_CAPTIONS_SERVICE_PACKAGE_NAME
+                | pm::GET_SETUP_WIZARD_PACKAGE_NAME
+                | pm::GET_SERVICES_SYSTEM_SHARED_LIBRARY_PACKAGE_NAME
+                | pm::GET_SHARED_SYSTEM_SHARED_LIBRARY_PACKAGE_NAME
+        ) {
+            let Some(system) = self.host.system.get() else {
+                return super::reply(Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native package system unavailable",
+                )));
+            };
+            let (public, _) = crate::package::service::PackageQueries::from_system(system);
+            return public.transact(call);
+        }
         let (state, resolution) = match self.host.packages() {
             Ok(packages) => packages,
             Err(e) => {

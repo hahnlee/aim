@@ -194,6 +194,19 @@ impl ServiceOwner {
         }
     }
 
+    /// An internal owner call, with the service process's identity. Remote
+    /// Binder calls already carry it; a local BBinder call otherwise inherits
+    /// the public caller. Explicit caller arguments remain unchanged.
+    pub fn transact_as_owner(
+        &self,
+        code: u32,
+        data: &Parcel,
+        oneway: bool,
+    ) -> std::result::Result<Received, aim_binder_host::parcel::StatusCode> {
+        let _identity = aim_binder_host::local::clear_calling_identity();
+        self.transact(code, data, oneway)
+    }
+
     pub fn transact(
         &self,
         code: u32,
@@ -3430,7 +3443,7 @@ impl System {
         write(&mut request);
         let reply = bridge
             .owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|status| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,

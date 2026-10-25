@@ -42,7 +42,7 @@ impl InitialOwner {
         fill(&mut data);
         let reply = self
             .node
-            .transact(code, &data, false)
+            .transact_as_owner(code, &data, false)
             .map_err(|code| failure(format!("initial owner transport: {code}")))?;
         let mut reader = reply.reader();
         reader
