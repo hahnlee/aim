@@ -191,9 +191,16 @@ session's recovered installer. Host tests cover pre-construction errors,
 registry readback, retained handles for both descriptors, caller security and
 sessions restored across epochs. This public-front change has no new local
 guest or real CTS result; the ADR 0013 switch/milestone gates remain open.
-Plain install still reaches explicit missing permission/app-data/cache/effect
-and external completion leaves (#2161, #2160, #2162, #1977, #2154, #2157,
-#1995); ART/dexopt remains #2063.
+App-data creation now calls installd without a second coordinator or Settings
+writer. It returns CE/DE inode receipts and tracks only newly created directories
+for rollback; commit releases the claim, and rollback validates device/inode and
+guest UID before destroying data. Updates clear code caches using the published
+per-user CE inodes. ART profile clearing follows the pinned AppDataHelper guard
+for an uninitialized ART owner; dexopt itself still fails explicitly (#2063).
+Focused claim/cache/storage tests pass; these install leaves have no new guest
+or two-boot install result. Plain install still reaches explicit missing
+permission, effect and external completion leaves (#2161, #1977, #2154,
+#2157, #1995). Candidate access publication has not been implemented.
 
 Current app-host source publishes enabled settings, permission grant/GID
 refreshes, data-clear component resets and isolated/implicit/user runtime

@@ -58,7 +58,7 @@ impl PackageInternalStorage {
 
     /// `Environment.getDataUserCeDirectory` or `getDataUserDeDirectory` of
     /// `volume` on the host.
-    fn user_directory(
+    pub(super) fn user_directory(
         &self,
         volume: Option<&str>,
         user: i32,
@@ -104,7 +104,7 @@ impl PackageInternalStorage {
         Ok(p)
     }
 
-    fn destroy(
+    pub(super) fn destroy(
         &self,
         volume: Option<String>,
         name: Option<String>,
@@ -124,7 +124,7 @@ impl PackageInternalStorage {
         self.void(installd::DESTROY_APP_DATA, &data)
     }
 
-    fn create(&self, args: &CreateAppDataArgs) -> Result<[i64; 2], Exception> {
+    pub(super) fn create(&self, args: &CreateAppDataArgs) -> Result<[i64; 2], Exception> {
         let mut data = Parcel::new();
         installd::CreateAppData {
             args: Some(args.clone()),
