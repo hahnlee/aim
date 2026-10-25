@@ -1071,3 +1071,107 @@ fn host_user_unlocking_publishes_and_survives_enabled_and_permission_updates() {
     );
     drop(workers);
 }
+
+/// A real session and disposable Settings owner for service-discovery regressions.
+pub(crate) fn with_discovery_session(
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+    ),
+) {
+    let Session {
+        fixture,
+        host,
+        bridge,
+        workers,
+        ..
+    } = session();
+    host.configure(
+        &fixture.root.join("image"),
+        &fixture.root.join("data"),
+        &fixture.root.join("bpf"),
+        Box::new(|name| match name {
+            "ro.build.version.sdk" => Some("36".into()),
+            "ro.build.version.codename" => Some("REL".into()),
+            "persist.sys.locale" => Some("en-US".into()),
+            "ro.sf.lcd_density" => Some("160".into()),
+            "ro.debuggable" => Some("1".into()),
+            _ => None,
+        }),
+        Box::new(|_, _| {}),
+        Box::new(|| Err(std::io::Error::other("no test zygote"))),
+    )
+    .unwrap();
+    let mut publish = |edit: &mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)| {
+        let base = fixture.system.capture_package_queries().unwrap();
+        let mut owner = base.scan().owner().clone();
+        for package in base
+            .state()
+            .packages
+            .values()
+            .filter_map(|ps| ps.pkg.as_deref())
+        {
+            let mut package = package.clone();
+            edit(&mut package);
+            if package.is(crate::package::pkg::booleans::SYSTEM) {
+                owner
+                    .settings
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.name == package.package_name)
+                    .unwrap()
+                    .flags |= crate::package::settings::FLAG_SYSTEM;
+            }
+            owner.load_test_code(package);
+        }
+        owner
+            .assign_seinfo_at_boot(
+                &crate::package::owner::seinfo::Policy::parse(&[]).unwrap(),
+                &mut |_: &crate::package::pkg::AndroidPackage| Ok(36),
+            )
+            .unwrap();
+        owner
+            .complete_library_dependencies(&|_, _| {
+                Ok(crate::package::libraries::Policy {
+                    enforce_native_dependencies: false,
+                    sdk_library_independence: false,
+                })
+            })
+            .unwrap();
+        owner
+            .rebuild_shared_processes_from_native_members()
+            .unwrap();
+        owner
+            .capture_replica_runtime(
+                ["p", "q"]
+                    .map(|name| {
+                        (
+                            (name.into(), false),
+                            crate::package::scan::ReplicaRuntime {
+                                usage: [0; 8],
+                                seinfo: owner.seinfo(name).unwrap().map(str::to_owned),
+                                override_seinfo: None,
+                                library_files: vec![],
+                                libraries: vec![],
+                            },
+                        )
+                    })
+                    .into(),
+            )
+            .unwrap();
+        let mut context = (**base.context()).clone();
+        context.scan_version = base.scan().version() + 1;
+        fixture
+            .system
+            .publish_package_scan_with_queries(
+                &bridge,
+                Some(base.scan()),
+                owner,
+                crate::package::owner::usage::Usage::new(["p", "q"]),
+                context,
+            )
+            .unwrap();
+    };
+    test(&host, &mut publish);
+    drop(workers);
+}

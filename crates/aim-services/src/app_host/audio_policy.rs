@@ -27,7 +27,7 @@ const SYSTEM_READY: u32 = 53;
 const USE_CLIENT: i32 = 7;
 /// How long audioserver may take to register: its HAL waits up to 3 s for
 /// the Mac's devices (docs/audio.md, "Start-up").
-const PATIENCE: Duration = Duration::from_secs(30);
+pub(super) const PATIENCE: Duration = Duration::from_secs(30);
 
 /// `AudioSystem.DEVICE_OUT_SPEAKER`, `DEVICE_OUT_DEFAULT`.
 pub const DEVICE_OUT_SPEAKER: i32 = 0x2;

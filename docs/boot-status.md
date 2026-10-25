@@ -216,9 +216,21 @@ validated grant/GID refreshes. No access view is added to query Context or to
 candidate contexts; install access lifecycle remains design step 7 (#2161).
 Focused permission (23), AppOps (22) and session-mutation (3) tests and the host
 build pass. No new local guest, second-boot or CTS result is claimed for this
-access change. The boot-input join and service discovery/mirror handover remain
-#2023; ShortcutService's manifest rescan and removed-package cleanup owner is
-still unsupported (#1669).
+access change. Current source also refreshes account authenticators (validating
+loaded accounts), spell checkers, unbound widget providers and media-route
+proxies on package notices, including the canonical epoch's add/update/remove
+feed. Setup-wizard selection resolves anew. WebView reselects from one capture
+and defers a second preparation across pending RELRO work; audioserver's
+permission controller receives rebuilt package/permission batches after package
+notices and permission changes, and reconnects on controller death. Account
+deletion (#1504), bound widgets (#1789), default WebView repair/explicit choice
+(#1491), internal guest broadcasts (#2167) and ShortcutService's manifest
+rescan/removal cleanup (#1669) retain their existing unsupported boundaries.
+The boot-input join remains #2023. Discovery/permission/session focused tests
+pass; one pre-existing Settings test is ignored and not run. No new guest or
+real CTS run is claimed. Platform/config reads no longer allocate application
+shared memory; bindApplication initializes that same platform-owned object on
+first use, retaining allocation errors there.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

@@ -263,11 +263,17 @@ pub struct AppWidgetService {
 }
 
 impl AppWidgetService {
-    pub fn new(host: Arc<AppHost>) -> Self {
-        AppWidgetService {
+    pub fn new(host: Arc<AppHost>) -> Arc<Self> {
+        let service = Arc::new(AppWidgetService {
             host,
             group: Mutex::new(None),
-        }
+        });
+        let monitor = service.clone() as Arc<dyn super::package_writes::PackageMonitor>;
+        service
+            .host
+            .package_monitors
+            .register(super::USER_ALL, Arc::downgrade(&monitor));
+        service
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
@@ -348,43 +354,7 @@ impl AppWidgetService {
     /// `loadGroupWidgetProvidersLocked`, then `loadGroupStateLocked`: the
     /// group, and whether `performUpgradeLocked` succeeded.
     fn load(&self, user: i32) -> Result<(Group, Result<(), Exception>), Exception> {
-        let mut providers: Vec<Provider> = Vec::new();
-        let update = Intent {
-            action: Some(ACTION_APPWIDGET_UPDATE.into()),
-            ..Default::default()
-        };
-        for ai in self.receivers(&update, user)? {
-            // `addProviderLocked`, with `createPartialProviderInfo`.
-            if ai.info.application_info.flags & FLAG_EXTERNAL_STORAGE != 0 {
-                continue;
-            }
-            let has_xml = ai.info.item.meta_data.as_ref().is_some_and(|m| {
-                m.0.iter().any(|(k, v)| {
-                    k == META_DATA_APPWIDGET_PROVIDER && matches!(v, Value::Int(id) if *id != 0)
-                })
-            });
-            let uid = ai.info.application_info.uid;
-            let component = ComponentName {
-                package: ai.info.item.package_name.clone().unwrap_or_default(),
-                class: ai.info.item.name.clone().unwrap_or_default(),
-            };
-            if has_xml
-                && !providers
-                    .iter()
-                    .any(|p| p.uid == uid && p.component == component)
-            {
-                providers.push(Provider {
-                    uid,
-                    component,
-                    activity: ai,
-                    info: Persisted::default(),
-                    parsed: false,
-                    info_tag: None,
-                    tag: TAG_UNDEFINED,
-                    pending_deleted: Vec::new(),
-                });
-            }
-        }
+        let providers = self.discover_providers(user)?;
         let mut group = Group {
             providers,
             hosts: Vec::new(),
@@ -449,6 +419,47 @@ impl AppWidgetService {
 
     /// `readProfileStateFromFileLocked` of the state file `bytes`: its
     /// version.
+    fn discover_providers(&self, user: i32) -> Result<Vec<Provider>, Exception> {
+        let mut providers: Vec<Provider> = Vec::new();
+        let update = Intent {
+            action: Some(ACTION_APPWIDGET_UPDATE.into()),
+            ..Default::default()
+        };
+        for ai in self.receivers(&update, user)? {
+            // `addProviderLocked`, with `createPartialProviderInfo`.
+            if ai.info.application_info.flags & FLAG_EXTERNAL_STORAGE != 0 {
+                continue;
+            }
+            let has_xml = ai.info.item.meta_data.as_ref().is_some_and(|m| {
+                m.0.iter().any(|(k, v)| {
+                    k == META_DATA_APPWIDGET_PROVIDER && matches!(v, Value::Int(id) if *id != 0)
+                })
+            });
+            let uid = ai.info.application_info.uid;
+            let component = ComponentName {
+                package: ai.info.item.package_name.clone().unwrap_or_default(),
+                class: ai.info.item.name.clone().unwrap_or_default(),
+            };
+            if has_xml
+                && !providers
+                    .iter()
+                    .any(|p| p.uid == uid && p.component == component)
+            {
+                providers.push(Provider {
+                    uid,
+                    component,
+                    activity: ai,
+                    info: Persisted::default(),
+                    parsed: false,
+                    info_tag: None,
+                    tag: TAG_UNDEFINED,
+                    pending_deleted: Vec::new(),
+                });
+            }
+        }
+        Ok(providers)
+    }
+
     fn read_state(&self, bytes: &[u8], user: i32, group: &mut Group) -> Result<i32, String> {
         let root = aim_android_xml::read(bytes)?;
         let fingerprint = self.host.property("ro.build.fingerprint");
@@ -845,6 +856,55 @@ impl AppWidgetService {
     }
 }
 
+impl super::package_writes::PackageMonitor for AppWidgetService {
+    fn package_changed(
+        &self,
+        change: &super::package_writes::PackageChanged<'_>,
+    ) -> Result<(), Exception> {
+        if change.user != 0 {
+            return Ok(());
+        }
+        let mut held = self.group.lock().unwrap();
+        let Some(group) = held.as_mut() else {
+            return Ok(());
+        };
+        let mut found = self.discover_providers(change.user)?;
+        if group.bound_widgets > 0 {
+            if group
+                .providers
+                .iter()
+                .chain(&found)
+                .any(|p| p.component.package == change.package)
+            {
+                return Err(self.unimplemented("bound app widgets"));
+            }
+            return Ok(());
+        }
+        // Keep the tags/info of unaffected providers and the group's host state.
+        for provider in &mut found {
+            if provider.component.package != change.package {
+                if let Some(index) = group
+                    .providers
+                    .iter()
+                    .position(|old| old.component == provider.component && old.uid == provider.uid)
+                {
+                    std::mem::swap(provider, &mut group.providers[index]);
+                }
+            } else if let Some(old) = group
+                .providers
+                .iter()
+                .find(|old| old.component == provider.component && old.uid == provider.uid)
+            {
+                provider.tag = old.tag;
+                provider.info_tag = old.info_tag.clone();
+                provider.pending_deleted = old.pending_deleted.clone();
+            }
+        }
+        group.providers = found;
+        self.save_state(change.user, group)
+    }
+}
+
 impl Service for AppWidgetService {
     fn descriptor(&self) -> &str {
         aw::DESCRIPTOR
@@ -1206,6 +1266,98 @@ fn write_atomic(path: &std::path::Path, root: &Element) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn widget_refresh_keeps_hosts_and_rejects_bound_state() {
+        use super::super::package_writes::{PackageChanged, PackageMonitor};
+        crate::system::with_discovery_session(|host, publish| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    let mut receiver = pkg.activities[0].clone();
+                    receiver.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec![ACTION_APPWIDGET_UPDATE.into()],
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                    receiver.main.component.meta_data =
+                        Some(crate::package::pkg::MetaData(vec![(
+                            META_DATA_APPWIDGET_PROVIDER.into(),
+                            Value::Int(1),
+                        )]));
+                    pkg.receivers = vec![receiver];
+                }
+            });
+            let service = AppWidgetService::new(host.clone());
+            let providers = service.discover_providers(0).unwrap();
+            assert_eq!(providers.len(), 1);
+            *service.group.lock().unwrap() = Some(Group {
+                providers,
+                hosts: vec![Host {
+                    package: "q".into(),
+                    id: 7,
+                    tag: 8,
+                }],
+                bind_allowed: vec!["q".into()],
+                bound_widgets: 0,
+                restore_state: false,
+            });
+            let change = PackageChanged {
+                package: "p",
+                user: 0,
+                components: &[],
+                removed: true,
+            };
+            service
+                .group
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .bound_widgets = 1;
+            assert!(
+                service
+                    .package_changed(&change)
+                    .unwrap_err()
+                    .message
+                    .contains("#1789")
+            );
+            assert_eq!(
+                service
+                    .group
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .providers
+                    .len(),
+                1
+            );
+            let unrelated = PackageChanged {
+                package: "q",
+                user: 0,
+                components: &[],
+                removed: false,
+            };
+            service.package_changed(&unrelated).unwrap();
+            service
+                .group
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .bound_widgets = 0;
+            publish(&mut |pkg| pkg.receivers.clear());
+            service.package_changed(&change).unwrap();
+            let held = service.group.lock().unwrap();
+            let group = held.as_ref().unwrap();
+            assert!(group.providers.is_empty());
+            assert_eq!(group.hosts[0].id, 7);
+            assert_eq!(group.bind_allowed, ["q"]);
+        });
+    }
     use super::*;
 
     /// `readAppWidgetProviderInfoLocked`: the attributes of a provider

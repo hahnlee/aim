@@ -24,6 +24,39 @@ pub trait PackageListObserver: Send + Sync {
     fn package_removed(&self, name: Option<&str>, uid: i32) -> Result<(), Exception>;
 }
 
+/// Discovery owners consume the canonical session's add/update/remove feed too.
+/// This does not deliver guest broadcasts (the internal broadcast leaf is #2167).
+pub(super) struct Discoveries(pub Weak<AppHost>);
+impl Discoveries {
+    fn changed(&self, name: Option<&str>, uid: i32, removed: bool) -> Result<(), Exception> {
+        let host = self
+            .0
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host gone"))?;
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name absent"))?;
+        if uid < 0 {
+            return Err(Exception::illegal_argument("package UID absent"));
+        }
+        host.notify_package_discoveries(&super::package_writes::PackageChanged {
+            package: name,
+            user: uid / super::PER_USER_RANGE as i32,
+            components: &[name.to_owned()],
+            removed,
+        })
+    }
+}
+impl PackageListObserver for Discoveries {
+    fn package_added(&self, name: Option<&str>, uid: i32) -> Result<(), Exception> {
+        self.changed(name, uid, false)
+    }
+    fn package_changed(&self, name: Option<&str>, uid: i32) -> Result<(), Exception> {
+        self.changed(name, uid, false)
+    }
+    fn package_removed(&self, name: Option<&str>, uid: i32) -> Result<(), Exception> {
+        self.changed(name, uid, true)
+    }
+}
+
 #[derive(Default)]
 struct Membership {
     closed: bool,
@@ -592,6 +625,6 @@ mod tests {
             .transact(events::PACKAGE_ADDED, &p, false)
             .unwrap();
         assert_eq!(p.reader().read_exception().unwrap(), Err(closed()));
-        assert_eq!(next.snapshot().unwrap().len(), 1);
+        assert_eq!(next.snapshot().unwrap().len(), 2); // includes the discovery subscriber
     }
 }

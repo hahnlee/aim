@@ -357,7 +357,19 @@ struct Platform {
     serial: String,
     /// `ro.sf.lcd_density`, the processes' `DisplayMetrics.DENSITY_DEVICE`.
     device_density: i32,
-    shared_memory: bind::ApplicationSharedMemory,
+    shared_memory: OnceLock<bind::ApplicationSharedMemory>,
+}
+
+impl Platform {
+    fn application_shared_memory(&self) -> Result<&bind::ApplicationSharedMemory, Exception> {
+        if let Some(memory) = self.shared_memory.get() {
+            return Ok(memory);
+        }
+        let memory = bind::ApplicationSharedMemory::new().map_err(|e| {
+            Exception::new(EX_ILLEGAL_STATE, format!("application shared memory: {e}"))
+        })?;
+        Ok(self.shared_memory.get_or_init(|| memory))
+    }
 }
 
 /// What the app host reads, loaded when the first process starts: the
@@ -608,6 +620,8 @@ pub struct AppHost {
     sensor_privacy: OnceLock<sensor_privacy::Persisted>,
     /// audioserver, once it registered, and the stream volumes.
     audio_policy: OnceLock<audio_policy::AudioPolicy>,
+    audio_permission_update: Mutex<()>,
+    audio_permission_controller: Mutex<Option<(Arc<aim_binder_host::local::Strong>, u64)>>,
     volumes: Mutex<Option<volume::Volumes>>,
     /// The players and recorders apps made.
     playback: Mutex<playback::Playback>,
@@ -696,6 +710,8 @@ impl AppHost {
             system_user: OnceLock::new(),
             sensor_privacy: OnceLock::new(),
             audio_policy: OnceLock::new(),
+            audio_permission_update: Mutex::new(()),
+            audio_permission_controller: Mutex::new(None),
             volumes: Mutex::new(None),
             playback: Mutex::default(),
             focus: Mutex::default(),
@@ -908,7 +924,7 @@ impl AppHost {
             ),
             (
                 "webviewupdate",
-                Arc::new(webview_update::WebViewUpdate::new(self.clone())),
+                webview_update::WebViewUpdate::new(self.clone()),
             ),
             (
                 "locale",
@@ -971,10 +987,7 @@ impl AppHost {
                     settings.clone(),
                 )),
             ),
-            (
-                "appwidget",
-                Arc::new(app_widget::AppWidgetService::new(self.clone())),
-            ),
+            ("appwidget", app_widget::AppWidgetService::new(self.clone())),
             (
                 "restrictions",
                 Arc::new(restrictions_service::RestrictionsManager::new(self.clone())),
@@ -1155,8 +1168,6 @@ impl AppHost {
         .map_err(state)?;
         let settings =
             settings::Settings::load(&configured.data, &configured.root).map_err(state)?;
-        let shared_memory = bind::ApplicationSharedMemory::new()
-            .map_err(|e| state(format!("application shared memory: {e}")))?;
         let platform = Platform {
             data: configured.data.clone(),
             compat,
@@ -1164,7 +1175,7 @@ impl AppHost {
             locales: property("persist.sys.locale")?,
             serial: property("ro.serialno").unwrap_or_else(|_| "unknown".into()),
             device_density: number("ro.sf.lcd_density")?,
-            shared_memory,
+            shared_memory: OnceLock::new(),
         };
         Ok(self.platform.get_or_init(|| Arc::new(platform)))
     }
@@ -4048,7 +4059,7 @@ impl AppHost {
             serialized_system_font_map: None,
             application_shared_memory_fd: bind::RawFileDescriptor(
                 inputs
-                    .shared_memory
+                    .application_shared_memory()?
                     .file()
                     .map_err(|e| state(e.to_string()))?,
             ),

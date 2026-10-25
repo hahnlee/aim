@@ -454,8 +454,8 @@ impl AppHost {
     /// `onReinitVolumes`), then AudioFlinger's system ready.
     pub(super) fn start_audio(&self) -> Result<(), String> {
         let policy = AudioPolicy::connect(&self.process)?;
+        self.audio_permission_service_started(policy.permission_controller(&self.process)?)?;
         let policy = self.audio_policy.get_or_init(|| policy);
-        self.populate_audio_permissions(&policy.permission_controller(&self.process)?)?;
         {
             let volumes = self.volumes().map_err(|e| format!("{e:?}"))?;
             volumes.as_ref().unwrap().init(policy)?;
@@ -963,7 +963,7 @@ impl AppHost {
             return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
         }
         if self
-            .inputs()?
+            .platform()?
             .settings
             .get(Table::System, MULTI_AUDIO_FOCUS_ENABLED)
             .and_then(|v| v.parse::<i32>().ok())
@@ -1616,7 +1616,7 @@ impl Service for AudioService {
             // One-way, as the next: `querySoundEffectsEnabled` of the user.
             audio::PLAY_SOUND_EFFECT => {
                 let args = audio::PlaySoundEffect::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let enabled = match self.host.inputs() {
+                let enabled = match self.host.platform() {
                     Ok(inputs) => {
                         inputs
                             .settings

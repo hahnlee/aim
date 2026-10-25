@@ -155,6 +155,11 @@ fn cached_package(cache: Option<Vec<u8>>) -> Result<AndroidPackage, Exception> {
 impl PackageBootstrap {
     pub fn new(host: Arc<AppHost>) -> Self {
         let observers = Arc::new(super::package_observers::Registry::default());
+        observers
+            .add_observer(Arc::new(super::package_observers::Discoveries(
+                Arc::downgrade(&host),
+            )))
+            .expect("new package observer epoch is open");
         let previous = std::mem::replace(
             &mut *host.package_observers.lock().unwrap(),
             Arc::downgrade(&observers),

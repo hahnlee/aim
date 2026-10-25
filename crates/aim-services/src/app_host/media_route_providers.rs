@@ -15,8 +15,8 @@
 //! `onProviderStateChangedOnHandler` and `dispatchUpdatesOnHandler` have
 //! it: every route to a router with system routing permissions, the
 //! providers' and the default route to the others, each filtered by the
-//! route's visibility. The app host's packages do not change while it
-//! runs, so the watcher scans once. No router request reaches a provider
+//! route's visibility. Package notifications rescan the watcher, retaining
+//! existing proxies in resolver order and stopping retired providers. No router request reaches a provider
 //! (#1663), so a session it creates is not implemented; a session list it
 //! reports empty, the release of a session it never had or the failure of
 //! a request no one made changes nothing.
@@ -440,6 +440,28 @@ pub(super) struct Providers {
     next_connection: AtomicU64,
 }
 
+impl super::package_writes::PackageMonitor for Providers {
+    fn package_changed(
+        &self,
+        change: &super::package_writes::PackageChanged<'_>,
+    ) -> Result<(), Exception> {
+        let user = change.user;
+        self.post_with(move |p| {
+            if p.users
+                .lock()
+                .unwrap()
+                .get(&user)
+                .is_some_and(|u| u.started)
+            {
+                if let Err(e) = p.scan(user) {
+                    eprintln!("app host: media_router: scanPackages: {e:?}");
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
 impl Providers {
     pub(super) fn new(host: Arc<AppHost>, routers: Routers) -> Arc<Providers> {
         let (send, receive) = mpsc::channel::<Job>();
@@ -451,14 +473,20 @@ impl Providers {
                 }
             })
             .expect("the media_router2 handler thread");
-        Arc::new_cyclic(|me| Providers {
+        let service = Arc::new_cyclic(|me| Providers {
             host,
             me: me.clone(),
             routers,
             handler: Mutex::new(send),
             users: Mutex::default(),
             next_connection: AtomicU64::new(1),
-        })
+        });
+        let monitor = service.clone() as Arc<dyn super::package_writes::PackageMonitor>;
+        service
+            .host
+            .package_monitors
+            .register(super::USER_ALL, Arc::downgrade(&monitor));
+        service
     }
 
     /// Runs `f` on the handler's thread.
@@ -529,6 +557,15 @@ impl Providers {
                     format!("media_router: queryIntentServices: {e:?}"),
                 )
             })?;
+        let mut remaining = self
+            .users
+            .lock()
+            .unwrap()
+            .entry(user)
+            .or_default()
+            .proxies
+            .clone();
+        let mut ordered = Vec::new();
         for r in found {
             let Info::Service(si) = &r.info else { continue };
             let package = si.info.item.package_name.clone().unwrap_or_default();
@@ -539,13 +576,10 @@ impl Providers {
                 .and_then(|f| f.categories.as_ref())
                 .is_some_and(|c| c.iter().any(|c| c == CATEGORY_SELF_SCAN_ONLY));
             let unique_id = short_name(&package, &class);
-            if self
-                .users
-                .lock()
-                .unwrap()
-                .get(&user)
-                .is_some_and(|u| u.proxies.iter().any(|p| p.unique_id == unique_id))
-            {
+            if let Some(index) = remaining.iter().position(|p| p.unique_id == unique_id) {
+                let proxy = remaining.remove(index);
+                self.update_binding(&proxy);
+                ordered.push(proxy);
                 continue;
             }
             let providers = self.me.clone();
@@ -567,10 +601,15 @@ impl Providers {
             let (actively, composite) = {
                 let mut users = self.users.lock().unwrap();
                 let u = users.entry(user).or_default();
-                u.proxies.push(proxy.clone());
                 (u.actively.clone(), u.composite.clone())
             };
             self.proxy_update_discovery(&proxy, actively.contains(&proxy.package), composite);
+            ordered.push(proxy);
+        }
+        self.users.lock().unwrap().entry(user).or_default().proxies = ordered;
+        for proxy in remaining {
+            proxy.state.lock().unwrap().running = false;
+            self.unbind(&proxy);
         }
         Ok(())
     }
@@ -1119,6 +1158,39 @@ impl Service for ProviderCallback {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn watcher_removes_retired_proxies_and_their_routes() {
+        crate::system::with_discovery_session(|host, publish| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    let mut service = crate::package::pkg::Service::default();
+                    service.main.enabled = true;
+                    service.main.exported = true;
+                    service.main.component.name = "p.Routes".into();
+                    service.main.component.package_name = "p".into();
+                    service.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec![SERVICE_INTERFACE.into()],
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                    pkg.services = vec![service];
+                }
+            });
+            let providers = Providers::new(host.clone(), Arc::new(Mutex::new(HashMap::new())));
+            providers.scan(0).unwrap();
+            let proxy = providers.users.lock().unwrap()[&0].proxies[0].clone();
+            assert!(proxy.state.lock().unwrap().running);
+            publish(&mut |pkg| pkg.services.clear());
+            providers.scan(0).unwrap();
+            assert!(providers.users.lock().unwrap()[&0].proxies.is_empty());
+            assert!(!proxy.state.lock().unwrap().running);
+            assert!(!proxy.state.lock().unwrap().bound);
+        });
+    }
     use super::*;
     use aim_binder_host::parcel::EX_SECURITY;
 

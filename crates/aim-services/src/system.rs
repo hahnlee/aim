@@ -47,6 +47,8 @@ mod internal_suspension;
 #[cfg(test)]
 #[path = "system_package_internal_usage_tests.rs"]
 mod internal_usage_tests;
+#[cfg(test)]
+pub(crate) use internal_usage_tests::host_mutations::with_discovery_session;
 mod legacy_domain;
 #[path = "system_package_original_domains.rs"]
 pub mod original_domains;

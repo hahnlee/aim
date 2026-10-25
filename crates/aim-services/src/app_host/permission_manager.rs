@@ -1685,7 +1685,10 @@ impl PermissionManager {
         *held = Some(after.clone());
         drop(held);
         self.grants_changed()?;
-        self.on_state_mutated(&changes, kill)
+        let effects = self.on_state_mutated(&changes, kill);
+        let audio = self.host.refresh_audio_permissions();
+        effects?;
+        audio
     }
 
     /// `PermissionManagerServiceInternal.resetRuntimePermissions` of
@@ -1858,6 +1861,55 @@ impl PermissionManager {
             return Ok(BTreeSet::new());
         }
         Ok(self.host.user_restrictions()?.clone())
+    }
+
+    /// AudioServerPermissionProvider's batch, over one package capture and access-owner view.
+    pub(super) fn audio_permission_holders(
+        &self,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        permissions: &[&str],
+        users: &[i32],
+        app_ids: impl Iterator<Item = i32>,
+    ) -> Result<Vec<Vec<i32>>, Exception> {
+        let user0 = self.user0()?;
+        let platform = self.host.platform()?;
+        let state = capture.state();
+        let resolution = capture.resolution().map_err(|e| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("audio permission resolution: {e:?}"),
+            )
+        })?;
+        let groups = self.groups(state);
+        let access = Access {
+            state,
+            filter: &resolution.apps_filter,
+            defined: &self.system()?.permissions,
+            groups: &groups,
+            user0: &user0,
+            compat: &platform.compat,
+        };
+        let app_ids: Vec<_> = app_ids.collect();
+        permissions
+            .iter()
+            .map(|permission| {
+                let mut holders = Vec::new();
+                for user in users {
+                    for &app_id in &app_ids {
+                        let uid = user * PER_USER_RANGE + app_id;
+                        if app_id == 0
+                            || app_id == 1000
+                            || (!(90000..=99999).contains(&app_id)
+                                && access.holds(uid, permission)?)
+                        {
+                            holders.push(uid);
+                        }
+                    }
+                }
+                holders.sort_unstable();
+                Ok(holders)
+            })
+            .collect()
     }
 
     /// `Context.checkPermission(permission, INVALID_PID, uid)` in the
@@ -2203,6 +2255,44 @@ impl Service for PermissionManager {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn audio_batch_uses_the_live_permission_owner_and_retained_package_capture() {
+        crate::system::with_discovery_session(|host, publish| {
+            let manager = PermissionManager::with_system(
+                host.clone(),
+                AccessSystem {
+                    permissions: vec![definition(CAMERA, "p", 1)],
+                    ..Default::default()
+                },
+            );
+            *manager.user0.lock().unwrap() = Some(Arc::new(AccessUser {
+                app_id_permissions: vec![(10100, vec![(CAMERA.into(), RUNTIME_GRANTED)])],
+                ..Default::default()
+            }));
+            let before = host.package_capture().unwrap();
+            assert_eq!(
+                manager
+                    .audio_permission_holders(
+                        &before,
+                        &[CAMERA],
+                        &[0],
+                        [10100, 10101, 1000, 99001].into_iter()
+                    )
+                    .unwrap(),
+                [vec![1000, 10100]]
+            );
+            *manager.user0.lock().unwrap() = Some(Arc::new(AccessUser::default()));
+            publish(&mut |pkg| pkg.activities.clear());
+            assert_eq!(
+                manager
+                    .audio_permission_holders(&before, &[CAMERA], &[0], [10100, 10101].into_iter())
+                    .unwrap(),
+                [Vec::<i32>::new()]
+            );
+            assert!(!Arc::ptr_eq(&before, &host.package_capture().unwrap()));
+        });
+    }
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;

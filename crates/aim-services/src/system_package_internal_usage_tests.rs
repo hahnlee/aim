@@ -2466,7 +2466,7 @@ fn app_data_read_through_observes_persisted_session_receipts() {
 }
 
 #[path = "system_package_host_mutation_tests.rs"]
-mod host_mutations;
+pub(crate) mod host_mutations;
 
 #[test]
 fn user_unlocking_during_query_lag_preserves_canonical_install_and_retained_users() {

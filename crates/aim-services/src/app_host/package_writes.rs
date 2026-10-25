@@ -70,6 +70,7 @@ pub(super) struct PackageChanged<'a> {
     pub package: &'a str,
     pub user: i32,
     pub components: &'a [String],
+    pub removed: bool,
 }
 
 impl PackageChanged<'_> {
@@ -95,7 +96,9 @@ pub(super) struct DataCleared<'a> {
 /// users): an event it does not take is ignored, as `PackageMonitor`'s
 /// callbacks do nothing by default.
 pub(super) trait PackageMonitor: Send + Sync {
-    fn package_changed(&self, _change: &PackageChanged<'_>) {}
+    fn package_changed(&self, _change: &PackageChanged<'_>) -> Result<(), Exception> {
+        Ok(())
+    }
     fn package_data_cleared(&self, _cleared: &DataCleared<'_>) {}
 }
 
@@ -447,15 +450,15 @@ impl Writes {
             package: &change.package,
             user: change.user,
             components: &change.components,
+            removed: false,
         };
-        for monitor in self.host.package_monitors.of(change.user) {
-            monitor.package_changed(&changed);
-        }
+        let failure = self.host.notify_package_discoveries(&changed).err();
         self.invoke_callbacks(
             &change.monitor_intent(),
             change.user,
             change.allow_list.as_deref(),
-        )
+        )?;
+        failure.map_or(Ok(()), Err)
     }
 
     /// All public handles register with the session's native event registry.
@@ -915,12 +918,13 @@ mod tests {
     struct Seen(Mutex<Vec<(String, i32, bool)>>);
 
     impl PackageMonitor for Seen {
-        fn package_changed(&self, change: &PackageChanged<'_>) {
+        fn package_changed(&self, change: &PackageChanged<'_>) -> Result<(), Exception> {
             self.0.lock().unwrap().push((
                 change.package.into(),
                 change.user,
                 change.some_packages_changed(),
             ));
+            Ok(())
         }
     }
 
@@ -950,11 +954,12 @@ mod tests {
             package: "org.example.app",
             user: 0,
             components: &components,
+            removed: false,
         };
         let of_user_0 = monitors.of(0);
         assert_eq!(of_user_0.len(), 1);
         for m in of_user_0 {
-            m.package_changed(&changed);
+            m.package_changed(&changed).unwrap();
         }
         assert_eq!(
             *all.0.lock().unwrap(),
@@ -974,7 +979,23 @@ mod tests {
             package: "org.example.app",
             user: 0,
             components: &components,
+            removed: false,
         };
         assert!(!changed.some_packages_changed());
+    }
+}
+
+impl AppHost {
+    pub(super) fn notify_package_discoveries(
+        &self,
+        change: &PackageChanged<'_>,
+    ) -> Result<(), Exception> {
+        let mut failure = self.refresh_audio_permissions().err();
+        for monitor in self.package_monitors.of(change.user) {
+            if let Err(error) = monitor.package_changed(change) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 }

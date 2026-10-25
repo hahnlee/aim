@@ -387,7 +387,7 @@ impl TextServices {
     /// checkers found again (`initializeTextServicesData`) and, while
     /// enabled, a system one selected if none was. A changed package is not
     /// disappearing (`isPackageDisappearing`), so a selected one stays.
-    fn packages_changed(&self, user: i32) -> Result<(), Exception> {
+    fn packages_changed(&self, user: i32, removed: Option<&str>) -> Result<(), Exception> {
         let mut users = self.users.lock().unwrap();
         let Some(data) = users.get_mut(&user) else {
             return Ok(());
@@ -397,7 +397,10 @@ impl TextServices {
         if !self.enabled(user)? {
             return Ok(());
         }
-        if selected.is_none() {
+        if selected
+            .as_ref()
+            .is_none_or(|checker| removed == Some(checker.package.as_str()))
+        {
             let sci = self.avail_system_checker(&data.checkers);
             self.set_current(sci.as_deref(), user)?;
         }
@@ -987,14 +990,15 @@ impl TextServices {
 impl PackageMonitor for TextServices {
     /// On its handler (`register(context, null, ...)`), when the whole
     /// package changed (`onPackageChanged`'s default).
-    fn package_changed(&self, change: &PackageChanged<'_>) {
+    fn package_changed(&self, change: &PackageChanged<'_>) -> Result<(), Exception> {
         if !change.some_packages_changed() {
-            return;
+            return Ok(());
         }
         let (me, user) = (self.me.clone(), change.user);
+        let removed = change.removed.then(|| change.package.to_owned());
         self.post(move || {
             if let Some(me) = me.upgrade()
-                && let Err(e) = me.packages_changed(user)
+                && let Err(e) = me.packages_changed(user, removed.as_deref())
             {
                 eprintln!(
                     "app host: textservices: packages of user {user}: {}",
@@ -1002,6 +1006,7 @@ impl PackageMonitor for TextServices {
                 );
             }
         });
+        Ok(())
     }
 }
 
