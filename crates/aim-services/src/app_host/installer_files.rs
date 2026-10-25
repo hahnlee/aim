@@ -135,7 +135,7 @@ impl Service for InstallerFiles {
                         format!("/{path}")
                     };
                     let (root, data) = (self.host.root()?, self.host.data()?);
-                    let exists = super::packages::host_path(root, data, &path)
+                    let exists = super::resources::host_path(root, data, &path)
                         .is_ok_and(|host| host.exists());
                     if !exists {
                         return Err(file_not_found(&path));

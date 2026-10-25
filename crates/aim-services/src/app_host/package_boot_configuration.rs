@@ -114,7 +114,7 @@ impl BootConfiguration {
     fn creation_inode(&self, path: Option<&str>) -> Result<Vec<u8>, Exception> {
         let path = path.unwrap_or_default();
         let (mode, parent) = creation(path)?;
-        let host = super::packages::host_path(self.host.root()?, self.host.data()?, parent)
+        let host = super::resources::host_path(self.host.root()?, self.host.data()?, parent)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         if !host.is_dir() {
             return Err(Exception::new(

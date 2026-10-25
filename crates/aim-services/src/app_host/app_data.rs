@@ -421,7 +421,7 @@ impl AppHost {
         };
         let root = self.root().map_err(|e| e.message)?;
         let data = self.data().map_err(|e| e.message)?;
-        if !super::packages::host_path(root, data, native)?.exists() {
+        if !super::resources::host_path(root, data, native)?.exists() {
             return Ok(());
         }
         let mut p = Parcel::new();

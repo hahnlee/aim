@@ -74,11 +74,11 @@ pub(super) fn request(host: &Arc<AppHost>, prepared: Prepared) -> Result<(), Ref
     let store = data.parent().map(|volume| volume.join("fs-verity"));
     let mut files = Vec::new();
     for (split, path) in &prepared.files {
-        let host_file = super::packages::host_path(root, data, path).map_err(state)?;
+        let host_file = super::resources::host_path(root, data, path).map_err(state)?;
         if !adb
             && trusted != Some(0)
             && let Some(base) = path.strip_suffix(".apk")
-            && super::packages::host_path(root, data, &format!("{base}.digests"))
+            && super::resources::host_path(root, data, &format!("{base}.digests"))
                 .map_err(state)?
                 .exists()
         {
@@ -93,7 +93,7 @@ pub(super) fn request(host: &Arc<AppHost>, prepared: Prepared) -> Result<(), Ref
             fs_verity_digest,
         });
     }
-    let build = host.inputs()?.packages.signing_build();
+    let build = crate::package::sign::Build::of(&host.framework()?.0);
     let listener = host.process.strong(listener);
     let (optional, required) = (prepared.optional, prepared.required);
     std::thread::Builder::new()

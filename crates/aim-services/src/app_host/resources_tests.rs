@@ -63,6 +63,5 @@ fn framework_requests_do_not_load_packages() {
         .transact(pm::GET_SPLIT_PERMISSIONS, &request, false)
         .unwrap();
     reply.reader().read_exception().unwrap().unwrap();
-    assert!(host.inputs.get().is_none());
     assert!(std::ptr::eq(framework, host.framework().unwrap()));
 }

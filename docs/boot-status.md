@@ -226,10 +226,16 @@ notices and permission changes, and reconnects on controller death. Account
 deletion (#1504), bound widgets (#1789), default WebView repair/explicit choice
 (#1491), internal guest broadcasts (#2167) and ShortcutService's manifest
 rescan/removal cleanup (#1669) retain their existing unsupported boundaries.
-The boot-input join remains #2023. Discovery/permission/session focused tests
-pass; one pre-existing Settings test is ignored and not run. No new guest or
-real CTS run is claimed. Platform/config reads no longer allocate application
-shared memory; bindApplication initializes that same platform-owned object on
+The boot-input join, Packages loader and persisted Settings/list/APK reconstruction
+are removed. Package checksums take build policy from the framework resource
+owner; the remaining inputs() compatibility accessor exposes only platform
+configuration and contains no package/access state. Package-dependent boot
+stops if its required session capture is unavailable. The 81 focused
+discovery/permission/session tests pass; one pre-existing Settings test is ignored and not run. The broader library
+run reports 1,695 passing, 14 failing and 13 ignored tests; all 14 failures also
+reproduce on committed HEAD, with no additional failure or missing-input skip.
+No new guest or real CTS run is claimed. Platform/config reads no longer
+allocate application shared memory; bindApplication initializes that same platform-owned object on
 first use, retaining allocation errors there.
 
 The current native CTS runtime restores active PackageSettings whose code was

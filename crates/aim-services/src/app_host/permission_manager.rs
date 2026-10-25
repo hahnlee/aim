@@ -38,7 +38,6 @@ use aim_service_aidl::android_permission_ionpermissionschangelistener as changed
 use aim_service_aidl::android_permission_ipermissionmanager as pm;
 
 use super::compat::CompatConfig;
-use super::packages::permission_granted;
 use super::{AppHost, reply};
 use crate::package::apps_filter::{self, AppsFilter, NotModelled, Setting};
 use crate::package::info::{
@@ -1434,6 +1433,32 @@ impl Access<'_> {
     }
 }
 
+/// `PermissionFlags.isPermissionGranted` (services/permission at
+/// `android-16.0.0_r1`).
+pub(super) fn permission_granted(flags: i32) -> bool {
+    const INSTALL_GRANTED: i32 = 1 << 0;
+    const INSTALL_REVOKED: i32 = 1 << 1;
+    const PROTECTION_GRANTED: i32 = 1 << 2;
+    const RUNTIME_GRANTED: i32 = 1 << 4;
+    const LEGACY_GRANTED: i32 = 1 << 10;
+    const IMPLICIT_GRANTED: i32 = 1 << 11;
+    const RESTRICTION_REVOKED: i32 = 1 << 18;
+    let has = |bits: i32| flags & bits == bits;
+    if has(INSTALL_GRANTED) {
+        return true;
+    }
+    if has(INSTALL_REVOKED) {
+        return false;
+    }
+    if has(PROTECTION_GRANTED) || has(LEGACY_GRANTED) || has(IMPLICIT_GRANTED) {
+        return true;
+    }
+    if has(RESTRICTION_REVOKED) {
+        return false;
+    }
+    has(RUNTIME_GRANTED)
+}
+
 pub struct PermissionManager {
     host: Arc<AppHost>,
     /// `AccessState.systemState`: the definitions and trees last persisted.
@@ -2475,13 +2500,11 @@ mod tests {
                 .unwrap(),
             Some(manager.capture_definitions().unwrap())
         );
-        assert!(host.inputs.get().is_none());
         assert!(host.platform.get().is_none());
         assert_eq!(
             host.inputs().err().unwrap().message,
             "no property ro.build.version.sdk"
         );
-        assert!(host.inputs.get().is_none());
         assert_eq!(
             manager
                 .granted_permissions("android", 1000, 0)
@@ -2525,7 +2548,6 @@ mod tests {
             std::fs::remove_file(fixture.data.join(path)).unwrap();
             assert_eq!(read().unwrap_err().code, EX_UNSUPPORTED_OPERATION);
         }
-        assert!(fixture.host.inputs.get().is_none());
     }
 
     /// `AppIdPermissionPersistence.parsePermission`, `toLegacyPermissions`
@@ -2922,7 +2944,6 @@ mod tests {
         );
         assert!(before.app_id_app_ops.is_empty());
         assert!(before.package_app_ops.is_empty());
-        assert!(persisted.host.inputs.get().is_none());
     }
 
     #[test]
@@ -2945,7 +2966,6 @@ mod tests {
         assert!(manager.groups(&after).is_empty());
         assert!(!groups.is_empty());
         assert_eq!(*manager.groups(&before), *groups);
-        assert!(persisted.host.inputs.get().is_none());
     }
 
     fn with_access<T>(f: impl FnOnce(&Access<'_>) -> T) -> T {

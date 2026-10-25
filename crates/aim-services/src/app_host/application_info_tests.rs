@@ -113,7 +113,6 @@ fn application_info_reuses_acquisition_and_preserves_trusted_flags() {
             .unwrap()
             .is_none()
     );
-    assert!(host.inputs.get().is_none());
     // No supplied capture means an ordinary acquisition, with its real error.
     assert_eq!(
         host.application_info("example.app", 0, None)

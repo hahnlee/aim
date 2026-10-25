@@ -192,8 +192,7 @@ impl Drop for PackageList {
 
 impl AppHost {
     /// Native services' `PackageManagerInternal.getPackageList(observer)`.
-    /// This reads the native boot capture without changing Packages::load or
-    /// the app-facing query projection (#2023).
+    /// Names come from the same native session capture as app-facing queries.
     pub fn get_package_list(
         &self,
         observer: Option<Arc<dyn PackageListObserver>>,

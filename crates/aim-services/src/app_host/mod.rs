@@ -135,7 +135,6 @@ pub mod package_shell;
 mod package_shell_policy;
 mod package_shell_read;
 mod package_writes;
-pub mod packages;
 pub mod pending_intents;
 pub mod permission_checker;
 pub mod permission_controller;
@@ -372,20 +371,6 @@ impl Platform {
     }
 }
 
-/// What the app host reads, loaded when the first process starts: the
-/// platform and the packages.
-struct Inputs {
-    platform: Arc<Platform>,
-    packages: packages::Packages,
-}
-
-impl std::ops::Deref for Inputs {
-    type Target = Platform;
-    fn deref(&self) -> &Platform {
-        &self.platform
-    }
-}
-
 /// A start's app data isolation (`zygote::Start`'s).
 #[derive(Default)]
 struct Isolation {
@@ -531,7 +516,6 @@ pub struct AppHost {
     platform: OnceLock<Arc<Platform>>,
     /// The device's framework and APK resource context.
     framework: OnceLock<resources::Framework>,
-    inputs: OnceLock<Inputs>,
     loading: Mutex<()>,
     zygote: Mutex<Option<zygote::Session>>,
     next_seq: AtomicI64,
@@ -645,7 +629,6 @@ impl AppHost {
             configured: OnceLock::new(),
             platform: OnceLock::new(),
             framework: OnceLock::new(),
-            inputs: OnceLock::new(),
             loading: Mutex::new(()),
             zygote: Mutex::new(None),
             next_seq: AtomicI64::new(1),
@@ -1193,40 +1176,10 @@ impl AppHost {
         Ok(self.framework.get_or_init(|| framework))
     }
 
-    /// What starts read, loaded by the first.
-    fn inputs(&self) -> Result<&Inputs, Exception> {
-        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        if let Some(inputs) = self.inputs.get() {
-            return Ok(inputs);
-        }
-        let platform = self.platform()?.clone();
-        let configured = self
-            .configured
-            .get()
-            .ok_or_else(|| state("app host not configured".into()))?;
-        let _loading = self.loading.lock().unwrap();
-        if let Some(inputs) = self.inputs.get() {
-            return Ok(inputs);
-        }
-        let started = Instant::now();
-        let compat = &platform.compat;
-        let packages = packages::Packages::load(
-            &configured.root,
-            &configured.data,
-            platform.device_density,
-            &platform.locales,
-            &|name| (configured.properties)(name),
-            // `SharedLibrariesImpl.ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES`.
-            &|name, target_sdk| compat.is_enabled(142_191_088, Some(name), target_sdk),
-            &apex_manager::inventory(&self.process).map_err(state)?,
-        )
-        .map_err(state)?;
-        eprintln!(
-            "app host: {} packages loaded in {:?}",
-            packages.state().packages.len(),
-            started.elapsed()
-        );
-        Ok(self.inputs.get_or_init(|| Inputs { platform, packages }))
+    /// Compatibility accessor for platform/config consumers; package queries
+    /// acquire the native session through package_capture.
+    fn inputs(&self) -> Result<&Arc<Platform>, Exception> {
+        self.platform()
     }
 
     /// The launcher's start of package `name`'s activity `class`, user
@@ -5373,8 +5326,8 @@ impl Service for Control {
                     Ok(()) => eprintln!("app host: package boot: through its construction"),
                     Err(e) => return eprintln!("app host: package boot: {e:?}"),
                 }
-                if let Err(e) = host.inputs().and_then(|_| host.packages()) {
-                    eprintln!("app host: loading its inputs: {e:?}");
+                if let Err(e) = host.platform().and_then(|_| host.package_capture()) {
+                    return eprintln!("app host: package boot inputs: {e:?}");
                 }
                 // UserManagerService's construction: the system user
                 // recorded at first boot.

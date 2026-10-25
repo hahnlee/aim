@@ -128,7 +128,7 @@ impl InitialContext {
     /// layer reports them for the guest (`dev.aim.guest-inode`, else root
     /// and the host's mode bits).
     fn native_library_inode(&self, path: &str) -> Result<Vec<u8>, Exception> {
-        let host = super::packages::host_path(self.host.root()?, self.host.data()?, path)
+        let host = super::resources::host_path(self.host.root()?, self.host.data()?, path)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         let errno = |e: std::io::Error| {
             Exception::new(

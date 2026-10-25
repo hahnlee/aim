@@ -1,12 +1,22 @@
 //! Framework and APK resources in the device configuration, independent
 //! of package selection and the live package model.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::package::parse::{self, Platform};
 use crate::package::pkg::AndroidPackage;
 
-use super::packages::host_path;
+/// Where the guest's `path` is on the host: below `data` for `/data`,
+/// else below the image.
+pub(super) fn host_path(root: &Path, data: &Path, path: &str) -> Result<PathBuf, String> {
+    let relative = path
+        .strip_prefix('/')
+        .ok_or_else(|| format!("relative code path {path}"))?;
+    Ok(match relative.strip_prefix("data/") {
+        Some(rest) => data.join(rest),
+        None => root.join(relative),
+    })
+}
 
 /// The framework's resources as the device configures them
 /// (`Resources.getSystem`: framework-res.apk with its static overlays, at

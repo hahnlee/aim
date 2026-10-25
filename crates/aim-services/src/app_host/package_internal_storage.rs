@@ -201,7 +201,7 @@ impl PackageInternalStorage {
             )
         })?;
         let (root, data) = (self.host.root()?, self.host.data()?);
-        if !super::packages::host_path(root, data, &library).is_ok_and(|h| h.exists()) {
+        if !super::resources::host_path(root, data, &library).is_ok_and(|h| h.exists()) {
             return Ok(());
         }
         let mut data = Parcel::new();
