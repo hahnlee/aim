@@ -1855,10 +1855,11 @@ impl ShortcutManager {
             .get(package)
             .and_then(|ps| ps.pkg.clone())
             .ok_or_else(|| Exception::illegal_argument(format!("no package {package}")))?;
-        let inputs = self.host.inputs()?;
+        let inputs = self.host.platform()?;
         let ids_u: Vec<u32> = ids.iter().map(|&i| i as u32).collect();
-        let found = inputs
-            .packages
+        let found = self
+            .host
+            .framework()?
             .resource_names_and_strings(self.host.root()?, &inputs.data, &pkg, &ids_u)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("shortcut: {e}")))?;
         // `lookUpResourceName`: a framework resource by its ID.

@@ -153,8 +153,7 @@ impl SafetyCenter {
             Some(bytes) => Table::parse(&bytes).map_err(|e| state(e.to_string()))?,
             None => return Err(state("no resources.arsc".into())),
         };
-        let inputs = self.host.inputs()?;
-        let resources = inputs.packages.package_resources(&table);
+        let resources = self.host.framework()?.package_resources(&table);
         // `getOptionalStringByName`.
         let string = |name: &str| {
             resources

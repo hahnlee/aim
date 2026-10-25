@@ -508,8 +508,7 @@ impl WifiService {
             Some(bytes) => ResourceTable::parse(&bytes).map_err(|e| state(e.to_string()))?,
             None => return Err(state("no resources.arsc".into())),
         };
-        let inputs = self.host.inputs()?;
-        let resources = inputs.packages.package_resources(&table);
+        let resources = self.host.framework()?.package_resources(&table);
         // `Resources.getBoolean`: any integer, nonzero is true.
         let boolean = |name: &str| -> Result<bool, Exception> {
             let id = resources

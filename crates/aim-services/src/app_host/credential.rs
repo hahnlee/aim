@@ -452,9 +452,8 @@ impl CredentialManager {
             );
             return Ok(Default::default());
         };
-        let inputs = self.host.inputs()?;
-        let parsed = inputs
-            .packages
+        let inputs = self.host.platform()?;
+        let parsed = self.host.framework()?
             .xml_resource(self.host.root()?, &inputs.data, &pkg, id, |e, ctx| {
                 if e.name != "credential-provider" {
                     eprintln!(

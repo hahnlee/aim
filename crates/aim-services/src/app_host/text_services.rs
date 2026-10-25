@@ -498,7 +498,7 @@ impl TextServices {
                     format!("queryIntentServicesAsUser: {e:?}"),
                 ),
             })?;
-        let inputs = self.host.inputs()?;
+        let inputs = self.host.platform()?;
         let root = self.host.root()?;
         let mut checkers = Vec::new();
         for r in found {
@@ -525,8 +525,9 @@ impl TextServices {
                 .filter(|id| *id != 0);
             let pkg = state.packages.get(&package).and_then(|ps| ps.pkg.clone());
             let parsed = match (id, pkg) {
-                (Some(id), Some(pkg)) => inputs
-                    .packages
+                (Some(id), Some(pkg)) => self
+                    .host
+                    .framework()?
                     .xml_resource(root, &inputs.data, &pkg, id, parse_checker)
                     .and_then(|r| r),
                 (None, _) => Err(format!("No {SERVICE_META_DATA} meta-data")),

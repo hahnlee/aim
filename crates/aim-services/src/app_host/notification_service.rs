@@ -646,9 +646,9 @@ impl NotificationManager {
             eprintln!("app host: cannot load package for icon:{package} res:{name}");
             return Ok(0);
         };
-        let inputs = self.host.inputs()?;
-        inputs
-            .packages
+        let inputs = self.host.platform()?;
+        self.host
+            .framework()?
             .named_identifier(self.host.root()?, &inputs.data, pkg, name)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("notification: {e}")))
     }

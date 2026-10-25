@@ -100,7 +100,7 @@ pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Excepti
                 format!("queryIntentServices: {e:?}"),
             )
         })?;
-    let inputs = host.inputs()?;
+    let inputs = host.platform()?;
     let root = host.root()?;
     let mut services = Vec::new();
     for r in found {
@@ -122,8 +122,7 @@ pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Excepti
         let pkg = state.packages.get(&package).and_then(|ps| ps.pkg.clone());
         let parsed = match (id, pkg) {
             (Some(id), Some(pkg)) => {
-                inputs
-                    .packages
+                host.framework()?
                     .xml_resource(root, &inputs.data, &pkg, id, |e, ctx| {
                         if e.name != ATTRIBUTES {
                             return Err(format!("Meta-data does not start with {ATTRIBUTES} tag"));

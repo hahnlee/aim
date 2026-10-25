@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::resources::{Framework, device_platform};
+use super::resources::device_platform;
 
 use crate::package::model::{PackageState, PackageUserState};
 use crate::package::parse::{self, Platform};
@@ -35,7 +35,7 @@ const APP_LIB32_INSTALL_DIR: &str = "/data/app-lib";
 
 pub struct Packages {
     state: model::State,
-    framework: Framework,
+    signing_build: package::sign::Build,
     /// User 0's permission and app op state (`access.abx`).
     access: Option<package::permissions::AccessUser>,
     domains: DomainInputs,
@@ -57,24 +57,6 @@ pub struct DomainPackage {
     pub id: Option<String>,
     pub signatures: Option<Vec<Vec<u8>>>,
     pub system: bool,
-}
-
-/// `ActivityRecord.WindowStyle`: what an activity's theme says of its
-/// window.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WindowStyle {
-    pub translucent: bool,
-    pub floating: bool,
-    pub show_wallpaper: bool,
-    pub no_display: bool,
-}
-
-impl WindowStyle {
-    /// `mOccludesParent` of an activity of this style: not translucent
-    /// or floating, or showing the wallpaper.
-    pub fn occludes_parent(&self) -> bool {
-        !(self.translucent || self.floating) || self.show_wallpaper
-    }
 }
 
 impl Packages {
@@ -282,7 +264,7 @@ impl Packages {
             Some(package::scan_snapshot::query_state::select_permission_controller(&state)?);
         Ok(Packages {
             state,
-            framework: Framework(platform),
+            signing_build: package::sign::Build::of(&platform),
             access: Some(access),
             domains: DomainInputs {
                 packages: persisted
@@ -313,237 +295,16 @@ impl Packages {
 
     /// What the APK signature verifier depends on of the platform.
     pub fn signing_build(&self) -> package::sign::Build {
-        package::sign::Build::of(&self.framework.0)
-    }
-
-    /// A package context's resources (`createPackageContext`): the
-    /// framework's, then the package's `table`, in the device's
-    /// configuration.
-    pub fn package_resources<'a>(
-        &'a self,
-        table: &'a crate::package::parse::resources::Table,
-    ) -> crate::package::parse::resources::Resources<'a> {
-        crate::package::parse::resources::Resources {
-            tables: vec![&self.framework.0.framework, table],
-            overlays: &self.framework.0.framework_overlays,
-            config: self.framework.0.config(),
+        package::sign::Build {
+            sdk_int: self.signing_build.sdk_int,
+            release: self.signing_build.release,
+            always_load_past_certs_v4: self.signing_build.always_load_past_certs_v4,
         }
     }
 
     /// User 0's permission and app op state.
     pub fn access(&self) -> Option<&package::permissions::AccessUser> {
         self.access.as_ref()
-    }
-
-    /// `ComponentInfo.loadXmlMetaData`'s parser and the attributes of
-    /// `getResourcesForApplication`: the compiled XML resource `id` of
-    /// `pkg`, from its APKs below the image `root` or the guest's `/data`
-    /// at `data`, its root element given to `read` with the package's
-    /// resources (its own and the framework's; overlays of the package
-    /// are not applied, #1426).
-    pub fn xml_resource<T>(
-        &self,
-        root: &Path,
-        data: &Path,
-        pkg: &AndroidPackage,
-        id: u32,
-        read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
-    ) -> Result<T, String> {
-        self.with_resources(root, data, pkg, |resources, apks, table_apks| {
-            let (table, file) = resources
-                .resource_string_source(id)
-                .ok_or_else(|| format!("no XML resource {id:#x}"))?;
-            let bytes = match table_apks
-                .get(table)
-                .ok_or("an XML resource of an overlay")?
-            {
-                Some(i) => apks[*i].file(file),
-                None => aim_apps::apk::Apk::open(&root.join("system/framework/framework-res.apk"))
-                    .and_then(|apk| apk.file(file)),
-            }
-            .map_err(|e| e.to_string())?;
-            let document = aim_apps::res::xml(&bytes).map_err(|e| e.to_string())?;
-            let ctx = parse::attrs::Ctx {
-                res: resources,
-                attrs: &self.framework.0.framework_attrs,
-                error: Default::default(),
-            };
-            let value = read(&document, &ctx);
-            match ctx.error.take() {
-                Some(e) => Err(e),
-                None => Ok(value),
-            }
-        })
-    }
-
-    /// `getResourcesForApplication`'s `getResourceName` and `getString` of
-    /// each of `ids` in `pkg`'s resources: its package id, type and entry,
-    /// and its string if it is one.
-    #[allow(clippy::type_complexity)]
-    pub fn resource_names_and_strings(
-        &self,
-        root: &Path,
-        data: &Path,
-        pkg: &AndroidPackage,
-        ids: &[u32],
-    ) -> Result<Vec<(Option<(u8, String, String)>, Option<String>)>, String> {
-        self.with_resources(root, data, pkg, |resources, _, _| {
-            Ok(ids
-                .iter()
-                .map(|&id| {
-                    let name = resources
-                        .entry_name(id)
-                        .map(|(p, t, n)| (p, t.to_owned(), n.to_owned()));
-                    (name, resources.resource_string(id))
-                })
-                .collect())
-        })
-    }
-
-    /// `getResourcesForApplication`'s `getIdentifier(name, "string",
-    /// package)` in `pkg`'s resources: 0 when there is none.
-    pub fn string_identifier(
-        &self,
-        root: &Path,
-        data: &Path,
-        pkg: &AndroidPackage,
-        name: &str,
-    ) -> Result<u32, String> {
-        self.with_resources(root, data, pkg, |resources, _, _| {
-            Ok(resources
-                .identifier(&pkg.package_name, "string", name)
-                .unwrap_or(0))
-        })
-    }
-
-    /// `getResourcesForApplication`'s `getIdentifier(name, null, null)` in
-    /// `pkg`'s resources: 0 when there is none.
-    pub fn named_identifier(
-        &self,
-        root: &Path,
-        data: &Path,
-        pkg: &AndroidPackage,
-        name: &str,
-    ) -> Result<u32, String> {
-        self.with_resources(root, data, pkg, |resources, _, _| {
-            Ok(full_name_identifier(resources, name).unwrap_or(0))
-        })
-    }
-
-    /// `ActivityRecord.WindowStyle` of the theme `theme` of `pkg`, an app
-    /// targeting `target_sdk` (`getThemeResource`, else `Theme` or
-    /// `Theme_Holo`): the `R.styleable.Window` attributes
-    /// `AttributeCache.get` obtains on the theme of a package's context
-    /// (`Resources.selectDefaultTheme`).
-    pub fn window_style(
-        &self,
-        root: &Path,
-        data: &Path,
-        pkg: &AndroidPackage,
-        theme: u32,
-        target_sdk: i32,
-    ) -> Result<WindowStyle, String> {
-        const HONEYCOMB: i32 = 11;
-        const ICE_CREAM_SANDWICH: i32 = 14;
-        const N: i32 = 24;
-        let style = |name: &str| {
-            self.framework
-                .0
-                .framework
-                .id("style", name)
-                .ok_or_else(|| format!("no framework style {name}"))
-        };
-        let theme = match theme {
-            0 => style(if target_sdk < HONEYCOMB {
-                "Theme"
-            } else {
-                "Theme.Holo"
-            })?,
-            theme => theme,
-        };
-        let default = style(if target_sdk < HONEYCOMB {
-            "Theme"
-        } else if target_sdk < ICE_CREAM_SANDWICH {
-            "Theme.Holo"
-        } else if target_sdk < N {
-            "Theme.DeviceDefault"
-        } else {
-            "Theme.DeviceDefault.Light.DarkActionBar"
-        })?;
-        self.with_resources(root, data, pkg, |resources, _, _| {
-            // `TypedArray.getBoolean`: an integer's, else false.
-            let flag = |name: &str| -> Result<bool, String> {
-                let attr = self
-                    .framework
-                    .0
-                    .framework
-                    .id("attr", name)
-                    .ok_or_else(|| format!("no attribute {name}"))?;
-                let int = parse::resources::TYPE_FIRST_INT..=parse::resources::TYPE_LAST_INT;
-                Ok(resources
-                    .styled_attr(theme, default, attr)
-                    .is_some_and(|v| int.contains(&v.kind) && v.data != 0))
-            };
-            Ok(WindowStyle {
-                translucent: flag("windowIsTranslucent")?,
-                floating: flag("windowIsFloating")?,
-                show_wallpaper: flag("windowShowWallpaper")?,
-                no_display: flag("windowNoDisplay")?,
-            })
-        })
-    }
-
-    /// `pkg`'s resources (its own and the framework's), from its APKs
-    /// below the image `root` or the guest's `/data` at `data`, given to
-    /// `f` with the APKs and each table's APK among them (None for the
-    /// framework's).
-    fn with_resources<T>(
-        &self,
-        root: &Path,
-        data: &Path,
-        pkg: &AndroidPackage,
-        f: impl FnOnce(
-            &parse::resources::Resources<'_>,
-            &[aim_apps::apk::Apk],
-            &[Option<usize>],
-        ) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let base = pkg.base_apk_path.as_deref().ok_or("no base APK")?;
-        let mut paths = vec![base];
-        for split in pkg.split_code_paths.iter().flatten() {
-            paths.push(split.as_deref().ok_or("a null split path")?);
-        }
-        let apks = paths
-            .iter()
-            .map(|path| {
-                let host = host_path(root, data, path)?;
-                aim_apps::apk::Apk::open(&host).map_err(|e| format!("{}: {e}", host.display()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let tables = apks
-            .iter()
-            .map(|apk| {
-                apk.file_if_present("resources.arsc")
-                    .map_err(|e| e.to_string())?
-                    .map(|b| parse::resources::Table::parse(&b).map_err(|e| e.to_string()))
-                    .transpose()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Each table's APK: the framework's first, then the package's.
-        let mut table_apks = vec![None];
-        let mut resources = vec![&self.framework.0.framework];
-        for (i, table) in tables.iter().enumerate() {
-            if let Some(table) = table {
-                resources.push(table);
-                table_apks.push(Some(i));
-            }
-        }
-        let resources = parse::resources::Resources {
-            tables: resources,
-            overlays: &self.framework.0.framework_overlays,
-            config: self.framework.0.config(),
-        };
-        f(&resources, &apks, &table_apks)
     }
 
     /// `getApplicationInfo(name, flags, 0)`.
@@ -643,47 +404,6 @@ pub(super) fn host_path(root: &Path, data: &Path, path: &str) -> Result<PathBuf,
         Some(rest) => data.join(rest),
         None => root.join(relative),
     })
-}
-
-/// `ResourcesImpl.getIdentifier(name, null, null)`: a decimal id as is,
-/// else `AssetManager2::GetResourceId` of `@?package:type/entry`
-/// (`ExtractResourceName`) with neither part to fall back on, a private
-/// attribute found under `^attr-private`.
-fn full_name_identifier(resources: &parse::resources::Resources<'_>, name: &str) -> Option<u32> {
-    if let Ok(id) = name.parse::<i32>() {
-        return Some(id as u32);
-    }
-    let (package, kind, entry) = full_name(name)?;
-    resources.identifier(package, kind, entry).or_else(|| {
-        (kind == "attr")
-            .then(|| resources.identifier(package, "^attr-private", entry))
-            .flatten()
-    })
-}
-
-/// `ExtractResourceName` of `@?package:type/entry`, with no default
-/// package or type: none unless both are named.
-fn full_name(name: &str) -> Option<(&str, &str, &str)> {
-    let name = name.strip_prefix('@').unwrap_or(name);
-    let (mut package, mut kind) = ("", "");
-    let (mut has_package, mut has_kind) = (false, false);
-    let mut start = 0;
-    for (i, c) in name.char_indices() {
-        if kind.is_empty() && c == '/' {
-            has_kind = true;
-            kind = &name[start..i];
-            start = i + 1;
-        } else if package.is_empty() && c == ':' {
-            has_package = true;
-            package = &name[start..i];
-            start = i + 1;
-        }
-    }
-    if (has_package && package.is_empty()) || (has_kind && kind.is_empty()) {
-        return None;
-    }
-    // `GetResourceId` takes neither from a fallback.
-    (!package.is_empty() && !kind.is_empty()).then(|| (package, kind, &name[start..]))
 }
 
 /// One package as the scan leaves it: parsed, with the setting's
@@ -869,24 +589,6 @@ fn join_apex(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `getIdentifier(name, null, null)` takes only a full name, as
-    /// `ExtractResourceName` splits it.
-    #[test]
-    fn full_resource_names_split_as_extract_resource_name() {
-        assert_eq!(full_name("p:drawable/ic"), Some(("p", "drawable", "ic")));
-        assert_eq!(
-            full_name("@android:drawable/ic_lock"),
-            Some(("android", "drawable", "ic_lock"))
-        );
-        // Without a default to fall back on, a missing part finds none.
-        assert_eq!(full_name("drawable/ic"), None);
-        assert_eq!(full_name("p:ic"), None);
-        assert_eq!(full_name("ic"), None);
-        // An empty part given by its separator is refused.
-        assert_eq!(full_name(":drawable/ic"), None);
-        assert_eq!(full_name("p:/ic"), None);
-    }
 
     #[test]
     fn grants_follow_permission_flags() {

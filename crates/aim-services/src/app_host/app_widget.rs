@@ -709,11 +709,12 @@ impl AppWidgetService {
             eprintln!("app host: appwidget: XML parsing failed for AppWidget provider {name}");
             return Ok(None);
         };
-        let inputs = self.host.inputs()?;
+        let inputs = self.host.platform()?;
         let root = self.host.root()?;
         let fail = |e: String| self.unimplemented(&format!("the provider XML of {name}: {e}"));
-        let parsed = inputs
-            .packages
+        let parsed = self
+            .host
+            .framework()?
             .xml_resource(root, &inputs.data, &pkg, id as u32, |e, ctx| {
                 (e.name == "appwidget-provider")
                     .then(|| read_provider_info(&ctx.obtain(e), &provider.component.package))
@@ -732,8 +733,9 @@ impl AppWidgetService {
             .iter()
             .map(|&r| r as u32)
             .collect();
-        let texts = inputs
-            .packages
+        let texts = self
+            .host
+            .framework()?
             .resource_names_and_strings(root, &inputs.data, &pkg, &ids)
             .map_err(fail)?;
         let text = |i: usize, res: i32| (res != 0).then(|| texts[i].1.clone()).flatten();

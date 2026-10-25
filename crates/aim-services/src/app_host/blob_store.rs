@@ -2021,9 +2021,10 @@ impl BlobStore {
             Some(pkg) if valid_resource_id(res_id) => pkg,
             _ => return Ok((None, description)),
         };
-        let inputs = self.host.inputs()?;
-        let found = inputs
-            .packages
+        let inputs = self.host.platform()?;
+        let found = self
+            .host
+            .framework()?
             .resource_names_and_strings(self.host.root()?, &inputs.data, &pkg, &[res_id as u32])
             .map_err(|e| illegal_state(format!("blob_store: {e}")))?;
         let (name, string) = found.into_iter().next().unwrap_or_default();
@@ -2052,9 +2053,9 @@ impl BlobStore {
         let Some(pkg) = self.package_of_user(&leasee.package, user_of(leasee.uid))? else {
             return Ok(0);
         };
-        let inputs = self.host.inputs()?;
-        inputs
-            .packages
+        let inputs = self.host.platform()?;
+        self.host
+            .framework()?
             .string_identifier(self.host.root()?, &inputs.data, &pkg, name)
             .map(|id| id as i32)
             .map_err(|e| illegal_state(format!("blob_store: {e}")))
