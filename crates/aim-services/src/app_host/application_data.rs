@@ -4,13 +4,16 @@
 //! permission is enforced as `Context.enforcePermission` enforces it; the
 //! memory check is DeviceStorageMonitorService's, which the app host does
 //! not run, so none is made; the preloads' file cache is emptied. A
-//! package's processes killed, its data cleared and the customization
-//! broadcast are not implemented (#2164).
+//! package's processes are killed, installd clears its data using the session's
+//! inode receipt and the permission owner publishes its reset. The native
+//! application-data owner coordinates these primitives and completion.
 
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel, UNKNOWN_TRANSACTION};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, UNKNOWN_TRANSACTION,
+};
 use aim_service_aidl::dev_aim_server_iapplicationdatabridge as bridge;
 
 use super::{AppHost, reply};
@@ -40,6 +43,68 @@ impl ApplicationData {
             "{permission}: uid {uid} does not have {permission}."
         )))
     }
+    fn kill_and_wait(&self, package: &str, app_id: i32) -> Result<(), Exception> {
+        let (state, _) = self.host.live_packages()?;
+        if state
+            .packages
+            .get(package)
+            .is_none_or(|ps| ps.app_id != app_id)
+        {
+            return Err(Exception::illegal_argument(
+                "clear-data package/UID identity differs",
+            ));
+        }
+        let starts: Vec<_> = self
+            .host
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, app)| {
+                app.package_uid % super::PER_USER_RANGE == app_id as u32 && app.package == package
+                    || app.package_deps.iter().any(|name| name == package)
+            })
+            .map(|(seq, _)| *seq)
+            .collect();
+        for seq in &starts {
+            if let Err(message) = self.host.kill_process(
+                *seq,
+                super::exit_info::REASON_USER_REQUESTED,
+                super::exit_info::SUBREASON_UNKNOWN,
+                "clearApplicationUserData",
+            ) {
+                // A concurrent death may have retired the same process record.
+                if self.host.apps.lock().unwrap().contains_key(seq) {
+                    return Err(Exception::new(EX_ILLEGAL_STATE, message));
+                }
+            }
+        }
+        if state
+            .system
+            .flags
+            .iter()
+            .any(|(name, enabled)| name == "android.content.pm.wait_application_killed" && *enabled)
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while self
+                .host
+                .apps
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|seq| starts.contains(seq))
+            {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!(
+                        "app host: clear data: timed out waiting for {package}'s killed processes"
+                    );
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Service for ApplicationData {
@@ -66,6 +131,54 @@ impl Service for ApplicationData {
                     p
                 }))
             }
+            bridge::KILL_AND_WAIT => {
+                let a = bridge::KillAndWait::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let result = a
+                    .package_name
+                    .as_deref()
+                    .ok_or_else(|| Exception::illegal_argument("null clear-data package"))
+                    .and_then(|name| self.kill_and_wait(name, a.app_id));
+                reply(result.map(|()| {
+                    bridge::write_kill_and_wait_reply(&mut p);
+                    p
+                }))
+            }
+            bridge::CLEAR_DATA => {
+                let a = bridge::ClearData::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let result = self.host.app_data_packages().and_then(|capture| {
+                    let Some(ps) = a
+                        .package_name
+                        .as_ref()
+                        .and_then(|name| capture.state().packages.get(name))
+                    else {
+                        return Ok(false);
+                    };
+                    if a.user < 0 || !capture.state().users.contains_key(&a.user) {
+                        return Err(Exception::illegal_argument("invalid clear-data user"));
+                    }
+                    self.host.clear_app_data_lif(ps, a.user)
+                });
+                reply(result.map(|succeeded| {
+                    bridge::write_clear_data_reply(&mut p, succeeded);
+                    p
+                }))
+            }
+            bridge::SEND_DEVICE_CUSTOMIZATION_READY => {
+                bridge::SendDeviceCustomizationReady::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.host.broadcasts.send_from_system_with_permission(
+                    &self.host,
+                    super::kept::RawIntent::new(
+                        "android.intent.action.DEVICE_CUSTOMIZATION_READY",
+                        0x0100_0000,
+                        &[],
+                    ),
+                    super::USER_ALL,
+                    "android.permission.RECEIVE_DEVICE_CUSTOMIZATION_READY",
+                );
+                bridge::write_send_device_customization_ready_reply(&mut p);
+                Ok(p)
+            }
             bridge::CHECK_MEMORY => {
                 bridge::CheckMemory::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 bridge::write_check_memory_reply(&mut p);
@@ -91,7 +204,7 @@ impl Service for ApplicationData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+    use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_SECURITY};
 
     /// Root and the system are served; a null permission is refused as
     /// `Context` refuses it; a package's data names its issue.
@@ -150,7 +263,7 @@ mod tests {
         .write(&mut clear);
         assert_eq!(
             code(SYSTEM_UID, bridge::CLEAR_DATA, &clear),
-            Some(EX_UNSUPPORTED_OPERATION)
+            Some(EX_ILLEGAL_STATE)
         );
     }
 }

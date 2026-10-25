@@ -400,6 +400,53 @@ impl Prepared {
                 }
             }
         }
+        if matches!(self.finish, Finish::ResetComponents(_)) {
+            let mut unsuspended = std::collections::BTreeMap::<i32, (Vec<String>, Vec<i32>)>::new();
+            let mut distracted = std::collections::BTreeMap::<i32, (Vec<String>, Vec<i32>)>::new();
+            for plan in &self.plans {
+                let Some(user) = plan.user else {
+                    continue;
+                };
+                let (Some(old), Some(new)) = (
+                    before.packages.get(&plan.package),
+                    after.packages.get(&plan.package),
+                ) else {
+                    continue;
+                };
+                let old_user = info::user_state(old, user);
+                let new_user = info::user_state(new, user);
+                let target = match plan.change {
+                    Change::Suspensions(_)
+                        if old_user
+                            .suspensions
+                            .as_ref()
+                            .is_some_and(|values| !values.is_empty())
+                            && new_user.suspensions.as_ref().is_none_or(Vec::is_empty) =>
+                    {
+                        Some(&mut unsuspended)
+                    }
+                    Change::Distraction(0)
+                        if old_user.distraction_flags != 0 && new_user.distraction_flags == 0 =>
+                    {
+                        Some(&mut distracted)
+                    }
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    let (names, uids) = target.entry(user).or_default();
+                    names.push(plan.package.clone());
+                    uids.push(apps_filter::uid(user, new.app_id));
+                }
+            }
+            for (user, (names, uids)) in unsuspended {
+                dependencies
+                    .effects
+                    .removed_suspensions(&names, &uids, user)?;
+            }
+            for (user, (names, uids)) in distracted {
+                dependencies.effects.distraction(&names, &uids, user, 0)?;
+            }
+        }
         Ok(())
     }
 }

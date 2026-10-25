@@ -366,8 +366,8 @@ impl AppHost {
     }
 
     /// `AppDataHelper.clearAppDataLeafLIF` of `ps` in `user`: installd's
-    /// `clearAppData` of its storage `flags`, a failure logged as the
-    /// original logs it. Its ART profiles are ART Service's
+    /// `clearAppData` of its storage `flags`, with failures returned to
+    /// the native coordinator and its observer. Its ART profiles are ART Service's
     /// (`destroyAppProfilesLIF`), which the app host does not start, so
     /// they stay, as the original leaves them before ART Service runs.
     pub(super) fn clear_app_data(
@@ -376,7 +376,7 @@ impl AppHost {
         ps: &PackageState,
         user: i32,
         flags: i32,
-    ) {
+    ) -> Result<(), String> {
         let mut data = Parcel::new();
         installd::ClearAppData {
             uuid: ps.volume_uuid.clone(),
@@ -386,15 +386,13 @@ impl AppHost {
             ce_data_inode: crate::package::info::user_state(ps, user).ce_data_inode,
         }
         .write(&mut data);
-        if let Err(e) = call(
+        call(
             installd,
             "clearAppData",
             installd::CLEAR_APP_DATA,
             &data,
             installd::read_clear_app_data_reply,
-        ) {
-            eprintln!("app host: app data: {e}");
-        }
+        )
     }
 
     /// `prepareAppDataContentsLeafLIF`: in CE, the native library link
@@ -434,19 +432,13 @@ impl AppHost {
             user_id: user,
         }
         .write(&mut p);
-        if let Err(e) = call(
+        call(
             installd,
             "linkNativeLibraryDirectory",
             installd::LINK_NATIVE_LIBRARY_DIRECTORY,
             &p,
             installd::read_link_native_library_directory_reply,
-        ) {
-            eprintln!(
-                "app host: app data: Failed to link native for {}: {e}",
-                ps.name
-            );
-        }
-        Ok(())
+        )
     }
 }
 

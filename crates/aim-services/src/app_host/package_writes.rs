@@ -25,7 +25,7 @@ use aim_service_aidl::WriteParcelable;
 use super::kept::RawIntent;
 use super::{AppHost, PER_USER_RANGE, USER_ALL};
 use crate::bundle::{self, Value};
-use crate::package::apps_filter::{SYSTEM_UID, app_id, uid, user_id};
+use crate::package::apps_filter::{app_id, uid, user_id};
 use crate::package::info::user_state;
 use crate::package::model::PackageState;
 use crate::package::uri::Uri;
@@ -190,27 +190,6 @@ impl Writes {
             pending.0.remove(&(user_id(uid), package.into()));
             drop(pending);
             self.package_changed(package, dont_kill, components, uid)?;
-        }
-        Ok(())
-    }
-
-    /// `resetComponentEnabledSettingsIfNeededLPw` once `package`'s data in
-    /// `user` was cleared: a package that asks for it
-    /// (`resetEnabledSettingsOnAppDataCleared`) has its components' states
-    /// restored to their defaults (`restoreComponentLPw`), the restrictions
-    /// written and the change sent as a pending one.
-    pub(super) fn reset_components_on_data_cleared(
-        self: &Arc<Self>,
-        package: &str,
-        user: i32,
-    ) -> Result<(), Exception> {
-        let system = self.host.package_system()?;
-        let bridge = system.package_bootstrap()?;
-        let before = system.capture_package_queries_for(&bridge)?;
-        let plans =
-            crate::package::application_data::reset_components(before.state(), package, user);
-        if !plans.is_empty() {
-            system.publish_package_plans(&bridge, &before, plans, SYSTEM_UID)?;
         }
         Ok(())
     }

@@ -35,12 +35,17 @@ impl Service for Effects {
             let mut reply = Parcel::new();
             effects::write_is_state_protected_reply(&mut reply, false);
             Ok(reply)
+        } else if call.code == effects::IS_DATA_PROTECTED {
+            effects::IsDataProtected::read(&mut call.data)?;
+            let mut reply = Parcel::new();
+            effects::write_is_data_protected_reply(&mut reply, false);
+            Ok(reply)
         } else {
             self.0.transact(call)
         }
     }
 }
-struct Bridge(Binder, Arc<std::sync::atomic::AtomicBool>);
+struct Bridge(Binder, Arc<std::sync::atomic::AtomicBool>, Binder);
 impl Service for Bridge {
     fn descriptor(&self) -> &str {
         bootstrap::DESCRIPTOR
@@ -51,6 +56,10 @@ impl Service for Bridge {
             bootstrap::GET_PACKAGE_MUTATION_BRIDGE => {
                 bootstrap::GetPackageMutationBridge::read(&mut call.data)?;
                 bootstrap::write_get_package_mutation_bridge_reply(&mut reply, Some(self.0));
+            }
+            bootstrap::GET_APPLICATION_DATA_BRIDGE => {
+                bootstrap::GetApplicationDataBridge::read(&mut call.data)?;
+                bootstrap::write_get_application_data_bridge_reply(&mut reply, Some(self.2));
             }
             bootstrap::PACKAGE_MONITOR_USER => {
                 let a = bootstrap::PackageMonitorUser::read(&mut call.data)?;
@@ -157,7 +166,14 @@ fn publish_code(
                     (
                         (name.into(), false),
                         crate::package::scan::CapturedUsers {
-                            states: BTreeMap::from([(0, Default::default())]),
+                            states: BTreeMap::from([(
+                                0,
+                                crate::package::restrictions::UserState {
+                                    ce_data_inode: 991,
+                                    de_data_inode: 992,
+                                    ..Default::default()
+                                },
+                            )]),
                             active_aliases: Default::default(),
                         },
                     )
@@ -259,8 +275,18 @@ fn publish_code(
         )
         .unwrap()
 }
-#[test]
-fn cached_host_enabled_writes_publish_and_notify_one_registry() {
+struct Session {
+    fixture: Fixture,
+    host: Arc<AppHost>,
+    cached: PackageService,
+    bridge: Arc<crate::package::bootstrap::Bridge>,
+    old: Arc<Capture>,
+    workers: Option<crate::package::events::Workers>,
+    dependencies: Arc<Dependencies>,
+    grants: Arc<std::sync::atomic::AtomicBool>,
+    fail_clear: Arc<std::sync::atomic::AtomicBool>,
+}
+fn session() -> Session {
     let mut fixture = Fixture::new();
     let host = AppHost::new(fixture.native.clone());
     let cached = PackageService::new(host.clone());
@@ -268,10 +294,17 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
     let host_leaf = host.clone();
     let grants = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bridge_grants = grants.clone();
+    let fail_clear = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let primitives = Arc::new(DataPrimitives {
+        system: Arc::downgrade(&fixture.system),
+        grants: grants.clone(),
+        fail: fail_clear.clone(),
+    });
     let bridge = fixture.attach_service(move |original| {
         Arc::new(Bridge(
             original.add_service(Arc::new(Effects(PackageEffects::new(host_leaf)))),
             bridge_grants,
+            original.add_service(primitives),
         ))
     });
     let old = publish_code(&fixture, &bridge);
@@ -323,6 +356,32 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         .system
         .install_package_mutations(&bridge, dependencies.clone())
         .unwrap();
+    Session {
+        fixture,
+        host,
+        cached,
+        bridge,
+        old,
+        workers,
+        dependencies,
+        grants,
+        fail_clear,
+    }
+}
+#[test]
+fn cached_host_enabled_writes_publish_and_notify_one_registry() {
+    let Session {
+        fixture,
+        host,
+        cached,
+        bridge,
+        old,
+        workers,
+        dependencies,
+        grants,
+        ..
+    } = session();
+    let data = fixture.root.join("data");
     let (send, receive) = mpsc::channel();
     let monitor = fixture.native.add_service(Arc::new(Monitor(send)));
     let (public, _) = crate::package::service::PackageQueries::from_system(&fixture.system);
@@ -566,5 +625,345 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         .system
         .internal_remove_isolated_uid(99001, 1000, 0)
         .unwrap();
+    drop(workers);
+}
+
+struct DataPrimitives {
+    system: std::sync::Weak<System>,
+    grants: Arc<std::sync::atomic::AtomicBool>,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Service for DataPrimitives {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_iapplicationdatabridge::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_iapplicationdatabridge as api;
+        assert_eq!(call.sender_euid, 1000);
+        let system = self.system.upgrade().unwrap();
+        let mut reply = Parcel::new();
+        match call.code {
+            api::ENFORCE_PERMISSION => {
+                let a = api::EnforcePermission::read(&mut call.data)?;
+                assert_eq!(
+                    a.permission.as_deref(),
+                    Some("android.permission.CLEAR_APP_USER_DATA")
+                );
+                if a.uid != 1000 {
+                    reply.write_exception(&Exception::security(
+                        "clear-data fixture permission denied",
+                    ));
+                    return Ok(reply);
+                }
+                api::write_enforce_permission_reply(&mut reply);
+            }
+            api::KILL_AND_WAIT => {
+                let a = api::KillAndWait::read(&mut call.data)?;
+                assert_eq!((a.package_name.as_deref(), a.app_id), (Some("p"), 10100));
+                assert_eq!(
+                    system
+                        .capture_package_queries()
+                        .unwrap()
+                        .frozen_packages()
+                        .unwrap()
+                        .get("p"),
+                    Some(&1)
+                );
+                api::write_kill_and_wait_reply(&mut reply);
+            }
+            api::CLEAR_DATA => {
+                let a = api::ClearData::read(&mut call.data)?;
+                assert_eq!((a.package_name.as_deref(), a.user), (Some("p"), 0));
+                if self.fail.load(Ordering::SeqCst) {
+                    reply.write_exception(&Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "injected installd failure",
+                    ));
+                    return Ok(reply);
+                }
+                let retained = system.capture_package_queries().unwrap();
+                assert_eq!(retained.state().packages["p"].users[&0].ce_data_inode, 991);
+                assert_eq!(retained.state().packages["p"].users[&0].de_data_inode, 992);
+                self.grants.store(false, Ordering::SeqCst);
+                let bridge = system.package_bootstrap().unwrap();
+                let capture = system.capture_package_queries().unwrap();
+                system
+                    .refresh_package_permission_queries(&bridge, &capture)
+                    .unwrap();
+                assert_eq!(
+                    system
+                        .capture_package_queries()
+                        .unwrap()
+                        .frozen_packages()
+                        .unwrap()
+                        .get("p"),
+                    Some(&1)
+                );
+                api::write_clear_data_reply(&mut reply, true);
+            }
+            api::CHECK_MEMORY => {
+                api::CheckMemory::read(&mut call.data)?;
+                let capture = system.capture_package_queries().unwrap();
+                assert!(capture.frozen_packages().unwrap().is_empty());
+                assert!(
+                    capture.state().packages["p"].users[&0]
+                        .disabled_components
+                        .is_empty()
+                );
+                api::write_check_memory_reply(&mut reply);
+            }
+            _ => panic!("unexpected application-data primitive {}", call.code),
+        }
+        Ok(reply)
+    }
+}
+struct DataObserver(mpsc::Sender<(Option<String>, bool)>);
+impl Service for DataObserver {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::android_content_pm_ipackagedataobserver::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_content_pm_ipackagedataobserver as api;
+        assert_eq!(call.code, api::ON_REMOVE_COMPLETED);
+        let a = api::OnRemoveCompleted::read(&mut call.data)?;
+        self.0.send((a.package_name, a.succeeded)).unwrap();
+        Ok(Parcel::new())
+    }
+}
+#[test]
+fn cached_host_data_clear_completes_after_session_publication_and_reports_failure() {
+    let Session {
+        fixture,
+        cached,
+        bridge,
+        dependencies,
+        grants,
+        fail_clear,
+        workers,
+        ..
+    } = session();
+    let base = fixture.system.capture_package_queries().unwrap();
+    let lifecycle = crate::package::lifecycle::Owner::from_settings(
+        &crate::package::settings::Settings {
+            versions: vec![crate::package::settings::Version {
+                fingerprint: Some("clear-fixture".into()),
+                sdk_version: 36,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        true,
+        "clear-fixture",
+        Box::new(|_| None),
+        Box::new(|_| Ok(true)),
+    )
+    .unwrap();
+    let (instant, instant_worker) =
+        crate::package::instant::Owner::open(&fixture.root.join("data"), base.state(), 16384, 320)
+            .unwrap();
+    let mut context = (**base.context()).clone();
+    context.scan_version += 1;
+    context.system.lifecycle = Some(lifecycle);
+    context.system.instant_registry = Some(instant);
+    fixture
+        .system
+        .publish_package_scan_with_queries(
+            &bridge,
+            Some(base.scan()),
+            base.scan().owner().clone(),
+            base.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    fixture
+        .system
+        .install_package_freezer_publication(&bridge)
+        .unwrap();
+    let system = Arc::downgrade(&fixture.system);
+    let attached = bridge.clone();
+    let commit = Arc::new(move |base, plans, uid| {
+        system
+            .upgrade()
+            .unwrap()
+            .publish_package_plans(&attached, &base, plans, uid)
+    });
+    let data_worker = fixture
+        .system
+        .install_package_application_data(&bridge, commit)
+        .unwrap();
+    let (send, receive) = mpsc::channel();
+    let observer = fixture.native.add_service(Arc::new(DataObserver(send)));
+    let clear = |name: &str| {
+        let mut data = Parcel::new();
+        pm::ClearApplicationUserData {
+            package_name: Some(name.into()),
+            observer: Some(observer),
+            user_id: 0,
+        }
+        .write(&mut data);
+        data
+    };
+    let (event_send, event_receive) = mpsc::channel();
+    let monitor = fixture.native.add_service(Arc::new(Monitor(event_send)));
+    let mut register = Parcel::new();
+    pm::RegisterPackageMonitorCallback {
+        callback: Some(monitor),
+        user_id: 0,
+    }
+    .write(&mut register);
+    transact(
+        &cached,
+        1000,
+        pm::REGISTER_PACKAGE_MONITOR_CALLBACK,
+        &register,
+    )
+    .reader()
+    .read_exception()
+    .unwrap()
+    .unwrap();
+    let denied = transact(&cached, 10101, pm::CLEAR_APPLICATION_USER_DATA, &clear("p"));
+    assert_eq!(
+        denied.reader().read_exception().unwrap().unwrap_err().code,
+        aim_binder_host::parcel::EX_SECURITY
+    );
+    assert!(receive.try_recv().is_err());
+    let mut request = Parcel::new();
+    pm::SetComponentEnabledSetting {
+        component_name: Some(crate::package::intent::ComponentName {
+            package: "p".into(),
+            class: "p.Main".into(),
+        }),
+        new_state: 2,
+        flags: 0,
+        user_id: 0,
+        calling_package: None,
+    }
+    .write(&mut request);
+    transact(&cached, 1000, pm::SET_COMPONENT_ENABLED_SETTING, &request)
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    let base = fixture.system.capture_package_queries().unwrap();
+    event_receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    grants.store(true, Ordering::SeqCst);
+    fixture
+        .system
+        .refresh_package_permission_queries(&bridge, &base)
+        .unwrap();
+    let before = fixture.system.capture_package_queries().unwrap();
+    assert_eq!(
+        before.state().packages["p"].users[&0].disabled_components,
+        ["p.Main"]
+    );
+    transact(&cached, 1000, pm::CLEAR_APPLICATION_USER_DATA, &clear("p"))
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receive.recv_timeout(Duration::from_secs(3)).unwrap(),
+        (Some("p".into()), true)
+    );
+    let after = fixture.system.capture_package_queries().unwrap();
+    assert!(
+        after.state().packages["p"].users[&0]
+            .disabled_components
+            .is_empty()
+    );
+    assert!(
+        after.state().packages["p"].users[&0]
+            .granted_permissions
+            .is_empty()
+    );
+    assert_eq!(
+        before.state().packages["p"].users[&0].granted_permissions,
+        ["android.permission.CAMERA"]
+    );
+    let persisted = crate::package::State::read(&fixture.root.join("data"), &[0])
+        .unwrap()
+        .unwrap();
+    let restriction = &persisted.users[0]
+        .1
+        .restrictions
+        .packages
+        .iter()
+        .find(|(name, _)| name == "p")
+        .unwrap()
+        .1;
+    assert!(
+        restriction
+            .disabled_components
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+    );
+    assert_eq!(
+        (restriction.ce_data_inode, restriction.de_data_inode),
+        (991, 992)
+    );
+    event_receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        fixture
+            .system
+            .package_events()
+            .unwrap()
+            .wait(3000, false)
+            .unwrap()
+    );
+    assert!(event_receive.try_recv().is_err());
+    fail_clear.store(true, Ordering::SeqCst);
+    transact(&cached, 1000, pm::CLEAR_APPLICATION_USER_DATA, &clear("p"))
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receive.recv_timeout(Duration::from_secs(3)).unwrap(),
+        (Some("p".into()), false)
+    );
+    assert!(
+        fixture
+            .system
+            .capture_package_queries()
+            .unwrap()
+            .frozen_packages()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .system
+            .package_application_data()
+            .unwrap()
+            .errors()
+            .iter()
+            .any(|error| error.contains("injected installd failure"))
+    );
+    transact(
+        &cached,
+        1000,
+        pm::CLEAR_APPLICATION_USER_DATA,
+        &clear("missing"),
+    )
+    .reader()
+    .read_exception()
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        receive.recv_timeout(Duration::from_secs(3)).unwrap(),
+        (Some("missing".into()), false)
+    );
+    assert!(receive.try_recv().is_err());
+    assert!(
+        fixture
+            .system
+            .package_events()
+            .unwrap()
+            .wait(3000, false)
+            .unwrap()
+    );
+    drop(data_worker);
+    drop(instant_worker);
+    drop(dependencies);
     drop(workers);
 }

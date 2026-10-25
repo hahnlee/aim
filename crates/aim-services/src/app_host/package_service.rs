@@ -81,18 +81,6 @@ impl PackageService {
         };
         let uid = call.sender_euid;
         Some(match call.code {
-            pm::CLEAR_APPLICATION_USER_DATA => {
-                let Ok(a) = pm::ClearApplicationUserData::read(&mut call.data) else {
-                    return Some(Err(BAD_VALUE));
-                };
-                let package = a.package_name.as_deref();
-                let done = super::clear_data::observer_of(&self.host, package, a.observer);
-                reply(
-                    self.host
-                        .clear_package_data(uid as i32, package, a.user_id, done),
-                    pm::write_clear_application_user_data_reply,
-                )
-            }
             pm::IS_PACKAGE_STATE_PROTECTED => {
                 let Ok(a) = pm::IsPackageStateProtected::read(&mut call.data) else {
                     return Some(Err(BAD_VALUE));
@@ -311,7 +299,8 @@ impl Service for PackageService {
         // including for clients that retained this pre-construction Binder.
         if matches!(
             call.code,
-            pm::SET_COMPONENT_ENABLED_SETTING
+            pm::CLEAR_APPLICATION_USER_DATA
+                | pm::SET_COMPONENT_ENABLED_SETTING
                 | pm::SET_APPLICATION_ENABLED_SETTING
                 | pm::SET_COMPONENT_ENABLED_SETTINGS
                 | pm::REGISTER_PACKAGE_MONITOR_CALLBACK
