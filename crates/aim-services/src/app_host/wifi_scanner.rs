@@ -457,9 +457,11 @@ impl WifiScanner {
     /// `WifiPermissionsUtil.isTargetSdkLessThan`, false for a package
     /// unknown.
     fn target_sdk_less_than(&self, package: Option<&str>, sdk: i32) -> Result<bool, Exception> {
-        let inputs = self.host.inputs()?;
+        let (state, _) = self.host.packages()?;
         Ok(package
-            .and_then(|p| inputs.packages.application_info(p, 0))
+            .map(|p| self.host.application_info(p, 0, Some(&state)))
+            .transpose()?
+            .flatten()
             .is_some_and(|ai| ai.target_sdk_version < sdk))
     }
 

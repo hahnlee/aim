@@ -38,9 +38,14 @@ impl PlatformCompat {
     /// `isChangeEnabledByPackageName`: the installed package's, else
     /// whether the change will be enabled for it.
     fn enabled_by_package(&self, change: i64, package: Option<&str>) -> Result<bool, Exception> {
-        let inputs = self.0.inputs()?;
+        let (state, _) = self.0.packages()?;
+        let inputs = self.0.platform()?;
         Ok(
-            match package.and_then(|p| inputs.packages.application_info(p, 0)) {
+            match package
+                .map(|p| self.0.application_info(p, 0, Some(&state)))
+                .transpose()?
+                .flatten()
+            {
                 Some(ai) => inputs
                     .compat
                     .is_enabled(change, package, ai.target_sdk_version),

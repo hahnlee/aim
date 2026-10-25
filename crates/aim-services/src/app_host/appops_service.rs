@@ -2249,8 +2249,8 @@ impl System for Host<'_> {
     /// `isChangeEnabledByUid`.
     fn invalid_tags_rejected(&self, package: &str, caller: i32) -> Result<bool, Exception> {
         let change = SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE;
-        let inputs = self.0.inputs()?;
-        let by_package = match inputs.packages.application_info(package, 0) {
+        let inputs = self.0.platform()?;
+        let by_package = match self.0.application_info(package, 0, None)? {
             Some(ai) => inputs
                 .compat
                 .is_enabled(change, Some(package), ai.target_sdk_version),

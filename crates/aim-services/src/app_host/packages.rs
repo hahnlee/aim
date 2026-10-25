@@ -20,7 +20,7 @@ use crate::package::model::{PackageState, PackageUserState};
 use crate::package::parse::{self, Platform};
 use crate::package::pkg::{AndroidPackage, booleans};
 use crate::package::scan::abi::{NativeLibraryEnvironment, NativeLibraryPaths};
-use crate::package::{self, info, model, restrictions, settings, system_config};
+use crate::package::{self, model, restrictions, settings, system_config};
 
 /// `ApplicationInfo.PRIVATE_FLAG_*` of the partitions.
 const PRIVATE_FLAG_OEM: i32 = 1 << 17;
@@ -305,19 +305,6 @@ impl Packages {
     /// User 0's permission and app op state.
     pub fn access(&self) -> Option<&package::permissions::AccessUser> {
         self.access.as_ref()
-    }
-
-    /// `getApplicationInfo(name, flags, 0)`.
-    pub fn application_info(&self, name: &str, flags: i64) -> Option<info::ApplicationInfo> {
-        let ps = self.state.packages.get(name)?;
-        let target = info::Target {
-            sys: &self.state.system,
-            pkg: ps.pkg.as_deref()?,
-            ps,
-            state: ps.users.get(&0)?,
-            user: 0,
-        };
-        info::generate_application_info(&target, flags)
     }
 }
 

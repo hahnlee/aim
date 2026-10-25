@@ -35,9 +35,7 @@ impl GameManager {
         };
         Ok(self
             .host
-            .inputs()?
-            .packages
-            .application_info(package, MATCH_ALL)
+            .application_info(package, MATCH_ALL, None)?
             .is_some_and(|ai| ai.category == CATEGORY_GAME))
     }
 

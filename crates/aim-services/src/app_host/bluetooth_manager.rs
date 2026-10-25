@@ -1520,7 +1520,9 @@ impl BluetoothManager {
             .map_err(|e| self.host.unimplemented_named("bluetooth_manager", e.0))??
                 == SIGNATURE_MATCH;
         let system = package
-            .and_then(|p| self.host.inputs().ok()?.packages.application_info(p, 0))
+            .map(|p| self.host.application_info(p, 0, Some(&state)))
+            .transpose()?
+            .flatten()
             .is_some_and(|ai| ai.flags & FLAG_SYSTEM != 0);
         // No device or profile owner: device_policy keeps none.
         Ok(privileged || system)

@@ -1550,7 +1550,6 @@ impl AppHost {
         from_background: bool,
         isolated: bool,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
         // The system process (`setSystemProcess`) is the `android`
         // package's, `system` of the system uid, which `aim-system`
         // attaches (`attach_system_process`) and nothing starts: a
@@ -1558,9 +1557,8 @@ impl AppHost {
         // The `android` package's own components are system_server's
         // services' code, which the system process does not run (#1518).
         if process == SYSTEM_PROCESS && !isolated {
-            let uid = inputs
-                .packages
-                .application_info(name, STOCK_PM_FLAGS)
+            let uid = self
+                .application_info(name, STOCK_PM_FLAGS, None)?
                 .map(|ai| ai.uid as u32);
             if uid == Some(SYSTEM_UID) {
                 if is_system_server_code(name, process) {
@@ -1670,7 +1668,7 @@ impl AppHost {
         setting: &package::settings::Package,
         listed: &package::list::Entry,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         if !isolated {
             let key = (process.to_string(), uid);
             let mut errors = self.app_errors.lock().unwrap();
@@ -1704,9 +1702,8 @@ impl AppHost {
             )
         };
         let target_sdk = setting.target_sdk_version;
-        let app_info = inputs
-            .packages
-            .application_info(name, STOCK_PM_FLAGS)
+        let app_info = self
+            .application_info(name, STOCK_PM_FLAGS, None)?
             .ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, format!("no application info of {name}"))
             })?;
@@ -2761,12 +2758,11 @@ impl AppHost {
             return Ok(None);
         };
         Ok(self
-            .inputs()?
-            .packages
             .application_info(
                 package,
                 MATCH_UNINSTALLED_PACKAGES | MATCH_DISABLED_COMPONENTS,
-            )
+                None,
+            )?
             .map(|ai| ai.uid))
     }
 
@@ -3370,6 +3366,36 @@ impl AppHost {
         }
     }
 
+    /// The app host's trusted user-0 ApplicationInfo generator. Keep the
+    /// caller's flags unchanged; this is not an unprivileged public query.
+    /// Reuse a retained package acquisition when the operation has one.
+    fn application_info(
+        &self,
+        name: &str,
+        flags: i64,
+        acquired: Option<&package::model::State>,
+    ) -> Result<Option<package::info::ApplicationInfo>, Exception> {
+        let current;
+        let state = match acquired {
+            Some(state) => state,
+            None => {
+                current = self.packages()?.0;
+                &current
+            }
+        };
+        Ok((|| {
+            let ps = state.packages.get(name)?;
+            let target = package::info::Target {
+                sys: &state.system,
+                pkg: ps.pkg.as_deref()?,
+                ps,
+                state: ps.users.get(&0)?,
+                user: 0,
+            };
+            package::info::generate_application_info(&target, flags)
+        })())
+    }
+
     /// The package model's state and its resolution, made once.
     fn packages(
         &self,
@@ -3787,7 +3813,7 @@ impl AppHost {
     /// `CompatChanges.isChangeEnabled(change, uid)`: enabled for every
     /// package of the uid.
     pub(super) fn change_enabled(&self, change: i64, uid: i32) -> Result<bool, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let (state, resolution) = self.packages()?;
         let query = crate::package::query::Query {
             state: &state,
@@ -3804,14 +3830,18 @@ impl AppHost {
         if names.peek().is_none() {
             return Ok(inputs.compat.default_value(change));
         }
-        Ok(
-            names.all(|name| match inputs.packages.application_info(&name, 0) {
+        for name in names {
+            let enabled = match self.application_info(&name, 0, Some(&state))? {
                 Some(ai) => inputs
                     .compat
                     .is_enabled(change, Some(&name), ai.target_sdk_version),
                 None => inputs.compat.default_value(change),
-            }),
-        )
+            };
+            if !enabled {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// DeviceIdleController, made when first needed.
@@ -3975,13 +4005,12 @@ impl AppHost {
         app: &App,
         providers: Vec<package::info::ProviderInfo>,
     ) -> Result<(Parcel, config::Configuration), Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let info = match &app.application_info {
             Some(info) => (**info).clone(),
-            None => inputs
-                .packages
-                .application_info(&app.package, STOCK_PM_FLAGS)
+            None => self
+                .application_info(&app.package, STOCK_PM_FLAGS, None)?
                 .ok_or_else(|| state(format!("no application info of {}", app.package)))?,
         };
         let config = self.global_configuration()?;
@@ -5676,3 +5705,6 @@ mod tests {
 
 #[cfg(test)]
 mod resources_tests;
+
+#[cfg(test)]
+mod application_info_tests;

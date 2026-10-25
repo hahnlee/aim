@@ -762,7 +762,7 @@ impl SettingsProvider {
             return Ok(false);
         }
         // `getCallingApplicationInfoOrThrow`.
-        let info = package.and_then(|p| self.host.inputs().ok()?.packages.application_info(p, 0));
+        let info = package.and_then(|p| self.host.application_info(p, 0, None).ok().flatten());
         let Some(info) = info else {
             eprintln!(
                 "app host: settings: isValidMediaUri: cannot get calling app info for setting: {name} URI: {value}"
@@ -2044,9 +2044,11 @@ impl SettingsProvider {
         }
         let name = name.unwrap_or_default();
         enforce_system_mutation(caller.app_id(), &op, name, &|| {
-            let packages = &self.host.inputs()?.packages;
+            let (state, _) = self.host.packages()?;
             let info = package
-                .and_then(|p| packages.application_info(p, 0))
+                .map(|p| self.host.application_info(p, 0, Some(&state)))
+                .transpose()?
+                .flatten()
                 .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Calling package doesn't exist"))?;
             Ok((
                 info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
@@ -2614,7 +2616,7 @@ impl SettingsProvider {
         if package == SYSTEM_PACKAGE_NAME || self.setup_wizard()?.as_deref() == Some(package) {
             return Ok(true);
         }
-        let Some(info) = self.host.inputs()?.packages.application_info(package, 0) else {
+        let Some(info) = self.host.application_info(package, 0, None)? else {
             return Ok(false);
         };
         Ok(info.uid < FIRST_APPLICATION_UID as i32

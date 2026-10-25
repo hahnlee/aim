@@ -377,9 +377,7 @@ impl WifiService {
     fn location_permitted(&self, package: &str, uid: i32) -> Result<bool, Exception> {
         let target_sdk = self
             .host
-            .inputs()?
-            .packages
-            .application_info(package, 0)
+            .application_info(package, 0, None)?
             .map(|ai| ai.target_sdk_version);
         let before_q = target_sdk.is_some_and(|sdk| sdk < Q);
         if !self.held(
@@ -669,8 +667,11 @@ impl WifiService {
         package: Option<&str>,
         uid: i32,
     ) -> Result<bool, Exception> {
-        let inputs = self.host.inputs()?;
-        let info = package.and_then(|p| inputs.packages.application_info(p, 0));
+        let (state, _) = self.host.packages()?;
+        let info = package
+            .map(|p| self.host.application_info(p, 0, Some(&state)))
+            .transpose()?
+            .flatten();
         if info.as_ref().is_some_and(|ai| ai.target_sdk_version < Q)
             || self.privileged(uid)?
             || self.admin(uid, package)?

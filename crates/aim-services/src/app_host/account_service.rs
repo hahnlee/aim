@@ -493,9 +493,7 @@ impl AccountManager {
     fn target_sdk(&self, name: &str) -> Result<Option<i32>, Exception> {
         Ok(self
             .host
-            .inputs()?
-            .packages
-            .application_info(name, 0)
+            .application_info(name, 0, None)?
             .map(|ai| ai.target_sdk_version))
     }
 

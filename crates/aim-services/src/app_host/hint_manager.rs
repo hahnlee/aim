@@ -767,13 +767,9 @@ impl HintManager {
             .name_for_uid(uid)
             .map_err(|e| self.host.unimplemented_named("performance_hint", e.0))?;
         Ok(name
-            .and_then(|n| {
-                self.host
-                    .inputs()
-                    .ok()?
-                    .packages
-                    .application_info(&n, MATCH_ALL)
-            })
+            .map(|n| self.host.application_info(&n, MATCH_ALL, Some(&state)))
+            .transpose()?
+            .flatten()
             .map_or(-1, |ai| ai.category))
     }
 

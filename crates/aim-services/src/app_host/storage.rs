@@ -611,9 +611,7 @@ impl AppHost {
         }
         if self.check_permission(Some("android.permission.ACCESS_MTP"), uid)? == 0
             && self
-                .inputs()?
-                .packages
-                .application_info(package, 0)
+                .application_info(package, 0, Some(&state))?
                 .is_some_and(|ai| ai.private_flags & PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY != 0)
         {
             return Ok(MountExternal::AndroidWritable);

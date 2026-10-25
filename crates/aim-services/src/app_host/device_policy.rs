@@ -1117,9 +1117,7 @@ impl Device for DevicePolicy {
     fn target_sdk(&self, package: &str) -> Result<Option<i32>, Exception> {
         Ok(self
             .host
-            .inputs()?
-            .packages
-            .application_info(package, 0)
+            .application_info(package, 0, None)?
             .map(|ai| ai.target_sdk_version))
     }
 
