@@ -182,6 +182,19 @@ event delivery and shutdown statistics remain #2167, permission state without
 `access.abx` #2168, boot admissions #2169, remaining package bootstrap owners
 #2022 and the query projection switch #2023.
 
+Current app-host source retains its startup `package` / `package_native`
+Binder pair through native construction and epoch replacement. Both fronts
+forward every call directly to the native Service implementation with the
+original caller, parcel cursor and flags. The old lazy app-host installer and
+shell adapter are removed; all public package handles return the current
+session's recovered installer. Host tests cover pre-construction errors,
+registry readback, retained handles for both descriptors, caller security and
+sessions restored across epochs. This public-front change has no new local
+guest or real CTS result; the ADR 0013 switch/milestone gates remain open.
+Plain install still reaches explicit missing permission/app-data/cache/effect
+and external completion leaves (#2161, #2160, #2162, #1977, #2154, #2157,
+#1995); ART/dexopt remains #2063.
+
 Current app-host source publishes enabled settings, permission grant/GID
 refreshes, data-clear component resets and isolated/implicit/user runtime
 changes through the native session (#2023, #2164). Ordinary host package

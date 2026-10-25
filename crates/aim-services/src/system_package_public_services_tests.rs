@@ -135,25 +135,39 @@ impl Service for Original {
     }
 }
 fn feature(process: &Arc<LocalProcess>, binder: Binder, name: &str) -> Result<bool> {
+    feature_on(process, binder, name, false)
+}
+fn feature_on(
+    process: &Arc<LocalProcess>,
+    binder: Binder,
+    name: &str,
+    native: bool,
+) -> Result<bool> {
+    use aim_service_aidl::android_content_pm_ipackagemanagernative as api;
     let mut request = Parcel::new();
-    pm::HasSystemFeature {
-        name: Some(name.into()),
-        version: 1,
-    }
-    .write(&mut request);
-    let reply = match binder {
-        Binder::Local(pointer) => process.local_service(pointer).unwrap().transact(
-            pm::HAS_SYSTEM_FEATURE,
-            &request,
-            false,
-        ),
-        Binder::Handle(handle) => {
-            process
-                .strong(handle)
-                .transact(pm::HAS_SYSTEM_FEATURE, &request, false)
+    let code = if native {
+        api::HasSystemFeature {
+            feature_name: Some(name.into()),
+            version: 1,
         }
+        .write(&mut request);
+        api::HAS_SYSTEM_FEATURE
+    } else {
+        pm::HasSystemFeature {
+            name: Some(name.into()),
+            version: 1,
+        }
+        .write(&mut request);
+        pm::HAS_SYSTEM_FEATURE
+    };
+    let reply = match binder {
+        Binder::Local(pointer) => process
+            .local_service(pointer)
+            .unwrap()
+            .transact(code, &request, false),
+        Binder::Handle(handle) => process.strong(handle).transact(code, &request, false),
     }
-    .unwrap();
+    .unwrap_or_else(|status| panic!("feature {name} native={native} binder={binder:?}: {status}"));
     pm::read_has_system_feature_reply(&mut reply.reader()).unwrap()
 }
 fn publish(system: &Arc<System>, bridge: &Arc<crate::package::bootstrap::Bridge>, name: &str) {
@@ -230,6 +244,182 @@ fn publish(system: &Arc<System>, bridge: &Arc<crate::package::bootstrap::Bridge>
         )
         .unwrap();
 }
+// A recovered native installer, with an actual sessions file. Policy is not
+// invoked by these retained-handle reads; fail if dispatch accidentally creates
+// another installer or attempts to normalize a session.
+struct InstallerFixture {
+    data: std::path::PathBuf,
+    id: i32,
+}
+impl InstallerFixture {
+    fn new() -> Self {
+        use crate::package::installer::{Record, Sessions, codec::SessionParams};
+        let data = std::env::temp_dir().join(format!(
+            "aim-public-installer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&data).unwrap();
+        std::fs::create_dir(data.join("system")).unwrap();
+        std::fs::create_dir(data.join("app")).unwrap();
+        let sessions = Sessions::default();
+        let id = sessions
+            .create_record(
+                Record {
+                    params: SessionParams {
+                        mode: 1,
+                        app_package_name: Some("a.b".into()),
+                        ..Default::default()
+                    },
+                    installer_uid: 1000,
+                    user: 0,
+                    installer_package: None,
+                    installer_attribution_tag: None,
+                    created_millis: 1,
+                    initiating_package: None,
+                    originating_package: None,
+                    installer_package_uid: -1,
+                },
+                true,
+            )
+            .unwrap();
+        let fixture = Self { data, id };
+        fixture.disk().write(&sessions.records()).unwrap();
+        fixture
+    }
+    fn disk(&self) -> crate::package::installer::storage::Store {
+        use crate::package::installer::storage;
+        let inode = aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        };
+        storage::Store::open(
+            self.data.clone(),
+            inode,
+            aim_storage::guest_inode::GuestInode {
+                mode: Some(0o775),
+                ..inode
+            },
+            Arc::new(|path, guest| {
+                use std::os::unix::ffi::OsStrExt;
+                assert_eq!(guest, "/data/system/install_sessions.xml.new");
+                let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                let label = b"u:object_r:system_data_file:s0\0";
+                if unsafe {
+                    libc::setxattr(
+                        path.as_ptr(),
+                        c"dev.aim.xattr.security.selinux".as_ptr(),
+                        label.as_ptr().cast(),
+                        label.len(),
+                        0,
+                        libc::XATTR_NOFOLLOW,
+                    )
+                } != 0
+                {
+                    return Err(storage::Error {
+                        legacy_status: -110,
+                        committed: false,
+                        message: std::io::Error::last_os_error().to_string(),
+                    });
+                }
+                Ok(())
+            }),
+        )
+        .unwrap()
+    }
+    fn install(
+        &self,
+        system: &Arc<System>,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+    ) -> Binder {
+        use crate::package::installer::{Sessions, endpoint::Endpoint, native::NativeOwners};
+        let weak = Arc::downgrade(system);
+        let retained = bridge.clone();
+        let sessions = Arc::new(Sessions::default());
+        let owner = NativeOwners::open(
+            sessions.clone(),
+            Arc::new(move || {
+                Ok(weak
+                    .upgrade()
+                    .unwrap()
+                    .capture_package_queries_for(&retained)?
+                    .state()
+                    .clone())
+            }),
+            Arc::new(|_, _, _| panic!("retained-handle read cannot normalize")),
+            Default::default(),
+            self.disk(),
+            {
+                let weak = Arc::downgrade(&system.process);
+                Arc::new(move |node| Ok(weak.upgrade().unwrap().add_service(node)))
+            },
+            Arc::new(|_| panic!("retained-handle read cannot mutate sessions")),
+            system.process.clone(),
+        )
+        .unwrap();
+        assert_eq!(owner.sessions.records()[0].0.id, self.id);
+        let binder = system.process.add_service(Arc::new(Endpoint {
+            sessions,
+            owners: owner.clone(),
+        }));
+        system
+            .package_bootstrap
+            .lock()
+            .unwrap()
+            .current
+            .as_mut()
+            .unwrap()
+            .installer = Some((owner, binder));
+        binder
+    }
+    fn check(&self, process: &Arc<LocalProcess>, public: Binder, expected: Binder) {
+        use aim_service_aidl::android_content_pm_ipackageinstaller as installer;
+        let Binder::Local(pointer) = public else {
+            panic!("local front")
+        };
+        let mut request = Parcel::new();
+        pm::GetPackageInstaller {}.write(&mut request);
+        let reply = process
+            .local_service(pointer)
+            .unwrap()
+            .transact(pm::GET_PACKAGE_INSTALLER, &request, false)
+            .unwrap();
+        let binder = pm::read_get_package_installer_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(binder, expected);
+        let Binder::Local(pointer) = binder else {
+            panic!("local installer")
+        };
+        let mut request = Parcel::new();
+        installer::GetSessionInfo {
+            session_id: self.id,
+        }
+        .write(&mut request);
+        let node = process.local_service(pointer).unwrap();
+        let reply = node
+            .transact(installer::GET_SESSION_INFO, &request, false)
+            .unwrap();
+        let info = installer::read_get_session_info_reply::<
+            crate::package::installer::codec::SessionInfo,
+        >(&mut reply.reader())
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(info.session_id, self.id);
+        assert_eq!(info.app_package_name.as_deref(), Some("a.b"));
+    }
+}
+impl Drop for InstallerFixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.data).unwrap();
+    }
+}
 #[test]
 fn original_names_stay_same_binder_across_two_epochs_private_reference_retires() {
     let driver = Driver::new();
@@ -277,6 +467,74 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
         .unwrap();
     manager.start();
     native.start();
+    // The exact app-host nodes issued before construction become the native
+    // process-lifetime pair; construction must not replace either descriptor.
+    let app_host = crate::app_host::AppHost::new(native.clone());
+    app_host.set_system(system.clone());
+    let early_public = native.add_service(Arc::new(
+        crate::app_host::package_service::PackageService::new(app_host.clone()),
+    ));
+    let early_native = native.add_service(Arc::new(
+        crate::app_host::package_service::PackageService::native(app_host.clone()),
+    ));
+    system
+        .retain_public_package_fronts(early_public, early_native)
+        .unwrap();
+    assert!(
+        system
+            .retain_public_package_fronts(early_public, early_native)
+            .is_err()
+    );
+    for (name, binder, is_native) in [
+        ("package", early_public, false),
+        ("package_native", early_native, true),
+    ] {
+        system.add_service(name, binder).unwrap();
+        assert_eq!(
+            feature_on(&native, binder, "epoch.first", is_native)
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_ILLEGAL_STATE
+        );
+    }
+    let client = LocalProcess::open(
+        &driver,
+        Device::Binder,
+        Credentials {
+            pid: 98242,
+            euid: 2000,
+            security_context: None,
+        },
+    );
+    client.start();
+    let lookup = |name: &str| {
+        let mut request = Parcel::new();
+        sm::CheckService {
+            name: Some(name.into()),
+        }
+        .write(&mut request);
+        let reply = client
+            .transact(0, sm::CHECK_SERVICE, &request, false)
+            .unwrap();
+        let Binder::Handle(handle) = sm::read_check_service_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("remote package front")
+        };
+        client.strong(handle)
+    };
+    let before_owners = [lookup("package"), lookup("package_native")];
+    let before = [before_owners[0].binder(), before_owners[1].binder()];
+    for (binder, is_native) in before.into_iter().zip([false, true]) {
+        assert_eq!(
+            feature_on(&client, binder, "epoch.first", is_native)
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_ILLEGAL_STATE
+        );
+    }
     let host_node = native.add_service(Arc::new(crate::service_host::ServiceHost::new(
         native.clone(),
         &system,
@@ -324,6 +582,8 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
     };
     let first = attach();
     publish(&system, &first, "epoch.first");
+    let installer = InstallerFixture::new();
+    let first_installer = installer.install(&system, &first);
     // A retained app-host adapter reads constructor role selections from
     // this session without loading its old joined package model.
     let app_host = crate::app_host::AppHost::new(native.clone());
@@ -352,7 +612,17 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
     );
 
     let one = system.register_public_package_fronts(&first).unwrap();
+    assert_eq!((one.public, one.native), (early_public, early_native));
+    installer.check(&native, early_public, first_installer);
+    installer.check(&native, one.public, first_installer);
     assert!(feature(&native, one.public, "epoch.first").unwrap());
+    for (name, binder, is_native) in [
+        ("package", before[0], false),
+        ("package_native", before[1], true),
+    ] {
+        assert_eq!(lookup(name).binder(), binder);
+        assert!(feature_on(&client, binder, "epoch.first", is_native).unwrap());
+    }
     let shell = LocalProcess::open(
         &driver,
         Device::Binder,
@@ -449,7 +719,12 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
     let private = native.add_service(private);
     let second = attach();
     publish(&system, &second, "epoch.second");
+    let next_installer = installer.install(&system, &second);
+    assert_ne!(first_installer, next_installer);
     let two = system.register_public_package_fronts(&second).unwrap();
+    installer.check(&native, early_public, next_installer);
+    installer.check(&native, one.public, next_installer);
+    installer.check(&native, two.public, next_installer);
     assert_eq!(one.public, two.public);
     assert_eq!(one.native, two.native);
     for (name, binder) in [("package", two.public), ("package_native", two.native)] {
@@ -468,6 +743,35 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
             Some(binder)
         );
     }
+    for (name, binder, is_native) in [
+        ("package", before[0], false),
+        ("package_native", before[1], true),
+    ] {
+        assert_eq!(lookup(name).binder(), binder);
+        assert!(feature_on(&client, binder, "epoch.second", is_native).unwrap());
+        assert!(!feature_on(&client, binder, "epoch.first", is_native).unwrap());
+        // Each descriptor rejects the other one's token, even through the
+        // compatibility adapter; UNKNOWN_TRANSACTION is never retried.
+        let mut wrong = Parcel::new();
+        wrong.write_interface_token(if is_native {
+            pm::DESCRIPTOR
+        } else {
+            aim_service_aidl::android_content_pm_ipackagemanagernative::DESCRIPTOR
+        });
+        let Binder::Handle(handle) = binder else {
+            panic!("remote front")
+        };
+        assert!(client.transact(handle, if is_native {
+            aim_service_aidl::android_content_pm_ipackagemanagernative::HAS_SYSTEM_FEATURE
+        } else { pm::HAS_SYSTEM_FEATURE }, &wrong, false).is_err());
+        assert_eq!(
+            client
+                .transact(handle, u32::MAX, &Parcel::new(), false)
+                .err()
+                .unwrap(),
+            aim_binder_host::parcel::UNKNOWN_TRANSACTION
+        );
+    }
     assert!(feature(&native, one.public, "epoch.second").unwrap());
     assert!(!feature(&native, one.public, "epoch.first").unwrap());
     assert!(feature(&native, private, "epoch.second").is_err());
@@ -475,6 +779,7 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
     for original in originals {
         driver.release(original.proc_handle());
     }
+    driver.release(client.proc_handle());
     driver.release(native.proc_handle());
     driver.release(manager.proc_handle());
 }

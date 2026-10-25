@@ -120,7 +120,6 @@ mod package_effects;
 pub(crate) use package_effects::PackageEffects;
 mod package_enable;
 pub mod package_initial_context;
-pub mod package_installer;
 mod package_installer_policy;
 mod package_internal_events;
 mod package_internal_leaves;
@@ -131,7 +130,6 @@ mod package_moves;
 pub mod package_observers;
 pub mod package_resolution_policy;
 pub mod package_service;
-pub mod package_shell;
 mod package_shell_policy;
 mod package_shell_read;
 mod package_writes;
@@ -783,6 +781,8 @@ impl AppHost {
             .text_services
             .get_or_init(|| text_services::TextServices::new(self.clone(), settings.clone()))
             .clone();
+        self.package_writes
+            .get_or_init(|| package_writes::Writes::new(self.clone()));
         vec![
             (
                 "activity",
@@ -795,6 +795,10 @@ impl AppHost {
             (
                 "package",
                 Arc::new(package_service::PackageService::new(self.clone())),
+            ),
+            (
+                "package_native",
+                Arc::new(package_service::PackageService::native(self.clone())),
             ),
             (
                 "display",
