@@ -6,8 +6,7 @@
 //! which with `improve_install_freeze` it reports as the observed
 //! exception and the install completes undexopted, its app interpreted and
 //! JIT-compiled; without the flag the exception fails the install, as there.
-//! The app-op owner's package-added state is part of committing an
-//! install (#1995).
+//! The app-op owner receives package-added on installs and updates.
 
 use std::sync::Arc;
 
@@ -107,11 +106,14 @@ impl Service for InstallerCompletion {
                 )
             }
             bridge::PACKAGE_ADDED => {
-                bridge::PackageAdded::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = bridge::PackageAdded::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(caller().and_then(|()| {
-                    Err(self
-                        .host
-                        .unimplemented_named("installer completion", "packageAdded (#1995)"))
+                    let name = a.package_name.ok_or_else(|| {
+                        Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "packageName")
+                    })?;
+                    super::appops_service::package_added(&self.host, &name, a.app_id)?;
+                    bridge::write_package_added_reply(&mut p);
+                    Ok(p)
                 }))
             }
             _ => Err(UNKNOWN_TRANSACTION),
@@ -169,5 +171,69 @@ mod tests {
         // An unconfigured host has no image flags to decide by.
         assert!(dexopt(SYSTEM_UID, false).is_err());
         assert_eq!(dexopt(10000, true).unwrap_err().code, EX_SECURITY);
+        let mut p = Parcel::new();
+        bridge::PackageAdded {
+            package_name: None,
+            app_id: 10100,
+        }
+        .write(&mut p);
+        let response = node(10000)
+            .transact(bridge::PACKAGE_ADDED, &p, false)
+            .unwrap();
+        assert_eq!(
+            response
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_SECURITY
+        );
+        let response = node(SYSTEM_UID)
+            .transact(bridge::PACKAGE_ADDED, &p, false)
+            .unwrap();
+        assert_eq!(
+            response
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_NULL_POINTER
+        );
+    }
+
+    #[test]
+    fn package_added_reaches_appops_without_access_files() {
+        crate::system::with_discovery_session(|host, _, _| {
+            std::fs::write(host.data().unwrap().join("system/users/0.xml"),
+                br#"<user id="0" serialNumber="0" flags="19" type="android.os.usertype.full.SYSTEM"/>"#).unwrap();
+            let service = InstallerCompletion::new(host.clone());
+            let aim_binder_host::parcel::Binder::Local(ptr) =
+                host.process.add_service(Arc::new(service))
+            else {
+                unreachable!()
+            };
+            let node = host.process.local_service(ptr).unwrap();
+            for _ in 0..2 {
+                let mut p = Parcel::new();
+                bridge::PackageAdded {
+                    package_name: Some("p".into()),
+                    app_id: 10100,
+                }
+                .write(&mut p);
+                let response = node.transact(bridge::PACKAGE_ADDED, &p, false).unwrap();
+                bridge::read_package_added_reply(&mut response.reader())
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(
+                !host
+                    .data()
+                    .unwrap()
+                    .join("misc_de/0/apexdata/com.android.permission/access.abx")
+                    .exists()
+            );
+        });
     }
 }
