@@ -480,6 +480,15 @@ impl Service for PackageBootstrap {
                     })
                     .map(|v| bridge::write_is_test_base_on_bootclasspath_reply(&mut p, v))
             }
+            // `PackageInstaller.ENABLE_REVOCABLE_FD`.
+            bridge::IS_INSTALLER_REVOCABLE_FD_ENABLED => {
+                bridge::IsInstallerRevocableFdEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let enabled =
+                    super::system_boolean(host.property("fw.revocable_fd").as_deref(), false);
+                bridge::write_is_installer_revocable_fd_enabled_reply(&mut p, enabled);
+                Ok(())
+            }
             // `Build.isDebuggable()`.
             bridge::IS_SIGNING_DEBUGGABLE => {
                 bridge::IsSigningDebuggable::read(&mut call.data).map_err(|_| BAD_VALUE)?;
