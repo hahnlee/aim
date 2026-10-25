@@ -1077,6 +1077,7 @@ pub(crate) fn with_discovery_session(
     test: impl FnOnce(
         &Arc<AppHost>,
         &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
     ),
 ) {
     let Session {
@@ -1084,8 +1085,23 @@ pub(crate) fn with_discovery_session(
         host,
         bridge,
         workers,
+        cached,
         ..
     } = session();
+    let image = fixture.root.join("image");
+    std::fs::create_dir_all(image.join("system/framework")).unwrap();
+    std::fs::write(image.join("system/build.prop"), "ro.build.version.sdk=36\n").unwrap();
+    std::fs::write(
+        image.join("system/framework/framework-res.apk"),
+        include_bytes!("../tests/fixtures/discovery/framework.apk"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(fixture.root.join("data/app/p")).unwrap();
+    std::fs::write(
+        fixture.root.join("data/app/p/base.apk"),
+        include_bytes!("../tests/fixtures/discovery/providers.apk"),
+    )
+    .unwrap();
     host.configure(
         &fixture.root.join("image"),
         &fixture.root.join("data"),
@@ -1163,6 +1179,15 @@ pub(crate) fn with_discovery_session(
         context.scan_version = base.scan().version() + 1;
         fixture
             .system
+            .package_persistence_owner(&base)
+            .unwrap()
+            .1
+            .lock()
+            .unwrap()
+            .commit_scan_settings_owner(&owner)
+            .unwrap();
+        fixture
+            .system
             .publish_package_scan_with_queries(
                 &bridge,
                 Some(base.scan()),
@@ -1172,6 +1197,51 @@ pub(crate) fn with_discovery_session(
             )
             .unwrap();
     };
-    test(&host, &mut publish);
+    let enabled = |class: Option<&str>, new_state| {
+        let before = fixture.system.capture_package_queries().unwrap();
+        let mut request = Parcel::new();
+        let code = if let Some(class) = class {
+            pm::SetComponentEnabledSetting {
+                component_name: Some(crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: class.into(),
+                }),
+                new_state,
+                flags: 0,
+                user_id: 0,
+                calling_package: None,
+            }
+            .write(&mut request);
+            pm::SET_COMPONENT_ENABLED_SETTING
+        } else {
+            pm::SetApplicationEnabledSetting {
+                package_name: Some("p".into()),
+                new_state,
+                flags: 0,
+                user_id: 0,
+                calling_package: None,
+            }
+            .write(&mut request);
+            pm::SET_APPLICATION_ENABLED_SETTING
+        };
+        transact(&cached, 1000, code, &request)
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &before,
+            &fixture.system.capture_package_queries().unwrap()
+        ));
+        assert!(
+            fixture
+                .system
+                .package_events()
+                .unwrap()
+                .wait(3000, false)
+                .unwrap()
+        );
+    };
+    test(&host, &mut publish, &enabled);
     drop(workers);
 }

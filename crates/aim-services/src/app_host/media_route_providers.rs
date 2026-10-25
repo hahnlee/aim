@@ -1158,10 +1158,62 @@ impl Service for ProviderCallback {
 
 #[cfg(test)]
 mod tests {
+    /// MediaRoute2ProviderWatcher scans every PACKAGE_CHANGED on its handler.
+    #[test]
+    fn route_providers_track_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    let mut service = crate::package::pkg::Service::default();
+                    service.main.enabled = true;
+                    service.main.exported = true;
+                    service.main.component.name = "p.Routes".into();
+                    service.main.component.package_name = "p".into();
+                    service.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec![SERVICE_INTERFACE.into()],
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                    pkg.services = vec![service];
+                }
+            });
+            let providers = Providers::new(host.clone(), Arc::new(Mutex::new(HashMap::new())));
+            let flush = || {
+                let (send, receive) = mpsc::channel();
+                providers.post_with(move |_| send.send(()).unwrap());
+                receive
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+            };
+            providers.start(0);
+            flush();
+            assert_eq!(providers.users.lock().unwrap()[&0].proxies.len(), 1);
+            for component in [Some("p.Routes"), None] {
+                let old = providers.users.lock().unwrap()[&0].proxies[0].clone();
+                enabled(component, 2);
+                flush();
+                assert!(providers.users.lock().unwrap()[&0].proxies.is_empty());
+                assert!(!old.state.lock().unwrap().running);
+                enabled(component, 1);
+                flush();
+                assert_eq!(providers.users.lock().unwrap()[&0].proxies.len(), 1);
+                assert!(
+                    providers.users.lock().unwrap()[&0].proxies[0]
+                        .state
+                        .lock()
+                        .unwrap()
+                        .running
+                );
+            }
+        });
+    }
 
     #[test]
     fn watcher_removes_retired_proxies_and_their_routes() {
-        crate::system::with_discovery_session(|host, publish| {
+        crate::system::with_discovery_session(|host, publish, _| {
             publish(&mut |pkg| {
                 if pkg.package_name == "p" {
                     let mut service = crate::package::pkg::Service::default();

@@ -267,8 +267,6 @@ pub struct SettingsProvider {
     host: Arc<AppHost>,
     generations: OnceLock<GenerationRegistry>,
     declared: OnceLock<Declared>,
-    /// `PackageManager.getSetupWizardPackageName`, cached as
-    /// `cacheSystemPackageNamesAndSystemSignature` caches it.
     /// `mSyncConfigDisabledUntilReboot`.
     sync_disabled_until_reboot: AtomicBool,
     /// `mConfigMonitorCallback`.
@@ -2700,10 +2698,64 @@ impl SettingsProvider {
 
 #[cfg(test)]
 mod tests {
+    /// PMS.getSetupWizardPackageNameImpl deliberately includes disabled
+    /// components and applications in the system-only setup-wizard query.
+    #[test]
+    fn setup_wizard_selection_follows_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.booleans |= crate::package::pkg::booleans::SYSTEM;
+                    pkg.activities[0].main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec!["android.intent.action.MAIN".into()],
+                                categories: Some(vec![
+                                    "android.intent.category.SETUP_WIZARD".into(),
+                                ]),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                }
+            });
+            let settings = SettingsProvider::new(host.clone());
+            let available = || {
+                let (_, resolution) = host.packages().unwrap();
+                let intent = crate::package::intent::Intent {
+                    action: Some("android.intent.action.MAIN".into()),
+                    categories: Some(vec!["android.intent.category.SETUP_WIZARD".into()]),
+                    ..Default::default()
+                };
+                resolution
+                    .query_intent_activities(
+                        &intent,
+                        None,
+                        flags::MATCH_SYSTEM_ONLY
+                            | flags::MATCH_DIRECT_BOOT_AWARE
+                            | flags::MATCH_DIRECT_BOOT_UNAWARE,
+                        0,
+                        SYSTEM_UID,
+                    )
+                    .unwrap()
+                    .len()
+            };
+            assert_eq!(available(), 1);
+            assert_eq!(settings.setup_wizard().unwrap().as_deref(), Some("p"));
+            for component in [Some("p.Main"), None] {
+                enabled(component, 2);
+                assert_eq!(available(), 0);
+                assert_eq!(settings.setup_wizard().unwrap().as_deref(), Some("p"));
+                enabled(component, 1);
+                assert_eq!(available(), 1);
+                assert_eq!(settings.setup_wizard().unwrap().as_deref(), Some("p"));
+            }
+        });
+    }
 
     #[test]
     fn setup_wizard_selection_tracks_published_code() {
-        crate::system::with_discovery_session(|host, publish| {
+        crate::system::with_discovery_session(|host, publish, _| {
             let settings = SettingsProvider::new(host.clone());
             assert_eq!(settings.setup_wizard().unwrap(), None);
             publish(&mut |pkg| {

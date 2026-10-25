@@ -472,10 +472,12 @@ impl super::package_writes::PackageMonitor for WebViewUpdate {
         &self,
         change: &super::package_writes::PackageChanged<'_>,
     ) -> Result<(), Exception> {
-        if self
-            .providers()?
-            .iter()
-            .any(|p| p.package == change.package)
+        // WebViewUpdateService.entirePackageChanged.
+        if change.some_packages_changed()
+            && self
+                .providers()?
+                .iter()
+                .any(|p| p.package == change.package)
         {
             drop(self.state()?);
         }
@@ -683,10 +685,61 @@ impl Service for WebViewUpdate {
 
 #[cfg(test)]
 mod tests {
+    /// WebViewUpdateService.entirePackageChanged includes application
+    /// enabled settings; component-only changes do not select a provider.
+    #[test]
+    fn webview_provider_follows_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.target_sdk_version = 36;
+                    pkg.meta_data = Some(crate::package::pkg::MetaData(vec![(
+                        WEBVIEW_LIBRARY.into(),
+                        crate::package::pkg::Value::String(Some("libwebview.so".into())),
+                    )]));
+                }
+            });
+            let service = WebViewUpdate::new(host.clone());
+            service
+                .providers
+                .set(vec![Provider {
+                    package: "p".into(),
+                    description: "provider".into(),
+                    available_by_default: true,
+                    is_fallback: false,
+                    signatures: vec![],
+                }])
+                .ok()
+                .unwrap();
+            drop(service.state().unwrap());
+            let cached = || {
+                let held = service.shared.0.lock().unwrap();
+                let state = held.as_ref().unwrap();
+                (
+                    state.capture.clone().unwrap(),
+                    state
+                        .current
+                        .as_ref()
+                        .and_then(|info| info.package_name.clone()),
+                )
+            };
+            let (before, current) = cached();
+            assert_eq!(current.as_deref(), Some("p"));
+            enabled(Some("p.Main"), 2);
+            assert!(Arc::ptr_eq(&before, &cached().0));
+            enabled(Some("p.Main"), 1);
+            assert!(Arc::ptr_eq(&before, &cached().0));
+            enabled(None, 2);
+            // Inspect the cached answer before asking state() to refresh it.
+            assert_eq!(cached().1, None);
+            enabled(None, 1);
+            assert_eq!(cached().1.as_deref(), Some("p"));
+        });
+    }
 
     #[test]
     fn provider_removal_during_relro_creation_reselects_after_completion() {
-        crate::system::with_discovery_session(|host, publish| {
+        crate::system::with_discovery_session(|host, publish, _| {
             publish(&mut |pkg| {
                 if pkg.package_name == "p" {
                     pkg.target_sdk_version = 36;

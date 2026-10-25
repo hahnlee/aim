@@ -217,10 +217,17 @@ candidate contexts; install access lifecycle remains design step 7 (#2161).
 Focused permission (23), AppOps (22) and session-mutation (3) tests and the host
 build pass. No new local guest, second-boot or CTS result is claimed for this
 access change. Current source also refreshes account authenticators (validating
-loaded accounts), spell checkers, unbound widget providers and media-route
-proxies on package notices, including the canonical epoch's add/update/remove
-feed. Setup-wizard selection resolves anew. WebView reselects from one capture
-and defers a second preparation across pending RELRO work; audioserver's
+loaded accounts), unbound widget providers and media-route proxies on component
+and application enabled changes, as well as the canonical epoch's add/update/remove
+feed. Spell checkers follow the pinned `TextServicesMonitor.onSomePackagesChanged`:
+application changes rebuild the map; component-only changes retain the loaded
+map because `PackageMonitor.onPackageChanged`'s default returns false. This is
+the pinned `android-16.0.0_r1` behavior, including a fresh resolver omitting a
+disabled component while `getEnabledSpellCheckers` still lists it. Setup-wizard
+selection resolves anew with the owner's `MATCH_DISABLED_COMPONENTS`, retaining
+the unique system package through enabled-state changes. WebView's package
+receiver ignores component-only changes (`entirePackageChanged`), reselects from
+one capture on application changes and defers a second preparation across pending RELRO work; audioserver's
 permission controller receives rebuilt package/permission batches after package
 notices and permission changes, and reconnects on controller death. Account
 deletion (#1504), bound widgets (#1789), default WebView repair/explicit choice
@@ -230,11 +237,17 @@ The boot-input join, Packages loader and persisted Settings/list/APK reconstruct
 are removed. Package checksums take build policy from the framework resource
 owner; the remaining inputs() compatibility accessor exposes only platform
 configuration and contains no package/access state. Package-dependent boot
-stops if its required session capture is unavailable. The 81 focused
-discovery/permission/session tests pass; one pre-existing Settings test is ignored and not run. The broader library
-run reports 1,695 passing, 14 failing and 13 ignored tests; all 14 failures also
-reproduce on committed HEAD, with no additional failure or missing-input skip.
-No new guest or real CTS run is claimed. Platform/config reads no longer
+stops if its required session capture is unavailable. The reviewer reports guest
+verification of these two discovery/join checkpoints on `fb6b7229`: boot,
+reconciliation, BOOT_COMPLETED, Contacts drawing with unchanged identity,
+242 packages and the account/textservices/webviewupdate raw reads; the reported
+whole-crate run passed 1,830 tests with no failures. Six additional real-session
+enabled-state regressions pass locally, covering each discovery and reverse
+changes, including the pinned unchanged-answer cases above. The local library
+run reports 1,701 passing, 14 failing and 13 ignored tests; the identical 14
+failures reproduce on `fb6b7229` (shared-memory/Mach access and the original-image
+read lease are unavailable in this environment). Ignored tests are not run; no
+missing-input skip is reported. No new guest or real CTS run is claimed. Platform/config reads no longer
 allocate application shared memory; bindApplication initializes that same platform-owned object on
 first use, retaining allocation errors there.
 

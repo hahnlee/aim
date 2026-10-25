@@ -1827,11 +1827,51 @@ impl Service for AccountManager {
 
 #[cfg(test)]
 mod tests {
+    /// RegisteredServicesCache.handlePackageEvent regenerates for every
+    /// PACKAGE_CHANGED, including a component-only enabled change.
+    #[test]
+    fn authenticators_track_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.base_apk_path = Some("/data/app/p/base.apk".into());
+                    let mut service = crate::package::pkg::Service::default();
+                    service.main.enabled = true;
+                    service.main.exported = true;
+                    service.main.component.name = "p.Authenticator".into();
+                    service.main.component.package_name = "p".into();
+                    service.main.component.meta_data = Some(crate::package::pkg::MetaData(vec![(
+                        "android.accounts.AccountAuthenticator".into(),
+                        crate::package::pkg::Value::Int(0x7f010000),
+                    )]));
+                    service.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec!["android.accounts.AccountAuthenticator".into()],
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                    pkg.services = vec![service];
+                }
+            });
+            let manager = AccountManager::new(host.clone());
+            let before = manager.authenticators(0).unwrap();
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].description.kind, "fixture.account");
+            for component in [Some("p.Authenticator"), None] {
+                enabled(component, 2);
+                assert!(manager.authenticators(0).unwrap().is_empty());
+                enabled(component, 1);
+                assert_eq!(*manager.authenticators(0).unwrap(), *before);
+            }
+        });
+    }
 
     #[test]
     fn authenticator_notices_replace_changed_lists_and_preserve_unchanged_lists() {
         use super::super::package_writes::{PackageChanged, PackageMonitor};
-        crate::system::with_discovery_session(|host, _| {
+        crate::system::with_discovery_session(|host, _, _| {
             let manager = AccountManager::new(host.clone());
             let old = Arc::new(vec![Authenticator {
                 description: AuthenticatorDescription {

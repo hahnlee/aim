@@ -2283,7 +2283,7 @@ mod tests {
 
     #[test]
     fn audio_batch_uses_the_live_permission_owner_and_retained_package_capture() {
-        crate::system::with_discovery_session(|host, publish| {
+        crate::system::with_discovery_session(|host, publish, _| {
             let manager = PermissionManager::with_system(
                 host.clone(),
                 AccessSystem {

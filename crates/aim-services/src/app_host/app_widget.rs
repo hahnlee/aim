@@ -1266,11 +1266,66 @@ fn write_atomic(path: &std::path::Path, root: &Element) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// AppWidgetServiceImpl's package receiver updates the loaded providers
+    /// for component and application PACKAGE_CHANGED alike.
+    #[test]
+    fn widget_providers_track_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    let mut receiver = pkg.activities[0].clone();
+                    receiver.main.component.name = "p.Widget".into();
+                    receiver.main.component.meta_data =
+                        Some(crate::package::pkg::MetaData(vec![(
+                            META_DATA_APPWIDGET_PROVIDER.into(),
+                            Value::Int(0x7f010002),
+                        )]));
+                    receiver.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec![ACTION_APPWIDGET_UPDATE.into()],
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                    pkg.receivers = vec![receiver];
+                }
+            });
+            let service = AppWidgetService::new(host.clone());
+            let providers = service.discover_providers(0).unwrap();
+            assert_eq!(providers.len(), 1);
+            *service.group.lock().unwrap() = Some(Group {
+                providers,
+                hosts: vec![],
+                bind_allowed: vec![],
+                bound_widgets: 0,
+                restore_state: false,
+            });
+            for component in [Some("p.Widget"), None] {
+                enabled(component, 2);
+                assert!(
+                    service
+                        .group
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .providers
+                        .is_empty()
+                );
+                enabled(component, 1);
+                let group = service.group.lock().unwrap();
+                let providers = &group.as_ref().unwrap().providers;
+                assert_eq!(providers.len(), 1);
+                assert_eq!(providers[0].component.class, "p.Widget");
+            }
+        });
+    }
 
     #[test]
     fn widget_refresh_keeps_hosts_and_rejects_bound_state() {
         use super::super::package_writes::{PackageChanged, PackageMonitor};
-        crate::system::with_discovery_session(|host, publish| {
+        crate::system::with_discovery_session(|host, publish, _| {
             publish(&mut |pkg| {
                 if pkg.package_name == "p" {
                     let mut receiver = pkg.activities[0].clone();
