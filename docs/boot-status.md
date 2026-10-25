@@ -199,9 +199,11 @@ new local guest run.
 
 Process starts now retain the session capture for application info, UID/GIDs,
 ABI, seInfo, package-dependent mount selection and data-isolation inodes rather
-than joining Settings/packages.list at start time. Focused owner tests and the
-host build pass for this launch-reader change; no new guest boot, app frame, second-boot or
-CTS result is recorded for it. The boot-input join and permission/domain/discovery
+than joining Settings/packages.list at start time. Domain queries use that
+capture's native domain owner and code, without a separately attached boot
+owner or cached verifier selection. Focused owner tests and the host build
+pass for these reader changes; no new guest boot, app frame, second-boot or
+CTS result is recorded for them. The boot-input join and permission/discovery
 reader handover remain #2023; install access lifecycle remains #2161.
 
 The current native CTS runtime restores active PackageSettings whose code was
