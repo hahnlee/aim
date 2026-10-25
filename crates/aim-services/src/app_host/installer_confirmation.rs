@@ -1,8 +1,7 @@
 //! `IInstallerConfirmationBridge` for the app host: the native installer
 //! session's confirmation leaves, answered as system_server's
 //! `InstallerConfirmationBridge` answers them (`android-16.0.0_r1`), to
-//! the system uid only. Whether an install is disabled for a package is
-//! the package policy bridge's, not ported (#2023).
+//! the system uid only.
 
 use std::sync::Arc;
 
@@ -90,12 +89,16 @@ impl Service for InstallerConfirmation {
                     })
                 }
             }
+            // The package policy's `isInstallDisabledForPackage`.
             bridge::IS_INSTALL_DISABLED => {
-                bridge::IsInstallDisabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                Err(host.unimplemented_named(
-                    "installer confirmation",
-                    "isInstallDisabledForPackage (#2023)",
-                ))
+                let a = bridge::IsInstallDisabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                super::package_initial_context::InitialContext::new(host.clone())
+                    .install_disabled(
+                        a.installer_package.as_deref().unwrap_or_default(),
+                        a.installer_uid,
+                        a.user_id,
+                    )
+                    .map(|v| bridge::write_is_install_disabled_reply(&mut p, v))
             }
             bridge::IS_DEPENDENCY_INSTALLER_ENABLED => {
                 bridge::IsDependencyInstallerEnabled::read(&mut call.data)
