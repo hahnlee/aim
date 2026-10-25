@@ -566,6 +566,44 @@ impl Service for PackageBootstrap {
                     })
                     .map(|v| bridge::write_is_test_base_on_bootclasspath_reply(&mut p, v))
             }
+            // `android.content.pm.Flags.cloudCompilationVerification()`.
+            bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED => {
+                bridge::InstallerCloudCompilationVerificationEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                host.framework().map(|framework| {
+                    let enabled = framework
+                        .0
+                        .flags
+                        .get("android.content.pm.cloud_compilation_verification")
+                        == Some(&true);
+                    bridge::write_installer_cloud_compilation_verification_enabled_reply(
+                        &mut p, enabled,
+                    )
+                })
+            }
+            // DeviceConfig `package_manager_service`'s pre-verified domain
+            // count and length limits.
+            bridge::GET_INSTALLER_DOMAIN_LIMITS => {
+                bridge::GetInstallerDomainLimits::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    let config = host
+                        .platform()?
+                        .settings
+                        .config_flags(Some("package_manager_service/"))?;
+                    let limit = |name: &str, default: i64| {
+                        config
+                            .get(&format!("package_manager_service/{name}"))
+                            .and_then(|v| v.as_deref())
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(default)
+                    };
+                    Ok(vec![
+                        limit("pre_verified_domains_count_limit", 1000),
+                        limit("pre_verified_domain_length_limit", 256),
+                    ])
+                })()
+                .map(|v| bridge::write_get_installer_domain_limits_reply(&mut p, &Some(v)))
+            }
             // `com.android.art.flags.Flags.artServiceV3()`, from the ART
             // APEX's flag storage.
             bridge::IS_INSTALLER_ART_SERVICE_V3ENABLED => {
