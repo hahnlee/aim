@@ -9,3 +9,29 @@ impl super::Endpoint {
         self.computer.lock().unwrap().take();
     }
 }
+impl super::Endpoint {
+    pub(crate) fn install_capture(
+        &self,
+    ) -> Result<std::sync::Arc<super::super::query_state::Capture>, String> {
+        self.computer
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|owner| owner.capture.clone())
+            .ok_or_else(|| "permission scope is retired".into())
+    }
+    pub(crate) fn pin_install_access(
+        &self,
+        access: std::sync::Arc<crate::package::permissions::AccessView>,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<(), String> {
+        let mut computer = self.computer.lock().unwrap();
+        let owner = computer.as_mut().ok_or("permission scope is retired")?;
+        let mut context = (**owner.capture.context()).clone();
+        access.project_context(&mut context, owner.capture.state(), config);
+        context.access = Some(access);
+        owner.capture =
+            super::super::query_state::Capture::new(owner.capture.scan().clone(), context)?;
+        Ok(())
+    }
+}

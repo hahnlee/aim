@@ -106,7 +106,7 @@ mod boot_configuration_epoch {
         owner.capture_legacy_permissions(&[0],Default::default(),shared).unwrap();
         let process_order=owner.identities.shared_users.keys().map(|name|(name.clone(),Vec::new())).collect();
         owner.complete_shared_processes(process_order).unwrap();
-        let context=Context{scan_version:version,native_domains:None,boot_classes:None,nonce:Some(17),
+        let context=Context{access:None,scan_version:version,native_domains:None,boot_classes:None,nonce:Some(17),
             system:model::System{sdk_sandbox_package:Some(None),..Default::default()},platform:model::Platform::default(),
             users:[(0,model::User{id:0,profile_group_id:0,unlocking_or_unlocked:true,..Default::default()})].into(),
             apex_inventory:ApexInventory{packages:Some(vec![]),active:vec![]},

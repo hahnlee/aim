@@ -24,6 +24,8 @@
 //! states are not implemented (#1508).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+mod install;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Mutex, Weak};
@@ -1469,6 +1471,7 @@ pub struct PermissionManager {
     host: Arc<AppHost>,
     /// The sole mutable access owner; readers retain immutable states.
     owner: Mutex<AccessOwner>,
+    installs: Mutex<BTreeMap<u64, install::Candidate>>,
     groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
     listeners: Mutex<Vec<Binder>>,
 }
@@ -1478,6 +1481,7 @@ impl PermissionManager {
         PermissionManager {
             host,
             owner: Mutex::new(AccessOwner::default()),
+            installs: Mutex::new(BTreeMap::new()),
             groups: Mutex::new(None),
             listeners: Mutex::new(Vec::new()),
         }
@@ -2338,13 +2342,13 @@ mod tests {
     use crate::package::model::{PackageUserState, SharedUser, User};
     use crate::package::pkg::{self, AndroidPackage, Component};
 
-    struct PersistedAccess {
-        host: Arc<AppHost>,
+    pub(super) struct PersistedAccess {
+        pub(super) host: Arc<AppHost>,
         data: std::path::PathBuf,
     }
 
     impl PersistedAccess {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let data = std::env::temp_dir().join(format!(
                 "aim-permission-bootstrap-{}-{}",
@@ -2374,7 +2378,7 @@ mod tests {
             Self { host, data }
         }
 
-        fn write(&self, path: &str, xml: &[u8]) {
+        pub(super) fn write(&self, path: &str, xml: &[u8]) {
             let path = self.data.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let root = aim_android_xml::read(xml).unwrap();
@@ -2388,13 +2392,13 @@ mod tests {
         }
     }
 
-    const BOOT_SYSTEM: &[u8] = br#"<access><permissions>
+    pub(super) const BOOT_SYSTEM: &[u8] = br#"<access><permissions>
         <permission name="android.permission.INTERNET" packageName="android" protectionLevel="0" type="0"/>
         <permission name="android.permission.CAMERA" packageName="android" protectionLevel="1" type="0"/>
         </permissions><permission-trees>
         <permission name="tree" packageName="android" protectionLevel="0" type="0"/>
         </permission-trees></access>"#;
-    const BOOT_USER: &[u8] = br#"<access><app-id-permissions><app-id id="10123">
+    pub(super) const BOOT_USER: &[u8] = br#"<access><app-id-permissions><app-id id="10123">
         <permission name="android.permission.CAMERA" flags="10"/>
         <permission name="android.permission.INTERNET" flags="1"/>
         <permission name="configured" flags="1"/>

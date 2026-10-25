@@ -201,6 +201,7 @@ mod tests {
         let capture = Capture::new(
             scan.clone(),
             Context {
+                access: None,
                 scan_version: scan.version(),
                 native_domains: None,
                 boot_classes: None,

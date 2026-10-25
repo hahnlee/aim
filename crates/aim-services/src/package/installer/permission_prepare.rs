@@ -233,7 +233,7 @@ impl Owner {
                 super::permission_capture::endpoint(current, context, &self.process)
                     .map_err(illegal)?,
             );
-            let binder = self.process.add_service(scope.0.clone());
+            let binder = super::permission_capture::bind(&self.process, &scope.0);
             let mut request = Parcel::new();
             api::Rollback {
                 candidate: Some(prepared.binder),
@@ -440,8 +440,8 @@ impl Owner {
             super::permission_capture::endpoint(base.clone(), previous_context, &self.process)
                 .map_err(illegal)?,
         );
-        let candidate_endpoint = self.process.add_service(candidate_scope.0.clone());
-        let previous_endpoint = self.process.add_service(previous_scope.0.clone());
+        let candidate_endpoint = super::permission_capture::bind(&self.process, &candidate_scope.0);
+        let previous_endpoint = super::permission_capture::bind(&self.process, &previous_scope.0);
         let prepared = Arc::new(Prepared {
             _candidate: candidate_scope,
             _previous: previous_scope,

@@ -229,6 +229,7 @@ fn publish_with_lifecycle(
         )]))
         .unwrap();
     let context = Context {
+        access: None,
         scan_version: 1,
         native_domains: None,
         boot_classes: None,

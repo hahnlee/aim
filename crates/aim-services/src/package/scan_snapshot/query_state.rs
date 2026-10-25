@@ -33,6 +33,7 @@ pub struct UserInputs {
 }
 #[derive(Clone, Debug)]
 pub struct Context {
+    pub access: Option<Arc<crate::package::permissions::AccessView>>,
     pub scan_version: u64,
     pub native_domains: Option<Arc<NativeDomains>>,
     pub boot_classes: Option<Arc<aim_android_image::linkage::Hierarchy>>,
@@ -2173,6 +2174,7 @@ mod resolver_tests {
         let capture = Capture::new(
             scan.clone(),
             Context {
+                access: None,
                 scan_version: scan.version(),
                 native_domains: None,
                 boot_classes: None,

@@ -159,6 +159,7 @@ pub fn build(input: Inputs) -> Result<Context, String> {
     }
     let ids = users.keys().copied().collect::<Vec<_>>();
     let mut context = Context {
+        access: None,
         scan_version: input.snapshot.version(),
         native_domains: None,
         boot_classes: Some(input.classes),

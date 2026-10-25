@@ -924,6 +924,7 @@ fn query_context_for(
         );
     }
     Context {
+        access: None,
         scan_version: version,
         native_domains: None,
         boot_classes: None,
