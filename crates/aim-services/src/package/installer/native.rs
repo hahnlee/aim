@@ -714,6 +714,8 @@ impl NativeOwners {
     }
     fn complete_install(&self, id: i32, warnings: &[String]) -> Result<(), Exception> {
         let root = self.sessions.snapshot(id)?;
+        self.deliver_install_with_warnings(id, 1, None, warnings)?;
+        self.receivers.lock().unwrap().remove(&id);
         for member in std::iter::once(id).chain(root.children.iter().copied()) {
             let session = self.sessions.snapshot(member)?;
             self.record_finished_install_history(member)?;
@@ -723,8 +725,6 @@ impl NativeOwners {
                 success: true,
             });
         }
-        self.deliver_install_with_warnings(id, 1, None, warnings)?;
-        self.receivers.lock().unwrap().remove(&id);
         let retired = self.sessions.finish_nonstaged(id)?;
         if !retired.is_empty() {
             self.persist()?;
@@ -749,11 +749,10 @@ impl NativeOwners {
         if let Err(delivery) = self.deliver_install(id, legacy, Some(error.message.clone())) {
             errors.push(delivery);
         }
-        if let Err(cleanup) = self
-            .sessions
-            .abandon(id, 1000)
-            .and_then(|ids| self.abandon_stage(&ids))
-        {
+        if let Err(cleanup) = self.sessions.abandon(id, 1000).and_then(|ids| {
+            self.install_warnings.retire(&ids);
+            self.abandon_stage(&ids)
+        }) {
             errors.push(cleanup);
         }
         self.receivers.lock().unwrap().remove(&id);
@@ -768,62 +767,13 @@ impl NativeOwners {
         }
         super::post_install::committed_result(Err(error), &errors)
     }
-    fn run_install(&self, id: i32) -> Result<(), Exception> {
-        let root = self.sessions.snapshot(id)?;
-        let ordered = std::iter::once(id)
-            .chain(root.children.iter().copied())
-            .collect();
-        let warning_attempt = match self.install_warnings.begin(id, ordered) {
-            Ok(attempt) => attempt,
-            Err(error) => return self.fail_install(id, -110, error),
-        };
-        let before = match (self.source)() {
-            Ok(before) => before,
-            Err(error) => return self.fail_install(id, -110, error),
-        };
-        let since = self.deferred.mark();
-        let result = self.install_staged_batch(id);
+    fn dispatch_install_result(
+        &self,
+        id: i32,
+        result: Result<(), super::pipeline::Error>,
+    ) -> Result<(), Exception> {
         match result {
-            Err(super::pipeline::Error::Pending) => Ok(()),
-            Ok(()) => {
-                let warnings = warning_attempt.take()?;
-                // handlePackagePostInstall defers an update's observer until
-                // its old processes are killed, or a delay passes.
-                let mut updated = false;
-                let mut killed = std::collections::BTreeSet::new();
-                for member in std::iter::once(id).chain(root.children.iter().copied()) {
-                    let (name, flags) = self.sessions.with_record(member, |session, record| {
-                        Ok((
-                            session.resolved_package.clone(),
-                            record.params.install_flags,
-                        ))
-                    })?;
-                    let Some(name) = name.filter(|name| before.packages.contains_key(name)) else {
-                        continue;
-                    };
-                    updated = true;
-                    if flags & 0x1000 == 0 {
-                        killed.insert(name);
-                    }
-                }
-                if !updated {
-                    return self.complete_install(id, &warnings);
-                }
-                let delay = if killed.is_empty() {
-                    super::deferred_observer::NO_KILL
-                } else {
-                    super::deferred_observer::PENDING_KILL
-                };
-                let this = self.this.clone();
-                std::thread::spawn(move || {
-                    let Some(owner) = this.upgrade() else { return };
-                    owner.deferred.wait(since, &killed, delay);
-                    if let Err(error) = owner.complete_install(id, &warnings) {
-                        owner.errors.lock().unwrap().push(error.message);
-                    }
-                });
-                Ok(())
-            }
+            Ok(()) | Err(super::pipeline::Error::Pending) => Ok(()),
             Err(super::pipeline::Error::Install(failure)) => self.fail_install(
                 id,
                 failure.legacy_status,
@@ -831,6 +781,78 @@ impl NativeOwners {
             ),
             Err(super::pipeline::Error::Owner { error, .. }) => self.fail_install(id, -110, error),
         }
+    }
+    fn run_install(&self, id: i32) -> Result<(), Exception> {
+        self.run_install_with(id, || self.install_staged_batch(id))
+    }
+    fn run_install_with(
+        &self,
+        id: i32,
+        install: impl FnOnce() -> Result<(), super::pipeline::Error>,
+    ) -> Result<(), Exception> {
+        let result = (|| {
+            let owner_error = |error| super::pipeline::Error::Owner {
+                committed: false,
+                error,
+            };
+            let root = self.sessions.snapshot(id).map_err(owner_error)?;
+            let ordered = std::iter::once(id)
+                .chain(root.children.iter().copied())
+                .collect();
+            let warning_attempt = self
+                .install_warnings
+                .begin(id, ordered)
+                .map_err(owner_error)?;
+            let before = (self.source)().map_err(owner_error)?;
+            let since = self.deferred.mark();
+            install()?;
+            let owner_error = |error| super::pipeline::Error::Owner {
+                committed: true,
+                error,
+            };
+            let warnings = warning_attempt.take().map_err(owner_error)?;
+            // handlePackagePostInstall defers an update's observer until
+            // its old processes are killed, or a delay passes.
+            let mut updated = false;
+            let mut killed = std::collections::BTreeSet::new();
+            for member in std::iter::once(id).chain(root.children.iter().copied()) {
+                let (name, flags) = self
+                    .sessions
+                    .with_record(member, |session, record| {
+                        Ok((
+                            session.resolved_package.clone(),
+                            record.params.install_flags,
+                        ))
+                    })
+                    .map_err(owner_error)?;
+                let Some(name) = name.filter(|name| before.packages.contains_key(name)) else {
+                    continue;
+                };
+                updated = true;
+                if flags & 0x1000 == 0 {
+                    killed.insert(name);
+                }
+            }
+            if !updated {
+                return self.complete_install(id, &warnings).map_err(owner_error);
+            }
+            let delay = if killed.is_empty() {
+                super::deferred_observer::NO_KILL
+            } else {
+                super::deferred_observer::PENDING_KILL
+            };
+            let this = self.this.clone();
+            std::thread::spawn(move || {
+                let Some(owner) = this.upgrade() else { return };
+                owner.deferred.wait(since, &killed, delay);
+                let result = owner.complete_install(id, &warnings).map_err(owner_error);
+                if let Err(error) = owner.dispatch_install_result(id, result) {
+                    owner.errors.lock().unwrap().push(error.message);
+                }
+            });
+            Ok(())
+        })();
+        self.dispatch_install_result(id, result)
     }
     pub fn configure_production_preparation(
         self: &Arc<Self>,
@@ -1052,7 +1074,7 @@ impl NativeOwners {
     }
     /// Called by the native commit handler after the session graph is sealed.
     /// The parser/verifier read actual staging files through the configured VFS.
-    pub fn install_staged_batch(&self, id: i32) -> Result<(), super::pipeline::Error> {
+    fn install_staged_batch(&self, id: i32) -> Result<(), super::pipeline::Error> {
         let failure = |message: &str| {
             super::pipeline::Error::Install(super::pipeline::Failure {
                 legacy_status: -110,
@@ -1303,6 +1325,13 @@ impl NativeOwners {
                 return Err(super::pipeline::Error::Pending);
             }
         }
+        self.install_verified_batch(config.owners.as_ref(), code)
+    }
+    fn install_verified_batch(
+        &self,
+        owners: &dyn super::pipeline::Owners,
+        code: Vec<super::pipeline::VerifiedCode>,
+    ) -> Result<(), super::pipeline::Error> {
         // The original commits against the settings it holds at commit, so a
         // concurrent change before then (a user removed while this one was
         // prepared) never fails the install. An uncommitted failure while the
@@ -1312,17 +1341,31 @@ impl NativeOwners {
         let mut attempts = 3;
         loop {
             attempts -= 1;
-            let base = (self.source)().map(|state| state.generation).ok();
-            let result =
-                super::pipeline::install(config.owners.as_ref(), code.clone(), &self.source);
+            let base = (self.source)()
+                .map_err(|error| super::pipeline::Error::Owner {
+                    committed: false,
+                    error,
+                })?
+                .generation;
+            let result = super::pipeline::install(owners, code.clone(), &self.source);
             match result {
-                Err(super::pipeline::Error::Install(ref failure))
-                    if attempts > 0
-                        && !failure.committed
-                        && base.is_some()
-                        && (self.source)().map(|state| state.generation).ok() != base =>
+                Err(super::pipeline::Error::Install(mut failure))
+                    if attempts > 0 && !failure.committed =>
                 {
-                    continue;
+                    let current = match (self.source)() {
+                        Ok(current) => current,
+                        Err(error) => {
+                            failure.message = format!(
+                                "{}; install retry query: {}",
+                                failure.message, error.message
+                            );
+                            return Err(super::pipeline::Error::Install(failure));
+                        }
+                    };
+                    if current.generation != base {
+                        continue;
+                    }
+                    return Err(super::pipeline::Error::Install(failure));
                 }
                 result => return result,
             }
@@ -2001,7 +2044,10 @@ impl Owners for NativeOwners {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::model::{PackageState, PackageUserState, User};
+    use crate::package::{
+        installer::pipeline,
+        model::{PackageState, PackageUserState, User},
+    };
     use aim_binder_host::{
         local::Call,
         parcel::{Parcel, Reader},
@@ -2281,8 +2327,12 @@ mod tests {
             panic!("descriptor-only fixture exchanges no files")
         }
     }
-    #[test]
-    fn commit_owner_failure_reaches_status_receiver_and_finishes_session() {
+    fn assert_install_failure(
+        message: &str,
+        source: QuerySource,
+        setup: impl FnOnce(&Arc<NativeOwners>, i32),
+        install: impl Fn(&NativeOwners, i32) -> Result<(), Exception> + Send + Sync + 'static,
+    ) {
         // android-16.0.0_r1 PIS.dispatchSessionFinished/sendOnPackageInstalled.
         use crate::app_host::{
             AppHost,
@@ -2294,10 +2344,7 @@ mod tests {
             android_content_iintentsender as sender,
             dev_aim_server_ipackagebootstrapbridge as bootstrap,
         };
-        use std::sync::{
-            atomic::{AtomicBool, Ordering},
-            mpsc,
-        };
+        use std::sync::mpsc;
         struct Receiver(mpsc::Sender<Parcel>);
         impl Service for Receiver {
             fn descriptor(&self) -> &str {
@@ -2363,23 +2410,12 @@ mod tests {
         );
         let data = Data::new();
         let sessions = Arc::new(Sessions::default());
-        let fail = Arc::new(AtomicBool::new(false));
-        let fault = fail.clone();
         let events = Arc::new(Mutex::new(Vec::new()));
         let observed = events.clone();
         let publisher = process.clone();
         let owner = NativeOwners::open(
             sessions.clone(),
-            Arc::new(move || {
-                if fault.swap(false, Ordering::SeqCst) {
-                    Err(Exception::new(
-                        EX_ILLEGAL_STATE,
-                        "commit query owner failed",
-                    ))
-                } else {
-                    Ok(state())
-                }
-            }),
+            source,
             Arc::new(|_, _, _| Ok(device())),
             SystemConfig::default(),
             disk(&data),
@@ -2406,20 +2442,31 @@ mod tests {
                 Some(process.strong(0)),
             ),
         );
-        fail.store(true, Ordering::SeqCst);
+        setup(&owner, id);
         let run = owner.clone();
         let (finished, failure) = mpsc::channel();
         let (queue, worker) = super::super::commit::Worker::start(
-            Arc::new(move |id| run.run_install(id)),
+            Arc::new(move |id| install(&run, id)),
             Arc::new(move |message| finished.send(message).unwrap()),
         );
         queue.send(Some(id)).unwrap();
-        assert_eq!(
-            failure
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap(),
-            "commit query owner failed"
-        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let failure = loop {
+            match failure.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(message) => break message,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(message) = owner.errors.lock().unwrap().pop() {
+                        break message;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "install never finished"
+                    );
+                }
+                Err(error) => panic!("commit worker stopped: {error}"),
+            }
+        };
+        assert_eq!(failure, message);
         drop(worker);
         let status = received
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2449,21 +2496,391 @@ mod tests {
         );
         assert_eq!(
             extras["android.content.pm.extra.STATUS_MESSAGE"],
-            Value::String(Some(
-                "INSTALL_FAILED_INTERNAL_ERROR: commit query owner failed".into()
-            ))
+            Value::String(Some(format!("INSTALL_FAILED_INTERNAL_ERROR: {message}")))
         );
         assert!(received.try_recv().is_err());
         assert!(sessions.snapshot(id).is_err());
         assert!(sessions.historical_records()[0].0.destroyed);
         assert!(!data.0.join(format!("app/vmdl{id}.tmp")).exists());
         assert!(owner.receivers.lock().unwrap().is_empty());
-        assert!(events.lock().unwrap().iter().any(
-            |e| matches!(e, Event::Finished { id: finished, success: false, .. } if *finished == id)
-        ));
+        assert!(owner.install_warnings.ticket(id).is_err());
+        let finished = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Finished {
+                    id: finished,
+                    success,
+                    ..
+                } if *finished == id => Some(*success),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(finished, vec![false]);
         owner.shutdown_callbacks();
         process.shutdown().unwrap();
         shell.shutdown().unwrap();
+    }
+    #[test]
+    fn commit_owner_failure_reaches_status_receiver_and_finishes_session() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fail = Arc::new(AtomicBool::new(false));
+        let fault = fail.clone();
+        assert_install_failure(
+            "commit query owner failed",
+            Arc::new(move || {
+                if fault.swap(false, Ordering::SeqCst) {
+                    Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "commit query owner failed",
+                    ))
+                } else {
+                    Ok(state())
+                }
+            }),
+            move |_, _| fail.store(true, Ordering::SeqCst),
+            NativeOwners::run_install,
+        );
+    }
+    struct Preparation(Option<Arc<std::sync::atomic::AtomicBool>>);
+    impl pipeline::Owners for Preparation {
+        fn prepare(
+            &self,
+            _: Vec<pipeline::VerifiedCode>,
+        ) -> Result<Box<dyn pipeline::PreparedInstall>, pipeline::Failure> {
+            if let Some(fault) = &self.0 {
+                fault.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(pipeline::Failure {
+                legacy_status: -110,
+                committed: false,
+                message: "preparation owner failed".into(),
+            })
+        }
+        fn confirm_publication(
+            &self,
+            _: &pipeline::PublishedInstall,
+        ) -> Result<(), pipeline::Failure> {
+            panic!("failed preparation cannot publish")
+        }
+        fn finish(&self, _: pipeline::PublishedInstall) -> Result<(), Exception> {
+            panic!("failed preparation cannot finish")
+        }
+    }
+    #[test]
+    fn preparation_owner_failure_reaches_status_receiver_and_finishes_session() {
+        assert_install_failure(
+            "preparation owner failed",
+            Arc::new(|| Ok(state())),
+            |_, _| {},
+            |owner, id| {
+                owner.run_install_with(id, || {
+                    pipeline::install(&Preparation(None), vec![], &owner.source)
+                })
+            },
+        );
+    }
+    #[derive(Clone, Copy)]
+    enum PreparationFault {
+        Reservation,
+        Permissions,
+    }
+    impl pipeline::Environment for PreparationFault {
+        fn reserve(
+            &self,
+            _: Vec<pipeline::VerifiedCode>,
+            _: &Arc<crate::package::scan_snapshot::Snapshot>,
+        ) -> Result<Box<dyn pipeline::Reservation>, pipeline::Failure> {
+            if matches!(self, Self::Reservation) {
+                return Err(pipeline::Failure {
+                    legacy_status: -110,
+                    committed: false,
+                    message: "reservation owner failed".into(),
+                });
+            }
+            Ok(Box::new(*self))
+        }
+        fn publish_queries(
+            &self,
+            _: &Arc<crate::package::scan_snapshot::Snapshot>,
+        ) -> Result<(), String> {
+            panic!("failed preparation cannot publish")
+        }
+        fn finish(&self, _: pipeline::PublishedInstall) -> Result<(), Exception> {
+            panic!("failed preparation cannot finish")
+        }
+    }
+    impl pipeline::Reservation for PreparationFault {
+        fn requests(
+            &self,
+        ) -> Result<Vec<crate::package::scan::live_install::Request>, pipeline::Failure> {
+            Ok(vec![])
+        }
+        fn users(&self) -> &[crate::package::scan::User] {
+            &[]
+        }
+        fn build_debuggable(&self) -> bool {
+            false
+        }
+        fn complete_metadata(
+            &self,
+            admission: crate::package::scan::live_install::Admission,
+            apks: &crate::package::write::Apks,
+        ) -> Result<crate::package::scan::live_install::CompletedAdmission, pipeline::Failure>
+        {
+            Ok(admission
+                .complete_metadata(apks, vec![])
+                .unwrap_or_else(|_| panic!("empty batch metadata")))
+        }
+        fn prepare_runtime(
+            &self,
+            _: &mut crate::package::scan::live_install::CompletedAdmission,
+        ) -> Result<(), pipeline::Failure> {
+            Err(pipeline::Failure {
+                legacy_status: -110,
+                committed: false,
+                message: "permission preparation owner failed".into(),
+            })
+        }
+        fn cross_user_suspensions(&self) -> bool {
+            panic!("failed preparation cannot commit")
+        }
+        fn mark_committed(&self, _: &Arc<crate::package::scan_snapshot::Snapshot>) {
+            panic!("failed preparation cannot commit")
+        }
+        fn publication_finished(
+            &self,
+            _: &Arc<crate::package::scan_snapshot::Snapshot>,
+        ) -> Result<(), Exception> {
+            panic!("failed preparation cannot finish")
+        }
+    }
+    fn assert_native_preparation_failure(fault: PreparationFault, message: &str) {
+        use crate::package::{installer::pipeline, owner::usage::Usage, scan::SigningScan};
+        let data = Data::new();
+        let native = pipeline::Native {
+            snapshots: Arc::new(
+                crate::package::scan_snapshot::Store::new(
+                    SigningScan::new(&Default::default(), &Default::default(), 36).unwrap(),
+                    Usage::new(std::iter::empty::<&str>()),
+                )
+                .unwrap(),
+            ),
+            disk: Arc::new(Mutex::new(
+                crate::package::owner::Store::create(&data.0, &[]).unwrap(),
+            )),
+            apks: Arc::new(crate::package::write::Apks {
+                files: Box::new(|_| panic!("empty batch does not open APKs")),
+                signing_overrides: None,
+                platform: crate::package::parse::Platform::load(
+                    &aim_paths::derived_image(),
+                    Default::default(),
+                )
+                .unwrap(),
+            }),
+            environment: Arc::new(fault),
+            publication_gate: Arc::new(Mutex::new(())),
+        };
+        assert_install_failure(
+            message,
+            Arc::new(|| Ok(state())),
+            |_, _| {},
+            move |owner, id| {
+                owner.run_install_with(id, || pipeline::install(&native, vec![], &owner.source))
+            },
+        );
+    }
+    #[test]
+    fn reservation_owner_failure_reaches_status_receiver_and_finishes_session() {
+        assert_native_preparation_failure(
+            PreparationFault::Reservation,
+            "reservation owner failed",
+        );
+    }
+    #[test]
+    fn permission_preparation_failure_reaches_status_receiver_and_finishes_session() {
+        assert_native_preparation_failure(
+            PreparationFault::Permissions,
+            "permission preparation owner failed",
+        );
+    }
+    #[test]
+    fn warning_result_failure_reaches_status_receiver_and_finishes_session() {
+        assert_install_failure(
+            "install warning child ART result unavailable",
+            Arc::new(|| Ok(state())),
+            |_, _| {},
+            |owner, id| owner.run_install_with(id, || Ok(())),
+        );
+    }
+    #[test]
+    fn warning_attempt_failure_reaches_status_receiver_and_finishes_session() {
+        assert_install_failure(
+            "install warning session attempt already active",
+            Arc::new(|| Ok(state())),
+            |_, _| {},
+            |owner, id| {
+                let _attempt = owner.install_warnings.begin(id, vec![id]).unwrap();
+                owner.run_install(id)
+            },
+        );
+    }
+    fn assert_generation_query_failure(retry: bool) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fail = Arc::new(AtomicBool::new(false));
+        let fault = fail.clone();
+        assert_install_failure(
+            if retry {
+                "preparation owner failed; install retry query: generation query owner failed"
+            } else {
+                "generation query owner failed"
+            },
+            Arc::new(move || {
+                if fault.swap(false, Ordering::SeqCst) {
+                    Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "generation query owner failed",
+                    ))
+                } else {
+                    Ok(state())
+                }
+            }),
+            |_, _| {},
+            move |owner, id| {
+                owner.run_install_with(id, || {
+                    if !retry {
+                        fail.store(true, Ordering::SeqCst);
+                    }
+                    owner.install_verified_batch(&Preparation(Some(fail.clone())), vec![])
+                })
+            },
+        );
+    }
+    #[test]
+    fn base_generation_query_failure_reaches_status_receiver_and_finishes_session() {
+        assert_generation_query_failure(false);
+    }
+    #[test]
+    fn retry_generation_query_failure_reaches_status_receiver_and_finishes_session() {
+        assert_generation_query_failure(true);
+    }
+    fn fail_external_call(owner: &NativeOwners, code: u32, message: &'static str) {
+        use super::super::preapproval::{BridgeOwner, IntentSender, Status};
+        use aim_service_aidl::dev_aim_server_iinstallerexternalbridge as api;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct StatusFault {
+            external: Arc<BridgeOwner>,
+            fail: AtomicBool,
+            code: u32,
+            message: &'static str,
+        }
+        impl Service for StatusFault {
+            fn descriptor(&self) -> &str {
+                api::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> aim_binder_host::local::Reply {
+                let mut reply = Parcel::new();
+                if call.code == self.code && self.fail.swap(false, Ordering::SeqCst) {
+                    reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, self.message));
+                } else {
+                    assert_eq!(call.code, api::SEND_SESSION_STATUS_WITH_WARNINGS);
+                    let args =
+                        api::SendSessionStatusWithWarnings::<IntentSender>::read(&mut call.data)?;
+                    let result = self.external.deliver(&Status {
+                        receiver: args.receiver.unwrap(),
+                        session_id: args.session_id,
+                        package: args.package_name,
+                        legacy_status: args.legacy_status,
+                        message: args.message,
+                        preapproval: args.preapproval,
+                        pending_installer: args.pending_installer_package,
+                    });
+                    match result {
+                        Ok(()) => reply.write_no_exception(),
+                        Err(error) => reply.write_exception(&error),
+                    }
+                }
+                Ok(reply)
+            }
+        }
+        let external = owner.external.lock().unwrap().clone().unwrap();
+        let process = owner.process.upgrade().unwrap();
+        let Binder::Local(ptr) = process.add_service(Arc::new(StatusFault {
+            external,
+            fail: AtomicBool::new(true),
+            code,
+            message,
+        })) else {
+            unreachable!()
+        };
+        *owner.external.lock().unwrap() = Some(BridgeOwner::new(
+            crate::system::ServiceOwner::Local(process.local_service(ptr).unwrap()),
+        ));
+    }
+    fn assert_completion_failure(deferred: bool) {
+        assert_install_failure(
+            "completion status owner failed",
+            Arc::new(|| Ok(state())),
+            move |owner, id| {
+                fail_external_call(owner,
+                    aim_service_aidl::dev_aim_server_iinstallerexternalbridge::SEND_SESSION_STATUS_WITH_WARNINGS,
+                    "completion status owner failed");
+                if deferred {
+                    owner
+                        .sessions
+                        .with_record_mut(id, |session, _| {
+                            session.resolved_package = Some("fixture".into());
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+            },
+            |owner, id| {
+                owner.run_install_with(id, || {
+                    owner
+                        .record_install_without_dexopt_result(
+                            owner.install_warning_ticket(id).unwrap(),
+                            1,
+                        )
+                        .map_err(|error| pipeline::Error::Owner {
+                            committed: true,
+                            error,
+                        })
+                })
+            },
+        );
+    }
+    #[test]
+    fn completion_failure_reaches_status_receiver_and_finishes_session() {
+        assert_completion_failure(false);
+    }
+    #[test]
+    fn deferred_completion_failure_reaches_status_receiver_and_finishes_session() {
+        assert_completion_failure(true);
+    }
+    #[test]
+    fn commit_metadata_failure_reaches_status_receiver_and_finishes_session() {
+        assert_install_failure(
+            "commit metadata owner failed",
+            Arc::new(|| Ok(state())),
+            |owner, _| {
+                *owner.commit_policy.lock().unwrap() = Some(Arc::new(|_, _| {
+                    Ok(super::super::commit::Policy {
+                        require_mutable_receiver: false,
+                        secure_frp: false,
+                        secure_frp_install_allowed: false,
+                    })
+                }));
+                fail_external_call(owner,
+                    aim_service_aidl::dev_aim_server_iinstallerexternalbridge::GET_APP_METADATA_SIZE_LIMIT,
+                    "commit metadata owner failed");
+            },
+            |owner, id| {
+                let receiver = owner.receivers.lock().unwrap().get(&id).unwrap().0;
+                super::super::SessionOperations::commit_session(owner, id, 0, Some(receiver), false)
+            },
+        );
     }
     #[test]
     fn archive_graph_backreferences_release_actual_store_and_reject_retired_installer() {
@@ -4771,43 +5188,54 @@ impl super::SessionOperations for NativeOwners {
             .lock()
             .unwrap()
             .insert(id, (receiver, retained));
-        self.seal_session(id, uid)?;
-        let limit = external.metadata_limit()?;
-        self.sessions.with_record_mut(id, |session, record| {
-            if session.has_app_metadata {
-                let file = self
-                    .disk
-                    .lock()
-                    .unwrap()
-                    .read_file(session, record, Some("app.metadata"))
-                    .map_err(disk_error)?;
-                if file
-                    .metadata()
-                    .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error.to_string()))?
-                    .len() as i64
-                    > limit
-                {
-                    self.disk
+        let result = (|| {
+            self.seal_session(id, uid)?;
+            let limit = external.metadata_limit()?;
+            self.sessions.with_record_mut(id, |session, record| {
+                if session.has_app_metadata {
+                    let file = self
+                        .disk
                         .lock()
                         .unwrap()
-                        .remove_metadata(session, record)
+                        .read_file(session, record, Some("app.metadata"))
                         .map_err(disk_error)?;
-                    session.has_app_metadata = false;
-                    return Err(Exception::illegal_argument(format!(
-                        "App metadata size exceeds the maximum allowed limit of {limit}"
-                    )));
+                    if file
+                        .metadata()
+                        .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error.to_string()))?
+                        .len() as i64
+                        > limit
+                    {
+                        self.disk
+                            .lock()
+                            .unwrap()
+                            .remove_metadata(session, record)
+                            .map_err(disk_error)?;
+                        session.has_app_metadata = false;
+                        return Err(Exception::illegal_argument(format!(
+                            "App metadata size exceeds the maximum allowed limit of {limit}"
+                        )));
+                    }
                 }
-            }
-            Ok(())
-        })?;
-        self.persist()?;
-        self.commit_queue
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Installer commit queue unavailable"))?
-            .send(Some(id))
-            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "Installer commit worker stopped"))
+                Ok(())
+            })?;
+            self.persist()?;
+            self.commit_queue
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok_or_else(|| {
+                    Exception::new(EX_ILLEGAL_STATE, "Installer commit queue unavailable")
+                })?
+                .send(Some(id))
+                .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "Installer commit worker stopped"))
+        })();
+        self.dispatch_install_result(
+            id,
+            result.map_err(|error| super::pipeline::Error::Owner {
+                committed: false,
+                error,
+            }),
+        )
     }
     fn request_preapproval(
         &self,
