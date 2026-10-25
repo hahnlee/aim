@@ -182,8 +182,13 @@ The boot's admissions into the modern policy are #2169 and the state without
 `access.abx` is #2168. Package monitor registration now resolves its caller's
 user through the activity manager's shared `UserController.handleIncomingUser`
 port (`ALLOW_FULL_ONLY`, all users allowed), with the current-or-self fallback,
-Recents' same-group exception and the shell's debugging restriction. Publication's
-remaining bridges are #2022; the query projection switch is #2023.
+Recents' same-group exception and the shell's debugging restriction. The
+package event owner serializes monitor results (including the receiving user's
+uid) and internal restarted/data-cleared Intents and their callback Bundles;
+`stay_stopped` selects asynchronous restart delivery and its elapsed-time extra.
+Internal event delivery to registered and native service receivers and shutdown
+statistics remain #2167; the PackageList observer producer remains #2022, and
+the query projection switch is #2023.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

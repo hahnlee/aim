@@ -381,20 +381,8 @@ impl Writes {
             .flags
             .iter()
             .any(|(n, on)| n == STAY_STOPPED && *on);
-        let mut extras = vec![(EXTRA_UID, Value::Int(uid))];
-        if stay_stopped {
-            extras.push((EXTRA_TIME, Value::Long(super::alarm_service::elapsed_ms())));
-        }
-        extras.push((EXTRA_USER_HANDLE, Value::Int(user)));
-        let data = Uri::preferred_opaque("package", package);
         // `mProcessesReady`: the app host runs once the processes are.
-        let intent = RawIntent::with_data(
-            Some(ACTION_PACKAGE_RESTARTED),
-            Some(&data),
-            None,
-            FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
-            &extras,
-        );
+        let intent = restarted_intent(package, uid, 0, stay_stopped);
         let me = self.clone();
         let monitor_intent = intent.clone();
         let monitor_allow_list = allow_list.clone();
@@ -445,24 +433,7 @@ impl Writes {
                     .apps_filter
                     .visibility_allow_list(&state, ps, user)
             });
-        let mut extras = vec![
-            (EXTRA_UID, Value::Int(uid)),
-            (EXTRA_USER_HANDLE, Value::Int(user)),
-        ];
-        if is_restore {
-            extras.push((EXTRA_IS_RESTORE, Value::Bool(true)));
-        }
-        if instant {
-            extras.push((EXTRA_PACKAGE_NAME, Value::String(Some(package.into()))));
-        }
-        let data = Uri::preferred_opaque("package", package);
-        let intent = RawIntent::with_data(
-            Some(ACTION_PACKAGE_DATA_CLEARED),
-            Some(&data),
-            None,
-            FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
-            &extras,
-        );
+        let intent = data_cleared_intent(package, uid, user, is_restore, instant);
         let required: Vec<String> = if instant {
             vec![ACCESS_INSTANT_APPS.into()]
         } else {
@@ -1011,6 +982,93 @@ fn callback_result(intent: &RawIntent) -> [(&'static str, Value); 1] {
             data: bytes.data().to_vec(),
         },
     )]
+}
+
+/// `NativePackageMonitorPayload.serialize`: the callback's Intent, with
+/// its uid translated to the receiving user, in the callback Bundle.
+pub(super) fn monitor_result(
+    action: Option<&str>,
+    package: Option<&str>,
+    user: i32,
+    package_uid: i32,
+    replacing: bool,
+) -> Vec<u8> {
+    let package_uid = if package_uid >= 0 && user_id(package_uid) != user {
+        user.wrapping_mul(100_000).wrapping_add(app_id(package_uid))
+    } else {
+        package_uid
+    };
+    let data = package.map(|p| Uri::preferred_opaque("package", p));
+    let intent = RawIntent::with_data(
+        action,
+        data.as_ref(),
+        None,
+        0,
+        &[
+            (EXTRA_UID, Value::Int(package_uid)),
+            ("android.intent.extra.REPLACING", Value::Bool(replacing)),
+            (EXTRA_USER_HANDLE, Value::Int(user)),
+        ],
+    );
+    callback_bundle(&intent)
+}
+
+pub(super) fn callback_bundle(intent: &RawIntent) -> Vec<u8> {
+    let mut p = Parcel::new();
+    bundle::write(&mut p, &callback_result(intent));
+    p.data().to_vec()
+}
+
+/// `PackageInternalEventsBridge.prepareRestarted` and
+/// `PackageManagerService.sendPackageRestartedBroadcast`'s Intent.
+pub(super) fn restarted_intent(
+    package: &str,
+    uid: i32,
+    flags: i32,
+    stay_stopped: bool,
+) -> RawIntent {
+    let mut extras = vec![
+        (EXTRA_UID, Value::Int(uid)),
+        (EXTRA_USER_HANDLE, Value::Int(user_id(uid))),
+    ];
+    if stay_stopped {
+        extras.push((EXTRA_TIME, Value::Long(super::alarm_service::elapsed_ms())));
+    }
+    RawIntent::with_data(
+        Some(ACTION_PACKAGE_RESTARTED),
+        Some(&Uri::preferred_opaque("package", package)),
+        None,
+        flags | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
+        &extras,
+    )
+}
+
+/// `PackageInternalEventsBridge.prepareDataCleared` and
+/// `PackageManagerService.sendPackageDataClearedBroadcast`'s Intent.
+pub(super) fn data_cleared_intent(
+    package: &str,
+    uid: i32,
+    user: i32,
+    restore: bool,
+    instant: bool,
+) -> RawIntent {
+    let mut extras = vec![
+        (EXTRA_UID, Value::Int(uid)),
+        (EXTRA_USER_HANDLE, Value::Int(user)),
+    ];
+    if restore {
+        extras.push((EXTRA_IS_RESTORE, Value::Bool(true)));
+    }
+    if instant {
+        extras.push((EXTRA_PACKAGE_NAME, Value::String(Some(package.into()))));
+    }
+    RawIntent::with_data(
+        Some(ACTION_PACKAGE_DATA_CLEARED),
+        Some(&Uri::preferred_opaque("package", package)),
+        None,
+        FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
+        &extras,
+    )
 }
 
 /// A bundle of `entries`, as `Bundle.writeToParcel` writes it.

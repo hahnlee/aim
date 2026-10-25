@@ -119,6 +119,7 @@ mod package_enable;
 pub mod package_initial_context;
 pub mod package_installer;
 mod package_installer_policy;
+mod package_internal_events;
 mod package_internal_leaves;
 mod package_internal_storage;
 mod package_launch;

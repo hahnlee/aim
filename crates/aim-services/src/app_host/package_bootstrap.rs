@@ -14,7 +14,8 @@
 //! the installer's preparation, removal and archive queries, the enable
 //! bridge, the launch Intent's serialization, the application data
 //! owners, the internal persistence, install and storage leaves, and the
-//! move's storage leaves. The bridge's other owners, its other sub-bridges
+//! move's storage leaves, monitor users and payloads, and internal event
+//! preparation. The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -289,6 +290,28 @@ impl Service for PackageBootstrap {
         let mut p = Parcel::new();
         let host = &self.host;
         let result: Result<(), Exception> = match call.code {
+            bridge::GET_PACKAGE_INTERNAL_EVENTS_BRIDGE => {
+                bridge::GetPackageInternalEventsBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let events = self.leaf(Arc::new(
+                    super::package_internal_events::InternalEvents::new(host.clone()),
+                ));
+                bridge::write_get_package_internal_events_bridge_reply(&mut p, Some(events));
+                Ok(())
+            }
+            bridge::PACKAGE_MONITOR_RESULT => {
+                let a =
+                    bridge::PackageMonitorResult::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let result = super::package_writes::monitor_result(
+                    a.action.as_deref(),
+                    a.package_name.as_deref(),
+                    a.user_id,
+                    a.uid,
+                    a.replacing,
+                );
+                bridge::write_package_monitor_result_reply(&mut p, &Some(result));
+                Ok(())
+            }
             bridge::PACKAGE_MONITOR_USER => {
                 let a = bridge::PackageMonitorUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 host.handle_incoming_user(
