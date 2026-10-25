@@ -128,6 +128,7 @@ mod package_launch;
 mod package_maintenance;
 mod package_moves;
 pub mod package_observers;
+mod package_policy;
 pub mod package_resolution_policy;
 pub mod package_service;
 mod package_shell_policy;

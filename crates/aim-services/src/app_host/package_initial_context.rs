@@ -26,7 +26,7 @@ const SYSTEM_UID: i32 = 1000;
 /// `AppOpsManager.OP_REQUEST_INSTALL_PACKAGES`,
 /// `OP_AUTO_REVOKE_PERMISSIONS_IF_UNUSED`; `MODE_ALLOWED`.
 const OP_REQUEST_INSTALL_PACKAGES: i32 = 66;
-const OP_AUTO_REVOKE_PERMISSIONS_IF_UNUSED: i32 = 97;
+pub(super) const OP_AUTO_REVOKE_PERMISSIONS_IF_UNUSED: i32 = 97;
 const MODE_ALLOWED: i32 = 0;
 /// `UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES` and its global form.
 const RESTRICTIONS: [&str; 2] = [
@@ -78,7 +78,12 @@ impl InitialContext {
     /// unknown-sources restrictions, then the external sources policy
     /// AppOpsService sets (`REQUEST_INSTALL_PACKAGES`, trusted only when
     /// allowed).
-    fn install_disabled(&self, name: &str, uid: i32, user: i32) -> Result<bool, Exception> {
+    pub(super) fn install_disabled(
+        &self,
+        name: &str,
+        uid: i32,
+        user: i32,
+    ) -> Result<bool, Exception> {
         // The app host's only user is 0; another has no restrictions.
         if user == 0 {
             let restrictions = self.host.user_restrictions()?;
@@ -114,7 +119,7 @@ impl InitialContext {
     }
 
     /// `Settings.Global.getInt(default_install_location, 0)`.
-    fn install_location(&self) -> Result<i32, Exception> {
+    pub(super) fn install_location(&self) -> Result<i32, Exception> {
         Ok(self
             .host
             .platform()?

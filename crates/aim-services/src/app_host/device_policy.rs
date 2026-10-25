@@ -124,6 +124,9 @@ impl Default for UserData {
 pub struct Policies {
     /// A device owner, or a profile owner of a user.
     owned: bool,
+    device_owner: Option<String>,
+    managed_users: Vec<i32>,
+    admin_packages: Vec<String>,
     /// The owners' system update policy (`OwnersData.mSystemUpdatePolicy`).
     system_update_policy: bool,
     /// An active admin or a delegation of a user.
@@ -155,6 +158,36 @@ impl Policies {
             }),
             ..Default::default()
         };
+        // `getDeviceOwnerComponent(false)` and `DeviceStateCacheImpl`'s
+        // enterprise device owner (the default owner type).
+        let mut owner_type = 0;
+        if let Some(root) = owners.as_ref().filter(|r| r.name == "root") {
+            policies.device_owner = root
+                .children()
+                .take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str()))
+                .filter(|e| e.name == "device-owner")
+                .filter_map(|e| e.string("component"))
+                .filter(|c| unflattens(c))
+                .map(|c| c.split_once('/').unwrap().0.to_string())
+                .last();
+            for e in root
+                .children()
+                .take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str()))
+                .filter(|e| {
+                    e.name == "device-owner-type"
+                        && e.string("package").as_deref() == policies.device_owner.as_deref()
+                })
+            {
+                owner_type = e
+                    .int("value")
+                    .map_err(|e| format!("device owner type: {e}"))?
+                    .unwrap_or(0);
+            }
+        }
+        let managed_device = policies.device_owner.is_some() && owner_type == 0;
+        if managed_device {
+            policies.managed_users.push(0);
+        }
         // `getPolicyFileDirectory`: the system user's file is in
         // `/data/system`, the others' in their user directories.
         let mut files = vec![(0, system.join(DEVICE_POLICIES_XML))];
@@ -173,10 +206,11 @@ impl Policies {
             else {
                 continue;
             };
-            if read_atomic(&entry.path().join(PROFILE_OWNER_XML))?
-                .is_some_and(|root| names_owner(&root, "profile-owner", PROFILE_OWNER_TAGS))
-            {
-                policies.owned = true;
+            let profile_owner = read_atomic(&entry.path().join(PROFILE_OWNER_XML))?
+                .is_some_and(|root| names_owner(&root, "profile-owner", PROFILE_OWNER_TAGS));
+            policies.owned |= profile_owner;
+            if managed_device || profile_owner {
+                policies.managed_users.push(user);
             }
             if user != 0 {
                 files.push((user, entry.path().join(DEVICE_POLICIES_XML)));
@@ -205,6 +239,14 @@ impl Policies {
             policies.admins |= root
                 .children()
                 .any(|e| e.name == "admin" || e.name == "delegation");
+            // `DevicePolicyData.load`: active admins' flattened components.
+            policies.admin_packages.extend(
+                root.children()
+                    .filter(|e| e.name == "admin")
+                    .filter_map(|e| e.string("name"))
+                    .filter(|c| unflattens(c))
+                    .map(|c| c.split_once('/').unwrap().0.to_string()),
+            );
         }
         // `DevicePoliciesReaderWriter.readFromFileLocked`: nothing without
         // the file itself; its entries are each a root.
@@ -244,6 +286,17 @@ impl Policies {
     /// engine a policy.
     pub fn has_admins_or_policies(&self) -> bool {
         self.admins || self.policies
+    }
+
+    /// `getDeviceOwnerComponent(false)` and `packageHasActiveAdmins`.
+    pub(super) fn package_is_admin(&self, package: &str) -> bool {
+        self.device_owner.as_deref() == Some(package)
+            || self.admin_packages.iter().any(|p| p == package)
+    }
+
+    /// `isUserOrganizationManaged`: a device or profile owner owns the user.
+    pub(super) fn managed_users(&self) -> &[i32] {
+        &self.managed_users
     }
 
     /// `getUserData(user)`: a user without a file has the defaults.

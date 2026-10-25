@@ -368,6 +368,28 @@ impl Service for PackageBootstrap {
                         }
                     })
             }
+            bridge::GET_PACKAGE_POLICY_BRIDGE => {
+                bridge::GetPackagePolicyBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let owner = self.leaf(Arc::new(super::package_policy::PackagePolicy(host.clone())));
+                bridge::write_get_package_policy_bridge_reply(&mut p, Some(owner));
+                Ok(())
+            }
+            bridge::IS_AUTO_REVOKE_WHITELISTED => {
+                let a =
+                    bridge::IsAutoRevokeWhitelisted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                super::appops_service::mode(
+                    host,
+                    super::package_initial_context::OP_AUTO_REVOKE_PERMISSIONS_IF_UNUSED,
+                    a.calling_uid,
+                    a.package_name.as_deref(),
+                )
+                .map(|mode| {
+                    bridge::write_is_auto_revoke_whitelisted_reply(
+                        &mut p,
+                        mode == super::appops_service::MODE_IGNORED,
+                    )
+                })
+            }
             bridge::GET_PACKAGE_SHELL_READ_LEAF => {
                 bridge::GetPackageShellReadLeaf::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let owner = self.leaf(Arc::new(super::package_shell_read::ShellRead(host.clone())));
@@ -1391,7 +1413,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
-        let reply = call(bridge::GET_PACKAGE_POLICY_BRIDGE);
+        let reply = call(bridge::GET_INSTALLER_USER_POLICY);
         let e = reply.reader().read_exception().unwrap().unwrap_err();
         assert!(e.message.contains("#2022"), "{}", e.message);
         std::fs::remove_dir_all(&data).unwrap();
