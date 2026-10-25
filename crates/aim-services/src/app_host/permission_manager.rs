@@ -1591,11 +1591,11 @@ impl PermissionManager {
             })?;
         let bridge = system.package_bootstrap()?;
         let capture = system.capture_package_queries_for(&bridge)?;
-        let user0 = self.user0()?;
+        let view = self.retained_access()?;
         granted_permissions(
             capture.state(),
-            &self.system()?.permissions,
-            &user0,
+            &view.system.permissions,
+            &view.user0,
             package,
             app_id,
             user,
@@ -1611,21 +1611,7 @@ impl PermissionManager {
         users: &[i32],
         config: &crate::package::system_config::SystemConfig,
     ) -> Result<Vec<u8>, Exception> {
-        validate_legacy_identity(app_id, users)?;
-        let user0 = self.user0()?;
-        let system = self.system()?;
-        let flags = user0
-            .app_id_permissions
-            .iter()
-            .find(|(id, _)| *id == app_id)
-            .map(|(_, flags)| flags);
-        Ok(legacy_state_record(app_id, users, flags, |name| {
-            match system.permissions.iter().find(|p| p.name == name) {
-                Some(permission) => Some(is_runtime(permission)),
-                // A configured permission no package defines.
-                None => config.permissions.contains_key(name).then_some(false),
-            }
-        }))
+        self.retained_access()?.legacy_state(app_id, users, config)
     }
 
     /// `PermissionService.getGidsForUid` (`uid_gids`), of user 0's state.
@@ -1757,9 +1743,29 @@ impl PermissionManager {
         let read = if backup.exists() { &backup } else { &path };
         let bytes = std::fs::read(read).map_err(|e| fail(e.to_string()))?;
         let root = aim_android_xml::read(&bytes).map_err(fail)?;
-        let root =
-            permissions::with_app_id_permissions(root, &state.app_id_permissions).map_err(fail)?;
+        let root = permissions::with_app_id_permissions(root, &state.app_id_permissions)
+            .and_then(|root| permissions::with_package_versions(root, &state.package_versions))
+            .map_err(fail)?;
         let bytes = aim_android_xml::abx::write(&root).map_err(fail)?;
+        self.write_access(USER0_ACCESS, &bytes)
+    }
+
+    fn write_system(&self, state: &AccessSystem) -> Result<(), Exception> {
+        let path = self.host.data()?.join(SYSTEM_ACCESS);
+        let backup = path.with_extension("abx.bak");
+        let bytes = std::fs::read(if backup.exists() { &backup } else { &path })
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
+        let root = aim_android_xml::read(&bytes)
+            .and_then(|root| permissions::with_system_permissions(root, state))
+            .and_then(|root| aim_android_xml::abx::write(&root))
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        self.write_access(SYSTEM_ACCESS, &root)
+    }
+
+    fn write_access(&self, relative: &str, bytes: &[u8]) -> Result<(), Exception> {
+        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{relative}: {e}"));
+        let path = self.host.data()?.join(relative);
+        let backup = path.with_extension("abx.bak");
         // New files of the system's, under system_server's umask (077).
         let owner = aim_storage::guest_inode::GuestInode {
             uid: Some(SYSTEM_UID as u32),
@@ -1914,7 +1920,7 @@ impl PermissionManager {
         users: &[i32],
         app_ids: impl Iterator<Item = i32>,
     ) -> Result<Vec<Vec<i32>>, Exception> {
-        let user0 = self.user0()?;
+        let view = self.retained_access()?;
         let platform = self.host.platform()?;
         let state = capture.state();
         let resolution = capture.resolution().map_err(|e| {
@@ -1927,9 +1933,9 @@ impl PermissionManager {
         let access = Access {
             state,
             filter: &resolution.apps_filter,
-            defined: &self.system()?.permissions,
+            defined: &view.system.permissions,
             groups: &groups,
-            user0: &user0,
+            user0: &view.user0,
             compat: &platform.compat,
         };
         let app_ids: Vec<_> = app_ids.collect();

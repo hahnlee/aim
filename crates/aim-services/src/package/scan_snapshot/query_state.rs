@@ -1883,6 +1883,7 @@ impl Capture {
     pub(crate) fn prepare_permission_refresh(
         self: &Arc<Self>,
         bridge: &crate::package::bootstrap::Bridge,
+        access: Option<Arc<crate::package::permissions::AccessView>>,
     ) -> Result<PackageUpdate, String> {
         let version = self
             .scan
@@ -1896,7 +1897,7 @@ impl Capture {
             version,
         )
         .map_err(|error| format!("permission refresh replica: {error:?}"))?;
-        let capture = self.permission_view(store.capture(), bridge)?;
+        let capture = self.permission_view(store.capture(), bridge, access)?;
         Ok(PackageUpdate { store, capture })
     }
 
@@ -1904,12 +1905,22 @@ impl Capture {
         &self,
         scan: Arc<super::Snapshot>,
         bridge: &crate::package::bootstrap::Bridge,
+        access: Option<Arc<crate::package::permissions::AccessView>>,
     ) -> Result<Arc<Self>, String> {
         let mut context = (*self.context).clone();
         context.scan_version = scan.version();
-        let context = bridge
+        let mut context = bridge
             .resolve_query_context(self.scan.owner(), context)
             .map_err(|error| format!("permission refresh original owner: {error:?}"))?;
+        if let Some(access) = access {
+            let config = &self
+                .domains
+                .as_ref()
+                .ok_or("native permission projection config unavailable")?
+                .config;
+            access.project_context(&mut context, &self.state, config);
+            context.access = Some(access);
+        }
         let mut capture = Self::new(scan, context)?;
         Arc::get_mut(&mut capture).unwrap().frozen = self.frozen.clone();
         Ok(capture)

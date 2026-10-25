@@ -48,7 +48,9 @@ mod internal_suspension;
 #[path = "system_package_internal_usage_tests.rs"]
 mod internal_usage_tests;
 #[cfg(test)]
-pub(crate) use internal_usage_tests::host_mutations::with_discovery_session;
+pub(crate) use internal_usage_tests::host_mutations::{
+    install_publication, with_discovery_session,
+};
 mod legacy_domain;
 #[path = "system_package_original_domains.rs"]
 pub mod original_domains;
@@ -240,6 +242,8 @@ const ALLOW_ISOLATED: &[&str] = &["activity", "display", "webviewupdate"];
 
 pub struct System {
     diagnostic_self: Weak<Self>,
+    native_permissions:
+        std::sync::OnceLock<Weak<crate::app_host::permission_manager::PermissionManager>>,
     process: Arc<LocalProcess>,
     services: Mutex<HashMap<&'static str, Arc<Strong>>>,
     listeners: Listeners,
@@ -584,6 +588,23 @@ struct Listeners {
 type Result<T> = std::result::Result<T, Exception>;
 
 impl System {
+    pub(crate) fn set_native_permissions(
+        &self,
+        owner: &Arc<crate::app_host::permission_manager::PermissionManager>,
+    ) {
+        let retained = self
+            .native_permissions
+            .get_or_init(|| Arc::downgrade(owner));
+        assert!(
+            retained.ptr_eq(&Arc::downgrade(owner)),
+            "native permission owner replaced"
+        );
+    }
+    pub(crate) fn native_permissions(
+        &self,
+    ) -> Option<Arc<crate::app_host::permission_manager::PermissionManager>> {
+        self.native_permissions.get().and_then(Weak::upgrade)
+    }
     /// `ops` are the app ops the service decides by.
     pub fn new(process: Arc<LocalProcess>, ops: &[i32]) -> Arc<Self> {
         let (notes, noted) = mpsc::channel::<Note>();
@@ -618,6 +639,7 @@ impl System {
             };
             Self {
                 diagnostic_self: this.clone(),
+                native_permissions: std::sync::OnceLock::new(),
                 process: process.clone(),
                 services: Mutex::new(HashMap::new()),
                 listeners,
@@ -5239,9 +5261,22 @@ impl System {
                     drop(state);
                     continue;
                 }
-                current.set_queries(Some(capture));
-                if let Some(page) = &current.version_page {
-                    page.publish(latest.version());
+                let access = capture.context().access.clone();
+                let publish = || {
+                    current.set_queries(Some(capture));
+                    if let Some(page) = &current.version_page {
+                        page.publish(latest.version());
+                    }
+                    Ok::<(), String>(())
+                };
+                if let Some(owner) = system.native_permissions() {
+                    owner.commit_install(
+                        &latest,
+                        &access.ok_or("install capture access unavailable")?,
+                        publish,
+                    )?;
+                } else {
+                    publish()?;
                 }
                 state.version = latest.version();
                 break;
@@ -7991,15 +8026,19 @@ impl System {
                 (capture, canonical)
             };
             // RPCs can reenter the permission owner; hold no publication lock.
+            let access = self
+                .native_permissions()
+                .map(|owner| owner.retained_access())
+                .transpose()?;
             let (view, update) = if Arc::ptr_eq(capture.scan(), &canonical) {
                 let update = capture
-                    .prepare_permission_refresh(bridge)
+                    .prepare_permission_refresh(bridge, access.clone())
                     .map_err(|cause| failure(&cause))?;
                 (update.capture.clone(), Some(update))
             } else {
                 (
                     capture
-                        .permission_view(capture.scan().clone(), bridge)
+                        .permission_view(capture.scan().clone(), bridge, access)
                         .map_err(|cause| failure(&cause))?,
                     None,
                 )
@@ -8021,7 +8060,19 @@ impl System {
             {
                 continue;
             }
-            if !self.publish_internal_query_view(&mut state, &canonical, view, update)? {
+            let access = view.context().access.clone();
+            let publish = || self.publish_internal_query_view(&mut state, &canonical, view, update);
+            let published = if let Some(owner) = self.native_permissions() {
+                let access =
+                    access.ok_or_else(|| failure("permission refresh access unavailable"))?;
+                let Some(result) = owner.if_current_access(&access, publish) else {
+                    continue;
+                };
+                result?
+            } else {
+                publish()?
+            };
+            if !published {
                 continue;
             }
             return Ok(());

@@ -397,6 +397,7 @@ fn changed_owners(before: &Snapshot, current: &Snapshot) -> Result<Option<Vec<u8
 }
 
 pub struct Endpoint {
+    install_retirement: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     lease: Mutex<Lease>,
     computer: Mutex<Option<ComputerLease>>,
     raw_metadata: bool,
@@ -446,10 +447,11 @@ impl Endpoint {
         if let Some(id) = comparison_id {
             comparisons().lock().unwrap().remove(&id);
         }
-        self.computer.lock().unwrap().take();
+        self.revoke_install_scope();
     }
     pub fn new(snapshot: Arc<Snapshot>) -> Self {
         Self {
+            install_retirement: Mutex::new(None),
             computer: Mutex::new(None),
             raw_metadata: false,
             lease: Mutex::new(Lease {

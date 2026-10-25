@@ -13,9 +13,11 @@ struct Install {
     path: String,
     version: i64,
     code: crate::package::pkg::AndroidPackage,
+    previous_code: Option<crate::package::pkg::AndroidPackage>,
 }
 pub(super) struct Candidate {
     scope: Weak<Endpoint>,
+    package_base: Arc<Snapshot>,
     base: Arc<permissions::AccessView>,
     access: Arc<permissions::AccessView>,
     installs: Vec<Install>,
@@ -31,7 +33,7 @@ fn unsupported(case: &str) -> Exception {
 }
 impl PermissionManager {
     pub(in crate::app_host) fn prepare_install(
-        &self,
+        self: &Arc<Self>,
         candidate: Binder,
         previous: Binder,
         installation: &[u8],
@@ -80,11 +82,18 @@ impl PermissionManager {
             key,
             Candidate {
                 scope: Arc::downgrade(&scope),
+                package_base: before.scan().clone(),
                 base,
                 access,
                 installs,
             },
         );
+        let owner = Arc::downgrade(self);
+        scope.on_install_retired(Box::new(move || {
+            if let Some(owner) = owner.upgrade() {
+                owner.installs.lock().unwrap().remove(&key);
+            }
+        }));
         Ok(out.data().to_vec())
     }
     pub(in crate::app_host) fn discard_install(
@@ -113,6 +122,7 @@ impl PermissionManager {
             }
         }
         pending.remove(&key);
+        drop(pending);
         scope.revoke_install_scope();
         Ok(())
     }
@@ -150,7 +160,7 @@ fn decode(capture: &Capture, before: &Capture, bytes: &[u8]) -> Result<Vec<Insta
                 return Err(BAD_VALUE);
             }
             let allowlist = strings(&mut input)?;
-            input.read_i32()?; // Auto-revoke mode is consumed by the separate AppOps install owner.
+            input.read_i32()?; // The modern PermissionService does not use auto-revoke mode here.
             records.push((name, flags, previous, user, names, allowlist));
         }
         if input.remaining() != 0 {
@@ -217,6 +227,7 @@ fn decode(capture: &Capture, before: &Capture, bytes: &[u8]) -> Result<Vec<Insta
             path: ps.path.clone(),
             version: ps.version_code,
             code: code.clone(),
+            previous_code: old.and_then(|p| p.pkg.as_deref()).cloned(),
         });
     }
     Ok(installs)
@@ -230,6 +241,20 @@ fn prepare(
     let mut user = (*base.user0).clone();
     let mut changed = BTreeSet::new();
     for install in installs {
+        match user
+            .package_versions
+            .iter_mut()
+            .find(|(name, _)| name == &install.name)
+        {
+            Some((_, version)) if *version < 17 => {
+                return Err(unsupported("access package-state upgrade"));
+            }
+            Some(_) => {}
+            None => {
+                user.package_versions.push((install.name.clone(), 17));
+                user.package_versions = info::array_order(user.package_versions, |(name, _)| name);
+            }
+        }
         for declared in &install.code.permissions {
             let name = &declared.component.name;
             let tree = system
@@ -248,18 +273,36 @@ fn prepare(
             if old.is_some_and(|i| definitions[i].package != install.name) {
                 return Err(unsupported("permission ownership transfer"));
             }
+            let old_declaration = install
+                .previous_code
+                .as_ref()
+                .and_then(|code| code.permissions.iter().find(|p| p.component.name == *name));
+            let reset = old_declaration.is_some_and(|old| {
+                let runtime =
+                    declared.protection_level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS;
+                (runtime && old.protection_level & PROTECTION_MASK_BASE != PROTECTION_DANGEROUS)
+                    || (runtime && declared.group.is_some() && declared.group != old.group)
+                    || (declared.protection_level & PROTECTION_MASK_BASE == 4
+                        && old.protection_level & PROTECTION_MASK_BASE != 4)
+            });
+            if reset {
+                for (_, flags) in &mut user.app_id_permissions {
+                    flags.retain(|(permission, _)| permission != name);
+                }
+            }
             let value = Permission {
                 name: name.clone(),
                 package: install.name.clone(),
                 protection_level: declared.protection_level,
                 dynamic: None,
             };
+            let differs = old.is_none_or(|i| definitions[i] != value);
             if let Some(i) = old {
                 definitions[i] = value;
             } else {
                 definitions.push(value);
             }
-            if !declared.tree {
+            if !declared.tree && (differs || reset) {
                 changed.insert(name.clone());
             }
         }
@@ -274,6 +317,9 @@ fn prepare(
                         .any(|d| d.component.name == p.name);
                 if !keep {
                     changed.insert(p.name.clone());
+                    for (_, flags) in &mut user.app_id_permissions {
+                        flags.retain(|(name, _)| name != &p.name);
+                    }
                 }
                 keep
             });
@@ -337,12 +383,25 @@ fn prepare(
                         INSTALL_REVOKED
                     }
                 }
-                1 => old & !(INSTALL_GRANTED | INSTALL_REVOKED | PROTECTION_GRANTED),
+                1 => {
+                    if old & (LEGACY_GRANTED | IMPLICIT_GRANTED | IMPLICIT) != 0 {
+                        return Err(unsupported("legacy or implicit runtime permission policy"));
+                    }
+                    old & (((1 << 24) - 1)
+                        & !(INSTALL_GRANTED | INSTALL_REVOKED | PROTECTION_GRANTED))
+                }
                 _ => return Err(unsupported("signature/internal protection policy")),
+            };
+            let flags = if permission.protection_level & 0x40 != 0 && !is_runtime(permission) {
+                flags | (old & (ROLE | USER_SET))
+            } else {
+                flags
             };
             user.set_permission_flags(ps.app_id, name, flags);
         }
     }
+    system.permissions = info::array_order(system.permissions, |p| &p.name);
+    system.permission_trees = info::array_order(system.permission_trees, |p| &p.name);
     Ok(Arc::new(permissions::AccessView {
         system: Arc::new(system),
         user0: Arc::new(user),
@@ -443,8 +502,20 @@ mod tests {
                 ..Default::default()
             },
             tree,
+            group: (!tree).then(|| "p.GROUP".into()),
             ..Default::default()
         }
+    }
+    fn seed(persisted: &PersistedAccess) {
+        persisted.write(SYSTEM_ACCESS, BOOT_SYSTEM);
+        persisted.write(USER0_ACCESS, BOOT_USER);
+        let path = persisted
+            .host
+            .root()
+            .unwrap()
+            .join("system/etc/permissions/platform.xml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, br#"<permissions><permission name="android.permission.INTERNET"><group gid="3003"/></permission></permissions>"#).unwrap();
     }
     fn installation() -> Vec<u8> {
         let mut p = Parcel::new();
@@ -464,12 +535,22 @@ mod tests {
     fn prepare_pins_private_definitions_and_install_grants_and_rollback_discards_them() {
         crate::system::with_discovery_session(|host, publish, _| {
             let persisted = PersistedAccess::new();
-            persisted.write(SYSTEM_ACCESS, BOOT_SYSTEM);
-            persisted.write(USER0_ACCESS, BOOT_USER);
-            let manager = PermissionManager::new(persisted.host.clone());
+            seed(&persisted);
+            let manager = Arc::new(PermissionManager::new(persisted.host.clone()));
             let base = manager.retained_access().unwrap();
             let previous = host.package_capture().unwrap();
             publish(&mut |code| {
+                if code.package_name != "p" {
+                    return;
+                }
+                code.permission_groups = vec![crate::package::pkg::PermissionGroup {
+                    component: Component {
+                        name: "p.GROUP".into(),
+                        package_name: "p".into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }];
                 code.target_sdk_version = 36;
                 code.permissions =
                     vec![declaration("p.NORMAL", false), declaration("p.tree", true)];
@@ -494,8 +575,35 @@ mod tests {
             ));
             let binder = permission_capture::bind(process, &endpoint);
             let old = permission_capture::bind(process, &before);
-            let receipt = manager
-                .prepare_install(binder, old, &installation())
+            use aim_service_aidl::dev_aim_server_iinstallerpermissionbridge as api;
+            assert!(
+                persisted
+                    .host
+                    .permission_manager
+                    .set(manager.clone())
+                    .is_ok()
+            );
+            let bridge = process.add_service(Arc::new(
+                crate::app_host::installer_permissions::InstallerPermissions::new(
+                    persisted.host.clone(),
+                ),
+            ));
+            let Binder::Local(ptr) = bridge else {
+                unreachable!()
+            };
+            let bridge = process.local_service(ptr).unwrap();
+            let mut request = Parcel::new();
+            api::Prepare {
+                candidate: Some(binder),
+                previous: Some(old),
+                installation: Some(installation()),
+                cross_user_suspensions: false,
+            }
+            .write(&mut request);
+            let reply = bridge.transact(api::PREPARE, &request, false).unwrap();
+            let receipt = api::read_prepare_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
                 .unwrap();
             let view = endpoint.install_capture().unwrap();
             let access = view.context().access.as_ref().unwrap();
@@ -535,10 +643,25 @@ mod tests {
                     .granted_permissions
                     .contains(&"p.NORMAL".into())
             );
+            assert_eq!(view.state().packages["p"].users[&0].gids, [3003]);
+            assert!(
+                permission_groups(view.state())
+                    .iter()
+                    .any(|g| g.item.name.as_deref() == Some("p.GROUP"))
+            );
             assert!(base.same_base(&manager.retained_access().unwrap()));
             assert!(!receipt.is_empty());
-            manager
-                .discard_install(binder, &[Some("p".into())])
+            let mut request = Parcel::new();
+            api::Rollback {
+                candidate: Some(binder),
+                current: Some(old),
+                package_names: Some(vec![Some("p".into())]),
+                cross_user_suspensions: false,
+            }
+            .write(&mut request);
+            let reply = bridge.transact(api::ROLLBACK, &request, false).unwrap();
+            api::read_rollback_reply(&mut reply.reader())
+                .unwrap()
                 .unwrap();
             assert!(endpoint.install_capture().is_err());
             assert!(manager.installs.lock().unwrap().is_empty());
@@ -551,5 +674,323 @@ mod tests {
                     .any(|p| p.name == "p.NORMAL")
             );
         });
+    }
+    #[test]
+    fn install_publication_commits_the_owner_or_retains_the_last_complete_capture() {
+        for case in ["commit", "stale", "access-write", "capture"] {
+            crate::system::with_discovery_session(|host, publish, _| {
+                let persisted = PersistedAccess::new();
+                seed(&persisted);
+                let manager = Arc::new(PermissionManager::new(persisted.host.clone()));
+                host.package_system()
+                    .unwrap()
+                    .set_native_permissions(&manager);
+                publish(&mut |code| {
+                    if code.package_name != "p" {
+                        return;
+                    }
+                    code.permission_groups = vec![crate::package::pkg::PermissionGroup {
+                        component: Component {
+                            name: "p.GROUP".into(),
+                            package_name: "p".into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }];
+                    code.target_sdk_version = 36;
+                    code.permissions =
+                        vec![declaration("p.NORMAL", false), declaration("p.tree", true)];
+                    code.requested_permissions = vec![
+                        "p.NORMAL".into(),
+                        "android.permission.INTERNET".into(),
+                        "android.permission.CAMERA".into(),
+                    ];
+                    code.implicit_permissions.clear();
+                });
+                let prepare = || {
+                    let capture = host.package_capture().unwrap();
+                    let process = &persisted.host.process;
+                    let endpoint = Arc::new(Endpoint::with_computer(
+                        capture.scan().clone(),
+                        capture.clone(),
+                        process,
+                    ));
+                    let before = Arc::new(Endpoint::with_computer(
+                        capture.scan().clone(),
+                        capture.clone(),
+                        process,
+                    ));
+                    let binder = permission_capture::bind(process, &endpoint);
+                    let old = permission_capture::bind(process, &before);
+                    manager
+                        .prepare_install(binder, old, &installation())
+                        .unwrap();
+                    endpoint
+                };
+                let endpoint = prepare();
+                let last = host.package_capture().unwrap();
+                let base = manager.retained_access().unwrap();
+                let documents = || {
+                    [SYSTEM_ACCESS, USER0_ACCESS].map(|path| {
+                        std::fs::read(persisted.host.data().unwrap().join(path)).unwrap()
+                    })
+                };
+                let before_files = documents();
+                let run = |scope: Arc<Endpoint>, fail_capture: bool| {
+                    let source = Arc::new(move |scan: &Arc<Snapshot>| {
+                        if fail_capture {
+                            return Err("injected query capture failure".into());
+                        }
+                        let mut context = (**scope.install_capture()?.context()).clone();
+                        context.scan_version = scan.version();
+                        Ok(context)
+                    });
+                    (crate::system::install_publication(host, source))(
+                        host.package_capture().unwrap().scan(),
+                    )
+                };
+                match case {
+                    "stale" => {
+                        let mut after = (*base.user0).clone();
+                        after.set_permission_flags(
+                            10999,
+                            "android.permission.CAMERA",
+                            RUNTIME_GRANTED | USER_SET,
+                        );
+                        manager.write_user0(&after).unwrap();
+                        manager.owner.lock().unwrap().user0 = Some(Arc::new(after));
+                        assert!(
+                            run(endpoint.clone(), false)
+                                .unwrap_err()
+                                .contains("reprepare")
+                        );
+                        assert_eq!(
+                            manager
+                                .retained_access()
+                                .unwrap()
+                                .user0
+                                .permission_flags(10999, "android.permission.CAMERA"),
+                            RUNTIME_GRANTED | USER_SET
+                        );
+                        assert_eq!(documents()[0], before_files[0]);
+                        assert!(Arc::ptr_eq(&last, &host.package_capture().unwrap()));
+                    }
+                    "access-write" => {
+                        std::fs::create_dir(
+                            persisted
+                                .host
+                                .data()
+                                .unwrap()
+                                .join(USER0_ACCESS)
+                                .with_extension("abx.new"),
+                        )
+                        .unwrap();
+                        assert!(run(endpoint.clone(), false).is_err());
+                        assert!(Arc::ptr_eq(&last, &host.package_capture().unwrap()));
+                        assert_eq!(documents()[1], before_files[1]);
+                        assert!(
+                            !manager
+                                .retained_access()
+                                .unwrap()
+                                .system
+                                .permissions
+                                .iter()
+                                .all(|p| p.name != "p.NORMAL")
+                        );
+                    }
+                    "capture" => {
+                        assert!(
+                            run(endpoint.clone(), true)
+                                .unwrap_err()
+                                .contains("injected")
+                        );
+                        assert!(Arc::ptr_eq(&last, &host.package_capture().unwrap()));
+                        assert!(base.same_base(&manager.retained_access().unwrap()));
+                        assert_eq!(documents(), before_files);
+                    }
+                    "commit" => {
+                        run(endpoint.clone(), false).unwrap();
+                        let first = host.package_capture().unwrap();
+                        let access = first.context().access.as_ref().unwrap();
+                        assert!(access.same_base(&manager.retained_access().unwrap()));
+                        assert_eq!(first.state().packages["p"].users[&0].gids, [3003]);
+                        let id = first.state().packages["p"].app_id;
+                        assert!(
+                            first.state().packages["p"]
+                                .installed_permissions
+                                .contains(&"p.NORMAL".into())
+                        );
+                        assert_eq!(
+                            access.user0.permission_flags(id, "p.NORMAL"),
+                            INSTALL_GRANTED
+                        );
+                        assert_eq!(
+                            access
+                                .user0
+                                .permission_flags(id, "android.permission.CAMERA"),
+                            0
+                        );
+                        endpoint.revoke_install_scope();
+                        assert!(manager.installs.lock().unwrap().is_empty());
+                        assert!(access.same_base(&manager.retained_access().unwrap()));
+                        publish(&mut |code| {
+                            if code.package_name != "p" {
+                                return;
+                            }
+                            code.permissions.push(declaration("p.NEW", false));
+                            code.requested_permissions.push("p.NEW".into());
+                        });
+                        let updated = prepare();
+                        run(updated.clone(), false).unwrap();
+                        let second = host.package_capture().unwrap();
+                        assert!(
+                            second.state().packages["p"].users[&0]
+                                .granted_permissions
+                                .contains(&"p.NEW".into())
+                        );
+                        assert!(!access.system.permissions.iter().any(|p| p.name == "p.NEW"));
+                        let reload = PermissionManager::new(persisted.host.clone())
+                            .retained_access()
+                            .unwrap();
+                        assert_eq!(*reload.system, *manager.retained_access().unwrap().system);
+                        assert_eq!(*reload.user0, *manager.retained_access().unwrap().user0);
+                        assert_eq!(
+                            reload
+                                .user0
+                                .package_versions
+                                .iter()
+                                .find(|(name, _)| name == "p")
+                                .unwrap()
+                                .1,
+                            17
+                        );
+                        updated.revoke_install_scope();
+                    }
+                    _ => unreachable!(),
+                }
+                endpoint.revoke_install_scope();
+                assert!(manager.installs.lock().unwrap().is_empty());
+            });
+        }
+    }
+}
+impl Candidate {
+    fn matches(&self, scan: &Snapshot) -> bool {
+        self.package_base.same_lineage(scan)
+            && self
+                .scope
+                .upgrade()
+                .is_some_and(|scope| scope.install_capture().is_ok())
+            && self.installs.iter().all(|install| {
+                scan.owner().settings.packages.iter().any(|p| {
+                    p.name == install.name
+                        && p.app_id == install.app_id
+                        && p.code_path == install.path
+                        && p.version_code == install.version
+                }) && scan
+                    .owner()
+                    .loaded_packages()
+                    .get(&install.name)
+                    .is_some_and(|code| code.runtime_package() == &install.code)
+                    && scan
+                        .owner()
+                        .scanned_user_states(&install.name)
+                        .is_some_and(|users| users.keys().copied().collect::<Vec<_>>() == [0])
+            })
+    }
+}
+impl PermissionManager {
+    pub(crate) fn install_access(
+        &self,
+        scan: &Snapshot,
+    ) -> Result<Arc<permissions::AccessView>, Exception> {
+        let pending = self.installs.lock().unwrap();
+        let mut candidates = pending.values().filter(|candidate| candidate.matches(scan));
+        let first = candidates.next();
+        if candidates.next().is_some() {
+            return Err(illegal("ambiguous permission install candidate"));
+        }
+        match first {
+            Some(candidate) => Ok(candidate.access.clone()),
+            None => self.retained_access(),
+        }
+    }
+    /// Validate the access view while publishing under the package owner lock.
+    /// The callback makes no owner RPC.
+    pub(crate) fn if_current_access<T>(
+        &self,
+        view: &permissions::AccessView,
+        publish: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let owner = self.owner.lock().unwrap();
+        let current = permissions::AccessView {
+            system: owner.system.clone()?,
+            user0: owner.user0.clone()?,
+        };
+        view.same_base(&current).then(publish)
+    }
+    pub(crate) fn commit_install<T>(
+        &self,
+        scan: &Snapshot,
+        view: &Arc<permissions::AccessView>,
+        publish: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut pending = self.installs.lock().unwrap();
+        let mut candidates = pending
+            .iter()
+            .filter(|(_, candidate)| candidate.matches(scan));
+        let (&key, candidate) = candidates
+            .next()
+            .ok_or("permission install candidate unavailable")?;
+        if candidates.next().is_some() || !Arc::ptr_eq(&candidate.access, view) {
+            return Err("permission install candidate differs".into());
+        }
+        let mut owner = self.owner.lock().unwrap();
+        let current = permissions::AccessView {
+            system: owner.system.clone().ok_or("access system unavailable")?,
+            user0: owner.user0.clone().ok_or("access user unavailable")?,
+        };
+        if !candidate.base.same_base(&current) {
+            return Err("stale permission access base; reprepare required (#2161)".into());
+        }
+        if *current.system != *view.system {
+            self.write_system(&view.system).map_err(|e| e.message)?;
+        }
+        owner.system = Some(view.system.clone());
+        if *current.user0 != *view.user0 {
+            self.write_user0(&view.user0).map_err(|e| e.message)?;
+        }
+        owner.user0 = Some(view.user0.clone());
+        pending.remove(&key);
+        publish()
+    }
+}
+impl permissions::AccessView {
+    pub(crate) fn gids(
+        &self,
+        app_id: i32,
+        user: i32,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Vec<i32> {
+        let flags = (user == 0)
+            .then(|| {
+                self.user0
+                    .app_id_permissions
+                    .iter()
+                    .find(|(id, _)| *id == app_id)
+                    .map(|(_, flags)| flags)
+            })
+            .flatten();
+        uid_gids(config, flags, user)
+    }
+    pub(crate) fn installed_permissions(&self, package: &str) -> Vec<String> {
+        tree_order(
+            self.system
+                .permissions
+                .iter()
+                .filter(|p| p.package == package)
+                .map(|p| p.name.clone())
+                .collect(),
+        )
     }
 }

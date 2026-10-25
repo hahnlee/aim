@@ -1245,3 +1245,24 @@ pub(crate) fn with_discovery_session(
     test(&host, &mut publish, &enabled);
     drop(workers);
 }
+
+pub(crate) fn install_publication(
+    host: &Arc<AppHost>,
+    context: crate::package::installer::permission_capture::ContextSource,
+) -> crate::package::installer::environment::QueryPublication {
+    let system = host.package_system().unwrap();
+    let bridge = system.package_bootstrap().unwrap();
+    let snapshots = system
+        .package_bootstrap
+        .lock()
+        .unwrap()
+        .current
+        .as_ref()
+        .unwrap()
+        .snapshots
+        .clone()
+        .unwrap();
+    system
+        .package_install_query_publication(&bridge, snapshots, context)
+        .unwrap()
+}

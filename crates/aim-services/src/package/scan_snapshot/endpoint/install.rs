@@ -7,9 +7,16 @@ impl super::Endpoint {
             lease.records.clear();
         }
         self.computer.lock().unwrap().take();
+        let retired = self.install_retirement.lock().unwrap().take();
+        if let Some(retired) = retired {
+            retired();
+        }
     }
 }
 impl super::Endpoint {
+    pub(crate) fn on_install_retired(&self, retired: Box<dyn FnOnce() + Send>) {
+        *self.install_retirement.lock().unwrap() = Some(retired);
+    }
     pub(crate) fn install_capture(
         &self,
     ) -> Result<std::sync::Arc<super::super::query_state::Capture>, String> {

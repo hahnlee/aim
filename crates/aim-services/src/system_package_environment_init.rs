@@ -180,6 +180,11 @@ impl System {
             current,
             bridge.clone(),
             Arc::new(installer.system_config().clone()),
+            self.native_permissions().map(|owner| {
+                Arc::new(move |scan: &crate::package::scan_snapshot::Snapshot| {
+                    owner.install_access(scan).map_err(|error| error.message)
+                }) as crate::package::scan_snapshot::install_context::AccessSource
+            }),
         );
         let permission = permission_prepare::Owner::new(
             self.environment_bridge_capability(bridge, EnvironmentLeaf::Permissions)?,

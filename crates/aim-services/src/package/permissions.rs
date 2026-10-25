@@ -430,3 +430,91 @@ mod tests {
         assert_eq!(read.permission_flags(10_100, CAMERA), ONE_TIME);
     }
 }
+
+/// `AppIdPermissionPersistence.serializeSystemState`, preserving other policies.
+pub fn with_system_permissions(
+    mut root: Element,
+    system: &AccessSystem,
+) -> Result<Element, String> {
+    use aim_android_xml::{Node, Value};
+    access(&root)?;
+    for (tag, definitions) in [
+        ("permissions", &system.permissions),
+        ("permission-trees", &system.permission_trees),
+    ] {
+        let section = Element {
+            name: tag.into(),
+            attrs: Vec::new(),
+            content: definitions
+                .iter()
+                .map(|p| {
+                    let mut attrs = vec![
+                        ("name".into(), Value::Interned(p.name.clone())),
+                        ("packageName".into(), Value::Interned(p.package.clone())),
+                        ("protectionLevel".into(), Value::Int(p.protection_level)),
+                        (
+                            "type".into(),
+                            Value::Int(if p.dynamic.is_some() {
+                                TYPE_DYNAMIC
+                            } else {
+                                TYPE_MANIFEST
+                            }),
+                        ),
+                    ];
+                    if let Some((icon, label)) = &p.dynamic {
+                        attrs.push(("icon".into(), Value::Int(*icon)));
+                        if let Some(label) = label {
+                            attrs.push(("label".into(), Value::String(label.clone())));
+                        }
+                    }
+                    Node::Element(Element {
+                        name: "permission".into(),
+                        attrs,
+                        content: Vec::new(),
+                    })
+                })
+                .collect(),
+        };
+        match root
+            .content
+            .iter_mut()
+            .find(|n| matches!(n, Node::Element(e) if e.name == tag))
+        {
+            Some(node) => *node = Node::Element(section),
+            None => root.content.push(Node::Element(section)),
+        }
+    }
+    Ok(root)
+}
+
+/// AccessPolicy's package-version owner alongside the user permission policy.
+pub fn with_package_versions(mut root: Element, versions: &Named) -> Result<Element, String> {
+    use aim_android_xml::{Node, Value};
+    access(&root)?;
+    let section = Node::Element(Element {
+        name: "package-versions".into(),
+        attrs: Vec::new(),
+        content: versions
+            .iter()
+            .map(|(name, version)| {
+                Node::Element(Element {
+                    name: "package".into(),
+                    attrs: vec![
+                        ("name".into(), Value::Interned(name.clone())),
+                        ("version".into(), Value::Int(*version)),
+                    ],
+                    content: Vec::new(),
+                })
+            })
+            .collect(),
+    });
+    match root
+        .content
+        .iter_mut()
+        .find(|n| matches!(n, Node::Element(e) if e.name == "package-versions"))
+    {
+        Some(node) => *node = section,
+        None => root.content.push(section),
+    }
+    Ok(root)
+}

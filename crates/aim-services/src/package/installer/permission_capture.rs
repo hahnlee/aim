@@ -24,7 +24,11 @@ pub(crate) fn bind(process: &Arc<LocalProcess>, endpoint: &Arc<Endpoint>) -> Bin
         unreachable!()
     };
     let mut scopes = scopes().lock().unwrap();
-    scopes.retain(|_, scope| scope.strong_count() != 0);
+    scopes.retain(|_, scope| {
+        scope
+            .upgrade()
+            .is_some_and(|scope| scope.install_capture().is_ok())
+    });
     scopes.insert(
         (Arc::as_ptr(process) as usize, ptr),
         Arc::downgrade(endpoint),

@@ -710,6 +710,9 @@ impl AppHost {
     /// `bindApplication` hands apps.
     /// The native services' system, whose package boot this runs.
     pub fn set_system(&self, system: Arc<crate::system::System>) {
+        if let Some(owner) = self.permission_manager.get() {
+            system.set_native_permissions(owner);
+        }
         let _ = self.system.set(system);
     }
 
@@ -770,6 +773,9 @@ impl AppHost {
             .permission_manager
             .get_or_init(|| Arc::new(permission_manager::PermissionManager::new(self.clone())))
             .clone();
+        if let Some(system) = self.system.get() {
+            system.set_native_permissions(&permission_manager);
+        }
         // Published together, as `StatsCompanion.Lifecycle` publishes them.
         let stats = self
             .stats

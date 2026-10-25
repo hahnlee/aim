@@ -881,7 +881,12 @@ impl System {
             sdk_sandbox_package,
         };
         let input = original.populate(input).map_err(failure)?;
-        let context = crate::package::scan_snapshot::boot_context::build(input).map_err(failure)?;
+        let mut context =
+            crate::package::scan_snapshot::boot_context::build(input).map_err(failure)?;
+        context.access = self
+            .native_permissions()
+            .map(|owner| owner.retained_access())
+            .transpose()?;
         let values = begin.initial.clone();
         let props = |name: &str| values.property_value(name);
         begin.initial.check()?;
