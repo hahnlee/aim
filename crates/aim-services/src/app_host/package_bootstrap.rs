@@ -294,9 +294,79 @@ impl PackageBootstrap {
     }
 }
 
+/// `ParcelFileDescriptor` as `writeToParcel` writes it without a comm
+/// channel: 0, then the fd.
+struct Descriptor(u32);
+
+impl aim_service_aidl::ReadParcelable for Descriptor {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
+        if r.read_i32()? != 0 {
+            return Err(BAD_VALUE);
+        }
+        r.read_fd().map(Self)
+    }
+}
+
+/// `PackageManager.INSTALL_ALLOCATE_AGGRESSIVE`, and
+/// `StorageManager.FLAG_ALLOCATE_AGGRESSIVE` it translates to.
+const INSTALL_ALLOCATE_AGGRESSIVE: i32 = 0x8000;
+const FLAG_ALLOCATE_AGGRESSIVE: i32 = 1;
+
+/// `allocateInstallerBytes`: `StorageManager.allocateBytes(fd, bytes,
+/// translateAllocateFlags(flags))`, which asks the storage owner for what
+/// the file has not allocated yet and then `posix_fallocate`s it to
+/// `bytes`, as the guest's fallocate does on a host file: reserved from its
+/// physical end, then extended.
+fn allocate_installer_bytes(
+    host: &AppHost,
+    file: &impl std::os::fd::AsRawFd,
+    bytes: i64,
+    install_flags: i32,
+) -> Result<(), Exception> {
+    let failed = || super::storage::io_exception(&std::io::Error::last_os_error().to_string());
+    let fd = file.as_raw_fd();
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: plain fstat.
+    if unsafe { libc::fstat(fd, &mut st) } < 0 {
+        return Err(failed());
+    }
+    let need = bytes - st.st_blocks * 512;
+    if need > 0 {
+        let flags = if install_flags & INSTALL_ALLOCATE_AGGRESSIVE != 0 {
+            FLAG_ALLOCATE_AGGRESSIVE
+        } else {
+            0
+        };
+        host.allocate_bytes(None, need, flags, SYSTEM_UID)?;
+        let mut store = libc::fstore_t {
+            fst_flags: libc::F_ALLOCATEALL,
+            fst_posmode: libc::F_PEOFPOSMODE,
+            fst_offset: 0,
+            fst_length: need,
+            fst_bytesalloc: 0,
+        };
+        // SAFETY: F_PREALLOCATE with a local fstore.
+        if unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut store) } < 0 {
+            return Err(failed());
+        }
+    }
+    // SAFETY: plain ftruncate.
+    if st.st_size < bytes && unsafe { libc::ftruncate(fd, bytes) } < 0 {
+        return Err(failed());
+    }
+    Ok(())
+}
+
 impl Service for PackageBootstrap {
     fn descriptor(&self) -> &str {
         bridge::DESCRIPTOR
+    }
+
+    /// `allocateInstallerBytes` takes the staged file's descriptor.
+    fn accepts_fds(&self) -> bool {
+        true
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
@@ -320,6 +390,22 @@ impl Service for PackageBootstrap {
                 }
                 host.has_user_restriction("no_debugging_features", a.user_id)
                     .map(|v| bridge::write_is_shell_debugging_restricted_reply(&mut p, v))
+            }
+            bridge::ALLOCATE_INSTALLER_BYTES => {
+                let a = bridge::AllocateInstallerBytes::<Descriptor>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                (|| {
+                    let fd = a.file.filter(|_| a.length_bytes > 0).ok_or_else(|| {
+                        Exception::illegal_argument("invalid installer allocation")
+                    })?;
+                    let file = host
+                        .process
+                        .file(fd.0)
+                        .and_then(|file| aim_binder_host::server::file_fd(&file))
+                        .ok_or_else(|| Exception::illegal_argument("invalid installer file"))?;
+                    allocate_installer_bytes(host, &file, a.length_bytes, a.install_flags)
+                })()
+                .map(|()| bridge::write_allocate_installer_bytes_reply(&mut p))
             }
             // `InstallerUserPolicy.capture`: what `createSessionInternal`
             // asks UserManager and DevicePolicyManager of the user.
