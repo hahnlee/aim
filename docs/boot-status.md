@@ -175,17 +175,12 @@ redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance. On the
 app host image, the native package boot runs its scans, construction and
-publication, and the guest reaches BOOT_COMPLETED. Private package bridge calls
-use the service process identity even when the bridge is local; the boot-context
-leaf reads the app host's live unlocking state. Package shell intent-filter
-syntax and user listing have native leaves, with the shell identity retained for
-UserManager authorization. Retained app-host package Binders delegate configured
-package selections and usage to the session owner. Public permission reads use
-PermissionManager's live access state with the original caller. Instrumentation
-shell listing reads the session's capture. Internal event delivery and
-shutdown statistics remain #2167, permission state without `access.abx` #2168,
-boot admissions #2169, remaining package bootstrap owners #2022 and the query
-projection switch #2023.
+publication, and the guest reaches BOOT_COMPLETED; the session's published
+`package` front answers the shell's `pm list packages`, `pm path`,
+`cmd package resolve-activity` and `pm list users` (2026-10-25). Internal
+event delivery and shutdown statistics remain #2167, permission state without
+`access.abx` #2168, boot admissions #2169, remaining package bootstrap owners
+#2022 and the query projection switch #2023.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
