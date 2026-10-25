@@ -546,6 +546,8 @@ pub struct AppHost {
     permission_manager: OnceLock<Arc<permission_manager::PermissionManager>>,
     /// The native services' system, whose package boot the app host runs.
     system: OnceLock<Arc<crate::system::System>>,
+    /// `startBootstrapServices` constructs PMS before `setSystemProcess`.
+    package_boot: OnceLock<Result<(), Exception>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -649,6 +651,7 @@ impl AppHost {
             uri_grants: Default::default(),
             permission_manager: OnceLock::new(),
             system: OnceLock::new(),
+            package_boot: OnceLock::new(),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
@@ -2021,6 +2024,7 @@ impl AppHost {
                 "the system process is attached",
             ));
         }
+        self.package_boot.wait().clone()?;
         let config = self.global_configuration()?;
         let providers = self.process_providers(SYSTEM_PROCESS, SYSTEM_UID)?;
         let strong = self.process.strong(handle);
@@ -5324,9 +5328,11 @@ impl Service for Control {
             // start, and not by the first start.
             let host = self.0.clone();
             std::thread::spawn(move || {
-                match host.package_system().and_then(|system| {
-                    package_boot::run(&host, system)?;
-                    system.wait_native_package_app_data()
+                match host.package_boot.get_or_init(|| {
+                    host.package_system().and_then(|system| {
+                        package_boot::run(&host, system)?;
+                        system.wait_native_package_app_data()
+                    })
                 }) {
                     Ok(()) => eprintln!("app host: package boot: through its construction"),
                     Err(e) => return eprintln!("app host: package boot: {e:?}"),

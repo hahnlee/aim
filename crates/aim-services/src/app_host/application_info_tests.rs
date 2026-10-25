@@ -13,6 +13,42 @@ fn host() -> Arc<AppHost> {
     ))
 }
 
+/// `SystemServer.startBootstrapServices` calls `setSystemProcess` after PMS.
+#[test]
+fn system_process_attach_waits_for_package_boot_outcome() {
+    for outcome in [
+        Ok(()),
+        Err(Exception::new(EX_ILLEGAL_STATE, "package boot failed")),
+    ] {
+        let host = host();
+        let expected = outcome
+            .clone()
+            .and_then(|()| Err(Exception::new(EX_ILLEGAL_STATE, "app host not configured")));
+        let (started, arrival) = std::sync::mpsc::channel();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let p = Parcel::new();
+                let call = Call {
+                    code: 0,
+                    flags: 0,
+                    sender_pid: 42,
+                    sender_euid: SYSTEM_UID,
+                    data: p.reader(),
+                };
+                started.send(()).unwrap();
+                done.send(host.attach_system_process(&call, Some(Binder::Handle(1))))
+                    .unwrap();
+            });
+            arrival.recv().unwrap();
+            let blocked = result.recv_timeout(Duration::from_millis(50));
+            host.package_boot.set(outcome).unwrap();
+            assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+            assert_eq!(result.recv().unwrap(), expected);
+        });
+    }
+}
+
 /// This internal generator keeps the old user-0/flags contract. It must
 /// not acquire another model or add public-query visibility/caller policy.
 #[test]
