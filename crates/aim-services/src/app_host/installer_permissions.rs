@@ -35,7 +35,12 @@ impl Service for InstallerPermissions {
                 "native package leaf requires system UID",
             )));
         }
-        let owner = self.host.permission_manager.get().ok_or(BAD_VALUE)?;
+        let Some(owner) = self.host.permission_manager.get() else {
+            return reply(Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "permission owner is unavailable",
+            )));
+        };
         let required = |value: Option<aim_binder_host::parcel::Binder>| {
             value.ok_or_else(|| Exception::illegal_argument("missing permission scope"))
         };
