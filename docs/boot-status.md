@@ -174,102 +174,23 @@ PackageManager remains original in the default image. Controlled slice C images
 redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance. On the
-app host image, the native package boot runs its scans, construction and
-publication, and the guest reaches BOOT_COMPLETED; the session's published
-`package` front answers the shell's `pm list packages`, `pm path`,
-`cmd package resolve-activity` and `pm list users` (2026-10-25). Internal
-event delivery and shutdown statistics remain #2167, permission state without
-`access.abx` #2168, boot admissions #2169, remaining package bootstrap owners
-#2022 and the query projection switch #2023.
-
-Current app-host source retains its startup `package` / `package_native`
-Binder pair through native construction and epoch replacement. Both fronts
-forward every call directly to the native Service implementation with the
-original caller, parcel cursor and flags. The old lazy app-host installer and
-shell adapter are removed; all public package handles return the current
-session's recovered installer. Host tests cover pre-construction errors,
-registry readback, retained handles for both descriptors, caller security and
-sessions restored across epochs. This public-front change has no new local
-guest or real CTS result; the ADR 0013 switch/milestone gates remain open.
-App-data creation now calls installd without a second coordinator or Settings
-writer. It returns CE/DE inode receipts and tracks only newly created directories
-for rollback; commit releases the claim, and rollback validates device/inode and
-guest UID before destroying data. Updates clear code caches using the published
-per-user CE inodes. ART profile clearing follows the pinned AppDataHelper guard
-for an uninitialized ART owner; dexopt itself still fails explicitly (#2063).
-Focused claim/cache/storage tests pass; these install leaves have no new guest
-or two-boot install result. Plain install still reaches explicit missing
-permission, effect and external completion leaves (#2161, #1977, #2154,
-#2157, #1995). Candidate access publication has not been implemented.
-
-Current app-host source publishes enabled settings, permission grant/GID
-refreshes, data-clear component resets and isolated/implicit/user runtime
-changes through the native session (#2023, #2164). Ordinary host package
-acquisitions and cached package intent queries use that capture and its resolver;
-there is no private mutable host package model or enabled-settings Store. Data clear
-uses the native application-data worker and freezer; installd receives the
-retained inode receipt and a failed storage/publication/effect operation reports
-false to the observer. The reviewer reports two boots of the same disposable
-step-4 data on `81595570` (2026-10-25): DeskClock disable/enable changes its
-launcher resolution immediately and survives reboot; data clear removes its
-sentinel while retaining CE/DE inodes, remains cleared after reboot and fails
-for an unknown package. BOOT_COMPLETED and Settings drawing were observed;
-the reported crate run passed 1825 tests. These are reviewer results, not a
-new local guest run.
-
-Process starts now retain the session capture for application info, UID/GIDs,
-ABI, seInfo, package-dependent mount selection and data-isolation inodes rather
-than joining Settings/packages.list at start time. Domain queries use that
-capture's native domain owner and code, without a separately attached boot
-owner or cached verifier selection. The reviewer reports guest verification of these two checkpoints on
-`5c342c3e` (2026-10-25): Contacts retains u0_a163, its untrusted_app SELinux
-label and groups 3003/50163/20163/9997; BOOT_COMPLETED, Settings and Contacts
-drawing, and immediate `pm disable-user`/`enable` on the running guest; the
-reported crate run passed 1825 tests. Domain shell verification remains
-unavailable (#2187), as does app-host `am start` (#1678).
-
-Current source also removes `Packages`' stored user-access copy: AppOps reads
-the permission manager's live owner, ordinary permission decisions retain the
-session's package state, and permission groups are keyed by that state's Arc
-identity. The existing live permission bridge still supplies the session's
-validated grant/GID refreshes. No access view is added to query Context or to
-candidate contexts; install access lifecycle remains design step 7 (#2161).
-Focused permission (23), AppOps (22) and session-mutation (3) tests and the host
-build pass. No new local guest, second-boot or CTS result is claimed for this
-access change. Current source also refreshes account authenticators (validating
-loaded accounts), unbound widget providers and media-route proxies on component
-and application enabled changes, as well as the canonical epoch's add/update/remove
-feed. Spell checkers follow the pinned `TextServicesMonitor.onSomePackagesChanged`:
-application changes rebuild the map; component-only changes retain the loaded
-map because `PackageMonitor.onPackageChanged`'s default returns false. This is
-the pinned `android-16.0.0_r1` behavior, including a fresh resolver omitting a
-disabled component while `getEnabledSpellCheckers` still lists it. Setup-wizard
-selection resolves anew with the owner's `MATCH_DISABLED_COMPONENTS`, retaining
-the unique system package through enabled-state changes. WebView's package
-receiver ignores component-only changes (`entirePackageChanged`), reselects from
-one capture on application changes and defers a second preparation across pending RELRO work; audioserver's
-permission controller receives rebuilt package/permission batches after package
-notices and permission changes, and reconnects on controller death. Account
-deletion (#1504), bound widgets (#1789), default WebView repair/explicit choice
-(#1491), internal guest broadcasts (#2167) and ShortcutService's manifest
-rescan/removal cleanup (#1669) retain their existing unsupported boundaries.
-The boot-input join, Packages loader and persisted Settings/list/APK reconstruction
-are removed. Package checksums take build policy from the framework resource
-owner; the remaining inputs() compatibility accessor exposes only platform
-configuration and contains no package/access state. Package-dependent boot
-stops if its required session capture is unavailable. The reviewer reports guest
-verification of these two discovery/join checkpoints on `fb6b7229`: boot,
-reconciliation, BOOT_COMPLETED, Contacts drawing with unchanged identity,
-242 packages and the account/textservices/webviewupdate raw reads; the reported
-whole-crate run passed 1,830 tests with no failures. Six additional real-session
-enabled-state regressions pass locally, covering each discovery and reverse
-changes, including the pinned unchanged-answer cases above. The local library
-run reports 1,701 passing, 14 failing and 13 ignored tests; the identical 14
-failures reproduce on `fb6b7229` (shared-memory/Mach access and the original-image
-read lease are unavailable in this environment). Ignored tests are not run; no
-missing-input skip is reported. No new guest or real CTS run is claimed. Platform/config reads no longer
-allocate application shared memory; bindApplication initializes that same platform-owned object on
-first use, retaining allocation errors there.
+app host image (2026-10-26) the native package boot runs its scans,
+construction and publication, the system process attaches once after it, and
+the guest reaches BOOT_COMPLETED. Every package read and write of the app
+host goes through the native session: there is no `Packages::load` join or
+host package model, and process starts, domains, permissions and the
+services' package discoveries read the session's capture. The published
+`package` front answers the shell's `pm`. A shell install session
+(`pm install-create`, `-write`, `-commit`) of an ordinary APK installs it
+(Success), a same-signer update keeps its uid and data (Success), another
+signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app
+launches, and `pm uninstall` removes its code and data; each survives a
+reboot. Installs are not dexopted: without ART Service (#2063) the
+completion reports the missing owner as the original's `observeException`
+does. `pm install <file>` (#2178), archiving (#1757), internal event delivery
+and shutdown statistics (#2167), permission state without `access.abx`
+(#2168), boot admissions into the permission policy (#2169) and the remaining
+bootstrap owners (#2022) are open.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
