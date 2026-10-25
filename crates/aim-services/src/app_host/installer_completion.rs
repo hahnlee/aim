@@ -2,15 +2,19 @@
 //! owners, which system_server's `InstallerCompletionBridge` serves, to
 //! the system uid only. An instant app, an APEX or a rollback from the
 //! platform is not dexopted, as the original answers it. The app host
-//! has no ART Service (#2063), so no install is dexopted: the app runs
-//! interpreted and JIT-compiled, as an app whose dexopt was skipped does
-//! (the maintainer's install policy until #2063); the app-op owner's
-//! package-added state is part of committing an install (#1995).
+//! has no ART Service (#2063): the original finds no `ArtManagerLocal`,
+//! which with `improve_install_freeze` it reports as the observed
+//! exception and the install completes undexopted, its app interpreted and
+//! JIT-compiled; without the flag the exception fails the install, as there.
+//! The app-op owner's package-added state is part of committing an
+//! install (#1995).
 
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel, UNKNOWN_TRANSACTION};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, UNKNOWN_TRANSACTION,
+};
 use aim_service_aidl::dev_aim_server_iinstallercompletionbridge as bridge;
 
 use super::{AppHost, reply};
@@ -27,13 +31,35 @@ impl InstallerCompletion {
         InstallerCompletion { host }
     }
 
-    /// `dexoptInstalledResult`'s answer: none for what is not dexopted,
-    /// and without ART Service (#2063) nothing else is.
-    fn dexopt(&self, instant: bool, apex: bool, rollback: bool) -> Result<(), Exception> {
-        if !(instant || apex || rollback) {
-            eprintln!("app host: installer completion: not dexopted without ART Service (#2063)");
+    /// `dexoptInstalledResult`: none for what is not dexopted; otherwise
+    /// `observeException` of the missing ART owner.
+    fn dexopt(
+        &self,
+        instant: bool,
+        apex: bool,
+        rollback: bool,
+    ) -> Result<Option<DexoptResult>, Exception> {
+        if instant || apex || rollback {
+            return Ok(None);
         }
-        Ok(())
+        const UNAVAILABLE: &str = "original ART/package snapshot owner unavailable (#2063)";
+        let improve_install_freeze = self
+            .host
+            .framework()?
+            .0
+            .flags
+            .get("android.content.pm.improve_install_freeze")
+            == Some(&true);
+        if !improve_install_freeze {
+            return Err(Exception::new(EX_ILLEGAL_STATE, UNAVAILABLE));
+        }
+        eprintln!(
+            "app host: installer completion: Dexopt encountered a fatal error: {UNAVAILABLE}"
+        );
+        Ok(Some(DexoptResult::ObservedException {
+            class: "java.lang.IllegalStateException".into(),
+            message: Some(UNAVAILABLE.into()),
+        }))
     }
 }
 
@@ -61,7 +87,8 @@ impl Service for InstallerCompletion {
                 reply(
                     caller()
                         .and_then(|()| self.dexopt(a.instant_app, a.apex, a.rollback_from_platform))
-                        .map(|()| {
+                        .map(|_| {
+                            // `dexoptInstalled`: an observed exception has no result.
                             bridge::write_dexopt_installed_reply(&mut p, -1);
                             p
                         }),
@@ -73,10 +100,8 @@ impl Service for InstallerCompletion {
                 reply(
                     caller()
                         .and_then(|()| self.dexopt(a.instant_app, a.apex, a.rollback_from_platform))
-                        .map(|()| {
-                            bridge::write_dexopt_installed_result_reply::<DexoptResult>(
-                                &mut p, None,
-                            );
+                        .map(|result| {
+                            bridge::write_dexopt_installed_result_reply(&mut p, result.as_ref());
                             p
                         }),
                 )
@@ -99,9 +124,10 @@ mod tests {
     use super::*;
     use aim_binder_host::parcel::EX_SECURITY;
 
-    /// No install is dexopted without ART Service; the system only asks.
+    /// What the original does not dexopt has no result; the rest needs
+    /// the image's `improve_install_freeze` flag; the system only asks.
     #[test]
-    fn installs_are_not_dexopted_without_art() {
+    fn dexopt_without_art() {
         let node = |euid: u32| {
             let process = aim_binder_host::local::LocalProcess::open(
                 &aim_binder_driver::Driver::new(),
@@ -140,7 +166,8 @@ mod tests {
             bridge::read_dexopt_installed_reply(&mut reply.reader()).unwrap()
         };
         assert_eq!(dexopt(SYSTEM_UID, true).unwrap(), -1);
-        assert_eq!(dexopt(SYSTEM_UID, false).unwrap(), -1);
+        // An unconfigured host has no image flags to decide by.
+        assert!(dexopt(SYSTEM_UID, false).is_err());
         assert_eq!(dexopt(10000, true).unwrap_err().code, EX_SECURITY);
     }
 }
