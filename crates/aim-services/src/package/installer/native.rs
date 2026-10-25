@@ -2333,6 +2333,15 @@ mod tests {
         setup: impl FnOnce(&Arc<NativeOwners>, i32),
         install: impl Fn(&NativeOwners, i32) -> Result<(), Exception> + Send + Sync + 'static,
     ) {
+        assert_install_failure_with_receiver(message, source, setup, install, None);
+    }
+    fn assert_install_failure_with_receiver(
+        message: &str,
+        source: QuerySource,
+        setup: impl FnOnce(&Arc<NativeOwners>, i32),
+        install: impl Fn(&NativeOwners, i32) -> Result<(), Exception> + Send + Sync + 'static,
+        commit_local: Option<bool>,
+    ) {
         // android-16.0.0_r1 PIS.dispatchSessionFinished/sendOnPackageInstalled.
         use crate::app_host::{
             AppHost,
@@ -2342,6 +2351,7 @@ mod tests {
         use aim_binder_driver::{Credentials, Device, Driver, uapi::*};
         use aim_service_aidl::{
             android_content_iintentsender as sender,
+            android_content_pm_ipackageinstallersession as session_api,
             dev_aim_server_ipackagebootstrapbridge as bootstrap,
         };
         use std::sync::mpsc;
@@ -2357,6 +2367,25 @@ mod tests {
                 Ok(Parcel::new())
             }
         }
+        struct Export {
+            process: Arc<LocalProcess>,
+            receiver: Binder,
+            session: Arc<Mutex<Option<aim_binder_host::local::Strong>>>,
+        }
+        impl Service for Export {
+            fn descriptor(&self) -> &str {
+                "fixture.export"
+            }
+            fn transact(&self, call: &mut Call<'_>) -> aim_binder_host::local::Reply {
+                let Some(Binder::Handle(handle)) = call.data.read_binder()? else {
+                    panic!("remote installer session required")
+                };
+                *self.session.lock().unwrap() = Some(self.process.strong(handle));
+                let mut reply = Parcel::new();
+                reply.write_binder(Some(self.receiver));
+                Ok(reply)
+            }
+        }
         let driver = Driver::new();
         let open = |pid, euid| {
             LocalProcess::open(
@@ -2370,9 +2399,19 @@ mod tests {
             )
         };
         let process = open(77701, 1000);
-        let shell = open(77702, 2000);
+        let shell = open(77702, 0);
         let (sent, received) = mpsc::channel();
-        let Binder::Local(ptr) = shell.add_service(Arc::new(Receiver(sent))) else {
+        let receiver = if commit_local == Some(true) {
+            process.add_service(Arc::new(Receiver(sent)))
+        } else {
+            shell.add_service(Arc::new(Receiver(sent)))
+        };
+        let remote_session = Arc::new(Mutex::new(None));
+        let Binder::Local(ptr) = shell.add_service(Arc::new(Export {
+            process: shell.clone(),
+            receiver,
+            session: remote_session.clone(),
+        })) else {
             unreachable!()
         };
         let mut object = FlatBinderObject {
@@ -2393,7 +2432,25 @@ mod tests {
             .unwrap();
         shell.start();
         process.start();
+        let data = Data::new();
         let host = AppHost::new(process.clone());
+        if commit_local.is_some() {
+            host.configure(
+                &data.0.join("image"),
+                &data.0,
+                &data.0.join("bpf"),
+                Box::new(|name| match name {
+                    "ro.build.version.sdk" => Some("36".into()),
+                    "ro.build.version.codename" => Some("REL".into()),
+                    "persist.sys.locale" => Some("en-US".into()),
+                    "ro.sf.lcd_density" => Some("160".into()),
+                    _ => None,
+                }),
+                Box::new(|_, _| {}),
+                Box::new(|| Err(std::io::Error::other("no test zygote"))),
+            )
+            .unwrap();
+        }
         let leaf = PackageBootstrap::new(host);
         let mut p = Parcel::new();
         bootstrap::GetInstallerExternalBridge {}.write(&mut p);
@@ -2408,7 +2465,6 @@ mod tests {
         let external = super::super::preapproval::BridgeOwner::new(
             crate::system::ServiceOwner::Local(process.local_service(ptr).unwrap()),
         );
-        let data = Data::new();
         let sessions = Arc::new(Sessions::default());
         let events = Arc::new(Mutex::new(Vec::new()));
         let observed = events.clone();
@@ -2432,24 +2488,79 @@ mod tests {
         let (session, record) = sessions.records().pop().unwrap();
         owner.prepare_stage(&session, &record).unwrap();
         sessions.prepared(id).unwrap();
-        sessions.seal(id, 0, &|_| false).unwrap();
-        owner.receivers.lock().unwrap().insert(
+        let session_node = Arc::new(SessionNode {
+            bound: sessions.bind_session(id).unwrap(),
+            operations: Some(owner.clone()),
+            sessions: sessions.clone(),
             id,
-            (
-                super::super::preapproval::IntentSender {
-                    target: Binder::Handle(0),
-                },
-                Some(process.strong(0)),
-            ),
-        );
+            notify: Arc::new(|_| {}),
+        });
+        let session = process.add_service(session_node.clone());
+        let (target, retained) = if commit_local == Some(true) {
+            (receiver, None)
+        } else {
+            let mut request = Parcel::new();
+            request.write_binder(Some(session));
+            let reply = process.transact(0, 1, &request, false).unwrap();
+            let Some(target @ Binder::Handle(handle)) = reply.reader().read_binder().unwrap()
+            else {
+                panic!("shell receiver must remain remote")
+            };
+            (target, Some(process.strong(handle)))
+        };
+        if commit_local.is_none() {
+            sessions.seal(id, 0, &|_| false).unwrap();
+            owner.receivers.lock().unwrap().insert(
+                id,
+                (super::super::preapproval::IntentSender { target }, retained),
+            );
+        }
         setup(&owner, id);
         let run = owner.clone();
         let (finished, failure) = mpsc::channel();
         let (queue, worker) = super::super::commit::Worker::start(
-            Arc::new(move |id| install(&run, id)),
+            Arc::new(move |id| {
+                assert_eq!(
+                    run.receivers.lock().unwrap().get(&id).unwrap().0.target,
+                    target
+                );
+                install(&run, id)
+            }),
             Arc::new(move |message| finished.send(message).unwrap()),
         );
-        queue.send(Some(id)).unwrap();
+        if let Some(local) = commit_local {
+            *owner.commit_queue.lock().unwrap() = Some(queue.clone());
+            *owner.commit_policy.lock().unwrap() = Some(Arc::new(move |_, receiver| {
+                assert_eq!(receiver.target, target);
+                Ok(super::super::commit::Policy {
+                    require_mutable_receiver: false,
+                    secure_frp: false,
+                    secure_frp_install_allowed: false,
+                })
+            }));
+            let mut request = Parcel::new();
+            session_api::Commit {
+                status_receiver: Some(super::super::preapproval::IntentSender { target: receiver }),
+                for_transferred: false,
+            }
+            .write(&mut request);
+            let reply = if local {
+                call(session_node.as_ref(), session_api::COMMIT, 0, &request)
+            } else {
+                remote_session
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .transact(session_api::COMMIT, &request, false)
+                    .unwrap()
+                    .into_parcel()
+            };
+            reply.reader().read_exception().unwrap().unwrap();
+        }
+        if commit_local.is_none() {
+            queue.send(Some(id)).unwrap();
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let failure = loop {
             match failure.recv_timeout(std::time::Duration::from_millis(10)) {
@@ -2521,6 +2632,30 @@ mod tests {
         owner.shutdown_callbacks();
         process.shutdown().unwrap();
         shell.shutdown().unwrap();
+    }
+    fn assert_commit_receiver(local: bool) {
+        assert_install_failure_with_receiver(
+            "commit receiver query failed",
+            Arc::new(|| Ok(state())),
+            |_, _| {},
+            |owner, id| {
+                owner.run_install_with(id, || {
+                    Err(super::super::pipeline::Error::Owner {
+                        committed: false,
+                        error: Exception::new(EX_ILLEGAL_STATE, "commit receiver query failed"),
+                    })
+                })
+            },
+            Some(local),
+        );
+    }
+    #[test]
+    fn commit_preserves_remote_intent_sender_and_delivers_status() {
+        assert_commit_receiver(false);
+    }
+    #[test]
+    fn commit_delivers_status_to_native_shell_local_intent_sender() {
+        assert_commit_receiver(true);
     }
     #[test]
     fn commit_owner_failure_reaches_status_receiver_and_finishes_session() {

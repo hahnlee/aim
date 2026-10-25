@@ -60,7 +60,7 @@ fn debug_pid_reply(pid: i32) -> Parcel {
 pub type Reply = Result<Parcel, StatusCode>;
 
 /// A binder node served on the host.
-pub trait Service: Send + Sync {
+pub trait Service: Send + Sync + std::any::Any {
     /// Its interface descriptor (`INTERFACE_TRANSACTION`).
     fn descriptor(&self) -> &str;
     /// A plain Binder has no attached interface descriptor.
@@ -340,6 +340,11 @@ pub struct LocalService {
     service: Arc<dyn Service>,
 }
 impl LocalService {
+    /// Whether this node implements the concrete local service `T`.
+    pub fn is<T: Service>(&self) -> bool {
+        self.service.as_ref().type_id() == std::any::TypeId::of::<T>()
+    }
+
     pub fn transact(&self, code: u32, data: &Parcel, oneway: bool) -> Result<Received, StatusCode> {
         if self.process.stopping.load(Ordering::Acquire) {
             return Err(DEAD_OBJECT);

@@ -553,7 +553,19 @@ impl AppHost {
             Some(Binder::Handle(h)) => Some(self.process.strong(h)),
             _ => None,
         };
-        let Binder::Handle(other) = target else {
+        let other = match target {
+            Binder::Handle(handle) => {
+                crate::system::ServiceOwner::Remote(Arc::new(self.process.strong(handle)))
+            }
+            Binder::Local(ptr) => {
+                crate::system::ServiceOwner::Local(self.process.local_service(ptr).ok_or_else(
+                    || Exception::new(EX_ILLEGAL_STATE, "IntentSender node unavailable"),
+                )?)
+            }
+        };
+        // AMS checks for PendingIntentRecord, not whether the binder is local:
+        // the native shell's LocalIntentReceiver is local too.
+        if matches!(&other, crate::system::ServiceOwner::Local(node) if node.is::<IntentSender>()) {
             return self.send_record(
                 caller,
                 target,
@@ -564,7 +576,7 @@ impl AppHost {
                 required_permission,
                 Sent::default(),
             );
-        };
+        }
         // Another implementation of IIntentSender: sent on, its result
         // reported here.
         let intent = intent.unwrap_or_else(|| RawIntent::new("android.intent.action.MAIN", 0, &[]));
@@ -579,12 +591,9 @@ impl AppHost {
             options: options.as_ref().map(By),
         }
         .write(&mut p);
-        self.process
-            .strong(other)
-            .transact(sender::SEND, &p, true)
-            .map_err(|status| {
-                Exception::new(EX_ILLEGAL_STATE, format!("IntentSender.send: {status}"))
-            })?;
+        other.transact(sender::SEND, &p, true).map_err(|status| {
+            Exception::new(EX_ILLEGAL_STATE, format!("IntentSender.send: {status}"))
+        })?;
         if let Some(f) = &finished {
             perform_receive(f, &intent, calling_uid / PER_USER_RANGE as i32);
         }
