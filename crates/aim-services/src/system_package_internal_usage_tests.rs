@@ -2372,3 +2372,86 @@ fn a_candidate_behind_canonical_usage_moves_onto_it_and_any_other_gap_is_refused
     );
     drop(install);
 }
+
+/// Legacy inode consumers acquire session state even when the disk join cannot
+/// load. An already held capture retains its receipts across publication.
+#[test]
+fn app_data_read_through_observes_persisted_session_receipts() {
+    use crate::package::{installer::removal::NativeStore, owner::Store as Disk};
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let before = publish(&fixture, &bridge);
+    let host = crate::app_host::AppHost::new(fixture.native.clone());
+    assert!(host.app_data_packages().is_err());
+    host.set_system(fixture.system.clone());
+    let old = host.app_data_packages().unwrap();
+    assert!(Arc::ptr_eq(&old, &before));
+    let snapshots = fixture
+        .system
+        .package_bootstrap
+        .lock()
+        .unwrap()
+        .current
+        .as_ref()
+        .unwrap()
+        .snapshots
+        .clone()
+        .unwrap();
+    let data = fixture.root.join("data");
+    std::fs::create_dir_all(data.join("system/users/0")).unwrap();
+    let mut disk = Disk::create(&data, &[0]).unwrap();
+    disk.commit_scan_settings(before.scan()).unwrap();
+    let system = fixture.system.clone();
+    let retained_bridge = bridge.clone();
+    let store = NativeStore {
+        snapshots,
+        disk: Arc::new(Mutex::new(disk)),
+        publish: Arc::new(move |base, next| {
+            let capture = system.capture_package_queries_for(&retained_bridge)?;
+            assert!(Arc::ptr_eq(capture.scan(), base));
+            let mut context = (**capture.context()).clone();
+            context.scan_version = next.version();
+            let capture =
+                crate::package::scan_snapshot::query_state::Capture::new(next.clone(), context)
+                    .map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, e))?;
+            system
+                .package_bootstrap
+                .lock()
+                .unwrap()
+                .current
+                .as_mut()
+                .unwrap()
+                .set_queries(Some(capture));
+            Ok(())
+        }),
+        invalidate: Arc::new(|| Ok(())),
+    };
+    let mut receipt = before.scan().owner().scanned_user_states("p").unwrap()[&0].clone();
+    receipt.ce_data_inode = 991;
+    receipt.de_data_inode = 992;
+    store.user_state("p", 0, receipt.clone()).unwrap();
+    let current = host.app_data_packages().unwrap();
+    let user = crate::package::info::user_state(&current.state().packages["p"], 0);
+    assert_eq!((user.ce_data_inode, user.de_data_inode), (991, 992));
+    assert_eq!(
+        crate::package::info::user_state(&old.state().packages["p"], 0).ce_data_inode,
+        0
+    );
+    let persisted = crate::package::State::read(&data, &[0]).unwrap().unwrap();
+    let written = &persisted.users[0]
+        .1
+        .restrictions
+        .packages
+        .iter()
+        .find(|(name, _)| name == "p")
+        .unwrap()
+        .1;
+    assert_eq!((written.ce_data_inode, written.de_data_inode), (991, 992));
+    // Repeating preparation with the same actual receipts retains their values.
+    store.user_state("p", 0, receipt).unwrap();
+    let current = host.app_data_packages().unwrap();
+    assert_eq!(
+        crate::package::info::user_state(&current.state().packages["p"], 0).ce_data_inode,
+        991
+    );
+}

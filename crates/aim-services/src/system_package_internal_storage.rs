@@ -177,18 +177,6 @@ impl System {
             |_| {},
             |r| r.read_bool(),
         )?;
-        if flags & 2 != 0
-            && encrypted
-            && !leaf.call(
-                storage_api::CE_UNLOCKED,
-                |p| p.write_i32(user_id),
-                |r| r.read_bool(),
-            )?
-        {
-            return Err(storage_error(
-                "Refusing CE reconciliation while user is locked; it would destroy valid data",
-            ));
-        }
         self.reconcile_apps_data_volumes(
             &leaf,
             volumes,
@@ -273,6 +261,18 @@ impl System {
         encrypted: bool,
         apply_device: bool,
     ) -> Result<Vec<String>> {
+        if flags & 2 != 0
+            && encrypted
+            && !leaf.call(
+                storage_api::CE_UNLOCKED,
+                |p| p.write_i32(user_id),
+                |r| r.read_bool(),
+            )?
+        {
+            return Err(storage_error(
+                "Refusing CE reconciliation while user is locked; it would destroy valid data",
+            ));
+        }
         let installer = {
             let state = self.package_bootstrap.lock().unwrap();
             state
@@ -287,6 +287,16 @@ impl System {
             let before = store.snapshots.capture().version();
             let install = self.package_install_guard();
             let mut receipts = BTreeMap::new();
+            let phase = match only_core {
+                Some(true) => "core",
+                Some(false) => "deferred",
+                None => match flags & 3 {
+                    1 => "DE",
+                    2 => "CE",
+                    _ => "DE+CE",
+                },
+            };
+            let mut prepared_count = 0;
             let result = (|| -> Result<()> {
                 if only_core != Some(false) {
                     leaf.call(
@@ -328,10 +338,14 @@ impl System {
                         let valid = setting.is_some_and(|setting| {
                             setting.volume_uuid == volume && storage_allowed(setting) && {
                                 let user = crate::package::info::user_state(setting, user_id);
-                                user.installed || user.ce_data_inode != 0 || user.de_data_inode != 0
+                                user.installed || user.ce_data_inode > 0 || user.de_data_inode > 0
                             }
                         });
                         if !valid {
+                            eprintln!(
+                                "native package: app data: destroying invalid {name} ({} u{user_id} 0x{mask:x})",
+                                volume.as_deref().unwrap_or("null")
+                            );
                             let inode = setting.map_or(0, |setting| {
                                 crate::package::info::user_state(setting, user_id).ce_data_inode
                             });
@@ -369,6 +383,7 @@ impl System {
                     {
                         continue;
                     }
+                    prepared_count += 1;
                     let prepared = (|| -> Result<()> {
                         let seinfo = setting.seinfo.as_ref().ok_or_else(|| {
                             storage_error("Reconciliation seinfo owner unavailable")
@@ -504,6 +519,10 @@ impl System {
             };
             drop(install);
             store.finish_after_unlock(before, result)?;
+            eprintln!(
+                "native package: app data: {phase} reconcileAppsData finished {prepared_count} packages ({} u{user_id} 0x{flags:x} migrateAppData={migrate_apps_data})",
+                volume.as_deref().unwrap_or("null")
+            );
         }
         Ok(deferred_packages)
     }
@@ -546,6 +565,66 @@ fn storage_io(message: String) -> Exception {
 
 #[cfg(test)]
 mod tests {
+    /// AppDataHelper's locked-CE guard runs before cleanup/list/create/destroy,
+    /// including the boot core/deferred entry points sharing this coordinator.
+    #[test]
+    fn locked_ce_reconciliation_never_touches_directories() {
+        use super::*;
+        use aim_binder_host::local::{Call, Reply, Service};
+        struct Locked;
+        impl Service for Locked {
+            fn descriptor(&self) -> &str {
+                storage_api::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.code, storage_api::CE_UNLOCKED);
+                let args = storage_api::CeUnlocked::read(&mut call.data)?;
+                assert_eq!(args.user, 0);
+                assert_eq!(call.data.remaining(), 0);
+                let mut p = Parcel::new();
+                storage_api::write_ce_unlocked_reply(&mut p, false);
+                Ok(p)
+            }
+        }
+        let process = LocalProcess::open(
+            &aim_binder_driver::Driver::new(),
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: std::process::id() as i32,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let system = System::new(process.clone(), &[]);
+        let Binder::Local(ptr) = process.add_service(Arc::new(Locked)) else {
+            unreachable!()
+        };
+        let leaf = StorageLeaf {
+            owner: ServiceOwner::Local(process.local_service(ptr).unwrap()),
+        };
+        for phase in [None, Some(true), Some(false)] {
+            for flags in [2, 3] {
+                let error = system
+                    .reconcile_apps_data_volumes(
+                        &leaf,
+                        vec![None],
+                        0,
+                        flags,
+                        false,
+                        phase,
+                        None,
+                        true,
+                        true,
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    error.message,
+                    "Refusing CE reconciliation while user is locked; it would destroy valid data"
+                );
+            }
+        }
+    }
+
     #[test]
     fn storage_failures_reach_the_original_as_parcelable_io_exceptions() {
         let error = super::storage_io("Failed to free 1 on storage device".into());

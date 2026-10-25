@@ -725,6 +725,20 @@ impl AppHost {
         let _ = self.system.set(system);
     }
 
+    pub(super) fn package_system(&self) -> Result<&Arc<crate::system::System>, Exception> {
+        self.system
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native package system unavailable"))
+    }
+
+    /// Inode-sensitive legacy callers read through the session until #2023's
+    /// remaining package queries move. Never copy its receipts into the join.
+    pub(super) fn app_data_packages(
+        &self,
+    ) -> Result<Arc<package::scan_snapshot::query_state::Capture>, Exception> {
+        self.package_system()?.capture_package_queries()
+    }
+
     pub fn set_published(&self, services: &[(String, Binder)]) {
         *self.published.lock().unwrap() = services.to_vec();
     }
@@ -1828,7 +1842,8 @@ impl AppHost {
         let flag = |name: &str, default: bool| {
             system_boolean((configured.properties)(name).as_deref(), default)
         };
-        let (state, _) = self.packages()?;
+        let capture = self.app_data_packages()?;
+        let state = capture.state();
         let user = (uid / PER_USER_RANGE) as i32;
         let app_id = uid % PER_USER_RANGE;
         let mut data_dirs = flag("persist.zygote.app_data_isolation", true)
@@ -5378,11 +5393,12 @@ impl Service for Control {
             // start, and not by the first start.
             let host = self.0.clone();
             std::thread::spawn(move || {
-                if let Some(system) = host.system.get() {
-                    match package_boot::run(&host, system) {
-                        Ok(()) => eprintln!("app host: package boot: through its construction"),
-                        Err(e) => eprintln!("app host: package boot: {e:?}"),
-                    }
+                match host.package_system().and_then(|system| {
+                    package_boot::run(&host, system)?;
+                    system.wait_native_package_app_data()
+                }) {
+                    Ok(()) => eprintln!("app host: package boot: through its construction"),
+                    Err(e) => return eprintln!("app host: package boot: {e:?}"),
                 }
                 if let Err(e) = host.inputs().and_then(|_| host.packages()) {
                     eprintln!("app host: loading its inputs: {e:?}");

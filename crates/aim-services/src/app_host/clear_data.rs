@@ -313,11 +313,12 @@ impl AppHost {
     /// its instant metadata deleted and, once cleared, its components'
     /// states reset and the suspensions it made lifted.
     fn clear_package_data_now(self: &Arc<Self>, package: &str, user: i32) -> bool {
-        let Ok((state, _)) = self.packages().inspect_err(|e| {
+        let Ok(capture) = self.app_data_packages().inspect_err(|e| {
             eprintln!("app host: clearing {package}'s data: {}", e.message);
         }) else {
             return false;
         };
+        let state = capture.state();
         let Some(ps) = state.packages.get(package) else {
             eprintln!("app host: Package named '{package}' doesn't exist.");
             return false;

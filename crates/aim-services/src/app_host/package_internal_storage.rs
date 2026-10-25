@@ -135,9 +135,24 @@ impl PackageInternalStorage {
         r.read_exception()
             .map_err(|s| installer_exception(&Exception::new(EX_ILLEGAL_STATE, s.to_string())))?
             .map_err(|e| installer_exception(&e))?;
+        let fail = |message| installer_exception(&Exception::new(EX_ILLEGAL_STATE, message));
         let result = aim_service_aidl::read_typed::<CreateAppDataResult>(&mut r)
-            .map_err(|s| installer_exception(&Exception::new(EX_ILLEGAL_STATE, s.to_string())))?
-            .unwrap_or_default();
+            .map_err(|s| fail(format!("createAppData result: {s}")))?
+            .ok_or_else(|| fail("createAppData returned no result".into()))?;
+        if result.exception_code != 0 {
+            let mut error = Exception::new(
+                EX_SERVICE_SPECIFIC,
+                result
+                    .exception_message
+                    .as_deref()
+                    .unwrap_or("createAppData failed"),
+            );
+            error.service_specific = result.exception_code;
+            return Err(installer_exception(&error));
+        }
+        if r.remaining() != 0 {
+            return Err(fail("createAppData result has trailing data".into()));
+        }
         Ok([result.ce_data_inode, result.de_data_inode])
     }
 
@@ -158,7 +173,11 @@ impl PackageInternalStorage {
             se_info: a.seinfo.unwrap_or_default(),
             target_sdk_version: a.target_sdk,
         };
-        self.create(&args).or_else(|_| {
+        self.create(&args).or_else(|error| {
+            eprintln!(
+                "native package: app data: createAppData {} failed; recovering: {}",
+                args.package_name, error.message
+            );
             self.destroy(a.volume, a.package_name, a.user, a.flags, 0)?;
             self.create(&args)
         })
@@ -223,14 +242,8 @@ impl Service for PackageInternalStorage {
             // `StorageManager.isCeStorageUnlocked`.
             bridge::CE_UNLOCKED => {
                 let a = bridge::CeUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(
-                    self.host
-                        .user_unlocking_or_unlocked(a.user)
-                        .map(|unlocked| {
-                            bridge::write_ce_unlocked_reply(&mut p, unlocked);
-                            p
-                        }),
-                )
+                bridge::write_ce_unlocked_reply(&mut p, self.host.ce_storage_prepared(a.user));
+                Ok(p)
             }
             bridge::FILE_ENCRYPTED => {
                 bridge::FileEncrypted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -248,19 +261,24 @@ impl Service for PackageInternalStorage {
             // `FileUtils.listFilesOrEmpty` of the user's directory.
             bridge::DATA_DIRECTORY_NAMES => {
                 let a = bridge::DataDirectoryNames::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(
-                    self.user_directory(a.volume.as_deref(), a.user, a.ce)
-                        .map(|dir| {
-                            let names = std::fs::read_dir(dir)
-                                .into_iter()
-                                .flatten()
-                                .flatten()
-                                .map(|e| Some(e.file_name().to_string_lossy().into_owned()))
-                                .collect::<Vec<_>>();
-                            bridge::write_data_directory_names_reply(&mut p, &Some(names));
-                            p
-                        }),
-                )
+                reply((|| {
+                    let dir = self.user_directory(a.volume.as_deref(), a.user, a.ce)?;
+                    let entries = match std::fs::read_dir(dir) {
+                        Ok(entries) => Some(entries),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => return Err(super::storage::io_exception(&error.to_string())),
+                    };
+                    let names = entries
+                        .into_iter()
+                        .flatten()
+                        .map(|entry| {
+                            entry.map(|e| Some(e.file_name().to_string_lossy().into_owned()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| super::storage::io_exception(&error.to_string()))?;
+                    bridge::write_data_directory_names_reply(&mut p, &Some(names));
+                    Ok(p)
+                })())
             }
             bridge::FREE_ALL_ABOVE_QUOTA => {
                 let a = bridge::FreeAllAboveQuota::read(&mut call.data).map_err(|_| BAD_VALUE)?;

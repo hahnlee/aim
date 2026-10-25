@@ -1,9 +1,8 @@
 //! `IPackageAppDataBridge` for the app host: the native installer's
 //! app-data owner, which system_server's `NativePackageAppDataBridge`
 //! serves (`android-16.0.0_r1`), to the system uid only. A user's storage
-//! flags are answered from the app host's users: CE once the user is
-//! unlocking or unlocked (the app host prepares a user's CE storage as it
-//! unlocks it), else DE while it runs. An install's app data, made,
+//! flags are answered from the app host's storage preparation: CE once
+//! vold and installd have prepared it, else DE while the user runs. An install's app data, made,
 //! committed and rolled back, is not implemented (#2160).
 
 use std::sync::Arc;
@@ -35,7 +34,7 @@ impl PackageAppData {
         if super::user_service::serial_number(&self.host, user)?.is_none() {
             return Err(Exception::illegal_argument(format!("Unknown user {user}")));
         }
-        Ok(if self.host.user_unlocking_or_unlocked(user)? {
+        Ok(if self.host.ce_storage_prepared(user) {
             FLAG_STORAGE_DE | FLAG_STORAGE_CE
         } else if user == SYSTEM_USER {
             FLAG_STORAGE_DE

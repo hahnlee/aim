@@ -100,6 +100,9 @@ const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE
 #[derive(Default)]
 pub struct Volumes {
     volume: Mutex<Option<VolumeInfo>>,
+    /// Storage successfully prepared by vold and installd, before the user
+    /// enters unlocking. This is independent of the user's lifecycle state.
+    prepared_users: Mutex<HashMap<i32, i32>>,
     vold: Mutex<Option<Strong>>,
     listeners: Mutex<HashMap<u32, (Strong, u64)>>,
     /// Each user's cloud media provider's authority, as MediaProvider set
@@ -214,10 +217,9 @@ impl AppHost {
     /// later (`unlock_user_storage`), as `finishUserBoot` unlocks it.
     pub(super) fn start_storage(&self) -> Result<StartedUser, String> {
         let installd = self.installd()?;
-        // PackageManagerService's start.
-        if let Err(e) = self.fix_apps_data_on_boot(&installd) {
-            eprintln!("app host: app data: {e}");
-        }
+        self.package_system()
+            .and_then(|system| system.wait_native_package_app_data())
+            .map_err(|e| e.message)?;
         let deadline = Instant::now() + VOLD_PATIENCE;
         let vold = loop {
             if let Ok(vold) = super::display::check_service(&self.process, VOLD) {
@@ -267,7 +269,7 @@ impl AppHost {
             fingerprint,
             updated,
         };
-        self.prepare_user_storage(&started, super::app_data::FLAG_STORAGE_DE);
+        self.prepare_user_storage(&started, super::app_data::FLAG_STORAGE_DE)?;
         call(ON_USER_STARTED, "onUserStarted", &|p| p.write_i32(USER))?;
         // The started user's emulated volume, mounted while the user is
         // locked (`onUserStarted` → `mount`).
@@ -285,20 +287,38 @@ impl AppHost {
 
     /// The user's and its apps' data of the storage of `flags`
     /// (`prepareUserData`, `reconcileAppsData`).
-    fn prepare_user_storage(&self, user: &StartedUser, flags: i32) {
-        if let Err(e) = self.prepare_user_data(&user.vold, &user.installd, USER, flags) {
-            eprintln!("app host: user data: {e}");
-        }
-        if let Err(e) = self.reconcile_apps_data(&user.installd, USER, flags, user.updated) {
-            eprintln!("app host: app data: {e}");
-        }
+    fn prepare_user_storage(&self, user: &StartedUser, flags: i32) -> Result<(), String> {
+        let system = self.package_system().map_err(|e| e.message)?;
+        system
+            .wait_native_package_app_data()
+            .map_err(|e| e.message)?;
+        self.prepare_user_data(&user.vold, &user.installd, USER, flags)?;
+        *self
+            .storage
+            .prepared_users
+            .lock()
+            .unwrap()
+            .entry(USER)
+            .or_default() |= flags;
+        system
+            .internal_reconcile_apps_data(USER, flags, user.updated, 1000, 0)
+            .map_err(|e| e.message)
+    }
+
+    pub(super) fn ce_storage_prepared(&self, user: i32) -> bool {
+        self.storage
+            .prepared_users
+            .lock()
+            .unwrap()
+            .get(&user)
+            .is_some_and(|flags| flags & super::app_data::FLAG_STORAGE_CE != 0)
     }
 
     /// `finishUserUnlocking` of user 0: UserManagerService's
     /// `onBeforeUnlockUser`, its CE storage and apps' data, then the user
     /// unlocking.
     pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<(), String> {
-        self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE);
+        self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE)?;
         self.user_unlocking(USER).map_err(|e| e.message)
     }
 
@@ -1449,14 +1469,11 @@ impl Service for StorageManager {
                         .volume_list(call, args.user_id, args.calling_package.as_deref()),
                 )
             }
-            // `mCeUnlockedUsers`: the users whose CE storage
-            // `start_storage` prepared.
+            // `mCeUnlockedUsers`: storage availability precedes the user's
+            // lifecycle transition to unlocking.
             sm::IS_CE_STORAGE_UNLOCKED => {
                 let args = sm::IsCeStorageUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let unlocked = match self.0.user_unlocking_or_unlocked(args.user_id) {
-                    Ok(unlocked) => unlocked,
-                    Err(e) => return reply(Err(e)),
-                };
+                let unlocked = self.0.ce_storage_prepared(args.user_id);
                 let mut p = Parcel::new();
                 sm::write_is_ce_storage_unlocked_reply(&mut p, unlocked);
                 Ok(p)
@@ -1638,6 +1655,68 @@ impl Service for TrimListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// StorageManager's CE fact precedes UserController's unlocking state.
+    /// Both the internal bridge and the public storage API must agree.
+    #[test]
+    fn ce_storage_availability_is_independent_of_user_unlocking() {
+        use aim_service_aidl::dev_aim_server_ipackageinternalstoragebridge as internal;
+        let process = aim_binder_host::local::LocalProcess::open(
+            &aim_binder_driver::Driver::new(),
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: std::process::id() as i32,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let host = AppHost::new(process.clone());
+        let Binder::Local(ptr) = process.add_service(Arc::new(
+            super::super::package_internal_storage::PackageInternalStorage::new(host.clone()),
+        )) else {
+            unreachable!()
+        };
+        let bridge = process.local_service(ptr).unwrap();
+        let Binder::Local(ptr) = process.add_service(Arc::new(StorageManager(host.clone()))) else {
+            unreachable!()
+        };
+        let mount = process.local_service(ptr).unwrap();
+        let available = || {
+            let mut request = Parcel::new();
+            internal::CeUnlocked { user: 0 }.write(&mut request);
+            let response = bridge
+                .transact(internal::CE_UNLOCKED, &request, false)
+                .unwrap();
+            let native = internal::read_ce_unlocked_reply(&mut response.reader())
+                .unwrap()
+                .unwrap();
+            let mut request = Parcel::new();
+            sm::IsCeStorageUnlocked { user_id: 0 }.write(&mut request);
+            let response = mount
+                .transact(sm::IS_CE_STORAGE_UNLOCKED, &request, false)
+                .unwrap();
+            assert_eq!(
+                sm::read_is_ce_storage_unlocked_reply(&mut response.reader())
+                    .unwrap()
+                    .unwrap(),
+                native
+            );
+            native
+        };
+        assert!(!available());
+        host.unlocked_users.lock().unwrap().insert(0);
+        assert!(
+            !available(),
+            "a lifecycle flag alone cannot permit CE reconciliation"
+        );
+        host.unlocked_users.lock().unwrap().clear();
+        host.storage.prepared_users.lock().unwrap().insert(0, 1);
+        assert!(!available());
+        host.storage.prepared_users.lock().unwrap().insert(0, 3);
+        assert!(available());
+        assert!(!host.user_unlocking_or_unlocked(0).unwrap());
+        assert!(!host.ce_storage_prepared(10));
+    }
 
     /// A listener of this process is told each volume's change, until it
     /// is unregistered.

@@ -1,16 +1,9 @@
-//! User 0's storage and its apps' data directories, prepared as
-//! PackageManagerService and UserManagerService prepare them at
-//! `android-16.0.0_r1`: `AppDataHelper.fixAppsDataOnBoot` at the package
-//! side's start, then at the user's start and unlock
-//! `UserDataPreparer.prepareUserData` (vold's `prepareUserStorage`, the
-//! directories' serial numbers, installd's `createUserData`) and
-//! `AppDataHelper.reconcileAppsData`, whose installd `createAppData`
-//! makes each installed package's directories and reports their inodes,
-//! which the package restrictions keep.
+//! User storage preparation and installd primitives at `android-16.0.0_r1`.
+//! The app host retains `UserDataPreparer`'s storage/serial-number work;
+//! the native package session coordinates package data and inode receipts.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::Strong;
@@ -21,8 +14,7 @@ use sha1::{Digest, Sha1};
 
 use super::AppHost;
 use super::storage::VOLD_DESCRIPTOR;
-use crate::package::model::{PackageState, State};
-use crate::package::pkg::booleans::{CORE_APP, DEFAULT_TO_DEVICE_PROTECTED_STORAGE};
+use crate::package::model::PackageState;
 
 const INSTALLD: &str = "installd";
 const INSTALLD_PATIENCE: Duration = Duration::from_secs(30);
@@ -38,10 +30,6 @@ const ENFORCE_SERIAL_NUMBER: u32 = 14;
 pub(super) const FLAG_STORAGE_DE: i32 = 1;
 pub(super) const FLAG_STORAGE_CE: i32 = 2;
 pub(super) const FLAG_STORAGE_SDK: i32 = 8;
-/// `Installer.Batch.CREATE_APP_DATA_BATCH_SIZE`.
-const CREATE_APP_DATA_BATCH_SIZE: usize = 256;
-/// `PackageManager.PROPERTY_NO_APP_DATA_STORAGE`.
-const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE";
 
 /// `android.os.CreateAppDataArgs`.
 #[derive(Clone, Debug, PartialEq)]
@@ -138,43 +126,6 @@ pub(super) fn is_64_bit_abi(abi: &str) -> Result<bool, String> {
     }
 }
 
-/// `AppDataHelper.shouldHaveAppStorage`.
-fn should_have_app_storage(ps: &PackageState) -> bool {
-    let Some(pkg) = &ps.pkg else {
-        return true;
-    };
-    let no_storage = pkg.properties.as_ref().is_some_and(|props| {
-        props.iter().any(|(name, p)| {
-            name == NO_APP_DATA_STORAGE && p.value == crate::package::pkg::PropertyValue::Bool(true)
-        })
-    });
-    !no_storage && ps.app_id >= 0
-}
-
-/// `assertPackageStorageValid` of the internal volume's directory
-/// `package` of `user`.
-fn assert_package_storage_valid(state: &State, package: &str, user: i32) -> Result<(), String> {
-    let Some(ps) = state.packages.get(package) else {
-        return Err(format!("Package {package} is unknown"));
-    };
-    if ps.volume_uuid.is_some() {
-        return Err(format!(
-            "Package {package} found on unknown volume null; expected volume {}",
-            ps.volume_uuid.as_deref().unwrap_or_default()
-        ));
-    }
-    let state = crate::package::info::user_state(ps, user);
-    if !state.installed && !(state.ce_data_inode > 0 || state.de_data_inode > 0) {
-        return Err(format!(
-            "Package {package} not installed for user {user} or was deleted without DELETE_KEEP_DATA"
-        ));
-    }
-    if !should_have_app_storage(ps) {
-        return Err(format!("Package {package} shouldn't have storage"));
-    }
-    Ok(())
-}
-
 /// The reply of a call `name` to `service`, read by `read`.
 fn call<T>(
     service: &Strong,
@@ -221,14 +172,6 @@ pub(super) fn delete_contents(dir: &Path, itself: bool) {
     }
 }
 
-/// A package's `createAppData` arguments and what is done with its
-/// result.
-struct Prepare<'a> {
-    ps: &'a PackageState,
-    args: CreateAppDataArgs,
-    migrate: bool,
-}
-
 impl AppHost {
     /// installd, once it registers.
     pub(super) fn installd(&self) -> Result<Strong, String> {
@@ -249,54 +192,6 @@ impl AppHost {
         self.property("ro.crypto.type").as_deref() == Some("file")
     }
 
-    /// `AppDataHelper.fixAppsDataOnBoot`: the system user's core apps'
-    /// data (DE, and CE without file-based encryption), installd's
-    /// `fixupAppData`, then the other apps'.
-    pub(super) fn fix_apps_data_on_boot(&self, installd: &Strong) -> Result<(), String> {
-        // system_server is zygote's child, so PackageManagerService starts
-        // after init's `zygote-start`, once post-fs-data's `init_user0`
-        // has made `/data/data` (`/data/user/0`) and user 0's DE storage;
-        // installd, of class main, is up before that.
-        let deadline = Instant::now() + INSTALLD_PATIENCE;
-        while self.property("init.svc.zygote").is_none() {
-            if Instant::now() > deadline {
-                return Err("zygote did not start".into());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let flags = if self.file_encrypted() {
-            FLAG_STORAGE_DE
-        } else {
-            FLAG_STORAGE_DE | FLAG_STORAGE_CE
-        };
-        let deferred = self.reconcile_apps_data_li(installd, 0, flags, true, true)?;
-        let mut data = Parcel::new();
-        installd::FixupAppData {
-            uuid: None,
-            flags: FLAG_STORAGE_DE | FLAG_STORAGE_CE,
-        }
-        .write(&mut data);
-        if let Err(e) = call(
-            installd,
-            "fixupAppData",
-            installd::FIXUP_APP_DATA,
-            &data,
-            installd::read_fixup_app_data_reply,
-        ) {
-            eprintln!("app host: app data: Trouble fixing GIDs: {e}");
-        }
-        let (state, _) = self.packages().map_err(|e| e.message)?;
-        let packages: Vec<&PackageState> = deferred
-            .iter()
-            .filter_map(|name| state.packages.get(name))
-            .filter(|ps| crate::package::info::user_state(ps, 0).installed)
-            .collect();
-        let count = packages.len();
-        self.prepare_apps_data(installd, &packages, 0, flags, true)?;
-        eprintln!("app host: app data: deferred reconcileAppsData finished {count} packages");
-        Ok(())
-    }
-
     /// `UserDataPreparer.prepareUserData` of the internal storage: the
     /// user's storage `flags` prepared by vold, its directories' serial
     /// numbers enforced, its data created by installd; a new user's
@@ -311,7 +206,7 @@ impl AppHost {
         let Some((serial, last_logged_in, _)) =
             super::user_service::storage_user(self, user).map_err(|e| e.message)?
         else {
-            return Ok(());
+            return Err(format!("Unknown storage user {user}"));
         };
         self.prepare_user_data_li(
             vold,
@@ -460,93 +355,6 @@ impl AppHost {
         }
     }
 
-    /// `AppDataHelper.reconcileAppsData` of the internal volume, the only
-    /// writable private volume.
-    pub(super) fn reconcile_apps_data(
-        &self,
-        installd: &Strong,
-        user: i32,
-        flags: i32,
-        migrate: bool,
-    ) -> Result<(), String> {
-        self.reconcile_apps_data_li(installd, user, flags, migrate, false)
-            .map(|_| ())
-    }
-
-    /// `reconcileAppsDataLI`: the user's directories of packages that
-    /// should have none destroyed, then the installed packages' prepared
-    /// (but for core apps' alone with `only_core`, which returns the
-    /// others).
-    fn reconcile_apps_data_li(
-        &self,
-        installd: &Strong,
-        user: i32,
-        flags: i32,
-        migrate: bool,
-        only_core: bool,
-    ) -> Result<Vec<String>, String> {
-        eprintln!(
-            "app host: app data: reconcileAppsData for null u{user} 0x{flags:x} migrateAppData={migrate}"
-        );
-        let mut data = Parcel::new();
-        installd::CleanupInvalidPackageDirs {
-            uuid: None,
-            user_id: user,
-            flags,
-        }
-        .write(&mut data);
-        if let Err(e) = call(
-            installd,
-            "cleanupInvalidPackageDirs",
-            installd::CLEANUP_INVALID_PACKAGE_DIRS,
-            &data,
-            installd::read_cleanup_invalid_package_dirs_reply,
-        ) {
-            eprintln!("app host: app data: Failed to cleanup deleted dirs: {e}");
-        }
-        let root = self.data().map_err(|e| e.message)?;
-        let (state, _) = self.packages().map_err(|e| e.message)?;
-        if flags & FLAG_STORAGE_CE != 0 {
-            self.destroy_invalid(
-                installd,
-                &state,
-                &self.ce_dir(root, user),
-                user,
-                FLAG_STORAGE_CE,
-            );
-        }
-        if flags & FLAG_STORAGE_DE != 0 {
-            let de = root.join(format!("user_de/{user}"));
-            self.destroy_invalid(installd, &state, &de, user, FLAG_STORAGE_DE);
-        }
-        let mut deferred = Vec::new();
-        let mut packages = Vec::new();
-        for ps in state
-            .packages
-            .values()
-            .filter(|ps| ps.volume_uuid.is_none())
-        {
-            let Some(pkg) = &ps.pkg else {
-                eprintln!(
-                    "app host: app data: Odd, missing scanned package {}",
-                    ps.name
-                );
-                continue;
-            };
-            if only_core && !pkg.is(CORE_APP) {
-                deferred.push(ps.name.clone());
-                continue;
-            }
-            if crate::package::info::user_state(ps, user).installed {
-                packages.push(ps);
-            }
-        }
-        let count = packages.len();
-        self.prepare_apps_data(installd, &packages, user, flags, migrate)?;
-        eprintln!("app host: app data: reconcileAppsData finished {count} packages");
-        Ok(deferred)
-    }
-
     /// `create_data_user_ce_path` on the host: user 0's is `/data/data`
     /// where that is a directory (`/data/user/0` binds it in the guest).
     pub(super) fn ce_dir(&self, root: &Path, user: i32) -> PathBuf {
@@ -555,193 +363,6 @@ impl AppHost {
             return data;
         }
         root.join(format!("user/{user}"))
-    }
-
-    /// The directories of `dir` whose package fails
-    /// `assertPackageStorageValid`, destroyed by installd (`flags`).
-    fn destroy_invalid(&self, installd: &Strong, state: &State, dir: &Path, user: i32, flags: i32) {
-        let names: Vec<String> = match std::fs::read_dir(dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        for package in names {
-            let Err(reason) = assert_package_storage_valid(state, &package, user) else {
-                continue;
-            };
-            eprintln!(
-                "app host: app data: Destroying {}/{package} due to: {reason}",
-                dir.display()
-            );
-            let mut data = Parcel::new();
-            installd::DestroyAppData {
-                uuid: None,
-                package_name: Some(package.clone()),
-                user_id: user,
-                flags,
-                ce_data_inode: 0,
-            }
-            .write(&mut data);
-            if let Err(e) = call(
-                installd,
-                "destroyAppData",
-                installd::DESTROY_APP_DATA,
-                &data,
-                installd::read_destroy_app_data_reply,
-            ) {
-                eprintln!("app host: app data: Failed to destroy: {e}");
-            }
-        }
-    }
-
-    /// `prepareAppDataAndMigrate` of each of `packages` in one
-    /// `Installer.Batch`, then the inodes installd reported recorded in
-    /// the package restrictions.
-    fn prepare_apps_data(
-        &self,
-        installd: &Strong,
-        packages: &[&PackageState],
-        user: i32,
-        flags: i32,
-        migrate: bool,
-    ) -> Result<(), String> {
-        let mut batch = Vec::new();
-        for ps in packages {
-            if !should_have_app_storage(ps) {
-                eprintln!(
-                    "app host: app data: Skipping preparing app data for {}",
-                    ps.name
-                );
-                continue;
-            }
-            batch.push(Prepare {
-                ps,
-                args: create_app_data_args(ps, user, flags)?,
-                migrate,
-            });
-        }
-        let mut inodes = Vec::new();
-        self.execute_batch(installd, &batch, user, flags, &mut inodes)?;
-        self.record_inodes(user, inodes)
-    }
-
-    /// `Installer.Batch.execute` and each package's completion
-    /// (`prepareAppData`'s, then the migration of `prepareAppDataAndMigrate`);
-    /// a batch that fails is logged (`executeBatchLI`).
-    fn execute_batch(
-        &self,
-        installd: &Strong,
-        batch: &[Prepare<'_>],
-        user: i32,
-        flags: i32,
-        inodes: &mut Vec<(String, i64, i64)>,
-    ) -> Result<(), String> {
-        for chunk in batch.chunks(CREATE_APP_DATA_BATCH_SIZE) {
-            let mut data = Parcel::new();
-            installd::CreateAppDataBatched {
-                args: Some(chunk.iter().map(|p| Some(p.args.clone())).collect()),
-            }
-            .write(&mut data);
-            let results = match call(
-                installd,
-                "createAppDataBatched",
-                installd::CREATE_APP_DATA_BATCHED,
-                &data,
-                installd::read_create_app_data_batched_reply::<CreateAppDataResult>,
-            ) {
-                Ok(results) => results.unwrap_or_default(),
-                Err(e) => {
-                    eprintln!("app host: app data: Failed to execute pending operations: {e}");
-                    return Ok(());
-                }
-            };
-            for (prepare, result) in chunk.iter().zip(results) {
-                let result = match result {
-                    Some(r) if r.exception_code == 0 => Some(r),
-                    failed => {
-                        let message = failed.and_then(|r| r.exception_message);
-                        self.recover(installd, prepare, user, flags, message.as_deref())
-                    }
-                };
-                // A failed recovery leaves `createAppDataResult` null: the
-                // completion throws, and nothing of it is recorded.
-                let Some(result) = result else {
-                    continue;
-                };
-                let ps = prepare.ps;
-                record(inodes, ps, user, flags, &result);
-                self.prepare_app_data_contents(installd, ps, user, flags)?;
-                if prepare.migrate && self.maybe_migrate_app_data(installd, ps, user) {
-                    let again = [Prepare {
-                        ps,
-                        args: prepare.args.clone(),
-                        migrate: false,
-                    }];
-                    self.execute_batch(installd, &again, user, flags, inodes)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `prepareAppData`'s recovery of a package whose `createAppData`
-    /// failed: its data destroyed (`destroyAppDataLeafLIF`) and created
-    /// once more.
-    fn recover(
-        &self,
-        installd: &Strong,
-        prepare: &Prepare<'_>,
-        user: i32,
-        flags: i32,
-        message: Option<&str>,
-    ) -> Option<CreateAppDataResult> {
-        let ps = prepare.ps;
-        eprintln!(
-            "app host: app data: Failed to create app data for {}, but trying to recover: {}",
-            ps.name,
-            message.unwrap_or_default()
-        );
-        let mut data = Parcel::new();
-        installd::DestroyAppData {
-            uuid: ps.volume_uuid.clone(),
-            package_name: Some(ps.name.clone()),
-            user_id: user,
-            flags,
-            ce_data_inode: crate::package::info::user_state(ps, user).ce_data_inode,
-        }
-        .write(&mut data);
-        if let Err(e) = call(
-            installd,
-            "destroyAppData",
-            installd::DESTROY_APP_DATA,
-            &data,
-            installd::read_destroy_app_data_reply,
-        ) {
-            eprintln!("app host: app data: {e}");
-        }
-        let mut data = Parcel::new();
-        installd::CreateAppData {
-            args: Some(prepare.args.clone()),
-        }
-        .write(&mut data);
-        match call(
-            installd,
-            "createAppData",
-            installd::CREATE_APP_DATA,
-            &data,
-            installd::read_create_app_data_reply::<CreateAppDataResult>,
-        ) {
-            Ok(Some(result)) => {
-                eprintln!("app host: app data: Recovery succeeded!");
-                Some(result)
-            }
-            Ok(None) | Err(_) => {
-                eprintln!("app host: app data: Recovery failed!");
-                None
-            }
-        }
     }
 
     /// `AppDataHelper.clearAppDataLeafLIF` of `ps` in `user`: installd's
@@ -826,143 +447,6 @@ impl AppHost {
             );
         }
         Ok(())
-    }
-
-    /// `maybeMigrateAppDataLIF`: a system app's data moved to the storage
-    /// its `defaultToDeviceProtectedStorage` asks for, without file-based
-    /// encryption; whether it was.
-    fn maybe_migrate_app_data(&self, installd: &Strong, ps: &PackageState, user: i32) -> bool {
-        if !ps.is.system || self.file_encrypted() {
-            return false;
-        }
-        let de = ps
-            .pkg
-            .as_ref()
-            .is_some_and(|pkg| pkg.is(DEFAULT_TO_DEVICE_PROTECTED_STORAGE));
-        let mut data = Parcel::new();
-        installd::MigrateAppData {
-            uuid: ps.volume_uuid.clone(),
-            package_name: Some(ps.name.clone()),
-            user_id: user,
-            flags: if de { FLAG_STORAGE_DE } else { FLAG_STORAGE_CE },
-        }
-        .write(&mut data);
-        if let Err(e) = call(
-            installd,
-            "migrateAppData",
-            installd::MIGRATE_APP_DATA,
-            &data,
-            installd::read_migrate_app_data_reply,
-        ) {
-            eprintln!("app host: app data: Failed to migrate {}: {e}", ps.name);
-        }
-        true
-    }
-
-    /// `PackageSetting.setCeDataInode`, `setDeDataInode` of `user`, in
-    /// the package model and its package restrictions; none written when
-    /// none changed.
-    fn record_inodes(&self, user: i32, inodes: Vec<(String, i64, i64)>) -> Result<(), String> {
-        let mut store = self.package_store.lock().unwrap();
-        let _writer = self.model_writer.lock().unwrap();
-        let (before, _) = self.packages().map_err(|e| e.message)?;
-        let changed: Vec<(String, i64, i64)> = inodes
-            .into_iter()
-            .filter(|(name, ce, de)| {
-                let state = crate::package::info::user_state(&before.packages[name], user);
-                (state.ce_data_inode, state.de_data_inode) != (*ce, *de)
-            })
-            .collect();
-        if changed.is_empty() {
-            return Ok(());
-        }
-        if store.is_none() {
-            let data = self.data().map_err(|e| e.message)?;
-            *store = Some(
-                crate::package::owner::Store::open(data, &[user as u32])
-                    .map_err(|e| format!("package restrictions: {e}"))?
-                    .ok_or("package restrictions: no package state")?,
-            );
-        }
-        let result = store
-            .as_mut()
-            .expect("opened")
-            .commit_data_inodes(user as u32, &changed);
-        if result.as_ref().is_ok() || result.as_ref().is_err_and(|e| e.committed) {
-            let mut after = (*before).clone();
-            for (name, ce, de) in &changed {
-                if let Some(ps) = after.packages.get_mut(name) {
-                    let state = ps.users.entry(user).or_default();
-                    state.ce_data_inode = *ce;
-                    state.de_data_inode = *de;
-                }
-            }
-            self.user_states_changed(&before, Arc::new(after))
-                .map_err(|e| e.message)?;
-        }
-        result.map_err(|e| format!("package restrictions: {}", e.message))
-    }
-}
-
-/// `Installer.buildCreateAppDataArgs` of `prepareAppData`: the package's
-/// seinfo with the user's (`SELinuxUtil.getSeinfoUser`), and the SDK
-/// storage of a package that uses SDK libraries. `Installer` sends no
-/// previous app id (b/221088088).
-fn create_app_data_args(
-    ps: &PackageState,
-    user: i32,
-    flags: i32,
-) -> Result<CreateAppDataArgs, String> {
-    let seinfo = ps
-        .seinfo
-        .as_ref()
-        .ok_or_else(|| format!("{}: no seinfo", ps.name))?;
-    let instant = crate::package::info::user_state(ps, user).instant_app;
-    let seinfo_user = if instant {
-        ":ephemeralapp:complete"
-    } else {
-        ":complete"
-    };
-    let sdk = if ps.uses_sdk_libraries.is_empty() {
-        0
-    } else {
-        FLAG_STORAGE_SDK
-    };
-    Ok(CreateAppDataArgs {
-        uuid: ps.volume_uuid.clone(),
-        package_name: ps.name.clone(),
-        user_id: user,
-        flags: flags | sdk,
-        app_id: ps.app_id,
-        previous_app_id: 0,
-        se_info: format!("{seinfo}{seinfo_user}"),
-        target_sdk_version: ps.target_sdk_version,
-    })
-}
-
-/// The inodes of `result` that `prepareAppData` keeps: CE's and DE's of
-/// the storage prepared, unless -1; the package's others as they were.
-fn record(
-    inodes: &mut Vec<(String, i64, i64)>,
-    ps: &PackageState,
-    user: i32,
-    flags: i32,
-    result: &CreateAppDataResult,
-) {
-    let index = match inodes.iter().position(|(name, ..)| *name == ps.name) {
-        Some(i) => i,
-        None => {
-            let state = crate::package::info::user_state(ps, user);
-            inodes.push((ps.name.clone(), state.ce_data_inode, state.de_data_inode));
-            inodes.len() - 1
-        }
-    };
-    let entry = &mut inodes[index];
-    if flags & FLAG_STORAGE_CE != 0 && result.ce_data_inode != -1 {
-        entry.1 = result.ce_data_inode;
-    }
-    if flags & FLAG_STORAGE_DE != 0 && result.de_data_inode != -1 {
-        entry.2 = result.de_data_inode;
     }
 }
 
