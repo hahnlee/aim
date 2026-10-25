@@ -566,6 +566,20 @@ impl Service for PackageBootstrap {
                     })
                     .map(|v| bridge::write_is_test_base_on_bootclasspath_reply(&mut p, v))
             }
+            // `com.android.art.flags.Flags.artServiceV3()`, from the ART
+            // APEX's flag storage.
+            bridge::IS_INSTALLER_ART_SERVICE_V3ENABLED => {
+                bridge::IsInstallerArtServiceV3Enabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                host.framework().map(|framework| {
+                    let enabled = framework
+                        .0
+                        .flags
+                        .get("com.android.art.flags.art_service_v3")
+                        == Some(&true);
+                    bridge::write_is_installer_art_service_v3enabled_reply(&mut p, enabled)
+                })
+            }
             // `PackageInstaller.ENABLE_REVOCABLE_FD`.
             bridge::IS_INSTALLER_REVOCABLE_FD_ENABLED => {
                 bridge::IsInstallerRevocableFdEnabled::read(&mut call.data)
