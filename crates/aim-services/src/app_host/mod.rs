@@ -2342,10 +2342,7 @@ impl AppHost {
                 })
             },
             |p| self.check_permission(Some(p), uid).map(|r| r == 0),
-            || {
-                self.user_restrictions()
-                    .map(|r| r.contains("no_debugging_features"))
-            },
+            |target| self.has_user_restriction("no_debugging_features", target),
         )
     }
 
@@ -2622,6 +2619,11 @@ impl AppHost {
         Ok(flags & FLAG_OR_STOPPED != 0
             || flags & FLAG_AND_LOCKED == 0
             || !self.user_unlocking_or_unlocked(user)?)
+    }
+
+    /// `UserManagerService.hasUserRestriction` for the host's single user.
+    fn has_user_restriction(&self, key: &str, user: i32) -> Result<bool, Exception> {
+        Ok(user == user_service::SYSTEM_USER && self.user_restrictions()?.contains(key))
     }
 
     /// User 0's base restrictions, as UserManagerService last persisted

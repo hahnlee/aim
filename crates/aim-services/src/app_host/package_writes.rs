@@ -29,8 +29,8 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
-use super::AppHost;
 use super::kept::RawIntent;
+use super::{AppHost, PER_USER_RANGE, USER_ALL};
 use crate::bundle::{self, Value};
 use crate::package::apps_filter::{NotModelled, SYSTEM_UID, app_id, uid, user_id};
 use crate::package::info::user_state;
@@ -74,8 +74,6 @@ const ACCESS_INSTANT_APPS: &str = "android.permission.ACCESS_INSTANT_APPS";
 const REDUCE_BROADCASTS: &str = "android.content.pm.reduce_broadcasts_for_component_state_changes";
 const STAY_STOPPED: &str = "android.content.pm.stay_stopped";
 const PLATFORM_PACKAGE: &str = "android";
-/// `UserHandle.USER_ALL`.
-const USER_ALL: i32 = -1;
 
 type Job = Box<dyn FnOnce() + Send>;
 /// `mPendingBroadcasts`: by user and package, the changed components.
@@ -994,7 +992,8 @@ pub(super) fn monitor_result(
     replacing: bool,
 ) -> Vec<u8> {
     let package_uid = if package_uid >= 0 && user_id(package_uid) != user {
-        user.wrapping_mul(100_000).wrapping_add(app_id(package_uid))
+        user.wrapping_mul(PER_USER_RANGE as i32)
+            .wrapping_add(app_id(package_uid))
     } else {
         package_uid
     };

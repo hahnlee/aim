@@ -173,22 +173,12 @@ clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list 
 PackageManager remains original in the default image. Controlled slice C images
 redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
-planned methods are implemented; this is not conformance acceptance. In the
-app host, construction's permission definitions come from the permission
-manager's system access state (#2165), exported as modern
-`writeLegacyPermissionsTEMP` / `toLegacyPermissions` and `LegacyPermission.write`
-write them; import follows the empty modern `readLegacyPermissionStateTEMP`.
-The boot's admissions into the modern policy are #2169 and the state without
-`access.abx` is #2168. Package monitor registration now resolves its caller's
-user through the activity manager's shared `UserController.handleIncomingUser`
-port (`ALLOW_FULL_ONLY`, all users allowed), with the current-or-self fallback,
-Recents' same-group exception and the shell's debugging restriction. The
-package event owner serializes monitor results (including the receiving user's
-uid) and internal restarted/data-cleared Intents and their callback Bundles;
-`stay_stopped` selects asynchronous restart delivery and its elapsed-time extra.
-Internal event delivery to registered and native service receivers and shutdown
-statistics remain #2167; the PackageList observer producer remains #2022, and
-the query projection switch is #2023.
+planned methods are implemented; this is not conformance acceptance. On the
+app host image, the native package boot runs its scans, construction and
+publication, and the guest reaches BOOT_COMPLETED. Internal event delivery and
+shutdown statistics remain #2167, permission state without `access.abx` #2168,
+boot admissions #2169, PackageList observers #2022 and the query projection
+switch #2023.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

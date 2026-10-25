@@ -21,7 +21,7 @@ use super::{AppHost, PER_USER_RANGE, reply};
 use crate::bundle::Value;
 
 /// The only user.
-const SYSTEM_USER: i32 = 0;
+pub(super) const SYSTEM_USER: i32 = 0;
 /// `UserManager.DISALLOW_DEBUGGING_FEATURES`.
 const DISALLOW_DEBUGGING_FEATURES: &str = "no_debugging_features";
 /// `UserHandle.USER_NULL`, also `UserInfo.NO_PROFILE_GROUP_ID`.
@@ -1641,11 +1641,11 @@ impl Service for UserManager {
             }
             um::HAS_USER_RESTRICTION => {
                 let args = um::HasUserRestriction::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let restricted = match self.host.user_restrictions() {
-                    Ok(r) => {
-                        args.user_id == SYSTEM_USER
-                            && args.restriction_key.is_some_and(|k| r.contains(&k))
-                    }
+                let restricted = match self.host.has_user_restriction(
+                    args.restriction_key.as_deref().unwrap_or(""),
+                    args.user_id,
+                ) {
+                    Ok(restricted) => restricted,
                     Err(e) => return reply(Err(e)),
                 };
                 um::write_has_user_restriction_reply(&mut p, restricted);
