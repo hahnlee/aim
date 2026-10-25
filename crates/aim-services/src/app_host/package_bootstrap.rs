@@ -321,6 +321,29 @@ impl Service for PackageBootstrap {
                 host.has_user_restriction("no_debugging_features", a.user_id)
                     .map(|v| bridge::write_is_shell_debugging_restricted_reply(&mut p, v))
             }
+            // `InstallerUserPolicy.capture`: what `createSessionInternal`
+            // asks UserManager and DevicePolicyManager of the user.
+            bridge::GET_INSTALLER_USER_POLICY => {
+                let a =
+                    bridge::GetInstallerUserPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if a.user_id < 0 {
+                    return reply(Err(Exception::illegal_argument(format!(
+                        "Invalid userId {}",
+                        a.user_id
+                    ))));
+                }
+                let user = a.user_id;
+                (|| {
+                    let mut record = Parcel::new();
+                    record.write_i32(user);
+                    record.write_bool(super::user_service::user_ids(host, true)?.contains(&user));
+                    record.write_bool(host.has_user_restriction("no_install_apps", user)?);
+                    record.write_bool(host.has_user_restriction("no_debugging_features", user)?);
+                    record.write_bool(host.device_policies()?.managed_users().contains(&user));
+                    Ok(record.data().to_vec())
+                })()
+                .map(|v| bridge::write_get_installer_user_policy_reply(&mut p, &Some(v)))
+            }
             bridge::GET_PACKAGE_PROFILE_PARENT => {
                 let a =
                     bridge::GetPackageProfileParent::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -1413,7 +1436,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
-        let reply = call(bridge::GET_INSTALLER_USER_POLICY);
+        let reply = call(bridge::GET_PACKAGE_SHUTDOWN_BRIDGE);
         let e = reply.reader().read_exception().unwrap().unwrap_err();
         assert!(e.message.contains("#2022"), "{}", e.message);
         std::fs::remove_dir_all(&data).unwrap();
