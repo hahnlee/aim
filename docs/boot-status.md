@@ -177,8 +177,8 @@ planned methods are implemented; this is not conformance acceptance. On the
 app host image, the native package boot runs its scans, construction and
 publication, and the guest reaches BOOT_COMPLETED. Internal event delivery and
 shutdown statistics remain #2167, permission state without `access.abx` #2168,
-boot admissions #2169, PackageList observers #2022 and the query projection
-switch #2023.
+boot admissions #2169, remaining package bootstrap owners #2022 and the query
+projection switch #2023.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

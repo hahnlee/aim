@@ -125,6 +125,7 @@ mod package_internal_storage;
 mod package_launch;
 mod package_maintenance;
 mod package_moves;
+pub mod package_observers;
 pub mod package_resolution_policy;
 pub mod package_service;
 pub mod package_shell;
@@ -594,6 +595,8 @@ pub struct AppHost {
     device_idle: OnceLock<Arc<device_idle::DeviceIdle>>,
     /// The services' package monitors.
     package_monitors: package_writes::NativeMonitors,
+    /// The current native PackageList observer epoch, owned by its bridge.
+    package_observers: Mutex<Weak<package_observers::Registry>>,
     /// PackageManager's writes and their handler, the package service's.
     package_writes: OnceLock<Arc<package_writes::Writes>>,
     /// What DevicePolicyManagerService persisted, read once.
@@ -692,6 +695,7 @@ impl AppHost {
             text_services: OnceLock::new(),
             device_idle: OnceLock::new(),
             package_monitors: Default::default(),
+            package_observers: Mutex::default(),
             package_writes: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),

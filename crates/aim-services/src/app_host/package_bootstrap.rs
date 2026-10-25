@@ -15,7 +15,8 @@
 //! bridge, the launch Intent's serialization, the application data
 //! owners, the internal persistence, install and storage leaves, and the
 //! move's storage leaves, monitor users and payloads, and internal event
-//! preparation. The bridge's other owners, its other sub-bridges
+//! preparation and the native services' PackageList observer registry.
+//! The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -54,6 +55,8 @@ const RESTORECON: u32 = 15;
 
 pub struct PackageBootstrap {
     host: Arc<AppHost>,
+    observers: Arc<super::package_observers::Registry>,
+    observer_events: OnceLock<aim_binder_host::parcel::Binder>,
     /// ApexManager's `mApexSystemServices`' names, kept across its
     /// notifications.
     apex_system_services: Mutex<Vec<String>>,
@@ -151,8 +154,19 @@ fn cached_package(cache: Option<Vec<u8>>) -> Result<AndroidPackage, Exception> {
 
 impl PackageBootstrap {
     pub fn new(host: Arc<AppHost>) -> Self {
+        let observers = Arc::new(super::package_observers::Registry::default());
+        let previous = std::mem::replace(
+            &mut *host.package_observers.lock().unwrap(),
+            Arc::downgrade(&observers),
+        )
+        .upgrade();
+        if let Some(previous) = previous {
+            previous.close();
+        }
         PackageBootstrap {
             host,
+            observers,
+            observer_events: OnceLock::new(),
             apex_system_services: Mutex::new(Vec::new()),
             config: OnceLock::new(),
             installer_external: OnceLock::new(),
@@ -290,6 +304,17 @@ impl Service for PackageBootstrap {
         let mut p = Parcel::new();
         let host = &self.host;
         let result: Result<(), Exception> = match call.code {
+            bridge::GET_PACKAGE_OBSERVER_EVENTS_BRIDGE => {
+                bridge::GetPackageObserverEventsBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let events = *self.observer_events.get_or_init(|| {
+                    self.leaf(Arc::new(super::package_observers::Events(
+                        self.observers.clone(),
+                    )))
+                });
+                bridge::write_get_package_observer_events_bridge_reply(&mut p, Some(events));
+                Ok(())
+            }
             bridge::GET_PACKAGE_INTERNAL_EVENTS_BRIDGE => {
                 bridge::GetPackageInternalEventsBridge::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

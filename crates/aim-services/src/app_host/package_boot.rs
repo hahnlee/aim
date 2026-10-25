@@ -43,6 +43,9 @@ pub(super) fn run(host: &Arc<AppHost>, system: &Arc<System>) -> Result<(), Excep
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "a node of this process is gone"))
     };
     system.attach_package_bootstrap_owner(ServiceOwner::Local(local(ptr)?))?;
+    // Retain the epoch owner even before the first notification, so session
+    // teardown revokes native service registrations too.
+    system.package_observer_owner(&system.package_bootstrap()?)?;
     let Binder::Local(ptr) = system.begin_package_manager_boot(false)? else {
         unreachable!("the session is this process's")
     };

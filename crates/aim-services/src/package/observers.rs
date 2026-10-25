@@ -1,5 +1,6 @@
-//! Actual original PackageList/PackageObserverHelper references stay in their
-//! Java LocalServices owner; native publication sends only names and real UIDs.
+//! PackageList observer references stay in their service owner: Java
+//! LocalServices in system_server, or the native registry in the app host.
+//! Publication sends only names and affected UIDs, outside publication locks.
 use aim_binder_host::{
     local::Strong,
     parcel::{BAD_VALUE, Exception, Parcel},
