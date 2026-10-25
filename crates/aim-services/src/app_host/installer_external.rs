@@ -3,6 +3,7 @@
 //! answers them (`android-16.0.0_r1`), to root and the system uid: the
 //! uids' importance changes it watches for install constraints, and the
 //! guest's install environment. Its other owners are not ported (#2157).
+//! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -13,8 +14,11 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 use aim_service_aidl::dev_aim_server_iinstallerexternalbridge as bridge;
 
+use super::kept::{RawBundle, RawIntent};
+use super::package_initial_context::InitialContext;
 use super::{AppHost, reply, system_boolean};
 use crate::bundle::{self, Value};
+use crate::package::installer::preapproval::{IntentSender, Status};
 use crate::package::query::Query;
 use crate::system::ServiceOwner;
 
@@ -170,6 +174,262 @@ impl InstallerExternal {
             &zone,
         ))
     }
+
+    fn user_action_policy(
+        &self,
+        installer: Option<&str>,
+        uid: i32,
+        user: i32,
+    ) -> Result<i32, Exception> {
+        let mut flags = 0;
+        if user == uid / super::PER_USER_RANGE as i32
+            && self.host.device_policies()?.can_silently_install_package(
+                installer,
+                uid,
+                |package| self.host.owns_package(uid, package),
+            )?
+        {
+            flags |= 1;
+        }
+        let config = self
+            .host
+            .platform()?
+            .settings
+            .config_flags(Some("package_manager_service/"))?;
+        if config
+            .get("package_manager_service/is_update_ownership_enforcement_available")
+            .and_then(|v| v.as_deref())
+            .is_none_or(|v| v.eq_ignore_ascii_case("true"))
+        {
+            flags |= 2;
+        }
+        let (state, _) = self.host.packages()?;
+        if state
+            .system
+            .flags
+            .iter()
+            .any(|(n, on)| n == "android.content.pm.sdk_dependency_installer" && *on)
+        {
+            flags |= 4;
+        }
+        if InitialContext::new(self.host.clone()).install_disabled(
+            installer.unwrap_or_default(),
+            uid,
+            user,
+        )? {
+            flags |= 8;
+        }
+        Ok(flags)
+    }
+
+    fn metadata_limit(&self) -> Result<i64, Exception> {
+        let config = self
+            .host
+            .platform()?
+            .settings
+            .config_flags(Some("package_manager_service/"))?;
+        Ok(config
+            .get("package_manager_service/app_metadata_byte_size_limit")
+            .and_then(|v| v.as_deref())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32000))
+    }
+
+    fn zip_offset(&self, fields: [i32; 6]) -> Result<i32, Exception> {
+        let tzdata = std::fs::read(
+            self.host
+                .root()?
+                .join(crate::tzdata::PATH.trim_start_matches('/')),
+        )
+        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("tzdata: {e}")))?;
+        let zone = self.host.property("persist.sys.timezone");
+        let rules = zone
+            .as_deref()
+            .and_then(|z| crate::tzdata::zone(&tzdata, z.trim()))
+            .or_else(|| crate::tzdata::zone(&tzdata, "GMT"))
+            .and_then(crate::tzdata::Rules::parse)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "tzdata: no default zone"))?;
+        Ok(rules.calendar_offset(fields))
+    }
+
+    /// `send`: system_server's identity, no background activity launch grant.
+    fn send(&self, receiver: Option<IntentSender>, intent: RawIntent) -> Result<(), Exception> {
+        let receiver = receiver.ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
+        let options = RawBundle::empty()
+            .with_ints(&[("android.pendingIntent.backgroundActivityAllowed", 2)])
+            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "installer broadcast options"))?;
+        let result = self.host.send_intent_sender(
+            SYSTEM_UID as i32,
+            None,
+            Some(receiver.target),
+            0,
+            Some(intent),
+            None,
+            None,
+            None,
+            Some(options),
+        )?;
+        if result < 0 {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "installer status delivery failed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn session_status(status: Status, warnings: Vec<Option<String>>) -> RawIntent {
+    let mut extras = Vec::new();
+    if !warnings.is_empty() {
+        extras.push((
+            "android.content.pm.extra.WARNINGS",
+            Value::NullableStringList(warnings),
+        ));
+    }
+    extras.push((
+        "android.content.pm.extra.SESSION_ID",
+        Value::Int(status.session_id),
+    ));
+    extras.push((
+        "android.content.pm.extra.PRE_APPROVAL",
+        Value::Bool(status.preapproval),
+    ));
+    if let Some(package) = &status.pending_installer {
+        let action = RawIntent::with_data(
+            Some(if status.preapproval {
+                "android.content.pm.action.CONFIRM_PRE_APPROVAL"
+            } else {
+                "android.content.pm.action.CONFIRM_INSTALL"
+            }),
+            None,
+            Some(package),
+            0,
+            &[(
+                "android.content.pm.extra.SESSION_ID",
+                Value::Int(status.session_id),
+            )],
+        );
+        extras.push(("android.content.pm.extra.STATUS", Value::Int(-1)));
+        extras.push((
+            "android.intent.extra.INTENT",
+            Value::Parcelable {
+                class: "android.content.Intent".into(),
+                data: action.parcel().data().to_vec(),
+            },
+        ));
+    } else {
+        let (public, message) = install_status(status.legacy_status, status.message.as_deref());
+        extras.push((
+            "android.content.pm.extra.PACKAGE_NAME",
+            Value::String(status.package),
+        ));
+        extras.push(("android.content.pm.extra.STATUS", Value::Int(public)));
+        extras.push((
+            "android.content.pm.extra.STATUS_MESSAGE",
+            Value::String(Some(message)),
+        ));
+        extras.push((
+            "android.content.pm.extra.LEGACY_STATUS",
+            Value::Int(status.legacy_status),
+        ));
+    }
+    RawIntent::of(None, 0, &extras)
+}
+
+fn pending_streaming(id: i32, cause: Option<&str>) -> RawIntent {
+    let message = match cause.filter(|c| !c.is_empty()) {
+        Some(cause) => format!("Staging Image Not Ready [{cause}]"),
+        None => "Staging Image Not Ready".into(),
+    };
+    RawIntent::of(
+        None,
+        0,
+        &[
+            ("android.content.pm.extra.SESSION_ID", Value::Int(id)),
+            ("android.content.pm.extra.STATUS", Value::Int(-2)),
+            (
+                "android.content.pm.extra.STATUS_MESSAGE",
+                Value::String(Some(message)),
+            ),
+        ],
+    )
+}
+
+/// `PackageManager.installStatusToPublicStatus` and `installStatusToString`, android-16.0.0_r1.
+fn install_status(status: i32, message: Option<&str>) -> (i32, String) {
+    let public = match status {
+        1 => 0,
+        -110 => 1,
+        -129 => 2,
+        -21 | -22 | -115 => 3,
+        -2 | -3 | -11 | -15 | -23 | -24 | -25 | -26 | -100 | -101 | -102 | -103 | -104 | -105
+        | -106 | -107 | -108 | -109 | -117 | -118 => 4,
+        -1 | -5 | -6 | -7 | -8 | -10 | -13 | -112 => 5,
+        -4 | -18 | -19 | -20 => 6,
+        -9 | -12 | -14 | -16 | -17 | -111 | -113 | -28 | -29 => 7,
+        _ => 1,
+    };
+    let name = match status {
+        1 => "INSTALL_SUCCEEDED".to_string(),
+        -1 => "INSTALL_FAILED_ALREADY_EXISTS".to_string(),
+        -2 => "INSTALL_FAILED_INVALID_APK".to_string(),
+        -3 => "INSTALL_FAILED_INVALID_URI".to_string(),
+        -4 => "INSTALL_FAILED_INSUFFICIENT_STORAGE".to_string(),
+        -5 => "INSTALL_FAILED_DUPLICATE_PACKAGE".to_string(),
+        -6 => "INSTALL_FAILED_NO_SHARED_USER".to_string(),
+        -7 => "INSTALL_FAILED_UPDATE_INCOMPATIBLE".to_string(),
+        -8 => "INSTALL_FAILED_SHARED_USER_INCOMPATIBLE".to_string(),
+        -9 => "INSTALL_FAILED_MISSING_SHARED_LIBRARY".to_string(),
+        -10 => "INSTALL_FAILED_REPLACE_COULDNT_DELETE".to_string(),
+        -11 => "INSTALL_FAILED_DEXOPT".to_string(),
+        -12 => "INSTALL_FAILED_OLDER_SDK".to_string(),
+        -13 => "INSTALL_FAILED_CONFLICTING_PROVIDER".to_string(),
+        -14 => "INSTALL_FAILED_NEWER_SDK".to_string(),
+        -15 => "INSTALL_FAILED_TEST_ONLY".to_string(),
+        -16 => "INSTALL_FAILED_CPU_ABI_INCOMPATIBLE".to_string(),
+        -17 => "INSTALL_FAILED_MISSING_FEATURE".to_string(),
+        -18 => "INSTALL_FAILED_CONTAINER_ERROR".to_string(),
+        -19 => "INSTALL_FAILED_INVALID_INSTALL_LOCATION".to_string(),
+        -20 => "INSTALL_FAILED_MEDIA_UNAVAILABLE".to_string(),
+        -21 => "INSTALL_FAILED_VERIFICATION_TIMEOUT".to_string(),
+        -22 => "INSTALL_FAILED_VERIFICATION_FAILURE".to_string(),
+        -23 => "INSTALL_FAILED_PACKAGE_CHANGED".to_string(),
+        -24 => "INSTALL_FAILED_UID_CHANGED".to_string(),
+        -25 => "INSTALL_FAILED_VERSION_DOWNGRADE".to_string(),
+        -100 => "INSTALL_PARSE_FAILED_NOT_APK".to_string(),
+        -101 => "INSTALL_PARSE_FAILED_BAD_MANIFEST".to_string(),
+        -102 => "INSTALL_PARSE_FAILED_UNEXPECTED_EXCEPTION".to_string(),
+        -103 => "INSTALL_PARSE_FAILED_NO_CERTIFICATES".to_string(),
+        -104 => "INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES".to_string(),
+        -105 => "INSTALL_PARSE_FAILED_CERTIFICATE_ENCODING".to_string(),
+        -106 => "INSTALL_PARSE_FAILED_BAD_PACKAGE_NAME".to_string(),
+        -107 => "INSTALL_PARSE_FAILED_BAD_SHARED_USER_ID".to_string(),
+        -108 => "INSTALL_PARSE_FAILED_MANIFEST_MALFORMED".to_string(),
+        -109 => "INSTALL_PARSE_FAILED_MANIFEST_EMPTY".to_string(),
+        -110 => "INSTALL_FAILED_INTERNAL_ERROR".to_string(),
+        -111 => "INSTALL_FAILED_USER_RESTRICTED".to_string(),
+        -112 => "INSTALL_FAILED_DUPLICATE_PERMISSION".to_string(),
+        -113 => "INSTALL_FAILED_NO_MATCHING_ABIS".to_string(),
+        -115 => "INSTALL_FAILED_ABORTED".to_string(),
+        -117 => "INSTALL_FAILED_BAD_DEX_METADATA".to_string(),
+        -28 => "INSTALL_FAILED_MISSING_SPLIT".to_string(),
+        -29 => "INSTALL_FAILED_DEPRECATED_SDK_VERSION".to_string(),
+        -118 => "INSTALL_FAILED_BAD_SIGNATURE".to_string(),
+        -121 => "INSTALL_FAILED_WRONG_INSTALLED_VERSION".to_string(),
+        -122 => "INSTALL_FAILED_PROCESS_NOT_DEFINED".to_string(),
+        -116 => "INSTALL_FAILED_SESSION_INVALID".to_string(),
+        -130 => "INSTALL_FAILED_SHARED_LIBRARY_BAD_CERTIFICATE_DIGEST".to_string(),
+        -131 => "INSTALL_FAILED_MULTI_ARCH_NOT_MATCH_ALL_NATIVE_ABIS".to_string(),
+        _ => status.to_string(),
+    };
+    (
+        public,
+        match message {
+            Some(message) => format!("{name}: {message}"),
+            None => name,
+        },
+    )
 }
 
 impl Service for InstallerExternal {
@@ -182,6 +442,22 @@ impl Service for InstallerExternal {
             return reply(Err(Exception::security(
                 "untrusted installer bridge caller",
             )));
+        }
+        if matches!(
+            call.code,
+            bridge::IS_COMMIT_MUTABLE_RECEIVER_ENFORCED
+                | bridge::IS_INTENT_SENDER_IMMUTABLE
+                | bridge::IS_SECURE_FRP_ACTIVE
+                | bridge::GET_USER_ACTION_POLICY
+                | bridge::IS_SILENT_INSTALL_TARGET_ALLOWED
+                | bridge::GET_APP_METADATA_SIZE_LIMIT
+                | bridge::GET_ZIP_LOCAL_UTC_OFFSET
+                | bridge::SEND_SESSION_STATUS
+                | bridge::SEND_SESSION_STATUS_WITH_WARNINGS
+                | bridge::SEND_PENDING_STREAMING
+        ) && let Err(e) = self.open()
+        {
+            return reply(Err(e));
         }
         let mut p = Parcel::new();
         let result = match call.code {
@@ -201,6 +477,113 @@ impl Service for InstallerExternal {
                     bridge::write_get_native_install_environment_reply(&mut p, &Some(record))
                 })
             }
+            bridge::IS_COMMIT_MUTABLE_RECEIVER_ENFORCED => {
+                let a = bridge::IsCommitMutableReceiverEnforced::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.host.change_enabled(240618202, a.uid).map(|enabled| {
+                    bridge::write_is_commit_mutable_receiver_enforced_reply(&mut p, enabled)
+                })
+            }
+            bridge::IS_INTENT_SENDER_IMMUTABLE => {
+                let a = bridge::IsIntentSenderImmutable::<IntentSender>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                a.receiver
+                    .ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))
+                    .and_then(|r| self.host.intent_sender_immutable(r.target))
+                    .map(|immutable| {
+                        bridge::write_is_intent_sender_immutable_reply(&mut p, immutable)
+                    })
+            }
+            bridge::IS_SECURE_FRP_ACTIVE => {
+                bridge::IsSecureFrpActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                // With frpEnforcement on, this image's PersistentDataBlockManager is null.
+                bridge::write_is_secure_frp_active_reply(&mut p, false);
+                Ok(())
+            }
+            bridge::GET_USER_ACTION_POLICY => {
+                let a = bridge::GetUserActionPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.user_action_policy(a.installer.as_deref(), a.installer_uid, a.user_id)
+                    .map(|flags| bridge::write_get_user_action_policy_reply(&mut p, flags))
+            }
+            bridge::IS_SILENT_INSTALL_TARGET_ALLOWED => {
+                let a = bridge::IsSilentInstallTargetAllowed::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let enabled = if a.target_sdk == i32::MAX {
+                    Ok(false)
+                } else {
+                    self.host.platform().map(|inputs| {
+                        inputs
+                            .compat
+                            .is_enabled(325888262, a.package_name.as_deref(), a.target_sdk)
+                    })
+                };
+                enabled.map(|enabled| {
+                    bridge::write_is_silent_install_target_allowed_reply(&mut p, enabled)
+                })
+            }
+            bridge::GET_APP_METADATA_SIZE_LIMIT => {
+                bridge::GetAppMetadataSizeLimit::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.metadata_limit()
+                    .map(|limit| bridge::write_get_app_metadata_size_limit_reply(&mut p, limit))
+            }
+            bridge::GET_ZIP_LOCAL_UTC_OFFSET => {
+                let a =
+                    bridge::GetZipLocalUtcOffset::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.zip_offset([a.year, a.month, a.day, a.hour, a.minute, a.second])
+                    .map(|offset| bridge::write_get_zip_local_utc_offset_reply(&mut p, offset))
+            }
+            bridge::SEND_SESSION_STATUS | bridge::SEND_SESSION_STATUS_WITH_WARNINGS => {
+                let (a, warnings) = if call.code == bridge::SEND_SESSION_STATUS {
+                    let a = bridge::SendSessionStatus::<IntentSender>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    (a, Some(Vec::new()))
+                } else {
+                    let a =
+                        bridge::SendSessionStatusWithWarnings::<IntentSender>::read(&mut call.data)
+                            .map_err(|_| BAD_VALUE)?;
+                    (
+                        bridge::SendSessionStatus {
+                            receiver: a.receiver,
+                            session_id: a.session_id,
+                            package_name: a.package_name,
+                            legacy_status: a.legacy_status,
+                            message: a.message,
+                            preapproval: a.preapproval,
+                            pending_installer_package: a.pending_installer_package,
+                        },
+                        a.warnings,
+                    )
+                };
+                a.receiver
+                    .ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))
+                    .and_then(|receiver| {
+                        let warnings =
+                            warnings.ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
+                        let intent = session_status(
+                            Status {
+                                receiver,
+                                session_id: a.session_id,
+                                package: a.package_name,
+                                legacy_status: a.legacy_status,
+                                message: a.message,
+                                preapproval: a.preapproval,
+                                pending_installer: a.pending_installer_package,
+                            },
+                            warnings,
+                        );
+                        self.send(Some(receiver), intent)
+                    })
+                    .map(|()| bridge::write_send_session_status_reply(&mut p))
+            }
+            bridge::SEND_PENDING_STREAMING => {
+                let a = bridge::SendPendingStreaming::<IntentSender>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.send(
+                    a.receiver,
+                    pending_streaming(a.session_id, a.message.as_deref()),
+                )
+                .map(|()| bridge::write_send_pending_streaming_reply(&mut p))
+            }
             code => {
                 let name = bridge::METHODS
                     .iter()
@@ -218,6 +601,283 @@ impl Service for InstallerExternal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aim_binder_host::parcel::Reader;
+    use std::fs;
+
+    fn call(
+        leaf: &InstallerExternal,
+        code: u32,
+        args: impl FnOnce(&mut Parcel),
+    ) -> Result<Vec<u8>, Exception> {
+        let mut p = Parcel::new();
+        p.write_interface_token(bridge::DESCRIPTOR);
+        args(&mut p);
+        let response = leaf
+            .transact(&mut Call {
+                code,
+                flags: 0,
+                sender_pid: 77,
+                sender_euid: SYSTEM_UID,
+                data: p.reader(),
+            })
+            .unwrap();
+        let mut r = response.reader();
+        r.read_exception().unwrap()?;
+        Ok(response.data()[r.position()..].to_vec())
+    }
+
+    fn integer(leaf: &InstallerExternal, code: u32, args: impl FnOnce(&mut Parcel)) -> i32 {
+        Reader::new(&call(leaf, code, args).unwrap(), &[])
+            .read_i32()
+            .unwrap()
+    }
+
+    fn setting(host: &AppHost, name: &str, value: &str) {
+        host.platform()
+            .unwrap()
+            .settings
+            .insert(
+                super::super::settings::Table::Config,
+                &format!("package_manager_service/{name}"),
+                &super::super::settings::Change {
+                    value: Some(value),
+                    tag: None,
+                    make_default: false,
+                    package: Some("android"),
+                    caller_system: true,
+                    overrideable_by_restore: false,
+                },
+                false,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn commit_policy_reads_its_owners() {
+        crate::system::with_discovery_session(|host, publish, _| {
+            publish(&mut |p| p.target_sdk_version = if p.package_name == "p" { 36 } else { 32 });
+            let dir = host.root().unwrap().join("system/etc/compatconfig");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("installer.xml"),
+                br#"<config>
+                <compat-change id="240618202" enableSinceTargetSdk="35"/>
+                <compat-change id="325888262" enableSinceTargetSdk="35"/>
+                </config>"#,
+            )
+            .unwrap();
+            let data = host.data().unwrap();
+            fs::write(data.join("system/device_owner_2.xml"),
+                br#"<root><device-owner component="p/.Admin"/><device-owner-context userId="0"/></root>"#).unwrap();
+            host.user_restrictions
+                .set(["no_install_unknown_sources".into()].into())
+                .unwrap();
+            let leaf = InstallerExternal::new(host.clone());
+            for (uid, expected) in [(10100, 1), (10101, 0)] {
+                assert_eq!(
+                    integer(&leaf, bridge::IS_COMMIT_MUTABLE_RECEIVER_ENFORCED, |p| p
+                        .write_i32(uid)),
+                    expected
+                );
+            }
+            for (sdk, expected) in [(34, 0), (35, 1), (i32::MAX, 0)] {
+                assert_eq!(
+                    integer(&leaf, bridge::IS_SILENT_INSTALL_TARGET_ALLOWED, |p| {
+                        p.write_string16(Some("p"));
+                        p.write_i32(sdk);
+                    }),
+                    expected
+                );
+            }
+            let policy = |uid| leaf.user_action_policy(Some("p"), uid, 0).unwrap();
+            assert_eq!(policy(10100) & !4, 1 | 2 | 8);
+            assert_eq!(policy(10101) & !4, 2 | 8);
+            setting(host, "is_update_ownership_enforcement_available", "false");
+            assert_eq!(policy(10100) & !4, 1 | 8);
+            assert_eq!(integer(&leaf, bridge::IS_SECURE_FRP_ACTIVE, |_| {}), 0);
+            assert!(
+                call(&leaf, bridge::IS_PREAPPROVAL_REQUEST_AVAILABLE, |_| {})
+                    .unwrap_err()
+                    .message
+                    .contains("#2157")
+            );
+        });
+    }
+
+    fn extras(intent: &RawIntent) -> (Parcel, std::collections::HashMap<String, Value>) {
+        let p = intent.parcel();
+        let mut r = p.reader();
+        r.read_string8().unwrap();
+        r.read_i32().unwrap(); // action, null Uri
+        r.read_string8().unwrap();
+        r.read_string8().unwrap(); // type, identifier
+        r.read_i32().unwrap();
+        r.read_i32().unwrap(); // flags
+        r.read_string8().unwrap();
+        r.read_string16().unwrap(); // package, component
+        for _ in 0..5 {
+            r.read_i32().unwrap();
+        } // bounds, categories, selector, clip, user
+        let values = bundle::read(&mut r).unwrap().unwrap();
+        (p, values)
+    }
+
+    #[test]
+    fn intent_sender_records_and_status_delivery() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let leaf = InstallerExternal::new(host.clone());
+            let make = |flags| IntentSender {
+                target: host
+                    .get_intent_sender(
+                        1000,
+                        super::super::pending_intents::Request {
+                            kind: super::super::pending_intents::INTENT_SENDER_BROADCAST,
+                            package: Some("android".into()),
+                            feature: None,
+                            token: None,
+                            result_who: None,
+                            request_code: flags,
+                            intents: Some(vec![Some(RawIntent::new("test.status", 0, &[]))]),
+                            resolved_types: None,
+                            flags,
+                            options: None,
+                            user: 0,
+                        },
+                    )
+                    .unwrap()
+                    .unwrap(),
+            };
+            let immutable = make(1 << 26);
+            let receiver = make(1 << 30);
+            for (sender, expected) in [(immutable, 1), (receiver, 0)] {
+                assert_eq!(
+                    integer(&leaf, bridge::IS_INTENT_SENDER_IMMUTABLE, |p| {
+                        p.write_i32(1);
+                        p.write_binder(Some(sender.target));
+                    }),
+                    expected
+                );
+            }
+            let status = Status {
+                receiver,
+                session_id: 7,
+                package: Some("p".into()),
+                legacy_status: -2,
+                message: Some("bad".into()),
+                preapproval: false,
+                pending_installer: None,
+            };
+            let (p, values) = extras(&session_status(
+                status.clone(),
+                vec![Some("warning".into()), None],
+            ));
+            assert_eq!(values["android.content.pm.extra.STATUS"], Value::Int(4));
+            assert_eq!(
+                values["android.content.pm.extra.STATUS_MESSAGE"],
+                Value::String(Some("INSTALL_FAILED_INVALID_APK: bad".into()))
+            );
+            let Value::Lazy { start, .. } = values["android.content.pm.extra.WARNINGS"] else {
+                panic!()
+            };
+            let mut r = p.reader();
+            r.set_position(start);
+            assert_eq!(r.read_i32().unwrap(), 2);
+            assert_eq!(r.read_i32().unwrap(), bundle::VAL_STRING);
+            assert_eq!(r.read_string16().unwrap().as_deref(), Some("warning"));
+            assert_eq!(r.read_i32().unwrap(), -1);
+            let (_, pending) = extras(&session_status(
+                Status {
+                    preapproval: true,
+                    pending_installer: Some("installer".into()),
+                    ..status.clone()
+                },
+                vec![],
+            ));
+            assert_eq!(pending["android.content.pm.extra.STATUS"], Value::Int(-1));
+            assert!(pending.contains_key("android.intent.extra.INTENT"));
+            let (_, streaming) = extras(&pending_streaming(7, Some("wait")));
+            assert_eq!(streaming["android.content.pm.extra.STATUS"], Value::Int(-2));
+            assert_eq!(
+                streaming["android.content.pm.extra.STATUS_MESSAGE"],
+                Value::String(Some("Staging Image Not Ready [wait]".into()))
+            );
+            call(&leaf, bridge::SEND_SESSION_STATUS, |p| {
+                p.write_i32(1);
+                p.write_binder(Some(receiver.target));
+                p.write_i32(7);
+                p.write_string16(Some("p"));
+                p.write_i32(1);
+                p.write_string16(None);
+                p.write_bool(false);
+                p.write_string16(None);
+            })
+            .unwrap();
+            assert!(host.intent_sender_immutable(receiver.target).is_err()); // one-shot consumed
+            assert!(
+                leaf.send(Some(receiver), pending_streaming(7, None))
+                    .is_err()
+            );
+            assert!(
+                leaf.send(
+                    Some(IntentSender {
+                        target: Binder::Handle(u32::MAX)
+                    }),
+                    pending_streaming(7, None)
+                )
+                .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn time_and_metadata_use_the_image_and_config() {
+        let path = crate::tzdata::PATH.trim_start_matches('/');
+        let root = aim_paths::original_image_with(path).expect("pinned tzdata image");
+        let tzdata = fs::read(root.join(path)).unwrap();
+        let zone = |name| {
+            crate::tzdata::Rules::parse(crate::tzdata::zone(&tzdata, name).unwrap()).unwrap()
+        };
+        let york = zone("America/New_York");
+        for (fields, offset) in [
+            ([2024, 1, 1, 12, 0, 0], -18000),
+            ([2024, 7, 1, 12, 0, 0], -14400),
+            ([2024, 3, 10, 2, 30, 0], -14400),
+            ([2024, 11, 3, 1, 30, 0], -18000),
+            ([2023, 13, 1, 12, 0, 0], -18000),
+        ] {
+            assert_eq!(york.calendar_offset(fields), offset);
+        }
+        assert_eq!(
+            zone("Asia/Seoul").calendar_offset([2024, 6, 1, 12, 0, 0]),
+            32400
+        );
+        crate::system::with_discovery_session(|host, _, _| {
+            let dest = host.root().unwrap().join(path);
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            fs::write(dest, &tzdata).unwrap();
+            let leaf = InstallerExternal::new(host.clone());
+            assert_eq!(
+                integer(&leaf, bridge::GET_ZIP_LOCAL_UTC_OFFSET, |p| {
+                    for field in [2024, 1, 1, 0, 0, 0] {
+                        p.write_i32(field);
+                    }
+                }),
+                0
+            ); // unset default zone is GMT
+            for (value, expected) in [
+                (None, 32000),
+                (Some("64000"), 64000),
+                (Some("bad"), 32000),
+                (Some("-1"), -1),
+            ] {
+                if let Some(value) = value {
+                    setting(host, "app_metadata_byte_size_limit", value);
+                }
+                let bytes = call(&leaf, bridge::GET_APP_METADATA_SIZE_LIMIT, |_| {}).unwrap();
+                assert_eq!(Reader::new(&bytes, &[]).read_i64().unwrap(), expected);
+            }
+        });
+    }
 
     /// The record reads as the native installer reads it.
     #[test]

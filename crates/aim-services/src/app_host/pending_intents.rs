@@ -373,6 +373,18 @@ impl AppHost {
             .map(|r| r.uid)
     }
 
+    /// `IntentSender.isImmutable`: the token must still name a record.
+    pub(super) fn intent_sender_immutable(&self, target: Binder) -> Result<bool, Exception> {
+        self.pending_intents
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.binder == target)
+            .map(|r| r.flags & FLAG_IMMUTABLE != 0)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "IntentSender record unavailable"))
+    }
+
     /// `getInfoForIntentSender`.
     pub(super) fn intent_sender_info(&self, target: Option<Binder>) -> impl WriteParcelable {
         let records = self.pending_intents.records.lock().unwrap();
@@ -567,7 +579,12 @@ impl AppHost {
             options: options.as_ref().map(By),
         }
         .write(&mut p);
-        let _ = self.process.strong(other).transact(sender::SEND, &p, true);
+        self.process
+            .strong(other)
+            .transact(sender::SEND, &p, true)
+            .map_err(|status| {
+                Exception::new(EX_ILLEGAL_STATE, format!("IntentSender.send: {status}"))
+            })?;
         if let Some(f) = &finished {
             perform_receive(f, &intent, calling_uid / PER_USER_RANGE as i32);
         }

@@ -1,5 +1,6 @@
 //! The guest's tzdata (`/apex/com.android.tzdata`), as bionic and libcore
 //! resolve zone names in it.
+//! Calendar resolution: Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 /// Where the image has it.
 pub const PATH: &str = "/apex/com.android.tzdata/etc/tz/tzdata";
@@ -38,6 +39,8 @@ pub fn zone<'a>(tzdata: &'a [u8], name: &str) -> Option<&'a [u8]> {
 #[derive(Debug, PartialEq)]
 pub struct Rules {
     transitions: Vec<(i64, i32)>,
+    daylight: Vec<bool>,
+    earliest_standard: i32,
     initial: i32,
     footer: Option<Posix>,
 }
@@ -75,6 +78,13 @@ impl Rules {
                 i32::from_be_bytes(data[o..o + 4].try_into().unwrap())
             })
             .collect();
+        let is_dst = |i: usize| data[timecnt * (time + 1) + 6 * i + 4] != 0;
+        let daylight = (0..timecnt)
+            .map(|i| {
+                let kind = data[timecnt * time + i] as usize;
+                (kind < typecnt).then(|| is_dst(kind))
+            })
+            .collect::<Option<Vec<_>>>()?;
         let transitions = (0..timecnt)
             .map(|i| {
                 let t = &data[i * time..(i + 1) * time];
@@ -100,9 +110,76 @@ impl Rules {
         };
         Some(Rules {
             transitions,
+            daylight,
+            earliest_standard: (0..typecnt)
+                .find(|&i| !is_dst(i))
+                .map(|i| types[i])
+                .unwrap_or(*types.first()?),
             initial: *types.first()?,
             footer,
         })
+    }
+
+    /// Android's `GregorianCalendar` in `ZoneInfo`: normalize lenient fields,
+    /// estimate UTC with the latest raw offset, then adjust historical raw/DST
+    /// offsets, clearing DST in a gap. Unlike java.time, overlaps use standard
+    /// time. `ZoneInfoData` uses TZif transitions, without the POSIX footer.
+    pub fn calendar_offset(&self, fields: [i32; 6]) -> i32 {
+        let [year, month, day, hour, minute, second] = fields;
+        let month = month.wrapping_sub(1) as i64;
+        let year = year as i64 + month.div_euclid(12);
+        let month = month.rem_euclid(12) + 1;
+        let clock = hour as i64 * 3600 + minute as i64 * 60 + second as i64;
+        let day = day as i64 + clock.div_euclid(86_400);
+        let gregorian = days_from_civil(year, month, day);
+        let days = if gregorian >= days_from_civil(1582, 10, 15) {
+            gregorian
+        } else {
+            let prior = year - 1;
+            let correction = if month <= 2 {
+                0
+            } else if year % 4 == 0 {
+                -1
+            } else {
+                -2
+            };
+            365 * prior + prior.div_euclid(4) + (367 * month - 362) / 12 + day + correction
+                - 719_165
+        };
+        let local = (days * 86_400 + clock.rem_euclid(86_400))
+            .wrapping_mul(1000)
+            .div_euclid(1000);
+        let raw = self
+            .transitions
+            .iter()
+            .zip(&self.daylight)
+            .rfind(|(_, dst)| !**dst)
+            .map_or(self.initial, |(t, _)| t.1);
+        let parts = |utc: i64| {
+            let end = self.transitions.partition_point(|t| t.0 <= utc);
+            let total = self
+                .transitions
+                .get(end.wrapping_sub(1))
+                .map_or(self.earliest_standard, |t| t.1);
+            let dst = end != 0 && self.daylight[end - 1];
+            let standard = if dst {
+                self.transitions[..end]
+                    .iter()
+                    .zip(&self.daylight[..end])
+                    .rfind(|(_, dst)| !**dst)
+                    .map_or(self.earliest_standard, |(t, _)| t.1)
+            } else {
+                total
+            };
+            (standard, total - standard, dst)
+        };
+        let estimate = local - raw as i64;
+        let (standard, mut dst, _) = parts(estimate);
+        if dst != 0 && !parts(estimate - dst as i64).2 {
+            dst = 0;
+        }
+        let (raw, dst, _) = parts(local - standard as i64 - dst as i64);
+        raw + dst
     }
 
     /// The transitions (UTC seconds and the offset after) around year

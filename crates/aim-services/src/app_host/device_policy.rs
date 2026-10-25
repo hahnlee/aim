@@ -125,6 +125,11 @@ pub struct Policies {
     /// A device owner, or a profile owner of a user.
     owned: bool,
     device_owner: Option<String>,
+    device_owner_user: i32,
+    device_owner_type: i32,
+    profile_owners: HashMap<i32, ComponentName>,
+    active_admins: HashMap<i32, Vec<ComponentName>>,
+    affiliation_ids: HashMap<i32, Vec<String>>,
     managed_users: Vec<i32>,
     admin_packages: Vec<String>,
     /// The owners' system update policy (`OwnersData.mSystemUpdatePolicy`).
@@ -162,6 +167,17 @@ impl Policies {
         // enterprise device owner (the default owner type).
         let mut owner_type = 0;
         if let Some(root) = owners.as_ref().filter(|r| r.name == "root") {
+            for e in root
+                .children()
+                .take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str()))
+            {
+                if e.name == "device-owner" {
+                    policies.device_owner_user = 0;
+                } else if e.name == "device-owner-context" {
+                    policies.device_owner_user =
+                        e.int("userId")?.unwrap_or(policies.device_owner_user);
+                }
+            }
             policies.device_owner = root
                 .children()
                 .take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str()))
@@ -184,6 +200,7 @@ impl Policies {
                     .unwrap_or(0);
             }
         }
+        policies.device_owner_type = owner_type;
         let managed_device = policies.device_owner.is_some() && owner_type == 0;
         if managed_device {
             policies.managed_users.push(0);
@@ -206,8 +223,23 @@ impl Policies {
             else {
                 continue;
             };
-            let profile_owner = read_atomic(&entry.path().join(PROFILE_OWNER_XML))?
-                .is_some_and(|root| names_owner(&root, "profile-owner", PROFILE_OWNER_TAGS));
+            let profile = read_atomic(&entry.path().join(PROFILE_OWNER_XML))?;
+            let profile_owner = profile
+                .as_ref()
+                .is_some_and(|root| names_owner(root, "profile-owner", PROFILE_OWNER_TAGS));
+            if let Some(root) = profile.as_ref().filter(|_| profile_owner) {
+                for e in root
+                    .children()
+                    .take_while(|e| PROFILE_OWNER_TAGS.contains(&e.name.as_str()))
+                {
+                    if let Some(component) = e
+                        .string("component")
+                        .and_then(|c| crate::package::preferred::unflatten(&c))
+                    {
+                        policies.profile_owners.insert(user, component);
+                    }
+                }
+            }
             policies.owned |= profile_owner;
             if managed_device || profile_owner {
                 policies.managed_users.push(user);
@@ -239,6 +271,21 @@ impl Policies {
             policies.admins |= root
                 .children()
                 .any(|e| e.name == "admin" || e.name == "delegation");
+            policies.active_admins.insert(
+                user,
+                root.children()
+                    .filter(|e| e.name == "admin")
+                    .filter_map(|e| e.string("name"))
+                    .filter_map(|c| crate::package::preferred::unflatten(&c))
+                    .collect(),
+            );
+            policies.affiliation_ids.insert(
+                user,
+                root.children()
+                    .filter(|e| e.name == "affiliation-id")
+                    .filter_map(|e| e.string("id").map(|id| id.into_owned()))
+                    .collect(),
+            );
             // `DevicePolicyData.load`: active admins' flattened components.
             policies.admin_packages.extend(
                 root.children()
@@ -286,6 +333,46 @@ impl Policies {
     /// engine a policy.
     pub fn has_admins_or_policies(&self) -> bool {
         self.admins || self.policies
+    }
+
+    /// `DevicePolicyManagerInternal.canSilentlyInstallPackage`: an affiliated
+    /// device owner or active profile owner. Identity is the uid, not the
+    /// supplied package name (which the original only checks for null).
+    pub(super) fn can_silently_install_package(
+        &self,
+        installer: Option<&str>,
+        uid: i32,
+        owns: impl Fn(&str) -> Result<bool, Exception>,
+    ) -> Result<bool, Exception> {
+        if installer.is_none() || self.device_owner.is_none() {
+            return Ok(false);
+        }
+        let user = uid / PER_USER_RANGE as i32;
+        let profile = self.profile_owners.get(&user);
+        let affiliated = user == 0
+            || user == self.device_owner_user
+            || (profile.is_some()
+                && self.affiliation_ids.get(&user).is_some_and(|ids| {
+                    self.affiliation_ids
+                        .get(&0)
+                        .is_some_and(|device| ids.iter().any(|id| device.contains(id)))
+                }));
+        if !affiliated {
+            return Ok(false);
+        }
+        if let Some(component) = profile
+            && self
+                .active_admins
+                .get(&user)
+                .is_some_and(|admins| admins.contains(component))
+            && owns(&component.package)?
+        {
+            return Ok(true);
+        }
+        if user == self.device_owner_user && matches!(self.device_owner_type, 0 | 1) {
+            return owns(self.device_owner.as_deref().unwrap());
+        }
+        Ok(false)
     }
 
     /// `getDeviceOwnerComponent(false)` and `packageHasActiveAdmins`.
