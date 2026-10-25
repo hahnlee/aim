@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
@@ -1459,41 +1459,55 @@ pub(super) fn permission_granted(flags: i32) -> bool {
     has(RUNTIME_GRANTED)
 }
 
+#[derive(Default)]
+struct AccessOwner {
+    system: Option<Arc<AccessSystem>>,
+    user0: Option<Arc<AccessUser>>,
+}
+
 pub struct PermissionManager {
     host: Arc<AppHost>,
-    /// `AccessState.systemState`: the definitions and trees last persisted.
-    system: OnceLock<AccessSystem>,
+    /// The sole mutable access owner; readers retain immutable states.
+    owner: Mutex<AccessOwner>,
     groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
     listeners: Mutex<Vec<Binder>>,
-    /// User 0's access state as the service last changed it; the
-    /// persisted one until then. Held while it changes (`mutateState`).
-    user0: Mutex<Option<Arc<AccessUser>>>,
 }
 
 impl PermissionManager {
     pub fn new(host: Arc<AppHost>) -> Self {
         PermissionManager {
             host,
-            system: OnceLock::new(),
+            owner: Mutex::new(AccessOwner::default()),
             groups: Mutex::new(None),
             listeners: Mutex::new(Vec::new()),
-            user0: Mutex::new(None),
         }
     }
 
     #[cfg(test)]
     pub(super) fn with_system(host: Arc<AppHost>, system: AccessSystem) -> Self {
         let manager = Self::new(host);
-        manager.system.set(system).unwrap();
+        manager.owner.lock().unwrap().system = Some(Arc::new(system));
         manager
     }
 
-    fn system(&self) -> Result<&AccessSystem, Exception> {
-        if let Some(system) = self.system.get() {
-            return Ok(system);
+    fn system(&self) -> Result<Arc<AccessSystem>, Exception> {
+        let mut owner = self.owner.lock().unwrap();
+        if owner.system.is_none() {
+            owner.system = Some(Arc::new(
+                self.read_access(SYSTEM_ACCESS, AccessSystem::parse)?,
+            ));
         }
-        let system = self.read_access(SYSTEM_ACCESS, AccessSystem::parse)?;
-        Ok(self.system.get_or_init(|| system))
+        Ok(owner.system.as_ref().unwrap().clone())
+    }
+
+    pub(crate) fn retained_access(&self) -> Result<Arc<permissions::AccessView>, Exception> {
+        self.system()?;
+        self.user0()?;
+        let owner = self.owner.lock().unwrap();
+        Ok(Arc::new(permissions::AccessView {
+            system: owner.system.as_ref().unwrap().clone(),
+            user0: owner.user0.as_ref().unwrap().clone(),
+        }))
     }
 
     fn read_access<T>(
@@ -1513,18 +1527,16 @@ impl PermissionManager {
 
     /// `PermissionService.writeLegacyPermissionsTEMP` / `toLegacyPermissions`.
     pub(super) fn capture_definitions(&self) -> Result<Vec<u8>, Exception> {
-        legacy_definitions(self.system()?).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
+        legacy_definitions(self.system()?.as_ref()).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 
     /// User 0's access state, from `access.abx` until it changes.
     fn user0(&self) -> Result<Arc<AccessUser>, Exception> {
-        let mut user0 = self.user0.lock().unwrap();
-        if let Some(state) = &*user0 {
-            return Ok(state.clone());
+        let mut owner = self.owner.lock().unwrap();
+        if owner.user0.is_none() {
+            owner.user0 = Some(Arc::new(self.read_access(USER0_ACCESS, AccessUser::parse)?));
         }
-        let state = Arc::new(self.read_access(USER0_ACCESS, AccessUser::parse)?);
-        *user0 = Some(state.clone());
-        Ok(state)
+        Ok(owner.user0.as_ref().unwrap().clone())
     }
 
     pub(super) fn uid_mode(&self, app_id: i32, op: &str) -> Result<Option<i32>, Exception> {
@@ -1642,8 +1654,8 @@ impl PermissionManager {
         &self,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
-        let user0 = self.user0()?;
-        self.access_with(&user0, f)
+        let view = self.retained_access()?;
+        self.access_with(&view.system, &view.user0, f)
     }
 
     /// `getPermissionGroupInfo` from `caller`.
@@ -1658,6 +1670,7 @@ impl PermissionManager {
 
     fn access_with<T>(
         &self,
+        system: &AccessSystem,
         user0: &AccessUser,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
@@ -1667,7 +1680,7 @@ impl PermissionManager {
         f(&Access {
             state: &state,
             filter: &resolution.apps_filter,
-            defined: &self.system()?.permissions,
+            defined: &system.permissions,
             groups: &groups,
             user0,
             compat: &platform.compat,
@@ -1697,17 +1710,18 @@ impl PermissionManager {
         kill: Option<&str>,
         change: impl FnOnce(&Access<'_>, &mut AccessUser) -> Result<Vec<FlagsChanged>, Exception>,
     ) -> Result<(), Exception> {
-        self.user0()?;
-        let mut held = self.user0.lock().unwrap();
-        let before = held.clone().expect("loaded");
+        self.retained_access()?;
+        let mut held = self.owner.lock().unwrap();
+        let before = held.user0.clone().expect("loaded");
+        let system = held.system.clone().expect("loaded");
         let mut after = (*before).clone();
-        let changes = self.access_with(&before, |access| change(access, &mut after))?;
+        let changes = self.access_with(&system, &before, |access| change(access, &mut after))?;
         if changes.is_empty() {
             return Ok(());
         }
         self.write_user0(&after)?;
         let after = Arc::new(after);
-        *held = Some(after.clone());
+        held.user0 = Some(after.clone());
         drop(held);
         self.grants_changed()?;
         let effects = self.on_state_mutated(&changes, kill);
@@ -2291,7 +2305,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            *manager.user0.lock().unwrap() = Some(Arc::new(AccessUser {
+            manager.owner.lock().unwrap().user0 = Some(Arc::new(AccessUser {
                 app_id_permissions: vec![(10100, vec![(CAMERA.into(), RUNTIME_GRANTED)])],
                 ..Default::default()
             }));
@@ -2307,7 +2321,7 @@ mod tests {
                     .unwrap(),
                 [vec![1000, 10100]]
             );
-            *manager.user0.lock().unwrap() = Some(Arc::new(AccessUser::default()));
+            manager.owner.lock().unwrap().user0 = Some(Arc::new(AccessUser::default()));
             publish(&mut |pkg| pkg.activities.clear());
             assert_eq!(
                 manager
@@ -2386,6 +2400,48 @@ mod tests {
         <permission name="configured" flags="1"/>
         <permission name="undefined" flags="1"/>
         </app-id></app-id-permissions></access>"#;
+
+    #[test]
+    fn retained_access_keeps_definitions_and_grants_when_owner_changes() {
+        let fixture = PersistedAccess::new();
+        fixture.write(SYSTEM_ACCESS, BOOT_SYSTEM);
+        fixture.write(USER0_ACCESS, BOOT_USER);
+        let manager = PermissionManager::new(fixture.host.clone());
+        let before = manager.retained_access().unwrap();
+        assert!(before.same_base(&manager.retained_access().unwrap()));
+        {
+            let mut owner = manager.owner.lock().unwrap();
+            let mut system = (*before.system).clone();
+            system
+                .permissions
+                .push(definition("fixture.NORMAL", "fixture", 0));
+            let mut user = (*before.user0).clone();
+            user.set_permission_flags(10123, "fixture.NORMAL", INSTALL_GRANTED);
+            owner.system = Some(Arc::new(system));
+            owner.user0 = Some(Arc::new(user));
+        }
+        let after = manager.retained_access().unwrap();
+        assert!(!before.same_base(&after));
+        assert!(
+            !before
+                .system
+                .permissions
+                .iter()
+                .any(|p| p.name == "fixture.NORMAL")
+        );
+        assert_eq!(before.user0.permission_flags(10123, "fixture.NORMAL"), 0);
+        assert!(
+            after
+                .system
+                .permissions
+                .iter()
+                .any(|p| p.name == "fixture.NORMAL")
+        );
+        assert_eq!(
+            after.user0.permission_flags(10123, "fixture.NORMAL"),
+            INSTALL_GRANTED
+        );
+    }
 
     /// The real boot leaves read their persisted owners even when Inputs cannot
     /// load. No package, platform or resolver is constructed by these calls.
@@ -2620,7 +2676,7 @@ mod tests {
             settings.permissions[2].dynamic,
             Some((0xf1234567u32 as i32, Some("<dynamic> & label".into())))
         );
-        assert_eq!(manager.system.get().unwrap(), &system);
+        assert_eq!(&*manager.system().unwrap(), &system);
     }
 
     #[test]
@@ -2748,7 +2804,7 @@ mod tests {
             },
         );
         let permissions = PermissionManager::new(AppHost::new(process));
-        *permissions.user0.lock().unwrap() = Some(Arc::new(AccessUser {
+        permissions.owner.lock().unwrap().user0 = Some(Arc::new(AccessUser {
             app_id_permissions: vec![(10_123, vec![(INTERNET.into(), INSTALL_GRANTED)])],
             ..Default::default()
         }));
@@ -2931,7 +2987,7 @@ mod tests {
         let mut after = (*before).clone();
         after.app_id_app_ops = vec![(10123, vec![("android:camera".into(), 1)])];
         after.package_app_ops = vec![("app".into(), vec![("android:camera".into(), 2)])];
-        *manager.user0.lock().unwrap() = Some(Arc::new(after));
+        manager.owner.lock().unwrap().user0 = Some(Arc::new(after));
         assert_eq!(manager.uid_mode(10123, "android:camera").unwrap(), Some(1));
         assert_eq!(
             manager.package_mode("app", "android:camera").unwrap(),

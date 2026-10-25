@@ -101,6 +101,19 @@ pub struct Permission {
     pub dynamic: Option<(i32, Option<String>)>,
 }
 
+/// An immutable retained view of the permission manager's authoritative state.
+#[derive(Clone, Debug)]
+pub struct AccessView {
+    pub system: std::sync::Arc<AccessSystem>,
+    pub user0: std::sync::Arc<AccessUser>,
+}
+impl AccessView {
+    pub(crate) fn same_base(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.system, &other.system)
+            && std::sync::Arc::ptr_eq(&self.user0, &other.user0)
+    }
+}
+
 /// `Permission.TYPE_MANIFEST`, `TYPE_DYNAMIC`.
 const TYPE_MANIFEST: i32 = 0;
 const TYPE_DYNAMIC: i32 = 2;
