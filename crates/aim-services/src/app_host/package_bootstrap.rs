@@ -289,6 +289,17 @@ impl Service for PackageBootstrap {
         let mut p = Parcel::new();
         let host = &self.host;
         let result: Result<(), Exception> = match call.code {
+            bridge::PACKAGE_MONITOR_USER => {
+                let a = bridge::PackageMonitorUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                host.handle_incoming_user(
+                    a.calling_uid,
+                    a.user_id,
+                    true,
+                    true,
+                    Some("registerPackageMonitorCallback"),
+                )
+                .map(|user| bridge::write_package_monitor_user_reply(&mut p, user))
+            }
             bridge::IS_TEST_BASE_ON_BOOTCLASSPATH => {
                 bridge::IsTestBaseOnBootclasspath::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 host.root()
@@ -1258,6 +1269,59 @@ mod tests {
         let e = reply.reader().read_exception().unwrap().unwrap_err();
         assert!(e.message.contains("#2022"), "{}", e.message);
         std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// The bridge uses its argument's caller, not the system transport
+    /// uid, and refuses a non-system transport before resolving any user.
+    #[test]
+    fn package_monitor_user_uses_the_activity_owner() {
+        let node = |euid| {
+            let process = aim_binder_host::local::LocalProcess::open(
+                &aim_binder_driver::Driver::new(),
+                aim_binder_driver::Device::Binder,
+                aim_binder_driver::Credentials {
+                    pid: std::process::id() as i32,
+                    euid,
+                    security_context: None,
+                },
+            );
+            let host = AppHost::new(process.clone());
+            let aim_binder_host::parcel::Binder::Local(ptr) =
+                process.add_service(Arc::new(PackageBootstrap::new(host)))
+            else {
+                unreachable!()
+            };
+            process.local_service(ptr).unwrap()
+        };
+        for (uid, user, expected) in [
+            (1000, -1, -1),
+            (0, -2, 0),
+            (1000, -3, 0),
+            (10_123, 0, 0),
+            (1_010_123, 10, 10),
+        ] {
+            let mut p = Parcel::new();
+            bridge::PackageMonitorUser {
+                calling_pid: 42,
+                calling_uid: uid,
+                user_id: user,
+            }
+            .write(&mut p);
+            let answer = node(1000)
+                .transact(bridge::PACKAGE_MONITOR_USER, &p, false)
+                .unwrap();
+            assert_eq!(
+                bridge::read_package_monitor_user_reply(&mut answer.reader()).unwrap(),
+                Ok(expected)
+            );
+            let denied = node(10_123)
+                .transact(bridge::PACKAGE_MONITOR_USER, &p, false)
+                .unwrap();
+            assert_eq!(
+                denied.reader().read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+        }
     }
 
     /// The package caches' invalidation is answered, the system's only.

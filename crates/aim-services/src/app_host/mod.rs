@@ -15,6 +15,7 @@ pub mod accounts_db;
 pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
+mod activity_user;
 pub mod alarm_service;
 pub mod apex_manager;
 mod app_data;
@@ -2326,14 +2327,25 @@ impl AppHost {
         require_full: bool,
         name: Option<&str>,
     ) -> Result<i32, Exception> {
-        let target = self.incoming_user(uid, user, !require_full)?;
-        if !allow_all && target < 0 {
-            return Err(Exception::illegal_argument(format!(
-                "Call does not support special user #{target}{}",
-                name.map(|n| format!(" ({n})")).unwrap_or_default()
-            )));
-        }
-        Ok(target)
+        activity_user::handle_incoming_user(
+            uid,
+            user,
+            allow_all,
+            require_full,
+            name,
+            || {
+                self.recents_uid().map(|r| {
+                    r.is_some_and(|r| {
+                        r.rem_euclid(PER_USER_RANGE as i32) == uid.rem_euclid(PER_USER_RANGE as i32)
+                    })
+                })
+            },
+            |p| self.check_permission(Some(p), uid).map(|r| r == 0),
+            || {
+                self.user_restrictions()
+                    .map(|r| r.contains("no_debugging_features"))
+            },
+        )
     }
 
     /// A guest property.

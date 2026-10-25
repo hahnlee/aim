@@ -178,9 +178,12 @@ app host, construction's permission definitions come from the permission
 manager's system access state (#2165), exported as modern
 `writeLegacyPermissionsTEMP` / `toLegacyPermissions` and `LegacyPermission.write`
 write them; import follows the empty modern `readLegacyPermissionStateTEMP`.
-The boot's admissions into the modern policy are #2169, the state without
-`access.abx` is #2168, and publication and the switch to the session's state
-remain #2022.
+The boot's admissions into the modern policy are #2169 and the state without
+`access.abx` is #2168. Package monitor registration now resolves its caller's
+user through the activity manager's shared `UserController.handleIncomingUser`
+port (`ALLOW_FULL_ONLY`, all users allowed), with the current-or-self fallback,
+Recents' same-group exception and the shell's debugging restriction. Publication's
+remaining bridges are #2022; the query projection switch is #2023.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

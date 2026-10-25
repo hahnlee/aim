@@ -686,7 +686,13 @@ impl Writes {
         user: i32,
     ) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
-        let user = self.host.incoming_user(uid, user, false)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            true,
+            true,
+            Some("registerPackageMonitorCallback"),
+        )?;
         let Some(binder) = callback else {
             return Err(Exception::new(EX_NULL_POINTER, "callback"));
         };
