@@ -2268,19 +2268,19 @@ impl System for Host<'_> {
     }
 
     fn uid_mode(&self, app_id: i32, op: &str) -> Result<Option<i32>, Exception> {
-        let access = self.0.inputs()?.packages.access();
-        let ops = access.and_then(|a| a.app_id_app_ops.iter().find(|(id, _)| *id == app_id));
-        Ok(ops
-            .and_then(|(_, ops)| ops.iter().find(|(n, _)| n == op))
-            .map(|(_, mode)| *mode))
+        self.0
+            .permission_manager
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native access owner unavailable"))?
+            .uid_mode(app_id, op)
     }
 
     fn package_mode(&self, package: &str, op: &str) -> Result<Option<i32>, Exception> {
-        let access = self.0.inputs()?.packages.access();
-        let ops = access.and_then(|a| a.package_app_ops.iter().find(|(name, _)| name == package));
-        Ok(ops
-            .and_then(|(_, ops)| ops.iter().find(|(n, _)| n == op))
-            .map(|(_, mode)| *mode))
+        self.0
+            .permission_manager
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native access owner unavailable"))?
+            .package_mode(package, op)
     }
 
     fn running(&self, uid: i32) -> bool {

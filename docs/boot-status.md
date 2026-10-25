@@ -201,10 +201,24 @@ Process starts now retain the session capture for application info, UID/GIDs,
 ABI, seInfo, package-dependent mount selection and data-isolation inodes rather
 than joining Settings/packages.list at start time. Domain queries use that
 capture's native domain owner and code, without a separately attached boot
-owner or cached verifier selection. Focused owner tests and the host build
-pass for these reader changes; no new guest boot, app frame, second-boot or
-CTS result is recorded for them. The boot-input join and permission/discovery
-reader handover remain #2023; install access lifecycle remains #2161.
+owner or cached verifier selection. The reviewer reports guest verification of these two checkpoints on
+`5c342c3e` (2026-10-25): Contacts retains u0_a163, its untrusted_app SELinux
+label and groups 3003/50163/20163/9997; BOOT_COMPLETED, Settings and Contacts
+drawing, and immediate `pm disable-user`/`enable` on the running guest; the
+reported crate run passed 1825 tests. Domain shell verification remains
+unavailable (#2187), as does app-host `am start` (#1678).
+
+Current source also removes `Packages`' stored user-access copy: AppOps reads
+the permission manager's live owner, ordinary permission decisions retain the
+session's package state, and permission groups are keyed by that state's Arc
+identity. The existing live permission bridge still supplies the session's
+validated grant/GID refreshes. No access view is added to query Context or to
+candidate contexts; install access lifecycle remains design step 7 (#2161).
+Focused permission (23), AppOps (22) and session-mutation (3) tests and the host
+build pass. No new local guest, second-boot or CTS result is claimed for this
+access change. The boot-input join and service discovery/mirror handover remain
+#2023; ShortcutService's manifest rescan and removed-package cleanup owner is
+still unsupported (#1669).
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

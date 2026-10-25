@@ -36,8 +36,6 @@ const APP_LIB32_INSTALL_DIR: &str = "/data/app-lib";
 pub struct Packages {
     state: model::State,
     signing_build: package::sign::Build,
-    /// User 0's permission and app op state (`access.abx`).
-    access: Option<package::permissions::AccessUser>,
     domains: DomainInputs,
 }
 
@@ -265,7 +263,6 @@ impl Packages {
         Ok(Packages {
             state,
             signing_build: package::sign::Build::of(&platform),
-            access: Some(access),
             domains: DomainInputs {
                 packages: persisted
                     .settings
@@ -300,11 +297,6 @@ impl Packages {
             release: self.signing_build.release,
             always_load_past_certs_v4: self.signing_build.always_load_past_certs_v4,
         }
-    }
-
-    /// User 0's permission and app op state.
-    pub fn access(&self) -> Option<&package::permissions::AccessUser> {
-        self.access.as_ref()
     }
 }
 

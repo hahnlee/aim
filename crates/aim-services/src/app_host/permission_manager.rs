@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
@@ -1438,7 +1438,7 @@ pub struct PermissionManager {
     host: Arc<AppHost>,
     /// `AccessState.systemState`: the definitions and trees last persisted.
     system: OnceLock<AccessSystem>,
-    groups: OnceLock<Vec<PermissionGroupInfo>>,
+    groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
     listeners: Mutex<Vec<Binder>>,
     /// User 0's access state as the service last changed it; the
     /// persisted one until then. Held while it changes (`mutateState`).
@@ -1450,7 +1450,7 @@ impl PermissionManager {
         PermissionManager {
             host,
             system: OnceLock::new(),
-            groups: OnceLock::new(),
+            groups: Mutex::new(None),
             listeners: Mutex::new(Vec::new()),
             user0: Mutex::new(None),
         }
@@ -1500,6 +1500,26 @@ impl PermissionManager {
         let state = Arc::new(self.read_access(USER0_ACCESS, AccessUser::parse)?);
         *user0 = Some(state.clone());
         Ok(state)
+    }
+
+    pub(super) fn uid_mode(&self, app_id: i32, op: &str) -> Result<Option<i32>, Exception> {
+        let state = self.user0()?;
+        Ok(state
+            .app_id_app_ops
+            .iter()
+            .find(|(id, _)| *id == app_id)
+            .and_then(|(_, ops)| ops.iter().find(|(name, _)| name == op))
+            .map(|(_, mode)| *mode))
+    }
+
+    pub(super) fn package_mode(&self, package: &str, op: &str) -> Result<Option<i32>, Exception> {
+        let state = self.user0()?;
+        Ok(state
+            .package_app_ops
+            .iter()
+            .find(|(name, _)| name == package)
+            .and_then(|(_, ops)| ops.iter().find(|(name, _)| name == op))
+            .map(|(_, mode)| *mode))
     }
 
     /// `PermissionService.getInstalledPermissions`: the names of the
@@ -1616,16 +1636,29 @@ impl PermissionManager {
         user0: &AccessUser,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
-        let inputs = self.host.inputs()?;
+        let platform = self.host.platform()?;
         let (state, resolution) = self.host.packages()?;
+        let groups = self.groups(&state);
         f(&Access {
             state: &state,
             filter: &resolution.apps_filter,
             defined: &self.system()?.permissions,
-            groups: self.groups.get_or_init(|| permission_groups(&state)),
+            groups: &groups,
             user0,
-            compat: &inputs.compat,
+            compat: &platform.compat,
         })
+    }
+
+    fn groups(&self, state: &Arc<State>) -> Arc<Vec<PermissionGroupInfo>> {
+        let mut held = self.groups.lock().unwrap();
+        if let Some((source, groups)) = &*held
+            && source.ptr_eq(&Arc::downgrade(state))
+        {
+            return groups.clone();
+        }
+        let groups = Arc::new(permission_groups(state));
+        *held = Some((Arc::downgrade(state), groups.clone()));
+        groups
     }
 
     /// `service.mutateState` of user 0's state: `change` decides the new
@@ -1806,7 +1839,7 @@ impl PermissionManager {
         if !self.access(|access| Ok(access.check_uid_permission(uid, BACKUP)? == GRANTED))? {
             return Ok(false);
         }
-        let settings = &self.host.inputs()?.settings;
+        let settings = &self.host.platform()?.settings;
         // `getIntForUser`: a setting not set or not an int is none.
         let int = |name: &str| {
             settings
@@ -2773,6 +2806,56 @@ mod tests {
             ..AccessUser::default()
         };
         (state, defined, access)
+    }
+
+    #[test]
+    fn appops_reads_the_live_access_owner_without_package_inputs() {
+        let persisted = PersistedAccess::new();
+        persisted.write(USER0_ACCESS, BOOT_USER);
+        let manager = PermissionManager::new(persisted.host.clone());
+        assert_eq!(manager.uid_mode(10123, "android:camera").unwrap(), None);
+        assert_eq!(manager.package_mode("app", "android:camera").unwrap(), None);
+        let before = manager.user0().unwrap();
+        let mut after = (*before).clone();
+        after.app_id_app_ops = vec![(10123, vec![("android:camera".into(), 1)])];
+        after.package_app_ops = vec![("app".into(), vec![("android:camera".into(), 2)])];
+        *manager.user0.lock().unwrap() = Some(Arc::new(after));
+        assert_eq!(manager.uid_mode(10123, "android:camera").unwrap(), Some(1));
+        assert_eq!(
+            manager.package_mode("app", "android:camera").unwrap(),
+            Some(2)
+        );
+        assert_eq!(manager.uid_mode(10124, "android:camera").unwrap(), None);
+        assert_eq!(
+            manager.package_mode("other", "android:camera").unwrap(),
+            None
+        );
+        assert!(before.app_id_app_ops.is_empty());
+        assert!(before.package_app_ops.is_empty());
+        assert!(persisted.host.inputs.get().is_none());
+    }
+
+    #[test]
+    fn permission_groups_follow_the_retained_package_state() {
+        let persisted = PersistedAccess::new();
+        let manager = PermissionManager::new(persisted.host.clone());
+        let (state, _, _) = fixture();
+        let before = Arc::new(state);
+        let groups = manager.groups(&before);
+        assert!(!groups.is_empty());
+        assert!(Arc::ptr_eq(&groups, &manager.groups(&before)));
+        let mut state = (*before).clone();
+        for ps in state.packages.values_mut() {
+            if let Some(pkg) = &mut ps.pkg {
+                Arc::make_mut(pkg).permission_groups.clear();
+            }
+        }
+        let after = Arc::new(state);
+        assert_eq!(before.generation, after.generation);
+        assert!(manager.groups(&after).is_empty());
+        assert!(!groups.is_empty());
+        assert_eq!(*manager.groups(&before), *groups);
+        assert!(persisted.host.inputs.get().is_none());
     }
 
     fn with_access<T>(f: impl FnOnce(&Access<'_>) -> T) -> T {
