@@ -288,6 +288,127 @@ fn publish_with_lifecycle(
         .publish_package_scan_with_queries(bridge, None, owner, Usage::new(["p"]), context)
         .unwrap()
 }
+
+/// The app-host refresh leaf reads the current native capture's UID and instant
+/// state, even while the joined package inputs cannot load.
+#[test]
+fn permission_refresh_uses_the_current_native_capture() {
+    use crate::app_host::{AppHost, package_bootstrap::PackageBootstrap};
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let before = publish(&fixture, &bridge);
+    let data = fixture.root.join("data");
+    for (path, xml) in [
+        (
+            "misc/apexdata/com.android.permission/access.abx",
+            r#"<access><permissions>
+            <permission name="normal" packageName="p" protectionLevel="0" type="0"/>
+            <permission name="instant" packageName="p" protectionLevel="1000" type="0"/>
+            </permissions></access>"#,
+        ),
+        (
+            "misc_de/0/apexdata/com.android.permission/access.abx",
+            r#"<access><app-id-permissions><app-id id="10100">
+            <permission name="normal" flags="1"/><permission name="instant" flags="1"/>
+            </app-id></app-id-permissions></access>"#,
+        ),
+    ] {
+        let path = data.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+        std::fs::write(path, aim_android_xml::abx::write(&root).unwrap()).unwrap();
+    }
+    let host = AppHost::new(fixture.native.clone());
+    host.configure(
+        &fixture.root.join("image"),
+        &data,
+        &data,
+        Box::new(|name| {
+            Some(
+                match name {
+                    "ro.build.version.sdk" => "36",
+                    "ro.build.version.codename" => "REL",
+                    "persist.sys.locale" => "en-US",
+                    "ro.sf.lcd_density" => "320",
+                    _ => return None,
+                }
+                .into(),
+            )
+        }),
+        Box::new(|_, _| {}),
+        Box::new(|| Err(std::io::Error::other("no zygote"))),
+    )
+    .unwrap();
+    host.set_system(fixture.system.clone());
+    let _services = host.services();
+    let Binder::Local(ptr) = fixture
+        .native
+        .add_service(Arc::new(PackageBootstrap::new(host)))
+    else {
+        unreachable!()
+    };
+    let node = fixture.native.local_service(ptr).unwrap();
+    let granted = |app_id, user_id| {
+        let mut request = Parcel::new();
+        bootstrap::GetPackageGrantedPermissions {
+            package_name: Some("p".into()),
+            app_id,
+            user_id,
+        }
+        .write(&mut request);
+        let reply = node
+            .transact(bootstrap::GET_PACKAGE_GRANTED_PERMISSIONS, &request, false)
+            .unwrap();
+        bootstrap::read_get_package_granted_permissions_reply(&mut reply.reader()).unwrap()
+    };
+    assert_eq!(
+        granted(10100, 0).unwrap(),
+        Some(vec![Some("instant".into()), Some("normal".into())])
+    );
+    assert_eq!(
+        granted(10101, 0).unwrap_err().message,
+        "permission UID owner differs"
+    );
+    assert_eq!(
+        granted(10100, 10).unwrap_err().message,
+        "permission user owner differs"
+    );
+    let mut owner = before.scan().owner().clone();
+    owner
+        .capture_user_states(BTreeMap::from([(
+            ("p".into(), false),
+            crate::package::scan::CapturedUsers {
+                states: BTreeMap::from([(
+                    0,
+                    crate::package::restrictions::UserState {
+                        instant_app: true,
+                        ..Default::default()
+                    },
+                )]),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+    let mut context = (**before.context()).clone();
+    context.scan_version = before.scan().version() + 1;
+    let after = fixture
+        .system
+        .publish_package_scan_with_queries(
+            &bridge,
+            Some(before.scan()),
+            owner,
+            before.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    assert!(!before.state().packages["p"].users[&0].instant_app);
+    assert!(after.state().packages["p"].users[&0].instant_app);
+    assert_eq!(
+        granted(10100, 0).unwrap(),
+        Some(vec![Some("instant".into())])
+    );
+}
+
 #[test]
 fn usage_preparation_releases_coordinator_and_retains_both_concurrent_updates() {
     let mut fixture = Fixture::new();

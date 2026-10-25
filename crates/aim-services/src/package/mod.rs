@@ -346,7 +346,7 @@ fn resilient<T>(
 /// runtime permissions' `readForUser`): the file, or its legacy backup
 /// (`.bak`), which replaces it; its reserve copy only when it does not
 /// parse.
-fn atomic<T>(
+pub(crate) fn atomic<T>(
     path: &Path,
     parse: impl Fn(&Element) -> Result<T, String>,
 ) -> Result<Option<T>, String> {

@@ -36,8 +36,6 @@ pub struct Packages {
     framework: Framework,
     /// User 0's permission and app op state (`access.abx`).
     access: Option<package::permissions::AccessUser>,
-    /// The permission manager's initial system state (`access.abx`).
-    access_system: Option<package::permissions::AccessSystem>,
     domains: DomainInputs,
 }
 
@@ -324,7 +322,6 @@ impl Packages {
                 ..Default::default()
             },
         );
-        let access_system = persisted.access;
         let mut system =
             system_config::system(root, property, &system_config::Framework::load(root)?)?;
         system.sdk_sandbox_package = Some(Some(sdk_sandbox_package(&packages)?));
@@ -389,7 +386,6 @@ impl Packages {
             state,
             framework: Framework(platform),
             access: Some(access),
-            access_system,
             domains: DomainInputs {
                 packages: persisted
                     .settings
@@ -472,11 +468,6 @@ impl Packages {
 
     pub fn framework_string_array(&self, name: &str) -> Option<Vec<Option<String>>> {
         self.framework.framework_string_array(name)
-    }
-
-    /// The permission manager's initial system state.
-    pub fn access_system(&self) -> Option<&package::permissions::AccessSystem> {
-        self.access_system.as_ref()
     }
 
     /// User 0's permission and app op state.

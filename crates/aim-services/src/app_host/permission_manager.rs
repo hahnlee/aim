@@ -174,7 +174,8 @@ const DISALLOW_DEBUGGING_FEATURES: &str = "no_debugging_features";
 const SHELL_UID: i32 = 2000;
 /// `Settings.Secure.USER_SETUP_PERSONALIZATION_STARTED`.
 const USER_SETUP_PERSONALIZATION_STARTED: i32 = 1;
-/// User 0's access state, beside its `misc_de` directory.
+/// AccessPersistence's system and user 0 state.
+const SYSTEM_ACCESS: &str = "misc/apexdata/com.android.permission/access.abx";
 const USER0_ACCESS: &str = "misc_de/0/apexdata/com.android.permission/access.abx";
 const PERMISSION_GROUP_INFO: &str = "android.content.pm.PermissionGroupInfo";
 const PERMISSION_INFO: &str = "android.content.pm.PermissionInfo";
@@ -521,6 +522,69 @@ fn legacy_state_record(
     out.data().to_vec()
 }
 
+/// `isSinglePermissionGranted`: instant apps hold only instant permissions.
+fn single_permission_granted(
+    defined: &[Permission],
+    flags: i32,
+    instant: bool,
+    name: &str,
+) -> bool {
+    permission_granted(flags)
+        && (!instant
+            || defined
+                .iter()
+                .find(|p| p.name == name)
+                .is_some_and(|p| p.protection_level & PROTECTION_FLAG_INSTANT != 0))
+}
+
+/// `PermissionService.getGrantedPermissions` against validated package owners.
+fn granted_permissions(
+    state: &State,
+    defined: &[Permission],
+    user0: &AccessUser,
+    package: &str,
+    app_id: i32,
+    user: i32,
+) -> Result<Vec<String>, Exception> {
+    let ps = state
+        .packages
+        .get(package)
+        .filter(|ps| ps.app_id == app_id)
+        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission UID owner differs"))?;
+    if !state.users.contains_key(&user) || !ps.users.contains_key(&user) {
+        return Err(Exception::new(
+            EX_ILLEGAL_STATE,
+            "permission user owner differs",
+        ));
+    }
+    // The access owner has user 0's state alone.
+    if user != 0 {
+        return Ok(Vec::new());
+    }
+    let Some((_, flags)) = user0
+        .app_id_permissions
+        .iter()
+        .find(|(id, _)| *id == app_id)
+    else {
+        return Ok(Vec::new());
+    };
+    let instant = info::user_state(ps, user).instant_app;
+    let single = |name: &str| {
+        let flags = flags
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(0, |(_, flags)| *flags);
+        single_permission_granted(defined, flags, instant, name)
+    };
+    Ok(tree_order(
+        flags
+            .iter()
+            .filter(|(name, _)| single(name) || fuller(name).is_some_and(single))
+            .map(|(name, _)| name.clone())
+            .collect(),
+    ))
+}
+
 /// What the permission service reads: the package model with its apps
 /// filter, the permissions defined, the permission groups and the access
 /// state of user 0, the model's one user.
@@ -566,11 +630,12 @@ impl Access<'_> {
     /// `isSinglePermissionGranted`: an instant app holds only `instant`
     /// permissions.
     fn single_granted(&self, app_id: i32, instant: bool, permission: &str) -> bool {
-        permission_granted(self.flags(app_id, permission))
-            && (!instant
-                || self
-                    .definition(permission)
-                    .is_some_and(|p| p.protection_level & PROTECTION_FLAG_INSTANT != 0))
+        single_permission_granted(
+            self.defined,
+            self.flags(app_id, permission),
+            instant,
+            permission,
+        )
     }
 
     /// `PackageManagerLocal.FilteredSnapshot.getPackageState`: the
@@ -1402,18 +1467,23 @@ impl PermissionManager {
         if let Some(system) = self.system.get() {
             return Ok(system);
         }
-        let system = self
-            .host
-            .inputs()?
-            .packages
-            .access_system()
+        let system = self.read_access(SYSTEM_ACCESS, AccessSystem::parse)?;
+        Ok(self.system.get_or_init(|| system))
+    }
+
+    fn read_access<T>(
+        &self,
+        path: &str,
+        parse: impl Fn(&aim_android_xml::Element) -> Result<T, String>,
+    ) -> Result<T, Exception> {
+        crate::package::atomic(&self.host.data()?.join(path), parse)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
             .ok_or_else(|| {
                 self.host.unimplemented_named(
                     "permissionmgr",
-                    "system access state migration without access.abx (#2168)",
+                    &format!("{path}: access state migration without access.abx (#2168)"),
                 )
-            })?;
-        Ok(self.system.get_or_init(|| system.clone()))
+            })
     }
 
     /// `PermissionService.writeLegacyPermissionsTEMP` / `toLegacyPermissions`.
@@ -1427,34 +1497,22 @@ impl PermissionManager {
         if let Some(state) = &*user0 {
             return Ok(state.clone());
         }
-        let state = Arc::new(
-            self.host
-                .inputs()?
-                .packages
-                .access()
-                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no permission state of user 0"))?
-                .clone(),
-        );
+        let state = Arc::new(self.read_access(USER0_ACCESS, AccessUser::parse)?);
         *user0 = Some(state.clone());
         Ok(state)
     }
 
-    /// `PermissionService.getGidsForUid` (`uid_gids`), of user 0's state,
-    /// the model's one user.
     /// `PermissionService.getInstalledPermissions`: the names of the
     /// permissions `package` defines, in `TreeSet` order.
     pub(super) fn installed_permissions(&self, package: &str) -> Result<Vec<String>, Exception> {
-        let user0 = self.user0()?;
-        self.access_with(&user0, |access| {
-            Ok(tree_order(
-                access
-                    .defined
-                    .iter()
-                    .filter(|p| p.package == package)
-                    .map(|p| p.name.clone())
-                    .collect(),
-            ))
-        })
+        Ok(tree_order(
+            self.system()?
+                .permissions
+                .iter()
+                .filter(|p| p.package == package)
+                .map(|p| p.name.clone())
+                .collect(),
+        ))
     }
 
     /// `PackageBootstrapBridge.getPackageGrantedPermissions`: `package`
@@ -1466,31 +1524,21 @@ impl PermissionManager {
         app_id: i32,
         user: i32,
     ) -> Result<Vec<String>, Exception> {
+        let system =
+            self.host.system.get().ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "native package owner unavailable")
+            })?;
+        let bridge = system.package_bootstrap()?;
+        let capture = system.capture_package_queries_for(&bridge)?;
         let user0 = self.user0()?;
-        self.access_with(&user0, |access| {
-            let ps = access
-                .state
-                .packages
-                .get(package)
-                .filter(|ps| ps.app_id == app_id)
-                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission UID owner differs"))?;
-            // The model has user 0's state alone.
-            let names = match user {
-                0 => user0
-                    .app_id_permissions
-                    .iter()
-                    .find(|(id, _)| *id == app_id)
-                    .map(|(_, flags)| flags.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            Ok(tree_order(
-                names
-                    .into_iter()
-                    .filter(|name| access.granted(ps, user, name))
-                    .collect(),
-            ))
-        })
+        granted_permissions(
+            capture.state(),
+            &self.system()?.permissions,
+            &user0,
+            package,
+            app_id,
+            user,
+        )
     }
 
     /// `PermissionService.getLegacyPermissionState` of `app_id`, captured
@@ -1504,27 +1552,30 @@ impl PermissionManager {
     ) -> Result<Vec<u8>, Exception> {
         validate_legacy_identity(app_id, users)?;
         let user0 = self.user0()?;
-        self.access_with(&user0, |access| {
-            let flags = user0
-                .app_id_permissions
-                .iter()
-                .find(|(id, _)| *id == app_id)
-                .map(|(_, flags)| flags);
-            Ok(legacy_state_record(app_id, users, flags, |name| {
-                match access.definition(name) {
-                    Some(permission) => Some(is_runtime(permission)),
-                    // A configured permission no package defines.
-                    None => config.permissions.contains_key(name).then_some(false),
-                }
-            }))
-        })
+        let system = self.system()?;
+        let flags = user0
+            .app_id_permissions
+            .iter()
+            .find(|(id, _)| *id == app_id)
+            .map(|(_, flags)| flags);
+        Ok(legacy_state_record(app_id, users, flags, |name| {
+            match system.permissions.iter().find(|p| p.name == name) {
+                Some(permission) => Some(is_runtime(permission)),
+                // A configured permission no package defines.
+                None => config.permissions.contains_key(name).then_some(false),
+            }
+        }))
     }
 
+    /// `PermissionService.getGidsForUid` (`uid_gids`), of user 0's state.
     pub(super) fn gids_for_uid(
         &self,
         uid: i32,
         config: &crate::package::system_config::SystemConfig,
     ) -> Result<Vec<i32>, Exception> {
+        if uid < 0 {
+            return Err(Exception::illegal_argument("negative permission UID"));
+        }
         if let Some(error) = &config.permission_error {
             return Err(Exception::new(EX_ILLEGAL_STATE, error.clone()));
         }
@@ -2151,6 +2202,236 @@ mod tests {
     use crate::package::model::{PackageUserState, SharedUser, User};
     use crate::package::pkg::{self, AndroidPackage, Component};
 
+    struct PersistedAccess {
+        host: Arc<AppHost>,
+        data: std::path::PathBuf,
+    }
+
+    impl PersistedAccess {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let data = std::env::temp_dir().join(format!(
+                "aim-permission-bootstrap-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&data).unwrap();
+            let process = aim_binder_host::local::LocalProcess::open(
+                &aim_binder_driver::Driver::new(),
+                aim_binder_driver::Device::Binder,
+                aim_binder_driver::Credentials {
+                    pid: std::process::id() as i32,
+                    euid: 1000,
+                    security_context: None,
+                },
+            );
+            let host = AppHost::new(process);
+            host.configure(
+                &data.join("missing-image"),
+                &data,
+                &data,
+                Box::new(|_| None),
+                Box::new(|_, _| {}),
+                Box::new(|| Err(std::io::Error::other("no zygote"))),
+            )
+            .unwrap();
+            Self { host, data }
+        }
+
+        fn write(&self, path: &str, xml: &[u8]) {
+            let path = self.data.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let root = aim_android_xml::read(xml).unwrap();
+            std::fs::write(path, aim_android_xml::abx::write(&root).unwrap()).unwrap();
+        }
+    }
+
+    impl Drop for PersistedAccess {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.data).unwrap();
+        }
+    }
+
+    const BOOT_SYSTEM: &[u8] = br#"<access><permissions>
+        <permission name="android.permission.INTERNET" packageName="android" protectionLevel="0" type="0"/>
+        <permission name="android.permission.CAMERA" packageName="android" protectionLevel="1" type="0"/>
+        </permissions><permission-trees>
+        <permission name="tree" packageName="android" protectionLevel="0" type="0"/>
+        </permission-trees></access>"#;
+    const BOOT_USER: &[u8] = br#"<access><app-id-permissions><app-id id="10123">
+        <permission name="android.permission.CAMERA" flags="10"/>
+        <permission name="android.permission.INTERNET" flags="1"/>
+        <permission name="configured" flags="1"/>
+        <permission name="undefined" flags="1"/>
+        </app-id></app-id-permissions></access>"#;
+
+    /// The real boot leaves read their persisted owners even when Inputs cannot
+    /// load. No package, platform or resolver is constructed by these calls.
+    #[test]
+    fn bootstrap_permission_getters_do_not_load_inputs() {
+        use crate::package::system_config::{ConfigPermission, SystemConfig};
+        use aim_service_aidl::{
+            dev_aim_server_ipackagebootstrapbridge as boot,
+            dev_aim_server_ipermissionpersistencebridge as persistence,
+        };
+        let fixture = PersistedAccess::new();
+        fixture.write(SYSTEM_ACCESS, BOOT_SYSTEM);
+        fixture.write(USER0_ACCESS, BOOT_USER);
+        let host = &fixture.host;
+        let manager = Arc::new(PermissionManager::new(host.clone()));
+        assert!(host.permission_manager.set(manager.clone()).is_ok());
+        let mut config = SystemConfig::default();
+        config.permissions.insert(
+            INTERNET.into(),
+            ConfigPermission {
+                per_user: false,
+                gids: vec![3003],
+            },
+        );
+        config
+            .permissions
+            .insert("configured".into(), ConfigPermission::default());
+        assert_eq!(manager.gids_for_uid(10123, &config).unwrap(), [3003]);
+        let record = manager
+            .legacy_permission_state(10123, &[0, 10], &config)
+            .unwrap();
+        let flags = manager.user0().unwrap();
+        assert_eq!(
+            record,
+            legacy_state_record(
+                10123,
+                &[0, 10],
+                Some(&flags.app_id_permissions[0].1),
+                |name| {
+                    match name {
+                        CAMERA => Some(true),
+                        INTERNET | "configured" => Some(false),
+                        _ => None,
+                    }
+                }
+            )
+        );
+        let node = |service: Arc<dyn Service>| {
+            let Binder::Local(ptr) = host.process.add_service(service) else {
+                unreachable!()
+            };
+            host.process.local_service(ptr).unwrap()
+        };
+        let bootstrap = node(Arc::new(
+            super::super::package_bootstrap::PackageBootstrap::new(host.clone()),
+        ));
+        let mut request = Parcel::new();
+        boot::GetPackageInstalledPermissions {
+            package_name: Some("android".into()),
+        }
+        .write(&mut request);
+        let reply = bootstrap
+            .transact(boot::GET_PACKAGE_INSTALLED_PERMISSIONS, &request, false)
+            .unwrap();
+        assert_eq!(
+            boot::read_get_package_installed_permissions_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            Some(vec![Some(CAMERA.into()), Some(INTERNET.into())])
+        );
+        let mut request = Parcel::new();
+        boot::GetLegacyPermissionState {
+            app_id: 10123,
+            user_ids: Some(vec![0, 10]),
+        }
+        .write(&mut request);
+        let reply = bootstrap
+            .transact(boot::GET_LEGACY_PERMISSION_STATE, &request, false)
+            .unwrap();
+        assert_eq!(
+            boot::read_get_legacy_permission_state_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            Some(
+                manager
+                    .legacy_permission_state(10123, &[0, 10], &SystemConfig::default())
+                    .unwrap()
+            )
+        );
+        let mut request = Parcel::new();
+        boot::GetPermissionGidsForUid { uid: 10123 }.write(&mut request);
+        let reply = bootstrap
+            .transact(boot::GET_PERMISSION_GIDS_FOR_UID, &request, false)
+            .unwrap();
+        assert_eq!(
+            boot::read_get_permission_gids_for_uid_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            Some(vec![])
+        );
+        let persistence = node(Arc::new(
+            super::super::package_internal_leaves::PermissionPersistence::new(host.clone()),
+        ));
+        let mut request = Parcel::new();
+        persistence::CaptureDefinitions {}.write(&mut request);
+        let reply = persistence
+            .transact(persistence::CAPTURE_DEFINITIONS, &request, false)
+            .unwrap();
+        assert_eq!(
+            persistence::read_capture_definitions_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            Some(manager.capture_definitions().unwrap())
+        );
+        assert!(host.inputs.get().is_none());
+        assert!(host.platform.get().is_none());
+        assert!(host.model.lock().unwrap().is_none());
+        assert_eq!(
+            host.inputs().err().unwrap().message,
+            "no property ro.build.version.sdk"
+        );
+        assert!(host.inputs.get().is_none());
+        assert_eq!(
+            manager
+                .granted_permissions("android", 1000, 0)
+                .unwrap_err()
+                .message,
+            "native package owner unavailable"
+        );
+    }
+
+    /// AccessPersistence's backup wins; a malformed document tries the reserve
+    /// copy. Missing access is the migration boundary, not an empty grant set.
+    #[test]
+    fn persisted_access_errors_and_atomic_recovery() {
+        let fixture = PersistedAccess::new();
+        for (path, xml) in [(SYSTEM_ACCESS, BOOT_SYSTEM), (USER0_ACCESS, BOOT_USER)] {
+            let read = || {
+                let manager = PermissionManager::new(fixture.host.clone());
+                if path == SYSTEM_ACCESS {
+                    manager.capture_definitions().map(|_| ())
+                } else {
+                    manager.gids_for_uid(10123, &Default::default()).map(|_| ())
+                }
+            };
+            let missing = read().unwrap_err();
+            assert_eq!(missing.code, EX_UNSUPPORTED_OPERATION);
+            assert!(missing.message.contains("#2168"));
+            assert!(missing.message.contains(path));
+            fixture.write(path, xml);
+            std::fs::write(fixture.data.join(format!("{path}.bak")), b"broken").unwrap();
+            assert_eq!(read().unwrap_err().code, EX_ILLEGAL_STATE);
+            fixture.write(&format!("{path}.reservecopy"), xml);
+            read().unwrap();
+            std::fs::write(fixture.data.join(path), b"broken").unwrap();
+            fixture.write(&format!("{path}.bak"), xml);
+            std::fs::remove_file(fixture.data.join(format!("{path}.reservecopy"))).unwrap();
+            read().unwrap();
+            std::fs::remove_file(fixture.data.join(format!("{path}.bak"))).unwrap();
+            assert_eq!(read().unwrap_err().code, EX_ILLEGAL_STATE);
+            fixture.write(&format!("{path}.reservecopy"), xml);
+            read().unwrap();
+            std::fs::remove_file(fixture.data.join(path)).unwrap();
+            assert_eq!(read().unwrap_err().code, EX_UNSUPPORTED_OPERATION);
+        }
+        assert!(fixture.host.inputs.get().is_none());
+    }
+
     /// `AppIdPermissionPersistence.parsePermission`, `toLegacyPermissions`
     /// and `LegacyPermissionSettings.writePermissions` / `writePermissionTrees`:
     /// both maps, their ArrayMap order (including a collision and replacement),
@@ -2534,6 +2815,37 @@ mod tests {
             user0: &user0,
             compat: &compat,
         })
+    }
+
+    #[test]
+    fn granted_permission_refresh_validates_package_and_user() {
+        with_access(|access| {
+            let granted = |name, id, user| {
+                granted_permissions(access.state, access.defined, access.user0, name, id, user)
+            };
+            assert_eq!(granted("granted", 10001, 0).unwrap(), [CAMERA]);
+            assert!(granted("denied", 10002, 0).unwrap().is_empty());
+            assert_eq!(granted("instant", 10004, 0).unwrap(), [CAMERA]);
+            assert_eq!(granted("shared.a", 10003, 0).unwrap(), [INTERNET]);
+            for (name, id) in [("granted", 10002), ("missing", 10001)] {
+                let error = granted(name, id, 0).unwrap_err();
+                assert_eq!(error.code, EX_ILLEGAL_STATE);
+                assert_eq!(error.message, "permission UID owner differs");
+            }
+            for user in [-1, 10] {
+                let error = granted("granted", 10001, user).unwrap_err();
+                assert_eq!(error.code, EX_ILLEGAL_STATE);
+                assert_eq!(error.message, "permission user owner differs");
+            }
+            let mut state = access.state.clone();
+            state.packages.get_mut("granted").unwrap().users.clear();
+            assert_eq!(
+                granted_permissions(&state, access.defined, access.user0, "granted", 10001, 0)
+                    .unwrap_err()
+                    .message,
+                "permission user owner differs"
+            );
+        });
     }
 
     /// CtsPermissionTestCases' `PermissionManagerTest.testCheckPermission`
