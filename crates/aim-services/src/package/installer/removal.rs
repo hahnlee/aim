@@ -1163,6 +1163,28 @@ impl Controller {
         }
         let data_removed = plan.request.flags & KEEP_DATA == 0;
         let remove_setting = should_remove_setting(&package, plan, data_removed);
+        let remove_code = should_remove_setting(&package, plan, true);
+        // Original full deletion calls onPackageUninstalled once, after
+        // removing the setting. Prepare its captured identity (and all other
+        // fallible permission inputs) before profiles or app data are lost.
+        let permissions = if remove_code {
+            Some(
+                self.external
+                    .prepare_permissions(&package.name, package.app_id, -1)?,
+            )
+        } else {
+            None
+        };
+        let mut user_permissions = BTreeMap::new();
+        if data_removed && !remove_code {
+            for &user in &plan.users {
+                user_permissions.insert(
+                    user,
+                    self.external
+                        .prepare_permissions(&package.name, package.app_id, user)?,
+                );
+            }
+        }
         self.external.destroy_profiles(&package.name)?;
         for &user in &plan.users {
             self.effects
@@ -1205,25 +1227,15 @@ impl Controller {
                         false,
                     )?);
                 }
-                let scope =
-                    self.external
-                        .prepare_permissions(&package.name, package.app_id, user)?;
-                self.external.apply_permissions(scope, false, true)?;
+                if let Some(scope) = user_permissions.remove(&user) {
+                    self.external.apply_permissions(scope, false, true)?;
+                }
                 self.keystore
                     .post(package.app_id, &[user])
                     .map_err(illegal)?;
             }
         }
-        let capture = self.store.snapshots.capture();
-        let installed = capture
-            .owner()
-            .scanned_user_states(&package.name)
-            .is_some_and(|users| users.values().any(|state| state.installed));
-        let remove_code = !package.is.system && !installed && !plan.keep_uninstalled;
-        if remove_code {
-            let permissions =
-                self.external
-                    .prepare_permissions(&package.name, package.app_id, -1)?;
+        if let Some(permissions) = permissions {
             if data_removed {
                 self.store.remove_setting(&package.name)?;
             } else {

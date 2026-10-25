@@ -438,7 +438,7 @@ impl permissions::AccessView {
         state: &State,
         config: &crate::package::system_config::SystemConfig,
     ) {
-        for ((name, _), inputs) in &mut context.packages {
+        for ((name, factory), inputs) in &mut context.packages {
             inputs.installed_permissions = tree_order(
                 self.system
                     .permissions
@@ -447,24 +447,35 @@ impl permissions::AccessView {
                     .map(|p| p.name.clone())
                     .collect(),
             );
+            let ps = if *factory {
+                state.disabled_system_packages.get(name)
+            } else {
+                state.packages.get(name)
+            };
+            let permission_id = ps
+                .and_then(|ps| ps.shared_user_app_id)
+                .unwrap_or(inputs.app_id);
             for (user, values) in &mut inputs.users {
                 let flags = (*user == 0)
                     .then(|| {
                         self.user0
                             .app_id_permissions
                             .iter()
-                            .find(|(id, _)| *id == inputs.app_id)
+                            .find(|(id, _)| *id == permission_id)
                             .map(|(_, flags)| flags)
                     })
                     .flatten();
-                let ps = state.packages.get(name);
                 let installed = ps
                     .and_then(|p| p.users.get(user))
                     .is_none_or(|u| u.installed);
                 let instant = ps
                     .and_then(|p| p.users.get(user))
                     .is_some_and(|u| u.instant_app);
-                values.gids = uid_gids(config, flags, *user);
+                values.gids = if permission_id < 0 {
+                    Vec::new()
+                } else {
+                    uid_gids(config, flags, *user)
+                };
                 values.granted_permissions = if installed {
                     tree_order(
                         flags

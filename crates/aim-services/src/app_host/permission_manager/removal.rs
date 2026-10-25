@@ -39,7 +39,16 @@ impl PermissionManager {
                 "shared UID or non-user-0 permissions (#1996)",
             ));
         }
-        self.retained_access()?;
+        // Validate the session's permission projection before the deletion
+        // coordinator destroys data. This is a read-only preparation, not a
+        // permission mutation or a publication.
+        let access = self.retained_access()?;
+        let system = self.host.package_system()?;
+        let bridge = system.package_bootstrap()?;
+        let capture = system.capture_package_queries_for(&bridge)?;
+        capture
+            .permission_view(capture.scan().clone(), &bridge, Some(access))
+            .map_err(|message| Exception::new(EX_ILLEGAL_STATE, message))?;
         Ok(self.host.process.add_service(Arc::new(Removal {
             owner: self.clone(),
             package: package.clone(),
@@ -130,6 +139,126 @@ impl PermissionManager {
 mod tests {
     use super::super::tests::{BOOT_SYSTEM, write_access};
     use super::*;
+
+    use crate::package::{
+        installer::removal::{Controller, External, Plan, PolicySource, RemovalPolicy, Request},
+        owner,
+    };
+    use aim_service_aidl::dev_aim_server_iinstallerremovalbridge as external_api;
+
+    struct FailedPermissionPreparation;
+    impl aim_binder_host::local::Service for FailedPermissionPreparation {
+        fn descriptor(&self) -> &str {
+            external_api::DESCRIPTOR
+        }
+        fn transact(
+            &self,
+            call: &mut aim_binder_host::local::Call<'_>,
+        ) -> aim_binder_host::local::Reply {
+            assert_eq!(
+                call.code,
+                external_api::PREPARE_PERMISSIONS,
+                "permission failure must precede destructive removal calls"
+            );
+            let a = external_api::PreparePermissions::read(&mut call.data)?;
+            assert_eq!(a.package_name.as_deref(), Some("p"));
+            assert_eq!(a.app_id, 10100);
+            assert!(matches!(a.user, -1 | 0));
+            let mut reply = Parcel::new();
+            reply.write_exception(&Exception::new(
+                EX_ILLEGAL_STATE,
+                "permission refresh original owner: invalid permission identity",
+            ));
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn permission_preparation_failure_preserves_code_data_and_installed_state() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let system = host.package_system().unwrap();
+            let capture = system.capture_package_queries().unwrap();
+            let (bridge, disk) = system.package_persistence_owner(&capture).unwrap();
+            let store = system.native_removal_store(&bridge, disk).unwrap();
+            let effects = system.package_effects_owner(&bridge).unwrap();
+            let Binder::Local(ptr) = host
+                .process
+                .add_service(Arc::new(FailedPermissionPreparation))
+            else {
+                unreachable!()
+            };
+            let external = External::new(
+                crate::system::ServiceOwner::Local(host.process.local_service(ptr).unwrap()),
+                host.process.clone(),
+            );
+            let state = capture.state().clone();
+            let controller = Controller {
+                store,
+                source: Arc::new(move || Ok(state.clone())),
+                resolver: Default::default(),
+                effects,
+                external,
+                policy: PolicySource {
+                    admission: Arc::new(|_, _| panic!("already admitted")),
+                    removal: Arc::new(|_, _| {
+                        Ok(RemovalPolicy {
+                            admins: Default::default(),
+                            protected: Default::default(),
+                            uninstall_restricted: Default::default(),
+                            users: vec![0],
+                            child_users: Default::default(),
+                            sdk_library_independence: false,
+                        })
+                    }),
+                },
+                publisher: Arc::new(|_| panic!("no observer")),
+                factory_restore: Arc::new(|_| panic!("ordinary removal")),
+                preferred_removal: Arc::new(|_, _, _| panic!("preparation failed")),
+                gate: Arc::new(Mutex::new(())),
+                keystore: Arc::new(owner::keystore::KeystoreCleanup::new(host.process.clone())),
+            };
+            let data = host.data().unwrap();
+            let sentinel = data.join("user/0/p/files/sentinel");
+            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+            std::fs::write(&sentinel, b"keep").unwrap();
+            let code = data.join("app/p/base.apk");
+            let original_code = std::fs::read(&code).unwrap();
+            let original_settings = std::fs::read(data.join("system/packages.xml")).unwrap();
+            for keep_uninstalled in [false, true] {
+                let error = controller
+                    .execute(&Plan {
+                        request: Request {
+                            package: "p".into(),
+                            version: -1,
+                            caller_package: None,
+                            uid: 0,
+                            pid: 7,
+                            user: 0,
+                            flags: 0,
+                            existing_only: false,
+                        },
+                        internal_package: "p".into(),
+                        users: vec![0],
+                        blocked_users: vec![],
+                        keep_uninstalled,
+                    })
+                    .unwrap_err();
+                assert!(error.message.contains("invalid permission identity"));
+                assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+                assert_eq!(std::fs::read(&code).unwrap(), original_code);
+                assert_eq!(
+                    std::fs::read(data.join("system/packages.xml")).unwrap(),
+                    original_settings
+                );
+                assert!(Arc::ptr_eq(
+                    &capture,
+                    &system.capture_package_queries().unwrap()
+                ));
+                let reloaded = crate::package::State::read(&data, &[0]).unwrap().unwrap();
+                assert!(reloaded.settings.packages.iter().any(|p| p.name == "p"));
+            }
+        });
+    }
 
     fn apply(
         owner: &PermissionManager,
@@ -329,6 +458,10 @@ mod tests {
             let capture = system.capture_package_queries().unwrap();
             assert!(capture.context().access.as_ref().unwrap().same_base(&after));
             assert!(!capture.state().packages.contains_key("p"));
+            let disk = crate::package::State::read(host.data().unwrap(), &[0])
+                .unwrap()
+                .unwrap();
+            assert!(!disk.settings.packages.iter().any(|p| p.name == "p"));
         });
     }
 }

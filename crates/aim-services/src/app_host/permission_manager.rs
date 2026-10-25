@@ -551,7 +551,7 @@ fn granted_permissions(
     let ps = state
         .packages
         .get(package)
-        .filter(|ps| ps.app_id == app_id)
+        .filter(|ps| ps.shared_user_app_id.unwrap_or(ps.app_id) == app_id)
         .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission UID owner differs"))?;
     if !state.users.contains_key(&user) || !ps.users.contains_key(&user) {
         return Err(Exception::new(
@@ -3082,6 +3082,14 @@ mod tests {
                 assert_eq!(error.message, "permission user owner differs");
             }
             let mut state = access.state.clone();
+            let shared = state.packages.get_mut("shared.a").unwrap();
+            shared.app_id = -1;
+            shared.shared_user_app_id = Some(10003);
+            assert_eq!(
+                granted_permissions(&state, access.defined, access.user0, "shared.a", 10003, 0)
+                    .unwrap(),
+                [INTERNET]
+            );
             state.packages.get_mut("granted").unwrap().users.clear();
             assert_eq!(
                 granted_permissions(&state, access.defined, access.user0, "granted", 10001, 0)
