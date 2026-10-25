@@ -476,6 +476,13 @@ impl Service for InstallerExternal {
                 bridge::write_close_reply(&mut p);
                 Ok(())
             }
+            // `preapprovals.remove(sessionId)`: the app host keeps no
+            // presentations, as `preparePreapproval` is not ported (#2157).
+            bridge::CLEAR_PREAPPROVAL => {
+                bridge::ClearPreapproval::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.open()
+                    .map(|_| bridge::write_clear_preapproval_reply(&mut p))
+            }
             bridge::GET_NATIVE_INSTALL_ENVIRONMENT => {
                 bridge::GetNativeInstallEnvironment::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.install_environment().map(|record| {
