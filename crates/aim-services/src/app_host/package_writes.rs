@@ -12,7 +12,8 @@
 //! decodes it. A package's data cleared (`clear_data`) is sent as
 //! `sendPackageRestartedBroadcast` and `sendPackageDataClearedBroadcast`
 //! send it, its `ACTION_PACKAGE_DATA_CLEARED` also to the services that
-//! receive it in the system server; installs and removals: #1757.
+//! receive it in the system server. The removal leaf also sends the package
+//! removal intents and notifies the native discovery monitors once.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeMap;
@@ -140,6 +141,42 @@ impl Writes {
             pending: Mutex::default(),
             started: Instant::now(),
         })
+    }
+
+    /// `InstallerRemovalBridge.sendRemovedBroadcast`: native discovery
+    /// monitors and guest package broadcasts share this leaf.
+    pub(super) fn removed(
+        &self,
+        package: &str,
+        app_id: i32,
+        user: i32,
+        data_removed: bool,
+        fully_removed: bool,
+        uid_removed: bool,
+    ) -> Result<(), Exception> {
+        let uid = uid(user, app_id);
+        let mut failure = self
+            .host
+            .notify_package_discoveries(&PackageChanged {
+                package,
+                user,
+                components: &[package.to_owned()],
+                removed: true,
+            })
+            .err();
+        for intent in removed_intents(package, uid, data_removed, fully_removed, uid_removed) {
+            if let Err(e) =
+                self.host
+                    .broadcasts
+                    .try_send_from_package_manager(&self.host, intent.clone(), user)
+            {
+                failure.get_or_insert(e);
+            }
+            if let Err(e) = self.invoke_callbacks(&intent, user, None) {
+                failure.get_or_insert(e);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     /// `mHandler.post`.
@@ -487,6 +524,52 @@ impl Writes {
     }
 }
 
+/// The Java removal bridge's actions and extras, without PMS broadcast additions.
+fn removed_intents(
+    package: &str,
+    uid: i32,
+    data_removed: bool,
+    fully_removed: bool,
+    uid_removed: bool,
+) -> Vec<RawIntent> {
+    let data = Uri::preferred_opaque("package", package);
+    let mut intents = vec![RawIntent::with_data(
+        Some("android.intent.action.PACKAGE_REMOVED"),
+        Some(&data),
+        None,
+        0,
+        &[
+            (EXTRA_UID, Value::Int(uid)),
+            (
+                "android.intent.extra.DATA_REMOVED",
+                Value::Bool(data_removed),
+            ),
+            (EXTRA_DONT_KILL_APP, Value::Bool(false)),
+            ("android.intent.extra.USER_INITIATED", Value::Bool(true)),
+        ],
+    )];
+    if fully_removed && data_removed {
+        intents.push(RawIntent::with_data(
+            Some("android.intent.action.PACKAGE_FULLY_REMOVED"),
+            Some(&data),
+            None,
+            0,
+            &[
+                (EXTRA_UID, Value::Int(uid)),
+                ("android.intent.extra.DATA_REMOVED", Value::Bool(true)),
+            ],
+        ));
+    }
+    if uid_removed {
+        intents.push(RawIntent::new(
+            "android.intent.action.UID_REMOVED",
+            0,
+            &[(EXTRA_UID, Value::Int(uid))],
+        ));
+    }
+    intents
+}
+
 /// `ArrayList.add` unless `list.contains(name)`.
 fn add(list: &mut Vec<String>, name: String) {
     if !list.contains(&name) {
@@ -736,6 +819,112 @@ mod tests {
     const OTHER: &str = "org.example.other";
     const MAIN: &str = "org.example.app.Main";
     const RECEIVER: &str = "org.example.app.Receiver";
+
+    #[test]
+    fn removal_intents_follow_the_java_actions_data_and_extras() {
+        let intents = removed_intents(APP, 10100, true, true, true);
+        assert_eq!(
+            intents
+                .iter()
+                .map(|i| i.intent.action.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "android.intent.action.PACKAGE_REMOVED",
+                "android.intent.action.PACKAGE_FULLY_REMOVED",
+                "android.intent.action.UID_REMOVED"
+            ]
+        );
+        assert_eq!(
+            intents[0].intent.data.as_ref().unwrap().as_str(),
+            "package:org.example.app"
+        );
+        assert_eq!(intents[1].intent.data, intents[0].intent.data);
+        assert!(intents[2].intent.data.is_none());
+        let extras = intents[0].test_extras();
+        assert_eq!(extras.len(), 4);
+        assert_eq!(extras[EXTRA_UID], Value::Int(10100));
+        assert_eq!(
+            extras["android.intent.extra.DATA_REMOVED"],
+            Value::Bool(true)
+        );
+        assert_eq!(extras[EXTRA_DONT_KILL_APP], Value::Bool(false));
+        assert_eq!(
+            extras["android.intent.extra.USER_INITIATED"],
+            Value::Bool(true)
+        );
+        assert_eq!(intents[1].test_extras().len(), 2);
+        assert_eq!(intents[2].test_extras().len(), 1);
+        assert_eq!(removed_intents(APP, 10100, false, true, false).len(), 1);
+        assert_eq!(removed_intents(APP, 10100, true, false, false).len(), 1);
+    }
+
+    struct RemovalSeen(Mutex<Vec<(String, i32, bool)>>);
+    impl PackageMonitor for RemovalSeen {
+        fn package_changed(&self, change: &PackageChanged<'_>) -> Result<(), Exception> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((change.package.into(), change.user, change.removed));
+            Ok(())
+        }
+    }
+    struct RemovalCallback(std::sync::mpsc::Sender<RawIntent>);
+    impl aim_binder_host::local::Service for RemovalCallback {
+        fn descriptor(&self) -> &str {
+            "android.os.IRemoteCallback"
+        }
+        fn transact(
+            &self,
+            call: &mut aim_binder_host::local::Call<'_>,
+        ) -> aim_binder_host::local::Reply {
+            call.data.enforce_interface(self.descriptor())?;
+            assert_eq!(call.data.read_i32()?, 1);
+            let values = bundle::read(&mut call.data)?.unwrap();
+            let Value::Lazy { start, .. } = values[EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT] else {
+                panic!("intent callback");
+            };
+            call.data.set_position(start);
+            assert_eq!(
+                call.data.read_string16()?.as_deref(),
+                Some("android.content.Intent")
+            );
+            self.0
+                .send(aim_service_aidl::ReadParcelable::read_from(&mut call.data)?)
+                .unwrap();
+            Ok(Parcel::new())
+        }
+    }
+
+    #[test]
+    fn removal_notifies_native_and_callback_monitors_once() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let native = Arc::new(RemovalSeen(Mutex::default()));
+            host.package_monitors.register(
+                0,
+                Arc::downgrade(&(native.clone() as Arc<dyn PackageMonitor>)),
+            );
+            let (send, receive) = std::sync::mpsc::channel();
+            let callback = host.process.add_service(Arc::new(RemovalCallback(send)));
+            let events = host.package_system().unwrap().package_events().unwrap();
+            events.register(Some(callback), 0, 1000).unwrap();
+            Writes::new(host.clone())
+                .removed("p", 10100, 0, true, true, true)
+                .unwrap();
+            assert!(events.wait(2000, false).unwrap());
+            assert_eq!(*native.0.lock().unwrap(), [("p".into(), 0, true)]);
+            let actions: Vec<_> = receive
+                .try_iter()
+                .map(|i| i.intent.action.unwrap())
+                .collect();
+            assert_eq!(
+                actions,
+                [
+                    "android.intent.action.PACKAGE_REMOVED",
+                    "android.intent.action.UID_REMOVED"
+                ]
+            );
+        });
+    }
 
     fn component(name: &str, exported: bool) -> Activity {
         let mut a = Activity::default();

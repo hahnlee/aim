@@ -1416,6 +1416,16 @@ impl Broadcasts {
         self.send_as_system(host, intent, user, allow_list, required_permissions);
     }
 
+    /// A synchronous package leaf propagates admission failures to its caller.
+    pub(super) fn try_send_from_package_manager(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+    ) -> Result<(), Exception> {
+        self.send_with(host, intent, user, None, Sender::system(&[]), None, None)
+    }
+
     fn send_as_system(
         &self,
         host: &AppHost,
@@ -1449,7 +1459,7 @@ impl Broadcasts {
         temp_allowlist: Option<TempAllowlist>,
         done: Option<Done>,
     ) {
-        self.send_with(
+        if let Err(e) = self.send_with(
             host,
             intent,
             user,
@@ -1457,7 +1467,9 @@ impl Broadcasts {
             Sender::system(required_permissions),
             temp_allowlist,
             done,
-        );
+        ) {
+            eprintln!("app host: a system broadcast: {e:?}");
+        }
     }
 
     fn send_as(
@@ -1468,7 +1480,9 @@ impl Broadcasts {
         allow_list: Option<&[i32]>,
         sender: Sender,
     ) {
-        self.send_with(host, intent, user, allow_list, sender, None, None);
+        if let Err(e) = self.send_with(host, intent, user, allow_list, sender, None, None) {
+            eprintln!("app host: a system broadcast: {e:?}");
+        }
     }
 
     /// A system service's broadcast: ordered when it has a `done`.
@@ -1482,7 +1496,7 @@ impl Broadcasts {
         sender: Sender,
         temp_allowlist: Option<TempAllowlist>,
         done: Option<Done>,
-    ) {
+    ) -> Result<(), Exception> {
         let mut flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let allowed_implicit = host.packages().map(|(model, _)| {
             intent
@@ -1491,7 +1505,16 @@ impl Broadcasts {
                 .as_ref()
                 .is_some_and(|a| model.system.allow_implicit_broadcasts.contains(a))
         });
-        if allowed_implicit.unwrap_or(false) {
+        let allowed_implicit = match allowed_implicit {
+            Ok(allowed) => allowed,
+            Err(e) => {
+                if let Some(done) = done {
+                    std::thread::spawn(done);
+                }
+                return Err(e);
+            }
+        };
+        if allowed_implicit {
             flags |= FLAG_RECEIVER_INCLUDE_BACKGROUND;
         }
         let extended = intent.intent.extended_flags;
@@ -1522,7 +1545,7 @@ impl Broadcasts {
                 if let Some(done) = done {
                     std::thread::spawn(done);
                 }
-                return eprintln!("app host: a system broadcast: {e:?}");
+                return Err(e);
             }
         };
         let mut st = self.state.lock().unwrap();
@@ -1578,10 +1601,10 @@ impl Broadcasts {
                 self.update_running(host, &mut st);
             }
             (Err(e), done) => {
-                eprintln!("app host: a system broadcast: {e:?}");
                 if let Some(done) = done {
                     std::thread::spawn(done);
                 }
+                return Err(e);
             }
         }
         drop(st);
@@ -1590,6 +1613,7 @@ impl Broadcasts {
         {
             host.update_time_zone();
         }
+        Ok(())
     }
 
     /// `collectReceiverComponents` for `intent`, then BroadcastSkipPolicy's

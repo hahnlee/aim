@@ -25,6 +25,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 mod install;
+mod removal;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::OpenOptionsExt;
@@ -1817,29 +1818,36 @@ impl PermissionManager {
         changes: &[FlagsChanged],
         kill: Option<&str>,
     ) -> Result<(), Exception> {
+        let system = self.system()?;
+        self.permission_effects(&system.permissions, changes, kill)
+    }
+
+    fn permission_effects(
+        &self,
+        definitions: &[Permission],
+        changes: &[FlagsChanged],
+        kill: Option<&str>,
+    ) -> Result<(), Exception> {
         let mut changed = Vec::new();
         // By uid, whether only notification permissions were revoked.
         let mut revoked: BTreeMap<i32, bool> = BTreeMap::new();
-        self.access(|access| {
-            for c in changes {
-                let Some(definition) = access.definition(&c.permission) else {
-                    continue;
-                };
-                if !is_runtime(definition) {
-                    continue;
-                }
-                // User 0's uid is its app id.
-                let uid = c.app_id;
-                if permission_granted(c.old) && !permission_granted(c.new) {
-                    let only = revoked.get(&uid).copied().unwrap_or(true);
-                    revoked.insert(uid, c.permission == POST_NOTIFICATIONS && only);
-                }
-                if !changed.contains(&uid) {
-                    changed.push(uid);
-                }
+        for c in changes {
+            let Some(definition) = definitions.iter().find(|p| p.name == c.permission) else {
+                continue;
+            };
+            if !is_runtime(definition) {
+                continue;
             }
-            Ok(())
-        })?;
+            // User 0's uid is its app id.
+            let uid = c.app_id;
+            if permission_granted(c.old) && !permission_granted(c.new) {
+                let only = revoked.get(&uid).copied().unwrap_or(true);
+                revoked.insert(uid, c.permission == POST_NOTIFICATIONS && only);
+            }
+            if !changed.contains(&uid) {
+                changed.push(uid);
+            }
+        }
         let listeners = self.listeners.lock().unwrap().clone();
         for uid in changed {
             let mut data = Parcel::new();
@@ -2385,11 +2393,15 @@ mod tests {
         }
 
         pub(super) fn write(&self, path: &str, xml: &[u8]) {
-            let path = self.data.join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let root = aim_android_xml::read(xml).unwrap();
-            std::fs::write(path, aim_android_xml::abx::write(&root).unwrap()).unwrap();
+            write_access(&self.host, path, xml);
         }
+    }
+
+    pub(super) fn write_access(host: &AppHost, path: &str, xml: &[u8]) {
+        let path = host.data().unwrap().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let root = aim_android_xml::read(xml).unwrap();
+        std::fs::write(path, aim_android_xml::abx::write(&root).unwrap()).unwrap();
     }
 
     impl Drop for PersistedAccess {

@@ -333,6 +333,15 @@ pub(super) fn profile_ids(user: i32) -> Vec<i32> {
     }
 }
 
+/// `InstallerRemovalBridge.getChildrenDeletedWithParent`: the app host's
+/// profile groups contain only the parent itself.
+pub(super) fn children_deleted_with_parent(user: i32) -> Vec<i32> {
+    profile_ids(user)
+        .into_iter()
+        .filter(|id| *id != user)
+        .collect()
+}
+
 /// `readUserListLP`'s first boot: with no user list persisted,
 /// `fallbackToSingleUserLP` records the system user (`writeUserLP`, then
 /// `writeUserListLP`), as the app host does at its start.

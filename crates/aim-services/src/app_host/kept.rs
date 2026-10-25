@@ -23,6 +23,14 @@ pub struct RawIntent {
 }
 
 impl RawIntent {
+    #[cfg(test)]
+    pub(super) fn test_extras(&self) -> std::collections::HashMap<String, crate::bundle::Value> {
+        let p = self.parcel();
+        let mut r = p.reader();
+        r.set_position(Spans::of(&self.raw).unwrap().extras.0);
+        crate::bundle::read(&mut r).unwrap().unwrap_or_default()
+    }
+
     /// Sets its flags and extended flags.
     pub fn set_flags(&mut self, flags: i32, extended_flags: i32) {
         self.intent.flags = flags;

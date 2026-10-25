@@ -325,7 +325,7 @@ impl External {
         name: &str,
         app: i32,
         user: i32,
-    ) -> Result<Strong, Exception> {
+    ) -> Result<crate::system::ServiceOwner, Exception> {
         self.call_with_reply(
             external_api::PREPARE_PERMISSIONS,
             |p| {
@@ -336,13 +336,13 @@ impl External {
             |r, reply| {
                 // Acquire in the actual receiving process before freeing the
                 // reply buffer's original reference.
-                reply.retain_remote_binder(r.read_binder()?.ok_or(BAD_VALUE)?)
+                crate::system::ServiceOwner::retain(reply, r.read_binder()?.ok_or(BAD_VALUE)?)
             },
         )
     }
     pub fn apply_permissions(
         &self,
-        scope: Strong,
+        scope: crate::system::ServiceOwner,
         code_removed: bool,
         clear_grants: bool,
     ) -> Result<(), Exception> {
@@ -352,7 +352,7 @@ impl External {
         data.write_bool(code_removed);
         data.write_bool(clear_grants);
         let reply = scope
-            .transact(permission_api::APPLY, &data, false)
+            .transact_as_owner(permission_api::APPLY, &data, false)
             .map_err(|code| illegal(format!("Permission removal transport: {code}")))?;
         let mut reader = reply.reader();
         reader

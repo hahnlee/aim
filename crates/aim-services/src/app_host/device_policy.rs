@@ -335,6 +335,13 @@ impl Policies {
         self.admins || self.policies
     }
 
+    /// `DevicePolicyManager.packageHasActiveAdmins` of this user.
+    pub(super) fn package_has_active_admins(&self, package: Option<&str>, user: i32) -> bool {
+        self.active_admins
+            .get(&user)
+            .is_some_and(|admins| admins.iter().any(|a| Some(a.package.as_str()) == package))
+    }
+
     /// `DevicePolicyManagerInternal.canSilentlyInstallPackage`: an affiliated
     /// device owner or active profile owner. Identity is the uid, not the
     /// supplied package name (which the original only checks for null).
