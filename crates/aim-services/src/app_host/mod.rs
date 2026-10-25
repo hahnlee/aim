@@ -87,6 +87,7 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod kept;
+mod launch_inputs;
 pub mod legacy_permission;
 pub mod locale_manager;
 pub mod lock_settings;
@@ -1598,25 +1599,8 @@ impl AppHost {
         from_background: bool,
         isolated: bool,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
-        let state = package::State::read(&inputs.data, &[0])
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
-            .ok_or_else(|| {
-                Exception::new(
-                    EX_ILLEGAL_STATE,
-                    "no package state: Android never booted on this data",
-                )
-            })?;
-        let setting = state
-            .settings
-            .packages
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| Exception::illegal_argument(format!("unknown package {name}")))?;
-        let listed = state.list.iter().find(|e| e.name == name).ok_or_else(|| {
-            Exception::new(EX_ILLEGAL_STATE, format!("{name} not in packages.list"))
-        })?;
-        let owner = listed.uid;
+        let launch = self.launch_inputs(name)?;
+        let owner = launch.uid;
         let uid = if isolated {
             self.isolated_uids
                 .lock()
@@ -1639,8 +1623,7 @@ impl AppHost {
             isolated,
             uid,
             owner,
-            setting,
-            listed,
+            launch,
         );
         if isolated {
             match &started {
@@ -1651,6 +1634,11 @@ impl AppHost {
             }
         }
         started
+    }
+
+    /// Acquire the inputs of one start through the legacy disk join.
+    fn launch_inputs(&self, name: &str) -> Result<launch_inputs::Inputs, Exception> {
+        launch_inputs::Inputs::legacy(&self.inputs()?.data, name)
     }
 
     /// The rest of `startProcessLocked` for the process `process` of
@@ -1665,8 +1653,7 @@ impl AppHost {
         isolated: bool,
         uid: u32,
         package_uid: u32,
-        setting: &package::settings::Package,
-        listed: &package::list::Entry,
+        launch: launch_inputs::Inputs,
     ) -> Result<(i64, i32), Exception> {
         let inputs = self.platform()?;
         if !isolated {
@@ -1694,14 +1681,14 @@ impl AppHost {
             (
                 mount_external,
                 process_gids(
-                    listed.gids.clone(),
+                    launch.permission_gids,
                     uid,
                     mount_external,
                     external_storage_access,
                 ),
             )
         };
-        let target_sdk = setting.target_sdk_version;
+        let target_sdk = launch.target_sdk;
         let app_info = self
             .application_info(name, STOCK_PM_FLAGS, None)?
             .ok_or_else(|| {
@@ -1726,13 +1713,13 @@ impl AppHost {
                     .get(settings::Table::Global, "hidden_api_policy")
                     .as_deref(),
             ) << API_ENFORCEMENT_POLICY_SHIFT
-                | memory_safety(&inputs.compat, name, setting.flags, target_sdk),
+                | memory_safety(&inputs.compat, name, launch.flags, target_sdk),
             mount_external,
             target_sdk_version: target_sdk,
             nice_name: process.to_string(),
-            seinfo: format!("{}{SEINFO_COMPLETE}", listed.seinfo),
-            instruction_set: setting.primary_cpu_abi.as_deref().map(instruction_set),
-            app_data_dir: Some(listed.data_dir.clone()),
+            seinfo: format!("{}{SEINFO_COMPLETE}", launch.seinfo),
+            instruction_set: launch.primary_cpu_abi.as_deref().map(instruction_set),
+            app_data_dir: Some(launch.data_dir),
             start_child_zygote: false,
             package_name: Some(name.to_string()),
             is_top_app: true,
