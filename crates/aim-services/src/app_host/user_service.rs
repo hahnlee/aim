@@ -493,8 +493,7 @@ pub(super) fn max_supported_users(host: &AppHost) -> Result<i32, Exception> {
         return Ok(1);
     }
     let config = host
-        .inputs()?
-        .packages
+        .framework()?
         .framework_integer("config_multiuserMaximumUsers")
         .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "missing config_multiuserMaximumUsers"))?;
     Ok(host
@@ -823,7 +822,7 @@ impl UserManager {
             return Ok(types);
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("user types: {e}"));
-        let packages = &self.host.inputs()?.packages;
+        let packages = self.host.framework()?;
         let communal = super::system_boolean(
             self.host
                 .property("persist.fw.omnipresent_communal_user")
@@ -1013,7 +1012,7 @@ impl UserManager {
                 None
             };
             if let Some(resource) = resource {
-                let name = self.host.inputs()?.packages.framework_string(resource);
+                let name = self.host.framework()?.framework_string(resource);
                 user.name = Some(name.ok_or_else(|| {
                     Exception::new(EX_ILLEGAL_STATE, format!("no framework string {resource}"))
                 })?);

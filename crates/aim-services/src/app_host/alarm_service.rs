@@ -372,8 +372,7 @@ impl AlarmManager {
         let (state, _) = self.host.packages()?;
         let Some(component) = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("config_systemUIServiceComponent")
         else {
             return Ok(None);

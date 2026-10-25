@@ -479,9 +479,10 @@ impl PowerManager {
     /// Battery saver: supported (`config_batterySaverSupported`) and on
     /// by the persisted `low_power` setting.
     pub(super) fn power_save_mode(&self) -> Result<bool, Exception> {
-        let inputs = self.host.inputs()?;
-        let supported = inputs
-            .packages
+        let inputs = self.host.platform()?;
+        let supported = self
+            .host
+            .framework()?
             .framework_bool("config_batterySaverSupported")
             .unwrap_or(true);
         Ok(supported && inputs.settings.get(Table::Global, "low_power").as_deref() == Some("1"))
@@ -495,8 +496,9 @@ impl PowerManager {
     /// `config_lowPowerStandbyEnabledByDefault`. The default is read, not
     /// written into the setting as `initSettingsLocked` does.
     fn low_power_standby_enabled(&self) -> Result<bool, Exception> {
-        let inputs = self.host.inputs()?;
-        let config = |name| inputs.packages.framework_bool(name).unwrap_or(false);
+        let inputs = self.host.platform()?;
+        let framework = self.host.framework()?;
+        let config = |name| framework.framework_bool(name).unwrap_or(false);
         let by_default = config("config_lowPowerStandbyEnabledByDefault");
         let enabled = inputs
             .settings
@@ -633,8 +635,8 @@ impl Service for PowerManager {
             }
             pm::IS_BATTERY_SAVER_SUPPORTED => {
                 pm::IsBatterySaverSupported::read(&mut call.data).map_err(bad)?;
-                bool_reply(self.host.inputs().map(|i| {
-                    i.packages
+                bool_reply(self.host.framework().map(|framework| {
+                    framework
                         .framework_bool("config_batterySaverSupported")
                         .unwrap_or(true)
                 }))

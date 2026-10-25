@@ -94,7 +94,7 @@ impl BootContext {
     fn capture(&self) -> Result<Vec<u8>, Exception> {
         let property = |name: &str| self.host.property(name).unwrap_or_default();
         let density = property("ro.sf.lcd_density").parse().unwrap_or(160);
-        let platform = super::packages::device_platform(
+        let platform = super::resources::device_platform(
             self.host.root()?,
             density,
             &property("persist.sys.locale"),
@@ -405,7 +405,7 @@ mod tests {
         else {
             return;
         };
-        let platform = super::super::packages::device_platform(&root, 320, "en-US").unwrap();
+        let platform = super::super::resources::device_platform(&root, 320, "en-US").unwrap();
         let user = super::super::user_service::ContextUser {
             id: 0,
             flags: 0xc13,

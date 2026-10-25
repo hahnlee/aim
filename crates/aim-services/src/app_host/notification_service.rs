@@ -701,8 +701,7 @@ impl NotificationManager {
     /// `R.string.default_notification_channel_label`.
     fn default_label(&self) -> Result<String, Exception> {
         self.host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("default_notification_channel_label")
             .ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "no default_notification_channel_label")
@@ -1101,8 +1100,7 @@ impl NotificationManager {
     ) -> Result<Option<crate::package::intent::ComponentName>, Exception> {
         let config = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("config_defaultAssistantAccessComponent")
             .unwrap_or_default();
         for entry in config.split(':') {
@@ -1294,8 +1292,7 @@ impl NotificationManager {
         // selector's; there are no enterprise admins.
         let search_selector = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("config_defaultSearchSelectorPackageName")
             .is_some_and(|s| s == package);
         if flags & FLAG_ONGOING_EVENT != 0

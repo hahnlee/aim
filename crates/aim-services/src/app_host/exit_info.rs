@@ -817,16 +817,12 @@ impl AppHost {
             return Ok(tracker);
         }
         let name = "config_app_exit_info_history_list_size";
-        let capacity = self
-            .inputs()?
-            .packages
-            .framework_integer(name)
-            .ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    format!("no integer {name}"),
-                )
-            })?;
+        let capacity = self.framework()?.framework_integer(name).ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("no integer {name}"),
+            )
+        })?;
         let data = self.data()?.to_path_buf();
         let host = self.me.clone();
         Ok(self.exit_infos.get_or_init(|| {

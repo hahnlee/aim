@@ -168,8 +168,7 @@ impl WebViewUpdate {
         }
         let xml = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_file(self.host.root()?, "xml", "config_webview_packages")
             .ok_or_else(|| {
                 Exception::new(

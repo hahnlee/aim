@@ -868,8 +868,7 @@ impl super::AppHost {
     /// `config_defaultInTouchMode`, the display's first touch mode.
     fn default_in_touch_mode(&self) -> Result<bool, Exception> {
         Ok(self
-            .inputs()?
-            .packages
+            .framework()?
             .framework_bool("config_defaultInTouchMode")
             .unwrap_or(true))
     }
@@ -893,8 +892,7 @@ impl super::AppHost {
         display: Option<i32>,
     ) -> Result<(), Exception> {
         let per_display_focus = self
-            .inputs()?
-            .packages
+            .framework()?
             .framework_bool("config_perDisplayFocusEnabled")
             .unwrap_or(false);
         if self.in_touch_mode()? == in_touch

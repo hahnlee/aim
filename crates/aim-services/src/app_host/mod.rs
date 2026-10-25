@@ -143,6 +143,7 @@ pub mod power_service;
 mod preferred_records;
 pub mod providers;
 mod recovery_certificates;
+mod resources;
 pub mod restrictions_service;
 pub mod role_service;
 pub mod rollback_service;
@@ -513,8 +514,8 @@ pub struct AppHost {
     process: Arc<LocalProcess>,
     configured: OnceLock<Configured>,
     platform: OnceLock<Arc<Platform>>,
-    /// The framework's resources read before the packages were.
-    framework: OnceLock<packages::Framework>,
+    /// The device's framework and APK resource context.
+    framework: OnceLock<resources::Framework>,
     inputs: OnceLock<Inputs>,
     loading: Mutex<()>,
     zygote: Mutex<Option<zygote::Session>>,
@@ -1167,18 +1168,15 @@ impl AppHost {
         Ok(self.platform.get_or_init(|| Arc::new(platform)))
     }
 
-    /// The framework's resources as the device configures them: the
-    /// packages', once read, else read on their own.
-    fn framework(&self) -> Result<&packages::Framework, Exception> {
-        if let Some(inputs) = self.inputs.get() {
-            return Ok(inputs.packages.framework());
-        }
+    /// The framework's resources as the device configures them, without
+    /// acquiring the package model.
+    fn framework(&self) -> Result<&resources::Framework, Exception> {
         if let Some(framework) = self.framework.get() {
             return Ok(framework);
         }
         let platform = self.platform()?;
         let framework =
-            packages::Framework::load(self.root()?, platform.device_density, &platform.locales)
+            resources::Framework::load(self.root()?, platform.device_density, &platform.locales)
                 .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         Ok(self.framework.get_or_init(|| framework))
     }
@@ -2755,14 +2753,16 @@ impl AppHost {
     fn recents_uid(&self) -> Result<Option<i32>, Exception> {
         const MATCH_DISABLED_COMPONENTS: i64 = 0x200;
         const MATCH_UNINSTALLED_PACKAGES: i64 = 0x2000;
-        let packages = &self.inputs()?.packages;
-        let component = packages
+        let framework = self.framework()?;
+        let component = framework
             .framework_string("config_recentsComponentName")
             .unwrap_or_default();
         let Some((package, _)) = component.split_once('/') else {
             return Ok(None);
         };
-        Ok(packages
+        Ok(self
+            .inputs()?
+            .packages
             .application_info(
                 package,
                 MATCH_UNINSTALLED_PACKAGES | MATCH_DISABLED_COMPONENTS,
@@ -3986,8 +3986,8 @@ impl AppHost {
         };
         let config = self.global_configuration()?;
         let compat_info = config::CompatibilityInfo::of(&info, &config, inputs.device_density);
-        let analog_clock_fps = inputs
-            .packages
+        let analog_clock_fps = self
+            .framework()?
             .framework_integer("config_defaultAnalogClockSecondsHandFps")
             .ok_or_else(|| state("no config_defaultAnalogClockSecondsHandFps".into()))?;
         let core_settings =
@@ -5673,3 +5673,6 @@ mod tests {
         assert!(errors.crash_times.is_empty() && errors.bad.is_empty());
     }
 }
+
+#[cfg(test)]
+mod resources_tests;

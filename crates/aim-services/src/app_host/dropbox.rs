@@ -706,13 +706,14 @@ impl DropBox {
 
     /// `getLowPriorityResourceConfigs`.
     fn low_priority_resource_configs(&self) -> Result<(), Exception> {
-        let inputs = self.host.inputs()?;
-        let period = inputs
-            .packages
+        let period = self
+            .host
+            .framework()?
             .framework_integer("config_dropboxLowPriorityBroadcastRateLimitPeriod")
             .unwrap_or(0);
-        let tags: HashSet<String> = inputs
-            .packages
+        let tags: HashSet<String> = self
+            .host
+            .framework()?
             .framework_string_array("config_dropboxLowPriorityTags")
             .unwrap_or_default()
             .into_iter()

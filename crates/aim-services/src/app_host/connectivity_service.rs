@@ -1021,8 +1021,7 @@ impl ConnectivityService {
         Ok(vendor < VENDOR_API_2024_Q2
             && self
                 .host
-                .inputs()?
-                .packages
+                .framework()?
                 .framework_bool("config_mobile_data_capable")
                 .unwrap_or(true))
     }

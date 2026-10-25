@@ -2060,9 +2060,8 @@ impl Service for PermissionManager {
             }
             pm::GET_SPLIT_PERMISSIONS => {
                 pm::GetSplitPermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.host.inputs().map(|inputs| {
-                    let splits: Vec<_> = inputs
-                        .packages
+                self.host.framework().map(|framework| {
+                    let splits: Vec<_> = framework
                         .split_permissions()
                         .iter()
                         .map(|s| Some(SplitPermissionInfo(s)))

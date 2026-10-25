@@ -334,7 +334,7 @@ impl DisplayManager {
         let size = if persisted.0 > 0 && persisted.1 > 0 {
             persisted
         } else {
-            let packages = &self.host.inputs()?.packages;
+            let packages = self.host.framework()?;
             let integer = |name: &str| {
                 packages
                     .framework_integer(name)
@@ -420,9 +420,8 @@ impl Service for DisplayManager {
             // Wi-Fi P2P is not modelled.
             dm::GET_WIFI_DISPLAY_STATUS => {
                 dm::GetWifiDisplayStatus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let configured = self.host.inputs().and_then(|inputs| {
-                    inputs
-                        .packages
+                let configured = self.host.framework().and_then(|framework| {
+                    framework
                         .framework_bool("config_enableWifiDisplay")
                         .ok_or_else(|| {
                             Exception::new(EX_ILLEGAL_STATE, "no config_enableWifiDisplay")

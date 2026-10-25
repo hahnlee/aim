@@ -359,7 +359,7 @@ impl ContentService {
         if let Some(listen) = root.as_ref().and_then(|r| master_sync_of(r, user)) {
             return Ok(listen);
         }
-        let packages = &self.host.inputs()?.packages;
+        let packages = self.host.framework()?;
         packages
             .framework_bool("config_syncstorageengine_masterSyncAutomatically")
             .ok_or_else(|| state("no config_syncstorageengine_masterSyncAutomatically".into()))

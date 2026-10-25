@@ -174,15 +174,14 @@ impl AppHost {
     /// `LegacyDeviceRouteController.createRouteFromAudioInfo` of the
     /// speaker route, at the music stream's volume.
     fn device_route(&self) -> Result<Route, Exception> {
-        let inputs = self.inputs()?;
-        let name = inputs
-            .packages
+        let name = self
+            .framework()?
             .framework_string("default_audio_route_name")
             .unwrap_or_default();
         // `getBuiltInSpeakerSuitabilityStatus`: the configured status, if
         // a known one.
-        let suitability = match inputs
-            .packages
+        let suitability = match self
+            .framework()?
             .framework_integer("config_mediaRouter_builtInSpeakerSuitability")
         {
             Some(s @ 0..=2) => s,

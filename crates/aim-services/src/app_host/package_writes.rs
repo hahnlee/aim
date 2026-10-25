@@ -461,8 +461,7 @@ impl Writes {
         }
         let provisioning = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("config_deviceProvisioningPackage");
         Ok(Some(provisioning.as_deref() == Some(package)))
     }

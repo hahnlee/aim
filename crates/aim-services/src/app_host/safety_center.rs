@@ -109,8 +109,7 @@ impl SafetyCenter {
         };
         let supported = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_bool("config_enableSafetyCenter")
             .unwrap_or(false);
         let (config, defaults) = if supported {

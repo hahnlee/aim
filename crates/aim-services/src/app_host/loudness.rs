@@ -494,7 +494,7 @@ fn spl_range(host: &AppHost, output: Output) -> Result<SplRange, Exception> {
 /// `AudioSystem.getPlatformType` finds, a voice capable device being
 /// neither.
 fn automotive_or_television(host: &AppHost) -> Result<bool, Exception> {
-    let packages = &host.inputs()?.packages;
+    let packages = host.framework()?;
     if packages
         .framework_bool("config_voice_capable")
         .unwrap_or(false)

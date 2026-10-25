@@ -434,7 +434,7 @@ impl Service for MediaRouter {
             mr::SET_SELECTED_ROUTE => {
                 let a = mr::SetSelectedRoute::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let packages = &self.host.inputs()?.packages;
+                    let packages = self.host.framework()?;
                     let string = |name: &str| {
                         packages.framework_string(name).ok_or_else(|| {
                             Exception::new(

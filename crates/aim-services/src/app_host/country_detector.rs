@@ -146,9 +146,9 @@ impl CountryDetector {
             .spawn(move || jobs.into_iter().for_each(|job| job()))
             .expect("the country detector's thread");
         let custom = host
-            .inputs()
+            .framework()
             .ok()
-            .and_then(|i| i.packages.framework_string("config_customCountryDetector"))
+            .and_then(|i| i.framework_string("config_customCountryDetector"))
             .filter(|c| !c.is_empty());
         if let Some(class) = custom {
             // `loadCustomCountryDetectorIfAvailable` loads a class of

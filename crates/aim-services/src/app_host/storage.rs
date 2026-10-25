@@ -695,9 +695,8 @@ impl AppHost {
             .unwrap()
             .as_ref()
             .map(|v| v.state);
-        let inputs = self.inputs()?;
-        let unknown = inputs
-            .packages
+        let unknown = self
+            .framework()?
             .framework_string("unknownName")
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no unknownName"))?;
         let volume = match state.filter(|_| user == USER) {
@@ -896,8 +895,7 @@ impl AppHost {
     /// in `state`.
     fn storage_volume(&self, user: i32, state: i32) -> Result<StorageVolume, Exception> {
         let description = self
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("storage_internal")
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no storage_internal"))?;
         Ok(StorageVolume {

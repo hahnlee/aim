@@ -502,12 +502,9 @@ impl AppHost {
     /// the task got.
     fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
         let min_dp = self
-            .inputs()
+            .framework()
             .ok()
-            .and_then(|i| {
-                i.packages
-                    .framework_dimension_dp("default_minimal_size_resizable_task")
-            })
+            .and_then(|i| i.framework_dimension_dp("default_minimal_size_resizable_task"))
             .ok_or("no default_minimal_size_resizable_task")? as i32;
         let density = self
             .display()

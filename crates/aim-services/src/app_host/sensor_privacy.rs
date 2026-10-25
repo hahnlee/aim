@@ -229,7 +229,7 @@ impl Service for SensorPrivacy {
                         (TOGGLE_TYPE_HARDWARE, CAMERA) => Some("config_supportsHardwareCamToggle"),
                         _ => None,
                     };
-                    let packages = &self.host.inputs()?.packages;
+                    let packages = self.host.framework()?;
                     spm::write_supports_sensor_toggle_reply(
                         &mut p,
                         name.and_then(|n| packages.framework_bool(n))

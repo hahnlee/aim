@@ -209,7 +209,7 @@ mod tests {
             );
             let host = AppHost::new(process.clone());
             let mut framework =
-                super::super::packages::Framework::load(&root, 320, "en-US").unwrap();
+                super::super::resources::Framework::load(&root, 320, "en-US").unwrap();
             framework
                 .0
                 .flags

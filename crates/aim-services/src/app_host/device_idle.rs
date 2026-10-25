@@ -515,7 +515,7 @@ impl DeviceIdle {
     /// (`UserSettingDeviceConfigMediator`), else the framework's default
     /// (`device_idle_<key>`).
     fn constant(&self, key: &str) -> Result<i64, Exception> {
-        let inputs = self.host.inputs()?;
+        let inputs = self.host.platform()?;
         let setting = inputs
             .settings
             .get(Table::Global, "device_idle_constants")
@@ -535,8 +535,8 @@ impl DeviceIdle {
         {
             return Ok(value);
         }
-        inputs
-            .packages
+        self.host
+            .framework()?
             .framework_integer(&format!("device_idle_{key}"))
             .map(i64::from)
             .ok_or_else(|| {

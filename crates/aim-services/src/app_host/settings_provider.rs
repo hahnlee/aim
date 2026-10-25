@@ -1966,8 +1966,7 @@ impl SettingsProvider {
     fn window_size(&self) -> Result<usize, Exception> {
         let kib = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_integer("config_cursorWindowSize")
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no config_cursorWindowSize"))?;
         Ok(kib.max(0) as usize * 1024)
@@ -2688,8 +2687,7 @@ impl SettingsProvider {
                 Some(users) => users,
                 None => self
                     .host
-                    .inputs()?
-                    .packages
+                    .framework()?
                     .framework_integer("config_multiuserMaximumUsers")
                     .ok_or_else(|| {
                         Exception::new(EX_ILLEGAL_STATE, "no config_multiuserMaximumUsers")

@@ -815,7 +815,7 @@ impl Service for PackageBootstrap {
             // process's `DisplayMetrics.DENSITY_DEVICE`.
             bridge::GET_INSTANT_APP_ICON_DENSITY => {
                 bridge::GetInstantAppIconDensity::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                host.inputs().map(|inputs| {
+                host.platform().map(|inputs| {
                     bridge::write_get_instant_app_icon_density_reply(&mut p, inputs.device_density);
                 })
             }

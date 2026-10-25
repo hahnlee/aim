@@ -255,11 +255,10 @@ impl AudioService {
         if let Some(e) = self.effects.get() {
             return Ok(e);
         }
-        let xml =
-            self.host
-                .inputs()?
-                .packages
-                .framework_file(self.host.root()?, "xml", "audio_assets");
+        let xml = self
+            .host
+            .framework()?
+            .framework_file(self.host.root()?, "xml", "audio_assets");
         let (files, repeat, home) = sound_assets(xml.as_deref());
         if repeat {
             self.navigation_repeat.store(true, Ordering::Relaxed);
@@ -295,8 +294,7 @@ impl AudioService {
         let gain = if volume < 0.0 {
             let db = self
                 .host
-                .inputs()?
-                .packages
+                .framework()?
                 .framework_integer("config_soundEffectVolumeDb")
                 .unwrap_or(0);
             10f32.powf(db as f32 / 20.0)
@@ -401,7 +399,7 @@ impl AppHost {
     fn volumes(&self) -> Result<MutexGuard<'_, Option<Volumes>>, Exception> {
         let mut volumes = self.volumes.lock().unwrap();
         if volumes.is_none() {
-            let inputs = self.inputs()?;
+            let inputs = self.platform()?;
             let (state, _) = self.packages()?;
             let configured = self.configured.get().ok_or_else(|| {
                 Exception::new(
@@ -410,11 +408,12 @@ impl AppHost {
                 )
             })?;
             let flag = |name: &str| state.system.flags.iter().any(|(n, on)| n == name && *on);
-            let resource = |name: &str| inputs.packages.framework_bool(name).unwrap_or(false);
+            let framework = self.framework()?;
+            let resource = |name: &str| framework.framework_bool(name).unwrap_or(false);
             if resource("config_handleVolumeAliasesUsingVolumeGroups") {
                 return Err(self.unimplemented_named("audio", "volume aliases by volume groups"));
             }
-            let integer = |name: &str| inputs.packages.framework_integer(name);
+            let integer = |name: &str| framework.framework_integer(name);
             let property = |name: &str| (configured.properties)(name).and_then(|v| v.parse().ok());
             let setting = |table: Table, name: &str| {
                 inputs
