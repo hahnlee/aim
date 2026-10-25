@@ -1,8 +1,10 @@
 //! `IInstallerCompletionBridge` for the app host: an install's completion
 //! owners, which system_server's `InstallerCompletionBridge` serves, to
 //! the system uid only. An instant app, an APEX or a rollback from the
-//! platform is not dexopted, as the original answers it; any other
-//! install's dexopt needs ART Service (#2063), and the app-op owner's
+//! platform is not dexopted, as the original answers it. The app host
+//! has no ART Service (#2063), so no install is dexopted: the app runs
+//! interpreted and JIT-compiled, as an app whose dexopt was skipped does
+//! (the maintainer's install policy until #2063); the app-op owner's
 //! package-added state is part of committing an install (#1995).
 
 use std::sync::Arc;
@@ -25,15 +27,13 @@ impl InstallerCompletion {
         InstallerCompletion { host }
     }
 
-    /// `dexoptInstalledResult`'s answer: none for what is not dexopted.
+    /// `dexoptInstalledResult`'s answer: none for what is not dexopted,
+    /// and without ART Service (#2063) nothing else is.
     fn dexopt(&self, instant: bool, apex: bool, rollback: bool) -> Result<(), Exception> {
-        if instant || apex || rollback {
-            Ok(())
-        } else {
-            Err(self
-                .host
-                .unimplemented_named("installer completion", "dexopt (#2063)"))
+        if !(instant || apex || rollback) {
+            eprintln!("app host: installer completion: not dexopted without ART Service (#2063)");
         }
+        Ok(())
     }
 }
 
@@ -97,12 +97,11 @@ impl Service for InstallerCompletion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+    use aim_binder_host::parcel::EX_SECURITY;
 
-    /// What the original does not dexopt is answered without ART; the rest
-    /// names its issue, to the system only.
+    /// No install is dexopted without ART Service; the system only asks.
     #[test]
-    fn only_dexoptable_installs_need_art() {
+    fn installs_are_not_dexopted_without_art() {
         let node = |euid: u32| {
             let process = aim_binder_host::local::LocalProcess::open(
                 &aim_binder_driver::Driver::new(),
@@ -141,10 +140,7 @@ mod tests {
             bridge::read_dexopt_installed_reply(&mut reply.reader()).unwrap()
         };
         assert_eq!(dexopt(SYSTEM_UID, true).unwrap(), -1);
-        assert_eq!(
-            dexopt(SYSTEM_UID, false).unwrap_err().code,
-            EX_UNSUPPORTED_OPERATION
-        );
+        assert_eq!(dexopt(SYSTEM_UID, false).unwrap(), -1);
         assert_eq!(dexopt(10000, true).unwrap_err().code, EX_SECURITY);
     }
 }
