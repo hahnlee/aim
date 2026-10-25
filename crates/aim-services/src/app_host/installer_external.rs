@@ -358,7 +358,20 @@ fn pending_streaming(id: i32, cause: Option<&str>) -> RawIntent {
 
 /// `PackageManager.installStatusToPublicStatus` and `installStatusToString`, android-16.0.0_r1.
 fn install_status(status: i32, message: Option<&str>) -> (i32, String) {
-    let public = match status {
+    let public = install_public_status(status);
+    let name = install_status_name(status).map_or_else(|| status.to_string(), str::to_string);
+    (
+        public,
+        match message {
+            Some(message) => format!("{name}: {message}"),
+            None => name,
+        },
+    )
+}
+
+/// `PackageManager.installStatusToPublicStatus`.
+pub(super) fn install_public_status(status: i32) -> i32 {
+    match status {
         1 => 0,
         -110 => 1,
         -129 => 2,
@@ -369,15 +382,7 @@ fn install_status(status: i32, message: Option<&str>) -> (i32, String) {
         -4 | -18 | -19 | -20 => 6,
         -9 | -12 | -14 | -16 | -17 | -111 | -113 | -28 | -29 => 7,
         _ => 1,
-    };
-    let name = install_status_name(status).map_or_else(|| status.to_string(), str::to_string);
-    (
-        public,
-        match message {
-            Some(message) => format!("{name}: {message}"),
-            None => name,
-        },
-    )
+    }
 }
 
 /// `PackageManager.installStatusToString`'s names.

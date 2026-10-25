@@ -1475,6 +1475,8 @@ pub struct PermissionManager {
     installs: Mutex<BTreeMap<u64, install::Candidate>>,
     groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
     listeners: Mutex<Vec<Binder>>,
+    /// `PermissionService.isDelayedPermissionBackupFinished`.
+    delayed_backup_finished: Mutex<BTreeSet<i32>>,
 }
 
 impl PermissionManager {
@@ -1485,6 +1487,40 @@ impl PermissionManager {
             installs: Mutex::new(BTreeMap::new()),
             groups: Mutex::new(None),
             listeners: Mutex::new(Vec::new()),
+            delayed_backup_finished: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// `PermissionService.restoreDelayedRuntimePermissions`: even before
+    /// any backup was staged, ask PermissionController once per user. Only
+    /// its successful "no more backup" callback closes that user's restore.
+    pub(super) fn restore_delayed_runtime_permissions(
+        self: &Arc<Self>,
+        package: &str,
+        user: i32,
+    ) -> Result<(), Exception> {
+        if user < 0 {
+            return Err(Exception::illegal_argument("userId"));
+        }
+        if self.delayed_backup_finished.lock().unwrap().contains(&user) {
+            return Ok(());
+        }
+        let owner = Arc::downgrade(self);
+        super::permission_controller::apply_staged_runtime_permission_backup(
+            &self.host,
+            package,
+            user,
+            move |has_more| {
+                if let Some(owner) = owner.upgrade() {
+                    owner.delayed_backup_completed(user, has_more);
+                }
+            },
+        )
+    }
+
+    fn delayed_backup_completed(&self, user: i32, has_more: bool) {
+        if !has_more {
+            self.delayed_backup_finished.lock().unwrap().insert(user);
         }
     }
 
@@ -2312,6 +2348,37 @@ impl Service for PermissionManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delayed_restore_caches_only_the_controllers_no_more_backup_for_each_user() {
+        let process = aim_binder_host::local::LocalProcess::open(
+            &aim_binder_driver::Driver::new(),
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: std::process::id() as i32,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let owner = Arc::new(PermissionManager::new(AppHost::new(process)));
+        // With no configured package owner, the first request cannot reach
+        // PermissionController and must not fabricate a finished restore.
+        assert!(owner.restore_delayed_runtime_permissions("p", 0).is_err());
+        owner.delayed_backup_completed(0, true);
+        assert!(owner.restore_delayed_runtime_permissions("p", 0).is_err());
+        owner.delayed_backup_completed(0, false);
+        owner.restore_delayed_runtime_permissions("p", 0).unwrap();
+        owner
+            .restore_delayed_runtime_permissions("updated.package", 0)
+            .unwrap();
+        assert!(owner.restore_delayed_runtime_permissions("p", 10).is_err());
+        assert_eq!(
+            owner
+                .restore_delayed_runtime_permissions("p", -1)
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+        );
+    }
 
     #[test]
     fn audio_batch_uses_the_live_permission_owner_and_retained_package_capture() {

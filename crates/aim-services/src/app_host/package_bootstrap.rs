@@ -16,6 +16,9 @@
 //! owners, the internal persistence, install and storage leaves, and the
 //! move's storage leaves, monitor users and payloads, and internal event
 //! preparation and the native services' PackageList observer registry.
+//! Existing-install completion restores delayed permissions through the
+//! permission owner and delivers its status; backup restore has no owner
+//! (#1925). The install-existing app-data leaf remains unsupported (#2022).
 //! The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -29,9 +32,12 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 use super::boot_policy;
+use super::kept::{RawBundle, RawIntent};
 use super::settings::Table;
 use super::{AppHost, reply};
+use crate::bundle::Value;
 use crate::package::bootstrap::ScanUsers;
+use crate::package::installer::existing::IntentSender;
 use crate::package::pkg::AndroidPackage;
 use crate::package::scan::SharedUidMigration;
 use crate::package::system_config::{Sdk, SystemConfig};
@@ -227,6 +233,59 @@ impl PackageBootstrap {
         Ok(self.config.get_or_init(|| config))
     }
 
+    /// `ExistingInstallEffects.complete`: only the public status extra,
+    /// with no pending-intent background activity launch grant.
+    fn complete_existing_install(
+        &self,
+        name: Option<&str>,
+        user: i32,
+        target: Option<IntentSender>,
+        status: i32,
+        restore_permissions: bool,
+    ) -> Result<Option<String>, Exception> {
+        if restore_permissions
+            && status == 1
+            && let Some(name) = name
+        {
+            self.permissions()?
+                .restore_delayed_runtime_permissions(name, user)?;
+        }
+        if let Some(target) = target {
+            let options = RawBundle::empty()
+                .with_ints(&[("android.pendingIntent.backgroundActivityAllowed", 2)])
+                .map_err(|_| {
+                    Exception::new(EX_ILLEGAL_STATE, "existing install broadcast options")
+                })?;
+            let intent = RawIntent::with_data(
+                None,
+                None,
+                None,
+                0,
+                &[(
+                    "android.content.pm.extra.STATUS",
+                    Value::Int(super::installer_external::install_public_status(status)),
+                )],
+            );
+            let result = self.host.send_intent_sender(
+                SYSTEM_UID,
+                None,
+                target.0,
+                0,
+                Some(intent),
+                None,
+                None,
+                None,
+                Some(options),
+            )?;
+            if result < 0 {
+                return Ok(Some(
+                    "android.content.IntentSender$SendIntentException".into(),
+                ));
+            }
+        }
+        Ok(None)
+    }
+
     /// `transactBatch`: each of `calls` (a count, then each call's code and
     /// data) answered as its own call, in order, until the replies pass
     /// `BATCH_REPLY_BUDGET`; a call's failure in its reply. The count of
@@ -379,6 +438,50 @@ impl Service for PackageBootstrap {
         let mut p = Parcel::new();
         let host = &self.host;
         let result: Result<(), Exception> = match call.code {
+            bridge::COMPLETE_EXISTING_PACKAGE_INSTALL => {
+                let a =
+                    bridge::CompleteExistingPackageInstall::<IntentSender>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                self.complete_existing_install(
+                    a.package_name.as_deref(),
+                    a.user_id,
+                    a.target,
+                    a.status,
+                    a.restore_permissions,
+                )
+                .map(|v| bridge::write_complete_existing_package_install_reply(&mut p, &v))
+            }
+            bridge::RESTORE_EXISTING_PACKAGE_INSTALL => {
+                bridge::RestoreExistingPackageInstall::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                // `ExistingInstallEffects.restore`: checkService("backup")
+                // finds no owner in the app host (#1925).
+                bridge::write_restore_existing_package_install_reply(&mut p, false);
+                Ok(())
+            }
+            bridge::GET_EXISTING_PACKAGE_INSTALL_USER_POLICY => {
+                let a = bridge::GetExistingPackageInstallUserPolicy::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                (|| {
+                    let user = a.user_id;
+                    if user < 0 {
+                        return Err(Exception::illegal_argument(format!(
+                            "Invalid userId {user}"
+                        )));
+                    }
+                    let mut record = Parcel::new();
+                    record.write_i32(user);
+                    record.write_bool(super::user_service::serial_number(host, user)?.is_some());
+                    record.write_bool(host.has_user_restriction("no_install_apps", user)?);
+                    record.write_bool(host.has_user_restriction("no_debugging_features", user)?);
+                    record.write_bool(host.device_policies()?.managed_users().contains(&user));
+                    bridge::write_get_existing_package_install_user_policy_reply(
+                        &mut p,
+                        &Some(record.data().to_vec()),
+                    );
+                    Ok(())
+                })()
+            }
             bridge::IS_SHELL_DEBUGGING_RESTRICTED => {
                 let a = bridge::IsShellDebuggingRestricted::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -1246,6 +1349,10 @@ impl Service for PackageBootstrap {
         reply(result.map(|()| p))
     }
 }
+
+#[cfg(test)]
+#[path = "package_bootstrap_existing_tests.rs"]
+mod existing_tests;
 
 #[cfg(test)]
 mod tests {
