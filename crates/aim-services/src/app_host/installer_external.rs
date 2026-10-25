@@ -494,7 +494,7 @@ impl Service for InstallerExternal {
                     .map_err(|_| BAD_VALUE)?;
                 a.receiver
                     .ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))
-                    .and_then(|r| self.host.intent_sender_immutable(r.target))
+                    .map(|r| self.host.intent_sender_immutable(r.target))
                     .map(|immutable| {
                         bridge::write_is_intent_sender_immutable_reply(&mut p, immutable)
                     })
@@ -817,7 +817,7 @@ mod tests {
                 p.write_string16(None);
             })
             .unwrap();
-            assert!(host.intent_sender_immutable(receiver.target).is_err()); // one-shot consumed
+            assert!(!host.intent_sender_immutable(receiver.target)); // one-shot consumed
             assert!(
                 leaf.send(Some(receiver), pending_streaming(7, None))
                     .is_err()

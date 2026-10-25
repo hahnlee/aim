@@ -373,16 +373,16 @@ impl AppHost {
             .map(|r| r.uid)
     }
 
-    /// `IntentSender.isImmutable`: the token must still name a record.
-    pub(super) fn intent_sender_immutable(&self, target: Binder) -> Result<bool, Exception> {
+    /// `isIntentSenderImmutable`: a record's FLAG_IMMUTABLE; another
+    /// IIntentSender (the shell's `LocalIntentReceiver`) is not immutable.
+    pub(super) fn intent_sender_immutable(&self, target: Binder) -> bool {
         self.pending_intents
             .records
             .lock()
             .unwrap()
             .iter()
             .find(|r| r.binder == target)
-            .map(|r| r.flags & FLAG_IMMUTABLE != 0)
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "IntentSender record unavailable"))
+            .is_some_and(|r| r.flags & FLAG_IMMUTABLE != 0)
     }
 
     /// `getInfoForIntentSender`.
