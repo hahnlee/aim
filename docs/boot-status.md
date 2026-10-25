@@ -189,11 +189,20 @@ acquisitions and cached package intent queries use that capture and its resolver
 there is no private mutable host package model or enabled-settings Store. Data clear
 uses the native application-data worker and freezer; installd receives the
 retained inode receipt and a failed storage/publication/effect operation reports
-false to the observer. The boot observation above predates this handover.
-Focused owner tests and the host build pass; no new guest boot, app frame,
-second-boot or CTS result is recorded for it. The local guest attempt for the
-preceding storage handover stopped before init because DiskManagement was
-unavailable; real installd/process/effect conformance remains unverified.
+false to the observer. The reviewer reports two boots of the same disposable
+step-4 data on `81595570` (2026-10-25): DeskClock disable/enable changes its
+launcher resolution immediately and survives reboot; data clear removes its
+sentinel while retaining CE/DE inodes, remains cleared after reboot and fails
+for an unknown package. BOOT_COMPLETED and Settings drawing were observed;
+the reported crate run passed 1825 tests. These are reviewer results, not a
+new local guest run.
+
+Process starts now retain the session capture for application info, UID/GIDs,
+ABI, seInfo, package-dependent mount selection and data-isolation inodes rather
+than joining Settings/packages.list at start time. Focused owner tests and the
+host build pass for this launch-reader change; no new guest boot, app frame, second-boot or
+CTS result is recorded for it. The boot-input join and permission/domain/discovery
+reader handover remain #2023; install access lifecycle remains #2161.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

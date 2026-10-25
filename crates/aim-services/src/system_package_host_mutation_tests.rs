@@ -381,6 +381,8 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         grants,
         ..
     } = session();
+    let old_launch = host.launch_inputs("p").unwrap();
+    assert!(Arc::ptr_eq(&old_launch.capture, &old));
     let data = fixture.root.join("data");
     let (send, receive) = mpsc::channel();
     let monitor = fixture.native.add_service(Arc::new(Monitor(send)));
@@ -508,6 +510,15 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         ["android.permission.CAMERA"]
     );
     assert_eq!(granted.state().packages["p"].users[&0].gids, [3003]);
+    let granted_launch = host.launch_inputs("p").unwrap();
+    assert!(Arc::ptr_eq(&granted_launch.capture, &granted));
+    assert_eq!(granted_launch.permission_gids, [3003]);
+    assert_eq!(granted_launch.application.uid, old_launch.application.uid);
+    assert_eq!(
+        granted_launch.application.se_info,
+        old_launch.application.se_info
+    );
+    assert!(old_launch.permission_gids.is_empty());
     assert_eq!(
         granted.state().packages["p"].users[&0].disabled_components,
         ["p.Main"]
@@ -531,6 +542,10 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
     );
     assert!(revoked.state().packages["p"].users[&0].gids.is_empty());
     assert_eq!(granted.state().packages["p"].users[&0].gids, [3003]);
+    let revoked_launch = host.launch_inputs("p").unwrap();
+    assert!(Arc::ptr_eq(&revoked_launch.capture, &revoked));
+    assert!(revoked_launch.permission_gids.is_empty());
+    assert_eq!(granted_launch.permission_gids, [3003]);
     // A delayed enable is visible before its callback, then delivers once.
     let request = setting("p.Main", 0, 1);
     transact(&cached, 1000, pm::SET_COMPONENT_ENABLED_SETTING, &request)

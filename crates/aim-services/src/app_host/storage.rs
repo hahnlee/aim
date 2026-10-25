@@ -590,10 +590,18 @@ impl AppHost {
 
     /// `StorageManagerInternal.getExternalStorageMountMode`
     /// (`getMountModeInternal`) of `package`'s process of `uid`.
-    pub(super) fn mount_mode(&self, uid: i32, package: &str) -> Result<MountExternal, Exception> {
+    pub(super) fn mount_mode(
+        &self,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        uid: i32,
+        package: &str,
+    ) -> Result<MountExternal, Exception> {
         /// `AppOpsManager.OP_REQUEST_INSTALL_PACKAGES`.
         const OP_REQUEST_INSTALL_PACKAGES: i32 = 66;
-        let (state, resolution) = self.packages()?;
+        let state = capture.state();
+        let resolution = capture
+            .resolution()
+            .map_err(|e| io_exception(&format!("mount mode resolution: {e:?}")))?;
         let user = uid / 100_000;
         let app_id = uid % 100_000;
         let packages: Vec<&str> = state

@@ -87,7 +87,7 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod kept;
-mod launch_inputs;
+pub(crate) mod launch_inputs;
 pub mod legacy_permission;
 pub mod locale_manager;
 pub mod lock_settings;
@@ -1342,7 +1342,7 @@ impl AppHost {
         uid: u32,
         crash_handler: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<i32, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let configured = self
             .configured
             .get()
@@ -1448,7 +1448,7 @@ impl AppHost {
         info: Arc<package::info::ApplicationInfo>,
         process: &str,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let owner = info.uid as u32;
         let package = info.item.package_name.clone().unwrap_or_default();
         let uid = self
@@ -1610,7 +1610,7 @@ impl AppHost {
         isolated: bool,
     ) -> Result<(i64, i32), Exception> {
         let launch = self.launch_inputs(name)?;
-        let owner = launch.uid;
+        let owner = launch.application.uid as u32;
         let uid = if isolated {
             self.isolated_uids
                 .lock()
@@ -1649,9 +1649,9 @@ impl AppHost {
         started
     }
 
-    /// Acquire the inputs of one start through the legacy disk join.
-    fn launch_inputs(&self, name: &str) -> Result<launch_inputs::Inputs, Exception> {
-        launch_inputs::Inputs::legacy(&self.inputs()?.data, name)
+    /// Retain the session generation used by this process start.
+    pub(crate) fn launch_inputs(&self, name: &str) -> Result<launch_inputs::Inputs, Exception> {
+        launch_inputs::Inputs::capture(self.package_capture()?, name)
     }
 
     /// The rest of `startProcessLocked` for the process `process` of
@@ -1689,7 +1689,7 @@ impl AppHost {
         let (mount_external, gids) = if isolated {
             (zygote::MountExternal::None, Vec::new())
         } else {
-            let mount_external = self.mount_mode(uid as i32, name)?;
+            let mount_external = self.mount_mode(&launch.capture, uid as i32, name)?;
             let external_storage_access = self.has_external_storage_access(uid as i32, name)?;
             (
                 mount_external,
@@ -1701,14 +1701,16 @@ impl AppHost {
                 ),
             )
         };
-        let target_sdk = launch.target_sdk;
-        let app_info = self
-            .application_info(name, STOCK_PM_FLAGS, None)?
-            .ok_or_else(|| {
-                Exception::new(EX_ILLEGAL_STATE, format!("no application info of {name}"))
-            })?;
+        let app_info = &launch.application;
+        let target_sdk = app_info.target_sdk_version;
         let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let mut isolation = self.data_isolation(name, uid, target_sdk, mount_external)?;
+        let mut isolation = self.data_isolation(
+            launch.capture.state(),
+            name,
+            uid,
+            target_sdk,
+            mount_external,
+        )?;
         // An isolated process does not even mount its own app's data.
         if isolated {
             isolation.packages.clear();
@@ -1730,9 +1732,12 @@ impl AppHost {
             mount_external,
             target_sdk_version: target_sdk,
             nice_name: process.to_string(),
-            seinfo: format!("{}{SEINFO_COMPLETE}", launch.seinfo),
-            instruction_set: launch.primary_cpu_abi.as_deref().map(instruction_set),
-            app_data_dir: Some(launch.data_dir),
+            seinfo: format!(
+                "{}{SEINFO_COMPLETE}",
+                app_info.se_info.as_deref().expect("validated seInfo")
+            ),
+            instruction_set: app_info.primary_cpu_abi.as_deref().map(instruction_set),
+            app_data_dir: app_info.data_dir.clone(),
             start_child_zygote: false,
             package_name: Some(name.to_string()),
             is_top_app: true,
@@ -1828,12 +1833,13 @@ impl AppHost {
     /// (`persist.sys.vold_app_data_isolation_enabled`).
     fn data_isolation(
         &self,
+        state: &package::model::State,
         package: &str,
         uid: u32,
         target_sdk: i32,
         mount_external: zygote::MountExternal,
     ) -> Result<Isolation, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let configured = self
             .configured
             .get()
@@ -1841,8 +1847,6 @@ impl AppHost {
         let flag = |name: &str, default: bool| {
             system_boolean((configured.properties)(name).as_deref(), default)
         };
-        let capture = self.package_capture()?;
-        let state = capture.state();
         let user = (uid / PER_USER_RANGE) as i32;
         let app_id = uid % PER_USER_RANGE;
         let mut data_dirs = flag("persist.zygote.app_data_isolation", true)
