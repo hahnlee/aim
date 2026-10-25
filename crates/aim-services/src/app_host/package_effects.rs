@@ -54,6 +54,46 @@ impl Service for PackageEffects {
                 self.protected(a.package_name.as_deref())
                     .map(|v| bridge::write_is_data_protected_reply(&mut p, v))
             }
+            bridge::PACKAGE_CHANGED => {
+                let a = bridge::PackageChanged::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let name = a.package_name.as_deref().ok_or_else(|| {
+                    Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "packageName")
+                });
+                let components = a
+                    .components
+                    .ok_or_else(|| {
+                        Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "components")
+                    })
+                    .and_then(|values| {
+                        values
+                            .into_iter()
+                            .map(|name| {
+                                name.ok_or_else(|| {
+                                    Exception::new(
+                                        aim_binder_host::parcel::EX_NULL_POINTER,
+                                        "component",
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    });
+                name.and_then(|name| {
+                    components.and_then(|components| {
+                        self.host
+                            .package_writes
+                            .get_or_init(|| super::package_writes::Writes::new(self.host.clone()))
+                            .changed(
+                                name,
+                                a.package_uid,
+                                a.dont_kill_app,
+                                components,
+                                a.delayed,
+                                a.reason.as_deref(),
+                            )
+                    })
+                })
+                .map(|()| bridge::write_package_changed_reply(&mut p))
+            }
             code => {
                 let name = bridge::METHODS
                     .iter()

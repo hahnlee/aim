@@ -157,7 +157,7 @@ impl AppHost {
         process: &str,
         uid: u32,
     ) -> Result<Vec<ProviderInfo>, Exception> {
-        let (model, resolution) = self.packages()?;
+        let (model, resolution) = self.live_packages()?;
         let query = crate::package::query::Query {
             state: &model,
             filter: &resolution.apps_filter,

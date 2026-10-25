@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
-    BAD_VALUE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader,
+    BAD_VALUE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
 };
 use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 
@@ -18,9 +18,7 @@ use super::AppHost;
 use super::package_writes::Writes;
 use super::settings_service::{java_exception, parse_user_arg};
 use crate::package::apps_filter::NotModelled;
-use crate::package::intent::ComponentName;
 use crate::package::query::Query;
-use crate::package::write::enabled::{Batch, Setting};
 use crate::shadow::{Answer, ShadowCall};
 use crate::shell::{SHELL_COMMAND_TRANSACTION, ShellCommand};
 
@@ -83,52 +81,6 @@ impl PackageService {
         };
         let uid = call.sender_euid;
         Some(match call.code {
-            pm::REGISTER_PACKAGE_MONITOR_CALLBACK => {
-                let Ok(a) = pm::RegisterPackageMonitorCallback::read(&mut call.data) else {
-                    return Some(Err(BAD_VALUE));
-                };
-                reply(
-                    self.writes.register_monitor(call, a.callback, a.user_id),
-                    pm::write_register_package_monitor_callback_reply,
-                )
-            }
-            pm::UNREGISTER_PACKAGE_MONITOR_CALLBACK => {
-                let Ok(a) = pm::UnregisterPackageMonitorCallback::read(&mut call.data) else {
-                    return Some(Err(BAD_VALUE));
-                };
-                self.writes.unregister_monitor(a.callback);
-                reply(Ok(()), pm::write_unregister_package_monitor_callback_reply)
-            }
-            pm::SET_COMPONENT_ENABLED_SETTING | pm::SET_APPLICATION_ENABLED_SETTING => {
-                let setting = match single(call.code, uid, &mut call.data) {
-                    Ok(setting) => setting,
-                    Err(status) => return Some(Err(status)),
-                };
-                let write = match call.code {
-                    pm::SET_COMPONENT_ENABLED_SETTING => {
-                        pm::write_set_component_enabled_setting_reply
-                    }
-                    _ => pm::write_set_application_enabled_setting_reply,
-                };
-                reply(
-                    setting.and_then(|s| self.writes.set_enabled(call, &[s])),
-                    write,
-                )
-            }
-            pm::SET_COMPONENT_ENABLED_SETTINGS => {
-                let batch = match Batch::read(uid as i32, &mut call.data) {
-                    Ok(batch) => batch,
-                    Err(status) => return Some(Err(status)),
-                };
-                // No settings: the user does not exist.
-                let result = batch
-                    .settings(query)
-                    .and_then(|settings| match settings.is_empty() {
-                        true => Ok(()),
-                        false => self.writes.set_enabled(call, &settings),
-                    });
-                reply(result, pm::write_set_component_enabled_settings_reply)
-            }
             pm::CLEAR_APPLICATION_USER_DATA => {
                 let Ok(a) = pm::ClearApplicationUserData::read(&mut call.data) else {
                     return Some(Err(BAD_VALUE));
@@ -250,24 +202,6 @@ impl PackageService {
     }
 }
 
-/// The setting of `setComponentEnabledSetting` or
-/// `setApplicationEnabledSetting`; a null component throws as
-/// `ComponentEnabledSetting`'s constructor does, and no package is known
-/// by a null name.
-fn single(code: u32, uid: u32, data: &mut Reader<'_>) -> Result<Result<Setting, Exception>, i32> {
-    let mut args = data.clone();
-    if let Some(setting) = Setting::read(code, uid, data) {
-        return Ok(Ok(setting));
-    }
-    Ok(Err(if code == pm::SET_COMPONENT_ENABLED_SETTING {
-        pm::SetComponentEnabledSetting::<ComponentName>::read(&mut args)?;
-        Exception::new(EX_NULL_POINTER, "componentName")
-    } else {
-        pm::SetApplicationEnabledSetting::read(&mut args)?;
-        Exception::illegal_argument("Unknown package: null")
-    }))
-}
-
 impl PackageService {
     /// `PackageManagerShellCommand.onCommand` of `uid` (of `pid`): `clear`;
     /// the installation commands run in `transact`; the other commands are
@@ -377,7 +311,12 @@ impl Service for PackageService {
         // including for clients that retained this pre-construction Binder.
         if matches!(
             call.code,
-            pm::NOTIFY_PACKAGE_USE
+            pm::SET_COMPONENT_ENABLED_SETTING
+                | pm::SET_APPLICATION_ENABLED_SETTING
+                | pm::SET_COMPONENT_ENABLED_SETTINGS
+                | pm::REGISTER_PACKAGE_MONITOR_CALLBACK
+                | pm::UNREGISTER_PACKAGE_MONITOR_CALLBACK
+                | pm::NOTIFY_PACKAGE_USE
                 | pm::GET_SYSTEM_TEXT_CLASSIFIER_PACKAGE_NAME
                 | pm::GET_ATTENTION_SERVICE_PACKAGE_NAME
                 | pm::GET_DEFAULT_TEXT_CLASSIFIER_PACKAGE_NAME
@@ -398,7 +337,7 @@ impl Service for PackageService {
             let (public, _) = crate::package::service::PackageQueries::from_system(system);
             return public.transact(call);
         }
-        let (state, resolution) = match self.host.packages() {
+        let (state, resolution) = match self.host.live_packages() {
             Ok(packages) => packages,
             Err(e) => {
                 let mut reply = Parcel::new();

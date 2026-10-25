@@ -367,7 +367,7 @@ fn to_xml(hints: &[Hint], bytes_when_calculated: i64) -> Element {
 /// `mServicesExtensionPackageName`: `config_servicesExtensionPackage`, a
 /// system image package) as the system resolves it.
 fn service_component(host: &AppHost) -> Result<Option<(String, String)>, String> {
-    let (state, resolution) = host.packages().map_err(|e| e.message)?;
+    let (state, resolution) = host.live_packages().map_err(|e| e.message)?;
     let query = Query {
         state: &state,
         filter: &resolution.apps_filter,
@@ -415,7 +415,7 @@ fn unfulfilled_requests(host: &AppHost) -> Result<Vec<(Hint, UsageStats)>, Strin
         else {
             continue;
         };
-        let (state, resolution) = host.packages().map_err(|e| e.message)?;
+        let (state, resolution) = host.live_packages().map_err(|e| e.message)?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,

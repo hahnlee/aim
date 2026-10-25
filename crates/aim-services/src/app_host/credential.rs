@@ -353,7 +353,7 @@ impl CredentialManager {
     /// The services of `action` `uid` sees in `user` (`queryIntentServicesAsUser`
     /// with GET_META_DATA).
     fn services(&self, action: &str, user: i32, uid: i32) -> Result<Vec<ServiceInfo>, Exception> {
-        let (_, resolution) = self.host.packages()?;
+        let (_, resolution) = self.host.live_packages()?;
         let intent = Intent {
             action: Some(action.into()),
             ..Default::default()
@@ -444,7 +444,7 @@ impl CredentialManager {
         }) else {
             return Ok(Default::default());
         };
-        let (state, _) = self.host.packages()?;
+        let (state, _) = self.host.live_packages()?;
         let package = si.info.item.package_name.clone().unwrap_or_default();
         let Some(pkg) = state.packages.get(&package).and_then(|ps| ps.pkg.clone()) else {
             eprintln!(
@@ -530,7 +530,7 @@ impl CredentialManager {
 
     /// Whether `package` is a system app `uid` sees in user 0.
     fn system_app(&self, package: &str, uid: i32) -> Result<bool, Exception> {
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,

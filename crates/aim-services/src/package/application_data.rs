@@ -355,7 +355,7 @@ impl Owner {
         self.errors.lock().unwrap().clone()
     }
 }
-fn reset_components(state: &State, name: &str, user: i32) -> Vec<Plan> {
+pub(crate) fn reset_components(state: &State, name: &str, user: i32) -> Vec<Plan> {
     let Some(setting) = state.packages.get(name) else {
         return vec![];
     };

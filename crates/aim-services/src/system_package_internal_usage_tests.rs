@@ -2455,3 +2455,6 @@ fn app_data_read_through_observes_persisted_session_receipts() {
         991
     );
 }
+
+#[path = "system_package_host_mutation_tests.rs"]
+mod host_mutations;

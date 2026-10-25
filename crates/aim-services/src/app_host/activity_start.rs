@@ -689,7 +689,7 @@ impl AppHost {
             ));
         }
         // `ActivityTaskSupervisor.resolveIntent`.
-        let (_, resolution) = self.packages()?;
+        let (_, resolution) = self.live_packages()?;
         let only_exported =
             self.change_enabled(IMPLICIT_INTENTS_ONLY_MATCH_EXPORTED_COMPONENTS, uid)?;
         let report = std::cell::RefCell::new(Vec::new());

@@ -116,6 +116,8 @@ pub mod package_bootstrap;
 mod package_checksums;
 mod package_domain_settings;
 mod package_effects;
+#[cfg(test)]
+pub(crate) use package_effects::PackageEffects;
 mod package_enable;
 pub mod package_initial_context;
 pub mod package_installer;
@@ -539,10 +541,6 @@ pub struct AppHost {
     /// The users unlocking or unlocked (`UserController`'s user states at
     /// `STATE_RUNNING_UNLOCKING` or later).
     unlocked_users: Mutex<std::collections::BTreeSet<i32>>,
-    /// The owner of PackageManager's persisted state, opened by its
-    /// first write (the package service's, the app data's inodes);
-    /// holding it serializes writes (`mLock`).
-    package_store: Mutex<Option<crate::package::owner::Store>>,
     resolver: crate::package::resolve::Resolver,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
@@ -652,7 +650,6 @@ impl AppHost {
             model: Mutex::new(None),
             model_writer: Mutex::new(()),
             unlocked_users: Mutex::new(Default::default()),
-            package_store: Mutex::new(None),
             resolver: Default::default(),
             activities: Default::default(),
             display: OnceLock::new(),
@@ -1261,7 +1258,7 @@ impl AppHost {
         name: &str,
         class: &str,
     ) -> Result<package::info::ActivityInfo, Exception> {
-        let (state, resolution) = self.packages()?;
+        let (state, resolution) = self.live_packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -1416,7 +1413,12 @@ impl AppHost {
             "app host: Start proc {pid}:{process}/{uid} for {entry} in {:?}",
             started.elapsed()
         );
-        self.isolated_owners_changed(|owners| owners.push((uid as i32, SYSTEM_UID as i32)))?;
+        self.package_system()?.internal_add_isolated_uid(
+            uid as i32,
+            SYSTEM_UID as i32,
+            SYSTEM_UID as i32,
+            0,
+        )?;
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
@@ -1525,7 +1527,12 @@ impl AppHost {
             "app host: Start proc {pid}:{process}/{uid} by the WebView zygote in {:?}",
             started.elapsed()
         );
-        self.isolated_owners_changed(|owners| owners.push((uid as i32, owner as i32)))?;
+        self.package_system()?.internal_add_isolated_uid(
+            uid as i32,
+            owner as i32,
+            SYSTEM_UID as i32,
+            0,
+        )?;
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
@@ -1641,9 +1648,12 @@ impl AppHost {
         );
         if isolated {
             match &started {
-                Ok(_) => {
-                    self.isolated_owners_changed(|owners| owners.push((uid as i32, owner as i32)))?
-                }
+                Ok(_) => self.package_system()?.internal_add_isolated_uid(
+                    uid as i32,
+                    owner as i32,
+                    SYSTEM_UID as i32,
+                    0,
+                )?,
                 Err(_) => self.free_isolated_uid(uid)?,
             }
         }
@@ -3271,7 +3281,7 @@ impl AppHost {
     /// launches `package` with: the first of its `MAIN` activities in the
     /// `INFO` category, else in the `LAUNCHER` category.
     fn launch_activity_of(&self, package: &str, calling_uid: i32) -> Result<String, Exception> {
-        let (_, resolution) = self.packages()?;
+        let (_, resolution) = self.live_packages()?;
         for category in [
             "android.intent.category.INFO",
             "android.intent.category.LAUNCHER",
@@ -3381,7 +3391,7 @@ impl AppHost {
         let state = match acquired {
             Some(state) => state,
             None => {
-                current = self.packages()?.0;
+                current = self.live_packages()?.0;
                 &current
             }
         };
@@ -3422,17 +3432,21 @@ impl AppHost {
         Ok((state, resolution))
     }
 
-    /// `PackageManagerInternal.addIsolatedUid`/`removeIsolatedUid`: the
-    /// package model's isolated uids and their owners, changed by `change`.
-    fn isolated_owners_changed(
+    /// Enabled-state consumers acquire the session's retained query generation.
+    pub(super) fn live_packages(
         &self,
-        change: impl FnOnce(&mut Vec<(i32, i32)>),
-    ) -> Result<(), Exception> {
-        let _writer = self.model_writer.lock().unwrap();
-        let (before, _) = self.packages()?;
-        let mut state = (*before).clone();
-        change(&mut state.system.isolated_owners);
-        self.user_states_changed(&before, Arc::new(state))
+    ) -> Result<
+        (
+            Arc<package::model::State>,
+            Arc<package::resolve::Resolution>,
+        ),
+        Exception,
+    > {
+        let capture = self.package_system()?.capture_package_queries()?;
+        let resolution = capture.resolution().map_err(|error| {
+            Exception::new(EX_ILLEGAL_STATE, format!("package resolution: {error:?}"))
+        })?;
+        Ok((capture.state().clone(), resolution))
     }
 
     /// `UserController.finishUserUnlocking`: `user`'s credential-encrypted
@@ -3472,31 +3486,24 @@ impl AppHost {
         recipient: i32,
         visible: i32,
     ) -> Result<(), Exception> {
-        let _writer = self.model_writer.lock().unwrap();
-        let (before, resolution) = self.packages()?;
-        let query = crate::package::query::Query {
-            state: &before,
-            filter: &resolution.apps_filter,
-            calling_uid: recipient,
-        };
-        let grants = crate::package::visibility_mutation::MakeUidVisible { recipient, visible }
-            .grant(&query)
-            .map_err(|e| {
-                self.unimplemented_named("package", &format!("grantImplicitAccess: {}", e.0))
-            })??;
-        let Some(grants) = grants else { return Ok(()) };
-        let mut state = (*before).clone();
-        state.system.implicit_access = grants;
-        self.user_states_changed(&before, Arc::new(state))
+        self.package_system()?.internal_grant_implicit_access(
+            recipient / PER_USER_RANGE as i32,
+            None,
+            recipient % PER_USER_RANGE as i32,
+            visible,
+            true,
+            false,
+            SYSTEM_UID as i32,
+            0,
+        )
     }
 
-    /// The isolated uid `uid` is free again (`freeIsolatedUidLocked`), and
-    /// no longer has an owner.
+    /// The isolated uid is free again after its session owner is removed.
     fn free_isolated_uid(&self, uid: u32) -> Result<(), Exception> {
+        self.package_system()?
+            .internal_remove_isolated_uid(uid as i32, SYSTEM_UID as i32, 0)?;
         self.isolated_uids.lock().unwrap().used.remove(&uid);
-        self.isolated_owners_changed(|owners| {
-            owners.retain(|(isolated, _)| *isolated != uid as i32)
-        })
+        Ok(())
     }
 
     /// Replaces the package model's state `before` with `state`, which
@@ -3771,7 +3778,7 @@ impl AppHost {
         user: i32,
         uid: i32,
     ) -> Result<Option<package::info::ProviderInfo>, Exception> {
-        let (_, resolution) = self.packages()?;
+        let (_, resolution) = self.live_packages()?;
         match resolution.resolve_content_provider(authority, flags, user, uid) {
             Ok(found) => Ok(found),
             Err(crate::package::resolve::ResolutionError::Original(e)) => Err(e),
@@ -3795,7 +3802,7 @@ impl AppHost {
 
     /// `AppOpsManager.checkPackage`: whether `package` is `uid`'s.
     pub(super) fn owns_package(&self, uid: i32, package: &str) -> Result<bool, Exception> {
-        let (state, _) = self.packages()?;
+        let (state, _) = self.live_packages()?;
         Ok(state
             .packages
             .get(package)
@@ -3816,7 +3823,7 @@ impl AppHost {
     /// package of the uid.
     pub(super) fn change_enabled(&self, change: i64, uid: i32) -> Result<bool, Exception> {
         let inputs = self.platform()?;
-        let (state, resolution) = self.packages()?;
+        let (state, resolution) = self.live_packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,

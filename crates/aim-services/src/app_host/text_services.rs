@@ -484,7 +484,7 @@ impl TextServices {
 
     /// `initializeTextServicesData`: the user's spell checkers.
     fn find_checkers(&self, user: i32) -> Result<Vec<Arc<Checker>>, Exception> {
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         let intent = Intent {
             action: Some(SERVICE_INTERFACE.into()),
             ..Default::default()
@@ -648,7 +648,7 @@ impl TextServices {
         if current == Some(checker.id.as_str()) {
             return Ok(true);
         }
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         let filtered = crate::package::apps_filter::should_filter_application(
             &state,
             &resolution.apps_filter,

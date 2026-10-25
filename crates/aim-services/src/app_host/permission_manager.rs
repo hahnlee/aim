@@ -1617,7 +1617,7 @@ impl PermissionManager {
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
         let inputs = self.host.inputs()?;
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         f(&Access {
             state: &state,
             filter: &resolution.apps_filter,
@@ -1651,7 +1651,7 @@ impl PermissionManager {
         let after = Arc::new(after);
         *held = Some(after.clone());
         drop(held);
-        self.grants_changed(&after, &changes)?;
+        self.grants_changed()?;
         self.on_state_mutated(&changes, kill)
     }
 
@@ -1718,37 +1718,12 @@ impl PermissionManager {
         Ok(())
     }
 
-    /// The package model's grants of the app ids that changed, as the
-    /// package service reads them from the access state.
-    fn grants_changed(
-        &self,
-        state: &AccessUser,
-        changes: &[FlagsChanged],
-    ) -> Result<(), Exception> {
-        let _writer = self.host.model_writer.lock().unwrap();
-        let (before, _) = self.host.packages()?;
-        let mut model = (*before).clone();
-        for ps in model.packages.values_mut() {
-            if !changes.iter().any(|c| c.app_id == ps.app_id) {
-                continue;
-            }
-            let granted = state
-                .app_id_permissions
-                .iter()
-                .find(|(id, _)| *id == ps.app_id)
-                .map(|(_, permissions)| {
-                    permissions
-                        .iter()
-                        .filter(|(_, flags)| permission_granted(*flags))
-                        .map(|(name, _)| name.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(user) = ps.users.get_mut(&0) {
-                user.granted_permissions = granted;
-            }
-        }
-        self.host.user_states_changed(&before, Arc::new(model))
+    /// Publish the committed access owner's grants and GIDs through the session.
+    fn grants_changed(&self) -> Result<(), Exception> {
+        let system = self.host.package_system()?;
+        let bridge = system.package_bootstrap()?;
+        let capture = system.capture_package_queries_for(&bridge)?;
+        system.refresh_package_permission_queries(&bridge, &capture)
     }
 
     /// `OnPermissionFlagsChangedListener.onStateMutated`.

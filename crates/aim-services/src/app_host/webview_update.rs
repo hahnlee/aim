@@ -192,7 +192,7 @@ impl WebViewUpdate {
 
     /// `pm.getPackageInfo(package, flags)` as the system asks it.
     fn package_info(&self, package: &str, flags: i64) -> Result<Option<PackageInfo>, Exception> {
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,

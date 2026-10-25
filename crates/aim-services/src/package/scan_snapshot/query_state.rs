@@ -1895,13 +1895,23 @@ impl Capture {
             version,
         )
         .map_err(|error| format!("permission refresh replica: {error:?}"))?;
+        let capture = self.permission_view(store.capture(), bridge)?;
+        Ok(PackageUpdate { store, capture })
+    }
+
+    pub(crate) fn permission_view(
+        &self,
+        scan: Arc<super::Snapshot>,
+        bridge: &crate::package::bootstrap::Bridge,
+    ) -> Result<Arc<Self>, String> {
         let mut context = (*self.context).clone();
-        context.scan_version = version;
+        context.scan_version = scan.version();
         let context = bridge
             .resolve_query_context(self.scan.owner(), context)
             .map_err(|error| format!("permission refresh original owner: {error:?}"))?;
-        let capture = Self::new(store.capture(), context)?;
-        Ok(PackageUpdate { store, capture })
+        let mut capture = Self::new(scan, context)?;
+        Arc::get_mut(&mut capture).unwrap().frozen = self.frozen.clone();
+        Ok(capture)
     }
 }
 impl Capture {

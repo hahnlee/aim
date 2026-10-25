@@ -7964,37 +7964,64 @@ impl System {
         base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let update = base
-            .prepare_permission_refresh(bridge)
-            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state
-            .current
-            .as_mut()
-            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
-            .ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "permission refresh bootstrap changed",
+        let failure =
+            |message: &str| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
+        loop {
+            let (capture, canonical) = {
+                let state = self.package_bootstrap.lock().unwrap();
+                let current = state
+                    .current
+                    .as_ref()
+                    .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+                    .ok_or_else(|| failure("permission refresh bootstrap changed"))?;
+                let capture = current
+                    .queries
+                    .clone()
+                    .ok_or_else(|| failure("permission refresh capture unavailable"))?;
+                if !base.scan().same_lineage(capture.scan()) {
+                    return Err(failure("permission refresh epoch changed"));
+                }
+                let canonical = current
+                    .snapshots
+                    .as_ref()
+                    .ok_or_else(|| failure("permission refresh scan unavailable"))?
+                    .capture();
+                (capture, canonical)
+            };
+            // RPCs can reenter the permission owner; hold no publication lock.
+            let (view, update) = if Arc::ptr_eq(capture.scan(), &canonical) {
+                let update = capture
+                    .prepare_permission_refresh(bridge)
+                    .map_err(|cause| failure(&cause))?;
+                (update.capture.clone(), Some(update))
+            } else {
+                (
+                    capture
+                        .permission_view(capture.scan().clone(), bridge)
+                        .map_err(|cause| failure(&cause))?,
+                    None,
                 )
-            })?;
-        if !current
-            .queries
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, base))
-        {
-            return Err(Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                "permission refresh generation changed",
-            ));
+            };
+            let mut state = self.package_bootstrap.lock().unwrap();
+            let current = state
+                .current
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+                .ok_or_else(|| failure("permission refresh bootstrap changed"))?;
+            if !current
+                .queries
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, &capture))
+                || !current
+                    .snapshots
+                    .as_ref()
+                    .is_some_and(|snapshots| Arc::ptr_eq(&snapshots.capture(), &canonical))
+            {
+                continue;
+            }
+            self.publish_internal_visibility_view(&mut state, &canonical, view, update)?;
+            return Ok(());
         }
-        let update = current.publish_update(update)?;
-        current.set_queries(Some(update.capture.clone()));
-        if let Some(page) = &current.version_page {
-            page.publish(update.capture.scan().version());
-        }
-        state.version = update.capture.scan().version();
-        Ok(())
     }
 }
 

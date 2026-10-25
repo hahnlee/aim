@@ -1099,7 +1099,7 @@ impl SliceManager {
 
     /// `getPackagesForUid`.
     fn packages_for_uid(&self, uid: i32) -> Result<Option<Vec<Option<String>>>> {
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -1136,7 +1136,7 @@ impl SliceManager {
     /// home of the system app of the highest priority, the last of
     /// equals.
     fn default_home(&self, user: i32) -> Result<Option<String>> {
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,

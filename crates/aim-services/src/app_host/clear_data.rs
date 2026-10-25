@@ -291,7 +291,7 @@ impl AppHost {
         };
         let writes = self.writes()?.clone();
         let Some(package) = package.filter(|_| visible) else {
-            writes.post(move || done(false));
+            writes.post(move || done(false))?;
             return Ok(());
         };
         if self.data_protected(package)? {
@@ -304,7 +304,7 @@ impl AppHost {
         writes.post(move || {
             let succeeded = host.clear_package_data_now(&package, user);
             done(succeeded);
-        });
+        })?;
         Ok(())
     }
 

@@ -99,7 +99,7 @@ impl MediaRouter {
     /// (`verifyServiceTrusted`: guarded by BIND_REMOTE_DISPLAY, their
     /// package granted REMOTE_DISPLAY_PROVIDER).
     fn providers(&self, user: i32) -> Result<usize, Exception> {
-        let (state, resolution) = self.host.packages()?;
+        let (state, resolution) = self.host.live_packages()?;
         let intent = Intent {
             action: Some(REMOTE_DISPLAY_PROVIDER.into()),
             ..Default::default()
