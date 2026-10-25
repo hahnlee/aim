@@ -114,12 +114,11 @@ fn application_info_reuses_acquisition_and_preserves_trusted_flags() {
             .is_none()
     );
     assert!(host.inputs.get().is_none());
-    assert!(host.model.lock().unwrap().is_none());
     // No supplied capture means an ordinary acquisition, with its real error.
     assert_eq!(
         host.application_info("example.app", 0, None)
             .unwrap_err()
             .message,
-        "app host not configured"
+        "native package system unavailable"
     );
 }

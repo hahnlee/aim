@@ -326,12 +326,18 @@ impl Service for PackageService {
             let (public, _) = crate::package::service::PackageQueries::from_system(system);
             return public.transact(call);
         }
-        let (state, resolution) = match self.host.live_packages() {
-            Ok(packages) => packages,
-            Err(e) => {
-                let mut reply = Parcel::new();
-                reply.write_exception(&e);
-                return Ok(reply);
+        let capture = match self.host.package_capture() {
+            Ok(capture) => capture,
+            Err(error) => return super::reply(Err(error)),
+        };
+        let state = capture.state().clone();
+        let resolution = match capture.resolution() {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                return super::reply(Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("package resolution: {error:?}"),
+                )));
             }
         };
         let mut shadow = ShadowCall {
@@ -346,7 +352,7 @@ impl Service for PackageService {
             dropped: 0,
             data: call.data.clone(),
         };
-        if let Some(answer) = self.host.resolver.answer(&state, &mut shadow) {
+        if let Some(answer) = capture.resolver().answer(&state, &mut shadow) {
             return match answer {
                 Answer::Reply(reply) => Ok(reply),
                 Answer::Status(status) => Err(status),

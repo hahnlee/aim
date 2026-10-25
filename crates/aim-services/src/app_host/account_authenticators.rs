@@ -86,7 +86,7 @@ pub struct Authenticator {
 /// `generateServicesMap(null, user)`: `user`'s authenticators, the
 /// persisted services updated (and written) as they changed.
 pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Exception> {
-    let (state, resolution) = host.live_packages()?;
+    let (state, resolution) = host.packages()?;
     let flags = GET_META_DATA | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE;
     let intent = Intent {
         action: Some(ACTION.into()),

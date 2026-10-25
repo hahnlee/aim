@@ -198,7 +198,7 @@ impl Writes {
     /// `uid` were force-stopped: to the receivers of the uid's user and the
     /// package monitors, from the handler as `stay_stopped` has it.
     pub(super) fn package_restarted(self: &Arc<Self>, package: &str, uid: i32) {
-        let (state, resolution) = match self.host.live_packages() {
+        let (state, resolution) = match self.host.packages() {
             Ok(packages) => packages,
             Err(e) => {
                 eprintln!("app host: {package} restarted: {}", e.message);
@@ -259,7 +259,7 @@ impl Writes {
         is_restore: bool,
         instant: bool,
     ) {
-        let (state, resolution) = match self.host.live_packages() {
+        let (state, resolution) = match self.host.packages() {
             Ok(packages) => packages,
             Err(e) => {
                 eprintln!("app host: {package}'s data cleared: {}", e.message);
@@ -319,7 +319,7 @@ impl Writes {
             pending.1 = false;
             std::mem::take(&mut pending.0)
         };
-        let state = match self.host.live_packages() {
+        let state = match self.host.packages() {
             Ok((state, _)) => state,
             Err(e) => {
                 eprintln!("app host: pending package changes: {}", e.message);
@@ -347,7 +347,7 @@ impl Writes {
         components: Vec<String>,
         package_uid: i32,
     ) -> Result<(), Exception> {
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         let Some(ps) = state.packages.get(package).filter(|ps| ps.pkg.is_some()) else {
             return Ok(());
         };

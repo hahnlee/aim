@@ -64,6 +64,5 @@ fn framework_requests_do_not_load_packages() {
         .unwrap();
     reply.reader().read_exception().unwrap().unwrap();
     assert!(host.inputs.get().is_none());
-    assert!(host.model.lock().unwrap().is_none());
     assert!(std::ptr::eq(framework, host.framework().unwrap()));
 }

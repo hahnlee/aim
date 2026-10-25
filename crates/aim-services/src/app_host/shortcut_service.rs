@@ -1422,7 +1422,7 @@ impl ShortcutManager {
         user: i32,
         exported_only: bool,
     ) -> Result<Vec<ComponentName>, Exception> {
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         let found = resolution
             .query_intent_activities(
                 intent,
@@ -1849,7 +1849,7 @@ impl ShortcutManager {
         if ids.iter().all(|&i| i == 0) {
             return Ok(());
         }
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         let pkg = state
             .packages
             .get(package)
@@ -2033,7 +2033,7 @@ impl ShortcutManager {
         if !self.host.owns_package(uid, package)? {
             return Err(Exception::security("Calling package name mismatch"));
         }
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         if state
             .packages
             .get(package)
@@ -2116,7 +2116,7 @@ impl ShortcutManager {
 
     /// `checkPackageChanges` and `rescanUpdatedPackagesLocked`.
     fn check_package_changes(&self, user: &mut User) -> Result<(), Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         for name in user.packages.keys() {
             if !state
                 .packages
@@ -2174,7 +2174,7 @@ impl ShortcutManager {
         {
             return Err(not_modelled("relabelling shortcuts for a new locale"));
         }
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         let Some(ps) = state.packages.get(package) else {
             return Ok(());
         };

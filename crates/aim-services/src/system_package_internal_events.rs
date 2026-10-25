@@ -799,3 +799,81 @@ mod component_use_concurrency_tests {
         assert_eq!(current.version(), 3);
     }
 }
+
+impl System {
+    /// UserController owns the running state; PM publishes its validated view.
+    pub(crate) fn publish_package_user_unlocking(&self, user: i32) -> Result<()> {
+        use crate::package::scan_snapshot::{Store, query_state::PackageUpdate};
+        let bridge = self.package_bootstrap()?;
+        self.check_package_bootstrap(&bridge)?;
+        loop {
+            let (capture, canonical) = {
+                let state = self.package_bootstrap.lock().unwrap();
+                let current = state
+                    .current
+                    .as_ref()
+                    .filter(|current| Arc::ptr_eq(&current.bridge, &bridge))
+                    .ok_or_else(|| event_error("runtime user bootstrap changed"))?;
+                let capture = current
+                    .queries
+                    .clone()
+                    .ok_or_else(|| event_error("runtime user capture unavailable"))?;
+                let canonical = current
+                    .snapshots
+                    .as_ref()
+                    .ok_or_else(|| event_error("runtime user scan unavailable"))?
+                    .capture();
+                (capture, canonical)
+            };
+            let known = capture
+                .state()
+                .users
+                .get(&user)
+                .filter(|entry| entry.id == user)
+                .ok_or_else(|| {
+                    Exception::illegal_argument("runtime publication names an unknown user")
+                })?;
+            if known.unlocking_or_unlocked {
+                return Ok(());
+            }
+            let (view, update) = if Arc::ptr_eq(capture.scan(), &canonical) {
+                let store = Store::prepare_unchanged_metadata_store(&canonical)
+                    .map_err(|error| event_error(format!("runtime user replica: {error:?}")))?;
+                let view = capture
+                    .user_unlocking_view(store.capture(), user)
+                    .map_err(event_error)?;
+                (
+                    view.clone(),
+                    Some(PackageUpdate {
+                        store,
+                        capture: view,
+                    }),
+                )
+            } else {
+                (
+                    capture
+                        .user_unlocking_view(capture.scan().clone(), user)
+                        .map_err(event_error)?,
+                    None,
+                )
+            };
+            let mut state = self.package_bootstrap.lock().unwrap();
+            let current = state
+                .current
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(&current.bridge, &bridge))
+                .ok_or_else(|| event_error("runtime user bootstrap changed"))?;
+            if !current
+                .queries
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, &capture))
+            {
+                continue;
+            }
+            if !self.publish_internal_query_view(&mut state, &canonical, view, update)? {
+                continue;
+            }
+            return Ok(());
+        }
+    }
+}

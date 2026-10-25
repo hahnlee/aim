@@ -929,7 +929,7 @@ impl BluetoothManager {
     /// `resolveSystemService`: the one system package's service for
     /// `action`.
     fn resolve_system_service(&self) -> Result<(String, String), Exception> {
-        let (_, resolution) = self.host.live_packages()?;
+        let (_, resolution) = self.host.packages()?;
         let intent = Intent {
             action: Some(ACTION_IBLUETOOTH.into()),
             ..Default::default()
@@ -1450,7 +1450,7 @@ impl BluetoothManager {
 
     /// SystemUI's uid, when installed as a system package.
     fn system_ui_app_id(&self) -> Result<Option<i32>, Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         let system = |ps: &&crate::package::model::PackageState| {
             ps.pkg
                 .as_deref()
@@ -1506,7 +1506,7 @@ impl BluetoothManager {
         if !self.host.change_enabled(RESTRICT_ENABLE_DISABLE, uid)? {
             return Ok(true);
         }
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         let privileged = self
             .host
             .check_permission(Some(BLUETOOTH_PRIVILEGED), uid)?
@@ -1611,7 +1611,7 @@ impl BluetoothManager {
     /// `bluetooth.profile.asha.central.enabled` says, else off on cars,
     /// watches and TVs.
     fn hearing_aid_supported(&self) -> Result<bool, Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         let feature = |name: &str| {
             state
                 .system

@@ -1262,7 +1262,8 @@ fn implicit_visibility_publication_preserves_install_and_actual_grant_during_que
     let view = before.with_visibility_view(grants.clone()).unwrap();
     let pending = before.prepare_visibility_update(grants.clone()).unwrap();
     // Real canonical disk publication wins after the visibility callback has
-    // prepared its candidate. The callback must retain its grant without replay.
+    // prepared its candidate. Retry as a context-only view; never publish the
+    // uncommitted prepared scan over the actual installed owner.
     let mut installed_owner = before.scan().owner().clone();
     installed_owner.settings.packages[0].version_code = 7;
     installed_owner
@@ -1287,10 +1288,18 @@ fn implicit_visibility_publication_preserves_install_and_actual_grant_during_que
         .unwrap();
     {
         let mut state = fixture.system.package_bootstrap.lock().unwrap();
-        fixture
-            .system
-            .publish_internal_visibility_view(&mut state, before.scan(), view, Some(pending))
-            .unwrap();
+        assert!(
+            !fixture
+                .system
+                .publish_internal_query_view(&mut state, before.scan(), view.clone(), Some(pending))
+                .unwrap()
+        );
+        assert!(
+            fixture
+                .system
+                .publish_internal_query_view(&mut state, &installed, view, None)
+                .unwrap()
+        );
     }
     let retained = fixture.system.capture_package_queries().unwrap();
     assert!(Arc::ptr_eq(retained.scan(), before.scan()));
@@ -1323,7 +1332,7 @@ fn implicit_visibility_publication_preserves_install_and_actual_grant_during_que
         let mut state = fixture.system.package_bootstrap.lock().unwrap();
         fixture
             .system
-            .publish_internal_visibility_view(&mut state, &installed, view, None)
+            .publish_internal_query_view(&mut state, &installed, view, None)
             .unwrap();
     }
     assert!(Arc::ptr_eq(&snapshots.capture(), &installed));
@@ -2382,9 +2391,9 @@ fn app_data_read_through_observes_persisted_session_receipts() {
     let bridge = fixture.attach();
     let before = publish(&fixture, &bridge);
     let host = crate::app_host::AppHost::new(fixture.native.clone());
-    assert!(host.app_data_packages().is_err());
+    assert!(host.package_capture().is_err());
     host.set_system(fixture.system.clone());
-    let old = host.app_data_packages().unwrap();
+    let old = host.package_capture().unwrap();
     assert!(Arc::ptr_eq(&old, &before));
     let snapshots = fixture
         .system
@@ -2430,7 +2439,7 @@ fn app_data_read_through_observes_persisted_session_receipts() {
     receipt.ce_data_inode = 991;
     receipt.de_data_inode = 992;
     store.user_state("p", 0, receipt.clone()).unwrap();
-    let current = host.app_data_packages().unwrap();
+    let current = host.package_capture().unwrap();
     let user = crate::package::info::user_state(&current.state().packages["p"], 0);
     assert_eq!((user.ce_data_inode, user.de_data_inode), (991, 992));
     assert_eq!(
@@ -2449,7 +2458,7 @@ fn app_data_read_through_observes_persisted_session_receipts() {
     assert_eq!((written.ce_data_inode, written.de_data_inode), (991, 992));
     // Repeating preparation with the same actual receipts retains their values.
     store.user_state("p", 0, receipt).unwrap();
-    let current = host.app_data_packages().unwrap();
+    let current = host.package_capture().unwrap();
     assert_eq!(
         crate::package::info::user_state(&current.state().packages["p"], 0).ce_data_inode,
         991
@@ -2458,3 +2467,84 @@ fn app_data_read_through_observes_persisted_session_receipts() {
 
 #[path = "system_package_host_mutation_tests.rs"]
 mod host_mutations;
+
+#[test]
+fn user_unlocking_during_query_lag_preserves_canonical_install_and_retained_users() {
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let first = publish(&fixture, &bridge);
+    let mut context = (**first.context()).clone();
+    context.scan_version += 1;
+    context.users.get_mut(&0).unwrap().unlocking_or_unlocked = false;
+    let before = fixture
+        .system
+        .publish_package_scan_with_queries(
+            &bridge,
+            Some(first.scan()),
+            first.scan().owner().clone(),
+            first.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    let snapshots = fixture
+        .system
+        .package_bootstrap
+        .lock()
+        .unwrap()
+        .current
+        .as_ref()
+        .unwrap()
+        .snapshots
+        .clone()
+        .unwrap();
+    let mut owner = before.scan().owner().clone();
+    owner.settings.packages[0].version_code = 7;
+    owner
+        .capture_replica_runtime(BTreeMap::from([(
+            ("p".into(), false),
+            before
+                .scan()
+                .owner()
+                .replica_runtime("p", false)
+                .unwrap()
+                .unwrap()
+                .clone(),
+        )]))
+        .unwrap();
+    let installed = snapshots
+        .publish_after(before.scan(), owner, before.scan().usage().clone(), |_| {
+            Ok(())
+        })
+        .unwrap();
+    fixture.system.publish_package_user_unlocking(0).unwrap();
+    let runtime = fixture.system.capture_package_queries().unwrap();
+    assert!(Arc::ptr_eq(runtime.scan(), before.scan()));
+    assert!(Arc::ptr_eq(&snapshots.capture(), &installed));
+    assert_eq!(installed.owner().settings.packages[0].version_code, 7);
+    assert!(runtime.state().users[&0].unlocking_or_unlocked);
+    assert!(runtime.context().users[&0].unlocking_or_unlocked);
+    assert!(!before.state().users[&0].unlocking_or_unlocked);
+    assert!(fixture.system.publish_package_user_unlocking(99).is_err());
+    let mut context = (**runtime.context()).clone();
+    context.scan_version = installed.version();
+    context
+        .packages
+        .get_mut(&("p".into(), false))
+        .unwrap()
+        .version = 7;
+    let projected =
+        crate::package::scan_snapshot::query_state::Capture::new(installed.clone(), context)
+            .unwrap();
+    assert!(projected.state().users[&0].unlocking_or_unlocked);
+    assert_eq!(
+        projected.state().packages["p"]
+            .pkg
+            .as_ref()
+            .map(|pkg| pkg.version_code),
+        None
+    );
+    assert_eq!(
+        projected.scan().owner().settings.packages[0].version_code,
+        7
+    );
+}

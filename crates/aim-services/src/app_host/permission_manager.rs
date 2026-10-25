@@ -1617,7 +1617,7 @@ impl PermissionManager {
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
         let inputs = self.host.inputs()?;
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         f(&Access {
             state: &state,
             filter: &resolution.apps_filter,
@@ -2354,7 +2354,6 @@ mod tests {
         );
         assert!(host.inputs.get().is_none());
         assert!(host.platform.get().is_none());
-        assert!(host.model.lock().unwrap().is_none());
         assert_eq!(
             host.inputs().err().unwrap().message,
             "no property ro.build.version.sdk"

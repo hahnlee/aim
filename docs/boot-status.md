@@ -182,6 +182,19 @@ event delivery and shutdown statistics remain #2167, permission state without
 `access.abx` #2168, boot admissions #2169, remaining package bootstrap owners
 #2022 and the query projection switch #2023.
 
+Current app-host source publishes enabled settings, permission grant/GID
+refreshes, data-clear component resets and isolated/implicit/user runtime
+changes through the native session (#2023, #2164). Ordinary host package
+acquisitions and cached package intent queries use that capture and its resolver;
+there is no private mutable host package model or enabled-settings Store. Data clear
+uses the native application-data worker and freezer; installd receives the
+retained inode receipt and a failed storage/publication/effect operation reports
+false to the observer. The boot observation above predates this handover.
+Focused owner tests and the host build pass; no new guest boot, app frame,
+second-boot or CTS result is recorded for it. The local guest attempt for the
+preceding storage handover stopped before init because DiskManagement was
+unavailable; real installd/process/effect conformance remains unverified.
+
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
 active setting inventory, matching the original PackageUsage owner, and a

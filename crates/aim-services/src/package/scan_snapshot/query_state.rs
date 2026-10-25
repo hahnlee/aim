@@ -2272,3 +2272,43 @@ mod resolver_tests {
         assert_eq!(reads.load(Ordering::Acquire), 3);
     }
 }
+
+impl Capture {
+    /// UserController's unlocking fact changes query policy, not Settings.
+    pub(crate) fn user_unlocking_view(
+        &self,
+        scan: Arc<Snapshot>,
+        user: i32,
+    ) -> Result<Arc<Self>, String> {
+        if !self.scan.same_lineage(&scan)
+            || self.scan.owner() != scan.owner()
+            || self.scan.usage() != scan.usage()
+        {
+            return Err("runtime user publication changed the package owner".into());
+        }
+        let mut context = (*self.context).clone();
+        let entry = context
+            .users
+            .get_mut(&user)
+            .filter(|entry| entry.id == user)
+            .ok_or("runtime user publication names an unknown user")?;
+        entry.unlocking_or_unlocked = true;
+        context.scan_version = scan.version();
+        let mut state = (*self.state).clone();
+        let entry = state
+            .users
+            .get_mut(&user)
+            .filter(|entry| entry.id == user)
+            .ok_or("runtime query user identity differs")?;
+        entry.unlocking_or_unlocked = true;
+        state.generation = scan.version();
+        Ok(Arc::new(Self {
+            scan,
+            state: Arc::new(state),
+            context: Arc::new(context),
+            domains: self.domains.clone(),
+            frozen: self.frozen.clone(),
+            resolver: Default::default(),
+        }))
+    }
+}

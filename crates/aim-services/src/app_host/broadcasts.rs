@@ -514,7 +514,7 @@ pub(super) fn filter_equals(a: &Intent, b: &Intent) -> bool {
 impl AppHost {
     /// Whether `package` is an instant app for `user`.
     fn instant_app(&self, package: &str, user: i32) -> Result<bool, Exception> {
-        let (state, _) = self.live_packages()?;
+        let (state, _) = self.packages()?;
         Ok(state
             .packages
             .get(package)
@@ -684,7 +684,7 @@ impl Broadcasts {
                 filter.priority = SYSTEM_HIGH_PRIORITY;
             }
         }
-        let (model, _) = host.live_packages()?;
+        let (model, _) = host.packages()?;
         let mut only_protected = true;
         if filter.actions.is_empty() {
             only_protected = false;
@@ -1079,7 +1079,7 @@ impl Broadcasts {
             self.cancel_result_to(host, &intent, result_to, result_to_app, user);
             return Ok(BROADCAST_FAILED_USER_STOPPED);
         }
-        let (model, _) = host.live_packages()?;
+        let (model, _) = host.packages()?;
         let action = intent.intent.action.clone();
         let protected = match action.as_deref() {
             Some(a) => crate::package::query::is_protected_broadcast(&model, a)
@@ -1484,7 +1484,7 @@ impl Broadcasts {
         done: Option<Done>,
     ) {
         let mut flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
-        let allowed_implicit = host.live_packages().map(|(model, _)| {
+        let allowed_implicit = host.packages().map(|(model, _)| {
             intent
                 .intent
                 .action
@@ -1603,7 +1603,7 @@ impl Broadcasts {
         s: &Sender,
         preflight: bool,
     ) -> Result<Vec<Arc<Manifest>>, Exception> {
-        let (_, resolution) = host.live_packages()?;
+        let (_, resolution) = host.packages()?;
         let found = resolution
             .query_intent_receivers(
                 intent,

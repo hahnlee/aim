@@ -276,7 +276,7 @@ impl AppWidgetService {
     }
 
     fn flag(&self, name: &str) -> Result<bool, Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
     }
 
@@ -293,7 +293,7 @@ impl AppWidgetService {
 
     /// `queryIntentReceivers(intent, user)` as the service asks it.
     fn receivers(&self, intent: &Intent, user: i32) -> Result<Vec<ActivityInfo>, Exception> {
-        let (_, resolution) = self.host.live_packages()?;
+        let (_, resolution) = self.host.packages()?;
         // No user of the app host is a profile, so none has an unlocked
         // parent (`isProfileWithUnlockedParent`).
         let flags = GET_META_DATA | MATCH_DEBUG_TRIAGED_MISSING | GET_SHARED_LIBRARY_FILES;
@@ -311,7 +311,7 @@ impl AppWidgetService {
 
     /// `getUidForPackage`, or -1.
     fn package_uid(&self, package: &str, user: i32) -> Result<i32, Exception> {
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -592,7 +592,7 @@ impl AppWidgetService {
         p: &mut Parcel,
     ) -> Result<(), Exception> {
         let user = uid / PER_USER_RANGE as i32;
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         // `isEnabledGroupProfile`: no user of the app host has profiles.
         if profile != user || !state.users.contains_key(&profile) {
             aw::write_get_installed_providers_for_profile_reply::<Slice<ProviderInfo>>(p, None);
@@ -700,7 +700,7 @@ impl AppWidgetService {
             eprintln!("app host: appwidget: No {key} meta-data for AppWidget provider '{name}'");
             return Ok(None);
         }
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         let Some(pkg) = state
             .packages
             .get(&provider.component.package)
@@ -915,7 +915,7 @@ impl Service for AppWidgetService {
             aw::IS_REQUEST_PIN_APP_WIDGET_SUPPORTED => {
                 aw::IsRequestPinAppWidgetSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let (state, _) = self.host.live_packages()?;
+                    let (state, _) = self.host.packages()?;
                     let instant =
                         crate::package::apps_filter::instant_app_package_name(&state, uid)
                             .map_err(|e| self.unimplemented(e.0))?

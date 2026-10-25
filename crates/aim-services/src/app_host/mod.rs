@@ -532,16 +532,9 @@ pub struct AppHost {
     /// user's system grammatical gender, read from its file once.
     grammatical_genders: Mutex<HashMap<i32, i32>>,
     unimplemented: Mutex<std::collections::HashSet<(String, u32)>>,
-    /// The package model's state, replaced as PackageManager's writes
-    /// change it.
-    model: Mutex<Option<Arc<crate::package::model::State>>>,
-    /// Held by each change of the package model from reading it to
-    /// storing the changed model, so that no change is lost to another.
-    model_writer: Mutex<()>,
     /// The users unlocking or unlocked (`UserController`'s user states at
     /// `STATE_RUNNING_UNLOCKING` or later).
     unlocked_users: Mutex<std::collections::BTreeSet<i32>>,
-    resolver: crate::package::resolve::Resolver,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
     /// The settings provider, its binder and its connection token.
@@ -647,10 +640,7 @@ impl AppHost {
             config_seq: AtomicI64::new(1),
             grammatical_genders: Mutex::new(HashMap::new()),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
-            model: Mutex::new(None),
-            model_writer: Mutex::new(()),
             unlocked_users: Mutex::new(Default::default()),
-            resolver: Default::default(),
             activities: Default::default(),
             display: OnceLock::new(),
             settings_provider: OnceLock::new(),
@@ -728,9 +718,8 @@ impl AppHost {
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native package system unavailable"))
     }
 
-    /// Inode-sensitive legacy callers read through the session until #2023's
-    /// remaining package queries move. Never copy its receipts into the join.
-    pub(super) fn app_data_packages(
+    /// Retain one session generation for an operation's scan and query inputs.
+    pub(super) fn package_capture(
         &self,
     ) -> Result<Arc<package::scan_snapshot::query_state::Capture>, Exception> {
         self.package_system()?.capture_package_queries()
@@ -1258,7 +1247,7 @@ impl AppHost {
         name: &str,
         class: &str,
     ) -> Result<package::info::ActivityInfo, Exception> {
-        let (state, resolution) = self.live_packages()?;
+        let (state, resolution) = self.packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -1852,7 +1841,7 @@ impl AppHost {
         let flag = |name: &str, default: bool| {
             system_boolean((configured.properties)(name).as_deref(), default)
         };
-        let capture = self.app_data_packages()?;
+        let capture = self.package_capture()?;
         let state = capture.state();
         let user = (uid / PER_USER_RANGE) as i32;
         let app_id = uid % PER_USER_RANGE;
@@ -3281,7 +3270,7 @@ impl AppHost {
     /// launches `package` with: the first of its `MAIN` activities in the
     /// `INFO` category, else in the `LAUNCHER` category.
     fn launch_activity_of(&self, package: &str, calling_uid: i32) -> Result<String, Exception> {
-        let (_, resolution) = self.live_packages()?;
+        let (_, resolution) = self.packages()?;
         for category in [
             "android.intent.category.INFO",
             "android.intent.category.LAUNCHER",
@@ -3391,7 +3380,7 @@ impl AppHost {
         let state = match acquired {
             Some(state) => state,
             None => {
-                current = self.live_packages()?.0;
+                current = self.packages()?.0;
                 &current
             }
         };
@@ -3408,32 +3397,8 @@ impl AppHost {
         })())
     }
 
-    /// The package model's state and its resolution, made once.
-    fn packages(
-        &self,
-    ) -> Result<
-        (
-            Arc<crate::package::model::State>,
-            Arc<crate::package::resolve::Resolution>,
-        ),
-        Exception,
-    > {
-        let inputs = self.inputs()?;
-        let state = self
-            .model
-            .lock()
-            .unwrap()
-            .get_or_insert_with(|| Arc::new(inputs.packages.state().clone()))
-            .clone();
-        let resolution = self
-            .resolver
-            .resolution(&state)
-            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "package resolution: MIME groups"))?;
-        Ok((state, resolution))
-    }
-
-    /// Enabled-state consumers acquire the session's retained query generation.
-    pub(super) fn live_packages(
+    /// Acquire the session's retained package state and its own resolver.
+    pub(super) fn packages(
         &self,
     ) -> Result<
         (
@@ -3442,7 +3407,7 @@ impl AppHost {
         ),
         Exception,
     > {
-        let capture = self.package_system()?.capture_package_queries()?;
+        let capture = self.package_capture()?;
         let resolution = capture.resolution().map_err(|error| {
             Exception::new(EX_ILLEGAL_STATE, format!("package resolution: {error:?}"))
         })?;
@@ -3452,15 +3417,16 @@ impl AppHost {
     /// `UserController.finishUserUnlocking`: `user`'s credential-encrypted
     /// storage is prepared, so it is unlocking and its components that are
     /// not direct-boot aware resolve.
-    fn user_unlocking(&self, user: i32) -> Result<(), Exception> {
-        self.unlocked_users.lock().unwrap().insert(user);
-        let _writer = self.model_writer.lock().unwrap();
-        let (before, _) = self.packages()?;
-        let mut state = (*before).clone();
-        if let Some(u) = state.users.get_mut(&user) {
-            u.unlocking_or_unlocked = true;
+    pub(super) fn user_unlocking(&self, user: i32) -> Result<(), Exception> {
+        let system = self.package_system()?;
+        let capture = system.capture_package_queries()?;
+        if !capture.state().users.contains_key(&user) {
+            return Err(Exception::illegal_argument(
+                "unlocking names an unknown user",
+            ));
         }
-        self.user_states_changed(&before, Arc::new(state))
+        self.unlocked_users.lock().unwrap().insert(user);
+        system.publish_package_user_unlocking(user)
     }
 
     #[cfg(test)]
@@ -3503,21 +3469,6 @@ impl AppHost {
         self.package_system()?
             .internal_remove_isolated_uid(uid as i32, SYSTEM_UID as i32, 0)?;
         self.isolated_uids.lock().unwrap().used.remove(&uid);
-        Ok(())
-    }
-
-    /// Replaces the package model's state `before` with `state`, which
-    /// differs from it in packages' user states only.
-    fn user_states_changed(
-        &self,
-        before: &Arc<crate::package::model::State>,
-        state: Arc<crate::package::model::State>,
-    ) -> Result<(), Exception> {
-        let mut model = self.model.lock().unwrap();
-        self.resolver
-            .user_states_changed(before, state.clone())
-            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "package resolution: MIME groups"))?;
-        *model = Some(state);
         Ok(())
     }
 
@@ -3778,7 +3729,7 @@ impl AppHost {
         user: i32,
         uid: i32,
     ) -> Result<Option<package::info::ProviderInfo>, Exception> {
-        let (_, resolution) = self.live_packages()?;
+        let (_, resolution) = self.packages()?;
         match resolution.resolve_content_provider(authority, flags, user, uid) {
             Ok(found) => Ok(found),
             Err(crate::package::resolve::ResolutionError::Original(e)) => Err(e),
@@ -3802,7 +3753,7 @@ impl AppHost {
 
     /// `AppOpsManager.checkPackage`: whether `package` is `uid`'s.
     pub(super) fn owns_package(&self, uid: i32, package: &str) -> Result<bool, Exception> {
-        let (state, _) = self.live_packages()?;
+        let (state, _) = self.packages()?;
         Ok(state
             .packages
             .get(package)
@@ -3823,7 +3774,7 @@ impl AppHost {
     /// package of the uid.
     pub(super) fn change_enabled(&self, change: i64, uid: i32) -> Result<bool, Exception> {
         let inputs = self.platform()?;
-        let (state, resolution) = self.live_packages()?;
+        let (state, resolution) = self.packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,

@@ -223,7 +223,7 @@ impl AppHost {
             None => Vec::new(),
         };
         let target_sdk = |p: &str| -> Result<i32, Exception> {
-            let (state, _) = self.live_packages()?;
+            let (state, _) = self.packages()?;
             Ok(state.packages.get(p).map_or(0, |p| p.target_sdk_version))
         };
         for intent in &intents {
@@ -432,7 +432,7 @@ impl AppHost {
                 r.user,
             )
         };
-        let (_, resolution) = self.live_packages()?;
+        let (_, resolution) = self.packages()?;
         let found = match kind {
             INTENT_SENDER_ACTIVITY => resolution.query_intent_activities(
                 &intent,

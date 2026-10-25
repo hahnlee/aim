@@ -44,7 +44,7 @@ impl ApplicationData {
         )))
     }
     fn kill_and_wait(&self, package: &str, app_id: i32) -> Result<(), Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         if state
             .packages
             .get(package)
@@ -145,7 +145,7 @@ impl Service for ApplicationData {
             }
             bridge::CLEAR_DATA => {
                 let a = bridge::ClearData::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let result = self.host.app_data_packages().and_then(|capture| {
+                let result = self.host.package_capture().and_then(|capture| {
                     let Some(ps) = a
                         .package_name
                         .as_ref()

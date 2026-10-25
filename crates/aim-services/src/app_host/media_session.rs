@@ -667,7 +667,7 @@ impl MediaSession {
     /// profiles, so each is its own full user; its record made when first
     /// asked, as `updateUser` makes it, the remembered receiver restored.
     fn full_user(&self, user: i32) -> Result<Option<i32>, Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         if !state.users.contains_key(&user) {
             return Ok(None);
         }
@@ -712,7 +712,7 @@ impl MediaSession {
     /// `getComponentType(context, componentName)`: an activity, a service,
     /// else a receiver.
     fn component_type(&self, component: &ComponentName, user: i32) -> Result<i32, Exception> {
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -755,7 +755,7 @@ impl MediaSession {
             component: component.cloned(),
             ..Default::default()
         };
-        let (_, resolution) = self.host.live_packages()?;
+        let (_, resolution) = self.host.packages()?;
         let found = resolution
             .query_intent_receivers(&intent, None, 0, user, SYSTEM_UID)
             .map_err(|e| {

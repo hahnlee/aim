@@ -516,7 +516,7 @@ impl Providers {
     /// new service, then added (`onAddProviderService`: told the current
     /// preference).
     fn scan(&self, user: i32) -> Result<(), Exception> {
-        let (_, resolution) = self.host.live_packages()?;
+        let (_, resolution) = self.host.packages()?;
         let intent = Intent {
             action: Some(SERVICE_INTERFACE.into()),
             ..Default::default()

@@ -821,7 +821,7 @@ impl AppHost {
         instance: Option<&str>,
         external: Option<&str>,
     ) -> Result<Lookup, Exception> {
-        let (_, resolution) = self.live_packages()?;
+        let (_, resolution) = self.packages()?;
         let report = std::cell::RefCell::new(Vec::new());
         let found = resolution
             .resolve_service_for_start(
@@ -866,7 +866,7 @@ impl AppHost {
                         "BIND_EXTERNAL_SERVICE failed, calling package not owned by calling UID ",
                     ));
                 }
-                let (state, _) = self.live_packages()?;
+                let (state, _) = self.packages()?;
                 let query = crate::package::query::Query {
                     state: &state,
                     filter: &resolution.apps_filter,
@@ -2201,7 +2201,7 @@ impl AppHost {
 
     /// Whether an aconfig flag of the image is on.
     pub(super) fn flag(&self, name: &str) -> Result<bool, Exception> {
-        let (state, _) = self.live_packages()?;
+        let (state, _) = self.packages()?;
         Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
     }
 
@@ -2839,7 +2839,7 @@ impl AppHost {
             }
             let posted = (|| {
                 let target_sdk = host
-                    .live_packages()?
+                    .packages()?
                     .0
                     .packages
                     .get(&package)

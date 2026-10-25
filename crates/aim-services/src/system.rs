@@ -8019,7 +8019,9 @@ impl System {
             {
                 continue;
             }
-            self.publish_internal_visibility_view(&mut state, &canonical, view, update)?;
+            if !self.publish_internal_query_view(&mut state, &canonical, view, update)? {
+                continue;
+            }
             return Ok(());
         }
     }

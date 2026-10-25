@@ -245,7 +245,7 @@ impl AppHost {
     /// `queryBroadcastReceiversAsUser(PRE_BOOT_COMPLETED,
     /// MATCH_SYSTEM_ONLY, user)`: their packages and classes, in order.
     fn pre_boot_receivers(&self) -> Result<Vec<(String, String)>, String> {
-        let (_, resolution) = self.live_packages().map_err(|e| e.message)?;
+        let (_, resolution) = self.packages().map_err(|e| e.message)?;
         let intent = pre_boot_completed();
         let found = resolution
             .query_intent_receivers(&intent.intent, None, MATCH_SYSTEM_ONLY, USER, SYSTEM_UID)

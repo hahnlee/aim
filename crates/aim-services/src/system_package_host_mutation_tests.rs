@@ -449,7 +449,7 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         "a callback registered through both handles fires once"
     );
     let current = fixture.system.capture_package_queries().unwrap();
-    let (state, resolution) = host.live_packages().unwrap();
+    let (state, resolution) = host.packages().unwrap();
     assert!(Arc::ptr_eq(&state, current.state()));
     let query = crate::package::query::Query {
         state: &state,
@@ -539,7 +539,7 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         .unwrap()
         .unwrap();
     assert!(
-        host.live_packages().unwrap().0.packages["p"].users[&0]
+        host.packages().unwrap().0.packages["p"].users[&0]
             .disabled_components
             .is_empty()
     );
@@ -965,5 +965,94 @@ fn cached_host_data_clear_completes_after_session_publication_and_reports_failur
     drop(data_worker);
     drop(instant_worker);
     drop(dependencies);
+    drop(workers);
+}
+
+#[test]
+fn host_user_unlocking_publishes_and_survives_enabled_and_permission_updates() {
+    let Session {
+        fixture,
+        host,
+        cached,
+        bridge,
+        grants,
+        workers,
+        ..
+    } = session();
+    let initial = fixture.system.capture_package_queries().unwrap();
+    let mut context = (**initial.context()).clone();
+    context.scan_version += 1;
+    context.users.get_mut(&0).unwrap().unlocking_or_unlocked = false;
+    let locked = fixture
+        .system
+        .publish_package_scan_with_queries(
+            &bridge,
+            Some(initial.scan()),
+            initial.scan().owner().clone(),
+            initial.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    assert!(!locked.state().users[&0].unlocking_or_unlocked);
+    assert!(!host.user_unlocking_or_unlocked(0).unwrap());
+    assert!(host.user_unlocking(99).is_err());
+    assert!(!host.user_unlocking_or_unlocked(99).unwrap());
+    host.user_unlocking(0).unwrap();
+    let unlocked = fixture.system.capture_package_queries().unwrap();
+    assert!(unlocked.state().users[&0].unlocking_or_unlocked);
+    assert!(unlocked.context().users[&0].unlocking_or_unlocked);
+    assert!(host.user_unlocking_or_unlocked(0).unwrap());
+    assert!(!locked.state().users[&0].unlocking_or_unlocked);
+    assert_eq!(
+        unlocked.scan().metadata_revision(),
+        locked.scan().metadata_revision()
+    );
+    host.user_unlocking(0).unwrap();
+    assert!(Arc::ptr_eq(
+        &unlocked,
+        &fixture.system.capture_package_queries().unwrap()
+    ));
+    let mut request = Parcel::new();
+    pm::SetComponentEnabledSetting {
+        component_name: Some(crate::package::intent::ComponentName {
+            package: "p".into(),
+            class: "p.Main".into(),
+        }),
+        new_state: 2,
+        flags: 0,
+        user_id: 0,
+        calling_package: None,
+    }
+    .write(&mut request);
+    transact(&cached, 1000, pm::SET_COMPONENT_ENABLED_SETTING, &request)
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    grants.store(true, Ordering::SeqCst);
+    fixture
+        .system
+        .refresh_package_permission_queries(&bridge, &locked)
+        .unwrap();
+    let after = fixture.system.capture_package_queries().unwrap();
+    assert!(after.state().users[&0].unlocking_or_unlocked);
+    assert_eq!(
+        after.state().packages["p"].users[&0].disabled_components,
+        ["p.Main"]
+    );
+    assert_eq!(
+        after.state().packages["p"].users[&0].granted_permissions,
+        ["android.permission.CAMERA"]
+    );
+    assert_eq!(after.state().packages["p"].users[&0].ce_data_inode, 991);
+    assert!(Arc::ptr_eq(&host.packages().unwrap().0, after.state()));
+    assert!(
+        fixture
+            .system
+            .package_events()
+            .unwrap()
+            .wait(3000, false)
+            .unwrap()
+    );
     drop(workers);
 }

@@ -1014,7 +1014,7 @@ impl JobScheduler {
     }
 
     fn flag(&self, name: &str) -> Result<bool, Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
     }
 
@@ -1034,7 +1034,7 @@ impl JobScheduler {
 
     /// `PackageManagerInternal.getPackageUid(package, 0, user)`.
     fn package_uid(&self, package: &str, user: i32) -> Result<Option<i32>, Exception> {
-        let (state, _) = self.host.live_packages()?;
+        let (state, _) = self.host.packages()?;
         Ok(state
             .packages
             .get(package)
@@ -1049,7 +1049,7 @@ impl JobScheduler {
         user: i32,
         uid: i32,
     ) -> Result<Option<crate::package::info::ServiceInfo>, Exception> {
-        let (state, resolution) = self.host.live_packages()?;
+        let (state, resolution) = self.host.packages()?;
         let query = crate::package::query::Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -1534,7 +1534,7 @@ impl JobScheduler {
             }
             if calls.len() >= API_QUOTA_SCHEDULE_COUNT {
                 eprintln!("app host: jobs: {user}-{package} has called schedule() too many times");
-                let (model, _) = self.host.live_packages()?;
+                let (model, _) = self.host.packages()?;
                 let debuggable = model
                     .packages
                     .get(&package)
@@ -2562,7 +2562,7 @@ impl JobScheduler {
         );
         // `getPackageUid(pkgName, 0, userId)`, `USER_ALL` as the system
         // user.
-        let (model, resolution) = self.host.live_packages()?;
+        let (model, resolution) = self.host.packages()?;
         let query = crate::package::query::Query {
             state: &model,
             filter: &resolution.apps_filter,

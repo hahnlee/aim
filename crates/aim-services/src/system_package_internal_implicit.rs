@@ -97,7 +97,7 @@ impl System {
             let canonical = current
                 .snapshots
                 .as_ref()
-                .ok_or_else(|| fail("implicit-access canonical owner unavailable".into()))?
+                .ok_or_else(|| fail("runtime query canonical owner unavailable".into()))?
                 .capture();
             let aligned = Arc::ptr_eq(capture.scan(), &canonical);
             let (view, update) = if instant {
@@ -156,7 +156,9 @@ impl System {
                 }
                 prepared
             };
-            self.publish_internal_visibility_view(&mut state, &canonical, view, update)?;
+            if !self.publish_internal_query_view(&mut state, &canonical, view, update)? {
+                continue;
+            }
             drop(state);
             self.check_package_bootstrap(&bridge)?;
             return bridge.invalidate_packages_for_uid_cache().map_err(|error| match error {
@@ -169,25 +171,25 @@ impl System {
 }
 
 impl System {
-    /// Retain an actual visibility delta while canonical installation is ahead
+    /// Retain an actual runtime query delta while canonical installation is ahead
     /// of query projection. No scan ownership is derived from the old query.
-    pub(super) fn publish_internal_visibility_view(
+    pub(super) fn publish_internal_query_view(
         &self,
         state: &mut PackageBootstrapState,
         base: &Arc<crate::package::scan_snapshot::Snapshot>,
         view: Arc<crate::package::scan_snapshot::query_state::Capture>,
         update: Option<crate::package::scan_snapshot::query_state::PackageUpdate>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let fail = |message| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
         let current = state
             .current
             .as_mut()
-            .ok_or_else(|| fail("implicit-access bootstrap unavailable".into()))?;
+            .ok_or_else(|| fail("runtime query bootstrap unavailable".into()))?;
         if let Some(update) = update {
             let snapshots = current
                 .snapshots
                 .as_ref()
-                .ok_or_else(|| fail("implicit-access canonical owner unavailable".into()))?;
+                .ok_or_else(|| fail("runtime query canonical owner unavailable".into()))?;
             match snapshots.publish_validated_store_after(base, &update.store) {
                 Ok(_) => {
                     let version = update.capture.scan().version();
@@ -196,17 +198,17 @@ impl System {
                         page.publish(version);
                     }
                     state.version = version;
-                    return Ok(());
+                    return Ok(true);
                 }
-                Err(crate::package::scan_snapshot::Error::Stale) => {}
+                Err(crate::package::scan_snapshot::Error::Stale) => return Ok(false),
                 Err(error) => {
                     return Err(fail(format!(
-                        "implicit-access canonical publication: {error:?}"
+                        "runtime query canonical publication: {error:?}"
                     )));
                 }
             }
         }
         current.set_queries(Some(view));
-        Ok(())
+        Ok(true)
     }
 }

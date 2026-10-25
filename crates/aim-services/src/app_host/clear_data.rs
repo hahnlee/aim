@@ -120,7 +120,7 @@ impl AppHost {
             }
             permitted = false;
         }
-        let (state, resolution) = self.live_packages()?;
+        let (state, resolution) = self.packages()?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,
