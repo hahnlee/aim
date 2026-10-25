@@ -1,4 +1,3 @@
-use super::resources::Framework;
 use super::*;
 
 struct Data(std::path::PathBuf);
@@ -55,14 +54,13 @@ fn framework_requests_do_not_load_packages() {
     )) else {
         unreachable!()
     };
+    use aim_service_aidl::android_permission_ipermissionmanager as pm;
+    let mut request = Parcel::new();
+    pm::GetSplitPermissions {}.write(&mut request);
     let reply = process
         .local_service(ptr)
         .unwrap()
-        .transact(
-            aim_service_aidl::android_permission_ipermissionmanager::GET_SPLIT_PERMISSIONS,
-            &Parcel::new(),
-            false,
-        )
+        .transact(pm::GET_SPLIT_PERMISSIONS, &request, false)
         .unwrap();
     reply.reader().read_exception().unwrap().unwrap();
     assert!(host.inputs.get().is_none());
