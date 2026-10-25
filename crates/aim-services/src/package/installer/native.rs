@@ -742,13 +742,45 @@ impl NativeOwners {
         self.receivers.lock().unwrap().remove(&id);
         Ok(())
     }
+    fn fail_install(&self, id: i32, legacy: i32, error: Exception) -> Result<(), Exception> {
+        // PIS.dispatchSessionFinished: status delivery does not own the
+        // session's destruction or onSessionFinished cleanup.
+        let mut errors = Vec::new();
+        if let Err(delivery) = self.deliver_install(id, legacy, Some(error.message.clone())) {
+            errors.push(delivery);
+        }
+        if let Err(cleanup) = self
+            .sessions
+            .abandon(id, 1000)
+            .and_then(|ids| self.abandon_stage(&ids))
+        {
+            errors.push(cleanup);
+        }
+        self.receivers.lock().unwrap().remove(&id);
+        if let Err(cleanup) = self.sessions.finish_nonstaged(id).and_then(|retired| {
+            if retired.is_empty() {
+                Ok(())
+            } else {
+                self.persist()
+            }
+        }) {
+            errors.push(cleanup);
+        }
+        super::post_install::committed_result(Err(error), &errors)
+    }
     fn run_install(&self, id: i32) -> Result<(), Exception> {
         let root = self.sessions.snapshot(id)?;
         let ordered = std::iter::once(id)
             .chain(root.children.iter().copied())
             .collect();
-        let warning_attempt = self.install_warnings.begin(id, ordered)?;
-        let before = (self.source)()?;
+        let warning_attempt = match self.install_warnings.begin(id, ordered) {
+            Ok(attempt) => attempt,
+            Err(error) => return self.fail_install(id, -110, error),
+        };
+        let before = match (self.source)() {
+            Ok(before) => before,
+            Err(error) => return self.fail_install(id, -110, error),
+        };
         let since = self.deferred.mark();
         let result = self.install_staged_batch(id);
         match result {
@@ -792,31 +824,12 @@ impl NativeOwners {
                 });
                 Ok(())
             }
-            Err(super::pipeline::Error::Install(failure)) => {
-                self.deliver_install(id, failure.legacy_status, Some(failure.message.clone()))?;
-                if !failure.committed {
-                    let ids = self.sessions.abandon(id, 1000)?;
-                    self.abandon_stage(&ids)?;
-                }
-                self.receivers.lock().unwrap().remove(&id);
-                Err(Exception::new(EX_ILLEGAL_STATE, failure.message))
-            }
-            Err(super::pipeline::Error::Owner {
-                committed,
-                mut error,
-            }) => {
-                error.message = format!(
-                    "Native installer session {id} owner failure (committed={committed}, exception {}): {}",
-                    error.code, error.message
-                );
-                self.deliver_install(id, -110, Some(error.message.clone()))?;
-                if !committed {
-                    let ids = self.sessions.abandon(id, 1000)?;
-                    self.abandon_stage(&ids)?;
-                }
-                self.receivers.lock().unwrap().remove(&id);
-                Err(error)
-            }
+            Err(super::pipeline::Error::Install(failure)) => self.fail_install(
+                id,
+                failure.legacy_status,
+                Exception::new(EX_ILLEGAL_STATE, failure.message),
+            ),
+            Err(super::pipeline::Error::Owner { error, .. }) => self.fail_install(id, -110, error),
         }
     }
     pub fn configure_production_preparation(
@@ -2244,6 +2257,214 @@ mod tests {
         )
         .unwrap()
     }
+    struct NoMemory;
+    impl aim_binder_driver::GuestProcess for NoMemory {
+        fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), aim_binder_driver::Errno> {
+            Err(aim_binder_driver::errno::EFAULT)
+        }
+        fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), aim_binder_driver::Errno> {
+            Err(aim_binder_driver::errno::EFAULT)
+        }
+        fn get_file(
+            &mut self,
+            _: u32,
+        ) -> Result<aim_binder_driver::File, aim_binder_driver::Errno> {
+            Err(aim_binder_driver::errno::EBADF)
+        }
+        fn install_file(
+            &mut self,
+            _: aim_binder_driver::File,
+        ) -> Result<u32, aim_binder_driver::Errno> {
+            Err(aim_binder_driver::errno::EBADF)
+        }
+        fn close_fd(&mut self, _: u32) {
+            panic!("descriptor-only fixture exchanges no files")
+        }
+    }
+    #[test]
+    fn commit_owner_failure_reaches_status_receiver_and_finishes_session() {
+        // android-16.0.0_r1 PIS.dispatchSessionFinished/sendOnPackageInstalled.
+        use crate::app_host::{
+            AppHost,
+            kept::{RawBundle, RawIntent},
+            package_bootstrap::PackageBootstrap,
+        };
+        use aim_binder_driver::{Credentials, Device, Driver, uapi::*};
+        use aim_service_aidl::{
+            android_content_iintentsender as sender,
+            dev_aim_server_ipackagebootstrapbridge as bootstrap,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        struct Receiver(mpsc::Sender<Parcel>);
+        impl Service for Receiver {
+            fn descriptor(&self) -> &str {
+                sender::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> aim_binder_host::local::Reply {
+                assert_eq!(call.code, sender::SEND);
+                let args = sender::Send::<RawIntent, RawBundle>::read(&mut call.data)?;
+                self.0.send(args.intent.unwrap().parcel()).unwrap();
+                Ok(Parcel::new())
+            }
+        }
+        let driver = Driver::new();
+        let open = |pid, euid| {
+            LocalProcess::open(
+                &driver,
+                Device::Binder,
+                Credentials {
+                    pid,
+                    euid,
+                    security_context: None,
+                },
+            )
+        };
+        let process = open(77701, 1000);
+        let shell = open(77702, 2000);
+        let (sent, received) = mpsc::channel();
+        let Binder::Local(ptr) = shell.add_service(Arc::new(Receiver(sent))) else {
+            unreachable!()
+        };
+        let mut object = FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: 0,
+            binder: ptr,
+            cookie: ptr,
+        }
+        .encode();
+        driver
+            .ioctl(
+                shell.proc_handle(),
+                77702,
+                BINDER_SET_CONTEXT_MGR_EXT,
+                &mut object,
+                &mut NoMemory,
+            )
+            .unwrap();
+        shell.start();
+        process.start();
+        let host = AppHost::new(process.clone());
+        let leaf = PackageBootstrap::new(host);
+        let mut p = Parcel::new();
+        bootstrap::GetInstallerExternalBridge {}.write(&mut p);
+        let reply = call(&leaf, bootstrap::GET_INSTALLER_EXTERNAL_BRIDGE, 1000, &p);
+        let binder = bootstrap::read_get_installer_external_bridge_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Binder::Local(ptr) = binder else {
+            unreachable!()
+        };
+        let external = super::super::preapproval::BridgeOwner::new(
+            crate::system::ServiceOwner::Local(process.local_service(ptr).unwrap()),
+        );
+        let data = Data::new();
+        let sessions = Arc::new(Sessions::default());
+        let fail = Arc::new(AtomicBool::new(false));
+        let fault = fail.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let publisher = process.clone();
+        let owner = NativeOwners::open(
+            sessions.clone(),
+            Arc::new(move || {
+                if fault.swap(false, Ordering::SeqCst) {
+                    Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "commit query owner failed",
+                    ))
+                } else {
+                    Ok(state())
+                }
+            }),
+            Arc::new(|_, _, _| Ok(device())),
+            SystemConfig::default(),
+            disk(&data),
+            Arc::new(move |node| Ok(publisher.add_service(node))),
+            Arc::new(move |event| observed.lock().unwrap().push(event)),
+            process.clone(),
+        )
+        .unwrap();
+        *owner.external.lock().unwrap() = Some(external);
+        let (record, permission) = owner
+            .normalize(0, 77, request(), Some("fixture".into()), None, 0)
+            .unwrap();
+        let id = sessions.create_record(record, permission).unwrap();
+        let (session, record) = sessions.records().pop().unwrap();
+        owner.prepare_stage(&session, &record).unwrap();
+        sessions.prepared(id).unwrap();
+        sessions.seal(id, 0, &|_| false).unwrap();
+        owner.receivers.lock().unwrap().insert(
+            id,
+            (
+                super::super::preapproval::IntentSender {
+                    target: Binder::Handle(0),
+                },
+                Some(process.strong(0)),
+            ),
+        );
+        fail.store(true, Ordering::SeqCst);
+        let run = owner.clone();
+        let (finished, failure) = mpsc::channel();
+        let (queue, worker) = super::super::commit::Worker::start(
+            Arc::new(move |id| run.run_install(id)),
+            Arc::new(move |message| finished.send(message).unwrap()),
+        );
+        queue.send(Some(id)).unwrap();
+        assert_eq!(
+            failure
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            "commit query owner failed"
+        );
+        drop(worker);
+        let status = received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let mut r = status.reader();
+        r.read_string8().unwrap();
+        r.read_i32().unwrap();
+        r.read_string8().unwrap();
+        r.read_string8().unwrap();
+        r.read_i32().unwrap();
+        r.read_i32().unwrap();
+        r.read_string8().unwrap();
+        r.read_string16().unwrap();
+        for _ in 0..5 {
+            r.read_i32().unwrap();
+        }
+        let extras = crate::bundle::read(&mut r).unwrap().unwrap();
+        use crate::bundle::Value;
+        assert_eq!(
+            extras["android.content.pm.extra.SESSION_ID"],
+            Value::Int(id)
+        );
+        assert_eq!(extras["android.content.pm.extra.STATUS"], Value::Int(1));
+        assert_eq!(
+            extras["android.content.pm.extra.LEGACY_STATUS"],
+            Value::Int(-110)
+        );
+        assert_eq!(
+            extras["android.content.pm.extra.STATUS_MESSAGE"],
+            Value::String(Some(
+                "INSTALL_FAILED_INTERNAL_ERROR: commit query owner failed".into()
+            ))
+        );
+        assert!(received.try_recv().is_err());
+        assert!(sessions.snapshot(id).is_err());
+        assert!(sessions.historical_records()[0].0.destroyed);
+        assert!(!data.0.join(format!("app/vmdl{id}.tmp")).exists());
+        assert!(owner.receivers.lock().unwrap().is_empty());
+        assert!(events.lock().unwrap().iter().any(
+            |e| matches!(e, Event::Finished { id: finished, success: false, .. } if *finished == id)
+        ));
+        owner.shutdown_callbacks();
+        process.shutdown().unwrap();
+        shell.shutdown().unwrap();
+    }
     #[test]
     fn archive_graph_backreferences_release_actual_store_and_reject_retired_installer() {
         use crate::package::{
@@ -2255,34 +2476,6 @@ mod tests {
         use std::{fs, os::unix::fs::MetadataExt};
         fn illegal(message: &str) -> Exception {
             Exception::new(EX_ILLEGAL_STATE, message)
-        }
-        struct NoMemory;
-        impl aim_binder_driver::GuestProcess for NoMemory {
-            fn copy_from_user(
-                &mut self,
-                _: u64,
-                _: &mut [u8],
-            ) -> Result<(), aim_binder_driver::Errno> {
-                Err(aim_binder_driver::errno::EFAULT)
-            }
-            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), aim_binder_driver::Errno> {
-                Err(aim_binder_driver::errno::EFAULT)
-            }
-            fn get_file(
-                &mut self,
-                _: u32,
-            ) -> Result<aim_binder_driver::File, aim_binder_driver::Errno> {
-                Err(aim_binder_driver::errno::EBADF)
-            }
-            fn install_file(
-                &mut self,
-                _: aim_binder_driver::File,
-            ) -> Result<u32, aim_binder_driver::Errno> {
-                Err(aim_binder_driver::errno::EBADF)
-            }
-            fn close_fd(&mut self, _: u32) {
-                panic!("descriptor-only fixture exchanges no files")
-            }
         }
         struct Effects;
         impl Service for Effects {
