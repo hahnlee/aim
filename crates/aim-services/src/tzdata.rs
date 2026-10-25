@@ -131,21 +131,8 @@ impl Rules {
         let month = month.rem_euclid(12) + 1;
         let clock = hour as i64 * 3600 + minute as i64 * 60 + second as i64;
         let day = day as i64 + clock.div_euclid(86_400);
-        let gregorian = days_from_civil(year, month, day);
-        let days = if gregorian >= days_from_civil(1582, 10, 15) {
-            gregorian
-        } else {
-            let prior = year - 1;
-            let correction = if month <= 2 {
-                0
-            } else if year % 4 == 0 {
-                -1
-            } else {
-                -2
-            };
-            365 * prior + prior.div_euclid(4) + (367 * month - 362) / 12 + day + correction
-                - 719_165
-        };
+        // ZIP entries are DOS times, from 1980: always Gregorian.
+        let days = days_from_civil(year, month, day);
         let local = (days * 86_400 + clock.rem_euclid(86_400))
             .wrapping_mul(1000)
             .div_euclid(1000);
