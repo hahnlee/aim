@@ -437,6 +437,7 @@ pub fn register_current(ctx: *mut GuestContext, stacks: HostStacks) {
         t.insert(tid, th.clone());
         th
     });
+    th.sched.host_stale.store(true, SeqCst);
     *th.stacks.lock().unwrap() = Some(stacks);
     // SAFETY: pthread_self is always valid.
     th.pthread
@@ -515,6 +516,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     if newsp != 0 {
         c.sp = newsp;
     }
+    let inherited_nice = super::cred::thread_nice(parent.tid);
     let th = with_table_mut(|t| {
         let tid = alloc_tid(t)?;
         let th = Arc::new(Thread::new(tid, child_ctx, parent.sig.mask()));
@@ -529,6 +531,8 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         if flags & CLONE_CHILD_CLEARTID != 0 {
             th.clear_child_tid.store(ctid, SeqCst);
         }
+        super::cred::inherit_nice(tid, inherited_nice);
+        th.sched.host_stale.store(true, SeqCst);
         t.insert(tid, th.clone());
         super::procrec::thread(tid, 0, &th.name.lock().unwrap());
         Some(th)
@@ -581,7 +585,10 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         }
     };
     if !ok {
-        with_table_mut(|t| t.remove(&tid));
+        with_table_mut(|t| {
+            t.remove(&tid);
+            super::cred::forget_nice(tid);
+        });
         super::procrec::gone(tid);
         super::cgroup::thread_gone(tid);
         super::ptrace::forget(tid);
@@ -640,6 +647,7 @@ pub fn exit(a: [u64; 6]) -> ! {
     // Out of the table before a joiner wakes: its tid is gone for tgkill.
     let left = with_table_mut(|t| {
         t.remove(&th.tid);
+        super::cred::forget_nice(th.tid);
         t.len()
     });
     super::procrec::gone(th.tid);
@@ -780,4 +788,5 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     for v in [&th.sched.nice, &th.sched.policy, &th.sched.priority] {
         v.store(r.i32(), SeqCst);
     }
+    th.sched.host_stale.store(true, SeqCst);
 }

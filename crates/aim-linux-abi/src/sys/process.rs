@@ -192,8 +192,7 @@ thread_local! {
 /// default priority on top of the task's base priority, which the host
 /// process's nice value moves (a job a shell starts in the background runs
 /// at nice 5); a Linux thread's priority is its own, so the importance is
-/// taken from the task's base priority as it is, and threads apply theirs
-/// again when it changes ([`task_priority_changed`]).
+/// taken from the task's base priority as it is.
 pub fn apply_host_sched(nice: i32, policy: i32) {
     let raised = matches!(policy, SCHED_FIFO | SCHED_RR)
         || nice < 0 && !matches!(policy, SCHED_BATCH | SCHED_IDLE);
@@ -217,17 +216,6 @@ pub fn apply_host_sched(nice: i32, policy: i32) {
         param.sched_priority = priority;
         libc::pthread_setschedparam(libc::pthread_self(), policy, &param);
     }
-}
-
-/// The task's base priority changed (the host process's nice value): every
-/// other thread applies its scheduling again at its next syscall.
-pub fn task_priority_changed() {
-    let me = thread::gettid() as i32;
-    thread::with_table(|t| {
-        for th in t.values().filter(|th| th.tid != me) {
-            th.sched.host_stale.store(true, SeqCst);
-        }
-    });
 }
 
 /// Apply the calling thread's scheduling, changed by another thread, to
