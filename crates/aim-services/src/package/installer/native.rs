@@ -3732,6 +3732,125 @@ mod tests {
         owner.shutdown_callbacks();
     }
     #[test]
+    fn session_checksums_call_private_files_as_owner_and_keep_public_caller() {
+        use aim_binder_host::local::{Call, LocalService, Reply};
+        use aim_service_aidl::{
+            android_content_pm_ipackageinstallersession as api,
+            dev_aim_server_ipackageinstallerfiles as files,
+        };
+        struct FileOwner(Mutex<Vec<String>>);
+        impl Service for FileOwner {
+            fn descriptor(&self) -> &str {
+                files::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                let args = files::RequestChecksums::read(&mut call.data)?;
+                assert_eq!(call.code, files::REQUEST_CHECKSUMS);
+                assert_eq!((args.optional, args.required), (8, 1));
+                self.0.lock().unwrap().push(args.guest_path.unwrap());
+                let mut reply = Parcel::new();
+                files::write_request_checksums_reply(&mut reply);
+                Ok(reply)
+            }
+        }
+        struct Forward(Arc<LocalService>);
+        impl Service for Forward {
+            fn descriptor(&self) -> &str {
+                api::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                let mut request = Parcel::new();
+                api::RequestChecksums::read(&mut call.data)?.write(&mut request);
+                let reply = self.0.transact(call.code, &request, false)?;
+                let mut p = Parcel::new();
+                match api::read_request_checksums_reply(&mut reply.reader())? {
+                    Ok(()) => api::write_request_checksums_reply(&mut p),
+                    Err(error) => p.write_exception(&error),
+                }
+                Ok(p)
+            }
+        }
+        let data = Data::new();
+        let sessions = Arc::new(Sessions::default());
+        let owner = make_owner(
+            &data,
+            sessions.clone(),
+            Default::default(),
+            Default::default(),
+        );
+        let process = crate::test_process(1000);
+        let local = |service: Arc<dyn Service>| {
+            let Binder::Local(ptr) = process.add_service(service) else {
+                unreachable!()
+            };
+            process.local_service(ptr).unwrap()
+        };
+        let files = Arc::new(FileOwner(Mutex::new(Vec::new())));
+        owner
+            .configure_files(super::super::hardlink::Files::new(
+                crate::system::ServiceOwner::Local(local(files.clone())),
+            ))
+            .unwrap();
+        let (record, permission) = owner
+            .normalize(10100, 77, request(), Some("fixture".into()), None, 0)
+            .unwrap();
+        let id = sessions.create_record(record, permission).unwrap();
+        let (session, record) = sessions.records().pop().unwrap();
+        owner.prepare_stage(&session, &record).unwrap();
+        sessions.prepared(id).unwrap();
+        let node = Arc::new(local(Arc::new(SessionNode {
+            bound: sessions.bind_session(id).unwrap(),
+            operations: Some(owner.clone()),
+            sessions: sessions.clone(),
+            id,
+            notify: Arc::new(|_| {}),
+        })));
+        let app = crate::test_process(10100);
+        let Binder::Local(ptr) = app.add_service(Arc::new(Forward(node.clone()))) else {
+            unreachable!()
+        };
+        let mut p = Parcel::new();
+        api::RequestChecksums {
+            name: Some("base.apk".into()),
+            optional: 8,
+            required: 1,
+            trusted_installers: None,
+            on_checksums_ready_listener: None,
+        }
+        .write(&mut p);
+        let reply = app
+            .local_service(ptr)
+            .unwrap()
+            .transact(api::REQUEST_CHECKSUMS, &p, false)
+            .unwrap();
+        api::read_request_checksums_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *files.0.lock().unwrap(),
+            [format!("/data/app/vmdl{id}.tmp/base.apk")]
+        );
+        let foreign = crate::test_process(10101);
+        let Binder::Local(ptr) = foreign.add_service(Arc::new(Forward(node))) else {
+            unreachable!()
+        };
+        let reply = foreign
+            .local_service(ptr)
+            .unwrap()
+            .transact(api::REQUEST_CHECKSUMS, &p, false)
+            .unwrap();
+        assert_eq!(
+            api::read_request_checksums_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        assert_eq!(files.0.lock().unwrap().len(), 1);
+        owner.shutdown_callbacks();
+    }
+    #[test]
     fn native_binder_create_prepare_reopen_abandon_has_real_files_and_identity() {
         let data = Data::new();
         let sessions = Arc::new(Sessions::default());

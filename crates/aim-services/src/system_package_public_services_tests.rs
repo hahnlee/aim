@@ -10,6 +10,112 @@ use std::{
     sync::{Arc, Mutex},
 };
 struct NoMemory;
+
+#[test]
+fn package_checksums_use_private_file_owner_after_app_visibility_checks() {
+    use aim_service_aidl::dev_aim_server_ipackageinstallerfiles as files;
+    struct FileOwner(Mutex<Vec<String>>);
+    impl Service for FileOwner {
+        fn descriptor(&self) -> &str {
+            files::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.sender_euid, 1000);
+            assert_eq!(call.code, files::REQUEST_PACKAGE_CHECKSUMS);
+            let args = files::RequestPackageChecksums::read(&mut call.data)?;
+            let bytes = args.file_parcel.unwrap();
+            let mut r = Reader::new(&bytes, &[]);
+            assert_eq!(r.read_i32()?, 1);
+            assert_eq!(r.read_string16()?, None);
+            self.0.lock().unwrap().push(r.read_string16()?.unwrap());
+            let mut reply = Parcel::new();
+            files::write_request_package_checksums_reply(&mut reply);
+            Ok(reply)
+        }
+    }
+    struct Forward(aim_binder_host::local::LocalService);
+    impl Service for Forward {
+        fn descriptor(&self) -> &str {
+            pm::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            let mut request = Parcel::new();
+            pm::RequestPackageChecksums::read(&mut call.data)?.write(&mut request);
+            let reply = self.0.transact(call.code, &request, false)?;
+            let mut p = Parcel::new();
+            match pm::read_request_package_checksums_reply(&mut reply.reader())? {
+                Ok(()) => pm::write_request_package_checksums_reply(&mut p),
+                Err(error) => p.write_exception(&error),
+            }
+            Ok(p)
+        }
+    }
+    with_discovery_session(|host, publish, _| {
+        publish(&mut |pkg| {
+            if pkg.package_name == "p" {
+                pkg.base_apk_path = Some("/data/app/p/base.apk".into());
+            }
+        });
+        let system = host.package_system().unwrap();
+        let capture = system.capture_package_queries().unwrap();
+        let uid = capture.state().packages["p"].app_id as u32;
+        let files = Arc::new(FileOwner(Mutex::new(Vec::new())));
+        let process = system.binder_process();
+        let Binder::Local(ptr) = process.add_service(files.clone()) else {
+            unreachable!()
+        };
+        system
+            .package_bootstrap
+            .lock()
+            .unwrap()
+            .current
+            .as_mut()
+            .unwrap()
+            .installer_files = Some(crate::package::installer::hardlink::Files::new(
+            ServiceOwner::Local(process.local_service(ptr).unwrap()),
+        ));
+        let (public, _) = crate::package::service::PackageQueries::from_system(system);
+        let Binder::Local(ptr) = process.add_service(public) else {
+            unreachable!()
+        };
+        let app = crate::test_process(uid);
+        let Binder::Local(ptr) =
+            app.add_service(Arc::new(Forward(process.local_service(ptr).unwrap())))
+        else {
+            unreachable!()
+        };
+        let endpoint = app.local_service(ptr).unwrap();
+        let request = |package: &str| {
+            let mut p = Parcel::new();
+            pm::RequestPackageChecksums {
+                package_name: Some(package.into()),
+                include_splits: false,
+                optional: 0,
+                required: 1,
+                trusted_installers: Some(vec![]),
+                on_checksums_ready_listener: Some(Binder::Local(ptr)),
+                user_id: 0,
+            }
+            .write(&mut p);
+            endpoint
+                .transact(pm::REQUEST_PACKAGE_CHECKSUMS, &p, false)
+                .unwrap()
+        };
+        let reply = request("p");
+        pm::read_request_package_checksums_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap();
+        assert_eq!(*files.0.lock().unwrap(), ["/data/app/p/base.apk"]);
+        let reply = request("absent");
+        assert!(
+            pm::read_request_package_checksums_reply(&mut reply.reader())
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(files.0.lock().unwrap().len(), 1);
+    });
+}
+
 impl GuestProcess for NoMemory {
     fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> std::result::Result<(), Errno> {
         Err(errno::EFAULT)

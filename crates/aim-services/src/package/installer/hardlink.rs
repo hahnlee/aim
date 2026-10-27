@@ -38,7 +38,7 @@ impl Files {
         self.current()?;
         let reply = self
             .bridge
-            .transact(code, parcel, false)
+            .transact_as_owner(code, parcel, false)
             .map_err(|status| {
                 Exception::new(
                     EX_ILLEGAL_STATE,
