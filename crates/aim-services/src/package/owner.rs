@@ -108,6 +108,7 @@ pub struct Store {
     settings_document: Element,
     settings_present: bool,
     first_write_files: Vec<OwnedFile>,
+    first_write_inventory: Vec<fs::Metadata>,
     preferred_users: BTreeSet<u32>,
     list_document: Option<String>,
     /// The last scan `validate_committed_scan` accepted, apart from user
@@ -229,6 +230,7 @@ impl Store {
             settings_document,
             settings_present,
             first_write_files: Vec::new(),
+            first_write_inventory: Vec::new(),
             preferred_users,
             list_document,
             validated: Default::default(),
@@ -648,8 +650,12 @@ impl Store {
             })
             .map_err(WriteError::before)?;
         } else {
-            require_initial_files(&self.data, &self.first_write_files)
-                .map_err(WriteError::before)?;
+            require_initial_files(
+                &self.data,
+                &self.first_write_files,
+                &self.first_write_inventory,
+            )
+            .map_err(WriteError::before)?;
             fs::create_dir_all(path.parent().unwrap()).map_err(WriteError::before)?;
         }
         let first = !self.settings_present;
@@ -681,9 +687,37 @@ impl Store {
             *self.validated.get_mut().unwrap() = None;
             self.settings_present = true;
             self.first_write_files.clear();
+            self.first_write_inventory.clear();
             self.state.settings = persisted;
         } else if first {
             let paths = settings_paths(&self.data);
+            let mut inventory = Vec::new();
+            for expected in &self.first_write_inventory {
+                for path in &paths {
+                    let metadata = match fs::symlink_metadata(path) {
+                        Ok(metadata) => metadata,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(WriteError::before(error)),
+                    };
+                    if metadata.dev() != expected.dev()
+                        || metadata.ino() != expected.ino()
+                        || self
+                            .first_write_files
+                            .iter()
+                            .any(|file| file.same_file(&metadata))
+                    {
+                        continue;
+                    }
+                    if !recovery::same_contents(expected, &metadata) {
+                        return Err(WriteError::before(
+                            "unopened recovery input changed during initial write",
+                        ));
+                    }
+                    // startWrite can rename the old main to backup, changing ctime.
+                    inventory.push(metadata);
+                }
+            }
+            self.first_write_inventory = inventory;
             // Keep descriptors pinned while their files remain: a removed
             // file's inode cannot be reused to impersonate an owned artifact.
             self.first_write_files.retain(|started| {
@@ -971,13 +1005,26 @@ fn settings_paths(data: &Path) -> [PathBuf; 3] {
 }
 
 fn require_missing_settings(data: &Path) -> Result<(), String> {
-    require_initial_files(data, &[])
+    require_initial_files(data, &[], &[])
 }
 
-fn require_initial_files(data: &Path, started: &[OwnedFile]) -> Result<(), String> {
-    for candidate in settings_paths(data) {
+fn require_initial_files(
+    data: &Path,
+    started: &[OwnedFile],
+    inventory: &[fs::Metadata],
+) -> Result<(), String> {
+    let paths = settings_paths(data);
+    let mut seen = vec![false; inventory.len()];
+    for candidate in &paths {
         match fs::symlink_metadata(&candidate) {
             Ok(metadata) => {
+                let mut claimed_inventory = false;
+                for (index, expected) in inventory.iter().enumerate() {
+                    if recovery::same_metadata(expected, &metadata) {
+                        seen[index] = true;
+                        claimed_inventory = true;
+                    }
+                }
                 let owned = started
                     .iter()
                     .find(|file| metadata.is_file() && file.same_file(&metadata));
@@ -986,7 +1033,7 @@ fn require_initial_files(data: &Path, started: &[OwnedFile]) -> Result<(), Strin
                         let bytes = fs::read(&candidate).map_err(|e| e.to_string())?;
                         file.payload.as_ref() == bytes.as_slice()
                     }
-                    None => false,
+                    None => claimed_inventory,
                 };
                 if !unchanged {
                     return Err(format!(
@@ -998,6 +1045,9 @@ fn require_initial_files(data: &Path, started: &[OwnedFile]) -> Result<(), Strin
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("{}: {error}", candidate.display())),
         }
+    }
+    if seen.contains(&false) {
+        return Err("unopened recovery input disappeared outside the initial native write".into());
     }
     Ok(())
 }

@@ -3491,11 +3491,12 @@ A late reserve-finalization failure publishes the committed main and the next
 write restores the reserve. Original ResilientAtomicFile agrees on partial main
 failure, empty retained reserve, descriptor-open failure and successful retry. Domain validation failures leave the directory unwritten, complete
 user XML survives, and a successful main commit changes the owner to restoration
-mode. An explicit exclusive recovery plan claims regular settings inputs with
-pinned descriptors/exact bytes and directory roles with pinned identity/timestamps,
-then follows original backup/main/reserve selection and failRead cleanup (#912).
-Backup directories fail open and fall through to main; unused reserve directories
-are not parsed. Backup selection attempts main/reserve cleanup before parsing:
+mode. Exclusive settings recovery now claims unopened roles by identity/metadata and
+reads only the selected stream, follows backup-open fallback without reading
+unused unreadable roles, preserves claims through initial-write retry, and
+reports selected nonregular streams or inaccessible inventory parents as
+UnsupportedOperation (#912).
+Backup selection attempts main/reserve cleanup before parsing:
 empty directories are removed, while nonempty directory deletion failure is
 recorded and the directory is preserved, as original File.delete does. Selected
 main/reserve directories expose their open error. Four additional original ART

@@ -3252,3 +3252,250 @@ fn null_factory_write_fails_without_touching_input_and_publication_is_explicit()
         ""
     );
 }
+
+#[test]
+fn recovery_opens_only_the_role_selected_by_original_precedence() {
+    use recovery::{Event, Plan, Source};
+    let parse = |bytes: &[u8], _: &mut crate::package::settings::Settings| {
+        aim_android_xml::read_next_optional(bytes)
+    };
+    for (unreadable, backup, expected) in [
+        (vec![2], false, vec![Event::Selected(Source::Main)]),
+        (
+            vec![1, 2],
+            true,
+            vec![
+                Event::OpenFailed(Source::Backup),
+                Event::Selected(Source::Main),
+            ],
+        ),
+        (
+            vec![0, 2],
+            true,
+            vec![
+                Event::Selected(Source::Backup),
+                Event::Removed(Source::Main),
+                Event::Removed(Source::Reserve),
+            ],
+        ),
+    ] {
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        let paths = settings_paths(&data.0);
+        for index in [0, 2].into_iter().chain(backup.then_some(1)) {
+            fs::write(&paths[index], b"<packages/>").unwrap();
+        }
+        for index in unreadable {
+            fs::set_permissions(&paths[index], fs::Permissions::from_mode(0)).unwrap();
+            assert_eq!(
+                File::open(&paths[index]).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        let (_, report) = Plan::inspect(&data.0)
+            .unwrap()
+            .recover(&[], &mut Default::default(), parse)
+            .unwrap();
+        assert_eq!(report.events, expected);
+        assert!(!report.first_boot);
+    }
+    for index in [0, 2] {
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        let paths = settings_paths(&data.0);
+        fs::write(&paths[index], b"<packages/>").unwrap();
+        fs::set_permissions(&paths[index], fs::Permissions::from_mode(0)).unwrap();
+        if index == 0 {
+            fs::write(&paths[2], b"<packages/>").unwrap();
+        }
+        let error = Plan::inspect(&data.0)
+            .unwrap()
+            .recover(&[], &mut Default::default(), |_, _| {
+                panic!("unopened input reached parser")
+            })
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.events,
+            vec![Event::OpenFailed(if index == 0 {
+                Source::Main
+            } else {
+                Source::Reserve
+            })]
+        );
+        assert!(paths[index].exists());
+        assert!(paths[2].exists());
+    }
+}
+
+#[test]
+fn unreadable_recovery_claims_survive_absent_no_start_and_failed_initial_write() {
+    use recovery::{Event, Plan, Source};
+    for (role, first_write_fails) in [(1, false), (1, true), (2, false), (2, true)] {
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        let paths = settings_paths(&data.0);
+        fs::write(&paths[role], b"unreadable alternate").unwrap();
+        fs::set_permissions(&paths[role], fs::Permissions::from_mode(0)).unwrap();
+        if role == 2 {
+            fs::write(&paths[0], b"").unwrap();
+        }
+        let (mut store, report) = Plan::inspect(&data.0)
+            .unwrap()
+            .recover(&[], &mut Default::default(), |bytes, _| {
+                aim_android_xml::read_next_optional(bytes)
+            })
+            .unwrap();
+        assert_eq!(
+            report.events,
+            if role == 1 {
+                vec![Event::OpenFailed(Source::Backup), Event::Absent]
+            } else {
+                vec![
+                    Event::Selected(Source::Main),
+                    Event::NoStartTag(Source::Main),
+                ]
+            }
+        );
+        assert!(report.first_boot);
+        if first_write_fails {
+            let error = store
+                .commit_package_document_using(element("packages"), None, |_, _| {
+                    Err(io::Error::other("controlled write failure"))
+                })
+                .unwrap_err();
+            assert!(!error.committed);
+            if role == 1 {
+                assert_eq!(
+                    File::open(&paths[1]).unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied
+                );
+            }
+        }
+        store
+            .commit_package_document_using(element("packages"), None, |file, bytes| {
+                file.write_all(bytes)
+            })
+            .unwrap();
+        assert!(Store::open(&data.0, &[]).unwrap().is_some());
+        assert!(!paths[1].exists());
+    }
+}
+
+#[test]
+fn unopened_recovery_roles_reject_changes_before_cleanup_and_initial_retry() {
+    use recovery::{Event, Plan, Source};
+    for mutation in 0..3 {
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        let paths = settings_paths(&data.0);
+        fs::write(&paths[1], b"backup").unwrap();
+        fs::set_permissions(&paths[1], fs::Permissions::from_mode(0)).unwrap();
+        let plan = Plan::inspect(&data.0).unwrap();
+        fs::write(&paths[0], b"foreign inventory").unwrap();
+        let error = plan
+            .recover(&[], &mut Default::default(), |_, _| panic!())
+            .err()
+            .unwrap();
+        assert!(error.events.is_empty());
+        assert!(paths[1].exists());
+        fs::remove_file(&paths[0]).unwrap();
+        let (mut store, report) = Plan::inspect(&data.0)
+            .unwrap()
+            .recover(&[], &mut Default::default(), |_, _| panic!())
+            .unwrap();
+        assert_eq!(
+            report.events,
+            vec![Event::OpenFailed(Source::Backup), Event::Absent]
+        );
+        if mutation == 2 {
+            fs::remove_file(&paths[1]).unwrap();
+        } else if mutation == 1 {
+            fs::remove_file(&paths[1]).unwrap();
+            fs::write(&paths[1], b"foreign backup").unwrap();
+        } else {
+            fs::set_permissions(&paths[1], fs::Permissions::from_mode(0o600)).unwrap();
+            fs::write(&paths[1], b"foreign backup").unwrap();
+        }
+        let error = store
+            .commit_package_document_using(element("packages"), None, |_, _| panic!())
+            .unwrap_err();
+        assert!(!error.committed);
+        assert!(error.message.contains("outside the initial native write"));
+        assert!(!paths[0].exists());
+        if mutation != 2 {
+            assert_eq!(fs::read(&paths[1]).unwrap(), b"foreign backup");
+        }
+    }
+}
+
+#[test]
+fn unused_nonregular_roles_are_not_opened_but_selected_streams_need_their_owner() {
+    use recovery::{Event, Plan, Source};
+    use std::os::unix::ffi::OsStrExt;
+    for selected in [false, true] {
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        let paths = settings_paths(&data.0);
+        let fifo = std::ffi::CString::new(paths[2].as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        if !selected {
+            fs::write(&paths[1], b"<packages/>").unwrap();
+        }
+        let result =
+            Plan::inspect(&data.0)
+                .unwrap()
+                .recover(&[], &mut Default::default(), |bytes, _| {
+                    aim_android_xml::read_next_optional(bytes)
+                });
+        if selected {
+            let error = result.err().unwrap();
+            assert!(
+                error.message.contains("UnsupportedOperation") && error.message.contains("#912")
+            );
+            assert!(matches!(
+                error.events.as_slice(),
+                [Event::OwnerFailed {
+                    source: Source::Reserve,
+                    ..
+                }]
+            ));
+            assert!(paths[2].exists());
+        } else {
+            assert_eq!(
+                result.unwrap().1.events,
+                vec![
+                    Event::Selected(Source::Backup),
+                    Event::Removed(Source::Reserve)
+                ]
+            );
+            assert!(!paths[2].exists());
+        }
+    }
+}
+
+#[test]
+fn backup_cleanup_updates_claims_for_its_own_hard_link_removals() {
+    use recovery::{Event, Plan, Source};
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let paths = settings_paths(&data.0);
+    fs::write(&paths[1], b"<packages/>").unwrap();
+    fs::hard_link(&paths[1], &paths[0]).unwrap();
+    fs::hard_link(&paths[1], &paths[2]).unwrap();
+    let (_, report) = Plan::inspect(&data.0)
+        .unwrap()
+        .recover(&[], &mut Default::default(), |bytes, _| {
+            aim_android_xml::read_next_optional(bytes)
+        })
+        .unwrap();
+    assert_eq!(
+        report.events,
+        vec![
+            Event::Selected(Source::Backup),
+            Event::Removed(Source::Main),
+            Event::Removed(Source::Reserve)
+        ]
+    );
+    assert_eq!(fs::read(&paths[1]).unwrap(), b"<packages/>");
+}
