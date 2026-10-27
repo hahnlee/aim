@@ -1456,7 +1456,7 @@ fn sys_node(tail: &str) -> Option<Node> {
             Node::File(format!("{s}\n").into_bytes())
         }
         "kernel/random/uuid" => Node::File(random_uuid().into_bytes()),
-        "kernel/pid_max" => Node::File(b"99999\n".to_vec()),
+        "kernel/pid_max" => Node::File(format!("{}\n", super::pidns::tids::PID_MAX).into_bytes()),
         "kernel/ostype" => Node::File(b"Linux\n".to_vec()),
         "kernel/osrelease" => {
             Node::File(format!("{}\n", super::pstate::kernel_release()).into_bytes())

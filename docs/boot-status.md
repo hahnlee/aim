@@ -7341,6 +7341,8 @@ lmkd reacting to the Mac's memory pressure, not from the guest.
 
 ## Other processes in /proc (2026-09-30, #238, #379)
 
+Clone TIDs are allocated across the by-pid namespace below the advertised Linux `pid_max` of 4194304, with incarnation-checked ownership and exit reclamation (#409).
+
 Each process keeps a record beside its by-pid entry
 (`docs/guest-init-contract.md` section 4): its threads, and the stack
 pages of its argument strings, mapped from the record. Another

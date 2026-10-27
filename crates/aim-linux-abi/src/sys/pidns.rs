@@ -21,6 +21,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::errno::ESRCH;
 
+pub(super) mod tids;
+
 fn me() -> i32 {
     // SAFETY: trivial.
     unsafe { libc::getpid() }
