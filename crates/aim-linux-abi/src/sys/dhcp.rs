@@ -256,7 +256,7 @@ mod tests {
         Lease {
             up: up(),
             dns: dns.to_vec(),
-            secs: 3600,
+            secs: super::super::uplink::LEASE_SECS,
         }
     }
 
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(option(&r, 1).unwrap(), [255, 255, 255, 0]);
         assert_eq!(option(&r, 3).unwrap(), [192, 168, 1, 1]);
         assert_eq!(option(&r, 6).unwrap(), [9, 9, 9, 9]);
-        assert_eq!(option(&r, 51).unwrap(), 3600u32.to_be_bytes());
+        assert_eq!(option(&r, 51).unwrap(), 60u32.to_be_bytes());
         // Valid IPv4 and UDP checksums.
         assert_eq!(checksum(&r[14..34], 0), 0);
         let mut pseudo = r[26..34].to_vec();
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn a_renewal_over_udp_is_answered() {
+    fn a_renewal_over_udp_picks_up_dns_changes() {
         // RENEWING: ciaddr is the leased address, no server identifier or
         // requested address, unicast to the server.
         let mut b = client(REQUEST, None)[14 + 20 + 8..].to_vec();
@@ -338,9 +338,20 @@ mod tests {
         let f = client_frame(up().addr, up().gateway, &b);
         assert_eq!(&f[..6], &ROUTER_MAC);
         assert_eq!(checksum(&f[14..34], 0), 0);
-        let ack = answer(&f, &lease(&[])).unwrap();
+        let old = lease(&[Ipv4Addr::new(9, 9, 9, 9)]);
+        let first = answer(&f, &old).unwrap();
+        assert_eq!(option(&first, 6).unwrap(), [9, 9, 9, 9]);
+        let mut changed = old;
+        changed.dns = vec![Ipv4Addr::new(1, 1, 1, 1)];
+        let ack = answer(&f, &changed).unwrap();
         assert_eq!(option(&ack, 53).unwrap(), [ACK]);
         assert_eq!(&ack[..6], &MAC);
+        assert_eq!(option(&ack, 6).unwrap(), [1, 1, 1, 1]);
+        assert_eq!(option(&ack, 51).unwrap(), 60u32.to_be_bytes());
+        assert_eq!(
+            &ack[14 + 20 + 8 + 16..14 + 20 + 8 + 20],
+            &up().addr.octets()
+        );
         // The Mac moved to another network: the old address is NAKed.
         let mut moved = lease(&[]);
         moved.up.addr = Ipv4Addr::new(10, 0, 0, 7);
