@@ -3437,10 +3437,6 @@ impl AppHost {
                 "unlocking names an unknown user",
             ));
         }
-        self.tasks
-            .launch_params(self.data()?)?
-            .unlock_user(user, capture.state().packages.keys().cloned().collect())
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         self.unlocked_users.lock().unwrap().insert(user);
         system.publish_package_user_unlocking(user)
     }

@@ -61,6 +61,22 @@ fn block(owner: &Persister) -> mpsc::Sender<()> {
 }
 
 #[test]
+fn launch_params_load_when_the_activity_side_unlocks_the_user() {
+    crate::system::with_discovery_session(|host, _, _| {
+        let data = host.data().unwrap();
+        std::fs::create_dir_all(folder(data, 0)).unwrap();
+        let component = name("p");
+        std::fs::write(file(&folder(data, 0), &component), params().xml().unwrap()).unwrap();
+        let owner = host.tasks.launch_params(data).unwrap();
+
+        host.user_unlocking(0).unwrap();
+        assert_eq!(owner.get(0, &component).unwrap(), None);
+        host.activity_task_user_unlocked(0).unwrap();
+        assert_eq!(owner.get(0, &component).unwrap(), Some(params()));
+    });
+}
+
+#[test]
 fn launch_params_survive_task_owner_restart_in_original_abx() {
     let data = Data::new();
     data.user(0);

@@ -204,6 +204,16 @@ impl Tasks {
 }
 
 impl AppHost {
+    /// `ActivityTaskManagerService.Lifecycle.onUserUnlocked` →
+    /// `ActivityTaskSupervisor.onUserUnlocked`: load the user's launch params.
+    pub(super) fn activity_task_user_unlocked(&self, user: i32) -> Result<(), Exception> {
+        let capture = self.package_capture()?;
+        self.tasks
+            .launch_params(self.data()?)?
+            .unlock_user(user, capture.state().packages.keys().cloned().collect())
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
+    }
+
     /// Connects to the display server's task bridge at `socket`, in a
     /// thread of its own; in window mode it keeps the connection and
     /// takes the server's requests.

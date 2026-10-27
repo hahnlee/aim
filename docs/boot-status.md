@@ -94,7 +94,12 @@ stopped at DownloadProvider's `grantUriPermission`, which the app host
 now makes (not yet seen live), and still stop at app ops the app host
 does not decide (#1558).
 
-The native task owner persists per-user launch parameters in Android's ABX format, restores saved bounds before freeform placement on the recorded display, and removes package records through the PackageList callback (#2171).
+The native task owner persists per-user launch parameters in Android's ABX
+format, restores saved bounds before freeform placement on the recorded
+display, and removes package records through the PackageList callback (#2171).
+Loading follows ActivityTaskManager's `onUserUnlocked`, after pre-boot
+processing and `onUserLoggedIn`, before posting `BOOT_COMPLETED`, rather than
+the package side's `user_unlocking` (2026-10-28; checked without a guest boot).
 
 In window mode (2026-10-19), Files draws its Downloads root and Photos its
 home with its terms-of-service dialog: their launcher activities start the
