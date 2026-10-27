@@ -6,7 +6,7 @@ use super::{
 };
 use aim_binder_host::{
     local::{Call, LocalProcess, Reply, Service},
-    parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
+    parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
 };
 use aim_service_aidl::{ReadParcelable, dev_aim_server_iinstallerpreparationbridge as api};
 use std::{
@@ -26,8 +26,6 @@ struct State {
     started: bool,
     finished: bool,
     failure: Option<String>,
-    status_node: Option<Binder>,
-    connector_node: Option<Binder>,
 }
 pub struct Owner {
     bridge: crate::system::ServiceOwner,
@@ -180,8 +178,6 @@ impl Owner {
                 started: true,
                 finished: false,
                 failure: None,
-                status_node: Some(callback),
-                connector_node: Some(connector),
             },
         );
         let mut params_reader = Reader::new(&params.bytes, &params.objects);

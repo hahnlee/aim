@@ -9,7 +9,7 @@ use crate::package::{
     query::preferred::{MutationOwner, Owner},
 };
 impl Capture {
-    pub fn preferred_selection(
+    pub(super) fn preferred_selection(
         &self,
         query: &Query<'_>,
         intent: Option<&Intent>,

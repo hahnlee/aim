@@ -36,12 +36,6 @@ pub struct Published {
     pub persistence: Arc<Mutex<Store>>,
     pub recovery: Report,
 }
-fn transport(stage: &str, status: i32) -> Exception {
-    Exception::new(
-        EX_ILLEGAL_STATE,
-        format!("package lifecycle {stage}: {status}"),
-    )
-}
 impl<M: AreaMemory + Send + 'static> BeforeScan<M> {
     /// Execute the existing native Settings record dispatcher and bind lifecycle
     /// before the caller advances the scan/version writer. ReadOwners is the

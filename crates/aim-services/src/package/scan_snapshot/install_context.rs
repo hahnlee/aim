@@ -17,19 +17,6 @@ use std::{
 };
 
 pub type Current = Arc<dyn Fn() -> Result<Arc<Capture>, String> + Send + Sync>;
-/// Permit a retained read across actual usage publication only. All settings,
-/// code, UID, user, signing, library and permission ownership remain compared.
-pub(crate) fn same_install_identity(before: &Snapshot, after: &Snapshot) -> Result<bool, String> {
-    if before.owner() == after.owner() && before.usage() == after.usage() {
-        return Ok(true);
-    }
-    if before.usage().names().ne(after.usage().names()) {
-        return Ok(false);
-    }
-    let mut normalized = before.owner().clone();
-    normalized.update_replica_usage(before.usage(), after.usage())?;
-    Ok(&normalized == after.owner())
-}
 /// Installation owns the changed code/settings and every package sharing its
 /// old/new appId. Other packages may receive native user-state publications.
 pub(crate) fn install_targets(

@@ -8,13 +8,13 @@ use crate::package::{
 };
 use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::WriteParcelable;
-pub(crate) enum RawError {
+pub(super) enum RawError {
     Transport(i32),
     Original(aim_binder_host::parcel::Exception),
     Gap(NotModelled),
 }
 impl Capture {
-    pub fn raw_components_record(
+    pub(super) fn raw_components_record(
         &self,
         resolution: &crate::package::resolve::Resolution,
         kind: i32,
@@ -120,7 +120,7 @@ impl Capture {
             Some(std::sync::Arc::new(application)),
         ))
     }
-    pub fn raw_providers_record(
+    pub(super) fn raw_providers_record(
         &self,
         process: Option<&str>,
         metadata: Option<&str>,

@@ -628,23 +628,6 @@ impl Capture {
         })
     }
 
-    /// Prepare a complete replacement before any native mutation commits disk.
-    pub(crate) fn prepare_shared_package_snapshot(
-        self: &Arc<Self>,
-        next: Arc<Snapshot>,
-    ) -> Result<Arc<Self>, String> {
-        if next.version()
-            != self
-                .scan
-                .version()
-                .checked_add(1)
-                .ok_or("package generation exhausted")?
-        {
-            return Err("shared snapshot generation differs".into());
-        }
-        self.prepare_committed_package_snapshot(next)
-    }
-
     pub(crate) fn prepare_committed_package_snapshot(
         self: &Arc<Self>,
         next: Arc<Snapshot>,
@@ -2027,16 +2010,6 @@ impl Capture {
         Self::new(self.scan.clone(), context)
     }
 }
-impl Capture {
-    pub(crate) fn prepare_isolated_owner_update(
-        self: &Arc<Self>,
-        isolated: i32,
-        owner: Option<i32>,
-    ) -> Result<PackageUpdate, String> {
-        self.prepare_isolated_owner_delta(isolated, owner)
-    }
-}
-
 impl Capture {
     pub(crate) fn apks_in_apex(
         &self,

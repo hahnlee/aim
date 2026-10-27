@@ -610,61 +610,6 @@ mod tests {
         );
     }
     #[test]
-    fn retained_permission_handoff_allows_real_usage_publication_but_rejects_code_changes() {
-        use crate::package::scan_snapshot::install_context::same_install_identity;
-        let original = base();
-        let store = Store::new(original.owner().clone(), original.usage().clone()).unwrap();
-        let before = store.capture();
-        let mut usage = before.usage().clone();
-        usage.notify("fixture", 0, 991);
-        let mut owner = before.owner().clone();
-        owner.update_replica_usage(before.usage(), &usage).unwrap();
-        let latest = store.publish(&before, owner, usage).unwrap();
-        assert!(same_install_identity(&before, &latest).unwrap());
-        assert_eq!(
-            latest
-                .replica_runtime("fixture", false)
-                .unwrap()
-                .unwrap()
-                .usage[0],
-            991
-        );
-        assert_eq!(
-            latest
-                .replica_runtime("fixture", true)
-                .unwrap()
-                .unwrap()
-                .usage,
-            [17; 8]
-        );
-        assert_eq!(
-            store
-                .publish(&before, latest.owner().clone(), latest.usage().clone())
-                .unwrap_err(),
-            crate::package::scan_snapshot::Error::Stale
-        );
-        let mut changed = latest.owner().clone();
-        changed.settings.packages[0].code_path = "/data/app/replaced-code".into();
-        let values = [false, true]
-            .into_iter()
-            .map(|factory| {
-                (
-                    ("fixture".into(), factory),
-                    latest
-                        .replica_runtime("fixture", factory)
-                        .unwrap()
-                        .unwrap()
-                        .clone(),
-                )
-            })
-            .collect();
-        changed.capture_replica_runtime(values).unwrap();
-        let replaced = store
-            .publish(&latest, changed, latest.usage().clone())
-            .unwrap();
-        assert!(!same_install_identity(&before, &replaced).unwrap());
-    }
-    #[test]
     fn candidate_runtime_rebuilds_new_shared_group_before_store_validation() {
         let base = base();
         let mut owner = base.owner().clone();
