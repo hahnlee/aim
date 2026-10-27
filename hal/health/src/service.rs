@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use aim_hostcall::guest;
-use aim_hostcall::health::Battery;
+use aim_hostcall::health::{Battery, ChargingLimits};
 use android_hardware_health::aidl::android::hardware::health::{
     BatteryCapacityLevel::BatteryCapacityLevel, BatteryChargingPolicy::BatteryChargingPolicy,
     BatteryHealth::BatteryHealth, BatteryHealthData::BatteryHealthData,
@@ -30,13 +30,19 @@ pub fn health_info() -> binder::Result<HealthInfo> {
         log::error!("host call health.battery failed: errno {}", e.0);
         Status::new_exception(ExceptionCode::ILLEGAL_STATE, None)
     })?;
-    Ok(to_health_info(&b))
+    let limits = guest::charging_limits().map_err(|e| {
+        log::error!("host call health.charging_limits failed: errno {}", e.0);
+        Status::new_exception(ExceptionCode::ILLEGAL_STATE, None)
+    })?;
+    Ok(to_health_info(&b, &limits))
 }
 
-fn to_health_info(b: &Battery) -> HealthInfo {
+fn to_health_info(b: &Battery, limits: &ChargingLimits) -> HealthInfo {
     let present = b.present != 0;
     HealthInfo {
         chargerAcOnline: b.ac_online != 0,
+        maxChargingCurrentMicroamps: limits.current_microamps,
+        maxChargingVoltageMicrovolts: limits.voltage_microvolts,
         batteryStatus: BatteryStatus(b.status as i32),
         batteryHealth: BatteryHealth(b.health as i32),
         batteryPresent: present,

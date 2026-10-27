@@ -95,7 +95,7 @@ first.
 | Id | Module | Version | Functions |
 | --- | --- | --- | --- |
 | 0 | core | `ABI_VERSION` = 1 | (version only) |
-| 1 | health | 1 | `FN_BATTERY`: fill `health::Battery` |
+| 1 | health | 2 | `FN_BATTERY`: fill `health::Battery`; `FN_CHARGING_LIMITS`: fill `health::ChargingLimits` |
 | 2 | gpu | 1 | `FN_INIT`, `FN_IMPORT_BUFFER`, `FN_PRESENT`, and the generated EGL/GLES entry points from `FN_TABLE_BASE` ([gles-driver.md](gles-driver.md)) |
 | 3 | display | 3 | `FN_CONNECT` (returns the event fd), `FN_IMPORT`, `FN_PRESENT`, `FN_RELEASE`, `FN_SET_VSYNC` ([composer.md](composer.md)); `FN_WINDOWS` (returns the task bridge's record fd, [windows.md](windows.md)) |
 | 4 | (retired) | | was the thermal HAL's host side; answered as an unknown module since the HAL went (`thermalservice` is native, #641). The id is never reused |
@@ -213,8 +213,12 @@ and joins the binder thread pool.
 - **Where the values come from.** The host module `health` reads the Mac's
   battery: level, status, AC and times from `IOPSCopyPowerSourcesInfo`, and
   charge (mAh), cycle count and voltage from the `AppleSmartBattery`
-  registry entry. Current macOS no longer publishes battery temperature
-  there, so it reads 0. A Mac without a battery (a Mac mini, Studio or
+  registry entry. Temperature uses the shared battery gauge HID reading
+  from `aim-host-sensors`, rounded to tenths of °C. Adapter current and
+  voltage come from `IOPSCopyExternalPowerAdapterDetails` (mA/mV to µA/µV,
+  with watts supplying a missing limit when the other is known); an unknown
+  limit stays 0. The version 2 charging-limits call preserves version 1's
+  battery layout. A Mac without a battery (a Mac mini, Studio or
   iMac) reports none present, on AC power, status unknown and health
   not available, with every battery value 0 (#646).
 - **Callbacks.** They get the state on registration, on `update()` and

@@ -97,10 +97,23 @@ pub mod module {
 /// Module [`module::HEALTH`]: the host's battery, for
 /// `android.hardware.health`.
 pub mod health {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// Fill a [`Battery`]. Returns 0.
     pub const FN_BATTERY: u32 = 1;
+
+    /// Fill [`ChargingLimits`]. Returns 0. Added in version 2.
+    pub const FN_CHARGING_LIMITS: u32 = 2;
+
+    /// The attached adapter's limits; 0 for a value the host cannot read.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct ChargingLimits {
+        pub current_microamps: i32,
+        pub voltage_microvolts: i32,
+    }
+
+    const _: () = assert!(core::mem::size_of::<ChargingLimits>() == 8);
 
     /// `android.hardware.health.BatteryStatus` values.
     pub mod status {
@@ -1324,6 +1337,13 @@ pub mod guest {
         let mut b = health::Battery::default();
         call_with(module::HEALTH, health::FN_BATTERY, &mut b)?;
         Ok(b)
+    }
+
+    /// The attached power adapter's charging limits (health version 2).
+    pub fn charging_limits() -> Result<health::ChargingLimits, Errno> {
+        let mut limits = health::ChargingLimits::default();
+        call_with(module::HEALTH, health::FN_CHARGING_LIMITS, &mut limits)?;
+        Ok(limits)
     }
 
     /// Open the Bluetooth controller; returns its wake fd.
