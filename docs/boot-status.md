@@ -8066,7 +8066,7 @@ kills on the Mac's memory pressure, which the host-call module `memory`
 reports (ADR 0012's lmkd row, [host-call.md](host-call.md)). A thread's
 Linux scheduling sets its host QoS: a nice value of 10 or more or
 SCHED_BATCH runs at utility, 19 or SCHED_IDLE at background.
-Cross-process `setpriority` records each target thread's nice value and applies its Darwin scheduling at the target's next syscall, including privileged raises (#380; NDK checked without a guest boot).
+Cross-process `setpriority` records each target thread's nice value and applies its Darwin scheduling at the target's next syscall, including privileged raises.
 
 Measured on a loaded host (load average 90, other agents' boots running),
 `cargo aim boot` with a reused data directory, seven apps opened with
