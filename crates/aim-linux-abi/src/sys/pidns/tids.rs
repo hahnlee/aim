@@ -4,14 +4,16 @@
 //! both kinds are strictly below the same /proc/sys/kernel/pid_max.
 //! The sparse by-pid table retains each TID's owning process incarnation. A
 //! killed process's reservations can be reclaimed without trusting a reused PID.
+//! Without a by-pid table, the host process itself is the task namespace.
 
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    OnceLock,
+    Mutex, OnceLock,
     atomic::{AtomicU64, Ordering::SeqCst},
 };
 
@@ -74,7 +76,36 @@ impl Drop for Mapping {
 
 // Attach before guest execution, including in a spawned fork child. Lookups
 // then need no file I/O that could turn a namespace storage error into ESRCH.
-static OWN: OnceLock<Mapping> = OnceLock::new();
+static OWN: OnceLock<Namespace> = OnceLock::new();
+
+enum Namespace {
+    Shared(PathBuf, Mapping),
+    Process(Mutex<Local>),
+}
+
+struct Local {
+    next: i32,
+    used: HashSet<i32>,
+}
+impl Local {
+    fn new() -> Self {
+        Self {
+            next: FIRST,
+            used: HashSet::new(),
+        }
+    }
+
+    fn allocate(&mut self, end: i32) -> io::Result<i32> {
+        for _ in FIRST..end {
+            let tid = self.next;
+            self.next = if tid + 1 == end { FIRST } else { tid + 1 };
+            if self.used.insert(tid) {
+                return Ok(tid);
+            }
+        }
+        Err(io::Error::from_raw_os_error(libc::EAGAIN))
+    }
+}
 
 struct Table(PrivateFile, Mapping);
 impl Table {
@@ -171,13 +202,19 @@ fn alive(owner: ProcessIdentity) -> io::Result<bool> {
 
 pub(in crate::sys) struct Reservation {
     pub tid: i32,
-    dir: PathBuf,
+    dir: Option<PathBuf>,
     owner: ProcessIdentity,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
+        let Some(dir) = &self.dir else {
+            if let Some(Namespace::Process(local)) = OWN.get() {
+                local.lock().unwrap().used.remove(&self.tid);
+            }
+            return;
+        };
         let release = || -> io::Result<()> {
-            let table = Table::open(&self.dir, true)?;
+            let table = Table::open(dir, true)?;
             if table.read(self.tid) == self.owner {
                 table.write(
                     self.tid,
@@ -198,26 +235,31 @@ impl Drop for Reservation {
 pub(in crate::sys) fn allocate() -> Result<Reservation, crate::errno::Errno> {
     let allocate = || -> io::Result<Reservation> {
         initialize()?;
-        let dir = super::super::cred::by_pid_dir().unwrap();
         let owner = ProcessIdentity::running_strict(unsafe { libc::getpid() })?;
-        let tid = Table::open(dir, true)?.allocate(owner, PID_MAX)?;
-        Ok(Reservation {
-            tid,
-            dir: dir.clone(),
-            owner,
-        })
+        let (tid, dir) = match OWN.get().unwrap() {
+            Namespace::Shared(dir, _) => (
+                Table::open(dir, true)?.allocate(owner, PID_MAX)?,
+                Some(dir.clone()),
+            ),
+            Namespace::Process(local) => (local.lock().unwrap().allocate(PID_MAX)?, None),
+        };
+        Ok(Reservation { tid, dir, owner })
     };
     allocate().map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))
 }
 
 pub(crate) fn initialize() -> io::Result<()> {
     if OWN.get().is_none() {
-        let dir = super::super::cred::by_pid_dir()
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ESRCH))?;
-        let Table(file, mapping) = Table::open(dir, true)?;
-        // Concurrent initializers attach the same namespace, fixed for life.
-        let _ = OWN.set(mapping);
-        drop(file);
+        let namespace = match super::super::cred::by_pid_dir() {
+            Some(dir) => {
+                let Table(file, mapping) = Table::open(dir, true)?;
+                drop(file);
+                Namespace::Shared(dir.clone(), mapping)
+            }
+            None => Namespace::Process(Mutex::new(Local::new())),
+        };
+        // Concurrent initializers select the same namespace, fixed for life.
+        let _ = OWN.set(namespace);
     }
     Ok(())
 }
@@ -229,7 +271,18 @@ pub(in crate::sys) fn owner(tid: i32) -> Option<i32> {
     if tid >= PID_MAX {
         return None;
     }
-    let owner = OWN.get()?.record(tid).get();
+    let mapping = match OWN.get()? {
+        Namespace::Shared(_, mapping) => mapping,
+        Namespace::Process(local) => {
+            return local
+                .lock()
+                .unwrap()
+                .used
+                .contains(&tid)
+                .then(|| unsafe { libc::getpid() });
+        }
+    };
+    let owner = mapping.record(tid).get();
     // As for pidns::contains, an exited or reused process no longer names a
     // task of this namespace. No filesystem operation is needed for lookup.
     owner.is_live().then_some(owner.host_pid)
@@ -272,9 +325,67 @@ mod tests {
             .unwrap();
         Reservation {
             tid,
-            dir: dir.to_owned(),
+            dir: Some(dir.to_owned()),
             owner,
         }
+    }
+
+    #[test]
+    fn local_ids_wrap_exhaust_and_reuse_released_ids() {
+        let mut local = Local::new();
+        assert_eq!(local.allocate(FIRST + 2).unwrap(), FIRST);
+        assert_eq!(local.allocate(FIRST + 2).unwrap(), FIRST + 1);
+        assert_eq!(
+            local.allocate(FIRST + 2).unwrap_err().raw_os_error(),
+            Some(libc::EAGAIN)
+        );
+        local.used.remove(&FIRST);
+        assert_eq!(local.allocate(FIRST + 2).unwrap(), FIRST);
+        local.next = PID_MAX - 1;
+        assert_eq!(local.allocate(PID_MAX).unwrap(), PID_MAX - 1);
+        assert_eq!(local.allocate(PID_MAX).unwrap(), FIRST + 2);
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for in_process_guest_threads_allocate_and_release_ids"]
+    fn in_process_allocator() {
+        assert!(super::super::super::cred::by_pid_dir().is_none());
+        let main = crate::context::init_thread();
+        assert_eq!(unsafe { (*main).tid }, std::process::id() as u64);
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let ctx = crate::context::init_thread();
+                    let tid = unsafe { (*ctx).tid } as i32;
+                    assert!((FIRST..PID_MAX).contains(&tid));
+                    assert_eq!(owner(tid), Some(std::process::id() as i32));
+                    tid
+                })
+            })
+            .collect();
+        let ids: HashSet<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(ids.len(), 16);
+        let reservation = allocate().unwrap();
+        let tid = reservation.tid;
+        assert_eq!(owner(tid), Some(std::process::id() as i32));
+        drop(reservation);
+        assert_eq!(owner(tid), None);
+        assert!(super::super::super::cred::by_pid_dir().is_none());
+    }
+
+    #[test]
+    fn in_process_guest_threads_allocate_and_release_ids() {
+        assert!(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "sys::pidns::tids::tests::in_process_allocator",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 
     #[test]
@@ -335,7 +446,7 @@ mod tests {
         };
         let last = Reservation {
             tid,
-            dir: dir.0.clone(),
+            dir: Some(dir.0.clone()),
             owner: me(),
         };
         assert_eq!(last.tid, PID_MAX - 1);

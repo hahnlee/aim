@@ -7346,7 +7346,14 @@ lmkd reacting to the Mac's memory pressure, not from the guest.
 
 ## Other processes in /proc (2026-09-30, #238, #379)
 
-Clone TIDs are allocated across the by-pid namespace below the advertised Linux `pid_max` of 4194304, with incarnation-checked ownership and exit reclamation (#409).
+Clone TIDs are allocated across the by-pid namespace below the advertised
+Linux `pid_max` of 4194304, with incarnation-checked ownership and exit
+reclamation (#409). Direct guest entry through `context::init_thread()`
+without a by-pid table uses the host process as its task namespace, with
+the same exclusive bound, cyclic allocation and exit reclamation.
+Verified 2026-10-28: boundary 10/10, hostcall 3/3, mremap 7/7, allocator
+unit tests 7/7 (both subprocess helpers exercised), NDK `t_tid` and
+threads 6/6 pass. No guest boot was run for this change.
 
 Each process keeps a record beside its by-pid entry
 (`docs/guest-init-contract.md` section 4): its threads, and the stack
