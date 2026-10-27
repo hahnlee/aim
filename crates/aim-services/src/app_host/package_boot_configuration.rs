@@ -446,6 +446,94 @@ mod tests {
     use super::*;
     use aim_binder_host::parcel::Reader;
 
+    /// The native scan asks for density and resources before it publishes
+    /// package queries. GrammaticalInflectionService's flag is an image
+    /// input, so the global configuration must be available then too.
+    #[test]
+    fn boot_configuration_precedes_package_queries() {
+        struct Data(std::path::PathBuf);
+        impl Drop for Data {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let Some(root) = aim_paths::original_image_with("system/framework/framework-res.apk")
+        else {
+            return;
+        };
+        let data = crate::app_host::test_temp_dir("boot-configuration");
+        let _cleanup = Data(data.clone());
+        let process = crate::test_process(SYSTEM_UID as u32);
+        let host = AppHost::new(process.clone());
+        host.set_system(crate::system::System::new(process.clone(), &[]));
+        crate::app_host::configure_test_host(
+            &host,
+            &root,
+            &data,
+            &data,
+            Box::new(|name| {
+                Some(
+                    match name {
+                        "ro.build.version.sdk" => "36",
+                        "ro.build.version.codename" => "REL",
+                        "persist.sys.locale" => "en-US",
+                        "ro.sf.lcd_density" => "320",
+                        "persist.sys.grammatical_gender" => "3",
+                        _ => return None,
+                    }
+                    .into(),
+                )
+            }),
+        );
+        let display = super::super::display::Display::phone_for_test();
+        let density = display.density_dpi();
+        assert!(
+            host.display
+                .set(Arc::new((
+                    display,
+                    super::super::display_service::Resources {
+                        name: "Built-in Screen".into(),
+                        density_dpi: density,
+                        brightness: (1, 255, 128),
+                        brightness_dim: 0.05,
+                    },
+                )))
+                .is_ok()
+        );
+        let missing = host.package_capture().err().unwrap();
+        assert_eq!(
+            missing.message,
+            "native package query owners are unavailable"
+        );
+        let aim_binder_host::parcel::Binder::Local(ptr) =
+            process.add_service(Arc::new(BootConfiguration::new(host.clone(), false)))
+        else {
+            unreachable!()
+        };
+        let owner = process.local_service(ptr).unwrap();
+        let mut request = Parcel::new();
+        leaf::CaptureResources {}.write(&mut request);
+        let reply = owner
+            .transact(leaf::CAPTURE_RESOURCES, &request, false)
+            .unwrap();
+        let bytes = leaf::read_capture_resources_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let resources = crate::package::boot_configuration::decode_resources(&bytes).unwrap();
+        assert_eq!(resources.density, density as u16);
+        assert_eq!(resources.grammatical_inflection, 3);
+        let mut request = Parcel::new();
+        leaf::GetDensity {}.write(&mut request);
+        let reply = owner.transact(leaf::GET_DENSITY, &request, false).unwrap();
+        assert_eq!(
+            leaf::read_get_density_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            density
+        );
+        assert!(host.package_capture().is_err());
+    }
     #[test]
     fn locale_codes_pack_as_res_table_config() {
         assert_eq!(pack("ko", b'a').unwrap(), [b'k' as i32, b'o' as i32]);
