@@ -44,7 +44,9 @@ impl Service for Effects {
         }
     }
 }
-struct Bridge(Binder, Arc<std::sync::atomic::AtomicBool>, Binder);
+struct Bridge(Binder, Arc<std::sync::atomic::AtomicBool>, Binder, Binder);
+// Fixture-only export of a service in the original process to the native host.
+const EXPORT_TEST_BINDER: u32 = 0xffff_fffe;
 impl Service for Bridge {
     fn descriptor(&self) -> &str {
         bootstrap::DESCRIPTOR
@@ -52,6 +54,13 @@ impl Service for Bridge {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut reply = Parcel::new();
         match call.code {
+            EXPORT_TEST_BINDER => {
+                reply.write_binder(Some(Binder::Local(call.data.read_i64()? as u64)));
+            }
+            bootstrap::GET_PACKAGE_INTERNAL_EVENTS_BRIDGE => {
+                bootstrap::GetPackageInternalEventsBridge::read(&mut call.data)?;
+                bootstrap::write_get_package_internal_events_bridge_reply(&mut reply, Some(self.3));
+            }
             bootstrap::GET_PACKAGE_MUTATION_BRIDGE => {
                 bootstrap::GetPackageMutationBridge::read(&mut call.data)?;
                 bootstrap::write_get_package_mutation_bridge_reply(&mut reply, Some(self.0));
@@ -365,9 +374,10 @@ fn session() -> Session {
     });
     let bridge = fixture.attach_service(move |original| {
         Arc::new(Bridge(
-            original.add_service(Arc::new(Effects(PackageEffects::new(host_leaf)))),
+            original.add_service(Arc::new(Effects(PackageEffects::new(host_leaf.clone())))),
             bridge_grants,
             original.add_service(primitives),
+            original.add_service(Arc::new(crate::app_host::InternalEvents::new(host_leaf))),
         ))
     });
     let old = publish_code(&fixture, &bridge);
@@ -1155,6 +1165,17 @@ pub(crate) fn with_discovery_session(
         &dyn Fn(Option<&str>, i32),
     ),
 ) {
+    with_discovery_binders(|host, publish, enabled, _| test(host, publish, enabled));
+}
+
+pub(crate) fn with_discovery_binders(
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
+        &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+    ),
+) {
     let Session {
         fixture,
         host,
@@ -1246,7 +1267,20 @@ pub(crate) fn with_discovery_session(
         ));
         wait_events(&fixture.system, 3000);
     };
-    test(&host, &mut publish, &enabled);
+    let export = |service| {
+        let Binder::Local(pointer) = fixture.original[0].add_service(service) else {
+            unreachable!()
+        };
+        let mut request = Parcel::new();
+        request.write_i64(pointer as i64);
+        let reply = bridge
+            .owner
+            .transact(EXPORT_TEST_BINDER, &request, false)
+            .unwrap();
+        let binder = reply.reader().read_binder().unwrap().unwrap();
+        reply.retain_remote_binder(binder).unwrap()
+    };
+    test(&host, &mut publish, &enabled, &export);
     drop(workers);
 }
 

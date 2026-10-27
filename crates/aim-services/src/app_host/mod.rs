@@ -123,6 +123,8 @@ mod package_enable;
 pub mod package_initial_context;
 mod package_installer_policy;
 mod package_internal_events;
+#[cfg(test)]
+pub(crate) use package_internal_events::InternalEvents;
 mod package_internal_leaves;
 mod package_internal_storage;
 mod package_launch;

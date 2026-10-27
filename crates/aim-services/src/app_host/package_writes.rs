@@ -101,6 +101,8 @@ pub(super) trait PackageMonitor: Send + Sync {
         Ok(())
     }
     fn package_data_cleared(&self, _cleared: &DataCleared<'_>) {}
+    /// `PackageMonitor.onHandleForceStop(..., false)` after force-stop.
+    fn package_restarted(&self, _package: &str, _uid: i32, _user: i32) {}
 }
 
 /// The app host's services' package monitors, each of a user or of all
@@ -141,6 +143,59 @@ impl Writes {
             pending: Mutex::default(),
             started: Instant::now(),
         })
+    }
+
+    /// The internal AM leaf delivers the prepared Intent to guest and native
+    /// receivers. Its caller owns scheduling and package-monitor callbacks.
+    pub(super) fn broadcast(
+        &self,
+        intent: RawIntent,
+        user: i32,
+        instant: bool,
+        allow_list: Option<&[i32]>,
+    ) -> Result<(), Exception> {
+        let package = intent
+            .intent
+            .data
+            .as_ref()
+            .and_then(Uri::scheme_specific_part);
+        let package_uid = intent
+            .int_extra(EXTRA_UID, -1)
+            .map_err(|_| Exception::illegal_argument("invalid package event extras"))?;
+        let event_user = intent
+            .int_extra(EXTRA_USER_HANDLE, user)
+            .map_err(|_| Exception::illegal_argument("invalid package event extras"))?;
+        let required = if instant {
+            vec![ACCESS_INSTANT_APPS.into()]
+        } else {
+            Vec::new()
+        };
+        self.host.broadcasts.try_send_package_effect(
+            &self.host,
+            intent.clone(),
+            user,
+            allow_list,
+            &required,
+            None,
+        )?;
+        if let Some(package) = package.as_deref() {
+            for monitor in self.host.package_monitors.of(user) {
+                match intent.intent.action.as_deref() {
+                    Some(ACTION_PACKAGE_RESTARTED) => {
+                        monitor.package_restarted(package, package_uid, event_user);
+                    }
+                    Some(ACTION_PACKAGE_DATA_CLEARED) => {
+                        monitor.package_data_cleared(&DataCleared {
+                            package,
+                            uid: package_uid,
+                            user: event_user,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `InstallerRemovalBridge.sendRemovedBroadcast`: native discovery
@@ -266,13 +321,9 @@ impl Writes {
         let monitor_intent = intent.clone();
         let monitor_allow_list = allow_list.clone();
         let send = move || {
-            me.host.broadcasts.send_from_package_manager(
-                &me.host,
-                intent,
-                user,
-                allow_list.as_deref(),
-                &[],
-            );
+            if let Err(error) = me.broadcast(intent, user, false, allow_list.as_deref()) {
+                eprintln!("app host: package restarted: {}", error.message);
+            }
         };
         if stay_stopped {
             if let Err(error) = self.post(send) {
@@ -316,21 +367,8 @@ impl Writes {
                     .visibility_allow_list(&state, ps, user)
             });
         let intent = data_cleared_intent(package, uid, user, is_restore, instant);
-        let required: Vec<String> = if instant {
-            vec![ACCESS_INSTANT_APPS.into()]
-        } else {
-            Vec::new()
-        };
-        self.host.broadcasts.send_from_package_manager(
-            &self.host,
-            intent.clone(),
-            user,
-            allow_list.as_deref(),
-            &required,
-        );
-        let cleared = DataCleared { package, uid, user };
-        for monitor in self.host.package_monitors.of(user) {
-            monitor.package_data_cleared(&cleared);
+        if let Err(error) = self.broadcast(intent.clone(), user, instant, allow_list.as_deref()) {
+            eprintln!("app host: data cleared broadcast: {}", error.message);
         }
         if let Err(error) = self.invoke_callbacks(&intent, user, allow_list.as_deref()) {
             eprintln!("app host: data cleared monitors: {}", error.message);

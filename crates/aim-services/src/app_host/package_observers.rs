@@ -25,7 +25,7 @@ pub trait PackageListObserver: Send + Sync {
 }
 
 /// Discovery owners consume the canonical session's add/update/remove feed too.
-/// This does not deliver guest broadcasts (the internal broadcast leaf is #2167).
+/// Guest broadcasts are delivered separately by the package broadcast owner.
 pub(super) struct Discoveries(pub Weak<AppHost>);
 impl Discoveries {
     fn changed(&self, name: Option<&str>, uid: i32, removed: bool) -> Result<(), Exception> {
