@@ -324,6 +324,7 @@ fn permission_refresh_uses_the_current_native_capture() {
         &fixture.root.join("image"),
         &data,
         &data,
+        &data,
         Box::new(|name| {
             Some(
                 match name {

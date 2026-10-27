@@ -382,6 +382,7 @@ mod tests {
             &root,
             &data,
             &data,
+            &data,
             Box::new(|name| {
                 Some(
                     match name {

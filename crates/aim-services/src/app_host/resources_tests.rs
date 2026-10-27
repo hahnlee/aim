@@ -32,6 +32,7 @@ fn framework_requests_do_not_load_packages() {
         &root,
         &data,
         &data,
+        &data,
         Box::new(|name| {
             Some(
                 match name {

@@ -557,6 +557,7 @@ mod tests {
             &root,
             &data,
             &data,
+            &data,
             Box::new(|name| {
                 properties(name)
                     .to_string()

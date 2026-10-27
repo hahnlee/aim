@@ -2439,6 +2439,7 @@ mod tests {
                 &data.0.join("image"),
                 &data.0,
                 &data.0.join("bpf"),
+                &data.0.join("bpf"),
                 Box::new(|name| match name {
                     "ro.build.version.sdk" => Some("36".into()),
                     "ro.build.version.codename" => Some("REL".into()),

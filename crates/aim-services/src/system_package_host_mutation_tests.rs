@@ -1106,6 +1106,7 @@ pub(crate) fn with_discovery_session(
         &fixture.root.join("image"),
         &fixture.root.join("data"),
         &fixture.root.join("bpf"),
+        &fixture.root.join("bpf"),
         Box::new(|name| match name {
             "ro.build.version.sdk" => Some("36".into()),
             "ro.build.version.codename" => Some("REL".into()),

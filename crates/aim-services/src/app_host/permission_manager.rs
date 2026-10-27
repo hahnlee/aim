@@ -2451,6 +2451,7 @@ mod tests {
                 &data.join("missing-image"),
                 &data,
                 &data,
+                &data,
                 Box::new(|_| None),
                 Box::new(|_, _| {}),
                 Box::new(|| Err(std::io::Error::other("no zygote"))),

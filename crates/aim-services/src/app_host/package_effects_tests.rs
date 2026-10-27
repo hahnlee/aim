@@ -408,6 +408,7 @@ fn kill_package_scopes_app_id_and_user_and_preserves_the_exit_reason() {
                     package_uid: app_uid,
                     isolated: false,
                     entry_point: None,
+                    crash_handler: None,
                     application_info: None,
                     pid: seq as i32,
                     started: std::time::Instant::now(),
