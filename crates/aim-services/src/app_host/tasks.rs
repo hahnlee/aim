@@ -7,7 +7,7 @@
 //! server's task bridge, which `aim-windows` is for the original's tasks:
 //! on the connection `FN_WINDOWS` makes (`aim_hostcall::display::window`)
 //! it reports its tasks and takes the server's requests, and a task opens
-//! at freeform's default bounds (`freeform`).
+//! at its saved launch bounds or freeform's default bounds (`freeform`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -19,13 +19,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aim_host_display::wire;
 use aim_hostcall::display::{Window as Record, Windows, mode, window};
 
-use aim_binder_host::parcel::Exception;
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
 use super::activity::Item;
 use super::activity_stack::Command;
 use super::config::{Configuration, Rect};
+use super::launch_params::{Params, Persister};
 use super::surface::{self, Change, Layer};
 use super::{AppHost, exit_info};
+use crate::package::info::ActivityInfo;
 
 /// A task on the display: in window mode, a window.
 pub struct Task {
@@ -35,6 +37,7 @@ pub struct Task {
     pub package: String,
     /// Its activity, `package/class`.
     pub component: String,
+    real_activity: String,
     pub bounds: Rect,
     /// Its root activity's window layout's minimum size, -1 for none.
     min_size: (i32, i32),
@@ -42,6 +45,8 @@ pub struct Task {
     layer: Option<Layer>,
     /// The server's `LAUNCH` it answers with `DRAWN` once it is idle.
     launch: Option<String>,
+    window_layout_affinity: Option<String>,
+    has_been_visible: bool,
 }
 
 impl Task {
@@ -58,9 +63,20 @@ pub struct Tasks {
     bridge: Mutex<Option<UnixStream>>,
     tasks: Mutex<Vec<Task>>,
     next: Mutex<i32>,
+    launch_params: Mutex<Option<Arc<Persister>>>,
 }
 
 impl Tasks {
+    pub(super) fn launch_params(&self, data: &Path) -> Result<Arc<Persister>, Exception> {
+        let mut owner = self.launch_params.lock().unwrap();
+        if owner.is_none() {
+            *owner = Some(Arc::new(
+                Persister::new(data).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?,
+            ));
+        }
+        Ok(owner.as_ref().unwrap().clone())
+    }
+
     /// `ActivityTaskManagerInternal.isBaseOfLockedTask`: this task owner
     /// has no lock task mode, so none of its tasks is locked.
     pub(super) fn is_base_of_locked_task(&self, package: Option<&str>) -> bool {
@@ -216,14 +232,14 @@ impl AppHost {
 
     /// A new task, in front, for the activity `class` of `uid`'s
     /// `package`: its id. It has the display, or in window mode freeform's
-    /// default bounds. It answers the package's pending launch, else the
+    /// saved or default bounds. It answers the package's pending launch, else the
     /// launch `source`'s task has not answered yet.
     pub(super) fn new_task(
         &self,
         uid: u32,
         package: &str,
         class: &str,
-        activity: super::freeform::Activity,
+        info: &ActivityInfo,
         source: Option<i32>,
     ) -> Result<i32, Exception> {
         let display = self.display()?.0.clone();
@@ -234,14 +250,34 @@ impl AppHost {
             bottom: display.height,
         };
         let windows = self.tasks.window_mode();
+        let activity = super::freeform::Activity::from(info);
+        let real_activity = super::activity_start::real_component(info);
         let bounds = if windows {
-            super::freeform::default_bounds(
-                &activity,
-                area,
-                display.density_dpi(),
-                false,
-                &self.tasks.all_bounds(),
-            )
+            let name = crate::package::preferred::unflatten(&real_activity)
+                .ok_or_else(|| Exception::illegal_argument("invalid task component"))?;
+            let saved = self
+                .tasks
+                .launch_params(self.data()?)?
+                .get((uid / super::PER_USER_RANGE) as i32, &name)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            let others = self.tasks.all_bounds();
+            // Display and mode are already selected here. Only reuse params
+            // for this display and a mode the freeform task owner supports.
+            match saved.filter(|p| {
+                p.display_unique_id.as_deref() == Some(format!("local:{}", display.id).as_str())
+                    && matches!(p.windowing_mode, 0 | 5)
+                    && p.bounds.width() > 0
+                    && p.bounds.height() > 0
+            }) {
+                Some(p) => super::freeform::restored_bounds(area, &others, p.bounds),
+                None => super::freeform::default_bounds(
+                    &activity,
+                    area,
+                    display.density_dpi(),
+                    false,
+                    &others,
+                ),
+            }
         } else {
             area
         };
@@ -268,10 +304,13 @@ impl AppHost {
             uid,
             package: package.to_string(),
             component: component.clone(),
+            real_activity,
             bounds,
             min_size: activity.min_size,
             layer: None,
             launch,
+            window_layout_affinity: info.window_layout.as_ref().and_then(|l| l.affinity.clone()),
+            has_been_visible: false,
         });
         drop(tasks);
         if windows {
@@ -341,14 +380,17 @@ impl AppHost {
     /// An activity of task `id` is idle: the launch the task answers drew
     /// its first frame.
     pub(super) fn task_idle(&self, id: i32) {
-        let launch = self
-            .tasks
-            .tasks
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .find(|t| t.id == id)
-            .and_then(|t| t.launch.take());
+        let launch = {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let Some(task) = tasks.iter_mut().find(|t| t.id == id) else {
+                return;
+            };
+            task.has_been_visible = true;
+            if let Err(e) = self.save_task_launch_params(task) {
+                eprintln!("app host: task {id} launch params: {e}");
+            }
+            task.launch.take()
+        };
         if let Some(launch) = launch {
             self.tasks.send_text(window::DRAWN, id, &launch);
         }
@@ -548,6 +590,7 @@ impl AppHost {
                 },
             );
             task.bounds = minimal_dimensions(bounds, task.bounds, min);
+            self.save_task_launch_params(task)?;
             task.bounds
         };
         self.place_tasks()?;
@@ -579,6 +622,30 @@ impl AppHost {
         }
         self.tasks.send_bounds(id, bounds);
         Ok(())
+    }
+
+    /// Task.saveLaunchingStateIfNeeded: visible leaf tasks in a freeform
+    /// display area. This owner currently has only freeform tasks there.
+    fn save_task_launch_params(&self, task: &Task) -> Result<(), String> {
+        if !self.tasks.window_mode() || !task.has_been_visible {
+            return Ok(());
+        }
+        let display = self.display().map_err(|e| e.message)?;
+        let name = crate::package::preferred::unflatten(&task.real_activity)
+            .ok_or_else(|| format!("invalid task component {}", task.real_activity))?;
+        self.tasks
+            .launch_params(self.data().map_err(|e| e.message)?)
+            .map_err(|e| e.message)?
+            .save(
+                (task.uid / super::PER_USER_RANGE) as i32,
+                &name,
+                Params {
+                    display_unique_id: Some(format!("local:{}", display.0.id)),
+                    windowing_mode: 5, // WINDOWING_MODE_FREEFORM
+                    bounds: task.bounds,
+                    window_layout_affinity: task.window_layout_affinity.clone(),
+                },
+            )
     }
 }
 
@@ -621,6 +688,123 @@ fn bridge(socket: &Path) -> Result<(UnixStream, bool), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn launch_host(ready: &AppHost, windows: bool) -> Arc<AppHost> {
+        let host = AppHost::new(ready.process.clone());
+        let data = ready.data().unwrap();
+        super::super::configure_test_host(&host, data, data, data, Box::new(|_| None));
+        host.display
+            .set(Arc::new((
+                super::super::display::Display::phone_for_test(),
+                super::super::display_service::Resources {
+                    name: "test display".into(),
+                    density_dpi: 320,
+                    brightness: (10, 255, 102),
+                    brightness_dim: 0.05,
+                },
+            )))
+            .ok()
+            .unwrap();
+        host.tasks.windows.set(windows).unwrap();
+        host
+    }
+
+    #[test]
+    fn a_launch_after_restart_restores_saved_task_bounds() {
+        crate::system::with_discovery_session(|ready, _, _| {
+            let mut info = ready.activity_info_of("p", "p.Main").unwrap();
+            // An alias uses realActivity for both saving and reading.
+            info.target_activity = Some("p.Real".into());
+            let saved = Rect {
+                left: 47,
+                top: 83,
+                right: 847,
+                bottom: 1483,
+            };
+            {
+                let host = launch_host(ready, true);
+                std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
+                let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
+                assert_ne!(host.tasks.bounds(id), Some(saved));
+                host.tasks.tasks.lock().unwrap()[0].bounds = saved;
+                host.task_idle(id);
+            } // Drop drains the real writer; the next host starts with empty memory.
+            let host = launch_host(ready, true);
+            host.tasks
+                .launch_params(host.data().unwrap())
+                .unwrap()
+                .unlock_user(0, BTreeSet::from(["p".into()]))
+                .unwrap();
+            // A fully resolved record keeps its size despite a new orientation.
+            info.screen_orientation = 0;
+            let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
+            assert_eq!(host.tasks.freeform_bounds(id), Some(saved));
+            // PHASE_BOUNDS still avoids another task's corners.
+            let next = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
+            let shifted = host.tasks.bounds(next).unwrap();
+            assert_ne!(shifted, saved);
+            assert_eq!(
+                (shifted.width(), shifted.height()),
+                (saved.width(), saved.height())
+            );
+        });
+    }
+
+    #[test]
+    fn a_launch_ignores_a_record_for_a_missing_display() {
+        crate::system::with_discovery_session(|ready, _, _| {
+            let info = ready.activity_info_of("p", "p.Main").unwrap();
+            let component = crate::package::preferred::unflatten("p/p.Main").unwrap();
+            let saved = Rect {
+                left: 47,
+                top: 83,
+                right: 847,
+                bottom: 1483,
+            };
+            for (display, mode) in [("local:99", 5), ("local:0", 2), ("local:0", 1)] {
+                {
+                    let host = launch_host(ready, true);
+                    std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
+                    host.tasks
+                        .launch_params(host.data().unwrap())
+                        .unwrap()
+                        .save(
+                            0,
+                            &component,
+                            Params {
+                                display_unique_id: Some(display.into()),
+                                windowing_mode: mode,
+                                bounds: saved,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                }
+                let host = launch_host(ready, true);
+                host.tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
+                    .unlock_user(0, BTreeSet::from(["p".into()]))
+                    .unwrap();
+                let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
+                let display = host.display().unwrap();
+                let expected = super::super::freeform::default_bounds(
+                    &super::super::freeform::Activity::from(&info),
+                    Rect {
+                        left: 0,
+                        top: 0,
+                        right: display.0.width,
+                        bottom: display.0.height,
+                    },
+                    display.0.density_dpi(),
+                    false,
+                    &[],
+                );
+                assert_eq!(host.tasks.bounds(id), Some(expected), "mode {mode}");
+                assert_ne!(host.tasks.bounds(id), Some(saved));
+            }
+        });
+    }
 
     #[test]
     fn a_task_keeps_its_minimal_size() {

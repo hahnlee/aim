@@ -130,6 +130,14 @@ pub fn default_bounds(
     bounds
 }
 
+/// `TaskLaunchParamsModifier`'s fully resolved current params at `PHASE_BOUNDS`:
+/// keep their size and orientation, but avoid existing tasks. Earlier phases
+/// do not adjust bounds. This owner has one display area, so it has not changed.
+pub fn restored_bounds(display: Rect, others: &[Rect], mut bounds: Rect) -> Rect {
+    avoid_conflict(display, others, &mut bounds);
+    bounds
+}
+
 /// `LaunchParamsUtil.getDefaultFreeformSize`.
 fn default_size(
     info: &Activity,
