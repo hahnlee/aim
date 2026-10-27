@@ -50,7 +50,19 @@ pub fn attribute(guest: &str) -> Option<Device> {
 
 /// Announce `action` for `dev`, with the caller's variables `extra`.
 pub fn emit(action: &str, dev: &Device, extra: &[String]) {
-    super::netlink::uevent(&message(action, dev, extra, next_seqnum()));
+    let own = super::fork::spawn::own_fds();
+    emit_locked(action, dev, extra, &own);
+}
+
+/// A device owner already holding the fork descriptor guard must not
+/// recursively acquire it: a fork writer may be waiting for that guard.
+pub(super) fn emit_locked(
+    action: &str,
+    dev: &Device,
+    extra: &[String],
+    _own: &std::sync::RwLockReadGuard<'_, ()>,
+) {
+    super::netlink::uevent(&message(action, dev, extra, advance_seqnum()));
 }
 
 fn message(action: &str, dev: &Device, extra: &[String], seqnum: u64) -> Vec<u8> {
@@ -107,6 +119,9 @@ fn parse_synth(req: &[u8]) -> Result<(&'static str, Vec<String>), Errno> {
 /// The boot's `uevent_seqnum`: the last sequence number a uevent took, as
 /// `/sys/kernel/uevent_seqnum` shows it; 0 before the first.
 pub(super) fn seqnum() -> u64 {
+    if let Err(e) = super::evdev::refresh_hotplug() {
+        crate::diag!("[linux-abi] input hotplug sequence: {e}");
+    }
     // The locked file must not reach a fork child (`spawn::own_fds`).
     let _own = super::fork::spawn::own_fds();
     let Ok(mut f) = std::fs::File::open(seqnum_path()) else {
@@ -127,6 +142,10 @@ fn seqnum_path() -> std::path::PathBuf {
 pub(super) fn next_seqnum() -> u64 {
     // The locked file must not reach a fork child (`spawn::own_fds`).
     let _own = super::fork::spawn::own_fds();
+    advance_seqnum()
+}
+
+fn advance_seqnum() -> u64 {
     let path = seqnum_path();
     let Ok(mut f) = std::fs::OpenOptions::new()
         .read(true)

@@ -8267,6 +8267,8 @@ CtsMediaProjection* wait for SystemUI's dialog (#632).
 
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
+Input device lifetimes now emit kernel add/remove uevents for `inputN` and `eventN`, and `inputN/uevent` reports the live identity and capability bitmaps.
+
 A window-mode boot of the derived image with the mouse device
 ([input.md](input.md)); the input went through the server's path for a
 window host's records (`hosts::apply`, the calls `aim-display`'s AppKit

@@ -1742,7 +1742,7 @@ fn canonical(guest: &str) -> String {
     if let Some(t) = guest.strip_prefix("/proc/thread-self/") {
         return format!("/proc/{me}/task/{}/{t}", super::process::gettid());
     }
-    guest.to_string()
+    super::evdev::canonical(guest).unwrap_or_else(|| guest.to_string())
 }
 
 /// The current process's procfs descriptor magic link. Callers must retain the

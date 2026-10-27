@@ -54,6 +54,10 @@ use super::procfs::Node;
 use crate::errno::{self, EAGAIN, EBADF, EFAULT, EINVAL, ENODEV, ENOENT, ENOSYS};
 use crate::vfs::{self, Area, Resolved};
 
+mod hotplug;
+pub(super) use hotplug::refresh as refresh_hotplug;
+pub(super) use hotplug::watch;
+
 /// `INPUT_MAJOR`, and the first minor of the evdev nodes.
 const INPUT_MAJOR: u32 = 13;
 const EVDEV_MINOR_BASE: u32 = 64;
@@ -1014,10 +1018,23 @@ pub fn fix_types(entries: &mut Vec<Entry>) {
     }
 }
 
-/// The sysfs view of the devices, under `/sys` (`rest` is the path after
-/// it): `/sys/dev/char/13:M` and `/sys/class/input/*` link to
-/// `/sys/devices/virtual/input/inputN/eventN`. Links are absolute here,
-/// where Linux's are relative; they resolve the same.
+/// Resolve a modeled sysfs link used as an ancestor, preserving a link
+/// at the end of a path for readlink/lstat.
+pub fn canonical(guest: &str) -> Option<String> {
+    let rest = guest.strip_prefix("/sys/")?;
+    let prefix = ["class/input/", "dev/char/"]
+        .into_iter()
+        .find(|p| rest.starts_with(p))?;
+    let (name, tail) = rest.strip_prefix(prefix)?.split_once('/')?;
+    let Node::Link(target) = sys_node(&format!("{prefix}{name}"))? else {
+        return None;
+    };
+    Some(format!("{target}/{tail}"))
+}
+
+/// The input core and evdev devices under `/sys`, including the class
+/// and character-device links. Our absolute links resolve as Linux's
+/// relative ones do.
 pub fn sys_node(rest: &str) -> Option<Node> {
     let devs = present();
     let dirs = |names: Vec<String>, ty| {
@@ -1068,7 +1085,13 @@ pub fn sys_node(rest: &str) -> Option<Node> {
             let (i, tail) = n.split_once('/').unwrap_or((n, ""));
             let i = i.parse::<u32>().ok().filter(|i| devs.contains(i))?;
             match tail {
-                "" => dirs(vec![format!("event{i}")], dir::DT_DIR),
+                "" => Node::Dir(vec![
+                    Entry::new(1, dir::DT_DIR, format!("event{i}")),
+                    Entry::new(1, dir::DT_REG, "uevent"),
+                ]),
+                "uevent" => Node::File(
+                    uevent_device(&format!("/devices/virtual/input/input{i}"))?.attribute(),
+                ),
                 t if t == format!("event{i}") => {
                     dirs(vec!["dev".into(), "uevent".into()], dir::DT_REG)
                 }
@@ -1085,26 +1108,141 @@ pub fn sys_node(rest: &str) -> Option<Node> {
     })
 }
 
-/// The uevent description of a present evdev node from its sysfs path
-/// below `/sys` (`/devices/virtual/input/inputN/eventN`).
+/// The input core or evdev device described by this sysfs path.
 pub fn uevent_device(devpath: &str) -> Option<super::uevent::Device> {
     let n = devpath.strip_prefix("/devices/virtual/input/input")?;
-    let (i, event) = n.split_once('/')?;
+    let (i, event) = n.split_once('/').unwrap_or((n, ""));
     let i = i.parse::<u32>().ok().filter(|i| present().contains(i))?;
-    (event == format!("event{i}")).then(|| super::uevent::Device {
-        devpath: devpath.to_string(),
+    match event {
+        "" => Some(input_device(&describe(vfs::input_dir()?, i)?)),
+        event if event == format!("event{i}") => Some(event_device(i)),
+        _ => None,
+    }
+}
+
+fn event_device(i: u32) -> super::uevent::Device {
+    super::uevent::Device {
+        devpath: format!("/devices/virtual/input/input{i}/event{i}"),
         subsystem: "input",
         env: vec![
             format!("MAJOR={INPUT_MAJOR}"),
             format!("MINOR={}", EVDEV_MINOR_BASE + i),
             format!("DEVNAME=input/event{i}"),
         ],
-    })
+    }
+}
+
+/// arm64 input bitmaps are most-significant unsigned long first, with
+/// leading zero words omitted and one unpadded hex number per word.
+fn bitmap(bits: &[u8]) -> String {
+    let words = bits
+        .chunks_exact(8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+    let words: Vec<_> = words
+        .rev()
+        .skip_while(|&w| w == 0)
+        .map(|w| format!("{w:x}"))
+        .collect();
+    if words.is_empty() {
+        "0".into()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// Linux v6.12 drivers/input/input.c's input_dev_uevent ABI. The server
+/// supplies no physical path or unique id, so PHYS and UNIQ are absent.
+fn input_device(d: &Descriptor) -> super::uevent::Device {
+    let [bus, vendor, product, version] = d.id;
+    let mut env = vec![
+        format!("PRODUCT={bus:x}/{vendor:x}/{product:x}/{version:x}"),
+        format!("NAME=\"{}\"", String::from_utf8_lossy(d.name())),
+        format!("PROP={}", bitmap(&d.props)),
+        format!("EV={}", bitmap(&d.bits.ev)),
+    ];
+    for (ev, name) in [
+        (EV_KEY, "KEY"),
+        (EV_REL, "REL"),
+        (EV_ABS, "ABS"),
+        (EV_MSC, "MSC"),
+        (EV_LED, "LED"),
+        (EV_SND, "SND"),
+        (EV_FF, "FF"),
+        (EV_SW, "SW"),
+    ] {
+        if test_bit(&d.bits.ev, ev) {
+            env.push(format!("{name}={}", bitmap(d.bits.of(ev).unwrap())));
+        }
+    }
+    let mut alias = format!("input:b{bus:04X}v{vendor:04X}p{product:04X}e{version:04X}-");
+    // KEY_MIN_INTERESTING excludes the ordinary keyboard keys from modalias.
+    for (tag, bits, first, max) in [
+        ('e', d.bits.ev.as_slice(), 0, EV_MAX),
+        ('k', d.bits.key.as_slice(), 0x71, KEY_MAX),
+        ('r', d.bits.rel.as_slice(), 0, REL_MAX),
+        ('a', d.bits.abs.as_slice(), 0, ABS_MAX),
+        ('m', d.bits.msc.as_slice(), 0, MSC_MAX),
+        ('l', d.bits.led.as_slice(), 0, LED_MAX),
+        ('s', d.bits.snd.as_slice(), 0, SND_MAX),
+        ('f', d.bits.ff.as_slice(), 0, FF_MAX),
+        ('w', d.bits.sw.as_slice(), 0, SW_MAX),
+    ] {
+        alias.push(tag);
+        for bit in first..max {
+            if test_bit(bits, bit) {
+                use std::fmt::Write;
+                write!(alias, "{bit:X},").unwrap();
+            }
+        }
+    }
+    env.push(format!("MODALIAS={alias}"));
+    super::uevent::Device {
+        devpath: format!("/devices/virtual/input/input{}", d.index),
+        subsystem: "input",
+        env,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_uevent_bitmaps_and_identity() {
+        assert_eq!(bitmap(&[0; 96]), "0");
+        let mut bits = [0; 32];
+        bits[0] = 1;
+        bits[16] = 0xab;
+        assert_eq!(bitmap(&bits), "ab 0 1");
+        let mut d = Descriptor {
+            index: 7,
+            id: [6, 0xabcd, 0x1234, 1],
+            ..Default::default()
+        };
+        d.name[..5].copy_from_slice(b"test\0");
+        d.props[0] = 2;
+        d.bits.ev[0] = (1 << EV_SYN) | (1 << EV_KEY);
+        d.bits.key[30 / 8] |= 1 << (30 % 8);
+        d.bits.key[0x120 / 8] |= 1 << (0x120 % 8);
+        let dev = input_device(&d);
+        assert_eq!(dev.devpath, "/devices/virtual/input/input7");
+        assert_eq!(dev.subsystem, "input");
+        assert_eq!(
+            dev.env,
+            [
+                "PRODUCT=6/abcd/1234/1",
+                "NAME=\"test\"",
+                "PROP=2",
+                "EV=3",
+                "KEY=100000000 0 0 0 40000000",
+                "MODALIAS=input:b0006vABCDp1234e0001-e0,1,k120,ramlsfw",
+            ]
+        );
+        assert_eq!(
+            event_device(7).env,
+            ["MAJOR=13", "MINOR=71", "DEVNAME=input/event7"]
+        );
+    }
 
     #[test]
     fn ioctl_numbers_are_linux() {

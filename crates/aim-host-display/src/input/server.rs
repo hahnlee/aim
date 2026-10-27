@@ -421,10 +421,22 @@ fn lock_dir(dir: &Path, how: libc::c_int) -> io::Result<std::fs::File> {
 
 /// Remove the device nodes in `dir`.
 fn remove_nodes(dir: &Path) -> io::Result<()> {
+    let (_, records) = super::hotplug::read(dir, 0)?;
+    let mut present = std::collections::BTreeMap::new();
+    for (added, desc) in records {
+        if added {
+            present.insert(desc.index, desc);
+        } else {
+            present.remove(&desc.index);
+        }
+    }
     for e in std::fs::read_dir(dir)?.flatten() {
         if e.file_name().to_string_lossy().starts_with("event") {
-            let _ = std::fs::remove_file(e.path());
+            std::fs::remove_file(e.path())?;
         }
+    }
+    for desc in present.values() {
+        super::hotplug::append(dir, false, desc)?;
     }
     Ok(())
 }
@@ -433,10 +445,13 @@ fn remove_nodes(dir: &Path) -> io::Result<()> {
 /// nodes if no server holds it. Returns whether they were stale.
 pub fn remove_stale(dir: &Path) -> bool {
     match lock_dir(dir, libc::LOCK_EX | libc::LOCK_NB) {
-        Ok(_lock) => {
-            let _ = remove_nodes(dir);
-            true
-        }
+        Ok(_lock) => match remove_nodes(dir) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("input: remove stale devices: {e}");
+                false
+            }
+        },
         Err(_) => false,
     }
 }
@@ -493,6 +508,7 @@ impl Devices {
                 }
             });
             std::fs::rename(staging.join(&name), dir.join(&name))?;
+            super::hotplug::append(dir, true, &desc)?;
             devices.push(device);
         }
         let _ = std::fs::remove_dir(&staging);
@@ -558,14 +574,23 @@ impl Devices {
     /// The devices go away: their nodes disappear (hotplug), their clients
     /// see the end of their connection, and the directory is free.
     pub fn close(&self) {
+        let mut lock = self.lock.lock().unwrap();
+        if lock.is_none() {
+            return;
+        }
         for d in &self.devices {
-            let _ = std::fs::remove_file(self.dir.join(format!("event{}", d.index)));
-            for c in &d.inner.lock().unwrap().clients {
+            let inner = d.inner.lock().unwrap();
+            let removed = std::fs::remove_file(self.dir.join(format!("event{}", d.index)))
+                .and_then(|()| super::hotplug::append(&self.dir, false, &inner.desc));
+            if let Err(e) = removed {
+                eprintln!("input: remove event{}: {e}", d.index);
+            }
+            for c in &inner.clients {
                 // SAFETY: shutting down a client socket we own.
                 unsafe { libc::shutdown(c.sock.as_raw_fd(), libc::SHUT_RDWR) };
             }
         }
-        self.lock.lock().unwrap().take();
+        lock.take();
     }
 }
 
@@ -580,6 +605,54 @@ mod tests {
     use super::super::codes::*;
     use super::super::*;
     use super::*;
+
+    #[test]
+    fn hotplug_retains_lifetimes_and_stale_removal_once() {
+        let root = std::env::temp_dir().join(format!("input-lifetime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("input");
+        let specs = || devices(100, 200, 160.0, 160.0);
+        let devs = Devices::create(&dir, specs()).unwrap();
+        let (at, records) = super::super::hotplug::read(&dir, 0).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|(a, d)| (*a, d.index))
+                .collect::<Vec<_>>(),
+            [(true, 0), (true, 1), (true, 2)]
+        );
+        devs.close();
+        devs.close();
+        drop(devs);
+        let devs = Devices::create(&dir, specs()).unwrap();
+        // A server death releases the directory lock without calling close.
+        devs.lock.lock().unwrap().take();
+        assert!(remove_stale(&dir));
+        assert!(remove_stale(&dir));
+        drop(devs);
+        let (end, records) = super::super::hotplug::read(&dir, at).unwrap();
+        assert!(end > at);
+        assert_eq!(
+            records
+                .iter()
+                .map(|(a, d)| (*a, d.index))
+                .collect::<Vec<_>>(),
+            [
+                (false, 0),
+                (false, 1),
+                (false, 2),
+                (true, 0),
+                (true, 1),
+                (true, 2),
+                (false, 0),
+                (false, 1),
+                (false, 2),
+            ]
+        );
+        assert_eq!(records[0].1.name(), b"aim-touchscreen");
+        assert!(super::super::hotplug::read(&dir, end).unwrap().1.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn open(dir: &Path, index: u32) -> (UnixStream, Descriptor) {
         let s = connect_in(dir, &format!("event{index}")).unwrap();
