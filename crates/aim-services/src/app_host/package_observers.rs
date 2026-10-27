@@ -1,9 +1,9 @@
-//! `NativePackageObserverOwner`, `PackageObserverHelper` and `PackageList`
+//! `NativePackageObserverOwner` and `PackageObserverHelper`
 //! (`android-16.0.0_r1`) for the app host's native service subscribers.
 //! Membership uses Arc identity, ordered by that identity as Java's ArraySet
 //! orders these identity-hashed observers. Each notification retains one
 //! immutable membership snapshot; callbacks run without registry or package
-//! publication locks. Removal/revocation cannot retract an in-flight snapshot.
+//! publication locks. Revocation cannot retract an in-flight snapshot.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, Weak};
@@ -97,39 +97,6 @@ impl Registry {
         Ok(())
     }
 
-    /// Valid after closure, and for identities that were never registered.
-    pub fn remove_observer(&self, observer: &Arc<dyn PackageListObserver>) {
-        let mut state = self.0.lock().unwrap();
-        let observers = Arc::make_mut(&mut state.observers);
-        if let Ok(at) = observers.binary_search_by_key(&identity(observer), identity) {
-            observers.remove(at);
-        }
-    }
-
-    /// Capture package names before registration, as getPackageList does.
-    /// The list stays a copy in time; notifications never change its names.
-    pub fn get_package_list(
-        self: &Arc<Self>,
-        capture: impl FnOnce() -> Result<Vec<String>, Exception>,
-        observer: Option<Arc<dyn PackageListObserver>>,
-    ) -> Result<PackageList, Exception> {
-        self.snapshot()?;
-        let names = capture()?;
-        // Each PackageList has its own wrapper identity, even when two lists
-        // wrap the same service observer.
-        let observer = observer.map(|o| Arc::new(Forward(o)) as Arc<dyn PackageListObserver>);
-        if let Some(observer) = &observer {
-            self.add_observer(observer.clone())?;
-        } else {
-            self.snapshot()?;
-        }
-        Ok(PackageList {
-            names,
-            observer,
-            registry: Arc::downgrade(self),
-        })
-    }
-
     fn notify(&self, event: Event, name: Option<&str>, uid: i32) -> Result<(), Exception> {
         let snapshot = self.snapshot()?;
         for observer in snapshot.iter() {
@@ -150,83 +117,6 @@ impl Registry {
             std::mem::take(&mut state.observers)
         };
         drop(previous);
-    }
-}
-
-struct Forward(Arc<dyn PackageListObserver>);
-impl PackageListObserver for Forward {
-    fn package_added(&self, name: Option<&str>, uid: i32) -> Result<(), Exception> {
-        self.0.package_added(name, uid)
-    }
-    fn package_changed(&self, name: Option<&str>, uid: i32) -> Result<(), Exception> {
-        self.0.package_changed(name, uid)
-    }
-    fn package_removed(&self, name: Option<&str>, uid: i32) -> Result<(), Exception> {
-        self.0.package_removed(name, uid)
-    }
-}
-
-/// `PackageList`, with explicit close and scope-exit cleanup.
-pub struct PackageList {
-    names: Vec<String>,
-    observer: Option<Arc<dyn PackageListObserver>>,
-    registry: Weak<Registry>,
-}
-impl PackageList {
-    pub fn package_names(&self) -> &[String] {
-        &self.names
-    }
-    pub fn close(&self) {
-        if let Some(registry) = self.registry.upgrade() {
-            if let Some(observer) = &self.observer {
-                registry.remove_observer(observer);
-            }
-        }
-    }
-}
-impl Drop for PackageList {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
-
-impl AppHost {
-    /// Native services' `PackageManagerInternal.getPackageList(observer)`.
-    /// Names come from the same native session capture as app-facing queries.
-    pub fn get_package_list(
-        &self,
-        observer: Option<Arc<dyn PackageListObserver>>,
-    ) -> Result<PackageList, Exception> {
-        let registry = self
-            .package_observers
-            .lock()
-            .unwrap()
-            .upgrade()
-            .ok_or_else(|| {
-                Exception::new(
-                    EX_ILLEGAL_STATE,
-                    "native package observer owner unavailable",
-                )
-            })?;
-        registry.get_package_list(
-            || {
-                let system = self.system.get().ok_or_else(|| {
-                    Exception::new(EX_ILLEGAL_STATE, "native package owner unavailable")
-                })?;
-                let bridge = system.package_bootstrap()?;
-                let capture = system.capture_package_queries_for(&bridge)?;
-                Ok(crate::package::info::array_order(
-                    capture
-                        .state()
-                        .packages
-                        .values()
-                        .filter_map(|p| p.pkg.as_ref().map(|p| p.package_name.clone()))
-                        .collect(),
-                    |name| name.as_str(),
-                ))
-            },
-            observer,
-        )
     }
 }
 
@@ -374,51 +264,6 @@ mod tests {
         })
         .collect();
         assert_eq!(*log.lock().unwrap(), expected);
-        let removed = observers[1].clone() as Arc<dyn PackageListObserver>;
-        registry.remove_observer(&removed);
-        registry.remove_observer(&removed);
-        assert_eq!(registry.snapshot().unwrap().len(), 2);
-        log.lock().unwrap().clear();
-        registry
-            .notify(Event::Removed, Some("a.b"), 1010123)
-            .unwrap();
-        assert_eq!(
-            log.lock().unwrap().iter().map(|r| r.0).collect::<Vec<_>>(),
-            vec![observers[0].id, observers[2].id]
-        );
-    }
-
-    #[test]
-    fn package_observers_lists_capture_names_and_own_distinct_registrations() {
-        let registry = Arc::new(Registry::default());
-        let observer = Arc::new(Observer::default());
-        let names = vec!["before".to_owned()];
-        let first = registry
-            .get_package_list(|| Ok(names.clone()), Some(observer.clone()))
-            .unwrap();
-        let second = registry
-            .get_package_list(|| Ok(vec!["after".into()]), Some(observer.clone()))
-            .unwrap();
-        let plain = registry.get_package_list(|| Ok(Vec::new()), None).unwrap();
-        assert_eq!(registry.snapshot().unwrap().len(), 2);
-        registry.notify(Event::Added, Some("new"), 1010123).unwrap();
-        assert_eq!(observer.log.lock().unwrap().len(), 2);
-        assert_eq!(first.package_names(), names);
-        assert_eq!(second.package_names(), &["after"]);
-        assert!(plain.package_names().is_empty());
-        first.close();
-        first.close();
-        assert_eq!(registry.snapshot().unwrap().len(), 1);
-        drop(second);
-        assert!(registry.snapshot().unwrap().is_empty());
-        let error = Exception::new(EX_ILLEGAL_STATE, "snapshot owner unavailable");
-        assert_eq!(
-            registry
-                .get_package_list(|| Err(error.clone()), Some(observer))
-                .err(),
-            Some(error)
-        );
-        assert!(registry.snapshot().unwrap().is_empty());
     }
 
     #[test]
@@ -434,10 +279,8 @@ mod tests {
             action: Mutex::default(),
         });
         let current = registry.clone();
-        let removed = observers[1].clone() as Arc<dyn PackageListObserver>;
         let new = added.clone();
         *observers[0].action.lock().unwrap() = Some(Box::new(move || {
-            current.remove_observer(&removed);
             current.add_observer(new)?;
             // Nested dispatch completes without holding any registry lock.
             current.notify(Event::Changed, Some("nested"), 1010123)
@@ -458,7 +301,7 @@ mod tests {
         let snapshot = registry.snapshot().unwrap();
         assert_eq!(nested.len(), snapshot.len());
         assert!(nested.contains(&99));
-        assert!(!nested.contains(&observers[1].id));
+        assert!(observers.iter().all(|o| nested.contains(&o.id)));
         assert_eq!(records.first().unwrap().1, "added");
         assert_eq!(records.last().unwrap().1, "added");
     }
@@ -485,28 +328,9 @@ mod tests {
             Err(closed())
         );
         assert_eq!(registry.add_observer(observers[0].clone()), Err(closed()));
-        registry.remove_observer(&(observers[0].clone() as Arc<dyn PackageListObserver>));
-        assert_eq!(
-            registry
-                .get_package_list(|| panic!("closed before capture"), None)
-                .err(),
-            Some(closed())
-        );
         let next = Arc::new(Registry::default());
         next.add_observer(observers[0].clone()).unwrap();
         assert!(next.notify(Event::Added, Some("a.b"), 10123).is_ok());
-        // A close during package snapshot capture also prevents registration.
-        assert_eq!(
-            next.get_package_list(
-                || {
-                    next.close();
-                    Ok(Vec::new())
-                },
-                Some(observers[0].clone())
-            )
-            .err(),
-            Some(closed())
-        );
     }
 
     #[test]
@@ -514,16 +338,8 @@ mod tests {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bootstrap;
         let process = process();
         let host = AppHost::new(process.clone());
-        assert_eq!(
-            host.get_package_list(None).err().unwrap().message,
-            "native package observer owner unavailable"
-        );
         let bridge = super::super::package_bootstrap::PackageBootstrap::new(host.clone());
         let registry = host.package_observers.lock().unwrap().upgrade().unwrap();
-        assert_eq!(
-            host.get_package_list(None).err().unwrap().message,
-            "native package owner unavailable"
-        );
         let observer = Arc::new(Observer::default());
         registry.add_observer(observer.clone()).unwrap();
         let get = || {
@@ -607,7 +423,6 @@ mod tests {
             registry.notify(Event::Changed, Some("a.b"), 10123),
             Err(closed())
         );
-        assert_eq!(host.get_package_list(None).err(), Some(closed()));
         // A retained old leaf cannot dispatch to the replacement registry.
         let _next_bridge = super::super::package_bootstrap::PackageBootstrap::new(host.clone());
         let next = host.package_observers.lock().unwrap().upgrade().unwrap();
