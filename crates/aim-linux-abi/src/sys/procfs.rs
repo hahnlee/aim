@@ -1149,7 +1149,7 @@ fn thread_comm(p: i32, tid: i32) -> Option<String> {
     (len > 0).then(|| String::from_utf8_lossy(&n[..len]).into_owned())
 }
 
-const NET_FILES: [&str; 4] = ["tcp", "tcp6", "udp", "udp6"];
+const NET_FILES: [&str; 5] = ["dev", "tcp", "tcp6", "udp", "udp6"];
 
 /// Nodes under `/proc/<p>/` (`rest` is the path after it); `thread` is the
 /// tid for `/proc/<p>/task/<tid>/` (and `/proc/<tid>/`).
@@ -1957,7 +1957,12 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
             if write {
                 return Some(-(EACCES as i64));
             }
-            match super::net::proc_table(&kind) {
+            let table = if kind == "dev" {
+                super::netif::proc_dev()
+            } else {
+                super::net::proc_table(&kind)
+            };
+            match table {
                 Ok(bytes) => content_fd(&bytes, cloexec),
                 Err(error) => -(error as i64),
             }

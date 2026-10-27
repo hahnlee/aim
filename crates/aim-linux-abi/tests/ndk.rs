@@ -244,6 +244,29 @@ fn network_devices() {
     check("t_netif", &[]);
 }
 
+#[test]
+fn network_device_statistics() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_netdev");
+    let prog = g.build(&clang, "t_netdev");
+    let (ok, out) = g.run(&[&prog]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_netdev failed:\n{out}");
+    let (ok, out) = g.run(&["/system/bin/toybox", "ifconfig", "-a"]);
+    println!("{out}");
+    assert!(ok, "ifconfig failed:\n{out}");
+    for name in ["lo", "eth0"] {
+        assert!(
+            out.lines()
+                .any(|line| line.split_whitespace().next() == Some(name)),
+            "ifconfig did not list {name}:\n{out}"
+        );
+    }
+}
+
 /// IPv6 on eth0 (#267).
 #[test]
 fn network_ipv6() {
