@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use super::codes::{
@@ -40,6 +40,8 @@ struct Client {
 }
 
 struct Inner {
+    exists: bool,
+    descriptions: Vec<Weak<UnixStream>>,
     /// Mutable: `EVIOCSABS` changes axes, `EVIOCSKEYCODE` the keys.
     desc: Descriptor,
     state: State,
@@ -164,16 +166,7 @@ impl Device {
             OP_GRAB => {
                 let _ = answer(self.grab(hello.client, hello.arg != 0));
             }
-            OP_DESCRIBE => {
-                let inner = self.inner.lock().unwrap();
-                let desc = Descriptor {
-                    client: 0,
-                    state: inner.state,
-                    ..inner.desc
-                };
-                drop(inner);
-                let _ = wire::send(conn.as_fd(), wire::bytes(&desc), None);
-            }
+            OP_DESCRIBE => self.describe(conn),
             OP_SET_ABS => {
                 if let Ok(Some(info)) = wire::recv_record::<AbsInfo>(conn.as_fd()) {
                     let _ = answer(self.inner.lock().unwrap().set_abs(hello.arg, info));
@@ -212,6 +205,56 @@ impl Device {
                 let _ = answer(self.flush_client(hello.client));
             }
             _ => {}
+        }
+    }
+
+    fn describe(&self, conn: UnixStream) {
+        let on = 1i32;
+        // Disconnecting a query client must not signal the display server.
+        let no_sigpipe = unsafe {
+            libc::setsockopt(
+                conn.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&on as *const i32).cast(),
+                size_of::<i32>() as libc::socklen_t,
+            )
+        };
+        if no_sigpipe < 0
+            || conn.set_read_timeout(None).is_err()
+            || conn
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .is_err()
+        {
+            return;
+        }
+        let conn = Arc::new(conn);
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if !inner.exists {
+                return;
+            }
+            inner.descriptions.retain(|s| s.strong_count() != 0);
+            inner.descriptions.push(Arc::downgrade(&conn));
+        }
+        loop {
+            let inner = self.inner.lock().unwrap();
+            if !inner.exists {
+                return;
+            }
+            let desc = Descriptor {
+                client: 0,
+                state: inner.state,
+                ..inner.desc
+            };
+            drop(inner);
+            if wire::send(conn.as_fd(), wire::bytes(&desc), None).is_err() {
+                return;
+            }
+            match wire::recv_record::<Hello>(conn.as_fd()) {
+                Ok(Some(h)) if h.version == VERSION && h.op == OP_DESCRIBE => {}
+                _ => return,
+            }
         }
     }
 
@@ -491,6 +534,8 @@ impl Devices {
             let device = Arc::new(Device {
                 index: desc.index,
                 inner: Mutex::new(Inner {
+                    exists: true,
+                    descriptions: Vec::new(),
                     desc,
                     state: desc.state,
                     pending: Vec::new(),
@@ -579,11 +624,16 @@ impl Devices {
             return;
         }
         for d in &self.devices {
-            let inner = d.inner.lock().unwrap();
+            let mut inner = d.inner.lock().unwrap();
             let removed = std::fs::remove_file(self.dir.join(format!("event{}", d.index)))
                 .and_then(|()| super::hotplug::append(&self.dir, false, &inner.desc));
             if let Err(e) = removed {
                 eprintln!("input: remove event{}: {e}", d.index);
+            }
+            inner.exists = false;
+            for s in inner.descriptions.drain(..).filter_map(|s| s.upgrade()) {
+                // SAFETY: the device owns this control session.
+                unsafe { libc::shutdown(s.as_raw_fd(), libc::SHUT_RDWR) };
             }
             for c in &inner.clients {
                 // SAFETY: shutting down a client socket we own.
