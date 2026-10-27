@@ -1,7 +1,6 @@
 use super::*;
 use std::{
     collections::{BTreeMap, VecDeque},
-    os::unix::net::UnixListener,
     sync::{Arc, Condvar, Mutex, mpsc},
 };
 const ENOTCONN: i32 = 107;
@@ -1246,7 +1245,7 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
     }
 }
 pub fn serve(path: &Path) -> Result<(), Errno> {
-    let listener = UnixListener::bind(path).map_err(io_error)?;
+    let (listener, _transport) = super::transport::listen(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
     // The socket's path exists from bind, before it listens: clients wait
     // for this marker, made once connections are accepted.
@@ -1298,11 +1297,6 @@ pub fn serve(path: &Path) -> Result<(), Errno> {
         std::thread::sleep(Duration::from_millis(2));
     }
     owner.abort();
-    let _ = fs::remove_file(super::ready_marker(path));
-    let _ = fs::remove_file(path);
-    if let Some(parent) = path.parent() {
-        let _ = fs::remove_dir(parent);
-    }
     Ok(())
 }
 

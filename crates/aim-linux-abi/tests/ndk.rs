@@ -204,6 +204,70 @@ fn files() {
     check("t_fs", &["/data/local/tmp"]);
 }
 
+/// Broker transport follows the last device description, including _exit.
+#[test]
+fn fuse_transport_lifetime() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_fuse_lifetime");
+    let prog = g.build(&clang, "t_fuse_lifetime");
+    let registry = g.runtime.join("fuse-sessions");
+    let (mut host, guest) = UnixStream::pair().unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let controller = std::thread::spawn(move || {
+        let wait_removed = |path: &Path| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while path.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{} leaked",
+                    path.display()
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let session = || {
+            let entries = std::fs::read_dir(&registry)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(entries.len(), 1);
+            PathBuf::from(String::from_utf8(std::fs::read(entries[0].path()).unwrap()).unwrap())
+        };
+        let mut command = [0];
+        host.read_exact(&mut command).unwrap();
+        assert_eq!(command, *b"d");
+        let first = session();
+        assert!(first.join("c.sock").exists());
+        host.write_all(b"d").unwrap();
+        host.read_exact(&mut command).unwrap();
+        assert_eq!(command, *b"c");
+        wait_removed(&first);
+        host.write_all(b"c").unwrap();
+        host.read_exact(&mut command).unwrap();
+        assert_eq!(command, *b"e");
+        // The short-lived second session's reaper may still be retiring.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(&registry).unwrap().count() != 1 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let exiting = session();
+        assert!(exiting.join("c.sock").exists());
+        host.write_all(b"e").unwrap();
+        wait_removed(&exiting);
+    });
+    let (ok, out) = g.run_with(&[&prog], vec![guest.into()]);
+    controller.join().unwrap();
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_fuse_lifetime failed:\n{out}");
+}
+
 #[test]
 fn pseudo_terminals() {
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
