@@ -76,6 +76,67 @@ pub(super) fn created(fd: i32) -> Result<SocketMetadata, Errno> {
     })
 }
 
+/// Live open descriptions in this network namespace, including inherited
+/// aliases. A virtual UDP binding lasts until its last descriptor closes.
+pub(super) fn live_socket_options() -> Result<BTreeMap<u64, (u32, u16)>, Errno> {
+    let me = unsafe { libc::getpid() };
+    let members = super::super::pidns::members().unwrap_or_else(|| vec![me]);
+    let mut sockets = BTreeMap::new();
+    for pid in members {
+        let size = size_of::<libc::proc_fdinfo>();
+        let count =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        if count <= 0 {
+            let error = errno::last();
+            if error == ESRCH {
+                continue;
+            }
+            return Err(if error == 0 { EIO } else { error });
+        }
+        let mut capacity = count as usize / size + 32;
+        let descriptors = loop {
+            let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(capacity);
+            let n = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    fds.as_mut_ptr().cast(),
+                    (capacity * size) as i32,
+                )
+            };
+            if n <= 0 {
+                let error = errno::last();
+                if error == ESRCH {
+                    break Vec::new();
+                }
+                return Err(if error == 0 { EIO } else { error });
+            }
+            if n as usize == capacity * size {
+                capacity *= 2;
+                continue;
+            }
+            unsafe {
+                fds.set_len(n as usize / size);
+            }
+            break fds;
+        };
+        for fd in descriptors {
+            if fd.proc_fdtype != libc::PROX_FDTYPE_SOCKET as u32 {
+                continue;
+            }
+            match Info::read(pid, fd.proc_fd) {
+                Ok(info) => {
+                    sockets.insert(info.cookie(), (info.word(188), info.port(true)));
+                }
+                Err(error) if matches!(error, errno::EBADF | errno::ENOENT | ESRCH) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(sockets)
+}
+
 pub(crate) fn socket_identity(fd: i32) -> Option<(u64, u32)> {
     let Kind::Sock(socket) = fdtab::get(fd)? else {
         return None;

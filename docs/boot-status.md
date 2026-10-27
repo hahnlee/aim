@@ -8056,8 +8056,7 @@ by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
   failed (DhcpClient).
 - The emulator's vendor overlay made `eth0` a restricted network; it goes
   from the derived image.
-- DhcpClient's UDP socket took the Mac's port 68, so a second guest (or
-  the NDK network tests) failed to bind it; the port is `eth0`'s (#334).
+- UDP port 68 binds on `eth0` stay separate from the Mac's port, enforce guest namespace address/reuse conflicts and receive virtual router replies alongside packet sockets (NDK tests, 2026-10-28, #334, #365).
 
 ## Memory pressure (2026-09-29, #277)
 
