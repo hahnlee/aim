@@ -3,7 +3,9 @@
 //!
 //! Expiries are one-shot zero-leeway kqueue timers on `park`'s timer
 //! kqueue (a periodic timer is re-armed at each expiry), so they are as
-//! precise as the layer's sleeps. An expiry queues the timer's signal
+//! precise as the layer's sleeps. CPU timers use the same owner to poll
+//! host CPU usage once per Linux tick (`TimerClock::deadline`).
+//! An expiry queues the timer's signal
 //! (`SIGEV_SIGNAL` to the process, `SIGEV_THREAD_ID` to one thread) with
 //! `si_code` SI_TIMER. As on Linux, a timer has at most one signal queued:
 //! expiries while it is pending count as overruns, reported in `si_overrun`
@@ -13,10 +15,10 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use super::clock::{self, Base, Deadline};
+use super::clock::{Deadline, TimerClock};
 use super::park::{self, PTIMER_EXPIRY};
 use super::sigframe::Siginfo;
-use crate::errno::{EINVAL, ENOMEM};
+use crate::errno::{EINVAL, ENOMEM, ESRCH};
 
 pub const SI_TIMER: i32 = -2;
 const SIGEV_SIGNAL: i32 = 0;
@@ -31,7 +33,7 @@ const MAX_TIMERS: usize = 4096;
 
 pub struct Timer {
     id: i32,
-    base: Base,
+    base: TimerClock,
     /// None for SIGEV_NONE.
     signo: Option<i32>,
     value: u64,
@@ -39,8 +41,8 @@ pub struct Timer {
     tid: Option<i32>,
     /// The next expiry on `clock`; 0 when disarmed.
     next: u64,
-    /// `base` as the last setting runs it ([`Base::timer`]).
-    clock: Base,
+    /// `base` as the last setting runs it ([`TimerClock::timer`]).
+    clock: TimerClock,
     interval: u64,
     /// Expiries not signalled while the signal was queued.
     overrun: u64,
@@ -103,13 +105,25 @@ pub fn expired(ident: u64) {
         let Some(tm) = t.iter_mut().find(|t| t.armed.is_some_and(|a| a.1 == ident)) else {
             return;
         };
-        // Zero leeway fires on time; the timer's clock may lag slightly.
-        let now = tm.clock.now();
-        let (n, next) = advance(tm.next, tm.interval, now.max(tm.next));
+        let now = match tm.clock.now() {
+            Ok(now) => now,
+            Err(_) => {
+                // The CPU-clock target exited: no further expirations.
+                tm.next = 0;
+                tm.armed = None;
+                return;
+            }
+        };
+        let now = match tm.clock {
+            // Zero leeway fires on time; the wall clock may lag slightly.
+            TimerClock::Wall(_) => now.max(tm.next),
+            TimerClock::Cpu(_) => now,
+        };
+        let (n, next) = advance(tm.next, tm.interval, now);
         tm.next = next;
         tm.armed = None;
         let info = match tm.signo {
-            Some(sig) if !tm.queued => {
+            Some(sig) if n != 0 && !tm.queued => {
                 tm.queued = true;
                 tm.overrun = tm.overrun.saturating_add(n - 1);
                 let mut i = Siginfo::new(sig, SI_TIMER);
@@ -125,10 +139,7 @@ pub fn expired(ident: u64) {
         let rearm = (next != 0).then(|| {
             let ident = park::timer_id();
             tm.armed = Some((-1, ident));
-            let next = Deadline {
-                base: tm.clock,
-                ns: next,
-            };
+            let next = tm.clock.deadline(next);
             (tm.id, ident, next)
         });
         (info, tm.tid, rearm)
@@ -162,7 +173,7 @@ pub fn dequeued(info: &mut Siginfo) {
 
 /// timer_create(clock, sevp, timerid).
 pub fn timer_create(a: [u64; 6]) -> i64 {
-    let base = match clock::timer_base(a[0]) {
+    let base = match TimerClock::new(a[0]) {
         Ok(b) => b,
         Err(e) => return e,
     };
@@ -220,10 +231,16 @@ pub fn timer_create(a: [u64; 6]) -> i64 {
 
 /// `struct itimerspec` { it_interval, it_value } of `tm` now.
 fn itimerspec(tm: &Timer) -> [u64; 2] {
-    let now = tm.clock.now();
+    let now = match tm.clock.now() {
+        Ok(n) => n,
+        Err(_) => return [0, 0],
+    };
+    if matches!(tm.clock, TimerClock::Cpu(_)) && tm.next == 0 {
+        return [0, 0];
+    }
     let (_, next) = advance(tm.next, tm.interval, now);
     let left = if next == 0 {
-        0
+        u64::from(tm.next != 0 && tm.signo.is_some())
     } else {
         next.saturating_sub(now).max(1)
     };
@@ -238,6 +255,9 @@ fn write_itimerspec(p: u64, v: [u64; 2]) {
 /// timer_settime(id, flags, new, old).
 pub fn timer_settime(a: [u64; 6]) -> i64 {
     let (id, flags, new, old) = (a[0] as i32, a[1], a[2], a[3]);
+    if flags & !TIMER_ABSTIME != 0 {
+        return -(EINVAL as i64);
+    }
     let (interval, value) = match (park::read_timespec(new), park::read_timespec(new + 16)) {
         (Ok(i), Ok(v)) => (i, v),
         _ => return -(EINVAL as i64),
@@ -247,26 +267,29 @@ pub fn timer_settime(a: [u64; 6]) -> i64 {
         let Some(tm) = t.iter_mut().find(|t| t.id == id) else {
             return -(EINVAL as i64);
         };
+        let absolute = flags & TIMER_ABSTIME != 0;
+        let clock = tm.base.timer(absolute);
+        let now = match clock.now() {
+            Ok(n) => n,
+            Err(_) => return -(ESRCH as i64),
+        };
         if old != 0 {
             write_itimerspec(old, itimerspec(tm));
         }
-        let absolute = flags & TIMER_ABSTIME != 0;
         tm.interval = interval;
-        tm.clock = tm.base.timer(absolute);
+        tm.clock = clock;
         tm.next = match value {
             0 => 0,
-            v if !absolute => tm.clock.now().saturating_add(v),
+            v if !absolute => now.saturating_add(v),
             v => v.max(1),
         };
         tm.overrun = 0;
+        tm.overrun_last = 0;
         let prev = tm.armed.take();
         let rearm = (tm.next != 0 && tm.signo.is_some()).then(|| {
             let ident = park::timer_id();
             tm.armed = Some((-1, ident));
-            let next = Deadline {
-                base: tm.clock,
-                ns: tm.next,
-            };
+            let next = tm.clock.deadline(tm.next);
             (ident, next)
         });
         (prev, rearm)
@@ -333,11 +356,6 @@ mod tests {
         assert_eq!(
             timer_create([1, ev.as_ptr() as u64, &mut id as *mut i32 as u64, 0, 0, 0]),
             0
-        );
-        // CPU-time timers are not provided.
-        assert_eq!(
-            timer_create([2, ev.as_ptr() as u64, &mut id as *mut i32 as u64, 0, 0, 0]),
-            -95
         );
         assert_eq!(
             timer_create([10, ev.as_ptr() as u64, &mut id as *mut i32 as u64, 0, 0, 0]),

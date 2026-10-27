@@ -185,7 +185,7 @@ static void nanosleep_clocks(void) {
   }
   CHECK(nsleep(CLOCK_MONOTONIC_RAW, 0, 1000) == -EOPNOTSUPP);
   CHECK(nsleep(CLOCK_MONOTONIC_COARSE, 0, 1000) == -EOPNOTSUPP);
-  CHECK(nsleep(CLOCK_THREAD_CPUTIME_ID, 0, 1000) == -EOPNOTSUPP);
+  CHECK(nsleep(CLOCK_THREAD_CPUTIME_ID, 0, 1000) == -EINVAL);
   CHECK(nsleep(100, 0, 1000) == -EINVAL);
 }
 
