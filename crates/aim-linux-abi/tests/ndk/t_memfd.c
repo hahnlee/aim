@@ -3,9 +3,12 @@
 // processes by fork and SCM_RIGHTS. Seals belong to the memfd, not to the
 // fd or the process.
 #include <fcntl.h>
+#include <stdlib.h>
+#include <sys/capability.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -267,6 +270,14 @@ static void seals_and_views(void) {
   CHECK(ro != MAP_FAILED);
   errno = 0;
   CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
+  CHECK(mprotect(ro, PAGE, PROT_NONE) == 0);
+  CHECK(mprotect(ro, PAGE, PROT_READ) == 0);
+  errno = 0;
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE | PROT_EXEC) == -1 && errno == EACCES);
+  // Conversion to executable-capable memory keeps the write denial.
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_EXEC) == 0);
+  errno = 0;
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
   munmap(ro, PAGE);
   close(fd);
   // F_SEAL_FUTURE_WRITE alike, and a view mapped before the seal stays
@@ -334,10 +345,60 @@ static void views_in_other_processes(void) {
   CHECK(pread(fd, &c, 1, 0) == 1 && c == 'c');
   CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
   close(fd);
+  // An executable view is backed by shared anonymous memory on Darwin.
+  // It still belongs to this memfd for i_mmap_writable.
+  fd = memfd_create("executable-view", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+  FORK_OR_SKIP(executable);
+  if (executable == 0) {
+    char* rx = mmap(NULL, PAGE, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    if (rx == MAP_FAILED || write(up[1], "x", 1) != 1) _exit(2);
+    close(fd);
+    if (read(down[0], &c, 1) != 1) _exit(3);
+    _exit(0);
+  }
+  CHECK(read(up[0], &c, 1) == 1);
+  errno = 0;
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == -1 && errno == EBUSY);
+  CHECK(write(down[1], "g", 1) == 1);
+  CHECK(waitpid(executable, &status, 0) == executable && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
+  close(fd);
   close(up[0]);
   close(up[1]);
   close(down[0]);
   close(down[1]);
+}
+
+static void seal_races_mmap(void) {
+  for (int i = 0; i < 24; ++i) {
+    int fd = memfd_create("race", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    int sv[2];
+    CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) == 0);
+    FORK_OR_SKIP(pid);
+    if (pid == 0) {
+      char c;
+      close(sv[0]);
+      if (read(sv[1], &c, 1) != 1) _exit(2);
+      char* v = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      c = v != MAP_FAILED ? 'm' : errno == EPERM ? 's' : 'e';
+      if (write(sv[1], &c, 1) != 1 || read(sv[1], &c, 1) != 1) _exit(3);
+      _exit(0);
+    }
+    close(sv[1]);
+    CHECK(write(sv[0], "g", 1) == 1);
+    int sealed = fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE);
+    int error = errno;
+    char c;
+    CHECK(read(sv[0], &c, 1) == 1);
+    CHECK((sealed == 0 && c == 's') || (sealed == -1 && error == EBUSY && c == 'm'));
+    CHECK(write(sv[0], "g", 1) == 1);
+    int status;
+    CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(sv[0]);
+    close(fd);
+  }
 }
 
 // F_SEAL_EXEC: the exec bits cannot change (shmem_setattr); the rest can.
@@ -350,16 +411,143 @@ static void exec_seal_chmod(void) {
   errno = 0;
   CHECK(fchmod(fd, st.st_mode & 0666) == -1 && errno == EPERM);
   CHECK(fchmod(fd, (st.st_mode & 07777) & ~0060) == 0);
+  // A separate description and a procfs chmod see the inode's seal too.
+  int again = reopen(fd, O_RDONLY);
+  CHECK(again >= 0);
+  errno = 0;
+  CHECK(fchmod(again, 0600) == -1 && errno == EPERM);
+  char path[64];
+  snprintf(path, sizeof path, "/proc/self/fd/%d", again);
+  errno = 0;
+  CHECK(chmod(path, 0600) == -1 && errno == EPERM);
+  CHECK(ftruncate(fd, PAGE) == -1 && errno == EPERM);
+  close(again);
   close(fd);
   int noexec = memfd_create("noexec", MFD_CLOEXEC | MFD_NOEXEC_SEAL);
   CHECK(noexec >= 0);
   errno = 0;
   CHECK(fchmod(noexec, 0755) == -1 && errno == EPERM);
   CHECK(fchmod(noexec, 0600) == 0);
+  CHECK(fstat(noexec, &st) == 0 && (st.st_mode & 0777) == 0600);
+  // F_SEAL_EXEC protects mode bits; it does not deny executable mmap.
+  CHECK(ftruncate(noexec, PAGE) == 0);
+  void* rx = mmap(NULL, PAGE, PROT_READ | PROT_EXEC, MAP_SHARED, noexec, 0);
+  CHECK(rx != MAP_FAILED);
+  munmap(rx, PAGE);
   close(noexec);
 }
 
-int main(void) {
+static int scope;
+
+// The exec bits of a memfd made with `flags`, and its seals; -1 if
+// memfd_create failed (errno kept).
+static int make(unsigned flags, int* seals) {
+  int fd = memfd_create("noexec", flags);
+  if (fd < 0) return -1;
+  struct stat st;
+  int exec = fstat(fd, &st) == 0 ? (int)(st.st_mode & 0111) : -2;
+  *seals = fcntl(fd, F_GET_SEALS);
+  close(fd);
+  return exec;
+}
+
+static void noexec_sysctl_read(void) {
+  char value[8] = {0};
+  int fd = open("/proc/sys/vm/memfd_noexec", O_RDONLY | O_CLOEXEC);
+  CHECK(fd >= 0);
+  CHECK(read(fd, value, sizeof value - 1) > 0 && atoi(value) == scope);
+  close(fd);
+}
+
+static void noexec_defaults(void) {
+  int seals = 0;
+  switch (scope) {
+    case 0:
+      // MFD_EXEC: executable, unsealable without MFD_ALLOW_SEALING.
+      CHECK(make(MFD_CLOEXEC, &seals) == 0111 && seals == F_SEAL_SEAL);
+      CHECK(make(MFD_ALLOW_SEALING, &seals) == 0111 && seals == 0);
+      break;
+    case 1:
+      // MFD_NOEXEC_SEAL: no exec bits, F_SEAL_EXEC, sealable.
+      CHECK(make(MFD_CLOEXEC, &seals) == 0 && seals == F_SEAL_EXEC);
+      CHECK(make(MFD_EXEC, &seals) == 0111 && seals == F_SEAL_SEAL);
+      break;
+    default:
+      // Enforced: MFD_EXEC is refused, MFD_NOEXEC_SEAL is the default.
+      CHECK(make(MFD_CLOEXEC, &seals) == 0 && seals == F_SEAL_EXEC);
+      errno = 0;
+      CHECK(make(MFD_EXEC, &seals) == -1 && errno == EACCES);
+      CHECK(make(MFD_NOEXEC_SEAL, &seals) == 0 && seals == F_SEAL_EXEC);
+      break;
+  }
+  // Both at once is EINVAL at any scope.
+  errno = 0;
+  CHECK(make(MFD_EXEC | MFD_NOEXEC_SEAL, &seals) == -1 && errno == EINVAL);
+}
+
+static void noexec_sysctl_permissions(void) {
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) _exit(1);
+    struct __user_cap_header_struct h = {.version = _LINUX_CAPABILITY_VERSION_3};
+    struct __user_cap_data_struct d[2] = {{0}};
+    if (syscall(SYS_capget, &h, d) != 0) _exit(2);
+    d[CAP_SYS_ADMIN / 32].effective &= ~(1U << (CAP_SYS_ADMIN % 32));
+    if (syscall(SYS_capset, &h, d) != 0) _exit(3);
+    // Losing the capability after open must deny writes, before parsing.
+    errno = 0;
+    if (pwrite(fd, "0", 1, 0) != -1 || errno != EPERM) _exit(4);
+    errno = 0;
+    if (pwrite(fd, "junk", 4, 0) != -1 || errno != EPERM) _exit(5);
+    // UID 0 can still open the 0644 file without CAP_SYS_ADMIN.
+    int again = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+    if (again < 0) _exit(6);
+    errno = 0;
+    if (write(again, "0", 1) != -1 || errno != EPERM) _exit(7);
+    if (setresuid(10001, 10001, 10001) != 0) _exit(8);
+    errno = 0;
+    if (open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC) != -1 || errno != EACCES)
+      _exit(9);
+    _exit(0);
+  }
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  noexec_sysctl_read();
+}
+
+static void noexec_sysctl_write(void) {
+  int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+  CHECK(fd >= 0);
+  for (int n = 0; n <= 2; ++n) {
+    char value = '0' + n;
+    CHECK(pwrite(fd, &value, 1, 0) == 1);
+    scope = n;
+    noexec_sysctl_read();
+    noexec_defaults();
+  }
+  for (const char** bad = (const char*[]){"-1", "3", "junk", "4294967296", NULL}; *bad; ++bad) {
+    errno = 0;
+    CHECK(pwrite(fd, *bad, strlen(*bad), 0) == -1 && errno == EINVAL);
+  }
+  scope = 2;
+  noexec_sysctl_read();
+  // The root pid namespace's parent scope is 0, so root can lower it.
+  CHECK(pwrite(fd, "0", 1, 0) == 1);
+  close(fd);
+  scope = 0;
+  noexec_sysctl_read();
+}
+
+int main(int argc, char** argv) {
+  if (argc > 1 && !strcmp(argv[1], "--noexec")) {
+    scope = argc > 2 ? atoi(argv[2]) : 0;
+    RUN(noexec_sysctl_read);
+    RUN(noexec_defaults);
+    RUN(noexec_sysctl_permissions);
+    RUN(noexec_sysctl_write);
+    DONE();
+  }
   RUN(reopen_proc_self_fd);
   RUN(seal_rules);
   RUN(seals_across_dup);
@@ -367,6 +555,7 @@ int main(void) {
   RUN(seals_across_scm_rights);
   RUN(seals_and_views);
   RUN(views_in_other_processes);
+  RUN(seal_races_mmap);
   RUN(exec_seal_chmod);
   DONE();
 }

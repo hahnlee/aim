@@ -558,7 +558,7 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
             off as i64,
         ) {
             Ok(b) => {
-                if let Some(k) = memfd {
+                if let Some((k, _guard)) = memfd {
                     super::memfd::note_view(k, b, len, off);
                     super::memfd::seal_view(fd, b, len, host_prot(prot));
                 }
@@ -872,6 +872,14 @@ fn mprotect_owned(a: [u64; 6]) -> i64 {
     if window::touches_reserved(addr, addr + len) {
         return -(ENOMEM as i64);
     }
+    // Check VM_MAYWRITE before executable/JIT replacement can raise the
+    // host maximum protection of a read-only shared mapping.
+    if prot & PROT_WRITE != 0
+        && vmmap::regions(addr, addr + len)
+            .any(|r| r.shared && r.usage.max_prot & libc::PROT_WRITE as u32 == 0)
+    {
+        return -(errno::EACCES as i64);
+    }
     let ranges = super::verity_pager::covered(addr, len);
     if !ranges.is_empty() {
         if let Err(error) = super::verity_pager::validate_protection(addr, len, host_prot(prot)) {
@@ -913,7 +921,9 @@ fn mprotect_owned(a: [u64; 6]) -> i64 {
     }
     let rwx = prot & (PROT_WRITE | PROT_EXEC) == PROT_WRITE | PROT_EXEC;
     if prot & PROT_EXEC != 0 {
-        super::memfd::before_exec_protect(addr, addr + len);
+        if let Err(error) = super::memfd::before_exec_protect(addr, addr + len) {
+            return error;
+        }
         let end = addr + len;
         let mut cur = addr;
         while cur < end {

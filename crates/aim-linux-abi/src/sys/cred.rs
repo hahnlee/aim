@@ -34,9 +34,10 @@ const CAP_SETGID: u32 = 6;
 const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
 const CAP_SYS_PTRACE: u32 = 19;
+pub(super) const CAP_SYS_ADMIN: u32 = 21;
 const CAP_SYS_NICE: u32 = 23;
 const RLIMIT_NICE: usize = 13;
-const CAP_DAC_OVERRIDE: u32 = 1;
+pub(super) const CAP_DAC_OVERRIDE: u32 = 1;
 const CAP_SYS_RESOURCE: u32 = 24;
 /// Capabilities that follow the fsuid (CAP_FS_MASK).
 const CAP_FS_MASK: u64 =

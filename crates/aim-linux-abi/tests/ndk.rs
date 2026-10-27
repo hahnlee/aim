@@ -443,10 +443,10 @@ fn memfd_noexec() {
     let g = Guest::new(&image, "t_memfd_noexec");
     let vm = g.runtime.join("kernfs/proc/sys/vm");
     std::fs::create_dir_all(&vm).unwrap();
-    let prog = g.build(&clang, "t_memfd_noexec");
+    let prog = g.build(&clang, "t_memfd");
     for scope in ["0", "1", "2"] {
         std::fs::write(vm.join("memfd_noexec"), format!("{scope}\n")).unwrap();
-        let (ok, out) = g.run(&[&prog, scope]);
+        let (ok, out) = g.run(&[&prog, "--noexec", scope]);
         println!("{out}");
         assert!(
             ok && out.contains("PASS"),
