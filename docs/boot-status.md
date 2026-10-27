@@ -8017,7 +8017,9 @@ Details in [network.md](network.md). The original EthernetService,
 NetworkStack and DnsResolver bring up `eth0`, which stands for the Mac's
 network: the layer's netlink and ioctls carry the configuration, and
 `eth0`'s virtual router leases the Mac's address, gateway and DNS servers
-by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
+by DHCP. Its default DHCP lease is 60 seconds, giving DNS-only changes a
+normal 30-second renewal interval without a carrier change (#307).
+First boot, `cargo aim boot`, on a Mac on Wi-Fi:
 
 - `dumpsys connectivity`: `Active default network: 100`, Ethernet,
   `IS_VALIDATED`, LinkProperties 172.30.1.46/24 with the Mac's gateway and
