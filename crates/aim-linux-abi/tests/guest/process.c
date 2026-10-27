@@ -1521,6 +1521,30 @@ static void ns_init_exit(void) {
   printf("pids %d %d\n", getpid(), child);
 }
 
+// pid_namespaces(7): even SIGKILL from the parent namespace ends init's
+// descendants, including one in a different session, and tears down its state.
+static void ns_init_wait(void) {
+  int ready[2];
+  CHECK(pipe(ready) == 0, "pipe");
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) {
+    close(1);
+    close(2);
+    CHECK(setsid() == getpid(), "setsid");
+    CHECK(write(ready[1], "r", 1) == 1, "ready");
+    for (;;) pause();
+  }
+  char c;
+  CHECK(read(ready[0], &c, 1) == 1, "child ready");
+  // The native namespace watcher must not be a waitable guest child.
+  int status;
+  CHECK(waitpid(-1, &status, WNOHANG) == 0, "only the running child is waitable");
+  printf("pids %d %d\n", getpid(), child);
+  fflush(stdout);
+  for (;;) pause();
+}
+
 static double now_us(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1795,11 +1819,13 @@ int main(int argc, char** argv) {
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
       {"ns_init_unkillable", ns_init_unkillable},
+      {"ns_init_wait", ns_init_wait},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
     if (strcmp(which, checks[i].name) == 0 ||
         (strcmp(which, "all") == 0 && checks[i].fn != bench && checks[i].fn != identity_file &&
-         checks[i].fn != ns_init_exit && checks[i].fn != ns_init_unkillable)) {
+         checks[i].fn != ns_init_exit && checks[i].fn != ns_init_unkillable &&
+         checks[i].fn != ns_init_wait)) {
       fflush(stdout);
       checks[i].fn();
       fflush(stdout);

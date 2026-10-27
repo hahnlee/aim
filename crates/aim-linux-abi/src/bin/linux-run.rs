@@ -71,6 +71,9 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
 
   linux-run --fuse-broker PATH (internal) the FUSE kernel connection owner
 
+  linux-run --pidns-watch PID SECONDS MICROSECONDS
+                         (internal) watch a private pid namespace's init
+
   linux-run --audio-io   (internal) the audio host module's CoreAudio
                          process, started by the module itself
   linux-run [RUNTIME OPTIONS] --fork-child FDS
@@ -125,6 +128,34 @@ fn main() {
     // inherits every descriptor not closed on exec.
     let inherited_fds = aim_linux_abi::sys::open_fds();
     let internal_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if internal_args
+        .first()
+        .is_some_and(|arg| arg == "--pidns-watch")
+    {
+        if internal_args.len() != 4 {
+            usage();
+        }
+        let init = aim_storage::process_namespace::ProcessIdentity {
+            host_pid: internal_args[1]
+                .to_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| usage()),
+            start_seconds: internal_args[2]
+                .to_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| usage()),
+            start_microseconds: internal_args[3]
+                .to_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| usage()),
+        };
+        aim_storage::inherited::close_above_stdio();
+        if let Err(error) = aim_linux_abi::sys::watch_pid_namespace(init) {
+            eprintln!("linux-run: pid namespace watcher: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if internal_args
         .first()
         .is_some_and(|arg| arg == "--fuse-broker")
