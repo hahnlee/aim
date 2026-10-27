@@ -62,9 +62,7 @@ impl DomainVerification {
     /// `getPackageUid(package, 0, user)`, or -1.
     fn package_uid(&self, capture: &Capture, package: &str, user: i32) -> Result<i32, Exception> {
         let state = capture.state();
-        let resolution = capture
-            .resolution()
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("domain resolution: {e:?}")))?;
+        let resolution = super::package_resolution(capture, "domain")?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -78,9 +76,7 @@ impl DomainVerification {
     /// The proxy's `isCallerVerifier`: `uid` is a verifier package's
     /// (`isCallerPackage`).
     fn is_caller_verifier(&self, capture: &Capture, uid: i32) -> Result<bool, Exception> {
-        let resolution = capture
-            .resolution()
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("domain resolution: {e:?}")))?;
+        let resolution = super::package_resolution(capture, "domain")?;
         let (legacy, modern) = agent::verifiers(capture.state(), &resolution)?;
         for package in agent::proxy_packages(legacy, modern) {
             if self.package_uid(capture, &package, uid / PER_USER_RANGE as i32)? == uid {
@@ -169,9 +165,7 @@ impl DomainVerification {
             )?;
         }
         let state = capture.state();
-        let resolution = capture
-            .resolution()
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("domain resolution: {e:?}")))?;
+        let resolution = super::package_resolution(capture, "domain")?;
         for id in [caller_user, user] {
             if !state.users.contains_key(&id) {
                 return Err(Exception::security(format!("User {id} does not exist")));
@@ -241,9 +235,7 @@ impl DomainVerification {
         self.assert_approved_querent(&capture, uid)?;
         let name = name.ok_or_else(name_not_found)?;
         let state = capture.state();
-        let resolution = capture
-            .resolution()
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("domain resolution: {e:?}")))?;
+        let resolution = super::package_resolution(&capture, "domain")?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,

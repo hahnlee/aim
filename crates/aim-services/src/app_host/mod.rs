@@ -3414,9 +3414,7 @@ impl AppHost {
         Exception,
     > {
         let capture = self.package_capture()?;
-        let resolution = capture.resolution().map_err(|error| {
-            Exception::new(EX_ILLEGAL_STATE, format!("package resolution: {error:?}"))
-        })?;
+        let resolution = package_resolution(&capture, "package")?;
         Ok((capture.state().clone(), resolution))
     }
 
@@ -4300,6 +4298,15 @@ impl WriteParcelable for RunningAppProcessInfo {
         p.write_i32(self.is_focused as i32);
         p.write_i64(self.last_activity_time);
     }
+}
+
+fn package_resolution(
+    capture: &package::scan_snapshot::query_state::Capture,
+    context: &str,
+) -> Result<Arc<package::resolve::Resolution>, Exception> {
+    capture.resolution().map_err(|error| {
+        Exception::new(EX_ILLEGAL_STATE, format!("{context} resolution: {error:?}"))
+    })
 }
 
 fn reply(result: Result<Parcel, Exception>) -> Reply {

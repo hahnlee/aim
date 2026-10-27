@@ -86,9 +86,7 @@ impl PackageEffects {
         {
             return Err(state_error("prior visibility code/UID changed"));
         }
-        let resolution = capture
-            .resolution()
-            .map_err(|e| state_error(format!("package resolution: {e:?}")))?;
+        let resolution = super::package_resolution(&capture, "package")?;
         let metadata = capture.scan().metadata_revision();
         let mut encoded = vec![0x56495332, (metadata >> 32) as i32, metadata as i32];
         for user in required_array(a.users, "users")? {

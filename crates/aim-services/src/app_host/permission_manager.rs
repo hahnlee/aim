@@ -1622,12 +1622,7 @@ impl PermissionManager {
         app_id: i32,
         user: i32,
     ) -> Result<Vec<String>, Exception> {
-        let system =
-            self.host.system.get().ok_or_else(|| {
-                Exception::new(EX_ILLEGAL_STATE, "native package owner unavailable")
-            })?;
-        let bridge = system.package_bootstrap()?;
-        let capture = system.capture_package_queries_for(&bridge)?;
+        let capture = self.host.package_capture()?;
         let view = self.retained_access()?;
         self.access_with_capture(&view.system, &view.user0, &capture, "package", |access| {
             access.granted_permissions(package, app_id, user)
@@ -1711,12 +1706,7 @@ impl PermissionManager {
     ) -> Result<T, Exception> {
         let platform = self.host.platform()?;
         let state = capture.state();
-        let resolution = capture.resolution().map_err(|error| {
-            Exception::new(
-                EX_ILLEGAL_STATE,
-                format!("{resolution_context} resolution: {error:?}"),
-            )
-        })?;
+        let resolution = super::package_resolution(capture, resolution_context)?;
         let groups = self.groups(state);
         f(&Access {
             state,
@@ -2658,7 +2648,7 @@ mod tests {
                 .granted_permissions("android", 1000, 0)
                 .unwrap_err()
                 .message,
-            "native package owner unavailable"
+            "native package system unavailable"
         );
     }
 

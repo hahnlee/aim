@@ -205,12 +205,7 @@ impl WebViewUpdate {
         flags: i64,
     ) -> Result<Option<PackageInfo>, Exception> {
         let state = capture.state();
-        let resolution = capture.resolution().map_err(|e| {
-            Exception::new(
-                EX_ILLEGAL_STATE,
-                format!("webviewupdate: resolution: {e:?}"),
-            )
-        })?;
+        let resolution = super::package_resolution(capture, "webviewupdate:")?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,

@@ -247,19 +247,8 @@ impl ShellRead {
         &self,
         a: leaf::ListInstrumentation,
     ) -> Result<Vec<Option<String>>, Exception> {
-        let system = self.0.system.get().ok_or_else(|| {
-            Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                "native package system unavailable",
-            )
-        })?;
-        let capture = system.capture_package_queries()?;
-        let resolution = capture.resolution().map_err(|e| {
-            Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                format!("instrumentation resolution: {e:?}"),
-            )
-        })?;
+        let capture = self.0.package_capture()?;
+        let resolution = super::package_resolution(&capture, "instrumentation")?;
         let query = crate::package::query::Query {
             state: capture.state(),
             filter: &resolution.apps_filter,
