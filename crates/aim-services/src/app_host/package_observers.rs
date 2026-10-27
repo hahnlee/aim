@@ -172,7 +172,6 @@ impl Service for Events {
 mod tests {
     use super::*;
     use crate::system::ServiceOwner;
-    use aim_binder_host::local::LocalProcess;
     use aim_binder_host::parcel::{Binder, EX_SECURITY};
 
     type Record = (usize, &'static str, Option<String>, i32);
@@ -205,18 +204,6 @@ mod tests {
         fn package_removed(&self, name: Option<&str>, uid: i32) -> Result<(), Exception> {
             self.event("removed", name, uid)
         }
-    }
-
-    fn process() -> Arc<LocalProcess> {
-        LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: SYSTEM_UID,
-                security_context: None,
-            },
-        )
     }
 
     fn observers() -> (Vec<Arc<Observer>>, Arc<Mutex<Vec<Record>>>) {
@@ -336,7 +323,7 @@ mod tests {
     #[test]
     fn package_observers_bridge_transport_and_epoch() {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bootstrap;
-        let process = process();
+        let process = crate::test_process(SYSTEM_UID);
         let host = AppHost::new(process.clone());
         let bridge = super::super::package_bootstrap::PackageBootstrap::new(host.clone());
         let registry = host.package_observers.lock().unwrap().upgrade().unwrap();

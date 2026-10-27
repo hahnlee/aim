@@ -54,15 +54,7 @@ mod tests {
     /// An invalid session is refused; a valid one names the issue.
     #[test]
     fn staged_apex_infos_are_not_read() {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: SYSTEM_UID,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(SYSTEM_UID);
         let host = AppHost::new(process.clone());
         let aim_binder_host::parcel::Binder::Local(ptr) =
             process.add_service(Arc::new(NativeStaging::new(host)))

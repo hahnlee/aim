@@ -257,15 +257,7 @@ mod tests {
     use aim_binder_host::parcel::EX_SECURITY;
 
     fn node(euid: u32) -> aim_binder_host::local::LocalService {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(euid);
         let host = AppHost::new(process.clone());
         let Binder::Local(ptr) = process.add_service(Arc::new(DomainSettings::new(host))) else {
             unreachable!()

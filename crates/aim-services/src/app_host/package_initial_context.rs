@@ -542,20 +542,12 @@ mod tests {
         else {
             return;
         };
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: SYSTEM_UID as u32,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(SYSTEM_UID as u32);
         let host = AppHost::new(process.clone());
-        let data = std::env::temp_dir().join(format!("aim-initial-leaf-{}", std::process::id()));
-        host.configure(
+        let data = crate::app_host::test_temp_dir("initial-leaf");
+        crate::app_host::configure_test_host(
+            &host,
             &root,
-            &data,
             &data,
             &data,
             Box::new(|name| {
@@ -565,10 +557,7 @@ mod tests {
                     .next()
                     .map(|_| properties(name))
             }),
-            Box::new(|_, _| {}),
-            Box::new(|| Err(std::io::Error::other("no zygote"))),
-        )
-        .unwrap();
+        );
         let aim_binder_host::parcel::Binder::Local(ptr) =
             process.add_service(Arc::new(InitialContext::new(host)))
         else {

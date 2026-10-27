@@ -2075,21 +2075,7 @@ mod tests {
     struct Data(std::path::PathBuf);
     impl Data {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            // A killed earlier run with this pid leaves its directory behind;
-            // creating the root exclusively keeps each test off that state.
-            let path = loop {
-                let path = std::env::temp_dir().join(format!(
-                    "aim-native-installer-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                match std::fs::create_dir(&path) {
-                    Ok(()) => break path,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(error) => panic!("{}: {error}", path.display()),
-                }
-            };
+            let path = crate::app_host::test_temp_dir("native-installer");
             for name in ["system", "app", "app-staging"] {
                 std::fs::create_dir(path.join(name)).unwrap();
             }
@@ -2435,10 +2421,10 @@ mod tests {
         let data = Data::new();
         let host = AppHost::new(process.clone());
         if commit_local.is_some() {
-            host.configure(
+            crate::app_host::configure_test_host(
+                &host,
                 &data.0.join("image"),
                 &data.0,
-                &data.0.join("bpf"),
                 &data.0.join("bpf"),
                 Box::new(|name| match name {
                     "ro.build.version.sdk" => Some("36".into()),
@@ -2447,10 +2433,7 @@ mod tests {
                     "ro.sf.lcd_density" => Some("160".into()),
                     _ => None,
                 }),
-                Box::new(|_, _| {}),
-                Box::new(|| Err(std::io::Error::other("no test zygote"))),
-            )
-            .unwrap();
+            );
         }
         let leaf = PackageBootstrap::new(host);
         let mut p = Parcel::new();

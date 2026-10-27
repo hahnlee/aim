@@ -169,15 +169,7 @@ fn existing_completion_sends_only_public_status_and_denies_background_launch() {
 
 #[test]
 fn existing_restore_has_no_backup_owner_and_completion_requires_permissions_only_when_reached() {
-    let process = aim_binder_host::local::LocalProcess::open(
-        &aim_binder_driver::Driver::new(),
-        aim_binder_driver::Device::Binder,
-        aim_binder_driver::Credentials {
-            pid: std::process::id() as i32,
-            euid: 1000,
-            security_context: None,
-        },
-    );
+    let process = crate::test_process(1000);
     let host = AppHost::new(process);
     let leaf = PackageBootstrap::new(host.clone());
     let mut p = Parcel::new();

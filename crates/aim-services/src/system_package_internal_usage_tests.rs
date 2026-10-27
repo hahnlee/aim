@@ -61,13 +61,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "aim-usage-epoch-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = crate::app_host::test_temp_dir("usage-epoch");
         std::fs::create_dir(root.join("image")).unwrap();
         std::fs::create_dir(root.join("data")).unwrap();
         let driver = Driver::new();
@@ -320,9 +314,9 @@ fn permission_refresh_uses_the_current_native_capture() {
         std::fs::write(path, aim_android_xml::abx::write(&root).unwrap()).unwrap();
     }
     let host = AppHost::new(fixture.native.clone());
-    host.configure(
+    crate::app_host::configure_test_host(
+        &host,
         &fixture.root.join("image"),
-        &data,
         &data,
         &data,
         Box::new(|name| {
@@ -337,10 +331,7 @@ fn permission_refresh_uses_the_current_native_capture() {
                 .into(),
             )
         }),
-        Box::new(|_, _| {}),
-        Box::new(|| Err(std::io::Error::other("no zygote"))),
-    )
-    .unwrap();
+    );
     host.set_system(fixture.system.clone());
     let _services = host.services();
     let Binder::Local(ptr) = fixture

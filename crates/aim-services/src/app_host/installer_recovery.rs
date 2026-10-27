@@ -55,15 +55,7 @@ mod tests {
     /// A PNG is not decoded but names its issue; none is a null pointer.
     #[test]
     fn an_icon_is_not_decoded() {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: SYSTEM_UID,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(SYSTEM_UID);
         let host = AppHost::new(process.clone());
         let aim_binder_host::parcel::Binder::Local(ptr) =
             process.add_service(Arc::new(InstallerRecovery::new(host)))

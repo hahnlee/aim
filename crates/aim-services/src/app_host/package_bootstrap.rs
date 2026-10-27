@@ -1416,21 +1416,13 @@ mod tests {
         else {
             return;
         };
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: SYSTEM_UID as u32,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(SYSTEM_UID as u32);
         let host = AppHost::new(process.clone());
-        let data = std::env::temp_dir().join(format!("aim-bootstrap-{}", std::process::id()));
+        let data = crate::app_host::test_temp_dir("bootstrap");
         std::fs::create_dir_all(data.join("system")).unwrap();
-        host.configure(
+        crate::app_host::configure_test_host(
+            &host,
             &root,
-            &data,
             &data,
             &data,
             Box::new(|name| {
@@ -1447,10 +1439,7 @@ mod tests {
                     .into(),
                 )
             }),
-            Box::new(|_, _| {}),
-            Box::new(|| Err(std::io::Error::other("no zygote"))),
-        )
-        .unwrap();
+        );
         super::super::user_service::ensure_system_user(&host).unwrap();
         let aim_binder_host::parcel::Binder::Local(ptr) =
             process.add_service(Arc::new(PackageBootstrap::new(host.clone())))
@@ -1714,15 +1703,7 @@ mod tests {
     #[test]
     fn package_monitor_user_uses_the_activity_owner() {
         let node = |euid| {
-            let process = aim_binder_host::local::LocalProcess::open(
-                &aim_binder_driver::Driver::new(),
-                aim_binder_driver::Device::Binder,
-                aim_binder_driver::Credentials {
-                    pid: std::process::id() as i32,
-                    euid,
-                    security_context: None,
-                },
-            );
+            let process = crate::test_process(euid);
             let host = AppHost::new(process.clone());
             let aim_binder_host::parcel::Binder::Local(ptr) =
                 process.add_service(Arc::new(PackageBootstrap::new(host)))
@@ -1766,15 +1747,7 @@ mod tests {
     #[test]
     fn package_caches_are_invalidated() {
         let node = |euid: u32| {
-            let process = aim_binder_host::local::LocalProcess::open(
-                &aim_binder_driver::Driver::new(),
-                aim_binder_driver::Device::Binder,
-                aim_binder_driver::Credentials {
-                    pid: std::process::id() as i32,
-                    euid,
-                    security_context: None,
-                },
-            );
+            let process = crate::test_process(euid);
             let host = AppHost::new(process.clone());
             let aim_binder_host::parcel::Binder::Local(ptr) =
                 process.add_service(Arc::new(PackageBootstrap::new(host)))

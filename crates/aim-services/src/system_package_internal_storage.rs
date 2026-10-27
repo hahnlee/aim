@@ -586,15 +586,7 @@ mod tests {
                 Ok(p)
             }
         }
-        let process = LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let system = System::new(process.clone(), &[]);
         let Binder::Local(ptr) = process.add_service(Arc::new(Locked)) else {
             unreachable!()

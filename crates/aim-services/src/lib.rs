@@ -450,6 +450,19 @@ impl Drop for NativeServices {
 }
 
 #[cfg(test)]
+fn test_process(euid: u32) -> Arc<LocalProcess> {
+    LocalProcess::open(
+        &aim_binder_driver::Driver::new(),
+        aim_binder_driver::Device::Binder,
+        aim_binder_driver::Credentials {
+            pid: std::process::id() as i32,
+            euid,
+            security_context: None,
+        },
+    )
+}
+
+#[cfg(test)]
 mod shutdown_tests {
     use super::*;
     use std::{fs, os::fd::AsRawFd};

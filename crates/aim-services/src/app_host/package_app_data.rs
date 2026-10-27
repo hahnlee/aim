@@ -348,19 +348,7 @@ mod tests {
     struct Data(PathBuf);
     impl Data {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let path = loop {
-                let path = std::env::temp_dir().join(format!(
-                    "aim-install-app-data-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                match std::fs::create_dir(&path) {
-                    Ok(()) => break path,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(error) => panic!("{error}"),
-                }
-            };
+            let path = crate::app_host::test_temp_dir("install-app-data");
             Self(path)
         }
         fn paths(&self) -> [PathBuf; 2] {
@@ -511,15 +499,7 @@ mod tests {
     #[test]
     fn app_data_is_the_systems() {
         let node = |euid: u32| {
-            let process = aim_binder_host::local::LocalProcess::open(
-                &aim_binder_driver::Driver::new(),
-                aim_binder_driver::Device::Binder,
-                aim_binder_driver::Credentials {
-                    pid: std::process::id() as i32,
-                    euid,
-                    security_context: None,
-                },
-            );
+            let process = crate::test_process(euid);
             let host = AppHost::new(process.clone());
             let aim_binder_host::parcel::Binder::Local(ptr) =
                 process.add_service(Arc::new(PackageAppData::new(host)))

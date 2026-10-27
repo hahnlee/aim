@@ -255,15 +255,7 @@ struct InstallerFixture {
 impl InstallerFixture {
     fn new() -> Self {
         use crate::package::installer::{Record, Sessions, codec::SessionParams};
-        let data = std::env::temp_dir().join(format!(
-            "aim-public-installer-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&data).unwrap();
+        let data = crate::app_host::test_temp_dir("public-installer");
         std::fs::create_dir(data.join("system")).unwrap();
         std::fs::create_dir(data.join("app")).unwrap();
         let sessions = Sessions::default();

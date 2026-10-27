@@ -5523,6 +5523,29 @@ impl Service for Control {
 }
 
 #[cfg(test)]
+pub(crate) use battery_history::tests::temp_dir as test_temp_dir;
+
+#[cfg(test)]
+pub(crate) fn configure_test_host(
+    host: &AppHost,
+    root: &Path,
+    data: &Path,
+    runtime: &Path,
+    properties: Properties,
+) {
+    host.configure(
+        root,
+        data,
+        runtime,
+        runtime,
+        properties,
+        Box::new(|_, _| {}),
+        Box::new(|| Err(std::io::Error::other("no zygote"))),
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

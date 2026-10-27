@@ -196,17 +196,8 @@ mod tests {
         else {
             return;
         };
-        let driver = aim_binder_driver::Driver::new();
         for stay_stopped in [false, true] {
-            let process = aim_binder_host::local::LocalProcess::open(
-                &driver,
-                aim_binder_driver::Device::Binder,
-                aim_binder_driver::Credentials {
-                    pid: std::process::id() as i32,
-                    euid: 1000,
-                    security_context: None,
-                },
-            );
+            let process = crate::test_process(1000);
             let host = AppHost::new(process.clone());
             let mut framework =
                 super::super::resources::Framework::load(&root, 320, "en-US").unwrap();

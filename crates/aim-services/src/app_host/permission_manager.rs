@@ -2347,15 +2347,7 @@ mod tests {
 
     #[test]
     fn delayed_restore_caches_only_the_controllers_no_more_backup_for_each_user() {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let owner = Arc::new(PermissionManager::new(AppHost::new(process)));
         // With no configured package owner, the first request cannot reach
         // PermissionController and must not fabricate a finished restore.
@@ -2422,33 +2414,16 @@ mod tests {
 
     impl PersistedAccess {
         pub(super) fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let data = std::env::temp_dir().join(format!(
-                "aim-permission-bootstrap-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&data).unwrap();
-            let process = aim_binder_host::local::LocalProcess::open(
-                &aim_binder_driver::Driver::new(),
-                aim_binder_driver::Device::Binder,
-                aim_binder_driver::Credentials {
-                    pid: std::process::id() as i32,
-                    euid: 1000,
-                    security_context: None,
-                },
-            );
+            let data = crate::app_host::test_temp_dir("permission-bootstrap");
+            let process = crate::test_process(1000);
             let host = AppHost::new(process);
-            host.configure(
+            crate::app_host::configure_test_host(
+                &host,
                 &data.join("missing-image"),
                 &data,
                 &data,
-                &data,
                 Box::new(|_| None),
-                Box::new(|_, _| {}),
-                Box::new(|| Err(std::io::Error::other("no zygote"))),
-            )
-            .unwrap();
+            );
             Self { host, data }
         }
 
@@ -2708,15 +2683,7 @@ mod tests {
             </permission-trees>
         </access>"#).unwrap();
         let system = AccessSystem::parse(&root).unwrap();
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let manager = PermissionManager::with_system(AppHost::new(process), system.clone());
         let bytes = manager.capture_definitions().unwrap();
         assert_eq!(bytes, legacy_definitions(&system).unwrap());
@@ -2876,15 +2843,7 @@ mod tests {
     #[test]
     fn gids_for_uid_of_user_0s_state() {
         use crate::package::system_config::{ConfigPermission, SystemConfig};
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let permissions = PermissionManager::new(AppHost::new(process));
         permissions.owner.lock().unwrap().user0 = Some(Arc::new(AccessUser {
             app_id_permissions: vec![(10_123, vec![(INTERNET.into(), INSTALL_GRANTED)])],

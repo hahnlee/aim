@@ -2,15 +2,7 @@ use super::*;
 use crate::package::{info, model, pkg};
 
 fn host() -> Arc<AppHost> {
-    AppHost::new(LocalProcess::open(
-        &aim_binder_driver::Driver::new(),
-        aim_binder_driver::Device::Binder,
-        aim_binder_driver::Credentials {
-            pid: std::process::id() as i32,
-            euid: SYSTEM_UID,
-            security_context: None,
-        },
-    ))
+    AppHost::new(crate::test_process(SYSTEM_UID))
 }
 
 /// `SystemServer.startBootstrapServices` calls `setSystemProcess` after PMS.

@@ -210,15 +210,7 @@ mod tests {
     };
 
     fn node(euid: u32) -> aim_binder_host::local::LocalService {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(euid);
         let host = AppHost::new(process.clone());
         let aim_binder_host::parcel::Binder::Local(ptr) =
             process.add_service(Arc::new(InstallerFiles::new(host)))

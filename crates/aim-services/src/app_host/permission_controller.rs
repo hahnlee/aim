@@ -272,15 +272,7 @@ mod backup_tests {
 
     #[test]
     fn staged_backup_reads_the_module_result_and_reports_failed_callbacks() {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let host = AppHost::new(process);
         for result in [Some(true), Some(false), None] {
             let binder = host.process.add_service(Arc::new(Module {

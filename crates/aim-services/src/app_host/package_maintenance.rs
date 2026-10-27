@@ -149,15 +149,7 @@ mod tests {
     /// ported naming their issues.
     #[test]
     fn the_maintenance_bridge_answers_as_the_original() {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: SYSTEM_UID,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(SYSTEM_UID);
         let host = AppHost::new(process.clone());
         let aim_binder_host::parcel::Binder::Local(ptr) =
             process.add_service(Arc::new(PackageMaintenance::new(host)))

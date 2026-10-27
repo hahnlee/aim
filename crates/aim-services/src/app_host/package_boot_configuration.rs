@@ -549,8 +549,8 @@ mod tests {
 
     #[test]
     fn the_parser_cache_keeps_only_its_fingerprint() {
-        let base = std::env::temp_dir().join(format!("aim-parser-cache-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::app_host::test_temp_dir("parser-cache");
+        std::fs::remove_dir_all(&base).unwrap();
         assert!(prepare_parser_cache(&base, "abc", None).unwrap());
         std::fs::create_dir(base.join("old")).unwrap();
         std::fs::write(base.join("old/entry"), b"x").unwrap();

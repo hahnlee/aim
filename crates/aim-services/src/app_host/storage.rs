@@ -1669,15 +1669,7 @@ mod tests {
     #[test]
     fn ce_storage_availability_is_independent_of_user_unlocking() {
         use aim_service_aidl::dev_aim_server_ipackageinternalstoragebridge as internal;
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let host = AppHost::new(process.clone());
         let Binder::Local(ptr) = process.add_service(Arc::new(
             super::super::package_internal_storage::PackageInternalStorage::new(host.clone()),
@@ -1730,15 +1722,7 @@ mod tests {
     /// is unregistered.
     #[test]
     fn native_listeners_are_told_volume_changes() {
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: std::process::id() as i32,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let host = AppHost::new(process);
         let told = Arc::new(Mutex::new(Vec::new()));
         let seen = told.clone();

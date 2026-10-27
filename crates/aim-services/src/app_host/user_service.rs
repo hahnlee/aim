@@ -1917,30 +1917,13 @@ mod shell_tests {
     use super::*;
     #[test]
     fn package_user_listing_reads_the_user_owner_and_excludes_partial_or_precreated() {
-        let data = std::env::temp_dir().join(format!("aim-package-users-{}", std::process::id()));
+        let data = crate::app_host::test_temp_dir("package-users");
         let users = data.join("system/users");
         std::fs::create_dir_all(&users).unwrap();
         std::fs::write(users.join("userlist.xml"), "<users/>").unwrap();
-        let process = aim_binder_host::local::LocalProcess::open(
-            &aim_binder_driver::Driver::new(),
-            aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials {
-                pid: 98260,
-                euid: 1000,
-                security_context: None,
-            },
-        );
+        let process = crate::test_process(1000);
         let host = AppHost::new(process);
-        host.configure(
-            &data,
-            &data,
-            &data,
-            &data,
-            Box::new(|_| None),
-            Box::new(|_, _| {}),
-            Box::new(|| Err(std::io::Error::other("no zygote"))),
-        )
-        .unwrap();
+        crate::app_host::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
         for (extra, expected) in [
             ("", "Users:\n\tUserInfo{0:Kim:4c13} running\n"),
             ("partial=\"true\"", "Users:\n"),

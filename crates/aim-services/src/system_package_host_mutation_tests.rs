@@ -1176,10 +1176,10 @@ pub(crate) fn with_discovery_session(
         include_bytes!("../tests/fixtures/discovery/providers.apk"),
     )
     .unwrap();
-    host.configure(
+    crate::app_host::configure_test_host(
+        &host,
         &fixture.root.join("image"),
         &fixture.root.join("data"),
-        &fixture.root.join("bpf"),
         &fixture.root.join("bpf"),
         Box::new(|name| match name {
             "ro.build.version.sdk" => Some("36".into()),
@@ -1189,10 +1189,7 @@ pub(crate) fn with_discovery_session(
             "ro.debuggable" => Some("1".into()),
             _ => None,
         }),
-        Box::new(|_, _| {}),
-        Box::new(|| Err(std::io::Error::other("no test zygote"))),
-    )
-    .unwrap();
+    );
     let mut publish = |edit: &mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)| {
         let base = fixture.system.capture_package_queries().unwrap();
         let mut owner = base.scan().owner().clone();

@@ -14,23 +14,15 @@ fn framework_requests_do_not_load_packages() {
     let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
         return;
     };
-    let data = std::env::temp_dir().join(format!("aim-resources-{}", std::process::id()));
+    let data = crate::app_host::test_temp_dir("resources");
     std::fs::create_dir_all(data.join("system")).unwrap();
     std::fs::write(data.join("system/packages.xml"), b"invalid package state").unwrap();
     let _cleanup = Data(data.clone());
-    let process = LocalProcess::open(
-        &aim_binder_driver::Driver::new(),
-        aim_binder_driver::Device::Binder,
-        aim_binder_driver::Credentials {
-            pid: std::process::id() as i32,
-            euid: SYSTEM_UID,
-            security_context: None,
-        },
-    );
+    let process = crate::test_process(SYSTEM_UID);
     let host = AppHost::new(process.clone());
-    host.configure(
+    crate::app_host::configure_test_host(
+        &host,
         &root,
-        &data,
         &data,
         &data,
         Box::new(|name| {
@@ -45,10 +37,7 @@ fn framework_requests_do_not_load_packages() {
                 .into(),
             )
         }),
-        Box::new(|_, _| {}),
-        Box::new(|| Err(std::io::Error::other("no zygote"))),
-    )
-    .unwrap();
+    );
     let framework = host.framework().unwrap();
     let Binder::Local(ptr) = process.add_service(Arc::new(
         permission_manager::PermissionManager::new(host.clone()),
