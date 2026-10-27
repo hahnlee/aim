@@ -62,6 +62,7 @@ pub mod display_service;
 pub mod domain_verification;
 pub mod dropbox;
 pub mod enhanced_confirmation;
+pub mod event_log;
 pub mod exit_info;
 pub mod fgs_types;
 pub mod file_integrity;

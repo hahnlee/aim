@@ -3,7 +3,7 @@
 //! use the same Settings, UserManager and AppOps leaves as boot queries.
 
 use super::package_initial_context::InitialContext;
-use super::{AppHost, reply};
+use super::{AppHost, event_log::Value, reply};
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagepolicybridge as policy;
@@ -90,10 +90,15 @@ impl Service for PackagePolicy {
         let result = match call.code {
             policy::REPORT_ADMIN_PERMISSION_DENIED => {
                 policy::ReportAdminPermissionDenied::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                Err(host.unimplemented_named(
-                    "package policy",
-                    "reportAdminPermissionDenied EventLog writer (#2188)",
-                ))
+                host.write_event(
+                    0x534e4554,
+                    Value::List(&[
+                        Value::String("128599183"),
+                        Value::Int(-1),
+                        Value::String(""),
+                    ]),
+                )
+                .map(|()| policy::write_report_admin_permission_denied_reply(&mut p))
             }
             policy::QUERY_PACKAGE_STATE_PROTECTED | policy::QUERY_PACKAGE_DATA_PROTECTED => {
                 let name = if call.code == policy::QUERY_PACKAGE_STATE_PROTECTED {
@@ -168,7 +173,7 @@ impl Service for PackagePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+    use aim_binder_host::parcel::{EX_ILLEGAL_STATE, EX_SECURITY, EX_UNSUPPORTED_OPERATION};
     use std::fs;
 
     #[test]
@@ -338,8 +343,8 @@ mod tests {
                 );
             }
             let error = call(1000, policy::REPORT_ADMIN_PERMISSION_DENIED, &|_| {}).unwrap_err();
-            assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
-            assert!(error.message.contains("#2188"));
+            assert_eq!(error.code, EX_ILLEGAL_STATE);
+            assert!(error.message.contains("agent has not attached"));
         });
     }
 }

@@ -323,8 +323,11 @@ fn installer_permission_uses_compat_and_unknown_uid_requires_permission() {
         )
         .unwrap();
         let effects = PackageEffects::new(host.clone());
-        assert!(!effects.require_installer_permission(10100).unwrap());
-        assert!(effects.require_installer_permission(12345).unwrap());
+        assert!(!effects.installer_permission_required(10100).unwrap());
+        assert!(effects.installer_permission_required(12345).unwrap());
+        let error = effects.require_installer_permission(10100).unwrap_err();
+        assert_eq!(error.code, EX_ILLEGAL_STATE);
+        assert!(error.message.contains("agent has not attached"));
         let mut data = Parcel::new();
         bridge::RequireInstallerPermission { calling_uid: 10100 }.write(&mut data);
         let reply = effects
