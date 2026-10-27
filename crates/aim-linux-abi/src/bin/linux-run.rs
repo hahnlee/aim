@@ -109,6 +109,18 @@ fn host_environment() -> Vec<Vec<u8>> {
 }
 
 fn main() {
+    // Before any runtime initialization or threads, own the macOS privacy request.
+    let responsibility = aim_process::responsible_pid().and_then(|pid| {
+        if pid != std::process::id() as libc::pid_t {
+            let program = std::env::current_exe()?;
+            return Err(aim_process::exec(program.as_os_str(), std::env::args_os()));
+        }
+        Ok(())
+    });
+    if let Err(error) = responsibility {
+        eprintln!("linux-run: cannot establish macOS process responsibility: {error}");
+        std::process::exit(1);
+    }
     // What the process was exec'd with: as Linux's execve, the program
     // inherits every descriptor not closed on exec.
     let inherited_fds = aim_linux_abi::sys::open_fds();

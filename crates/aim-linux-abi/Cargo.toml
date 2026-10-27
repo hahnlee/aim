@@ -18,6 +18,7 @@ name = "linux-translate"
 path = "src/bin/linux-translate.rs"
 
 [dependencies]
+aim-process.workspace = true
 aim-ashmem = { path = "../aim-ashmem" }
 aim-binder-driver = { path = "../aim-binder-driver" }
 aim-binder-host = { path = "../aim-binder-host" }
