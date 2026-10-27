@@ -19,12 +19,11 @@
 //!
 //! What the original does through system_server-internal APIs is done
 //! through their binder counterparts (docs/system-services.md); where
-//! none exists, this service does without: granting clipped URIs to the
-//! apps that read them (#429), focus as WindowManager sees it, content
-//! capture and autofill access and virtual devices (#430), the paste
+//! none exists, this service does without: focus as WindowManager sees
+//! it, content capture and autofill access and virtual devices (#430), the paste
 //! toast, text classification and statistics (#431).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -127,6 +126,7 @@ struct Clipboard {
     primary_uid: Option<i32>,
     source_package: Option<String>,
     listeners: Vec<Listener>,
+    active_permission_owners: HashSet<String>,
     /// When the clip is cleared (`scheduleAutoClear`).
     clear_at: Option<Instant>,
 }
@@ -145,7 +145,9 @@ pub struct ClipboardService {
     system: Arc<System>,
     settings: Arc<Settings>,
     process: Arc<LocalProcess>,
+    operations: Mutex<()>,
     state: Mutex<State>,
+    permission_owner: Mutex<Option<Arc<crate::clipboard_permissions::UriOwner>>>,
     this: Weak<ClipboardService>,
 }
 
@@ -165,6 +167,8 @@ impl ClipboardService {
             system,
             settings,
             process,
+            operations: Mutex::new(()),
+            permission_owner: Mutex::new(None),
             state: Mutex::new(State {
                 mac_seen: pasteboard::change_count(),
                 ..State::default()
@@ -187,6 +191,7 @@ impl ClipboardService {
     /// Picks up a change of the Mac's pasteboard, and clears clips whose
     /// time is up.
     fn tick(&self) {
+        let _operation = self.operations.lock().unwrap();
         let count = pasteboard::change_count();
         let changed = {
             let mut st = self.state.lock().unwrap();
@@ -198,13 +203,15 @@ impl ClipboardService {
             let primary = Primary::Mac {
                 timestamp: now_millis(),
             };
-            self.set_primary_on(
+            if let Err(e) = self.set_primary_on(
                 0,
                 DEVICE_ID_DEFAULT,
                 Some(primary),
                 SHELL_UID,
                 Some(SHELL_PACKAGE),
-            );
+            ) {
+                eprintln!("clipboard: replacing clip from pasteboard: {}", e.message);
+            }
         }
         let due: Vec<(i32, i32, i32)> = {
             let st = self.state.lock().unwrap();
@@ -223,7 +230,9 @@ impl ClipboardService {
                 .entry((user, device))
                 .or_default()
                 .clear_at = None;
-            let _ = self.set_primary(None, uid, device, None);
+            if let Err(e) = self.set_primary_locked(None, uid, device, None) {
+                eprintln!("clipboard: clearing expired clip: {}", e.message);
+            }
         }
     }
 
@@ -343,6 +352,17 @@ impl ClipboardService {
         device_id: i32,
         source_package: Option<&str>,
     ) -> Result<()> {
+        let _operation = self.operations.lock().unwrap();
+        self.set_primary_locked(clip, uid, device_id, source_package)
+    }
+
+    fn set_primary_locked(
+        &self,
+        clip: Option<(ClipData, Vec<Strong>)>,
+        uid: i32,
+        device_id: i32,
+        source_package: Option<&str>,
+    ) -> Result<()> {
         let user_id = user_of(uid);
         if device_id == DEVICE_ID_DEFAULT {
             // EmulatorClipboardMonitor.accept: the text, and its HTML,
@@ -368,7 +388,7 @@ impl ClipboardService {
             clip: Box::new(clip),
             _held: held,
         });
-        self.set_primary_on(user_id, device_id, primary, uid, source_package);
+        self.set_primary_on(user_id, device_id, primary, uid, source_package)?;
         let related = self.system.profile_ids(user_id)?;
         if related.len() > 1 {
             let copy = if self
@@ -376,7 +396,9 @@ impl ClipboardService {
                 .has_user_restriction(DISALLOW_CROSS_PROFILE_COPY_PASTE, user_id)?
             {
                 None
-            } else if let Some(clip) = copy {
+            } else if let Some(mut clip) = copy {
+                clip.fix_uris_light(user_id)
+                    .map_err(|s| Exception::illegal_argument(format!("bad clip: status {s}")))?;
                 Some(clip)
             } else {
                 return Ok(());
@@ -398,7 +420,7 @@ impl ClipboardService {
                             _held: held,
                         }
                     });
-                    self.set_primary_on(id, device_id, primary, uid, source_package);
+                    self.set_primary_on(id, device_id, primary, uid, source_package)?;
                 }
             }
         }
@@ -414,12 +436,14 @@ impl ClipboardService {
         primary: Option<Primary>,
         uid: i32,
         source_package: Option<&str>,
-    ) {
+    ) -> Result<()> {
         let listeners: Vec<(u32, i32, Option<String>, Option<String>)> = {
             let mut st = self.state.lock().unwrap();
             let board = st.clipboards.entry((user_id, device_id)).or_default();
+            self.revoke_uris(board)?;
+            board.active_permission_owners.clear();
             if primary.is_none() && board.primary.is_none() {
-                return;
+                return Ok(());
             }
             let primary = primary.map(|p| match p {
                 Primary::Clip { mut clip, _held } => {
@@ -473,6 +497,60 @@ impl ClipboardService {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// The one owner of all clipboard grants, as in ClipboardService.
+    fn permission_owner(&self) -> Result<Arc<crate::clipboard_permissions::UriOwner>> {
+        let mut owner = self.permission_owner.lock().unwrap();
+        if owner.is_none() {
+            *owner = Some(Arc::new(self.system.new_clipboard_uri_owner()?));
+        }
+        Ok(owner.as_ref().expect("created").clone())
+    }
+
+    /// `revokeUris`: the old clip's exact read grants, across all readers.
+    /// Called under the clipboard lock, including replacement by Mac text
+    /// and automatic clearing, so a paste cannot resurrect an old grant.
+    fn revoke_uris(&self, board: &Clipboard) -> Result<()> {
+        let owner = self.permission_owner.lock().unwrap().clone();
+        if let (Some(owner), Some(Primary::Clip { clip, .. })) = (owner, &board.primary) {
+            for (uri, user) in
+                clip_content_uris(clip, user_of(board.primary_uid.unwrap_or(NOBODY_UID)))
+            {
+                owner.revoke(&uri, user)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `addActiveOwnerLocked`, before returning a clip. The app's package
+    /// identity was checked by `clipboardAccessAllowed`.
+    fn grant_active_owner(&self, user: i32, device: i32, package: &str) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        let Some(board) = st.clipboards.get_mut(&(user, device)) else {
+            return Ok(());
+        };
+        if board.active_permission_owners.contains(package) {
+            return Ok(());
+        }
+        if let Some(Primary::Clip { clip, .. }) = &board.primary {
+            let uid = board.primary_uid.expect("clip's source uid");
+            for (uri, source_user) in clip_content_uris(clip, user_of(uid)) {
+                self.permission_owner()?.grant(
+                    &self.system,
+                    uid,
+                    package,
+                    &uri,
+                    source_user,
+                    user,
+                )?;
+            }
+        }
+        if board.primary.is_some() {
+            board.active_permission_owners.insert(package.into());
+        }
+        Ok(())
     }
 
     /// The clip to hand out, the Mac's read now.
@@ -521,20 +599,13 @@ impl ClipboardService {
     /// `checkDataOwner`: throws unless `uid` may grant read access to each
     /// item's content URI and intent data.
     fn check_data_owner(&self, clip: &ClipData, uid: i32) -> Result<()> {
-        for uri in clip
-            .items
-            .iter()
-            .flat_map(|i| [&i.uri, &i.intent_data])
-            .flatten()
-        {
-            if let Some((uri, user)) = content_uri(uri, user_of(uid)) {
-                self.system.check_grant_uri_permission(
-                    uid,
-                    &uri,
-                    FLAG_GRANT_READ_URI_PERMISSION,
-                    user,
-                )?;
-            }
+        for (uri, user) in clip_content_uris(clip, user_of(uid)) {
+            self.system.check_grant_uri_permission(
+                uid,
+                &uri,
+                FLAG_GRANT_READ_URI_PERMISSION,
+                user,
+            )?;
         }
         Ok(())
     }
@@ -696,7 +767,7 @@ impl ClipboardService {
             ic::GET_PRIMARY_CLIP => {
                 let a = ic::GetPrimaryClip::read(r).map_err(status)?;
                 let mut clip = None;
-                if let Some((_, user, device)) = self.readable(
+                if let Some((uid, user, device)) = self.readable(
                     &caller,
                     a.pkg.as_deref(),
                     a.attribution_tag.as_deref(),
@@ -705,10 +776,24 @@ impl ClipboardService {
                     true,
                 )? && self.clipboard_exists(user, device)?
                 {
-                    clip = self.state.lock().unwrap().clipboards[&(user, device)]
-                        .primary
-                        .as_ref()
-                        .and_then(Self::clip_of);
+                    let _operation = self.operations.lock().unwrap();
+                    match self.grant_active_owner(
+                        user,
+                        device,
+                        a.pkg.as_deref().unwrap_or_default(),
+                    ) {
+                        Ok(()) => {
+                            clip = self.state.lock().unwrap().clipboards[&(user, device)]
+                                .primary
+                                .as_ref()
+                                .and_then(Self::clip_of);
+                        }
+                        Err(e) if e.code == aim_binder_host::parcel::EX_SECURITY => {
+                            // The original clears a clip whose source lost URI access.
+                            self.set_primary_locked(None, uid, device, a.pkg.as_deref())?;
+                        }
+                        Err(e) => return Err(e),
+                    }
                     if clip.is_some() {
                         self.schedule_auto_clear(a.user_id, device)?;
                     }
@@ -924,24 +1009,37 @@ impl ClipboardService {
     }
 }
 
+fn clip_content_uris(
+    clip: &ClipData,
+    default_user: i32,
+) -> impl Iterator<Item = (String, i32)> + '_ {
+    clip.items
+        .iter()
+        .flat_map(|i| [&i.uri, &i.intent_data])
+        .flatten()
+        .filter_map(move |uri| content_uri(uri, default_user))
+}
+
 /// A `content:` URI as `ContentProvider.getUriWithoutUserId` and
 /// `getUserIdFromUri(uri, default_user)` split it: without the user in
 /// its authority (`user@authority`), and that user. None for another
 /// scheme.
 fn content_uri(uri: &str, default_user: i32) -> Option<(String, i32)> {
-    let rest = uri.strip_prefix("content:")?;
-    let Some(after) = rest.strip_prefix("//") else {
-        return Some((uri.to_string(), default_user));
+    use crate::package::uri::{Uri, encode, parse_int};
+    let parsed = Uri::parse(uri);
+    if parsed.scheme() != Some("content") {
+        return None;
+    }
+    let authority = parsed.authority();
+    let (user, authority) = match authority.as_deref().and_then(|a| a.rsplit_once('@')) {
+        Some((user, authority)) => (parse_int(user).unwrap_or(-10_000), Some(authority)),
+        None => (default_user, authority.as_deref()),
     };
-    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
-    let authority = &after[..end];
-    let Some(at) = authority.rfind('@') else {
-        return Some((uri.to_string(), default_user));
-    };
-    // UserHandle.USER_NULL for a user that is not a number.
-    let user = authority[..at].parse().unwrap_or(-10_000);
     Some((
-        format!("content://{}{}", &authority[at + 1..], &after[end..]),
+        parsed
+            .with_encoded_authority(authority.map(encode).as_deref())
+            .as_str()
+            .into(),
         user,
     ))
 }
@@ -984,5 +1082,205 @@ mod tests {
             Some(("content://com.example.files/a".into(), 10))
         );
         assert_eq!(content_uri("https://example.com", 0), None);
+    }
+
+    use crate::app_host::uri_grants::UriGrantsManager;
+    use aim_service_aidl::android_app_iurigrantsmanager as ugm;
+    use aim_service_aidl::{ReadParcelable, WriteParcelable};
+
+    fn clip(uri: &str) -> ClipData {
+        let mut p = Parcel::new();
+        ClipData::new_plain_text(None, None)
+            .description
+            .write_to(&mut p);
+        p.write_i32(0); // icon
+        p.write_i32(1); // item count
+        p.write_i32(1);
+        p.write_string8(None); // null text
+        p.write_string8(None); // HTML
+        p.write_i32(0);
+        p.write_i32(0); // intent, sender
+        p.write_i32(1);
+        p.write_i32(1);
+        p.write_string8(Some(uri));
+        p.write_i32(0);
+        p.write_i32(0); // activity info, links
+        ClipData::read_from(&mut p.reader()).unwrap()
+    }
+
+    fn service(system: Arc<System>) -> ClipboardService {
+        let process = system.process();
+        ClipboardService {
+            system: system.clone(),
+            settings: Settings::new(process.clone(), system),
+            process,
+            operations: Mutex::new(()),
+            state: Mutex::new(State::default()),
+            permission_owner: Mutex::new(None),
+            this: Weak::new(),
+        }
+    }
+
+    fn count(host: &Arc<crate::app_host::AppHost>, uid: u32, package: &str) -> i32 {
+        let mut p = Parcel::new();
+        ugm::GetUriPermissions {
+            package_name: Some(package.into()),
+            incoming: true,
+            persisted_only: false,
+        }
+        .write(&mut p);
+        let mut call = Call {
+            code: ugm::GET_URI_PERMISSIONS,
+            flags: 0,
+            sender_pid: 42,
+            sender_euid: uid,
+            data: p.reader(),
+        };
+        let reply = UriGrantsManager(host.clone()).transact(&mut call).unwrap();
+        let mut r = reply.reader();
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i32().unwrap(), 1); // typed slice
+        r.read_i32().unwrap()
+    }
+
+    /// ClipboardService.checkDataOwner/addActiveOwnerLocked/revokeUris and
+    /// UriGrantsManagerService.grantUriPermissionFromOwner, android-16.0.0_r1.
+    #[test]
+    fn a_paste_grants_read_until_replacement_and_rechecks_the_source() {
+        crate::system::with_discovery_session(|host, publish, _| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    let mut provider = crate::package::pkg::Provider::default();
+                    provider.main.component.name = "p.Provider".into();
+                    provider.main.component.package_name = "p".into();
+                    provider.main.enabled = true;
+                    provider.authority = Some("p.files".into());
+                    provider.grant_uri_permissions = true;
+                    pkg.providers.push(provider);
+                }
+            });
+            let system = host.package_system().unwrap();
+            system.set_native_uri_grants(host);
+            let service = service(system.clone());
+            let clip = clip("content://p.files/item");
+            service.check_data_owner(&clip, 10100).unwrap();
+            assert_eq!(
+                service.check_data_owner(&clip, 10101).unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+            assert_eq!(count(host, 10101, "q"), 0);
+            service
+                .set_primary_on(
+                    0,
+                    0,
+                    Some(Primary::Clip {
+                        clip: Box::new(clip.clone()),
+                        _held: vec![],
+                    }),
+                    10100,
+                    Some("p"),
+                )
+                .unwrap();
+            assert_eq!(count(host, 10101, "q"), 0);
+            service.grant_active_owner(0, 0, "q").unwrap();
+            assert_eq!(count(host, 10101, "q"), 1);
+            service.check_data_owner(&clip, 10101).unwrap(); // a granted reader may copy
+            assert_eq!(
+                system
+                    .check_grant_uri_permission(10101, "content://p.files/item", 2, 0)
+                    .unwrap_err()
+                    .code,
+                aim_binder_host::parcel::EX_SECURITY
+            ); // clipboard grants no write access
+            service.grant_active_owner(0, 0, "q").unwrap();
+            assert_eq!(count(host, 10101, "q"), 1);
+            service
+                .set_primary_on(
+                    0,
+                    0,
+                    Some(Primary::Mac { timestamp: 0 }),
+                    SHELL_UID,
+                    Some(SHELL_PACKAGE),
+                )
+                .unwrap();
+            assert_eq!(count(host, 10101, "q"), 0);
+            assert!(
+                service.state.lock().unwrap().clipboards[&(0, 0)]
+                    .active_permission_owners
+                    .is_empty()
+            );
+            assert_eq!(
+                service.check_data_owner(&clip, 10101).unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+            service
+                .set_primary_on(
+                    0,
+                    0,
+                    Some(Primary::Clip {
+                        clip: Box::new(clip),
+                        _held: vec![],
+                    }),
+                    10100,
+                    Some("p"),
+                )
+                .unwrap();
+            service.grant_active_owner(0, 0, "q").unwrap();
+            assert_eq!(count(host, 10101, "q"), 1);
+            service
+                .set_primary_on(0, 0, None, 10100, Some("p"))
+                .unwrap();
+            assert_eq!(count(host, 10101, "q"), 0);
+        });
+    }
+
+    #[test]
+    fn profile_uris_keep_the_source_user_in_the_returned_parcel() {
+        let mut original = clip("content://p.files/item");
+        original.fix_uris_light(10).unwrap();
+        assert_eq!(
+            original.items[0].uri.as_deref(),
+            Some("content://10@p.files/item")
+        );
+        let mut p = Parcel::new();
+        original.write_to(&mut p);
+        let copied = ClipData::read_from(&mut p.reader()).unwrap();
+        assert_eq!(
+            clip_content_uris(&copied, 0).collect::<Vec<_>>(),
+            vec![("content://p.files/item".into(), 10)]
+        );
+        for (uri, expected) in [
+            (
+                "content://%31%30@p.files/item",
+                Some(("content://p.files/item".into(), 10)),
+            ),
+            (
+                "content://bad@p.files/item",
+                Some(("content://p.files/item".into(), -10000)),
+            ),
+            ("file:///tmp/a", None),
+        ] {
+            assert_eq!(content_uri(uri, 0), expected);
+        }
+        let mut encoded = clip("content://p%2Efiles/item");
+        encoded.fix_uris_light(10).unwrap();
+        assert_eq!(
+            encoded.items[0].uri.as_deref(),
+            Some("content://10@p%2Efiles/item")
+        );
+        assert_eq!(
+            clip_content_uris(&encoded, 0).collect::<Vec<_>>(),
+            vec![("content://p.files/item".into(), 10)]
+        );
+        assert_eq!(
+            content_uri("content://p%2Efiles/item", 0),
+            Some(("content://p.files/item".into(), 0))
+        );
+        let mut clip = clip("content://12@p.files/item");
+        clip.fix_uris_light(10).unwrap();
+        assert_eq!(
+            clip.items[0].uri.as_deref(),
+            Some("content://12@p.files/item")
+        );
     }
 }

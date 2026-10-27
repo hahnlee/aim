@@ -69,4 +69,9 @@ interface IBridge {
     int[] getPermissionGidsForUid(int uid);
 
     IPackageDiagnosticInputs getPackageDiagnosticInputs();
+
+    /** UriGrantsManagerInternal, for native services such as the clipboard. */
+    IBinder newUriPermissionOwner(String name);
+    void revokeUriPermissionFromOwner(IBinder owner, in android.net.Uri uri,
+            int modeFlags, int sourceUserId);
 }

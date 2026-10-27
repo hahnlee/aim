@@ -242,6 +242,7 @@ const ALLOW_ISOLATED: &[&str] = &["activity", "display", "webviewupdate"];
 
 pub struct System {
     diagnostic_self: Weak<Self>,
+    native_uri_grants: std::sync::OnceLock<Weak<crate::app_host::AppHost>>,
     native_permissions:
         std::sync::OnceLock<Weak<crate::app_host::permission_manager::PermissionManager>>,
     process: Arc<LocalProcess>,
@@ -588,6 +589,54 @@ struct Listeners {
 type Result<T> = std::result::Result<T, Exception>;
 
 impl System {
+    pub(crate) fn set_native_uri_grants(&self, owner: &Arc<crate::app_host::AppHost>) {
+        let retained = self.native_uri_grants.get_or_init(|| Arc::downgrade(owner));
+        assert!(
+            retained.ptr_eq(&Arc::downgrade(owner)),
+            "native URI grant owner replaced"
+        );
+    }
+
+    pub(crate) fn new_clipboard_uri_owner(&self) -> Result<crate::clipboard_permissions::UriOwner> {
+        use crate::clipboard_permissions::UriOwner;
+        if let Some(host) = self.native_uri_grants.get().and_then(Weak::upgrade) {
+            let owner = host.new_clipboard_uri_owner();
+            return Ok(UriOwner::Native { host, owner });
+        }
+        let bridge = self
+            .nonces
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|n| n.bridge.clone())
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "URI permission owner unavailable: system_server bridge is not attached",
+                )
+            })?;
+        let mut data = Parcel::new();
+        bridge::NewUriPermissionOwner {
+            name: Some("clipboard".into()),
+        }
+        .write(&mut data);
+        let reply = bridge
+            .transact(bridge::NEW_URI_PERMISSION_OWNER, &data, false)
+            .map_err(|s| unreachable_service("bridge", s))?;
+        let token = bridge::read_new_uri_permission_owner_reply(&mut reply.reader())
+            .map_err(|s| unreachable_service("bridge", s))??;
+        let Some(Binder::Handle(handle)) = token else {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "bridge returned no URI permission owner",
+            ));
+        };
+        Ok(UriOwner::Remote {
+            bridge,
+            token: self.process.strong(handle),
+        })
+    }
+
     pub(crate) fn set_native_permissions(
         &self,
         owner: &Arc<crate::app_host::permission_manager::PermissionManager>,
@@ -639,6 +688,7 @@ impl System {
             };
             Self {
                 diagnostic_self: this.clone(),
+                native_uri_grants: std::sync::OnceLock::new(),
                 native_permissions: std::sync::OnceLock::new(),
                 process: process.clone(),
                 services: Mutex::new(HashMap::new()),
@@ -6514,6 +6564,10 @@ impl System {
         mode_flags: i32,
         user_id: i32,
     ) -> Result<()> {
+        let _identity = aim_binder_host::local::clear_calling_identity();
+        if let Some(host) = self.native_uri_grants.get().and_then(Weak::upgrade) {
+            return host.check_clipboard_uri(uid, uri, user_id, mode_flags);
+        }
         let args = ugm::CheckGrantUriPermissionIgnoreNonSystem {
             source_uid: uid,
             target_pkg: None,
