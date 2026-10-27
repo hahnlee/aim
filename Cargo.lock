@@ -416,6 +416,7 @@ version = "0.1.0"
 dependencies = [
  "aim-apps",
  "aim-paths",
+ "aim-service-aidl",
  "aim-storage",
  "libc",
 ]

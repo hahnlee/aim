@@ -15,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-pub fn export(directory: &Path, snapshot: &Arc<Snapshot>) {
+pub fn context(snapshot: &Arc<Snapshot>) -> Context {
     let mut packages = BTreeMap::new();
     for (settings, factory) in [
         (&snapshot.owner().settings.packages, false),
@@ -102,53 +102,53 @@ pub fn export(directory: &Path, snapshot: &Arc<Snapshot>) {
             },
         );
     }
-    let capture = Capture::new(
-        snapshot.clone(),
-        Context {
-            access: None,
-            scan_version: snapshot.version(),
-            native_domains: None,
-            boot_classes: None,
-            nonce: None,
-            system: model::System {
-                sdk_sandbox_package: Some(None),
-                ..Default::default()
-            },
-            platform: model::Platform::default(),
-            users: [0, 10]
-                .into_iter()
-                .map(|id| {
-                    (
-                        id,
-                        model::User {
-                            id,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
-            apex_inventory: ApexInventory {
-                packages: Some(vec![]),
-                active: vec![],
-            },
-            scan_users: ScanUsers {
-                users: Some(
-                    [0, 10]
-                        .into_iter()
-                        .map(|id| scan::User {
-                            id,
-                            pre_created: false,
-                            adb_install_disallowed: false,
-                        })
-                        .collect(),
-                ),
-            },
-            cross_user_suspensions: true,
-            packages,
-            retained_packages,
+    Context {
+        access: None,
+        scan_version: snapshot.version(),
+        native_domains: None,
+        boot_classes: None,
+        nonce: None,
+        system: model::System {
+            sdk_sandbox_package: Some(None),
+            ..Default::default()
         },
-    )
-    .unwrap();
+        platform: model::Platform::default(),
+        users: [0, 10]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    model::User {
+                        id,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
+        apex_inventory: ApexInventory {
+            packages: Some(vec![]),
+            active: vec![],
+        },
+        scan_users: ScanUsers {
+            users: Some(
+                [0, 10]
+                    .into_iter()
+                    .map(|id| scan::User {
+                        id,
+                        pre_created: false,
+                        adb_install_disallowed: false,
+                    })
+                    .collect(),
+            ),
+        },
+        cross_user_suspensions: true,
+        packages,
+        retained_packages,
+    }
+}
+
+pub fn export(directory: &Path, snapshot: &Arc<Snapshot>) {
+    let capture = Capture::new(snapshot.clone(), context(snapshot)).unwrap();
     for (packages, scope) in [
         (&capture.state().packages, "active"),
         (&capture.state().disabled_system_packages, "factory"),

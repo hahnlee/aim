@@ -60,18 +60,40 @@ impl Guest {
         crate::output::run(&mut self.command(argv), timeout)
     }
 
-    /// Whether Android finished booting (`sys.boot_completed`), or, for
-    /// an app host image, which never does, whether its agent runs: app
-    /// starts wait for zygote from then on.
+    /// App launches require the system user to be unlocking: agent startup
+    /// precedes package construction and CE storage preparation.
     pub fn booted(&self, app_host: bool) -> bool {
-        let (property, ready) = if app_host {
-            ("init.svc.aim-app-host-agent", "running")
-        } else {
-            ("sys.boot_completed", "1")
-        };
-        self.output(&["/system/bin/getprop", property], Duration::from_secs(10))
-            .is_ok_and(|(status, out)| status.success() && out.trim() == ready)
+        if app_host {
+            let code = aim_service_aidl::android_os_iusermanager::IS_USER_UNLOCKING_OR_UNLOCKED
+                .to_string();
+            return self
+                .output(
+                    &["/system/bin/service", "call", "user", &code, "i32", "0"],
+                    Duration::from_secs(10),
+                )
+                .is_ok_and(|(status, out)| status.success() && unlocked_reply(&out));
+        }
+        self.output(
+            &["/system/bin/getprop", "sys.boot_completed"],
+            Duration::from_secs(10),
+        )
+        .is_ok_and(|(status, out)| status.success() && out.trim() == "1")
     }
+}
+
+/// `service call` prints the Parcel's exception code followed by the boolean.
+fn unlocked_reply(output: &str) -> bool {
+    let Some(body) = output
+        .trim()
+        .strip_prefix("Result: Parcel(")
+        .and_then(|body| body.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let mut words = body
+        .split_whitespace()
+        .filter(|word| word.len() == 8 && word.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    words.next() == Some("00000000") && words.next() == Some("00000001") && words.next().is_none()
 }
 
 /// What the guest's processes use.
@@ -162,6 +184,62 @@ mod tests {
         );
         assert!(args.iter().any(|arg| arg == "--mount-namespace-from-init"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn app_host_readiness_waits_for_the_user_unlocking() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("aimctl-user-ready-{}", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        std::fs::create_dir(&root).unwrap();
+        let _cleanup = Cleanup(root.clone());
+        let executable = root.join("linux-run");
+        let code = aim_service_aidl::android_os_iusermanager::IS_USER_UNLOCKING_OR_UNLOCKED;
+        let script = |unlocked: bool| {
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n*init.svc.aim-app-host-agent) echo running ;;\n*sys.boot_completed) echo 1 ;;\n*'/system/bin/service call user {code} i32 0') echo \"Result: Parcel(00000000 {:08x}   '........')\" ;;\n*) exit 1 ;;\nesac\n",
+                i32::from(unlocked)
+            )
+        };
+        std::fs::write(&executable, script(false)).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guest = Guest {
+            linux_run: executable.clone(),
+            image: root.clone(),
+            path_map: root.join("path-map"),
+            by_pid: root.join("by-pid"),
+            environ: root.join("environment"),
+            binder: "fixture".into(),
+        };
+        assert!(guest.booted(false));
+        assert!(!guest.booted(true), "agent running is not user readiness");
+        std::fs::write(&executable, script(true)).unwrap();
+        assert!(guest.booted(true));
+    }
+
+    #[test]
+    fn unlocking_requires_a_successful_boolean_service_reply() {
+        assert!(unlocked_reply(
+            "Result: Parcel(00000000 00000001   '........')\n"
+        ));
+        assert!(unlocked_reply(
+            "Result: Parcel(\n  0x00000000: 00000000 00000001 '........'\n)"
+        ));
+        for output in [
+            "",
+            "running",
+            "Result: Parcel(00000000 00000000 '........')",
+            "Result: Parcel(ffffffff 00000001 '........')",
+            "Result: Parcel(00000000)",
+            "Result: Parcel(00000000 00000001 00000001)",
+        ] {
+            assert!(!unlocked_reply(output), "{output}");
+        }
     }
 
     #[test]

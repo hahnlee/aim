@@ -85,8 +85,9 @@ With `--image` an app host image ([app-host.md](app-host.md),
 `tools/app-host-image.sh`), the resident guest boots without
 system_server: guest-init starts only the services the image lists in
 `/system/etc/aim/app-host-services` (`--only`). `aimctl status` says
-`running` once the app host agent runs, about 3.7 s after `start`;
-zygote is ready about half a second later, and starts wait for it. `aimctl
+`running` once UserManager reports user 0 unlocking or unlocked. Agent
+startup precedes package construction and CE storage preparation; until the
+user unlocks, Android resolves only direct-boot-aware activities. `aimctl
 open PACKAGE` asks the app host to start the package's launch activity
 (`aim.app_host`), which it resolves as `getLaunchIntentForPackage` does;
 it returns in about 0.3 s, and the app's first frame follows about 0.6 s

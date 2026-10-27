@@ -207,7 +207,10 @@ the guest reaches BOOT_COMPLETED. Every package read and write of the app
 host goes through the native session: there is no `Packages::load` join or
 host package model, and process starts, domains, permissions and the
 services' package discoveries read the session's capture. The published
-`package` front answers the shell's `pm`. A shell install session
+`package` front answers the shell's `pm`. While user 0 is locked only the direct-boot-aware launchers resolve, as on
+Android; `aimctl` reports the guest ready once UserManager says user 0 is
+unlocking or unlocked.
+A shell install session
 (`pm install-create`, `-write`, `-commit`) of an ordinary APK installs it
 (Success), a same-signer update keeps its uid and data (Success), another
 signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app
