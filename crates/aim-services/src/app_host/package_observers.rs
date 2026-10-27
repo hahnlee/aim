@@ -322,9 +322,30 @@ mod tests {
 
     #[test]
     fn package_observers_bridge_transport_and_epoch() {
+        crate::system::with_discovery_session(|host, _, _| bridge_transport(host));
+    }
+
+    fn bridge_transport(host: &Arc<AppHost>) {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bootstrap;
-        let process = crate::test_process(SYSTEM_UID);
-        let host = AppHost::new(process.clone());
+        let process = host.process.clone();
+        for relative in [
+            "misc/apexdata/com.android.permission/access.abx",
+            "misc_de/0/apexdata/com.android.permission/access.abx",
+        ] {
+            let path = host.data().unwrap().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let root =
+                aim_android_xml::read(b"<access><permissions/><app-id-permissions/></access>")
+                    .unwrap();
+            std::fs::write(path, aim_android_xml::abx::write(&root).unwrap()).unwrap();
+        }
+        assert!(
+            host.permission_manager
+                .set(Arc::new(
+                    super::super::permission_manager::PermissionManager::new(host.clone())
+                ))
+                .is_ok()
+        );
         let bridge = super::super::package_bootstrap::PackageBootstrap::new(host.clone());
         let registry = host.package_observers.lock().unwrap().upgrade().unwrap();
         let observer = Arc::new(Observer::default());
@@ -426,6 +447,6 @@ mod tests {
             .transact(events::PACKAGE_ADDED, &p, false)
             .unwrap();
         assert_eq!(p.reader().read_exception().unwrap(), Err(closed()));
-        assert_eq!(next.snapshot().unwrap().len(), 2); // includes the discovery subscriber
+        assert_eq!(next.snapshot().unwrap().len(), 3); // discovery and permission policy
     }
 }

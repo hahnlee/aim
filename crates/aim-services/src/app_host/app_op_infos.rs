@@ -6,7 +6,8 @@
 //! with an aconfig flag of the image), user restriction and the system's
 //! bypass of it, default mode, whether only the app ops managers may read
 //! it and whether its notes are always collected. `setDisableReset` is
-//! not kept: the app host resets no modes.
+//! not kept: PermissionPolicy resets its permission ops, rather than the
+//! general `resetAllModes` operation.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use super::appops_service::{

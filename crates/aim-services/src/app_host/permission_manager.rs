@@ -26,7 +26,10 @@
 
 mod boot;
 mod install;
+mod policy;
 mod removal;
+
+pub(super) use policy::PermissionPolicy;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::OpenOptionsExt;
@@ -1791,6 +1794,7 @@ impl PermissionManager {
         let root = aim_android_xml::read(&bytes).map_err(fail)?;
         let root = permissions::with_app_id_permissions(root, &state.app_id_permissions)
             .and_then(|root| permissions::with_package_versions(root, &state.package_versions))
+            .and_then(|root| permissions::with_app_ops(root, state))
             .map_err(fail)?;
         let bytes = aim_android_xml::abx::write(&root).map_err(fail)?;
         self.write_access(USER0_ACCESS, &bytes)
@@ -1897,6 +1901,7 @@ impl PermissionManager {
         }
         let listeners = self.listeners.lock().unwrap().clone();
         for uid in changed {
+            self.synchronize_permission_app_ops(uid, None, true)?;
             let mut data = Parcel::new();
             data.write_interface_token(changed_listener::DESCRIPTOR);
             data.write_i32(uid);
