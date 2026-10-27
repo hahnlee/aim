@@ -202,6 +202,8 @@ static void carrier(void) {
   CHECK(discover(p) > 0);
   unsigned char* b = router_reply(p);
   CHECK(b[242] == 2);  // OFFER
+  unsigned char* o = option(b, 51);
+  CHECK(o && memcmp(o, "\x00\x00\x00\x3c", 4) == 0);
   // Another network: carrier goes and comes back, and the lease is new.
   hook("addr 10.11.12.13/24\ngateway 10.11.12.1\ndns 9.9.9.9\nlease 120\n");
   f = link_event(ev, 10000);
@@ -210,7 +212,6 @@ static void carrier(void) {
   CHECK(f >= 0 && (f & CARRIER) == CARRIER);
   CHECK(discover(p) > 0);
   b = router_reply(p);
-  unsigned char* o;
   CHECK(memcmp(b + 16, "\x0a\x0b\x0c\x0d", 4) == 0);  // yiaddr
   CHECK((o = option(b, 3)) && memcmp(o, "\x0a\x0b\x0c\x01", 4) == 0);
   CHECK((o = option(b, 6)) && memcmp(o, "\x09\x09\x09\x09", 4) == 0);
@@ -222,7 +223,9 @@ static void carrier(void) {
 // DhcpClient's renewals: a UDP socket bound to eth0 and port 68, connected
 // to the server (RENEWING), or broadcasting (REBINDING).
 static void renewal(void) {
-  hook("addr 10.11.12.13/24\ngateway 10.11.12.1\nlease 120\n");
+  hook("addr 10.11.12.13/24\ngateway 10.11.12.1\ndns 9.9.9.9\n");
+  CHECK(ifflags() & IFF_RUNNING);
+  int ev = rtnl_link();
   int p = packet_socket();
   int u = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
   int on = 1;
@@ -244,7 +247,22 @@ static void renewal(void) {
   unsigned char* b = router_reply(p);
   unsigned char* o;
   CHECK(b[242] == 5 && memcmp(b + 16, "\x0a\x0b\x0c\x0d", 4) == 0);  // ACK
-  CHECK((o = option(b, 51)) && memcmp(o, "\x00\x00\x00\x78", 4) == 0);
+  CHECK((o = option(b, 51)) && memcmp(o, "\x00\x00\x00\x3c", 4) == 0);
+  uint32_t secs;
+  memcpy(&secs, o, sizeof secs);
+  CHECK((o = option(b, 6)) && memcmp(o, "\x09\x09\x09\x09", 4) == 0);
+  // RFC 2131 section 4.4.5: absent option 58, T1 is half the lease.
+  // A DNS-only change reaches the next renewal without a carrier event.
+  hook("addr 10.11.12.13/24\ngateway 10.11.12.1\ndns 1.1.1.1\n");
+  CHECK(link_event(ev, (int)(ntohl(secs) * 1000 / 2)) == -1);
+  CHECK(ifflags() & IFF_RUNNING);
+  CHECK(write(u, m, n) == n);
+  b = router_reply(p);
+  CHECK(b[242] == 5 && memcmp(b + 16, "\x0a\x0b\x0c\x0d", 4) == 0);
+  CHECK((o = option(b, 6)) && memcmp(o, "\x01\x01\x01\x01", 4) == 0);
+  CHECK((o = option(b, 51)) && memcmp(o, "\x00\x00\x00\x3c", 4) == 0);
+  CHECK(link_event(ev, 0) == -1);
+  close(ev);
   // The Mac moved on: the old address is NAKed, by broadcast too.
   hook("addr 10.11.12.14/24\ngateway 10.11.12.1\n");
   CHECK(write(u, m, n) == n);

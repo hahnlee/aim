@@ -36,7 +36,7 @@ EthernetTracker                                                    (INetd)
   IpClient.start ----------------> DhcpClient
                                    AF_PACKET: DISCOVER --> virtual router
                                    <-- OFFER (the Mac's address, gateway, DNS)
-                                   REQUEST --> <-- ACK (1 h lease)
+                                   REQUEST --> <-- ACK (60 s lease)
                                    interfaceSetCfg(addr) ---------> SIOCSIFADDR,
                                                                     SIOCSIFNETMASK
                                    <- RTM_NEWADDR (RTNLGRP_IPV4_IFADDR) <- kernel
@@ -54,8 +54,9 @@ NetworkMonitor: DNS through DnsResolver, HTTP and HTTPS generate_204 probes
 - **The lease** is the Mac's primary network as a routing socket and
   `getifaddrs` report it: the address and prefix of the default route's
   interface, its gateway (also the DHCP server identifier) and MTU, and the
-  IPv4 nameservers of `/etc/resolv.conf`. The lease time is one hour, so
-  DhcpClient renews after 30 minutes and picks up new DNS servers. A
+  IPv4 nameservers of `/etc/resolv.conf`. The lease time is 60 seconds, so
+  DhcpClient normally renews after 30 seconds and picks up new DNS servers
+  without dropping carrier (#307; RFC 2131 section 4.4.5). A
   request for another address is NAKed.
 - **Hardware addresses** are fixed and locally administered: `eth0`
   `02:61:69:6d:00:02`, the router `02:61:69:6d:00:01`.
@@ -92,7 +93,8 @@ Mac: default route back          eth0: carrier back -> RTM_NEWLINK with
   new NetworkAgent -> NetworkMonitor validates -> default network
 Mac: another network (address,   eth0: carrier lost and back at once,
   gateway, MTU or interface)       so the steps above run with a new lease
-Mac: new DNS servers only        the next renewal (a DHCPACK with them)
+Mac: new DNS servers only        the next renewal (normally within 30 s),
+                                 a DHCPACK with them; carrier stays up
 ```
 
 - **Watching.** Every process that binds a NETLINK_ROUTE socket to

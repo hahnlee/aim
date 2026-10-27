@@ -24,9 +24,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub use aim_uplink::{Lease, Uplink, Uplink6, host_index};
 use aim_uplink::{dns_servers, dns6_servers, simulate, uplink, uplink6};
 
-/// The lease time the virtual router gives: DhcpClient renews after half
-/// of it, which is how DNS changes reach the guest.
-pub const LEASE_SECS: u32 = 3600;
+/// A one-minute lease bounds DNS-only changes to the next renewal (T1,
+/// half the lease, RFC 2131 section 4.4.5) without dropping carrier.
+/// Android's DhcpPacket clamps shorter leases to 60 seconds.
+pub const LEASE_SECS: u32 = 60;
 
 fn hook() -> String {
     aim_uplink::hook(&super::netif::kernel_dir("net"))
