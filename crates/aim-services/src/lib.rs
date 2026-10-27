@@ -17,6 +17,7 @@ pub mod app_host;
 mod bundle;
 pub mod clip;
 pub mod clipboard;
+mod clipboard_permissions;
 pub mod locale;
 pub mod location;
 pub mod media;
@@ -254,6 +255,7 @@ impl NativeServices {
         }
         if let Some(host) = &app_host {
             host.set_system(system.clone());
+            system.set_native_uri_grants(host);
             let front = |name| services.iter().find(|(n, _)| n == name).map(|(_, b)| *b);
             system
                 .retain_public_package_fronts(

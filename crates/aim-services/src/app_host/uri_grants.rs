@@ -1,14 +1,15 @@
 //! URI permissions in the app host (`UriGrantsManagerService` and its
 //! `ActivityManagerService` entry points at `android-16.0.0_r1`, ADR 0013):
 //! the grants apps hold, by target uid (`mGrantedUriPermissions`), each
-//! with its modes owned by an activity or a service start, granted with no
+//! with its modes owned by an activity, a service start or the clipboard, granted with no
 //! owner, persistable or persisted (`UriPermission`). `grantUriPermission`
 //! makes them, as do the intents that start activities and services and
 //! deliver new intents and results (`FLAG_GRANT_*` over the data and the
 //! ClipData's URIs and intents), checked as `checkGrantUriPermissionUnlocked`
 //! checks them (the provider's permissions and path permissions,
 //! `grantUriPermissions` and its patterns, the caller's own access); an
-//! activity's or a start's go with it (`UriPermissionOwner`).
+//! activity's or a start's go with it (`UriPermissionOwner`); clipboard
+//! read grants go when the clip is replaced, cleared or expires (#429).
 //! Broadcasts carry none, as in the original. `revokeUriPermission`,
 //! `takePersistableUriPermission`, `releasePersistableUriPermission` and
 //! `clearGrantedUriPermissions` change them; a provider's process is
@@ -106,12 +107,14 @@ const SYSTEM_PACKAGE: &str = "android";
 /// `UriPermissionOwner`: what holds the modes granted for it, which go
 /// with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Owner {
+pub(crate) enum Owner {
     /// An activity's (`ActivityRecord.getUriPermissionsLocked`), by its
     /// token.
     Activity(u64),
     /// A service start's (`ServiceRecord.StartItem.getUriPermissionsLocked`).
     Start(u64),
+    /// The native clipboard service's permission owner.
+    Clipboard(u64),
 }
 
 /// `GrantUri`: a URI in its source user, and whether it grants its
@@ -491,6 +494,24 @@ impl Grants {
         self.0.retain(|_, perms| !perms.is_empty());
     }
 
+    fn revoke_owner(&mut self, owner: Owner, uri: &Uri, source_user: i32, modes: i32) {
+        for perms in self.0.values_mut() {
+            for p in perms
+                .iter_mut()
+                .filter(|p| p.uri.source_user == source_user && p.uri.uri.as_str() == uri.as_str())
+            {
+                if modes & FLAG_GRANT_READ_URI_PERMISSION != 0 {
+                    p.read_owners.retain(|o| *o != owner);
+                }
+                if modes & FLAG_GRANT_WRITE_URI_PERMISSION != 0 {
+                    p.write_owners.retain(|o| *o != owner);
+                }
+            }
+            perms.retain(|p| p.modes() != 0);
+        }
+        self.0.retain(|_, perms| !perms.is_empty());
+    }
+
     /// `maybePrunePersistedUriGrantsLocked`: the oldest persisted grants
     /// of `uid` beyond `MAX_PERSISTED_URI_GRANTS` released; whether any
     /// was.
@@ -787,6 +808,7 @@ pub struct UriGrants {
     /// The grants, once read.
     grants: Mutex<Option<Grants>>,
     next_start_owner: AtomicU64,
+    next_clipboard_owner: AtomicU64,
 }
 
 /// `android.content.UriPermission`.
@@ -1022,6 +1044,80 @@ impl AppHost {
     pub(super) fn release_uri_grants(&self, owner: Owner) {
         if let Some(grants) = self.uri_grants.grants.lock().unwrap().as_mut() {
             grants.release(owner);
+        }
+    }
+
+    pub(crate) fn check_clipboard_uri(
+        &self,
+        uid: i32,
+        uri: &str,
+        user: i32,
+        modes: i32,
+    ) -> Result<(), Exception> {
+        self.check_grant(
+            uid,
+            None,
+            &GrantUri::new(user, Uri::parse(uri), modes),
+            modes,
+            -1,
+        )
+        .map(drop)
+    }
+
+    /// `newUriPermissionOwner("clipboard")`, in the existing grant owner.
+    pub(crate) fn new_clipboard_uri_owner(&self) -> Owner {
+        Owner::Clipboard(
+            self.uri_grants
+                .next_clipboard_owner
+                .fetch_add(1, Ordering::Relaxed),
+        )
+    }
+
+    /// `grantUriPermissionFromOwner` after its internal caller has supplied
+    /// the owner: resolve the target in its user, then check the source.
+    pub(crate) fn grant_clipboard_uri(
+        &self,
+        owner: Owner,
+        source_uid: i32,
+        target: &str,
+        uri: &str,
+        source_user: i32,
+        target_user: i32,
+    ) -> Result<(), Exception> {
+        let target_uid = self.package_uid(target, MATCH_DEBUG_TRIAGED_MISSING, target_user)?;
+        if target_uid < 0 {
+            return Ok(());
+        }
+        let uri = GrantUri::new(source_user, Uri::parse(uri), FLAG_GRANT_READ_URI_PERMISSION);
+        let uid = self.check_grant(
+            source_uid,
+            Some(target),
+            &uri,
+            FLAG_GRANT_READ_URI_PERMISSION,
+            target_uid,
+        )?;
+        if uid >= 0 {
+            self.grant_unchecked(
+                uid,
+                target,
+                &uri,
+                FLAG_GRANT_READ_URI_PERMISSION,
+                Some(owner),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `revokeUriPermissionFromOwner`: exact URI and source user, only this
+    /// owner's read mode. Other owners, global and persisted modes survive.
+    pub(crate) fn revoke_clipboard_uri(&self, owner: Owner, uri: &str, source_user: i32) {
+        if let Some(grants) = self.uri_grants.grants.lock().unwrap().as_mut() {
+            grants.revoke_owner(
+                owner,
+                &Uri::parse(uri),
+                source_user,
+                FLAG_GRANT_READ_URI_PERMISSION,
+            );
         }
     }
 
@@ -2094,6 +2190,45 @@ mod tests {
         g.find_or_create("p.provider", "p.target", 10_001, uri)
             .grant_modes(modes, owner);
         g
+    }
+
+    #[test]
+    fn clipboard_revocation_is_exact_and_preserves_other_modes_and_owners() {
+        let uri = grant_uri("content://p/one", 0);
+        let owner = Owner::Clipboard(7);
+        let mut g = granted(&uri, READ, Some(owner));
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .grant_modes(WRITE, Some(owner));
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .grant_modes(READ, Some(Owner::Activity(3)));
+        let other_user = GrantUri::new(10, uri.uri.clone(), READ);
+        g.find_or_create("p.provider", "p.target", 10_001, &other_user)
+            .grant_modes(READ, Some(owner));
+        let child = grant_uri("content://p/one/child", 0);
+        g.find_or_create("p.provider", "p.target", 10_002, &child)
+            .grant_modes(READ, Some(owner));
+        g.revoke_owner(owner, &uri.uri, 0, READ);
+        assert!(g.check(&uri, 10_001, READ | WRITE));
+        g.release(Owner::Activity(3));
+        assert!(!g.check(&uri, 10_001, READ));
+        assert!(g.check(&uri, 10_001, WRITE));
+        assert!(g.check(&other_user, 10_001, READ));
+        assert!(g.check(&child, 10_002, READ));
+
+        let mut g = granted(
+            &uri,
+            READ | FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+            Some(owner),
+        );
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .take_persistable_modes(READ, 10);
+        g.revoke_owner(owner, &uri.uri, 0, READ);
+        assert!(g.check(&uri, 10_001, READ));
+        let mut g = granted(&uri, READ, None);
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .grant_modes(READ, Some(owner));
+        g.revoke_owner(owner, &uri.uri, 0, READ);
+        assert!(g.check(&uri, 10_001, READ));
     }
 
     #[test]

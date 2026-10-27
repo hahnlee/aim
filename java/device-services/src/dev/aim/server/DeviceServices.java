@@ -241,6 +241,23 @@ public final class DeviceServices extends SystemService {
             return packageBootstrap.getPermissionGidsForUid(uid);
         }
 
+        @Override
+        public IBinder newUriPermissionOwner(String name) {
+            enforceSystemUid();
+            return com.android.server.LocalServices.getService(
+                    com.android.server.uri.UriGrantsManagerInternal.class)
+                    .newUriPermissionOwner(name);
+        }
+
+        @Override
+        public void revokeUriPermissionFromOwner(IBinder owner, android.net.Uri uri,
+                int modeFlags, int sourceUserId) {
+            enforceSystemUid();
+            com.android.server.LocalServices.getService(
+                    com.android.server.uri.UriGrantsManagerInternal.class)
+                    .revokeUriPermissionFromOwner(owner, uri, modeFlags, sourceUserId);
+        }
+
         private static void enforceSystemUid() {
             if (Binder.getCallingUid() != Process.SYSTEM_UID) {
                 throw new SecurityException("the bridge serves the system uid only");

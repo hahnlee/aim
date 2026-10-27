@@ -288,6 +288,11 @@ The migration's state and conformance results are in
   not the platform's. The code is compiled against stubs that are checked
   with every reference against the image's jars, so a changed internal
   API fails the build.
+- **Clipboard URI owners (#429).** The same system-uid-only bridge exposes
+  `UriGrantsManagerInternal.newUriPermissionOwner` and
+  `revokeUriPermissionFromOwner`; the native clipboard grants through the
+  original `IUriGrantsManager`. In the app host the existing native URI
+  grant owner serves these internal calls directly, with no bridge.
 - **First slice (#497).** The service hands the native service host a
   bridge (`IBridge`, answering the system uid only). Its first method
   gives the read-only `ApplicationSharedMemory`, whose

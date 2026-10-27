@@ -871,16 +871,21 @@ only when an app pastes it (a change is noticed from `changeCount` and
 the types, which do not read the content). Clearing an Android clip
 clears the Mac's pasteboard only while it still holds that clip.
 
+Clipped content URIs and intent data are checked against the source uid,
+then granted read access on each package's first paste and revoked when the
+clip changes, clears or expires (#429). The app host's existing URI grant
+owner holds these modes; with system_server, the system-uid-only device
+bridge creates the original permission owner and revokes its exact URI
+read grants, while granting uses `IUriGrantsManager`. Related profile
+copies qualify their URIs with the source user. A source permission failure
+on paste clears the clip as the pinned original does.
+
 Where the original uses a system_server-internal API with no binder form,
 the native clipboard does without, or stands in:
 
 - focus: the focused root task's `effectiveUid` for
   `WindowManagerInternal.isUidFocused`; content capture, autofill and
   virtual devices not consulted (#430);
-- no URI permission grants to the apps that read a clip (#429): the
-  grant (`IUriGrantsManager.grantUriPermissionFromOwner`) takes a
-  permission owner only `UriGrantsManagerInternal.newUriPermissionOwner`
-  makes, and no binder interface hands one out;
 - no paste toast, text classification (clips are marked
   `CLASSIFICATION_NOT_PERFORMED`) or statistics (#431). The toast's
   text is the app's label in the device's language and the framework's

@@ -281,6 +281,56 @@ impl ClipData {
         }
     }
 
+    /// `ClipData.fixUrisLight`: qualify item and intent data URIs before
+    /// copying to a profile. Rewrite the kept parcel too, retaining objects.
+    pub(crate) fn fix_uris_light(&mut self, user: i32) -> Result<()> {
+        for item in &mut self.items {
+            let parcel = item.raw.parcel();
+            let r = &mut parcel.reader();
+            char_sequence(r)?;
+            r.read_string8()?;
+            let mut edits = Vec::new();
+            if r.read_i32()? != 0 {
+                let intent_start = r.position();
+                r.read_string8()?;
+                let start = r.position();
+                let data = uri(r)?;
+                let end = r.position();
+                if let Some(data) = data {
+                    let fixed = maybe_add_user_id(&data, user);
+                    if fixed != data {
+                        edits.push((start, end, fixed.clone()));
+                    }
+                    item.intent_data = Some(fixed);
+                }
+                r.set_position(intent_start);
+                intent(r)?;
+            }
+            if r.read_i32()? != 0 {
+                r.read_binder()?;
+            }
+            if r.read_i32()? != 0 {
+                let start = r.position();
+                let data = uri(r)?;
+                let end = r.position();
+                if let Some(data) = data {
+                    let fixed = maybe_add_user_id(&data, user);
+                    if fixed != data {
+                        edits.push((start, end, fixed.clone()));
+                    }
+                    item.uri = Some(fixed);
+                }
+            }
+            for (start, end, fixed) in edits.into_iter().rev() {
+                let mut uri = Parcel::new();
+                uri.write_i32(1);
+                uri.write_string8(Some(&fixed));
+                item.raw = item.raw.replace(start, end, &uri);
+            }
+        }
+        Ok(())
+    }
+
     /// A clip of the Mac's text, as EmulatorClipboardMonitor makes the
     /// host's: labelled "host clipboard", with no clipboard overlay; with
     /// the pasteboard's HTML when it has some, as `ClipData.newHtmlText`
@@ -591,6 +641,23 @@ pub(crate) fn text_links(r: &mut Reader<'_>) -> Result<()> {
     bundle(r).map(drop)
 }
 
+/// `ContentProvider.maybeAddUserId` for a related profile's clip.
+fn maybe_add_user_id(uri: &str, user: i32) -> String {
+    use crate::package::uri::Uri;
+    let parsed = Uri::parse(uri);
+    if user == -2
+        || parsed.scheme() != Some("content")
+        || parsed.user_info().is_some_and(|u| !u.is_empty())
+    {
+        return uri.into();
+    }
+    let authority = parsed.encoded_authority().unwrap_or("null");
+    parsed
+        .with_encoded_authority(Some(&format!("{user}@{authority}")))
+        .as_str()
+        .into()
+}
+
 /// `Uri.CREATOR`: the URI string, or none for null.
 pub(crate) fn uri(r: &mut Reader<'_>) -> Result<Option<String>> {
     match r.read_i32()? {
@@ -668,6 +735,10 @@ mod tests {
     /// A clip as `ClipData.writeToParcel` writes
     /// `ClipData.newRawUri(label, uri)` with a text item added.
     fn java_clip() -> Parcel {
+        java_clip_with_intent_uri("https://example.com")
+    }
+
+    fn java_clip_with_intent_uri(intent_uri: &str) -> Parcel {
         let mut p = Parcel::new();
         // description: label (spanned, one StyleSpan), mime types, extras,
         // timestamp, styled, classification status, confidences
@@ -713,7 +784,7 @@ mod tests {
         p.write_i32(1);
         p.write_string8(Some("android.intent.action.VIEW"));
         p.write_i32(1);
-        p.write_string8(Some("https://example.com"));
+        p.write_string8(Some(intent_uri));
         p.write_string8(None);
         p.write_string8(None);
         p.write_i32(0);
@@ -735,6 +806,29 @@ mod tests {
         p.write_i32(0);
         p.write_i32(0);
         p
+    }
+
+    #[test]
+    fn profile_copy_qualifies_intent_data_and_keeps_the_other_item_fields() {
+        let p = java_clip_with_intent_uri("content://p.files/from-intent");
+        let original = ClipData::read_from(&mut p.reader()).unwrap();
+        let mut copy = original.clone();
+        copy.fix_uris_light(10).unwrap();
+        let mut out = Parcel::new();
+        copy.write_to(&mut out);
+        let copy = ClipData::read_from(&mut out.reader()).unwrap();
+        assert_eq!(copy.items[0].uri.as_deref(), Some("content://10@media/1"));
+        assert_eq!(
+            copy.items[1].intent_data.as_deref(),
+            Some("content://10@p.files/from-intent")
+        );
+        assert_eq!(copy.items[1].text, original.items[1].text);
+        assert_eq!(copy.items[1].html, original.items[1].html);
+        assert_eq!(copy.description, original.description);
+        assert_eq!(
+            original.items[1].intent_data.as_deref(),
+            Some("content://p.files/from-intent")
+        );
     }
 
     #[test]
