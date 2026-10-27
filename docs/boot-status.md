@@ -176,6 +176,12 @@ reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
+Native Binder reference and reply cleanup survives host-thread TLS teardown
+(2026-10-28, #2189). If `Strong` or `Received` drops after the thread's Binder
+state, cleanup owns a temporary driver thread through `BINDER_THREAD_EXIT`
+rather than reading dead TLS. The regression forces that destruction order
+and verifies the remote callback is released; no guest boot was run.
+
 PackageManager remains original in the default image. Controlled slice C images
 redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298

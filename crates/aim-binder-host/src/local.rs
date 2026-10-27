@@ -95,10 +95,7 @@ impl Call<'_> {
 static NEXT_TID: AtomicI32 = AtomicI32::new(1);
 
 thread_local! {
-    static THREAD: ThreadState = ThreadState {
-        tid: NEXT_TID.fetch_add(1, Ordering::Relaxed),
-        joined: RefCell::new(Vec::new()),
-    };
+    static THREAD: ThreadState = ThreadState::new();
 }
 
 /// A host thread's binder identity; on exit it leaves every process it
@@ -114,6 +111,26 @@ struct ThreadState {
 struct Joined {
     process: Weak<LocalProcess>,
     input: VecDeque<(u32, Vec<u8>)>,
+}
+
+impl ThreadState {
+    fn new() -> Self {
+        Self {
+            tid: NEXT_TID.fetch_add(1, Ordering::Relaxed),
+            joined: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn join(&self, process: &LocalProcess) -> i32 {
+        let mut joined = self.joined.borrow_mut();
+        if !joined.iter().any(|j| j.process.ptr_eq(&process.this)) {
+            joined.push(Joined {
+                process: process.this.clone(),
+                input: VecDeque::new(),
+            });
+        }
+        self.tid
+    }
 }
 
 impl Drop for ThreadState {
@@ -490,16 +507,7 @@ impl LocalProcess {
 
     /// This thread's driver thread id, registering it for its exit.
     fn tid(&self) -> i32 {
-        THREAD.with(|t| {
-            let mut joined = t.joined.borrow_mut();
-            if !joined.iter().any(|j| j.process.ptr_eq(&self.this)) {
-                joined.push(Joined {
-                    process: self.this.clone(),
-                    input: VecDeque::new(),
-                });
-            }
-            t.tid
-        })
+        THREAD.with(|t| t.join(self))
     }
 
     /// This thread's queue of unhandled returns from this process.
@@ -519,6 +527,10 @@ impl LocalProcess {
 
     /// One `BINDER_WRITE_READ`: returns what was consumed and read.
     fn talk(&self, write: &[u8], read: &mut [u8]) -> Result<(usize, usize), Errno> {
+        self.talk_on(self.tid(), write, read)
+    }
+
+    fn talk_on(&self, tid: i32, write: &[u8], read: &mut [u8]) -> Result<(usize, usize), Errno> {
         let bwr = WriteRead {
             write_size: write.len() as u64,
             write_consumed: 0,
@@ -528,7 +540,6 @@ impl LocalProcess {
             read_buffer: read.as_mut_ptr() as u64,
         };
         let mut arg = bwr.encode();
-        let tid = self.tid();
         loop {
             match self.ioctl(tid, BINDER_WRITE_READ, &mut arg) {
                 Err(errno::EINTR) if !self.stopping.load(Ordering::Acquire) => continue,
@@ -543,7 +554,18 @@ impl LocalProcess {
 
     /// Commands that need no answer (reference counts, freed buffers).
     fn write(&self, commands: &[u8]) {
-        let _ = self.talk(commands, &mut []);
+        match THREAD.try_with(|t| t.join(self)) {
+            Ok(tid) => {
+                let _ = self.talk_on(tid, commands, &mut []);
+            }
+            Err(_) => {
+                // Strong/Received can outlive THREAD in another TLS slot.
+                // Their commands still need sending; own this temporary
+                // driver thread through its BINDER_THREAD_EXIT.
+                let thread = ThreadState::new();
+                let _ = self.talk_on(thread.join(self), commands, &mut []);
+            }
+        }
     }
 
     /// Its open binder file description, for the driver's own calls
@@ -1868,6 +1890,57 @@ mod tests {
             unreachable!()
         };
         assert!(server.local_service(service).is_some());
+    }
+
+    #[test]
+    fn retained_binders_and_replies_drop_after_thread_state() {
+        struct Retained(RefCell<Option<(Strong, Received)>>);
+        impl Drop for Retained {
+            fn drop(&mut self) {
+                assert!(THREAD.try_with(|_| ()).is_err());
+            }
+        }
+        thread_local! {
+            static RETAINED: Retained = const { Retained(RefCell::new(None)) };
+        }
+
+        let driver = Driver::new();
+        let manager = start_registry(&driver);
+        let server = open(&driver, 210, 1000);
+        let gives = Arc::new(Gives {
+            process: Mutex::new(Arc::downgrade(&server)),
+            given: Mutex::new(Vec::new()),
+        });
+        let binder = server.add_service(gives.clone());
+        server.start();
+        let client = open(&driver, 310, 10124);
+        let remote = publish(&server, &client, "tls-gives", binder);
+        let caller = client.clone();
+        std::thread::Builder::new()
+            .name("binder-local".into())
+            .spawn(move || {
+                // TLS destructors run in reverse initialization order.
+                RETAINED.with(|_| ());
+                caller.tid();
+                let reply = remote.transact(0, &Parcel::new(), false).unwrap();
+                let Some(Binder::Handle(h)) = reply.reader().read_binder().unwrap() else {
+                    panic!("no callback binder");
+                };
+                let callback = caller.strong(h);
+                RETAINED.with(|r| *r.0.borrow_mut() = Some((callback, reply)));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        let ptr = gives.given.lock().unwrap()[0];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while server.local_service(ptr).is_some() {
+            assert!(std::time::Instant::now() < deadline, "callback node kept");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        client.shutdown().unwrap();
+        server.shutdown().unwrap();
+        manager.shutdown().unwrap();
     }
 
     /// Releases its own process while it serves a call, as a process that
