@@ -47,7 +47,20 @@ impl PackageEffects {
     }
 
     fn require_installer_permission(&self, calling_uid: i32) -> Result<bool, Exception> {
-        // EventLog.writeEvent is the only omitted effect: no EventLog writer (#2188).
+        use super::event_log::Value;
+        self.host.write_event(
+            0x534e4554,
+            Value::List(&[
+                Value::String("150857253"),
+                Value::Int(calling_uid),
+                Value::String(""),
+            ]),
+        )?;
+        self.installer_permission_required(calling_uid)
+    }
+
+    /// `NativePackageEffectsBridge.isInstallerPermissionRequired`.
+    fn installer_permission_required(&self, calling_uid: i32) -> Result<bool, Exception> {
         let (state, resolution) = self.host.packages()?;
         let query = Query {
             state: &state,
