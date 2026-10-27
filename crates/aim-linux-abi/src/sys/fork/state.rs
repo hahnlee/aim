@@ -271,6 +271,10 @@ pub fn restore(r: &mut Reader) -> bool {
     crate::vdso::fork_restore(r);
     r.stage("cred");
     cred::fork_restore(r);
+    if let Err(error) = super::super::initialize_task_ids() {
+        eprintln!("fork task namespace restore failed: {error}");
+        return false;
+    }
     r.stage("process");
     process::fork_restore(r);
     r.stage("procfs");

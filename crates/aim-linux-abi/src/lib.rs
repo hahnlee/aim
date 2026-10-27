@@ -217,6 +217,9 @@ pub fn run(mut opts: RunOptions) -> String {
         sys::enter_pid_namespace(&by_pid);
     }
     sys::cred::init(opts.identity, Some(by_pid));
+    if let Err(error) = sys::initialize_task_ids() {
+        return format!("task namespace: {error}");
+    }
     // A member's execve that relaunched this process.
     if opts.execfn.is_some() {
         sys::reset_exec_cgroups();
