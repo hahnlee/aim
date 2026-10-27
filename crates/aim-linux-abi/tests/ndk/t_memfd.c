@@ -3,6 +3,7 @@
 // processes by fork and SCM_RIGHTS. Seals belong to the memfd, not to the
 // fd or the process.
 #include <fcntl.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -434,7 +435,84 @@ static void exec_seal_chmod(void) {
   close(noexec);
 }
 
-int main(void) {
+static int scope;
+
+// The exec bits of a memfd made with `flags`, and its seals; -1 if
+// memfd_create failed (errno kept).
+static int make(unsigned flags, int* seals) {
+  int fd = memfd_create("noexec", flags);
+  if (fd < 0) return -1;
+  struct stat st;
+  int exec = fstat(fd, &st) == 0 ? (int)(st.st_mode & 0111) : -2;
+  *seals = fcntl(fd, F_GET_SEALS);
+  close(fd);
+  return exec;
+}
+
+static void noexec_sysctl_read(void) {
+  char value[8] = {0};
+  int fd = open("/proc/sys/vm/memfd_noexec", O_RDONLY | O_CLOEXEC);
+  CHECK(fd >= 0);
+  CHECK(read(fd, value, sizeof value - 1) > 0 && atoi(value) == scope);
+  close(fd);
+}
+
+static void noexec_defaults(void) {
+  int seals = 0;
+  switch (scope) {
+    case 0:
+      // MFD_EXEC: executable, unsealable without MFD_ALLOW_SEALING.
+      CHECK(make(MFD_CLOEXEC, &seals) == 0111 && seals == F_SEAL_SEAL);
+      CHECK(make(MFD_ALLOW_SEALING, &seals) == 0111 && seals == 0);
+      break;
+    case 1:
+      // MFD_NOEXEC_SEAL: no exec bits, F_SEAL_EXEC, sealable.
+      CHECK(make(MFD_CLOEXEC, &seals) == 0 && seals == F_SEAL_EXEC);
+      CHECK(make(MFD_EXEC, &seals) == 0111 && seals == F_SEAL_SEAL);
+      break;
+    default:
+      // Enforced: MFD_EXEC is refused, MFD_NOEXEC_SEAL is the default.
+      CHECK(make(MFD_CLOEXEC, &seals) == 0 && seals == F_SEAL_EXEC);
+      errno = 0;
+      CHECK(make(MFD_EXEC, &seals) == -1 && errno == EACCES);
+      CHECK(make(MFD_NOEXEC_SEAL, &seals) == 0 && seals == F_SEAL_EXEC);
+      break;
+  }
+  // Both at once is EINVAL at any scope.
+  errno = 0;
+  CHECK(make(MFD_EXEC | MFD_NOEXEC_SEAL, &seals) == -1 && errno == EINVAL);
+}
+
+static void noexec_sysctl_write(void) {
+  int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+  CHECK(fd >= 0);
+  for (int n = 0; n <= 2; ++n) {
+    char value = '0' + n;
+    CHECK(pwrite(fd, &value, 1, 0) == 1);
+    scope = n;
+    noexec_sysctl_read();
+    noexec_defaults();
+  }
+  for (const char** bad = (const char*[]){"-1", "3", "junk", "4294967296", NULL}; *bad; ++bad) {
+    errno = 0;
+    CHECK(pwrite(fd, *bad, strlen(*bad), 0) == -1 && errno == EINVAL);
+  }
+  scope = 2;
+  noexec_sysctl_read();
+  CHECK(pwrite(fd, "0", 1, 0) == 1);
+  close(fd);
+  scope = 0;
+  noexec_sysctl_read();
+}
+
+int main(int argc, char** argv) {
+  if (argc > 1 && !strcmp(argv[1], "--noexec")) {
+    scope = argc > 2 ? atoi(argv[2]) : 0;
+    RUN(noexec_sysctl_read);
+    RUN(noexec_defaults);
+    RUN(noexec_sysctl_write);
+    DONE();
+  }
   RUN(reopen_proc_self_fd);
   RUN(seal_rules);
   RUN(seals_across_dup);

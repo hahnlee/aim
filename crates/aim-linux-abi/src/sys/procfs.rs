@@ -1419,7 +1419,15 @@ fn sys_node(tail: &str) -> Option<Node> {
         return super::ipv6conf::node(tail.strip_prefix("net").unwrap().trim_start_matches('/'));
     }
     Some(match tail {
-        "" => Node::Dir(entries(&[("kernel", dir::DT_DIR), ("net", dir::DT_DIR)])),
+        "" => Node::Dir(entries(&[
+            ("kernel", dir::DT_DIR),
+            ("net", dir::DT_DIR),
+            ("vm", dir::DT_DIR),
+        ])),
+        "vm" => Node::Dir(entries(&[("memfd_noexec", dir::DT_REG)])),
+        "vm/memfd_noexec" => {
+            Node::File(format!("{}\n", super::memfd::noexec_scope().ok()?).into_bytes())
+        }
         "kernel" => Node::Dir(entries(&[
             ("hostname", dir::DT_REG),
             ("osrelease", dir::DT_REG),
@@ -1821,6 +1829,9 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     }
     let cloexec = flags & O_CLOEXEC != 0;
     let write = flags & O_ACCMODE != 0;
+    if canonical(guest) == super::memfd::NOEXEC_SYSCTL {
+        return Some(super::memfd::open_noexec(write, cloexec));
+    }
     if canonical(guest) == "/proc/kmsg" {
         return Some(super::kmsg::open_proc(flags, host_flags));
     }
@@ -2127,6 +2138,10 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     st.st_mtime = now;
     st.st_ctime = now;
     match node(&canon) {
+        Some(Node::File(_)) if canon == super::memfd::NOEXEC_SYSCTL => {
+            st.st_mode = libc::S_IFREG | 0o644;
+            st.st_nlink = 1;
+        }
         Some(Node::File(_)) if conf6.is_some() => {
             st.st_mode = libc::S_IFREG as u16 | conf6.unwrap() as u16;
             st.st_nlink = 1;

@@ -546,7 +546,10 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     {
         return -(EINVAL as i64);
     }
-    let scope = noexec_scope();
+    let scope = match noexec_scope() {
+        Ok(scope) => scope,
+        Err(error) => return -(error as i64),
+    };
     let flags = match noexec_flags(flags, scope) {
         Ok(flags) => flags,
         Err(error) => {
@@ -640,14 +643,64 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     fd as i64
 }
 
-/// `vm.memfd_noexec` (`MEMFD_NOEXEC_SCOPE_*`): 0 when unset or not a
-/// number, as the sysctl starts.
-fn noexec_scope() -> u32 {
-    let (host, _) = crate::vfs::lookup("/proc/sys/vm/memfd_noexec");
-    std::fs::read_to_string(host)
+pub const NOEXEC_SYSCTL: &str = "/proc/sys/vm/memfd_noexec";
+
+/// `vm.memfd_noexec` starts at zero. Its recorded value is shared by all
+/// processes of the runtime, including children and exec successors.
+pub fn noexec_scope() -> Result<u32, errno::Errno> {
+    let _guard = state_lock().map_err(|error| -error as i32)?;
+    read_noexec_scope()
+}
+
+fn read_noexec_scope() -> Result<u32, errno::Errno> {
+    let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);
+    if area != crate::vfs::Area::Kernfs {
+        return Ok(0);
+    }
+    match std::fs::read(host) {
+        Ok(bytes) => parse_noexec(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(errno::from_darwin(
+            error.raw_os_error().unwrap_or(libc::EIO),
+        )),
+    }
+}
+
+fn parse_noexec(bytes: &[u8]) -> Result<u32, errno::Errno> {
+    let text = std::str::from_utf8(bytes).map_err(|_| EINVAL)?;
+    text.trim()
+        .parse::<u32>()
         .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0)
+        .filter(|&n| n <= 2)
+        .ok_or(EINVAL)
+}
+
+pub fn open_noexec(write: bool, cloexec: bool) -> i64 {
+    let id = super::cred::current();
+    if write && id.uid[super::attrs::FS] != 0 && id.cap_eff & (1 << 1) == 0 {
+        return -(errno::EACCES as i64);
+    }
+    let scope = match noexec_scope() {
+        Ok(scope) => scope,
+        Err(error) => return -(error as i64),
+    };
+    if !write {
+        return super::procfs::content_fd(format!("{scope}\n").as_bytes(), cloexec);
+    }
+    super::knob::open(format!("{scope}\n").as_bytes(), cloexec, |bytes| {
+        let value = parse_noexec(bytes)?;
+        let _guard = state_lock().map_err(|error| -error as i32)?;
+        let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);
+        if area != crate::vfs::Area::Kernfs {
+            return Err(errno::EACCES);
+        }
+        let store = || -> std::io::Result<()> {
+            std::fs::create_dir_all(host.parent().unwrap())?;
+            std::fs::write(&host, format!("{value}\n"))
+        };
+        store().map_err(|e| errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+        Ok(Some(format!("{value}\n").into_bytes()))
+    })
 }
 
 /// `check_sysctl_memfd_noexec`: a memfd asked for with neither MFD_EXEC
