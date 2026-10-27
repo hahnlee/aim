@@ -3,13 +3,15 @@
 //!
 //! Status, level and times come from the power-source API
 //! (`IOPSCopyPowerSourcesInfo`), the same source as the menu bar battery.
-//! Charge in mAh, cycle count and (where macOS still publishes it)
-//! temperature come from the `AppleSmartBattery` registry entry; without
-//! it, the temperature is the gauge's HID sensor, as the thermal HAL's.
+//! Charge in mAh and cycle count come from `AppleSmartBattery`; temperature
+//! is the gauge's shared HID reading, as the thermal service's. Charging
+//! limits come from `IOPSCopyExternalPowerAdapterDetails`.
 
 use std::ffi::{CStr, c_char, c_void};
 
-use aim_hostcall::health::{Battery, FN_BATTERY, VERSION, condition, status};
+use aim_hostcall::health::{
+    Battery, ChargingLimits, FN_BATTERY, FN_CHARGING_LIMITS, VERSION, condition, status,
+};
 use aim_hostcall::{HostModule, args_mut, errno, module};
 
 pub static MODULE: HostModule = HostModule {
@@ -26,6 +28,16 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
             match unsafe { args_mut::<Battery>(args, len) } {
                 Ok(out) => {
                     *out = battery();
+                    0
+                }
+                Err(e) => e,
+            }
+        }
+        FN_CHARGING_LIMITS => {
+            // SAFETY: the registry passes the guest's argument block.
+            match unsafe { args_mut::<ChargingLimits>(args, len) } {
+                Ok(out) => {
+                    *out = charging_limits();
                     0
                 }
                 Err(e) => e,
@@ -59,6 +71,7 @@ aim_hostcall::dylib! {
         fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
         fn IOPSCopyPowerSourcesList(blob: CFTypeRef) -> CFTypeRef;
         fn IOPSGetPowerSourceDescription(blob: CFTypeRef, ps: CFTypeRef) -> CFTypeRef;
+        fn IOPSCopyExternalPowerAdapterDetails() -> CFTypeRef;
         fn IOServiceMatching(name: *const c_char) -> CFTypeRef;
         fn IOServiceGetMatchingService(main_port: u32, matching: CFTypeRef) -> u32;
         fn IORegistryEntryCreateCFProperty(
@@ -179,7 +192,47 @@ pub fn battery() -> Battery {
         return no_battery();
     }
     from_smart_battery(&mut b);
+    if let Some(t) = temperature_tenths(aim_host_sensors::read_thermal().battery_celsius) {
+        b.temperature_tenths_celsius = t;
+    }
     b
+}
+
+fn charging_limits() -> ChargingLimits {
+    // SAFETY: the returned dictionary is owned and outlives its borrowed values.
+    let Some(details) = Owned::new(unsafe { IOPSCopyExternalPowerAdapterDetails() }) else {
+        return ChargingLimits::default();
+    };
+    let d = Description(details.0);
+    adapter_limits(
+        number(d.get(c"Current")),
+        number(d.get(c"Voltage")),
+        number(d.get(c"Watts")),
+    )
+}
+
+fn adapter_limits(
+    current_ma: Option<i64>,
+    voltage_mv: Option<i64>,
+    watts: Option<i64>,
+) -> ChargingLimits {
+    let positive = |v: Option<i64>| v.filter(|&v| v > 0).map(i128::from);
+    let (current, voltage, watts) = (positive(current_ma), positive(voltage_mv), positive(watts));
+    // IOPSKeys.h: Current is mA, Watts is W; IOPSKeysPrivate.h: Voltage is mV.
+    let micro = |v: Option<i128>| v.and_then(|v| i32::try_from(v).ok()).unwrap_or(0);
+    // Leave missing limits at 0: the HAL's unknown value.
+    ChargingLimits {
+        current_microamps: micro(
+            current
+                .map(|v| v * 1000)
+                .or_else(|| watts.zip(voltage).map(|(w, mv)| w * 1_000_000_000 / mv)),
+        ),
+        voltage_microvolts: micro(
+            voltage
+                .map(|v| v * 1000)
+                .or_else(|| watts.zip(current).map(|(w, ma)| w * 1_000_000_000 / ma)),
+        ),
+    }
 }
 
 fn from_power_source(d: &Description, b: &mut Battery) {
@@ -267,11 +320,6 @@ fn from_smart_battery(b: &mut Battery) {
         if let Some(c) = capacity(c"DesignCapacity", c"DesignCapacity") {
             b.full_charge_design_uah = c;
         }
-        if let Some(t) = temperature_tenths(top(c"Temperature"), || {
-            aim_host_sensors::read_thermal().battery_celsius
-        }) {
-            b.temperature_tenths_celsius = t;
-        }
         if let Some(c) = top(c"CycleCount") {
             b.cycle_count = c as i32;
         }
@@ -289,18 +337,9 @@ fn from_smart_battery(b: &mut Battery) {
     }
 }
 
-/// The battery's temperature in tenths of a degree: the smart battery's
-/// `Temperature` (hundredths of a degree), else the gauge's HID sensor the
-/// thermal HAL reads (`aim_host_sensors`), so the two agree; none if
-/// neither reads.
-fn temperature_tenths(
-    smart_hundredths: Option<i64>,
-    gauge_celsius: impl FnOnce() -> f32,
-) -> Option<i32> {
-    smart_hundredths.map(|t| (t / 10) as i32).or_else(|| {
-        let celsius = gauge_celsius();
-        celsius.is_finite().then(|| (celsius * 10.0).round() as i32)
-    })
+/// The shared thermal reading, rounded to the health HAL's tenths of °C.
+fn temperature_tenths(celsius: f32) -> Option<i32> {
+    celsius.is_finite().then(|| (celsius * 10.0).round() as i32)
 }
 
 #[cfg(test)]
@@ -337,11 +376,42 @@ mod tests {
     }
 
     #[test]
-    fn temperature_is_the_smart_batterys_else_the_gauges() {
-        let unread = || -> f32 { panic!("the gauge is read only without Temperature") };
-        assert_eq!(temperature_tenths(Some(3075), unread), Some(307));
-        assert_eq!(temperature_tenths(None, || 33.75), Some(338));
-        assert_eq!(temperature_tenths(None, || f32::NAN), None);
+    fn temperature_is_the_thermal_reading_in_tenths() {
+        for (celsius, tenths) in [(33.75, 338), (30.74, 307), (0.0, 0), (-5.25, -53)] {
+            assert_eq!(temperature_tenths(celsius), Some(tenths));
+        }
+        for unknown in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(temperature_tenths(unknown), None);
+        }
+    }
+
+    #[test]
+    fn adapter_units_and_power_relation() {
+        let expected = ChargingLimits {
+            current_microamps: 3_250_000,
+            voltage_microvolts: 20_000_000,
+        };
+        assert_eq!(adapter_limits(Some(3250), Some(20000), None), expected);
+        assert_eq!(adapter_limits(None, Some(20000), Some(65)), expected);
+        assert_eq!(adapter_limits(Some(3250), None, Some(65)), expected);
+        // Prefer reported limits when the advertised wattage is rounded.
+        assert_eq!(adapter_limits(Some(3250), Some(20000), Some(67)), expected);
+    }
+
+    #[test]
+    fn unknown_adapter_limits_stay_zero() {
+        for missing in [None, Some(0), Some(-1)] {
+            assert_eq!(
+                adapter_limits(missing, missing, Some(65)),
+                ChargingLimits::default()
+            );
+        }
+        assert_eq!(
+            adapter_limits(Some(i64::MAX), Some(i64::MAX), None),
+            ChargingLimits::default()
+        );
+        assert_eq!(adapter_limits(Some(3000), None, None).voltage_microvolts, 0);
+        assert_eq!(adapter_limits(None, Some(20000), None).current_microamps, 0);
     }
 
     #[test]
@@ -356,5 +426,17 @@ mod tests {
             assert_eq!(call(FN_BATTERY, p, 64), 0);
         }
         assert_ne!(b.status, 0);
+        let mut limits = ChargingLimits {
+            current_microamps: -1,
+            voltage_microvolts: -1,
+        };
+        let p = &mut limits as *mut ChargingLimits as u64;
+        // SAFETY: a live, correctly sized block; the bad calls never touch it.
+        unsafe {
+            assert_eq!(call(FN_CHARGING_LIMITS, p, 7), -(errno::EINVAL as i64));
+            assert_eq!(call(FN_CHARGING_LIMITS, 0, 8), -(errno::EINVAL as i64));
+            assert_eq!(call(FN_CHARGING_LIMITS, p, 8), 0);
+        }
+        assert!(limits.current_microamps >= 0 && limits.voltage_microvolts >= 0);
     }
 }

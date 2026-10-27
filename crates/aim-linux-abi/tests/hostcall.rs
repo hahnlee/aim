@@ -161,6 +161,20 @@ fn check(islands: bool) {
     assert_eq!(hostcall(code, module::HEALTH, health::FN_BATTERY, p, 64), 0);
     assert_eq!(b.present, aim_host_health::battery().present);
     assert_ne!(b.status, 0, "the host filled the block");
+    let mut limits = health::ChargingLimits {
+        current_microamps: -1,
+        voltage_microvolts: -1,
+    };
+    let p = (&mut limits as *mut health::ChargingLimits).cast();
+    assert_eq!(
+        hostcall(code, module::HEALTH, health::FN_CHARGING_LIMITS, p, 7),
+        -(errno::EINVAL as i64)
+    );
+    assert_eq!(
+        hostcall(code, module::HEALTH, health::FN_CHARGING_LIMITS, p, 8),
+        0
+    );
+    assert!(limits.current_microamps >= 0 && limits.voltage_microvolts >= 0);
 }
 
 #[test]
