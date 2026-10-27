@@ -183,6 +183,8 @@ struct State {
     tasks: HashMap<i32, TaskWindow>,
     infos: HashMap<i32, Info>,
     front: Option<i32>,
+    /// Ordered-in AIM task windows, back to front (server only).
+    order: Vec<(i32, isize)>,
     held: Option<Held>,
     generation: u64,
     /// Set while the server changes windows itself, so the delegate does
@@ -257,6 +259,7 @@ pub fn start(device: Id) -> crate::window::Window {
             tasks: HashMap::new(),
             infos: HashMap::new(),
             front: None,
+            order: Vec::new(),
             held: None,
             generation: 0,
             applying: false,
@@ -352,18 +355,20 @@ fn on_bridge_record(r: &Record) {
         // The new owner got the task as it is now, this record included.
         return;
     }
+    let relative = front_window();
     let host = with(|s| s.infos.get(&r.task).and_then(|i| i.host.clone())).flatten();
     match host {
         Some(h) => {
-            h.send_window(r);
+            h.send_window_relative(r, relative);
             if r.op == window::REMOVED {
+                window_order(r.task, 0);
                 with(|s| s.infos.remove(&r.task));
             }
             if r.op == window::FRONT {
                 release_held(None);
             }
         }
-        None => apply(r),
+        None => apply(r, relative),
     }
     publish_tasks();
 }
@@ -386,16 +391,16 @@ fn publish_tasks() {
 }
 
 /// A record the server passed on (in a window host).
-pub fn on_host_record(r: &Record) {
+pub fn on_host_record(r: &Record, relative: isize) {
     if r.op == window::DRAWN {
         return drawn();
     }
     with(|s| note(s, r));
-    apply(r);
+    apply(r, relative);
 }
 
 /// Show what `r` says in this process's windows.
-fn apply(r: &Record) {
+fn apply(r: &Record, relative: isize) {
     match r.op {
         window::TASK => task(r.task, r.bounds, r.caption),
         window::PACKAGE | window::ACTIVITY | window::TITLE => {
@@ -408,7 +413,7 @@ fn apply(r: &Record) {
                 send!(w, c"setTitle:" => (), Id = nsstring(&title));
             }
         }
-        window::FRONT => front(r.task),
+        window::FRONT => front(r.task, relative),
         window::COLORS => {
             if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
                 crate::titlebar::set(w, r.primary_color, r.background_color);
@@ -447,6 +452,7 @@ fn route(task: i32) -> bool {
     }) else {
         return false;
     };
+    window_order(task, 0);
     match old {
         Some(h) => h.send_window(&Record {
             op: window::REMOVED,
@@ -487,11 +493,14 @@ fn route(task: i32) -> bool {
                 });
             }
             if front {
-                h.send_window(&Record {
-                    op: window::FRONT,
-                    task,
-                    ..Default::default()
-                });
+                h.send_window_relative(
+                    &Record {
+                        op: window::FRONT,
+                        task,
+                        ..Default::default()
+                    },
+                    front_window(),
+                );
             }
         }
         None => {
@@ -538,6 +547,38 @@ pub fn window_numbers() -> Vec<(i32, isize)> {
         .into_iter()
         .map(|(t, w)| (t, send!(w, c"windowNumber" => isize)))
         .collect()
+}
+
+/// The frontmost ordered-in AIM window, including cooperating hosts.
+fn front_window() -> isize {
+    with(|s| s.order.last().map_or(0, |&(_, n)| n)).unwrap_or(0)
+}
+
+/// A task window was raised, or left the screen (`number == 0`).
+pub fn window_order(task: i32, number: isize) {
+    if crate::shim::is_host() {
+        crate::shim::window_number(task, number);
+        return;
+    }
+    with(|s| {
+        s.order.retain(|&(t, _)| t != task);
+        if number > 0 {
+            s.order.push((task, number));
+        }
+    });
+}
+
+/// Accept a window number only from the task's current host.
+pub fn host_window_number(host: &Arc<Host>, task: i32, number: isize) {
+    if with(|s| {
+        s.infos
+            .get(&task)
+            .and_then(|i| i.host.as_ref())
+            .is_some_and(|h| Arc::ptr_eq(h, host))
+    }) == Some(true)
+    {
+        window_order(task, number);
+    }
 }
 
 fn cg(f: Frame) -> CGRect {
@@ -716,7 +757,7 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
     // For `screencapture -l`, and for the server's stacking.
     let number = send!(w, c"windowNumber" => isize);
     eprintln!("aim-display: task {task} window {number}");
-    crate::shim::window_number(task, number);
+    window_order(task, number);
     if placed != c {
         set_bounds(task, bounds(placed, caption));
     }
@@ -917,7 +958,7 @@ fn set_bounds(task: i32, b: [i32; 4]) {
 }
 
 /// Android brought `task` to the front.
-fn front(task: i32) {
+fn front(task: i32, relative: isize) {
     let Some(w) = with(|s| {
         s.front = Some(task);
         let t = s.tasks.get(&task).filter(|t| !t.closed)?;
@@ -931,8 +972,23 @@ fn front(task: i32) {
         let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
         let key = send!(w, c"isKeyWindow" => bool);
         let minimized = send!(w, c"isMiniaturized" => bool);
-        if send!(app, c"isActive" => bool) && !key && !minimized {
-            send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
+        if !minimized {
+            if !send!(app, c"isActive" => bool) {
+                // A zero anchor would raise above other Mac apps. Only
+                // reorder against a known AIM window, at its current depth.
+                let number = send!(w, c"windowNumber" => isize);
+                if relative > 0
+                    && relative != number
+                    && send!(w, c"isVisible" => bool)
+                    && !send!(app, c"isHidden" => bool)
+                {
+                    send!(w, c"orderWindow:relativeTo:" => (), isize = 1, isize = relative);
+                    window_order(task, number);
+                }
+            } else if !key {
+                send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
+                window_order(task, send!(w, c"windowNumber" => isize));
+            }
         }
         with(|s| s.applying = false);
     }
@@ -951,6 +1007,7 @@ fn remove(task: i32) {
 
 /// Close the task's window here.
 fn close_window(task: i32) {
+    window_order(task, 0);
     let Some(Some(t)) = with(|s| {
         let t = s.tasks.remove(&task);
         s.applying = true;
@@ -1198,6 +1255,9 @@ extern "C" fn did_become_key(_: Id, _: Sel, note: Id) {
 /// Make `task` the focused one, unless it is (in the server, which alone
 /// knows which task is in front; a window host asks it).
 pub fn focus(task: i32) {
+    if let Some(Some(w)) = with(|s| s.tasks.get(&task).map(|t| t.window)) {
+        window_order(task, send!(w, c"windowNumber" => isize));
+    }
     if crate::shim::is_host() || with(|s| s.front != Some(task)) == Some(true) {
         request(window::FOCUS, task, [0; 4]);
     }
@@ -1215,14 +1275,53 @@ extern "C" fn should_close(_: Id, _: Sel, w: Id) -> bool {
     })
     .flatten();
     if let Some(task) = task {
+        window_order(task, 0);
         request(window::CLOSE, task, [0; 4]);
         update_targets(None);
     }
     true
 }
 
+/// Activation raises this application's windows together. Read only
+/// this process's AppKit windows and report their relative order.
+pub extern "C" fn did_activate(_: Id, _: Sel, _: Id) {
+    let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
+    let windows = send!(app, c"orderedWindows" => Id);
+    for i in (0..send!(windows, c"count" => usize)).rev() {
+        let w = send!(windows, c"objectAtIndex:" => Id, usize = i);
+        let task = with(|s| {
+            s.tasks
+                .iter()
+                .find(|(_, t)| t.window == w && !t.closed)
+                .map(|(&t, _)| t)
+        })
+        .flatten();
+        if let Some(task) = task
+            && send!(w, c"isVisible" => bool)
+            && !send!(w, c"isMiniaturized" => bool)
+        {
+            window_order(task, send!(w, c"windowNumber" => isize));
+        }
+    }
+}
+
+pub extern "C" fn did_hide(_: Id, _: Sel, _: Id) {
+    for (task, _) in window_numbers() {
+        window_order(task, 0);
+    }
+}
+
+extern "C" fn did_deminiaturize(_: Id, _: Sel, note: Id) {
+    if let Some((task, w)) = task_of(note) {
+        window_order(task, send!(w, c"windowNumber" => isize));
+    }
+}
+
 /// A minimized window's task goes behind the visible ones.
-extern "C" fn did_miniaturize(_: Id, _: Sel, _note: Id) {
+extern "C" fn did_miniaturize(_: Id, _: Sel, note: Id) {
+    if let Some((task, _)) = task_of(note) {
+        window_order(task, 0);
+    }
     if crate::shim::is_host() {
         crate::shim::restack();
     } else {
@@ -1232,21 +1331,10 @@ extern "C" fn did_miniaturize(_: Id, _: Sel, _note: Id) {
 
 /// Stack the tasks as the screen stacks their windows (in the server):
 /// focus the visible ones from the back to the front. The windows of all
-/// processes count, by their window numbers.
+/// cooperating hosts count, using their reported ordering.
 pub fn restack() {
-    let order = crate::window::on_screen_windows();
-    let local = window_numbers();
-    let tasks: Vec<i32> = order
-        .iter()
-        .filter_map(|&n| {
-            local
-                .iter()
-                .find(|&&(_, w)| w == n as isize)
-                .map(|&(t, _)| t)
-                .or_else(|| crate::hosts::task_of_window(n as isize))
-        })
-        .collect();
-    for &task in tasks.iter().rev() {
+    let tasks = with(|s| s.order.iter().map(|&(t, _)| t).collect::<Vec<_>>()).unwrap_or_default();
+    for task in tasks {
         request(window::FOCUS, task, [0; 4]);
     }
 }
@@ -1354,6 +1442,7 @@ fn delegate() -> Id {
                 (c"windowDidBecomeKey:", did_become_key),
                 (c"windowDidResignKey:", crate::input::resign_key),
                 (c"windowDidMiniaturize:", did_miniaturize),
+                (c"windowDidDeminiaturize:", did_deminiaturize),
                 (c"windowDidChangeOcclusionState:", did_change_occlusion),
             ],
         );
@@ -1389,6 +1478,7 @@ mod tests {
             held: None,
             generation: 0,
             applying: false,
+            order: Vec::new(),
             splash: None,
         };
         let colors = Record {

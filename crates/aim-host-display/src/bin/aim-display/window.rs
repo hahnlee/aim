@@ -33,34 +33,6 @@ unsafe extern "C" {
     fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
     fn CGColorSpaceRelease(space: *const c_void);
     static kCGColorSpaceSRGB: *const c_void;
-    fn CGWindowListCreate(option: u32, relative_to: u32) -> *const c_void;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFArrayGetCount(a: *const c_void) -> isize;
-    fn CFArrayGetValueAtIndex(a: *const c_void, i: isize) -> *const c_void;
-    fn CFRelease(r: *const c_void);
-}
-
-/// `kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements`.
-const ON_SCREEN: u32 = (1 << 0) | (1 << 4);
-
-/// The numbers of the windows on screen, of every process, front to back.
-pub fn on_screen_windows() -> Vec<u32> {
-    // SAFETY: an array of CGWindowIDs (stored as the values themselves),
-    // released here.
-    unsafe {
-        let list = CGWindowListCreate(ON_SCREEN, 0);
-        if list.is_null() {
-            return Vec::new();
-        }
-        let ids = (0..CFArrayGetCount(list))
-            .map(|i| CFArrayGetValueAtIndex(list, i) as usize as u32)
-            .collect();
-        CFRelease(list);
-        ids
-    }
 }
 
 pub const NS_WINDOW_STYLE: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturizable, resizable
@@ -127,6 +99,18 @@ fn app_delegate() -> Id {
             crate::input::will_terminate as *const c_void,
             c"v@:@".as_ptr(),
         );
+        for (name, handler) in [
+            (
+                c"applicationDidBecomeActive:",
+                crate::windows::did_activate as *const c_void,
+            ),
+            (
+                c"applicationDidHide:",
+                crate::windows::did_hide as *const c_void,
+            ),
+        ] {
+            class_addMethod(cls, sel(name), handler, c"v@:@".as_ptr());
+        }
         objc_registerClassPair(cls);
         cls
     };

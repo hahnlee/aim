@@ -94,11 +94,13 @@ pub mod host {
     /// (`CLOCK_MONOTONIC` ns).
     pub const SAMPLED: u32 = 5;
     /// Either way: a task record (`window`), to the host as the bridge
-    /// sends it, from the host as a request for the bridge.
+    /// sends it, from the host as a request for the bridge. For a server
+    /// FRONT, `id` is the frontmost AIM window number (0: none known).
     pub const WINDOW: u32 = 6;
     /// Host: an input event (`input`).
     pub const INPUT: u32 = 7;
-    /// Host: task `flag`'s window has number `id`.
+    /// Host: task `flag`'s window was raised with number `id`, or left
+    /// the screen (`id` = 0).
     pub const NUMBER: u32 = 8;
     /// Host: it minimized a window; stack the tasks as the screen does.
     pub const RESTACK: u32 = 9;
