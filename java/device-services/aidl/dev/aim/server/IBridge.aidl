@@ -69,4 +69,10 @@ interface IBridge {
     int[] getPermissionGidsForUid(int uid);
 
     IPackageDiagnosticInputs getPackageDiagnosticInputs();
+
+    /** VibrationSettings' internal owners, until they move native. */
+    boolean shouldIgnoreVibration(int uid, int deviceId, in android.os.VibrationAttributes attrs);
+
+    /** HapticFeedbackVibrationProvider: null when no effect is configured. */
+    int[] getHapticFeedbackAttributes(int constant, int inputSource, int flags, int privFlags);
 }

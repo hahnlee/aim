@@ -182,6 +182,7 @@ derived image's `services.jar` does not start `ClipboardService`,
 the native services with servicemanager when `servicemanager.ready` is
 set; `service check clipboard` finds it. The vibrator control service
 (`IVibratorControlService/default`) is no longer declared or published.
+Policy-permitted no-motor vibrations start and finish OP_VIBRATE; focused host tests pass without a guest boot (#479).
 Boots with it reach `sys.boot_completed` as before (four boots of a
 reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the

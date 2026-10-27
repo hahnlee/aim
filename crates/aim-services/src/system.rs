@@ -242,6 +242,7 @@ const ALLOW_ISOLATED: &[&str] = &["activity", "display", "webviewupdate"];
 
 pub struct System {
     diagnostic_self: Weak<Self>,
+    native_app_host: std::sync::OnceLock<Weak<crate::app_host::AppHost>>,
     native_permissions:
         std::sync::OnceLock<Weak<crate::app_host::permission_manager::PermissionManager>>,
     process: Arc<LocalProcess>,
@@ -588,6 +589,88 @@ struct Listeners {
 type Result<T> = std::result::Result<T, Exception>;
 
 impl System {
+    pub(crate) fn set_native_app_host(&self, host: &Arc<crate::app_host::AppHost>) {
+        let retained = self.native_app_host.get_or_init(|| Arc::downgrade(host));
+        assert!(
+            retained.ptr_eq(&Arc::downgrade(host)),
+            "native app host replaced"
+        );
+    }
+
+    pub(crate) fn vibration_ignored(
+        &self,
+        uid: i32,
+        device_id: i32,
+        attrs: &crate::vibrator::VibrationAttributes,
+    ) -> Result<bool> {
+        if let Some(host) = self.native_app_host.get().and_then(Weak::upgrade) {
+            return host.vibration_ignored(uid, device_id, attrs);
+        }
+        let source = self.nonces.lock().unwrap().clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "vibrator: no policy owner",
+            )
+        })?;
+        let mut p = Parcel::new();
+        bridge::ShouldIgnoreVibration {
+            uid,
+            device_id,
+            attrs: Some(*attrs),
+        }
+        .write(&mut p);
+        let reply = source
+            .bridge
+            .transact(bridge::SHOULD_IGNORE_VIBRATION, &p, false)
+            .map_err(|s| unreachable_service("vibration policy", s))?;
+        bridge::read_should_ignore_vibration_reply(&mut reply.reader())
+            .map_err(|s| unreachable_service("vibration policy", s))?
+    }
+
+    pub(crate) fn haptic_attributes(
+        &self,
+        constant: i32,
+        input_source: i32,
+        flags: i32,
+        priv_flags: i32,
+    ) -> Result<Option<crate::vibrator::VibrationAttributes>> {
+        if let Some(host) = self.native_app_host.get().and_then(Weak::upgrade) {
+            return host.haptic_attributes(constant, input_source, flags, priv_flags);
+        }
+        let source = self.nonces.lock().unwrap().clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "vibrator: no policy owner",
+            )
+        })?;
+        let mut p = Parcel::new();
+        bridge::GetHapticFeedbackAttributes {
+            constant,
+            input_source,
+            flags,
+            priv_flags,
+        }
+        .write(&mut p);
+        let reply = source
+            .bridge
+            .transact(bridge::GET_HAPTIC_FEEDBACK_ATTRIBUTES, &p, false)
+            .map_err(|s| unreachable_service("haptic policy", s))?;
+        bridge::read_get_haptic_feedback_attributes_reply(&mut reply.reader())
+            .map_err(|s| unreachable_service("haptic policy", s))?
+            .and_then(|a| match a {
+                None => Ok(None),
+                Some(a) if a.len() == 3 => Ok(Some(crate::vibrator::VibrationAttributes {
+                    usage: a[0],
+                    audio_usage: a[1],
+                    flags: a[2],
+                })),
+                _ => Err(unreachable_service(
+                    "haptic policy",
+                    aim_binder_host::parcel::BAD_VALUE,
+                )),
+            })
+    }
+
     pub(crate) fn set_native_permissions(
         &self,
         owner: &Arc<crate::app_host::permission_manager::PermissionManager>,
@@ -640,6 +723,7 @@ impl System {
             Self {
                 diagnostic_self: this.clone(),
                 native_permissions: std::sync::OnceLock::new(),
+                native_app_host: std::sync::OnceLock::new(),
                 process: process.clone(),
                 services: Mutex::new(HashMap::new()),
                 listeners,
@@ -7010,8 +7094,8 @@ impl ReadParcelable for ParcelFileDescriptor {
 }
 
 /// `SyncNotedAppOp`'s mode and the attribution tag it was noted under.
-struct NotedOp {
-    mode: i32,
+pub(crate) struct NotedOp {
+    pub(crate) mode: i32,
     attribution_tag: Option<String>,
 }
 
