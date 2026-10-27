@@ -8272,6 +8272,7 @@ CtsMediaProjection* wait for SystemUI's dialog (#632).
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
 Input device lifetimes now emit kernel add/remove uevents for `inputN` and `eventN`, and `inputN/uevent` reports the live identity and capability bitmaps.
+Evdev capability and axis queries reuse one control connection per open file while reading current device state.
 
 A window-mode boot of the derived image with the mouse device
 ([input.md](input.md)); the input went through the server's path for a

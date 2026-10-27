@@ -21,6 +21,8 @@
 //!   ([`OP_MASK`]), the keymap ([`OP_KEYCODE`]) and flushing a client's
 //!   queue ([`OP_FLUSH`]). The server answers one `i32` (0 or a negative
 //!   Linux errno), and some a record after it.
+//!   `OP_DESCRIBE` instead answers a descriptor alone and accepts further
+//!   `OP_DESCRIBE` hellos on the same connection until the device goes away.
 //!
 //! The server ([`server`]) applies the input core's rules: events a device
 //! does not declare and values that do not change are dropped, and an empty
@@ -42,13 +44,14 @@ use codes::*;
 
 /// Sent in every [`Hello`]; the server closes a connection of another
 /// version.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Open the device: the server answers with a [`Descriptor`].
 pub const OP_OPEN: u32 = 1;
 /// `client` = the open client's id, `arg` = 1 to grab, 0 to release.
 pub const OP_GRAB: u32 = 2;
-/// The [`Descriptor`] as the device is now, its state the device's.
+/// The [`Descriptor`] as the device is now, its state the device's. May be
+/// repeated on the same connection; disconnect ends the session.
 pub const OP_DESCRIBE: u32 = 3;
 /// `EVIOCSABS`: `arg` = the axis, an [`AbsInfo`] follows.
 pub const OP_SET_ABS: u32 = 4;
