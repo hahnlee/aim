@@ -80,6 +80,47 @@ static void madvise_dontneed(void) {
   CHECK(madvise(a + 1, PG, MADV_DONTNEED) == -1 && errno == EINVAL);
 }
 
+static void madvise_dontneed_ranges(void) {
+  // Large anonymous gaps must stay demand-zero after repeated partial discards,
+  // including a read-only piece. The unadvised boundary pages stay intact.
+  const size_t len = 1026 * PG;
+  unsigned char* a = (unsigned char*)anon(len, PROT_READ | PROT_WRITE, MAP_PRIVATE);
+  CHECK(a != MAP_FAILED);
+  memset(a, 7, len);
+  CHECK(mprotect(a + 512 * PG, PG, PROT_READ) == 0);
+  for (int round = 0; round < 3; round++) {
+    CHECK(madvise(a + PG, 1024 * PG - 1, MADV_DONTNEED) == 0);
+    CHECK(a[0] == 7 && a[PG - 1] == 7 && a[1025 * PG] == 7 && a[len - 1] == 7);
+    for (size_t i = PG; i < 1025 * PG; i++) CHECK(a[i] == 0);
+    a[PG] = 9;
+    a[1025 * PG - 1] = 9;
+  }
+  CHECK(munmap(a, len) == 0);
+
+  // A nonzero file offset must refault current file bytes, leaving adjacent
+  // private dirt intact and shared dirt visible through both shared views.
+  const char* path = "/data/local/tmp/t_mem_dontneed";
+  int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+  CHECK(fd >= 0 && ftruncate(fd, 4 * PG) == 0);
+  unsigned char* s = mmap(NULL, 4 * PG, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHECK(s != MAP_FAILED);
+  memset(s, 11, 4 * PG);
+  unsigned char* p = mmap(NULL, 3 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, PG);
+  unsigned char* q = mmap(NULL, 4 * PG, PROT_READ, MAP_SHARED, fd, 0);
+  CHECK(p != MAP_FAILED && q != MAP_FAILED);
+  memset(p, 22, 3 * PG);
+  memset(s + 2 * PG, 33, PG);
+  CHECK(mprotect(p + PG, PG, PROT_READ) == 0);
+  CHECK(madvise(p + PG, PG - 1, MADV_DONTNEED) == 0);
+  for (size_t i = 0; i < 3 * PG; i++)
+    CHECK(p[i] == (i >= PG && i < 2 * PG ? 33 : 22));
+  CHECK(madvise(s, 4 * PG, MADV_DONTNEED) == 0);
+  for (size_t i = 0; i < 4 * PG; i++)
+    CHECK(s[i] == q[i] && q[i] == (i >= 2 * PG && i < 3 * PG ? 33 : 11));
+  CHECK(munmap(p, 3 * PG) == 0 && munmap(s, 4 * PG) == 0 && munmap(q, 4 * PG) == 0);
+  CHECK(close(fd) == 0 && unlink(path) == 0);
+}
+
 static void mincore_msync_mlock(void) {
   char* a = anon(2 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE);
   a[0] = 1;
@@ -241,6 +282,7 @@ static void jit_dual_mapping(void) {
 int main(void) {
   RUN(mremap_moves);
   RUN(madvise_dontneed);
+  RUN(madvise_dontneed_ranges);
   RUN(mincore_msync_mlock);
   RUN(membarrier_and_vm_readv);
   RUN(private_file_mappings);

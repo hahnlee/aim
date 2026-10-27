@@ -83,6 +83,37 @@ pub fn find(addr: u64) -> Option<(Copy, u64)> {
     (addr < c.end).then(|| (c.clone(), c.offset + (addr - s)))
 }
 
+/// Copies overlapping `[lo, hi)`, clipped to it with adjusted file offsets.
+/// Anonymous gaps require no per-page lookup or lock acquisition.
+pub fn in_range(lo: u64, hi: u64) -> Vec<(u64, Copy)> {
+    pieces(&COPIES.lock().unwrap(), lo, hi)
+}
+
+fn pieces(m: &BTreeMap<u64, Copy>, lo: u64, hi: u64) -> Vec<(u64, Copy)> {
+    let mut out = Vec::new();
+    if lo >= hi {
+        return out;
+    }
+    // Entries never overlap: walking back from hi stops at the first gap
+    // below lo, with only one tree search even for a wholly anonymous range.
+    for (&start, c) in m.range(..hi).rev() {
+        if c.end <= lo {
+            break;
+        }
+        let at = start.max(lo);
+        out.push((
+            at,
+            Copy {
+                end: c.end.min(hi),
+                offset: c.offset + (at - start),
+                ..c.clone()
+            },
+        ));
+    }
+    out.reverse();
+    out
+}
+
 /// mremap moved `[old, old+len)` to `new`.
 pub fn moved(old: u64, new: u64, len: u64) {
     let parts: Vec<(u64, Copy)> = {
@@ -138,4 +169,49 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         )
     });
     COPIES.lock().unwrap().extend(v);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn copy(end: u64, offset: u64) -> Copy {
+        Copy {
+            end,
+            offset,
+            guest: "/file".into(),
+            host: "file".into(),
+            dev: 1,
+            ino: 2,
+        }
+    }
+
+    #[test]
+    fn range_clips_both_ends_and_skips_anonymous_gaps() {
+        let m = BTreeMap::from([
+            (10, copy(30, 100)),
+            (40, copy(50, 200)),
+            (50, copy(80, 300)),
+            (90, copy(100, 400)),
+        ]);
+        let got: Vec<_> = pieces(&m, 20, 60)
+            .iter()
+            .map(|(s, c)| (*s, c.end, c.offset))
+            .collect();
+        assert_eq!(got, [(20, 30, 110), (40, 50, 200), (50, 60, 300)]);
+        assert_eq!(m[&10].offset, 100);
+        assert_eq!(m[&50].end, 80);
+    }
+
+    #[test]
+    fn range_excludes_touching_endpoints_and_empty_ranges() {
+        let m = BTreeMap::from([(10, copy(20, 100)), (30, copy(40, 200))]);
+        for (lo, hi) in [(0, 10), (20, 30), (40, u64::MAX), (15, 15), (30, 20)] {
+            assert!(pieces(&m, lo, hi).is_empty(), "{lo}..{hi}");
+        }
+        let got = pieces(&m, 10, 20);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0, got[0].1.end, got[0].1.offset), (10, 20, 100));
+        assert!(pieces(&BTreeMap::new(), 0, u64::MAX).is_empty());
+    }
 }

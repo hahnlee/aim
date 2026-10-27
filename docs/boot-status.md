@@ -7399,6 +7399,8 @@ Pro, host load 7-16, a reused data image, boot to 4 minutes after
 | membarrier, ashmem PIN | 0.5 s, 0.4 s | 140 µs, 16 µs | #503, #504 |
 | fork (zygote's clone) | 0.5 s | 10 ms | #421 |
 
+MADV_DONTNEED now skips anonymous gaps in the private-file copy registry by range, retaining fresh remaps for zero-fill and page release (#502; host and NDK tests, no new boot measurement).
+
 A binder read reserves placeholder fds for the files a transaction may
 carry. They were opens of `/dev/null`, and installing a file over one
 closed a vnode: about 40 µs of kernel time per file received. They are

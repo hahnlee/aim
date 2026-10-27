@@ -1313,6 +1313,8 @@ pub(super) fn allocate(len: u64) -> Result<u64, i64> {
 /// or the file's contents (file-backed); Darwin's does not guarantee it.
 /// Replace each private, non-executable piece with fresh memory of the
 /// same protection. Shared mappings keep their contents, as on Linux.
+/// MADV_ZERO keeps pages resident; MADV_FREE does not guarantee zeros.
+/// The remap provides both zero-fill-on-demand and immediate page release.
 fn discard_private(addr: u64, len: u64) -> i64 {
     for r in vmmap::regions(addr, addr + len) {
         let prot = r.prot as i32 & (libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
@@ -1367,20 +1369,15 @@ fn discard_private(addr: u64, len: u64) -> i64 {
 
 /// Reload the file contents of copied pages in fresh `[lo, lo+n)`.
 fn refill_copy(lo: u64, n: u64, prot: i32) -> Result<(), i64> {
-    let mut cur = lo;
-    while cur < lo + n {
-        let Some((copy, offset)) = copies::find(cur) else {
-            cur += PAGE;
-            continue;
-        };
-        let end = copy.end.min(lo + n);
+    for (cur, copy) in copies::in_range(lo, lo + n) {
+        let end = copy.end;
         let path = std::ffi::CString::new(copy.host.as_os_str().as_bytes())
             .map_err(|_| -(errno::EINVAL as i64))?;
         let source = super::verified_source::VerifiedSource::open(&path, false)
             .map_err(|error| -(error as i64))?;
         let mut bytes = vec![0; (end - cur) as usize];
         source
-            .read_exact_at(&mut bytes, offset)
+            .read_exact_at(&mut bytes, copy.offset)
             .map_err(|error| -(error as i64))?;
         if prot & libc::PROT_WRITE == 0
             && host_mprotect(cur, end - cur, prot | libc::PROT_WRITE) < 0
@@ -1393,7 +1390,6 @@ fn refill_copy(lo: u64, n: u64, prot: i32) -> Result<(), i64> {
         if prot & libc::PROT_WRITE == 0 && host_mprotect(cur, end - cur, prot) < 0 {
             return Err(-(errno::last() as i64));
         }
-        cur = end;
     }
     Ok(())
 }
@@ -2104,4 +2100,67 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let heap = brk_heap();
     vm_account::with(|s| s.set_heap(heap));
     super::vma_names::fork_restore(r);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discard_restores_clipped_copies_and_releases_anonymous_gaps() {
+        let path = std::env::temp_dir().join(format!("aim-discard-{}", std::process::id()));
+        let bytes: Vec<u8> = (0..8 * PAGE).map(|i| (i / PAGE + 1) as u8).collect();
+        std::fs::write(&path, bytes).unwrap();
+        let rw = libc::PROT_READ | libc::PROT_WRITE;
+        let base = host_mmap(0, 10 * PAGE, rw, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0).unwrap();
+        struct Mapping(u64, std::path::PathBuf);
+        impl Drop for Mapping {
+            fn drop(&mut self) {
+                copies::forget(self.0, self.0 + 10 * PAGE);
+                unsafe { libc::munmap(self.0 as *mut _, (10 * PAGE) as usize) };
+                std::fs::remove_file(&self.1).unwrap();
+            }
+        }
+        let _mapping = Mapping(base, path.clone());
+        // A host anonymous region can contain file copies separated by anonymous
+        // gaps. Clip the first and last copy and preserve the surrounding bytes.
+        copies::note(base + PAGE, 2 * PAGE, &path, "/file", 2 * PAGE);
+        copies::note(base + 5 * PAGE, 2 * PAGE, &path, "/file", 5 * PAGE);
+        copies::note(base + 7 * PAGE, 2 * PAGE, &path, "/file", 0);
+        unsafe { std::ptr::write_bytes(base as *mut u8, 127, (10 * PAGE) as usize) };
+        let lo = base + 2 * PAGE;
+        assert_eq!(host_mprotect(lo, 6 * PAGE, libc::PROT_READ), 0);
+        assert_eq!(discard_private(lo, 6 * PAGE), 0);
+        let mut resident = [0u8; 6];
+        assert_eq!(
+            unsafe {
+                libc::mincore(
+                    lo as *mut _,
+                    (6 * PAGE) as usize,
+                    resident.as_mut_ptr().cast(),
+                )
+            },
+            0
+        );
+        // Discard releases the anonymous pages; merely zeroing them is not enough.
+        assert_eq!((resident[1] & 1, resident[2] & 1), (0, 0));
+        let memory = unsafe { std::slice::from_raw_parts(base as *const u8, (10 * PAGE) as usize) };
+        for (page, expected) in [127, 127, 4, 0, 0, 6, 7, 1, 127, 127]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                memory[page * PAGE as usize..(page + 1) * PAGE as usize]
+                    .iter()
+                    .all(|&b| b == expected),
+                "page {page}"
+            );
+        }
+        for page in 2..8 {
+            assert_eq!(
+                vmmap::info_at(base + page * PAGE).unwrap().prot,
+                libc::PROT_READ as u32
+            );
+        }
+    }
 }
