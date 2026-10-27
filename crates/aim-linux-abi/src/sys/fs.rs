@@ -832,6 +832,15 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
         }
         return Some(description.rw(pin.descriptor(), &one(buf, len), Some(pos), write));
     }
+    if let Some(Kind::ProcMem(open)) = pin.kind() {
+        return Some(super::proc_mem::rw(
+            actual,
+            *open,
+            &one(buf, len),
+            Some(pos as u64),
+            write,
+        ));
+    }
     let pos = match write.then(|| append_end(actual)).flatten() {
         Some(Ok(end)) => end,
         Some(Err(error)) => return Some(error),
@@ -882,6 +891,7 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
             None,
             false,
         )),
+        Kind::ProcMem(open) => Some(super::proc_mem::rw(fd, open, iov, None, false)),
         Kind::Pty(description) => Some(description.rw(iov, false)),
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, false)),
@@ -936,6 +946,7 @@ fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64>
             None,
             true,
         )),
+        Kind::ProcMem(open) => Some(super::proc_mem::rw(fd, open, iov, None, true)),
         Kind::Pty(description) => Some(description.rw(iov, true)),
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, true)),
@@ -986,6 +997,13 @@ fn special_pio_kernel(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> O
             unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) },
             &one(buf, len),
             Some(pos),
+            write,
+        )),
+        Kind::ProcMem(open) => Some(super::proc_mem::rw(
+            fd,
+            open,
+            &one(buf, len),
+            Some(pos as u64),
             write,
         )),
         Kind::Path(_) => Some(-(EBADF as i64)),
@@ -1098,7 +1116,12 @@ fn prepare_iov(pin: &fdtab::Pinned, iov: &[libc::iovec], write: bool) -> Result<
     if !write && matches!(pin.kind(), Some(Kind::Dir(_))) {
         return Err(EISDIR as errno::Errno);
     }
-    if let Some(Kind::Regular(description)) = pin.kind() {
+    if let Some(Kind::ProcMem(open)) = pin.kind() {
+        let mode = open.mode;
+        if mode == 3 || write && mode == 0 || !write && mode == 1 {
+            return Err(EBADF);
+        }
+    } else if let Some(Kind::Regular(description)) = pin.kind() {
         let mode = description.flags & 3;
         if mode == 3 || write && mode == 0 || !write && mode == 1 {
             return Err(EBADF);
@@ -1413,6 +1436,9 @@ pub fn lseek(a: [u64; 6]) -> i64 {
         };
         return description.seek(pin.descriptor(), a[1] as i64, whence);
     }
+    if let Some(Kind::ProcMem(_)) = pin.kind() {
+        return super::proc_mem::seek(pin.descriptor().as_raw_fd(), a[1] as i64, a[2] as i32);
+    }
     if let Some(Kind::Cgroup(open)) = pin.kind() {
         return super::cgroup::lseek(&open, a[1] as i64, a[2] as i32);
     }
@@ -1538,6 +1564,9 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     stat_fd_kernel(pin.descriptor().as_raw_fd())
 }
 pub(super) fn stat_fd_kernel(fd: i32) -> Result<libc::stat, i64> {
+    if let Some(Kind::ProcMem(open)) = fdtab::get(fd) {
+        return Ok(open.stat());
+    }
     if let Some(stat) = super::fuse_device::stat(fd) {
         return Ok(stat);
     }
@@ -2473,6 +2502,9 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                     let mut flags = open_flags_from_host(r);
                     if let Some(Kind::Regular(description)) = fdtab::get(fd) {
                         flags = (flags & !O_ACCMODE) | (description.flags & O_ACCMODE);
+                    }
+                    if let Some(Kind::ProcMem(open)) = fdtab::get(fd) {
+                        flags = (flags & !O_ACCMODE) | open.mode as u64;
                     }
                     flags as i64
                 }

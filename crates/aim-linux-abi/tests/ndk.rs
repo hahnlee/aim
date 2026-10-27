@@ -382,6 +382,11 @@ fn ptrace() {
 }
 
 #[test]
+fn proc_mem() {
+    check("t_proc_mem", &[]);
+}
+
+#[test]
 fn posix_timers() {
     check("t_timer", &[]);
 }

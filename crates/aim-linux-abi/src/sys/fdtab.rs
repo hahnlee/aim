@@ -46,6 +46,7 @@ pub enum Kind {
     /// A synthesized kernel file: an unlinked file holding its contents
     /// (`procfs::content_fd`).
     Content,
+    ProcMem(super::proc_mem::Open),
     /// A kernel file whose writes act (`knob`); also a content file.
     Knob(Arc<knob::Knob>),
     /// An open evdev device (`/dev/input/eventN`).
@@ -1168,6 +1169,10 @@ pub(super) fn adopt_untyped(fd: i32) {
     if super::fuse_client::adopt(fd) == Ok(true) {
         return;
     }
+    super::proc_mem::adopt(fd);
+    if super::proc_mem::is_mem(fd) {
+        return;
+    }
     net::adopt(fd);
     memfd::adopt(fd);
     super::ashmem::adopt(fd);
@@ -1236,6 +1241,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Memfd(_)
             | Kind::Path(_)
             | Kind::Content
+            | Kind::ProcMem(_)
             | Kind::Knob(_)
             | Kind::Random
             | Kind::Ashmem
@@ -1624,6 +1630,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             | Kind::Random
             | Kind::Ashmem
             | Kind::ProxyFile
+            | Kind::ProcMem(_)
             | Kind::Path(_) => std::ptr::null(),
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => continue,
         };
@@ -1702,6 +1709,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Random => w.u32(8),
             Kind::Ashmem => w.u32(13),
             Kind::ProxyFile => w.u32(9),
+            Kind::ProcMem(_) => w.u32(16),
             Kind::Path(path) => {
                 w.u32(10);
                 w.u64(path.flags);
@@ -1745,6 +1753,13 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             8 => Kind::Random,
             13 => Kind::Ashmem,
             9 => Kind::ProxyFile,
+            16 => match super::proc_mem::Open::load(fd) {
+                Ok(open) => Kind::ProcMem(open),
+                Err(_) => {
+                    r.invalidate();
+                    return (fd, None);
+                }
+            },
             14 => Kind::Kmsg(Arc::new(super::kmsg::Open::restore(r.bool()))),
             // A group removed since keeps its open files as plain ones.
             15 => match super::cgroup::restore_open(r) {

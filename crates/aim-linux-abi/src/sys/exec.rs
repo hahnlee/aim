@@ -393,6 +393,7 @@ fn in_place(
     trace_stage("in-place.reset");
     super::fdtab::adopt_plain();
     super::binder::exec_reset();
+    let mem_epoch = super::proc_mem::exec_reset();
     super::mem::exec_reset();
     crate::diag::exec_reset();
     crate::patch::exec_reset();
@@ -415,6 +416,7 @@ fn in_place(
             // The descriptor close is the successful exec commit. A waiter
             // woken by CLOEXEC must not observe the old image still resetting
             // or loading after the close.
+            drop(mem_epoch);
             trace_stage("in-place.close-on-exec");
             if let Err(error) = super::fs::close_on_exec() {
                 crate::diag!("[linux-abi] exec descriptor close: errno {error}");
