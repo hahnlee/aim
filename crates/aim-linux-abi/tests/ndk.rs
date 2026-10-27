@@ -387,6 +387,11 @@ fn posix_timers() {
 }
 
 #[test]
+fn cpu_timers() {
+    check("t_cpu_timer", &[]);
+}
+
+#[test]
 fn interval_timers() {
     check("t_itimer", &[]);
 }

@@ -124,10 +124,10 @@ impl Deadline {
     }
 }
 
-/// The clock a timer (timer_create, timerfd_create) or clock_nanosleep
-/// takes `id` to: EINVAL for an unknown clock, EOPNOTSUPP for one that
-/// cannot be slept on, EPERM for an alarm clock without CAP_WAKE_ALARM.
-/// timerfd also refuses TAI; its caller checks.
+/// The wall-clock base of a timer or sleep: EINVAL for an unknown clock,
+/// EOPNOTSUPP for clocks without a wall-clock base, EPERM for an alarm
+/// clock without CAP_WAKE_ALARM. POSIX CPU timers use TimerClock instead;
+/// timerfd also refuses TAI (its caller checks).
 pub fn timer_base(id: u64) -> Result<Base, i64> {
     let alarm = matches!(id, REALTIME_ALARM | BOOTTIME_ALARM);
     let base = match id {
@@ -220,6 +220,95 @@ fn cpu_clock(id: u64) -> Option<(i32, bool, i64)> {
     }
 }
 
+/// A CPU clock bound to its creator's target, not the host timer thread.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CpuClock(i32, bool, i64);
+
+impl CpuClock {
+    pub fn now(self) -> Result<u64, i64> {
+        if self.1 {
+            // A host worker has no guest thread; gettid's fallback there
+            // is the process leader, not the thread being sampled.
+            let (user, system) = super::thread::cpu_times(self.0).ok_or(-(EINVAL as i64))?;
+            Ok(if self.2 == CPUCLOCK_VIRT {
+                user
+            } else {
+                user + system
+            })
+        } else {
+            cpu_ns((self.0, false, self.2), false)
+        }
+    }
+
+    pub fn is_calling_thread(self) -> bool {
+        self.1 && self.0 == super::thread::gettid() as i32
+    }
+}
+
+/// Decode and validate as timer_create does: unlike clock_gettime, a
+/// process clock must name a thread-group leader. Resolve pid/tid 0 now.
+pub fn cpu_timer(id: u64) -> Result<Option<CpuClock>, i64> {
+    let Some((id, thread, which)) = cpu_clock(id) else {
+        return Ok(None);
+    };
+    cpu_ns((id, thread, which), false)?;
+    let id = if id != 0 {
+        id
+    } else if thread {
+        super::thread::gettid() as i32
+    } else {
+        std::process::id() as i32
+    };
+    Ok(Some(CpuClock(id, thread, which)))
+}
+
+/// POSIX timers can also run on a CPU clock; timerfds stay on Base.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TimerClock {
+    Wall(Base),
+    Cpu(CpuClock),
+}
+
+impl TimerClock {
+    pub fn new(id: u64) -> Result<Self, i64> {
+        match cpu_timer(id)? {
+            Some(c) => Ok(Self::Cpu(c)),
+            None => timer_base(id).map(Self::Wall),
+        }
+    }
+
+    pub fn now(self) -> Result<u64, i64> {
+        match self {
+            Self::Wall(b) => Ok(b.now()),
+            Self::Cpu(c) => c.now(),
+        }
+    }
+
+    pub fn timer(self, absolute: bool) -> Self {
+        match self {
+            Self::Wall(b) => Self::Wall(b.timer(absolute)),
+            c => c,
+        }
+    }
+
+    pub fn deadline(self, ns: u64) -> Deadline {
+        match self {
+            Self::Wall(base) => Deadline { base, ns },
+            // CPU expiries are sampled every Linux tick (CONFIG_HZ=250,
+            // 4 ms) using host task/thread usage, never elapsed wall time.
+            // The same cadence is used by CPU-clock nanosleep.
+            Self::Cpu(c) => Deadline::after(
+                Base::Monotonic,
+                if c.now().is_ok_and(|now| now >= ns) {
+                    0
+                } else {
+                    TICK_NS
+                },
+            ),
+        }
+    }
+}
+
 /// User and system time of a Mach thread, in nanoseconds.
 pub fn thread_times(port: libc::mach_port_t) -> Option<(u64, u64)> {
     // SAFETY: THREAD_EXTENDED_INFO into a local of the right size.
@@ -238,18 +327,16 @@ pub fn thread_times(port: libc::mach_port_t) -> Option<(u64, u64)> {
 
 /// User and system time of host process `pid`, in nanoseconds.
 fn process_times(pid: i32) -> Option<(u64, u64)> {
-    // SAFETY: RUSAGE_INFO_V0 into a local of the right type.
+    // SAFETY: PROC_PIDTASKINFO into a local of the right size. Its total
+    // times include live and exited threads, in Mach absolute ticks.
     unsafe {
-        let mut ri: libc::rusage_info_v0 = std::mem::zeroed();
-        let r = libc::proc_pid_rusage(
-            pid,
-            libc::RUSAGE_INFO_V0,
-            (&mut ri as *mut libc::rusage_info_v0).cast(),
-        );
-        (r == 0).then(|| {
+        let mut info: libc::proc_taskinfo = std::mem::zeroed();
+        let size = size_of::<libc::proc_taskinfo>() as i32;
+        let r = libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size);
+        (r == size).then(|| {
             (
-                ticks_to_ns(ri.ri_user_time) as u64,
-                ticks_to_ns(ri.ri_system_time) as u64,
+                ticks_to_ns(info.pti_total_user) as u64,
+                ticks_to_ns(info.pti_total_system) as u64,
             )
         })
     }

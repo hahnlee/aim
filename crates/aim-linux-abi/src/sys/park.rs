@@ -310,9 +310,23 @@ pub fn nanosleep(a: [u64; 6]) -> i64 {
     }
 }
 
-/// clock_nanosleep(clock, flags, req, rem): returns the error number itself.
+/// clock_nanosleep(clock, flags, req, rem).
 pub fn clock_nanosleep(a: [u64; 6]) -> i64 {
     let (clock, flags, req, rem) = (a[0], a[1], a[2], a[3]);
+    let cpu = match clock::cpu_timer(clock) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    if let Some(cpu) = cpu {
+        if cpu.is_calling_thread() {
+            return -(EINVAL as i64);
+        }
+        let ns = match read_timespec(req) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        return cpu_sleep(cpu, flags, ns, rem);
+    }
     let base = match clock::timer_base(clock) {
         Ok(b) => b,
         Err(e) => return e,
@@ -335,5 +349,39 @@ pub fn clock_nanosleep(a: [u64; 6]) -> i64 {
             }
             -(EINTR as i64)
         }
+    }
+}
+
+fn cpu_sleep(cpu: clock::CpuClock, flags: u64, ns: u64, rem: u64) -> i64 {
+    let absolute = flags & TIMER_ABSTIME != 0;
+    let start = match cpu.now() {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let end = if absolute {
+        ns
+    } else {
+        start.saturating_add(ns)
+    };
+    let Some(th) = super::thread::current() else {
+        return -(EINVAL as i64);
+    };
+    loop {
+        let now = match cpu.now() {
+            Ok(n) => n,
+            Err(_) => return -(crate::errno::ESRCH as i64),
+        };
+        let left = end.saturating_sub(now);
+        if left == 0 {
+            return 0;
+        }
+        if super::signal::interrupted(th) {
+            if !absolute && rem != 0 {
+                write_timespec(rem, left);
+            }
+            return -(EINTR as i64);
+        }
+        th.park
+            .park(th.tid, Some(clock::TimerClock::Cpu(cpu).deadline(end)));
     }
 }
