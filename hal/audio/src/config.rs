@@ -466,3 +466,51 @@ pub fn primary(devices: &Devices) -> Configuration {
     }
     c
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_hostcall::audio::Device;
+
+    #[test]
+    fn input_profiles_follow_the_device_rate() {
+        for rate in [16000, 24000, 44100, 48000] {
+            let configuration = primary(&Devices {
+                input: Device {
+                    present: 1,
+                    sample_rate: rate,
+                    channels: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            let mix = configuration.ports.iter().find(|p| p.is_mix()).unwrap();
+            assert!(mix.flags.is_input());
+            assert_eq!(mix.profiles.len(), 2);
+            for profile in &mix.to_aidl().profiles {
+                assert_eq!(profile.sampleRates, [rate as i32]);
+                assert_eq!(
+                    profile
+                        .channelMasks
+                        .iter()
+                        .map(Channels::from_aidl)
+                        .collect::<Vec<_>>(),
+                    [
+                        Channels::Layout(LAYOUT_MONO),
+                        Channels::Layout(LAYOUT_STEREO),
+                    ]
+                );
+            }
+            assert_eq!(configuration.routes.len(), 1);
+            assert_eq!(configuration.routes[0].sink, mix.id);
+        }
+    }
+
+    #[test]
+    fn no_input_device_has_no_input_ports() {
+        let configuration = primary(&Devices::default());
+        assert!(configuration.ports.is_empty());
+        assert!(configuration.routes.is_empty());
+        assert!(configuration.initial_configs.is_empty());
+    }
+}

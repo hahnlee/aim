@@ -351,12 +351,16 @@ impl Stream {
     /// answer, and the guest must not wait with it. Until then the ring
     /// stays empty.
     pub fn open(args: &Open) -> Result<Self, i32> {
+        Self::open_on_device(args, ca::describe(args.direction == DIRECTION_INPUT))
+    }
+
+    fn open_on_device(args: &Open, device: aim_hostcall::audio::Device) -> Result<Self, i32> {
         let input = args.direction == DIRECTION_INPUT;
-        let device = ca::describe(input);
         if device.present == 0 {
             return Err(ENODEV);
         }
-        // Without a converter, AUHAL captures at the device's own rate.
+        // AUHAL cannot convert sample rates (Apple TN2091). Like ALSA's
+        // SNDRV_PCM_IOCTL_HW_PARAMS, reject an unsupported rate with EINVAL.
         if input && device.sample_rate != args.sample_rate {
             return Err(EINVAL);
         }
@@ -591,6 +595,58 @@ mod tests {
 
     const CAPACITY: u64 = 256;
     const FRAME: usize = 4; // PCM 16, stereo
+
+    #[test]
+    fn input_opens_at_bluetooth_rates_without_starting_capture() {
+        use crate::tests::TestRing;
+        use aim_hostcall::audio::Device;
+
+        for rate in [16000, 24000, 44100, 48000] {
+            for (format, sample_bytes) in [(FORMAT_PCM_16, 2), (FORMAT_FLOAT, 4)] {
+                for channels in [1, 2] {
+                    let ring = TestRing::new("audio-input-rate", 1024, channels * sample_bytes);
+                    let args = Open {
+                        direction: DIRECTION_INPUT,
+                        format,
+                        sample_rate: rate,
+                        channels,
+                        fd: ring.fd,
+                        length: ring.length as u64,
+                        ..Default::default()
+                    };
+                    let device = Device {
+                        present: 1,
+                        sample_rate: rate,
+                        channels: 1,
+                        buffer_frames: rate / 50,
+                        latency_frames: rate / 100,
+                        ..Default::default()
+                    };
+                    let stream = Stream::open_on_device(&args, device).unwrap();
+                    assert!(stream.0.lock().unit.is_none());
+                    let shared = &stream.0.shared;
+                    let samples = vec![0; 100 * shared.frame_bytes];
+                    shared.push_captured(&samples, 1_000_000_000);
+                    assert_eq!(shared.ring().write.load(Acquire), 100);
+                    assert_eq!(shared.ring().stamp_ns.load(Relaxed), 990_000_000);
+                    drop(stream);
+
+                    let unsupported = Open {
+                        sample_rate: rate + 1,
+                        ..args
+                    };
+                    assert!(matches!(
+                        Stream::open_on_device(&unsupported, device),
+                        Err(EINVAL)
+                    ));
+                    assert!(matches!(
+                        Stream::open_on_device(&args, Device::default()),
+                        Err(ENODEV)
+                    ));
+                }
+            }
+        }
+    }
 
     fn shared() -> Shared {
         let length = RING_DATA_OFFSET + CAPACITY as usize * FRAME;

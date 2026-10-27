@@ -17,15 +17,15 @@ use aim_hostcall::errno::{EINVAL, ENOSYS};
 use super::*;
 
 /// A ring file like the guest's memfd, mapped by the test.
-struct TestRing {
+pub(crate) struct TestRing {
     _file: std::fs::File,
-    fd: i32,
+    pub(crate) fd: i32,
     base: *mut u8,
-    length: usize,
+    pub(crate) length: usize,
 }
 
 impl TestRing {
-    fn new(name: &str, capacity: u32, frame_bytes: u32) -> Self {
+    pub(crate) fn new(name: &str, capacity: u32, frame_bytes: u32) -> Self {
         use std::os::fd::AsRawFd;
         let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         let file = std::fs::OpenOptions::new()

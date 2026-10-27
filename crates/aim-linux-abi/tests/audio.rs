@@ -139,6 +139,38 @@ fn field(text: &str, line: &str, key: &str) -> Option<f64> {
     words.next()?.trim_end_matches(',').parse().ok()
 }
 
+fn check_recording(text: &str, ms: u32) {
+    if text.lines().any(|l| l == "input ports none") {
+        return;
+    }
+    // Use the HAL's selected stream rate, which may be 16/24 kHz for a
+    // Bluetooth microphone. The Mac's default can change after the open.
+    let rate = field(text, "input read", "rate").expect("input stream rate");
+    let frames = field(text, "input read", "read").expect("input frames");
+    assert!((8000.0..=192000.0).contains(&rate), "{text}");
+    assert!(frames >= rate * ms as f64 / 1000.0, "{text}");
+}
+
+#[test]
+fn recording_follows_the_selected_input_rate() {
+    for rate in [16000, 24000, 44100, 48000] {
+        check_recording(
+            &format!("input read {rate} frames in 1000 ms, rate {rate} Hz, peak 0.00000"),
+            1000,
+        );
+    }
+    check_recording("input ports none\n", 1000);
+}
+
+#[test]
+#[should_panic]
+fn recording_rejects_a_short_capture() {
+    check_recording(
+        "input read 23999 frames in 1000 ms, rate 24000 Hz, peak 0.00000",
+        1000,
+    );
+}
+
 #[test]
 fn audioserver_and_the_hal_play_through_coreaudio() {
     let Some(clang) = ndk_clang() else {
@@ -221,13 +253,7 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
     )
     .unwrap();
     assert!((5.0..200.0).contains(&latency), "latency {latency} ms");
-    // The microphone is recorded if the Mac has an input device; without
-    // one the HAL declares no input port.
-    if aim_host_audio::devices().input.present != 0 {
-        assert!(field(&stdout, "input read", "read").unwrap() >= 48000.0);
-    } else {
-        assert!(stdout.contains("input ports none"), "{stdout}");
-    }
+    check_recording(&stdout, 1000);
     // What CoreAudio's render callback saw.
     let hal = guest.log(HAL_TAG);
     let standby = hal
