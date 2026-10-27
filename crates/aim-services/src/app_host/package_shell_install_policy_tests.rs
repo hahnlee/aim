@@ -8,13 +8,6 @@ use std::{
     process::Command,
 };
 
-struct Data(PathBuf);
-impl Drop for Data {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
-    }
-}
-
 struct File(aim_binder_driver::File);
 impl WriteParcelable for File {
     fn write_to(&self, p: &mut Parcel) {
@@ -86,12 +79,7 @@ fn compile(
 fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
     let root =
         aim_paths::original_image_with("system/framework/framework-res.apk").expect("pinned image");
-    let data = Data(
-        aim_paths::root()
-            .join("target/codex")
-            .join(format!("shell-install-{}", std::process::id())),
-    );
-    fs::create_dir(&data.0).unwrap();
+    let data = crate::app_host::test_temp_dir("shell-install");
     let process = |euid| {
         aim_binder_host::local::LocalProcess::open(
             &aim_binder_driver::Driver::new(),
@@ -109,9 +97,9 @@ fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
     let filter_property = default_filter.clone();
     host.configure(
         &root,
-        &data.0,
-        &data.0,
-        &data.0,
+        &data,
+        &data,
+        &data,
         Box::new(move |name| {
             if name == "pm.dexopt.install" {
                 return filter_property.lock().unwrap().clone();
@@ -322,7 +310,7 @@ fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
             vec![(None, 31), (Some("-"), 31), (Some("arm64-v8a"), 17)],
         ),
     ] {
-        let apk = compile(&data.0, &root, name, flags, children, bitcode);
+        let apk = compile(&data, &root, name, flags, children, bitcode);
         let bytes = fs::read(&apk).unwrap();
         for (abi, native) in cases {
             assert_eq!(
@@ -333,7 +321,7 @@ fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
         }
         assert_eq!(fs::read(&apk).unwrap(), bytes);
     }
-    let malformed = data.0.join("malformed.apk");
+    let malformed = data.join("malformed.apk");
     fs::write(&malformed, b"not an APK").unwrap();
     let e = size(&malformed, None).unwrap_err();
     assert_eq!(e.code, EX_ILLEGAL_ARGUMENT);
@@ -342,7 +330,7 @@ fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
         "Error: Failed to parse APK file: /data/local/tmp/absent.apk: Failed to parse /data/local/tmp/absent.apk"
     );
     let newer = compile(
-        &data.0,
+        &data,
         &root,
         "newer",
         "",
@@ -406,4 +394,5 @@ fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
             }
         }
     }
+    fs::remove_dir_all(data).unwrap();
 }
