@@ -210,8 +210,8 @@ use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER,
-    EX_UNSUPPORTED_OPERATION, Exception, Parcel, UNKNOWN_TRANSACTION,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
+    Parcel, UNKNOWN_TRANSACTION,
 };
 use aim_service_aidl::android_app_iactivitymanager as am;
 use aim_service_aidl::android_app_iapplicationthread as thread;
