@@ -482,6 +482,84 @@ fn a_standalone_guest_has_a_private_namespace() {
     assert!(!table.exists(), "{} removed", table.display());
 }
 
+#[test]
+fn sigkilled_standalone_init_leaves_no_table_or_descendants() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::ExitStatusExt;
+    let Some(root) = root() else { return };
+    struct Guest(std::process::Child);
+    impl Drop for Guest {
+        fn drop(&mut self) {
+            if self.0.try_wait().unwrap().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+    struct Member(aim_storage::process_namespace::ProcessIdentity);
+    impl Drop for Member {
+        fn drop(&mut self) {
+            if self.0.is_live() {
+                // SAFETY: the child started by this test, with the same incarnation.
+                unsafe { libc::kill(self.0.host_pid, libc::SIGKILL) };
+            }
+        }
+    }
+    let mut init = Guest(
+        Command::new(env!("CARGO_BIN_EXE_linux-run"))
+            .arg("--no-cache")
+            .arg("--root")
+            .arg(root)
+            // The watcher must survive the init process's guest exec, too.
+            .args([
+                "/system/bin/sh",
+                "-c",
+                &format!("exec {PROGRAM} ns_init_wait"),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = init.0.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    reader.join().unwrap();
+    let pids = line
+        .strip_prefix("pids ")
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect::<Vec<_>>();
+    let [pid, child] = pids[..] else {
+        panic!("{line}")
+    };
+    assert_eq!(pid, init.0.id() as i32);
+    let member = Member(aim_storage::process_namespace::ProcessIdentity::running(child).unwrap());
+    let table = std::env::temp_dir().join(format!("aim-pidns-{pid}"));
+    assert!(table.exists());
+    init.0.kill().unwrap();
+    assert_eq!(init.0.wait().unwrap().signal(), Some(libc::SIGKILL));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (table.exists() || member.0.is_live()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !member.0.is_live(),
+        "namespace member {child} died with init"
+    );
+    assert!(
+        !table.exists(),
+        "{} removed without another standalone start",
+        table.display()
+    );
+}
+
 /// `pid_namespace` of `tests/guest/process.c` with a host process's pid.
 /// With `leader_gone`, the guest starts in a session and process group
 /// whose leader has exited, as under a shell that went away.
