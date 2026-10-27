@@ -18,3 +18,7 @@ libc.workspace = true
 
 [dev-dependencies]
 aim-paths.workspace = true
+
+[[test]]
+name = "titlebar"
+harness = false

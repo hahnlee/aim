@@ -34,7 +34,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use aim_hostcall::display::{Import, Window};
 
 /// Sent in the hello; the server closes a connection of another version.
-pub const VERSION: u64 = 9;
+pub const VERSION: u64 = 10;
 
 /// `id` = [`VERSION`], `flag` = display index.
 pub const OP_HELLO: u32 = 1;

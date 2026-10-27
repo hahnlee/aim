@@ -82,9 +82,9 @@ with no NDK backend, so the few calls are written by hand with the
 transaction codes of the pinned AIDL (first method = 1); the image's
 `framework.jar` stubs have the same `TRANSACTION_*` values. The
 `RunningTaskInfo` of the callbacks is read up to its `TaskDescription`
-label, in the layout of the pinned `TaskInfo`, `Intent` (with
-`prevent_intent_redirect`, which the image enables), `ComponentName`,
-`Uri` and `Bundle`.
+label and primary/background colors, in the layout of the pinned
+`TaskInfo`, `Intent` (with `prevent_intent_redirect`, which the image
+enables), `ComponentName`, `Uri` and `Bundle`.
 
 It connects to the display server with `FN_WINDOWS`, which answers the
 server's mode. Its binders die with system_server, so its rc starts it
@@ -104,6 +104,7 @@ drops the old connection's tasks. The mode:
 | --- | --- | --- |
 | `TASK` | guest | the task's bounds and caption height, new or changed |
 | `PACKAGE`, `TITLE` | guest | the task's package; its `TaskDescription` label |
+| `COLORS` | guest | the task description's ARGB primary and background colors (zero means unset) |
 | `ACTIVITY` | guest | the activity the task was started with, `package/class` (`origActivity`, an alias, else `realActivity`) |
 | `FRONT` | guest | the task is the focused, top one |
 | `MOVED_TO_BACK` | guest | Back on its root activity moved it behind the others |
@@ -227,6 +228,10 @@ visibility included). It connects to the display server itself
   calls it: in a shim, the shim's name; in the server, the label of the
   launcher activity the task was started with, else its app's label (both
   from the shims in `--apps`); else its package.
+- **Title-bar color.** The task description's primary color, else its
+  background color, in sRGB through AppKit's transparent title bar and
+  window background; both unset restores the standard macOS chrome.
+  Updates and a handoff between the server and a shim retain the colors.
 - **Occlusion.** Hidden and minimized windows are not presented into; a
   window that becomes visible shows the last frame at once.
 - **Home.** An app that starts a HOME intent while its task is in front
