@@ -601,6 +601,7 @@ fn saved_scan_libraries_match_original_pms() {
                 remove_test_base: &|_, _| Err("system/BCP must not query compat".into()),
                 destinations: &destinations,
                 resources: &resources,
+                removal: None,
                 new_domain_id: &domain_ids,
             },
         )

@@ -6330,6 +6330,7 @@ impl System {
                 platform: &platform,
                 volumes,
                 users: data_users,
+                removal: None,
                 first_boot_or_upgrade,
                 old_stub_packages,
                 expecting_better,

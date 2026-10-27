@@ -121,6 +121,7 @@ pub struct DataBootInputs<'a> {
     pub destinations:
         &'a std::collections::BTreeMap<String, crate::package::scan::NativeLibraryDestination<'a>>,
     pub resources: &'a crate::package::owner::resources::CodeResources,
+    pub removal: Option<crate::package::scan::BootRemovalOwners<'a>>,
 }
 
 /// All captured inputs belong to this exact policy.
@@ -266,6 +267,7 @@ impl BootOwners<'_> {
                     remove_test_base: &remove_test_base,
                     destinations: data.destinations,
                     resources: data.resources,
+                    removal: data.removal,
                     new_domain_id: &domain,
                 },
             )

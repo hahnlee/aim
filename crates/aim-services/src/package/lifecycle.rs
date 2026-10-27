@@ -32,6 +32,7 @@ struct Live {
     frozen: BTreeMap<String, usize>,
     revision: u64,
     publication_error: Option<String>,
+    preferred_activity_broadcasts: usize,
 }
 impl fmt::Debug for Owner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -92,6 +93,24 @@ impl Owner {
     }
     pub fn is_system_ready(&self) -> bool {
         self.state.lock().unwrap().system_ready
+    }
+    /// RemovePackageHelper posts one USER_ALL notification per changed package.
+    /// The boot session delivers it when its broadcast owner is ready; the
+    /// pre-ready home update is ignored, as PreferredActivityHelper does.
+    pub(crate) fn post_boot_preferred_activity_changed(&self) {
+        self.state.lock().unwrap().preferred_activity_broadcasts += 1;
+    }
+    pub(crate) fn complete_boot_preferred_activity_changes(
+        &self,
+        mut send: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        loop {
+            if self.state.lock().unwrap().preferred_activity_broadcasts == 0 {
+                return Ok(());
+            }
+            send()?;
+            self.state.lock().unwrap().preferred_activity_broadcasts -= 1;
+        }
     }
     pub fn safe_mode(&self) -> bool {
         self.state.lock().unwrap().safe_mode
@@ -311,6 +330,38 @@ mod tests {
             Box::new(|_| Err("missing CE storage owner".into())),
         )
         .unwrap()
+    }
+    #[test]
+    fn boot_preferred_notifications_wait_for_completion_and_retain_failed_work() {
+        for first_boot in [false, true] {
+            let owner = owner(!first_boot, Some("current"), 36);
+            owner.post_boot_preferred_activity_changed();
+            owner.post_boot_preferred_activity_changed();
+            assert!(!owner.is_system_ready());
+            let sent = std::cell::Cell::new(0);
+            owner.system_ready(1000).unwrap();
+            assert!(
+                owner
+                    .complete_boot_preferred_activity_changes(|| {
+                        if sent.get() == 1 {
+                            return Err("broadcast unavailable".into());
+                        }
+                        sent.set(sent.get() + 1);
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            owner
+                .complete_boot_preferred_activity_changes(|| {
+                    sent.set(sent.get() + 1);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(sent.get(), 2);
+            owner
+                .complete_boot_preferred_activity_changes(|| panic!("already delivered"))
+                .unwrap();
+        }
     }
     #[test]
     fn restored_versions_define_first_boot_upgrade_and_prior_sdk_independently() {

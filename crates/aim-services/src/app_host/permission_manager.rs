@@ -1849,8 +1849,12 @@ impl PermissionManager {
     /// with its reserve copy: the document as read with its
     /// `<app-id-permissions>` written anew.
     fn write_user0(&self, state: &AccessUser) -> Result<(), Exception> {
-        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{USER0_ACCESS}: {e}"));
-        let path = self.host.data()?.join(USER0_ACCESS);
+        self.write_user(USER0_ACCESS, state)
+    }
+
+    fn write_user(&self, relative: &str, state: &AccessUser) -> Result<(), Exception> {
+        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{relative}: {e}"));
+        let path = self.host.data()?.join(relative);
         let backup = path.with_extension("abx.bak");
         let read = if backup.exists() { &backup } else { &path };
         let bytes = std::fs::read(read).map_err(|e| fail(e.to_string()))?;
@@ -1860,7 +1864,7 @@ impl PermissionManager {
             .and_then(|root| permissions::with_app_ops(root, state))
             .map_err(fail)?;
         let bytes = aim_android_xml::abx::write(&root).map_err(fail)?;
-        self.write_access(USER0_ACCESS, &bytes)
+        self.write_access(relative, &bytes)
     }
 
     fn write_system(&self, state: &AccessSystem) -> Result<(), Exception> {

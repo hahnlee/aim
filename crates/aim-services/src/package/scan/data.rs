@@ -10,6 +10,21 @@ use super::{
 use crate::package::{restrictions::UserState, sign::SigningDetails, write::Apks};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Pre-publication side owners for RemovePackageHelper's USER_ALL path.
+/// Static AppsFilter relations are built from the surviving scan inventory;
+/// interaction grants and restored preferred choices already have live owners.
+pub struct BootRemovalOwners<'a> {
+    pub implicit: &'a mut crate::package::apps_filter::ImplicitAccess,
+    pub preferred: &'a std::sync::Mutex<crate::package::owner::Store>,
+    pub keystore: &'a crate::package::owner::keystore::KeystoreCleanup,
+    /// Post the background notification even if a later removal step fails.
+    /// Home updates are ignored before systemReady by PreferredActivityHelper.
+    pub preferred_changed: &'a dyn Fn(),
+    pub permissions:
+        &'a dyn Fn(&SigningScan, &crate::package::settings::Package, &[User]) -> Result<(), String>,
+    pub migration: super::SharedUidMigration,
+}
+
 /// Policy and metadata owners resolved before boot data admission.
 pub struct DataScanInputs<'a> {
     pub factory: Option<&'a DisabledSystemMetadata>,
@@ -59,6 +74,7 @@ pub struct DataImageScanInputs<'a> {
         &'a dyn Fn(&crate::package::pkg::AndroidPackage, bool) -> Result<Option<bool>, String>,
     pub destinations: &'a BTreeMap<String, super::NativeLibraryDestination<'a>>,
     pub resources: &'a crate::package::owner::resources::CodeResources,
+    pub removal: Option<BootRemovalOwners<'a>>,
     pub new_domain_id: &'a dyn Fn() -> Result<[u8; 16], String>,
 }
 
@@ -101,7 +117,7 @@ impl SigningScan {
         &mut self,
         image: super::DataImage<S>,
         apks: &Apks,
-        inputs: DataImageScanInputs<'_>,
+        mut inputs: DataImageScanInputs<'_>,
     ) -> Result<DataImagePackages, SigningError> {
         let fatal = |package: String, path: String, phase, message| {
             SigningError::Fatal(Error {
@@ -135,12 +151,12 @@ impl SigningScan {
         let mut incremental = BTreeSet::new();
         // prepareSystemPackageCleanUp removes disappeared, non-updated system
         // settings before a data APK can be considered known (#822).
-        if let Some(package) = self
+        let disappeared: Vec<_> = self
             .settings
             .packages
             .iter()
             .rev()
-            .find(|p| {
+            .filter(|p| {
                 p.flags & crate::package::settings::FLAG_SYSTEM != 0
                     && !self.has_scanned_package(&p.name)
                     && !self
@@ -150,11 +166,11 @@ impl SigningScan {
                         .any(|d| d.name == p.name)
             })
             .cloned()
-        {
+            .collect();
+        for package in disappeared {
             Self::destroy_removed_boot_storage(&package, &inputs)?;
             self.clear_removed_boot_metadata(&package)?;
-            return Err(fatal(package.name.clone(), package.code_path.clone(), "package-state",
-                "app storage/domain/keysets/update ownership removed; filter/preferred/keystore and setting/permission deletion require their owners (#822/#798)".into()));
+            self.remove_boot_package_state(&package, &mut inputs)?;
         }
         for rejected in &image.rejected {
             if (inputs.is_incremental)(&rejected.location.path).map_err(|e| {
@@ -319,8 +335,8 @@ impl SigningScan {
                 };
                 Self::destroy_removed_boot_storage(&package, &inputs)?;
                 self.clear_removed_boot_metadata(&package)?;
-                return Err(fatal(name, package.code_path.clone(), "package-state",
-                    "app storage removed; remaining package state deletion requires its owners (#822/#798)".into()));
+                self.remove_boot_package_state(&package, &mut inputs)?;
+                continue;
             };
             let previous = packages.remove(at);
             self.withdraw_scanned_package(&previous.candidate.record);
@@ -639,6 +655,114 @@ impl SigningScan {
         Ok(())
     }
 
+    fn remove_boot_package_state(
+        &mut self,
+        package: &crate::package::settings::Package,
+        inputs: &mut DataImageScanInputs<'_>,
+    ) -> Result<(), SigningError> {
+        let fail = |phase, message| {
+            SigningError::Fatal(Error {
+                package: package.name.clone(),
+                path: package.code_path.clone(),
+                phase,
+                message,
+            })
+        };
+        let owners = inputs.removal.as_mut().ok_or_else(|| {
+            fail(
+                "unsupported-operation",
+                "boot package filter/preferred/keystore owners unavailable (#798)".into(),
+            )
+        })?;
+        // destroy_removed_boot_storage validated the complete inventory first.
+        let users = inputs.all_users.ok_or_else(|| {
+            fail(
+                "package-state",
+                "removed package resolved users unavailable".into(),
+            )
+        })?;
+        self.finish_boot_package_removal(package, users, owners)
+    }
+
+    fn finish_boot_package_removal(
+        &mut self,
+        package: &crate::package::settings::Package,
+        users: &[User],
+        owners: &mut BootRemovalOwners<'_>,
+    ) -> Result<(), SigningError> {
+        let fail = |phase, message| {
+            SigningError::Fatal(Error {
+                package: package.name.clone(),
+                path: package.code_path.clone(),
+                phase,
+                message,
+            })
+        };
+        let ids = users.iter().map(|user| user.id).collect::<Vec<_>>();
+        owners.implicit.remove_package(package.uid_owner_id(), &ids);
+        let changed = match owners
+            .preferred
+            .lock()
+            .unwrap()
+            .clear_all_package_preferred_activities(Some(&package.name))
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                if !error.changed_users.is_empty() {
+                    (owners.preferred_changed)();
+                }
+                return Err(fail("preferred", error.error.to_string()));
+            }
+        };
+        if !changed.is_empty() {
+            (owners.preferred_changed)();
+        }
+        owners
+            .keystore
+            .post(package.app_id, &ids)
+            .map_err(|message| fail("keystore", message))?;
+        // The setting/UID stage precedes onPackageUninstalled. Its shared UID
+        // owner retains surviving active and disabled members, as Settings does.
+        self.remove_package_setting(&package.name)?;
+        (owners.permissions)(self, package, users)
+            .map_err(|message| fail("permissions", message))?;
+        if let Some(group) = self
+            .settings
+            .shared_users
+            .iter()
+            .find(|group| Some(group.app_id) == package.shared_app_id())
+            .map(|group| group.name.clone())
+        {
+            let disabled = self
+                .settings
+                .disabled_system_packages
+                .iter()
+                .filter_map(|setting| {
+                    let code = self.disabled_loaded.get(&setting.name)?;
+                    Some((
+                        setting.name.clone(),
+                        super::Record {
+                            settings: setting.clone(),
+                            parsed: code.package.clone(),
+                            signing: code.collected_signing.clone(),
+                            identity: Identity {
+                                manifest_name: code.package.package_name.clone(),
+                                internal_name: setting.name.clone(),
+                                real_name: setting.real_name.clone(),
+                            },
+                            origin:
+                                crate::package::owner::shared_users::ScanOrigin::SystemDirectory,
+                        },
+                    ))
+                })
+                .collect();
+            self.migrate_single_shared_user(&group, owners.migration, &disabled)
+                .map_err(SigningError::Fatal)?;
+        }
+        self.remove_renamed_package(package.real_name.as_deref());
+        Ok(())
+    }
+
     /// Remove rejected parse/signature inputs using their original scan paths.
     /// Earlier deletions and pending resource retries survive a later failure.
     pub fn clean_invalid_data_inputs(
@@ -928,6 +1052,331 @@ impl SigningScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::owner::{Store, keystore::KeystoreCleanup};
+    use aim_binder_driver::{Credentials, Device, Driver};
+    use aim_binder_host::local::LocalProcess;
+    use std::{fs, path::PathBuf, sync::Mutex};
+
+    struct RemovalFixture {
+        data: PathBuf,
+        driver: std::sync::Arc<Driver>,
+        process: std::sync::Arc<LocalProcess>,
+        disk: Mutex<Store>,
+    }
+    impl RemovalFixture {
+        fn new(shared: bool) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let data = std::env::temp_dir().join(format!(
+                "aim-boot-removal-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(data.join("system/users/0")).unwrap();
+            fs::create_dir_all(data.join("system/users/10")).unwrap();
+            let uid = if shared {
+                "sharedUserId='10100'"
+            } else {
+                "userId='10100'"
+            };
+            let group = if shared {
+                "<shared-user name='group' userId='10100'/>"
+            } else {
+                ""
+            };
+            let other = if shared {
+                "sharedUserId='10100'"
+            } else {
+                "userId='10101'"
+            };
+            fs::write(data.join("system/packages.xml"), format!(
+                "<packages><package name='a' realName='real.a' codePath='/system/app/a' publicFlags='1' {uid}/><package name='b' codePath='/system/app/b' {other}/>{group}<renamed-package new='real.a' old='a'/></packages>"
+            )).unwrap();
+            for user in [0, 10] {
+                fs::write(data.join(format!("system/users/{user}/package-restrictions.xml")),
+                    b"<package-restrictions><pkg name='a' inst='true'/><pkg name='b' stopped='true'/><preferred-activities><item name='a/.Always' always='true' set='0'><filter/></item><item name='a/.Last' always='false' set='0'><filter/></item><item name='b/.Main' always='true' set='0'><filter/></item></preferred-activities><persistent-preferred-activities><item name='a/.Policy'><filter/></item></persistent-preferred-activities><future/></package-restrictions>"
+                ).unwrap();
+            }
+            let disk = Mutex::new(Store::open(&data, &[0, 10]).unwrap().unwrap());
+            let driver = Driver::new();
+            let process = LocalProcess::open(
+                &driver,
+                Device::Binder,
+                Credentials {
+                    pid: 822,
+                    euid: 1000,
+                    security_context: None,
+                },
+            );
+            Self {
+                data,
+                driver,
+                process,
+                disk,
+            }
+        }
+        fn scan(&self) -> SigningScan {
+            SigningScan::new(
+                &Default::default(),
+                &self.disk.lock().unwrap().state().settings,
+                36,
+            )
+            .unwrap()
+        }
+        fn permissions(&self) -> crate::app_host::permission_manager::PermissionManager {
+            let host = crate::app_host::AppHost::new(self.process.clone());
+            crate::app_host::configure_test_host(
+                &host,
+                &self.data.join("image"),
+                &self.data,
+                &self.data,
+                Box::new(|_| None),
+            );
+            for (relative, xml) in [
+                (
+                    "misc/apexdata/com.android.permission/access.abx",
+                    "<access><permissions><permission name='a.NORMAL' packageName='a' protectionLevel='0' type='0'/><permission name='b.NORMAL' packageName='b' protectionLevel='0' type='0'/></permissions><permission-trees><permission name='a.tree' packageName='a' protectionLevel='0' type='0'/></permission-trees></access>",
+                ),
+                (
+                    "misc_de/0/apexdata/com.android.permission/access.abx",
+                    "<access><package-versions><package name='a' version='15'/><package name='b' version='15'/></package-versions><app-id-permissions><app-id id='10100'><permission name='b.NORMAL' flags='1'/></app-id><app-id id='10101'><permission name='b.NORMAL' flags='1'/><permission name='a.NORMAL' flags='1'/></app-id></app-id-permissions></access>",
+                ),
+            ] {
+                let path = self.data.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(
+                    path,
+                    aim_android_xml::abx::write(&aim_android_xml::read(xml.as_bytes()).unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            let user0 = self
+                .data
+                .join("misc_de/0/apexdata/com.android.permission/access.abx");
+            let user10 = self
+                .data
+                .join("misc_de/10/apexdata/com.android.permission/access.abx");
+            fs::create_dir_all(user10.parent().unwrap()).unwrap();
+            fs::copy(user0, user10).unwrap();
+            crate::app_host::permission_manager::PermissionManager::new(host)
+        }
+    }
+    impl Drop for RemovalFixture {
+        fn drop(&mut self) {
+            self.driver.release(self.process.proc_handle());
+            fs::remove_dir_all(&self.data).unwrap();
+        }
+    }
+    fn users() -> [User; 2] {
+        [0, 10].map(|id| User {
+            id,
+            pre_created: id == 10,
+            adb_install_disallowed: false,
+        })
+    }
+
+    // RemovePackageHelper.clearPackageStateForUserLIF/removePackageDataLIF:
+    // side owners precede setting deletion; permission uninstall follows it.
+    #[test]
+    fn disappeared_system_boot_removal_completes_through_modern_permission_owner() {
+        for shared in [false, true] {
+            let fixture = RemovalFixture::new(shared);
+            let mut scan = fixture.scan();
+            let package = scan.settings.packages[0].clone();
+            let unrelated = scan.settings.packages[1].clone();
+            let keystore = KeystoreCleanup::new(fixture.process.clone());
+            let mut implicit = crate::package::apps_filter::ImplicitAccess::default();
+            for (from, to) in [(10100, 10101), (10101, 10100), (1010100, 1010101)] {
+                implicit.grant(from, to, false);
+                implicit.grant(from, to, true);
+            }
+            let mut expected = crate::package::apps_filter::ImplicitAccess::default();
+            implicit.grant(1110100, 1110101, true);
+            expected.grant(1110100, 1110101, true);
+            let preferred_changes = std::cell::Cell::new(0);
+            let preferred_changed = || preferred_changes.set(preferred_changes.get() + 1);
+            let permissions = fixture.permissions();
+            let uninstall = |scan: &SigningScan,
+                             package: &crate::package::settings::Package,
+                             users: &[User]| {
+                assert!(
+                    !scan
+                        .settings
+                        .packages
+                        .iter()
+                        .any(|p| p.name == package.name)
+                );
+                assert_eq!(scan.settings.renamed_packages.len(), 1);
+                assert_eq!(preferred_changes.get(), 1);
+                assert_eq!(keystore.pending(), 2);
+                permissions
+                    .remove_boot_permissions(scan, package, users)
+                    .map_err(|error| error.message)
+            };
+            scan.clear_removed_boot_metadata(&package).unwrap();
+            scan.finish_boot_package_removal(
+                &package,
+                &users(),
+                &mut BootRemovalOwners {
+                    implicit: &mut implicit,
+                    preferred: &fixture.disk,
+                    keystore: &keystore,
+                    preferred_changed: &preferred_changed,
+                    permissions: &uninstall,
+                    migration: super::super::SharedUidMigration::BestEffort,
+                },
+            )
+            .unwrap();
+            assert_eq!(implicit, expected);
+            assert_eq!(preferred_changes.get(), 1);
+            assert_eq!(keystore.pending(), 2);
+            assert_eq!(scan.settings.packages, [unrelated]);
+            assert_eq!(scan.identities.ids.get(10100).is_some(), shared);
+            assert_eq!(scan.settings.shared_users.len(), usize::from(shared));
+            assert!(scan.settings.renamed_packages.is_empty());
+            let access = permissions.retained_access().unwrap();
+            assert!(!access.system.permissions.iter().any(|p| p.package == "a"));
+            assert!(
+                !access
+                    .system
+                    .permission_trees
+                    .iter()
+                    .any(|p| p.package == "a")
+            );
+            assert!(
+                !access
+                    .user0
+                    .package_versions
+                    .iter()
+                    .any(|(name, _)| name == "a")
+            );
+            assert_eq!(
+                access.user0.permission_flags(10100, "b.NORMAL"),
+                if shared { 1 } else { 0 }
+            );
+            assert_eq!(access.user0.permission_flags(10101, "b.NORMAL"), 1);
+            assert_eq!(access.user0.permission_flags(10101, "a.NORMAL"), 0);
+            if !shared {
+                assert!(
+                    !access
+                        .user0
+                        .app_id_permissions
+                        .iter()
+                        .any(|(id, _)| *id == 10100)
+                );
+            }
+            for user in [0, 10] {
+                let reloaded = aim_android_xml::read(
+                    &fs::read(fixture.data.join(format!(
+                        "misc_de/{user}/apexdata/com.android.permission/access.abx"
+                    )))
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    crate::package::permissions::AccessUser::parse(&reloaded).unwrap(),
+                    *access.user0
+                );
+            }
+            let reopened = Store::open(&fixture.data, &[0, 10]).unwrap().unwrap();
+            for (_, preferred) in reopened.native_preferred_users().unwrap() {
+                let choices = preferred.preferred.entries();
+                assert_eq!(choices.len(), 2);
+                assert!(
+                    choices
+                        .iter()
+                        .any(|p| p.component.package == "a" && !p.always)
+                );
+                assert!(choices.iter().any(|p| p.component.package == "b"));
+                assert_eq!(preferred.persistent.entries().len(), 1);
+            }
+            // Boot's writeSettings=false leaves the global write to its caller.
+            assert_eq!(reopened.state().settings.packages.len(), 2);
+        }
+    }
+
+    #[test]
+    fn permission_failure_preserves_posted_work_and_stops_before_rename_cleanup() {
+        let fixture = RemovalFixture::new(false);
+        let mut scan = fixture.scan();
+        let package = scan.settings.packages[0].clone();
+        let permissions = fixture.permissions();
+        let before = permissions.retained_access().unwrap();
+        fs::create_dir(
+            fixture
+                .data
+                .join("misc_de/0/apexdata/com.android.permission/access.abx.new"),
+        )
+        .unwrap();
+        let keystore = KeystoreCleanup::new(fixture.process.clone());
+        let mut implicit = Default::default();
+        let posted = std::cell::Cell::new(0);
+        let error = scan
+            .finish_boot_package_removal(
+                &package,
+                &users(),
+                &mut BootRemovalOwners {
+                    implicit: &mut implicit,
+                    preferred: &fixture.disk,
+                    keystore: &keystore,
+                    preferred_changed: &|| posted.set(posted.get() + 1),
+                    permissions: &|scan, package, users| {
+                        permissions
+                            .remove_boot_permissions(scan, package, users)
+                            .map_err(|error| error.message)
+                    },
+                    migration: super::super::SharedUidMigration::BestEffort,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, SigningError::Fatal(e) if e.phase == "permissions"));
+        assert_eq!(posted.get(), 1);
+        assert_eq!(keystore.pending(), 2);
+        assert!(!scan.settings.packages.iter().any(|p| p.name == "a"));
+        assert_eq!(scan.settings.renamed_packages.len(), 1);
+        let after = permissions.retained_access().unwrap();
+        assert_eq!(after.user0, before.user0);
+        assert!(!after.system.permissions.iter().any(|p| p.package == "a"));
+    }
+
+    #[test]
+    fn preferred_failure_keeps_setting_and_does_not_post_keystore_work() {
+        let fixture = RemovalFixture::new(false);
+        let mut scan = fixture.scan();
+        let package = scan.settings.packages[0].clone();
+        let original = scan.clone();
+        let path = fixture
+            .data
+            .join("system/users/10/package-restrictions.xml");
+        let external = b"<package-restrictions external='preserve'/>";
+        fs::write(&path, external).unwrap();
+        let mut implicit = crate::package::apps_filter::ImplicitAccess::default();
+        implicit.grant(10100, 10101, true);
+        let keystore = KeystoreCleanup::new(fixture.process.clone());
+        let preferred_changes = std::cell::Cell::new(0);
+        let preferred_changed = || preferred_changes.set(preferred_changes.get() + 1);
+        let error = scan
+            .finish_boot_package_removal(
+                &package,
+                &users(),
+                &mut BootRemovalOwners {
+                    implicit: &mut implicit,
+                    preferred: &fixture.disk,
+                    keystore: &keystore,
+                    preferred_changed: &preferred_changed,
+                    permissions: &|_, _, _| panic!("preferred failure precedes permissions"),
+                    migration: super::super::SharedUidMigration::BestEffort,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, SigningError::Fatal(e) if e.phase == "preferred"));
+        assert_eq!(scan, original);
+        assert_eq!(implicit, Default::default());
+        assert_eq!(preferred_changes.get(), 1);
+        assert_eq!(keystore.pending(), 0);
+        assert_eq!(fs::read(path).unwrap(), external);
+    }
+
     #[test]
     fn domain_removal_survives_a_later_keyset_owner_failure() {
         let root = aim_android_xml::read(b"<packages><package name='a' codePath='/system/app/a' userId='10100'><proper-signing-keyset identifier='7'/></package><domain-verifications><active><package-state packageName='a' id='00000000-0000-0000-0000-000000000001'/></active></domain-verifications></packages>").unwrap();
