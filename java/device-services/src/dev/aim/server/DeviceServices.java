@@ -153,6 +153,27 @@ public final class DeviceServices extends SystemService {
     }
 
     private static final class Bridge extends IBridge.Stub {
+        private com.android.server.vibrator.NativeVibrationPolicy vibrationPolicy;
+
+        private synchronized com.android.server.vibrator.NativeVibrationPolicy vibrationPolicy() {
+            if (vibrationPolicy == null) {
+                vibrationPolicy = new com.android.server.vibrator.NativeVibrationPolicy(context);
+            }
+            return vibrationPolicy;
+        }
+
+        @Override
+        public boolean shouldIgnoreVibration(int uid, int deviceId, android.os.VibrationAttributes attrs) {
+            enforceSystemUid();
+            return vibrationPolicy().shouldIgnore(uid, deviceId, attrs);
+        }
+
+        @Override
+        public int[] getHapticFeedbackAttributes(int constant, int inputSource, int flags, int privFlags) {
+            enforceSystemUid();
+            return vibrationPolicy().hapticAttributes(constant, inputSource, flags, privFlags);
+        }
+
         private final PackageBootstrapBridge packageBootstrap = new PackageBootstrapBridge();
         private final Context context;
         private final IServiceHost host;

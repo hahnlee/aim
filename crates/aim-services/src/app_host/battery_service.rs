@@ -571,6 +571,10 @@ impl BatteryService {
         )
     }
 
+    pub(super) fn on_wireless_charger(&self) -> bool {
+        self.state.lock().unwrap().plug_type == PLUGGED_WIRELESS
+    }
+
     /// The constructor's and `updateBatteryWarningLevelLocked`'s levels,
     /// then the HAL.
     pub(super) fn start(self: &Arc<Self>) -> Result<(), String> {

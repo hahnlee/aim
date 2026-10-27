@@ -115,6 +115,11 @@ impl Framework {
         self.framework_resources().resource_string(id)
     }
 
+    pub fn framework_int_array(&self, name: &str) -> Option<Vec<i32>> {
+        self.framework_resources()
+            .int_array(self.0.framework.id("array", name)?)
+    }
+
     /// The framework's string array resource `name` (`getStringArray`).
     pub fn framework_string_array(&self, name: &str) -> Option<Vec<Option<String>>> {
         let id = self.0.framework.id("array", name)?;
