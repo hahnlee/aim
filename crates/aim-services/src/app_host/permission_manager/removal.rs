@@ -220,7 +220,12 @@ impl PermissionManager {
         // serialized by the same permission owner and AtomicFile writer.
         for user in other_users {
             let path = format!("misc_de/{user}/apexdata/com.android.permission/access.abx");
-            let before = self.read_access(&path, AccessUser::parse)?;
+            let before = self.read_access(&path, AccessUser::parse)?.ok_or_else(|| {
+                self.host.unimplemented_named(
+                    "permissionmgr",
+                    "AppIdPermissionMigration.migrateUserState (#2201)",
+                )
+            })?;
             let mut after = before.clone();
             trim(&mut after);
             if after != before {
