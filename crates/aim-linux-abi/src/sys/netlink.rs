@@ -1146,8 +1146,9 @@ fn send_user(
     // Darwin AF_UNIX reports a full receive queue as ENOBUFS, even on a
     // blocking send, and POLLOUT does not track the destination's queue.
     // Linux netlink waits interruptibly, or returns EAGAIN for a
-    // nonblocking send / expired SO_SNDTIMEO. Retry with an interruptible
-    // poll timeout because the host provides no peer-queue writable event.
+    // nonblocking send / expired SO_SNDTIMEO. Own the wait here, using
+    // nonblocking host sends and timed retries: there is no peer-queue
+    // writable event, and a signal can arrive between a send and a wait.
     let nonblock = flags & libc::MSG_DONTWAIT != 0 || super::fdtab::nonblocking(fd);
     let mut timeout: libc::timeval = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of_val(&timeout) as u32;
@@ -1167,15 +1168,30 @@ fn send_user(
     let timeout = std::time::Duration::from_secs(timeout.tv_sec as u64)
         + std::time::Duration::from_micros(timeout.tv_usec as u64);
     let start = std::time::Instant::now();
+    let th = super::thread::current();
     loop {
         match send_user_once(fd, proto, portid, group, from, data, flags) {
             Err(ENOBUFS | errno::EAGAIN) => {
-                if nonblock || (!timeout.is_zero() && start.elapsed() >= timeout) {
+                if nonblock {
                     return Err(errno::EAGAIN);
                 }
-                // SAFETY: poll with no fds is an interruptible timeout.
-                if unsafe { libc::poll(std::ptr::null_mut(), 0, 1) } < 0 {
-                    return Err(errno::last());
+                if th.is_some_and(super::signal::interrupted) {
+                    return Err(errno::EINTR);
+                }
+                if !timeout.is_zero() && start.elapsed() >= timeout {
+                    return Err(errno::EAGAIN);
+                }
+                if let Some(th) = th {
+                    th.park.park(th.tid, Some(super::park::after(1_000_000)));
+                } else {
+                    // SAFETY: poll with no fds is a timeout for native callers.
+                    if unsafe { libc::poll(std::ptr::null_mut(), 0, 1) } < 0 {
+                        return Err(errno::last());
+                    }
+                }
+                // A wakeup alone does not mean a timeout or a guest signal.
+                if th.is_some_and(super::signal::interrupted) {
+                    return Err(errno::EINTR);
                 }
             }
             result => return result,
@@ -1211,9 +1227,8 @@ fn send_user_once(
             if peer(&path)?.is_some_and(|(id, _)| id != from.0) {
                 return Err(ECONNREFUSED);
             }
-            // Use the caller's socket, so O_NONBLOCK, MSG_DONTWAIT and
-            // SO_SNDTIMEO govern a full queue; broadcasts use sender().
-            deliver_on(fd, &path, group, from, data, flags)
+            // The outer loop owns Linux's blocking and timeout semantics.
+            deliver_on(fd, &path, group, from, data, flags | libc::MSG_DONTWAIT)
         })();
         return result.map_err(|e| if e == errno::ENOENT { ECONNREFUSED } else { e });
     }
