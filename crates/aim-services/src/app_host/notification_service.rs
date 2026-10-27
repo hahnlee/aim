@@ -468,6 +468,8 @@ struct State {
     policy: Element,
     prefs: Preferences,
     zen_mode: i32,
+    zen: zen_config::ZenModeConfig,
+    default_zen: Option<Element>,
     /// `mNotificationList`, in posting order.
     records: Vec<Record>,
     listeners: Vec<Listener>,
@@ -567,6 +569,19 @@ impl NotificationManager {
                 }
                 None => Preferences::default(),
             };
+            let (zen, default_zen) = match zen_config::read(&policy) {
+                Some(config) => (config, None),
+                None => {
+                    let framework = self.host.framework()?;
+                    let xml = framework
+                        .framework_file(self.host.root()?, "xml", "default_zen_mode_config")
+                        .ok_or_else(|| fail("no default_zen_mode_config".into()))?;
+                    let zen =
+                        zen_config::read_default(&xml, 0, |name| framework.framework_string(name))
+                            .map_err(fail)?;
+                    (zen_config::read_xml(&zen), Some(zen))
+                }
+            };
             // ZenModeHelper's manual rule: automatic rules, whose state
             // their condition providers set, are not run (#1488).
             let zen_mode = policy
@@ -580,6 +595,8 @@ impl NotificationManager {
                 policy,
                 prefs,
                 zen_mode,
+                zen,
+                default_zen,
                 records: Vec::new(),
                 listeners: Vec::new(),
                 rates: HashMap::new(),
@@ -613,7 +630,11 @@ impl NotificationManager {
             eprintln!("app host: Notification policy access denied calling {method}");
             return Err(Exception::security("Notification policy access denied"));
         }
-        Ok(zen_config::read(policy)?
+        Ok(guard
+            .as_ref()
+            .unwrap()
+            .zen
+            .clone()
             .rules()
             .into_iter()
             .filter(|r| {
@@ -682,7 +703,7 @@ impl NotificationManager {
             )));
         }
         let guard = self.state()?;
-        zen_config::read(&guard.as_ref().unwrap().policy)
+        Ok(guard.as_ref().unwrap().zen.clone())
     }
 
     /// `getPackagesForUid`.
@@ -750,6 +771,11 @@ impl NotificationManager {
     /// `handleSavePolicyFile`: the file with the ranking written now, as
     /// `AtomicFile` writes it.
     fn save(state: &mut State) -> Result<(), Exception> {
+        if !state.policy.children().any(|e| e.name == "zen") {
+            if let Some(zen) = &state.default_zen {
+                state.policy.content.push(Node::Element(zen.clone()));
+            }
+        }
         let ranking = state.prefs.to_xml();
         let content = &mut state.policy.content;
         match content
@@ -3012,6 +3038,71 @@ mod tests {
     use super::*;
     use crate::notifications::parcels::StatusBarNotification;
     use crate::notifications::parcels::tests::java_notification;
+
+    /// Fresh data and a policy without `<zen>` retain defaults until the
+    /// first save; a persisted `<zen>` replaces them, even with no rules.
+    #[test]
+    fn fresh_zen_config_is_retained_and_saved_with_the_policy() {
+        let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
+            return;
+        };
+        struct Data(PathBuf);
+        impl Drop for Data {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        for policy in [
+            None,
+            Some("<notification-policy><dnd_apps /></notification-policy>"),
+            Some("<notification-policy><zen version=\"12\" user=\"0\" /></notification-policy>"),
+        ] {
+            let data = Data(crate::app_host::test_temp_dir("default-zen"));
+            std::fs::create_dir_all(data.0.join("system")).unwrap();
+            let path = data.0.join("system/notification_policy.xml");
+            if let Some(policy) = policy {
+                std::fs::write(&path, policy).unwrap();
+            }
+            let host = AppHost::new(crate::test_process(1000));
+            crate::app_host::configure_test_host(
+                &host,
+                &root,
+                &data.0,
+                &data.0,
+                Box::new(|name| {
+                    Some(
+                        match name {
+                            "ro.build.version.sdk" => "36",
+                            "ro.build.version.codename" => "REL",
+                            "persist.sys.locale" => "en-US",
+                            "ro.sf.lcd_density" => "320",
+                            _ => return None,
+                        }
+                        .into(),
+                    )
+                }),
+            );
+            let manager = NotificationManager::new(host.clone());
+            let before = manager.zen_mode_config(1000).unwrap();
+            let expected = if policy.is_some_and(|p| p.contains("<zen")) {
+                0
+            } else {
+                2
+            };
+            assert_eq!(before.clone().rules().len(), expected);
+            assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), policy);
+            {
+                let mut guard = manager.state().unwrap();
+                let state = guard.as_mut().unwrap();
+                // Another notification policy consumer may request a save.
+                NotificationManager::save(state).unwrap();
+            }
+            let saved = aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved.children().filter(|e| e.name == "zen").count(), 1);
+            assert_eq!(zen_config::read(&saved).unwrap(), before);
+            assert_eq!(manager.zen_mode_config(1000).unwrap(), before);
+        }
+    }
 
     /// The listeners a user approved, primary and secondary lists alike,
     /// split as `ManagedServices` splits them.

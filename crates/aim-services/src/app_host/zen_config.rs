@@ -10,9 +10,9 @@
 
 use std::sync::Arc;
 
-use aim_android_xml::Element;
+use aim_android_xml::{Element, Node, Value};
 use aim_binder_host::local::LocalProcess;
-use aim_binder_host::parcel::{EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
+use aim_binder_host::parcel::{EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 
 use crate::package::list_slice::Slice;
@@ -288,6 +288,7 @@ fn write_component(p: &mut Parcel, component: Option<&(String, String)>, trim: b
 }
 
 /// `ZenModeConfig` (`modes_ui` on), in `writeToParcel`'s order.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ZenModeConfig {
     user: i32,
     manual: ZenRule,
@@ -832,17 +833,151 @@ fn new_manual_rule(policy: ZenPolicy) -> ZenRule {
     }
 }
 
-/// `ZenModeConfig.readXml` of the zen config of `policy`, the root of
-/// `notification_policy.xml`: its rules in the order of the config's
-/// `ArrayMap`s, and a manual rule without a policy, or none, given the
-/// config's own as `modes_ui` migrates it.
-pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
-    let zen = policy.children().find(|e| e.name == "zen").ok_or_else(|| {
-        Exception::new(
-            EX_UNSUPPORTED_OPERATION,
-            "notification: the default zen config (#2143)",
-        )
-    })?;
+/// `readDefaultConfig`'s compiled XML, adapted to the same typed attributes
+/// the policy parser supplies to `readXml`.
+fn compiled_element(e: aim_apps::res::Element) -> Result<Element, String> {
+    let attrs = e
+        .attrs
+        .into_iter()
+        .filter(|a| a.ns.is_empty())
+        .map(|a| {
+            let value = match a.value {
+                aim_apps::res::Value::String(v) => Value::String(v),
+                aim_apps::res::Value::Int(v) => Value::Int(v),
+                aim_apps::res::Value::Bool(v) => Value::Bool(v),
+                _ => return Err(format!("unsupported zen attribute {}", a.name)),
+            };
+            Ok((a.name, value))
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(Element {
+        name: e.name,
+        attrs,
+        content: e
+            .children
+            .into_iter()
+            .map(|e| compiled_element(e).map(Node::Element))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+fn set(e: &mut Element, name: &str, value: Value) {
+    e.attrs.retain(|(n, _)| n != name);
+    e.attrs.push((name.into(), value));
+}
+
+/// `writeZenPolicyXml`: only populated states, including the channel
+/// policy translated back to `getPriorityChannelsAllowed`'s state.
+fn write_policy(e: &mut Element, policy: &ZenPolicy) {
+    let categories = [
+        "reminders",
+        "events",
+        "messages",
+        "calls",
+        "repeatCallers",
+        "alarms",
+        "media",
+        "system",
+        "convos",
+    ];
+    for (i, name) in categories.into_iter().enumerate() {
+        if !matches!(i, MESSAGES | CALLS | CONVERSATIONS) && policy.categories[i] != STATE_UNSET {
+            set(e, name, Value::Int(policy.categories[i]));
+        }
+    }
+    let effects = [
+        "showFullScreenIntent",
+        "showLights",
+        "shoePeek",
+        "showStatusBarIcons",
+        "showBadges",
+        "showAmbient",
+        "showNotificationList",
+    ];
+    for (name, value) in effects.into_iter().zip(policy.effects).chain([
+        ("callsFrom", policy.calls),
+        ("messagesFrom", policy.messages),
+        ("convosFrom", policy.conversations),
+        (
+            "priorityChannelsAllowed",
+            match policy.channels {
+                CHANNEL_POLICY_PRIORITY => STATE_ALLOW,
+                CHANNEL_POLICY_NONE => STATE_DISALLOW,
+                _ => STATE_UNSET,
+            },
+        ),
+    ]) {
+        if value != STATE_UNSET {
+            set(e, name, Value::Int(value));
+        }
+    }
+}
+
+/// `readDefaultConfig`, `updateDefaultAutomaticRulePolicies` and
+/// `updateRuleStringsForCurrentLocale` for the resource-backed default.
+/// Keep its XML alongside the parsed config so a later policy save writes
+/// the initialized rules, rather than losing them on the next start.
+pub fn read_default(
+    xml: &[u8],
+    user: i32,
+    string: impl Fn(&str) -> Option<String>,
+) -> Result<Element, String> {
+    let mut zen = compiled_element(aim_apps::res::xml(xml).map_err(|e| e.to_string())?)?;
+    if zen.name != "zen" {
+        return Err("default_zen_mode_config has no zen root".into());
+    }
+    let config = read_xml(&zen);
+    let policy = config.manual.policy.as_ref().unwrap();
+    for e in &mut zen.content {
+        let Node::Element(e) = e else { continue };
+        if e.name != "automatic" {
+            continue;
+        }
+        let name = match e.string("ruleId").as_deref() {
+            Some("EVERY_NIGHT_DEFAULT_RULE") => "zen_mode_default_every_night_name",
+            Some("EVENTS_DEFAULT_RULE") => "zen_mode_default_events_name",
+            _ => continue,
+        };
+        let name = string(name).ok_or_else(|| format!("no framework string {name}"))?;
+        set(e, "name", Value::String(name));
+        if read_policy(e).is_none() {
+            write_policy(e, policy);
+        }
+    }
+    // `writeXml` includes the migrated manual rule, not merely the old
+    // config-level allow/disallow fields.
+    let mut manual = Element {
+        name: "manual".into(),
+        attrs: vec![],
+        content: vec![],
+    };
+    for (name, value) in [
+        ("enabled", Value::Bool(true)),
+        ("zen", Value::Int(0)),
+        ("pkg", Value::String("android".into())),
+        ("conditionId", Value::String(String::new())),
+        ("creationTime", Value::Long(0)),
+        ("userInvokable", Value::Bool(true)),
+        ("type", Value::Int(TYPE_OTHER)),
+    ] {
+        set(&mut manual, name, value);
+    }
+    write_policy(&mut manual, policy);
+    zen.content.push(Node::Element(manual));
+    set(&mut zen, "user", Value::Int(user));
+    set(&mut zen, "version", Value::String("12".into()));
+    Ok(zen)
+}
+
+/// The persisted config, if the policy contains `<zen>`. Otherwise the
+/// service keeps the config it initialized from the framework resource.
+pub fn read(policy: &Element) -> Option<ZenModeConfig> {
+    policy.children().find(|e| e.name == "zen").map(read_xml)
+}
+
+/// `ZenModeConfig.readXml`, shared by the compiled default and persisted
+/// config: rules in `ArrayMap` order and the `modes_ui` manual migration.
+pub fn read_xml(zen: &Element) -> ZenModeConfig {
     let mut manual = None;
     let (mut automatic, mut deleted) = (Vec::new(), Vec::new());
     let mut has_priority_channels = false;
@@ -909,7 +1044,7 @@ pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
         }
         None => new_manual_rule(legacy.to_zen_policy()),
     };
-    Ok(ZenModeConfig {
+    ZenModeConfig {
         user: int(zen, "user", 0),
         manual,
         automatic: crate::package::info::array_order(automatic, |r: &ZenRule| {
@@ -919,7 +1054,7 @@ pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
             k.as_str()
         }),
         has_priority_channels,
-    })
+    }
 }
 
 impl ZenModeConfig {
@@ -977,6 +1112,99 @@ pub fn policy_access_approved(policy: &Element, package: &str, user: i32) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pinned resource-backed defaults (`ZenModeHelper.readDefaultConfig`
+    /// and `updateDefaultConfig`): both disabled rules, localized names,
+    /// fully populated policies and the target user survive persistence.
+    #[test]
+    fn compiled_defaults_are_localized_and_return_automatic_rules() {
+        let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
+            return;
+        };
+        for locale in ["en-US", "ko-KR"] {
+            let framework =
+                crate::app_host::resources::Framework::load(&root, 320, locale).unwrap();
+            let xml = framework
+                .framework_file(&root, "xml", "default_zen_mode_config")
+                .unwrap();
+            let zen = read_default(&xml, 10, |name| framework.framework_string(name)).unwrap();
+            let config = read_xml(&zen);
+            assert_eq!(config.user, 10);
+            assert_eq!(config.automatic.len(), 2);
+            assert!(!config.has_priority_channels);
+            let (a, d) = (STATE_ALLOW, STATE_DISALLOW);
+            assert_eq!(
+                config.manual.policy.as_ref().unwrap(),
+                &ZenPolicy {
+                    categories: [d, d, a, a, a, a, a, d, a],
+                    effects: [d, d, d, a, a, d, a],
+                    messages: PEOPLE_TYPE_STARRED,
+                    calls: PEOPLE_TYPE_STARRED,
+                    conversations: CONVERSATION_SENDERS_IMPORTANT,
+                    channels: CHANNEL_POLICY_PRIORITY,
+                }
+            );
+            for (id, name, component, condition) in [
+                (
+                    "EVERY_NIGHT_DEFAULT_RULE",
+                    "zen_mode_default_every_night_name",
+                    "com.android.server.notification.ScheduleConditionProvider",
+                    "condition://android/schedule?days=1.2.3.4.5.6.7&start=22.0&end=7.0&exitAtAlarm=true",
+                ),
+                (
+                    "EVENTS_DEFAULT_RULE",
+                    "zen_mode_default_events_name",
+                    "com.android.server.notification.EventConditionProvider",
+                    "condition://android/event?userId=-10000&calendar=&reply=1",
+                ),
+            ] {
+                let rule = config
+                    .automatic
+                    .iter()
+                    .find(|r| r.id.as_deref() == Some(id))
+                    .unwrap();
+                assert!(!rule.enabled);
+                assert_eq!(rule.name, framework.framework_string(name));
+                assert_eq!(rule.zen_mode, ZEN_MODE_IMPORTANT_INTERRUPTIONS);
+                assert_eq!(rule.pkg.as_deref(), Some("android"));
+                assert_eq!(rule.component, Some(("android".into(), component.into())));
+                assert_eq!(rule.condition_id.as_ref().unwrap().as_str(), condition);
+                assert_eq!(rule.policy, config.manual.policy);
+                assert_eq!(rule.creation_time, 0);
+                assert!(rule.condition.is_none());
+            }
+            let automatic =
+                automatic_zen_rules(config.clone().rules(), |_, _| panic!("default icon")).unwrap();
+            assert_eq!(automatic.len(), 2);
+            for r in automatic {
+                let mut parcel = Parcel::new();
+                r.write_to(&mut parcel);
+                let mut reader = parcel.reader();
+                assert!(
+                    reader
+                        .read_string8()
+                        .unwrap()
+                        .unwrap()
+                        .ends_with("DEFAULT_RULE")
+                );
+                assert_eq!(
+                    reader.read_string16().unwrap().as_deref(),
+                    Some("android.app.AutomaticZenRule")
+                );
+                assert_eq!(reader.read_i32().unwrap(), 0); // disabled
+            }
+            let policy = Element {
+                name: "notification-policy".into(),
+                attrs: vec![],
+                content: vec![Node::Element(zen)],
+            };
+            let persisted = aim_android_xml::abx::write(&policy).unwrap();
+            assert_eq!(
+                read(&aim_android_xml::read(&persisted).unwrap()).unwrap(),
+                config
+            );
+        }
+    }
 
     /// A rule's attributes, policy and effects read as `readRuleXml` reads
     /// them, and the approved packages.
