@@ -895,6 +895,9 @@ fn spawn_program_suspended(
     };
     unsafe {
         checked(libc::posix_spawnattr_init(&mut setup.attr))?;
+        aim_process::disclaim(&mut setup.attr).map_err(|error| {
+            -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::ENOSYS)) as i64)
+        })?;
         checked(libc::posix_spawn_file_actions_init(&mut setup.actions))?;
         let mut all: libc::sigset_t = 0;
         libc::sigfillset(&mut all);

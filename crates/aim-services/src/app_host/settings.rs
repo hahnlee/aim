@@ -215,6 +215,37 @@ impl State {
         }
     }
 
+    /// `DatabaseHelper.loadGlobalSettings` / `loadSecureSettings`: the
+    /// app host's vendor defaults stand for `def_device_provisioned=true`
+    /// and `def_user_setup_complete=true`, since the Mac is already set up.
+    /// Provision's `DefaultActivity` at android-16.0.0_r1 sets only these two.
+    fn defaults(table: Table) -> Option<State> {
+        let name = match table {
+            Table::Global => "device_provisioned",
+            Table::Secure => "user_setup_complete",
+            _ => return None,
+        };
+        let mut state = State::new();
+        // `SettingsProvider.UpgradeController.SETTINGS_VERSION` at the pin.
+        state.version = 229;
+        let mut setting = Setting {
+            name: name.into(),
+            ..Default::default()
+        };
+        setting.update(
+            Some("1"),
+            true,
+            Some(SYSTEM_PACKAGE_NAME),
+            None,
+            true,
+            true,
+            false,
+            &mut state.next_id,
+        );
+        state.put(setting);
+        Some(state)
+    }
+
     /// `ArrayMap.indexOf`: where `name` is, or where it would be added.
     fn index(&self, name: &str) -> Result<usize, usize> {
         let hash = java_hash(name);
@@ -608,15 +639,24 @@ pub struct Settings {
 
 impl Settings {
     /// User 0's settings below the guest's `/data` at `data`, with the
-    /// aconfig defaults of the image at `root`; a table never written has
-    /// none.
+    /// aconfig defaults of the image at `root`. A new secure or global
+    /// table starts with the vendor defaults; existing XML is kept as-is,
+    /// as the original has no provisioning backfill for SettingsState XML.
     pub fn load(data: &Path, root: &Path) -> Result<Settings, String> {
         let mut tables = HashMap::new();
         for table in Table::ALL {
             let path = data.join("system/users/0").join(table.file());
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(state) = State::defaults(table) {
+                        std::fs::create_dir_all(data.join("system/users/0"))
+                            .and_then(|()| write(data, table, &state.document(table)))
+                            .map_err(|e| format!("{}: {e}", path.display()))?;
+                        tables.insert(table, state);
+                    }
+                    continue;
+                }
                 Err(e) => return Err(format!("{}: {e}", path.display())),
             };
             tables.insert(
@@ -1192,6 +1232,71 @@ mod tests {
             caller_system: false,
             overrideable_by_restore: false,
         }
+    }
+
+    /// `DatabaseHelper`'s vendor provisioning defaults, migrated with
+    /// `SettingsRegistry.migrateLegacySettingsLocked`'s system attribution.
+    #[test]
+    fn fresh_settings_are_provisioned_and_persisted() {
+        let dir = std::env::temp_dir().join(format!("aim-settings-fresh-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let defaults = [
+            (Table::Global, "device_provisioned"),
+            (Table::Secure, "user_setup_complete"),
+        ];
+        let settings = Settings::load(&dir, &dir).unwrap();
+        for (table, name) in defaults {
+            let setting = settings.setting(table, name).unwrap();
+            assert_eq!(settings.get(table, name).as_deref(), Some("1"));
+            assert_eq!(setting.default_value.as_deref(), Some("1"));
+            assert_eq!(setting.package.as_deref(), Some(SYSTEM_PACKAGE_NAME));
+            assert!(setting.default_from_system);
+            assert!(!setting.preserved_in_restore);
+            let bytes = std::fs::read(dir.join("system/users/0").join(table.file())).unwrap();
+            assert!(bytes.starts_with(aim_android_xml::abx::MAGIC));
+            let state = State::parse(table, &bytes).unwrap();
+            assert_eq!(state.version, 229);
+            assert_eq!(state.get(name), Some(&setting));
+        }
+        assert_eq!(settings.get(Table::Secure, "tv_user_setup_complete"), None);
+        let again = Settings::load(&dir, &dir).unwrap();
+        for (table, name) in defaults {
+            assert_eq!(again.get(table, name).as_deref(), Some("1"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The legacy SQLite 92->93 upgrade derives USER_SETUP_COMPLETE from
+    /// DEVICE_PROVISIONED; it does not backfill existing SettingsState XML.
+    #[test]
+    fn existing_settings_do_not_reapply_provisioning_defaults() {
+        let dir =
+            std::env::temp_dir().join(format!("aim-settings-existing-{}", std::process::id()));
+        let users = dir.join("system/users/0");
+        std::fs::create_dir_all(&users).unwrap();
+        for value in [None, Some("0"), Some("1")] {
+            let mut documents = Vec::new();
+            for (table, name) in [
+                (Table::Global, "device_provisioned"),
+                (Table::Secure, "user_setup_complete"),
+            ] {
+                let setting = value.map_or(String::new(), |value| {
+                    format!(r#"<setting id="7" name="{name}" value="{value}" package="android" />"#)
+                });
+                let xml = format!(r#"<settings version="229">{setting}</settings>"#);
+                std::fs::write(users.join(table.file()), &xml).unwrap();
+                documents.push((table, name, xml));
+            }
+            let settings = Settings::load(&dir, &dir).unwrap();
+            for (table, name, xml) in documents {
+                assert_eq!(settings.get(table, name).as_deref(), value);
+                assert_eq!(
+                    std::fs::read_to_string(users.join(table.file())).unwrap(),
+                    xml
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

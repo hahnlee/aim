@@ -1621,7 +1621,7 @@ impl Query<'_> {
     }
 
     /// `getInstallSourceInfo`.
-    fn install_source_info(
+    pub(crate) fn install_source_info(
         &self,
         name: &str,
         user: i32,

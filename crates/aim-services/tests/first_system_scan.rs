@@ -2231,6 +2231,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 remove_test_base: &remove_test_base,
                 destinations: &destinations,
                 resources: &resources,
+                removal: None,
                 new_domain_id: &domain_ids,
             };
             let mut data_loop = before.clone();

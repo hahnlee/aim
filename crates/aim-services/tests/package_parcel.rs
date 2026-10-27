@@ -2122,10 +2122,7 @@ fn native_package_parcels_match_original_read_write() {
         read_runtime("original-duplicate-runtime-permissions.xml"),
         read_runtime("duplicate-runtime-permissions.xml")
     );
-    eprintln!(
-        "Original nullable factory write status: {}",
-        fs::read_to_string(directory.join("nullable-factory-original.write-status")).unwrap()
-    );
+    common::factory_read_events::verify_nullable(&directory);
     assert_eq!(
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())

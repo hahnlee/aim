@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 pub struct InstallRead<'a, T> {
     pub users: &'a [i32],
     pub packages: &'a mut BTreeMap<String, Migration>,
-    pub factories: &'a mut BTreeMap<String, Migration>,
+    pub factories: &'a mut BTreeMap<Option<String>, Migration>,
     pub shared_users: &'a mut BTreeMap<String, Migration>,
     pub remaining: &'a mut T,
 }
@@ -28,7 +28,7 @@ impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
         ids: &AppIds,
     ) -> Result<(), ReadError> {
         let mut own = Migration::default();
-        let index = settings.read_factory(reader, start, |package, reader| {
+        let name = settings.read_factory(reader, start, |package, reader| {
             if !package.shared_user {
                 return own.read_install_events(reader, self.users);
             }
@@ -47,8 +47,7 @@ impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
             })?;
             state.read_install_events(reader, self.users)
         })?;
-        self.factories
-            .insert(settings.disabled_system_packages[index].name.clone(), own);
+        self.factories.insert(name, own);
         Ok(())
     }
     fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError> {

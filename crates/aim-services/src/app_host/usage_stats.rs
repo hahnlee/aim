@@ -266,6 +266,11 @@ impl AppHost {
 
     /// `reportEvent` of an event the app host reports for user 0.
     pub(super) fn report_usage_stats_event(&self, event: Event) {
+        if let Some(owner) = self.background_install_control.get()
+            && let Err(e) = owner.usage(0, event.clone())
+        {
+            eprintln!("app host: {}", e.message);
+        }
         let reported = self.with_usage(|user, clocks, notified| {
             let n = user.report(event, clocks);
             notified.updated |= n.updated;

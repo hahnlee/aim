@@ -8,6 +8,7 @@ AOSP_TAG=android-16.0.0_r1
 
 # project|path|sha256
 SOURCE_FILES=(
+  "platform/frameworks/base|core/java/android/content/pm/IBackgroundInstallControlService.aidl|d0f1e7892919cd816b4fc459d995667d373432540007af97c0c60355c9441e9f"
   "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmManager.aidl|78d732d32eb4f06bc5c6fe24bdaea98888eed17cc73605060827063e6b39a15a"
   "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmListener.aidl|9410b8de3eb90001ace6ddca3cc2bf83228eed5a1bd50b2e8d59824a49aae563"
   "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmCompleteListener.aidl|2ea3aedd260c5c10f8d1398e9e92a043dfb4db538091bb022cbbd491dabada3d"
@@ -261,6 +262,7 @@ INTERFACES=(
   "android.content.pm.IPackageStatsObserver|system/framework/framework.jar|*"
   "android.content.pm.IOnChecksumsReadyListener|system/framework/framework.jar|*"
   "android.content.pm.IDexModuleRegisterCallback|system/framework/framework.jar|*"
+  "android.content.pm.IBackgroundInstallControlService|system/framework/framework.jar|*"
   "android.os.IRemoteCallback|system/framework/framework.jar|*"
   "com.android.internal.policy.IDeviceLockedStateListener|system/framework/framework.jar|*"
   "android.app.INotificationManager|system/framework/framework.jar|registerListener,unregisterListener,cancelNotificationsFromListener,getActiveNotificationsFromListener,getNotificationChannelForPackage,finishToken,cancelAllNotifications,cancelNotificationWithTag,areNotificationsEnabled,areNotificationsEnabledForPackage,getPackageImportance,getNotificationChannel,getConversationNotificationChannel,getNotificationChannels,deleteNotificationChannel,deleteNotificationChannelGroup,getNotificationChannelGroup,getNotificationChannelGroups,getAppActiveNotifications,getZenMode,getAutomaticZenRules,getAutomaticZenRule,getDefaultNotificationAssistant,getAllowedNotificationAssistant,shouldHideSilentStatusIcons,getConversations,getZenModeConfig,setNotificationDelegate,isNotificationPolicyAccessGranted"

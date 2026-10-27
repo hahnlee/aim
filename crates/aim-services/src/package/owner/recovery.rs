@@ -76,10 +76,11 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 struct Input {
-    file: OwnedFile,
+    file: Option<OwnedFile>,
+    metadata: fs::Metadata,
+    read: bool,
     source: Source,
     path: PathBuf,
-    directory: Option<(i64, i64, i64, i64)>,
 }
 
 /// Read-only claim of the canonical settings files. The exclusive boot owner
@@ -112,46 +113,25 @@ impl Plan {
             .enumerate()
         {
             let path = paths[index].clone();
-            let mut file = match OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)
-            {
-                Ok(file) => file,
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => {
                     return Err(Error {
                         events: Vec::new(),
-                        message: format!("{}: {error}", path.display()),
+                        message: format!(
+                            "UnsupportedOperation: settings inventory lookup requires an accessible parent (#912): {}: {error}",
+                            path.display()
+                        ),
                     });
                 }
             };
-            let metadata = file.metadata().map_err(|error| Error {
-                events: Vec::new(),
-                message: error.to_string(),
-            })?;
-            if !metadata.is_file() && !metadata.is_dir() {
-                return Err(Error {
-                    events: Vec::new(),
-                    message: "unsupported nonregular settings input".into(),
-                });
-            }
-            let directory = metadata.is_dir().then(|| directory_stamp(&metadata));
-            let mut bytes = Vec::new();
-            if directory.is_none() {
-                file.read_to_end(&mut bytes).map_err(|error| Error {
-                    events: Vec::new(),
-                    message: error.to_string(),
-                })?;
-            }
             inputs[index] = Some(Input {
-                file: OwnedFile {
-                    file,
-                    payload: bytes.into(),
-                },
+                file: None,
+                metadata,
+                read: false,
                 source,
                 path,
-                directory,
             });
         }
         Ok(Self {
@@ -170,24 +150,101 @@ impl Plan {
             };
             match (&self.inputs[index], metadata) {
                 (None, None) => {}
-                (Some(input), Some(metadata))
-                    if metadata.is_dir()
-                        && input.file.same_file(&metadata)
-                        && input.directory == Some(directory_stamp(&metadata)) => {}
-                (Some(input), Some(metadata))
-                    if metadata.is_file() && input.file.same_file(&metadata) =>
-                {
-                    if fs::read(path)
-                        .map_err(|error| error.to_string())?
-                        .as_slice()
-                        != input.file.payload.as_ref()
-                    {
-                        return Err("settings bytes changed outside the recovery owner".into());
+                (Some(input), Some(metadata)) if same_metadata(&input.metadata, &metadata) => {
+                    if input.read {
+                        let file = input.file.as_ref().unwrap();
+                        if !file.same_file(&metadata)
+                            || fs::read(path)
+                                .map_err(|error| error.to_string())?
+                                .as_slice()
+                                != file.payload.as_ref()
+                        {
+                            return Err("settings bytes changed outside the recovery owner".into());
+                        }
                     }
                 }
                 _ => return Err("settings inventory changed outside the recovery owner".into()),
             }
         }
+        Ok(())
+    }
+
+    // openRead catches only backup open errors; reading the selected stream
+    // happens after backup cleanup, and read errors enter failRead.
+    fn open(&mut self, index: usize) -> Result<(), ReadError> {
+        let input = self.inputs[index].as_mut().unwrap();
+        if input.metadata.is_dir() {
+            return Err(ReadError::File(
+                io::Error::from_raw_os_error(libc::EISDIR).to_string(),
+            ));
+        }
+        if !input.metadata.is_file() {
+            return Err(ReadError::Owner(
+                "UnsupportedOperation: selected nonregular settings input requires stream/target ownership (#912)".into(),
+            ));
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&input.path)
+            .map_err(|error| ReadError::File(error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| ReadError::Owner(error.to_string()))?;
+        if !same_metadata(&input.metadata, &metadata) {
+            return Err(ReadError::Owner(
+                "settings inventory changed while opening recovery input".into(),
+            ));
+        }
+        input.file = Some(OwnedFile {
+            file,
+            payload: std::sync::Arc::from([]),
+        });
+        Ok(())
+    }
+
+    fn select(&mut self, events: &mut Vec<Event>) -> Result<Option<usize>, Error> {
+        for index in [1, 0, 2] {
+            let Some(input) = &self.inputs[index] else {
+                continue;
+            };
+            let source = input.source;
+            match self.open(index) {
+                Ok(()) => return Ok(Some(index)),
+                Err(ReadError::File(message)) => {
+                    events.push(Event::OpenFailed(source));
+                    if index != 1 {
+                        return Err(Error {
+                            events: events.clone(),
+                            message,
+                        });
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    events.push(Event::OwnerFailed {
+                        source,
+                        message: message.clone(),
+                    });
+                    return Err(Error {
+                        events: events.clone(),
+                        message,
+                    });
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn read(&mut self, index: usize) -> Result<(), ReadError> {
+        let input = self.inputs[index].as_mut().unwrap();
+        let file = input.file.as_mut().unwrap();
+        let mut bytes = Vec::new();
+        file.file
+            .read_to_end(&mut bytes)
+            .map_err(|error| ReadError::File(error.to_string()))?;
+        file.payload = bytes.into();
+        input.read = true;
         Ok(())
     }
 
@@ -202,7 +259,7 @@ impl Plan {
             message,
         })?;
         if let Some(input) = &self.inputs[index] {
-            let removed = if input.directory.is_some() {
+            let removed = if input.metadata.is_dir() {
                 fs::remove_dir(&input.path)
             } else {
                 fs::remove_file(&input.path)
@@ -217,8 +274,27 @@ impl Plan {
                     message: error.to_string(),
                 });
             }
+            let removed = (input.metadata.dev(), input.metadata.ino());
             events.push(Event::Removed(input.source));
             self.inputs[index] = None;
+            // Unlink changes every remaining hard link's ctime/link count.
+            for input in self.inputs.iter_mut().flatten() {
+                if (input.metadata.dev(), input.metadata.ino()) == removed {
+                    let metadata = fs::symlink_metadata(&input.path).map_err(|error| Error {
+                        events: events.clone(),
+                        message: error.to_string(),
+                    })?;
+                    if !same_data(&input.metadata, &metadata)
+                        || input.metadata.nlink().checked_sub(1) != Some(metadata.nlink())
+                    {
+                        return Err(Error {
+                            events: events.clone(),
+                            message: "settings hard link changed during recovery cleanup".into(),
+                        });
+                    }
+                    input.metadata = metadata;
+                }
+            }
         }
         Ok(())
     }
@@ -308,35 +384,7 @@ impl Plan {
                 events: events.clone(),
                 message,
             })?;
-            let backup = self.inputs[1]
-                .as_ref()
-                .filter(|input| input.directory.is_none());
-            if self.inputs[1]
-                .as_ref()
-                .is_some_and(|input| input.directory.is_some())
-            {
-                events.push(Event::OpenFailed(Source::Backup));
-            }
-            let selected = if backup.is_some() {
-                Some(1)
-            } else {
-                [0, 2]
-                    .into_iter()
-                    .find(|index| self.inputs[*index].is_some())
-            };
-            if let Some(index) = selected
-                && self.inputs[index]
-                    .as_ref()
-                    .is_some_and(|input| input.directory.is_some())
-            {
-                events.push(Event::OpenFailed(
-                    self.inputs[index].as_ref().unwrap().source,
-                ));
-                return Err(Error {
-                    events,
-                    message: io::Error::from_raw_os_error(libc::EISDIR).to_string(),
-                });
-            }
+            let selected = self.select(&mut events)?;
             let Some(index) = selected else {
                 events.push(Event::Absent);
                 if let Some(current) = current {
@@ -364,10 +412,21 @@ impl Plan {
                 self.remove(0, &mut events, true)?;
                 self.remove(2, &mut events, true)?;
             }
-            match parse(
-                ReadStage::File(&self.inputs[index].as_ref().unwrap().file.payload),
-                settings,
-            ) {
+            let result = self.read(index).and_then(|()| {
+                parse(
+                    ReadStage::File(
+                        &self.inputs[index]
+                            .as_ref()
+                            .unwrap()
+                            .file
+                            .as_ref()
+                            .unwrap()
+                            .payload,
+                    ),
+                    settings,
+                )
+            });
+            match result {
                 Ok(Some(document)) => {
                     if let Some(current) = current {
                         settings.ensure_boot_versions(current);
@@ -510,24 +569,36 @@ impl Plan {
             message,
         })?;
         if !present {
-            store
-                .first_write_files
-                .extend(self.inputs.iter_mut().filter_map(|input| {
-                    input
-                        .take()
-                        .filter(|input| input.directory.is_none())
-                        .map(|input| input.file)
-                }));
+            for input in self.inputs.iter_mut().filter_map(Option::take) {
+                if input.read {
+                    store.first_write_files.push(input.file.unwrap());
+                } else {
+                    store.first_write_inventory.push(input.metadata);
+                }
+            }
         }
         Ok((store, report))
     }
 }
 
-fn directory_stamp(metadata: &fs::Metadata) -> (i64, i64, i64, i64) {
-    (
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.ctime(),
-        metadata.ctime_nsec(),
-    )
+// Metadata claims cover unopened roles without requiring read access. Reads do
+// not change these fields; chmod, replacement and in-place writes do.
+fn same_data(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && a.mode() == b.mode()
+        && a.uid() == b.uid()
+        && a.gid() == b.gid()
+        && a.len() == b.len()
+        && a.rdev() == b.rdev()
+        && a.mtime() == b.mtime()
+        && a.mtime_nsec() == b.mtime_nsec()
+}
+
+pub(super) fn same_contents(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    same_data(a, b) && a.nlink() == b.nlink()
+}
+
+pub(super) fn same_metadata(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    same_contents(a, b) && a.ctime() == b.ctime() && a.ctime_nsec() == b.ctime_nsec()
 }

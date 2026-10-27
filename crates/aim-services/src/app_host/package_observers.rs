@@ -468,6 +468,8 @@ mod tests {
             .transact(events::PACKAGE_ADDED, &p, false)
             .unwrap();
         assert_eq!(p.reader().read_exception().unwrap(), Err(closed()));
-        assert_eq!(next.snapshot().unwrap().len(), 4); // discovery, permission policy, launch params
+        // Discovery, permission policy, background install control, launch
+        // params and the test observer.
+        assert_eq!(next.snapshot().unwrap().len(), 5);
     }
 }

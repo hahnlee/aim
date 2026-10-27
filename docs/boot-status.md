@@ -5,6 +5,8 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+`linux-run` embeds the **AIM Runtime** macOS privacy identity and establishes its own process responsibility before initialization ([host privacy](host-privacy.md), #2190).
+
 ## How to reproduce
 
 ```
@@ -30,6 +32,9 @@ guest-init --image <derived> --data <data> --run \
   `build.prop` still describes the emulator (#206).
 
 ## The app host boot (2026-10-16)
+
+The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
+A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.
 
 The app host image ([app-host.md](app-host.md)) boots without
 system_server: with `--only` its 33 services and one-shots, zygote accepts
@@ -205,10 +210,10 @@ signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app
 launches, and `pm uninstall` removes its code and data; each survives a
 reboot. Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
-does. `pm install <file>` (#2178), archiving (#1757), internal event delivery
-and shutdown statistics (#2167), permission state without `access.abx`
-(#2168), boot admissions into the permission policy (#2169) and the remaining
-bootstrap owners (#2022) are open.
+does. Without `access.abx`, the permission manager migrates the legacy
+permission definitions and trees from `packages.xml`; the user state's
+migration is #2201. Archiving (#1757), shutdown statistics (#2167) and the
+remaining bootstrap owners (#2022) are open.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
@@ -3496,11 +3501,12 @@ A late reserve-finalization failure publishes the committed main and the next
 write restores the reserve. Original ResilientAtomicFile agrees on partial main
 failure, empty retained reserve, descriptor-open failure and successful retry. Domain validation failures leave the directory unwritten, complete
 user XML survives, and a successful main commit changes the owner to restoration
-mode. An explicit exclusive recovery plan claims regular settings inputs with
-pinned descriptors/exact bytes and directory roles with pinned identity/timestamps,
-then follows original backup/main/reserve selection and failRead cleanup (#912).
-Backup directories fail open and fall through to main; unused reserve directories
-are not parsed. Backup selection attempts main/reserve cleanup before parsing:
+mode. Exclusive settings recovery now claims unopened roles by identity/metadata and
+reads only the selected stream, follows backup-open fallback without reading
+unused unreadable roles, preserves claims through initial-write retry, and
+reports selected nonregular streams or inaccessible inventory parents as
+UnsupportedOperation (#912).
+Backup selection attempts main/reserve cleanup before parsing:
 empty directories are removed, while nonempty directory deletion failure is
 recorded and the directory is preserved, as original File.delete does. Selected
 main/reserve directories expose their open error. Four additional original ART
@@ -5522,18 +5528,11 @@ flags and the original disabled domain ID, does not register a UID, reads only
 permissions/static/SDK-library children, and replaces the disabled setting only
 after the body completes. Each factory own migration state is fresh; shared
 permissions affect the UID owner visible at that event even if a later file error
-prevents factory publication. Factory fixed markers remain false. Missing code
-paths are FatalInput; nullable factory names remain an explicit unavailable owner
-(#975). Actual original Settings reads null and empty factory names as separate
-keys and replaces duplicate null keys with the last path/appId/version. Original
-PackageSetting.getPackageName retains null; writeDisabledSysPackageLPr fails on
-that name with NullPointerException. A direct original read/get/write probe now
-records this contract. Native nullable identity representation is still missing
-and #975 remains open; the native Owner error preserves selected input. The
-expanded original ART contract probe passes without skips (58.79s), including
-null/empty identity separation, last-null-key replacement and original serializer
-NullPointerException. This turn changes fixture/contract evidence only; native
-read/query representation still requires an explicit nullable factory model. Complete factory/group post-read binding, detached/retained object/user
+prevents factory publication. Factory fixed markers remain false. Native factory read/query preserves distinct null/empty identities and last-
+null-key replacement, missing code paths remain FatalInput, null-name
+serialization fails as original, and nullable factory scan/permission
+publication remains explicit UnsupportedOperation (#917).
+Complete factory/group post-read binding, detached/retained object/user
 identity and native PMS/SystemServer lifecycle remain #914/#858/#798.
 Fifteen text/ABX factory fixtures agree with actual original Settings.readSettingsLPw
 on SYSTEM/priv-app flags, appId/shared status, disabled domain ID, version/path,
@@ -6323,9 +6322,13 @@ then retires the package's signing/alias keyset references. Shared sets and publ
 keys remain until their last owner disappears; upgrade aliases add no separate
 references and last-issued IDs never rewind (#823). KeySetData now restores
 KEYSET_UNASSIGNED=-1, including the original unversioned-settings reset. A keyset
-owner failure leaves the earlier domain removal in place. The scan then stops at
-unconnected filter/preferred/keystore and setting/permission cleanup stages
-(#798/#822). Between keyset retirement and that boundary, the scan now removes
+owner failure leaves the earlier domain removal in place. Boot removal clears
+implicit visibility and persisted preferred choices, posts keystore cleanup,
+removes setting/UID membership, reconciles modern permissions through the app host
+owner, then converts eligible shared UIDs and removes renamed-package mappings,
+with pre-ready home updates skipped and posted preferred-change broadcasts
+delivered by the app host's boot-completion owner (#798/#822).
+Between keyset retirement and visibility cleanup, the scan removes
 the deleted provider from native update-ownership denylist relations, preserving
 other providers for overlapping targets. Repeated additions accumulate, matching
 UpdateOwnershipHelper; empty additions do not withdraw old contributions. Accepted
@@ -6357,10 +6360,8 @@ installer/originator/update-owner references and attribution, retaining the
 initiator name/signatures with its uninstalled flag and marking installer
 orphans. Original Settings compares independent/shared/disabled-reserved UID
 removal, repeated missing removal and installer source effects (19.35s). All 338
-units pass (3.10s), and image API linkage passes (13.1s). This in-memory stage is
-not yet called by boot cleanup: full side-owner ordering, permission uninstall
-reconciliation and publication remain #822/#798. The native store now persists
-that completed setting removal and its installer-source effects, rejecting
+units pass (3.10s), and image API linkage passes (13.1s). The native store now
+persists that completed setting removal and its installer-source effects, rejecting
 unrelated metadata changes before writing. A last shared-UID group is removed
 only without an active or disabled factory member; unknown XML stays intact.
 Certificate references are materialized before deleting their defining owner,
@@ -6404,8 +6405,7 @@ renamed-package real-name key, preserving mappings whose values name the same
 old package, after permission uninstall/shared-UID conversion. Named, absent,
 null and repeated map removals match original Settings; disk reopening preserves
 the native change and unrelated XML. All 338 units pass (3.10s), the combined
-original fixture passes (19.35s), and new image APIs link (14.0s). These stages
-are not yet orchestrated by boot deletion (#798/#822). All eight Java-oracle DEX
+original fixture passes (19.35s), and new image APIs link (14.0s). All eight Java-oracle DEX
 build paths now check references against the original boot classpath and the
 client's explicit services.jar before starting a guest (#830). A separate
 all-oracle compilation/linkage test passes (2.83s), and a JDK API regression

@@ -265,6 +265,12 @@ fn spawn() -> Option<Conn> {
         let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
         libc::posix_spawn_file_actions_init(&mut actions);
         libc::posix_spawnattr_init(&mut attr);
+        if let Err(error) = aim_process::disclaim(&mut attr) {
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+            libc::posix_spawnattr_destroy(&mut attr);
+            crate::log(format_args!("CoreAudio process responsibility: {error}"));
+            return None;
+        }
         let null = c"/dev/null";
         libc::posix_spawn_file_actions_addopen(&mut actions, 0, null.as_ptr(), libc::O_RDONLY, 0);
         libc::posix_spawn_file_actions_addopen(&mut actions, 1, null.as_ptr(), libc::O_WRONLY, 0);

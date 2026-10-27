@@ -231,6 +231,18 @@ fn failure(message: impl Into<String>) -> Exception {
     Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message)
 }
 
+fn data_scan_exception(error: crate::package::bootstrap::BootError) -> Exception {
+    let code = match &error {
+        crate::package::bootstrap::BootError::Scan(crate::package::scan::SigningError::Fatal(
+            error,
+        )) if error.phase == "unsupported-operation" => {
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        }
+        _ => aim_binder_host::parcel::EX_ILLEGAL_STATE,
+    };
+    Exception::new(code, format!("native data scan: {error:?}"))
+}
+
 pub struct Begun {
     pub prepared: Prepared,
     pub lifecycle: Production,
@@ -415,7 +427,7 @@ impl System {
         bridge: &Arc<Bridge>,
         begin: Begun,
         mut original: crate::package::scan_snapshot::boot_context::Original,
-        runtime_system: model::System,
+        mut runtime_system: model::System,
         classes: Arc<aim_android_image::linkage::Hierarchy>,
         apks: &crate::package::write::Apks,
         policy: ScanPolicy<'_>,
@@ -528,7 +540,20 @@ impl System {
             .ok_or_else(|| failure("actual platform package absent"))?
             .collected_signing
             .clone();
-        boot.scan_data(
+        let keystore = crate::package::owner::keystore::KeystoreCleanup::new(self.binder_process());
+        let preferred_changed = || begin.lifecycle.owner.post_boot_preferred_activity_changed();
+        let permissions = self.native_permissions();
+        let uninstall_permissions =
+            |scan: &SigningScan,
+             package: &crate::package::settings::Package,
+             users: &[crate::package::scan::User]| {
+                permissions
+                    .as_ref()
+                    .ok_or_else(|| "boot permission removal owner unavailable".to_string())?
+                    .remove_boot_permissions(scan, package, users)
+                    .map_err(|error| error.message)
+            };
+        let data_result = boot.scan_data(
             &mut owner,
             apks,
             policy,
@@ -543,9 +568,35 @@ impl System {
                 is_incremental,
                 destinations,
                 resources,
+                removal: Some(crate::package::scan::BootRemovalOwners {
+                    implicit: &mut runtime_system.implicit_access,
+                    preferred: &begin.prepared.disk,
+                    keystore: &keystore,
+                    preferred_changed: &preferred_changed,
+                    permissions: &uninstall_permissions,
+                    migration: boot.migration(),
+                }),
             },
-        )
-        .map_err(|error| failure(format!("native data scan: {error:?}")))?;
+        );
+        // These requests were posted before setting removal. Execute the
+        // deferred work after the synchronous scan, including on its failure;
+        // never lose already-posted namespaces with the failed constructor.
+        let keystore_result = (|| {
+            while keystore.complete_next()? {}
+            Ok::<_, String>(())
+        })();
+        let data_result = data_result.map_err(data_scan_exception);
+        match (data_result, keystore_result) {
+            (Ok(_), Ok(())) => {}
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => return Err(failure(error)),
+            (Err(mut error), Err(cleanup)) => {
+                error
+                    .message
+                    .push_str(&format!("; deferred keystore cleanup: {cleanup}"));
+                return Err(error);
+            }
+        }
         let decompression = Arc::new(
             crate::package::scan::boot_compressed::BootDecompression::new(begin.data.join("app"))
                 .map_err(failure)?,
@@ -923,6 +974,33 @@ impl System {
             boot_apex_changed,
             decompression,
         })
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+    #[test]
+    fn boot_removal_preserves_the_unsupported_exception_at_the_session_boundary() {
+        for (phase, code) in [
+            (
+                "unsupported-operation",
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+            ),
+            ("preferred", aim_binder_host::parcel::EX_ILLEGAL_STATE),
+        ] {
+            let error = data_scan_exception(crate::package::bootstrap::BootError::Scan(
+                crate::package::scan::SigningError::Fatal(crate::package::scan::Error {
+                    package: "disappeared".into(),
+                    path: "/system/app/gone".into(),
+                    phase,
+                    message: "boot removal owner (#798)".into(),
+                }),
+            ));
+            assert_eq!(error.code, code);
+            assert!(error.message.contains("disappeared"));
+            assert!(error.message.contains("#798"));
+        }
     }
 }
 

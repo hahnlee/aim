@@ -32,6 +32,7 @@ pub mod audio_permissions;
 pub mod audio_policy;
 pub mod audio_service;
 pub mod auth_service;
+mod background_install_control;
 mod battery_history;
 pub mod battery_service;
 pub mod battery_stats;
@@ -211,8 +212,8 @@ use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER,
-    EX_UNSUPPORTED_OPERATION, Exception, Parcel, UNKNOWN_TRANSACTION,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
+    Parcel, UNKNOWN_TRANSACTION,
 };
 use aim_service_aidl::android_app_iactivitymanager as am;
 use aim_service_aidl::android_app_iapplicationthread as thread;
@@ -549,6 +550,7 @@ pub struct AppHost {
     uri_grants: uri_grants::UriGrants,
     /// `permissionmgr`, which the app host's own permission checks ask.
     permission_manager: OnceLock<Arc<permission_manager::PermissionManager>>,
+    background_install_control: OnceLock<Arc<background_install_control::BackgroundInstallControl>>,
     /// The native services' system, whose package boot the app host runs.
     system: OnceLock<Arc<crate::system::System>>,
     /// `startBootstrapServices` constructs PMS before `setSystemProcess`.
@@ -689,6 +691,7 @@ impl AppHost {
             bluetooth: OnceLock::new(),
             text_services: OnceLock::new(),
             device_idle: OnceLock::new(),
+            background_install_control: OnceLock::new(),
             package_monitors: Default::default(),
             package_observers: Mutex::default(),
             package_writes: OnceLock::new(),
@@ -851,6 +854,12 @@ impl AppHost {
                 Arc::new(permission_controller::PermissionController(self.clone())),
             ),
             ("permissionmgr", permission_manager.clone()),
+            // SystemServer's optional_background_install_control flag is on;
+            // the image leaves background_install_control_enabled at true.
+            (
+                "background_install_control",
+                self.background_install_control(),
+            ),
             (
                 "permission_checker",
                 Arc::new(permission_checker::PermissionChecker::new(

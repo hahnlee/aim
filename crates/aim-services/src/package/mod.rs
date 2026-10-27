@@ -331,7 +331,7 @@ fn first<T>(
 /// A `ResilientAtomicFile` (packages.xml, package-restrictions.xml): the
 /// backup a write in progress left, which then wins over the others;
 /// else the file, else its reserve copy.
-fn resilient<T>(
+pub(crate) fn resilient<T>(
     path: &Path,
     backup: &Path,
     parse: impl Fn(&Element) -> Result<T, String>,

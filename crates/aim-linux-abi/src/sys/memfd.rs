@@ -41,10 +41,10 @@
 //! `i_mmap_writable`) fails with EBUSY: a process mapping the file shared
 //! through a description open for writing puts its pid on the file
 //! ([`VIEW_ATTR`], a fork child its own), and the sealer looks at those
-//! processes' regions (`PROC_PIDREGIONPATHINFO`), with [`DENY_ATTR`]
-//! holding new views back meanwhile. Views of a memfd a process moved to
-//! anonymous memory are not file regions and are not seen, in this
-//! process or another. EXEC refuses a chmod of the exec bits
+//! processes' regions (`PROC_PIDREGIONPATHINFO`), with [`StateLock`]
+//! serializing the check with mmap. Executable copies advertise their backing
+//! address so the scan also recognizes their anonymous aliases by VM object,
+//! excluding the layer's backing allocation. EXEC refuses a chmod of the exec bits
 //! (`shmem_setattr`).
 //! `vm.memfd_noexec` (the `/proc/sys` value init writes) picks MFD_EXEC or
 //! MFD_NOEXEC_SEAL for a memfd asked for with neither, and from scope 2
@@ -52,11 +52,13 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use super::cred::{self, CAP_DAC_OVERRIDE, CAP_SYS_ADMIN};
 use super::fdtab::{self, Kind};
 use super::vmmap;
 use crate::errno::{self, EINVAL, EPERM};
@@ -86,9 +88,6 @@ const SEAL_ATTR: &str = "dev.aim.memfd.seal.";
 /// the file that may be written, so adding F_SEAL_WRITE in another process
 /// looks at its views.
 const VIEW_ATTR: &str = "dev.aim.memfd.view.";
-/// The host pid of a process adding F_SEAL_WRITE while it looks for views
-/// (`mapping_deny_writable`): a new view that may be written waits for it.
-const DENY_ATTR: &CStr = c"dev.aim.memfd.deny";
 /// A process sweeps at every this many memfd_create calls. Not at its
 /// first: a sweep opens every file in the directory (milliseconds of host
 /// kernel time with a few dozen memfds alive), and every app would pay it
@@ -269,15 +268,12 @@ fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
 }
 
-/// The host pid an attribute of the file holds, if it has it.
-fn attr_pid(fd: i32, name: &CStr) -> Option<i32> {
-    let mut buf = [0u8; 16];
+/// The text an attribute of the file holds, if it has it.
+fn attr_text(fd: i32, name: &CStr) -> Option<String> {
+    let mut buf = [0u8; 64];
     // SAFETY: reading our attribute into a local buffer.
     let n = unsafe { libc::fgetxattr(fd, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, 0) };
-    std::str::from_utf8(&buf[..usize::try_from(n).ok()?])
-        .ok()?
-        .parse()
-        .ok()
+    String::from_utf8(buf[..usize::try_from(n).ok()?].to_vec()).ok()
 }
 
 /// Set attribute `name` of the file at `path` (or of `fd`) to `value`.
@@ -310,9 +306,7 @@ fn set_attr(fd: Option<i32>, path: Option<&std::path::Path>, name: &str, value: 
 }
 
 /// Before a shared view of memfd `fd` that may be written: this process
-/// puts its [`VIEW_ATTR`] on the file once, then waits while a live
-/// process adding F_SEAL_WRITE looks for views, so that either the seal
-/// sees the view or the view sees the seal (`mapping_map_writable`).
+/// puts its [`VIEW_ATTR`] on the file once, while holding [`StateLock`].
 fn note_viewer(k: Key, fd: i32) {
     if !with(|m| m.get(&k).is_some_and(|f| f.viewer.is_some())) {
         let mut path = [0u8; libc::PATH_MAX as usize];
@@ -331,8 +325,44 @@ fn note_viewer(k: Key, fd: i32) {
             });
         }
     }
-    while attr_pid(fd, DENY_ATTR).is_some_and(alive) {
-        std::thread::sleep(std::time::Duration::from_millis(1));
+}
+
+/// The inode lock is separate from guest flock and record locks. Keep it
+/// through mmap, not just its seal check, as Linux's i_mmap_writable does.
+pub struct StateLock(OwnedFd);
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        fdtab::unhide(self.0.as_raw_fd());
+    }
+}
+
+fn state_lock() -> Result<StateLock, i64> {
+    let _own = super::fork::spawn::own_fds();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir().join(".state-lock"))
+        .map_err(|e| -(errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)) as i64))?;
+    let file = StateLock(unsafe { OwnedFd::from_raw_fd(fdtab::hide(file.into_raw_fd())) });
+    loop {
+        if unsafe { libc::flock(file.0.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        if errno::last() != errno::EINTR {
+            return Err(-(errno::last() as i64));
+        }
+    }
+}
+
+/// chmod and F_ADD_SEALS share the inode's seal/mode critical section.
+pub fn lock_mode(fd: i32) -> Result<Option<StateLock>, i64> {
+    if memfd_stat(fd).is_some() {
+        state_lock().map(Some)
+    } else {
+        Ok(None)
     }
 }
 
@@ -375,8 +405,16 @@ const PROC_PIDREGIONPATHINFO: i32 = 8;
 /// Whether host process `pid` has a guest shared view of `k` that may be
 /// written (its maximum protection has write), as [`mapped_writable`]
 /// looks in this process.
-fn viewed_writable_by(pid: i32, k: Key) -> bool {
+fn viewed_writable_by(pid: i32, k: Key, anon: Option<(u64, u64)>) -> bool {
     let size = std::mem::size_of::<RegionWithPath>() as i32;
+    let object = anon.and_then(|(base, _)| {
+        let mut r: RegionWithPath = unsafe { std::mem::zeroed() };
+        let n = unsafe {
+            libc::proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, base, (&raw mut r).cast(), size)
+        };
+        (n == size && r.info.address <= base && base < r.info.address + r.info.size)
+            .then_some(r.info.obj_id)
+    });
     let mut at = super::arena::LO;
     while at < super::arena::HI {
         // SAFETY: zeroed plain data, filled by proc_pidinfo up to its size.
@@ -391,7 +429,11 @@ fn viewed_writable_by(pid: i32, k: Key) -> bool {
         if r.info.inheritance == 0
             && r.info.max_protection & libc::PROT_WRITE as u32 != 0
             && r.info.user_tag != super::window::TAG
-            && (st.vst_dev as u32 as u64, st.vst_ino) == k
+            && ((st.vst_dev as u32 as u64, st.vst_ino) == k
+                || (object == Some(r.info.obj_id)
+                    && !anon.is_some_and(|(base, len)| {
+                        r.info.address >= base && r.info.address + r.info.size <= base + len
+                    })))
         {
             return true;
         }
@@ -422,7 +464,17 @@ fn viewed_writable_elsewhere(fd: i32, k: Key) -> bool {
             }
             continue;
         }
-        if viewed_writable_by(pid, k) {
+        let anon = CString::new(name)
+            .ok()
+            .and_then(|name| attr_text(fd, &name))
+            .and_then(|text| {
+                let (base, size) = text.split_once(':')?;
+                Some((
+                    u64::from_str_radix(base, 16).ok()?,
+                    u64::from_str_radix(size, 16).ok()?,
+                ))
+            });
+        if viewed_writable_by(pid, k, anon) {
             return true;
         }
     }
@@ -495,7 +547,10 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     {
         return -(EINVAL as i64);
     }
-    let scope = noexec_scope();
+    let scope = match noexec_scope() {
+        Ok(scope) => scope,
+        Err(error) => return -(error as i64),
+    };
     let flags = match noexec_flags(flags, scope) {
         Ok(flags) => flags,
         Err(error) => {
@@ -589,14 +644,67 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     fd as i64
 }
 
-/// `vm.memfd_noexec` (`MEMFD_NOEXEC_SCOPE_*`): 0 when unset or not a
-/// number, as the sysctl starts.
-fn noexec_scope() -> u32 {
-    let (host, _) = crate::vfs::lookup("/proc/sys/vm/memfd_noexec");
-    std::fs::read_to_string(host)
+pub const NOEXEC_SYSCTL: &str = "/proc/sys/vm/memfd_noexec";
+
+/// `vm.memfd_noexec` starts at zero. Its recorded value is shared by all
+/// processes of the runtime, including children and exec successors.
+pub fn noexec_scope() -> Result<u32, errno::Errno> {
+    let _guard = state_lock().map_err(|error| -error as i32)?;
+    read_noexec_scope()
+}
+
+fn read_noexec_scope() -> Result<u32, errno::Errno> {
+    let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);
+    if area != crate::vfs::Area::Kernfs {
+        return Ok(0);
+    }
+    match std::fs::read(host) {
+        Ok(bytes) => parse_noexec(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(errno::from_darwin(
+            error.raw_os_error().unwrap_or(libc::EIO),
+        )),
+    }
+}
+
+fn parse_noexec(bytes: &[u8]) -> Result<u32, errno::Errno> {
+    let text = std::str::from_utf8(bytes).map_err(|_| EINVAL)?;
+    text.trim()
+        .parse::<u32>()
         .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0)
+        .filter(|&n| n <= 2)
+        .ok_or(EINVAL)
+}
+
+pub fn open_noexec(write: bool, cloexec: bool) -> i64 {
+    let id = cred::current();
+    if write && id.uid[super::attrs::FS] != 0 && !cred::capable(CAP_DAC_OVERRIDE) {
+        return -(errno::EACCES as i64);
+    }
+    let scope = match noexec_scope() {
+        Ok(scope) => scope,
+        Err(error) => return -(error as i64),
+    };
+    if !write {
+        return super::procfs::content_fd(format!("{scope}\n").as_bytes(), cloexec);
+    }
+    super::knob::open(format!("{scope}\n").as_bytes(), cloexec, |bytes| {
+        if !cred::capable(CAP_SYS_ADMIN) {
+            return Err(EPERM);
+        }
+        let value = parse_noexec(bytes)?;
+        let _guard = state_lock().map_err(|error| -error as i32)?;
+        let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);
+        if area != crate::vfs::Area::Kernfs {
+            return Err(errno::EACCES);
+        }
+        let store = || -> std::io::Result<()> {
+            std::fs::create_dir_all(host.parent().unwrap())?;
+            std::fs::write(&host, format!("{value}\n"))
+        };
+        store().map_err(|e| errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+        Ok(Some(format!("{value}\n").into_bytes()))
+    })
 }
 
 /// `check_sysctl_memfd_noexec`: a memfd asked for with neither MFD_EXEC
@@ -675,12 +783,8 @@ pub fn get_seals(fd: i32) -> i64 {
 /// A shared mapping of `k` by the guest of this process that may be
 /// written (`vma_is_shared_maywrite`).
 fn mapped_writable(k: Key) -> bool {
-    vmmap::shared_regions(super::arena::LO, super::arena::HI)
-        .into_iter()
-        .any(|r| {
-            r.usage.max_prot & libc::PROT_WRITE as u32 != 0
-                && r.file.as_ref().is_some_and(|f| (f.1, f.2) == k)
-        })
+    let anon = with(|m| m.get(&k).and_then(|f| f.anon));
+    viewed_writable_by(std::process::id() as i32, k, anon)
 }
 
 /// A new shared view `[base, base + len)` of `fd` with protection `prot`:
@@ -691,7 +795,17 @@ pub fn seal_view(fd: i32, base: u64, len: u64, prot: i32) {
         && seals(fd).is_some_and(|s| s & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0)
     {
         // SAFETY: lowering the maximum protection of our own new view.
-        unsafe { crate::patch::vm::mach_vm_protect(crate::patch::vm::task(), base, len, 1, prot) };
+        if let Some(view) = vmmap::info_at(base) {
+            unsafe {
+                crate::patch::vm::mach_vm_protect(
+                    crate::patch::vm::task(),
+                    base,
+                    len,
+                    1,
+                    view.max_prot as i32 & !libc::PROT_WRITE,
+                )
+            };
+        }
     }
 }
 
@@ -700,9 +814,6 @@ pub fn seal_view(fd: i32, base: u64, len: u64, prot: i32) {
 pub fn chmod_sealed(fd: i32, old: u32, mode: u32) -> bool {
     (old ^ mode) & 0o111 != 0 && seals(fd).is_some_and(|s| s & F_SEAL_EXEC != 0)
 }
-
-/// Serializes this process's check-and-add of seals.
-static SEAL_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn add_seals(fd: i32, add: u32) -> i64 {
     // SAFETY: plain fcntl.
@@ -716,39 +827,37 @@ pub fn add_seals(fd: i32, add: u32) -> i64 {
     if add & !F_ALL_SEALS != 0 {
         return -(EINVAL as i64);
     }
-    let Some(st) = memfd_stat(fd) else {
+    let Some(mut st) = memfd_stat(fd) else {
         return -(EINVAL as i64);
     };
-    let _g = SEAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = match state_lock() {
+        Ok(lock) => lock,
+        Err(error) => return error,
+    };
+    st = stat_fd(fd).unwrap_or(st);
     let cur = read_seals(fd);
     if cur & F_SEAL_SEAL != 0 {
         return -(EPERM as i64);
     }
+    let explicit_write = add & F_SEAL_WRITE != 0;
     let mut add = add;
     // SEAL_EXEC implies the write seals on an executable memfd (W^X).
     if add & F_SEAL_EXEC != 0 && st.st_mode & 0o111 != 0 {
         add |= F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE;
     }
-    if add & F_SEAL_WRITE == 0 || cur & F_SEAL_WRITE != 0 {
+    // Linux checks an explicitly requested WRITE before EXEC adds its
+    // implied seals; existing views survive EXEC alone.
+    if !explicit_write || cur & F_SEAL_WRITE != 0 {
         return set_seals(fd, add & !cur);
     }
     // `mapping_deny_writable`: views that may be written in any process
-    // are EBUSY; new ones wait while this looks (`note_viewer`).
-    let me = std::process::id().to_string();
-    if !set_attr(Some(fd), None, DENY_ATTR.to_str().unwrap(), &me) {
-        return -(errno::last() as i64);
-    }
+    // are EBUSY; new ones wait on StateLock through the host mmap.
     let k = key_of(&st);
     let r = if mapped_writable(k) || viewed_writable_elsewhere(fd, k) {
         -(libc::EBUSY as i64)
     } else {
         set_seals(fd, add & !cur)
     };
-    // Another process sealing at once may have put its own pid there since.
-    if attr_pid(fd, DENY_ATTR) == Some(std::process::id() as i32) {
-        // SAFETY: removing our attribute of our file.
-        unsafe { libc::fremovexattr(fd, DENY_ATTR.as_ptr(), 0) };
-    }
     r
 }
 
@@ -890,6 +999,25 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
         super::mem::remap_shared(v.start, base + v.offset, v.end - v.start)?;
         // SAFETY: restoring the view's protection.
         unsafe { libc::mprotect(v.start as *mut _, (v.end - v.start) as usize, v.prot as i32) };
+        // Conversion must keep VM_MAYWRITE, including a write seal's denial.
+        unsafe {
+            crate::patch::vm::mach_vm_protect(
+                crate::patch::vm::task(),
+                v.start,
+                v.end - v.start,
+                1,
+                v.usage.max_prot as i32,
+            )
+        };
+    }
+    let path = with(|m| m.get(&k).and_then(|f| f.viewer.clone()));
+    if !set_attr(
+        fd,
+        path.as_deref(),
+        &format!("{VIEW_ATTR}{}", std::process::id()),
+        &format!("{base:x}:{size:x}"),
+    ) {
+        return Err(-(errno::last() as i64));
     }
     with(|m| {
         if let Some(f) = m.get_mut(&k) {
@@ -960,7 +1088,7 @@ pub enum Shared {
     Done(i64),
     /// The caller maps the file itself, and reports a memfd's view with
     /// [`note_view`].
-    File(Option<Key>),
+    File(Option<(Key, StateLock)>),
 }
 
 /// mmap(MAP_SHARED) of `fd`: the host mapping of the file itself is right
@@ -970,6 +1098,10 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
         return Shared::File(None);
     };
     let k = key_of(&st);
+    let guard = match state_lock() {
+        Ok(lock) => lock,
+        Err(error) => return Shared::Done(error),
+    };
     know(k, fd);
     // A shared view of a description open for writing may be written
     // (`VM_MAYWRITE`), whatever its protection now.
@@ -983,10 +1115,7 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
     }
     let anon = with(|m| m.get(&k).and_then(|f| f.anon));
     if anon.is_none() && prot & libc::PROT_EXEC == 0 {
-        return Shared::File(Some(k));
-    }
-    if prot & libc::PROT_EXEC != 0 && seals & F_SEAL_EXEC != 0 {
-        return Shared::Done(-(libc::EACCES as i64));
+        return Shared::File(Some((k, guard)));
     }
     let (base, size) = match convert(k, Some(fd), off + len) {
         Ok(a) => a,
@@ -1016,15 +1145,17 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
 
 /// mprotect adding PROT_EXEC over `[lo, hi)`: shared views of memfds there
 /// move to executable-capable memory first.
-pub fn before_exec_protect(lo: u64, hi: u64) {
+pub fn before_exec_protect(lo: u64, hi: u64) -> Result<(), i64> {
     let keys: Vec<Key> = vmmap::regions(lo, hi)
         .filter(|r| r.shared)
         .filter_map(|r| r.file.map(|f| (f.1, f.2)))
         .filter(|k| with(|m| m.contains_key(k)))
         .collect();
     for k in keys {
-        let _ = convert(k, None, 0);
+        let _guard = state_lock()?;
+        convert(k, None, 0)?;
     }
+    Ok(())
 }
 
 /// read/write/pread/pwrite on a memfd in executable mode go to the shared
@@ -1106,7 +1237,11 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let me = std::process::id();
     for (_, f) in &v {
         if let Some(path) = &f.viewer {
-            set_attr(None, Some(path), &format!("{VIEW_ATTR}{me}"), "");
+            let value = f
+                .anon
+                .map(|(base, size)| format!("{base:x}:{size:x}"))
+                .unwrap_or_default();
+            set_attr(None, Some(path), &format!("{VIEW_ATTR}{me}"), &value);
         }
     }
     with(|m| m.extend(v));

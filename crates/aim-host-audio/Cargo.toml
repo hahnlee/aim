@@ -7,5 +7,6 @@ publish = false
 description = "Host-call module for android.hardware.audio.core: PCM streams on CoreAudio (AUHAL) over a shared lock-free ring"
 
 [dependencies]
+aim-process.workspace = true
 aim-hostcall.workspace = true
 libc.workspace = true
