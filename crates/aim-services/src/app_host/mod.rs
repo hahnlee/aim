@@ -2311,15 +2311,17 @@ impl AppHost {
         uid: i32,
         user: i32,
         allow_all: bool,
-        require_full: bool,
+        mode: activity_user::AllowMode,
         name: Option<&str>,
+        caller_package: Option<&str>,
     ) -> Result<i32, Exception> {
         activity_user::handle_incoming_user(
             uid,
             user,
             allow_all,
-            require_full,
+            mode,
             name,
+            caller_package,
             || {
                 self.recents_uid().map(|r| {
                     r.is_some_and(|r| {
@@ -2328,6 +2330,22 @@ impl AppHost {
                 })
             },
             |p| self.check_permission(Some(p), uid).map(|r| r == 0),
+            || {
+                permission_checker::preflight_source(
+                    self,
+                    "android.permission.INTERACT_ACROSS_PROFILES",
+                    &permission_checker::AttributionSourceState {
+                        pid: -1,
+                        uid,
+                        device_id: 0,
+                        package: caller_package.map(Into::into),
+                        tag: None,
+                        token: None,
+                        renounced: None,
+                        next: None,
+                    },
+                )
+            },
             |target| self.has_user_restriction("no_debugging_features", target),
         )
     }
@@ -4873,8 +4891,13 @@ impl Service for Activity {
                             a.calling_uid,
                             a.user_id,
                             a.allow_all,
-                            a.require_full,
+                            if a.require_full {
+                                activity_user::AllowMode::FullOnly
+                            } else {
+                                activity_user::AllowMode::NonFull
+                            },
                             a.name.as_deref(),
+                            a.caller_package.as_deref(),
                         )
                         .map(|user| {
                             let mut p = Parcel::new();

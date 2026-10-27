@@ -14,6 +14,7 @@ use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_content_om_ioverlaymanager as om;
 
+use super::activity_user;
 use super::{AppHost, reply};
 
 /// `OverlayManagerSettings.Serializer.CURRENT_VERSION`; versions 3 and 4
@@ -151,8 +152,9 @@ impl Service for OverlayManager {
                     call.sender_euid as i32,
                     a.user_id,
                     false,
-                    true,
+                    activity_user::AllowMode::FullOnly,
                     Some("getOverlayInfosForTarget"),
+                    None,
                 );
                 let overlays = user.and_then(|user| {
                     Ok(self

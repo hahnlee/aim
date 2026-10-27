@@ -111,6 +111,7 @@ fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
         &root,
         &data.0,
         &data.0,
+        &data.0,
         Box::new(move |name| {
             if name == "pm.dexopt.install" {
                 return filter_property.lock().unwrap().clone();

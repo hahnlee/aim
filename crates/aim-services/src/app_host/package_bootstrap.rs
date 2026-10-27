@@ -31,6 +31,7 @@ use aim_binder_host::parcel::{
 };
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
+use super::activity_user;
 use super::boot_policy;
 use super::kept::{RawBundle, RawIntent};
 use super::settings::Table;
@@ -664,8 +665,9 @@ impl Service for PackageBootstrap {
                     a.calling_uid,
                     a.user_id,
                     true,
-                    true,
+                    activity_user::AllowMode::FullOnly,
                     Some("registerPackageMonitorCallback"),
+                    None,
                 )
                 .map(|user| bridge::write_package_monitor_user_reply(&mut p, user))
             }

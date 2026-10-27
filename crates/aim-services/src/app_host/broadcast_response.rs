@@ -17,6 +17,7 @@ use std::sync::Mutex;
 use aim_binder_host::parcel::{Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 
+use super::activity_user;
 use super::settings::Table;
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::info::java_hash;
@@ -462,7 +463,14 @@ impl AppHost {
                 "{name}: Neither user {uid} nor current process has {ACCESS_BROADCAST_RESPONSE_STATS}."
             )));
         }
-        self.handle_incoming_user(uid, user, false, false, Some(name))
+        self.handle_incoming_user(
+            uid,
+            user,
+            false,
+            activity_user::AllowMode::NonFull,
+            Some(name),
+            None,
+        )
     }
 
     /// `queryBroadcastResponseStats`.
@@ -536,8 +544,9 @@ impl AppHost {
             uid,
             user,
             false,
-            false,
+            activity_user::AllowMode::NonFull,
             Some("clearBroadcastResponseStats"),
+            None,
         )?;
         self.broadcast_responses
             .state

@@ -1,5 +1,5 @@
 //! `UserController.handleIncomingUser` (`android-16.0.0_r1`), with
-//! `ALLOW_FULL_ONLY` or `ALLOW_NON_FULL`, for this host's single current
+//! the allow modes below, for this host's single current
 //! user (0), with no other user in its profile group.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -9,6 +9,15 @@ use super::activity::USER_CURRENT;
 use super::user_service::SYSTEM_USER as USER_SYSTEM;
 use super::{FIRST_APPLICATION_UID, FIRST_ISOLATED_UID, PER_USER_RANGE, SYSTEM_UID};
 use crate::package::apps_filter::{ROOT_UID, SHELL_UID};
+
+/// `ActivityManagerInternal`'s `ALLOW_*` modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AllowMode {
+    FullOnly,
+    NonFull,
+    NonFullInProfile,
+    ProfilesOrNonFull,
+}
 
 /// `UserHandle.USER_CURRENT_OR_SELF`.
 const USER_CURRENT_OR_SELF: i32 = -3;
@@ -39,10 +48,12 @@ pub(super) fn handle_incoming_user(
     uid: i32,
     user: i32,
     allow_all: bool,
-    require_full: bool,
+    mode: AllowMode,
     name: Option<&str>,
+    caller_package: Option<&str>,
     recents: impl FnOnce() -> Result<bool, Exception>,
     permission: impl Fn(&str) -> Result<bool, Exception>,
+    profile_permission: impl FnOnce() -> Result<bool, Exception>,
     shell_restricted: impl FnOnce(i32) -> Result<bool, Exception>,
 ) -> Result<i32, Exception> {
     let calling_user = uid / PER_USER_RANGE as i32;
@@ -56,21 +67,38 @@ pub(super) fn handle_incoming_user(
         user
     };
     if uid != ROOT_UID && uid != SYSTEM_UID as i32 {
-        let allowed = calling_user == target && recents()?
+        let same_profile_group = calling_user == target;
+        let allowed = same_profile_group && recents()?
             || permission("android.permission.INTERACT_ACROSS_USERS_FULL")?
-            || !require_full && permission("android.permission.INTERACT_ACROSS_USERS")?;
+            || mode != AllowMode::FullOnly
+                && (mode == AllowMode::ProfilesOrNonFull
+                    && same_profile_group
+                    && profile_permission()?
+                    || permission("android.permission.INTERACT_ACROSS_USERS")?
+                        && (mode != AllowMode::NonFullInProfile || same_profile_group));
         if !allowed {
             if user == USER_CURRENT_OR_SELF {
                 target = calling_user;
             } else {
                 return Err(Exception::security(format!(
-                    "Permission Denial: {} asks to run as user {user} but is calling from uid {}; this requires android.permission.INTERACT_ACROSS_USERS_FULL{}",
+                    "Permission Denial: {}{} asks to run as user {user} but is calling from uid {}; this requires android.permission.INTERACT_ACROSS_USERS_FULL{}{}",
                     name.unwrap_or("null"),
+                    caller_package
+                        .map(|p| format!(" from {p}"))
+                        .unwrap_or_default(),
                     format_uid(uid),
-                    if require_full {
-                        ""
-                    } else {
+                    if mode == AllowMode::NonFull
+                        || mode == AllowMode::ProfilesOrNonFull
+                        || mode == AllowMode::NonFullInProfile && same_profile_group
+                    {
                         " or android.permission.INTERACT_ACROSS_USERS"
+                    } else {
+                        ""
+                    },
+                    if mode == AllowMode::ProfilesOrNonFull && same_profile_group {
+                        " or android.permission.INTERACT_ACROSS_PROFILES"
+                    } else {
+                        ""
                     },
                 )));
             }
@@ -95,6 +123,125 @@ mod tests {
     use super::*;
     use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_SECURITY};
 
+    fn resolve_mode(
+        mode: AllowMode,
+        uid: i32,
+        user: i32,
+        grant: &str,
+        profile: bool,
+    ) -> Result<i32, Exception> {
+        handle_incoming_user(
+            uid,
+            user,
+            true,
+            mode,
+            Some("service"),
+            Some("com.example"),
+            || Ok(false),
+            |p| Ok(p == grant),
+            || Ok(profile),
+            |_| Ok(false),
+        )
+    }
+
+    const FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
+    const NON_FULL: &str = "android.permission.INTERACT_ACROSS_USERS";
+
+    #[test]
+    fn full_only_requires_full_permission() {
+        let mode = AllowMode::FullOnly;
+        assert_eq!(resolve_mode(mode, 10_123, USER_CURRENT, FULL, false), Ok(0));
+        assert!(resolve_mode(mode, 10_123, USER_CURRENT, NON_FULL, true).is_err());
+        assert!(resolve_mode(mode, 10_123, USER_CURRENT, "", true).is_err());
+    }
+
+    #[test]
+    fn non_full_allows_cross_user_permission() {
+        let mode = AllowMode::NonFull;
+        for grant in [FULL, NON_FULL] {
+            assert_eq!(resolve_mode(mode, 10_123, 10, grant, false), Ok(10));
+        }
+        assert!(resolve_mode(mode, 10_123, USER_CURRENT, "", true).is_err());
+    }
+
+    #[test]
+    fn non_full_in_profile_requires_the_same_group() {
+        let mode = AllowMode::NonFullInProfile;
+        assert_eq!(
+            resolve_mode(mode, 10_123, USER_CURRENT, NON_FULL, false),
+            Ok(0)
+        );
+        assert_eq!(resolve_mode(mode, 10_123, 10, FULL, false), Ok(10));
+        assert!(resolve_mode(mode, 10_123, 10, NON_FULL, true).is_err());
+        assert!(resolve_mode(mode, 10_123, USER_ALL, NON_FULL, true).is_err());
+    }
+
+    #[test]
+    fn profiles_or_non_full_checks_profile_permission_only_in_the_same_group() {
+        let mode = AllowMode::ProfilesOrNonFull;
+        assert_eq!(resolve_mode(mode, 10_123, USER_CURRENT, "", true), Ok(0));
+        assert!(resolve_mode(mode, 10_123, 10, "", true).is_err());
+        assert_eq!(resolve_mode(mode, 10_123, 10, NON_FULL, false), Ok(10));
+        let error = Exception::new(-5, "profile permission owner unavailable");
+        assert_eq!(
+            handle_incoming_user(
+                10_123,
+                USER_CURRENT,
+                false,
+                mode,
+                None,
+                None,
+                || Ok(false),
+                |_| Ok(false),
+                || Err(error.clone()),
+                |_| panic!("not shell"),
+            ),
+            Err(error)
+        );
+    }
+
+    #[test]
+    fn allow_modes_report_only_applicable_permissions() {
+        for (mode, same, suffix) in [
+            (AllowMode::FullOnly, true, ""),
+            (
+                AllowMode::NonFull,
+                false,
+                " or android.permission.INTERACT_ACROSS_USERS",
+            ),
+            (
+                AllowMode::NonFullInProfile,
+                true,
+                " or android.permission.INTERACT_ACROSS_USERS",
+            ),
+            (AllowMode::NonFullInProfile, false, ""),
+            (
+                AllowMode::ProfilesOrNonFull,
+                false,
+                " or android.permission.INTERACT_ACROSS_USERS",
+            ),
+            (
+                AllowMode::ProfilesOrNonFull,
+                true,
+                " or android.permission.INTERACT_ACROSS_USERS or android.permission.INTERACT_ACROSS_PROFILES",
+            ),
+        ] {
+            let user = if same { USER_CURRENT } else { 10 };
+            let error = resolve_mode(mode, 10_123, user, "", false).unwrap_err();
+            assert_eq!(error.code, EX_SECURITY);
+            assert_eq!(
+                error.message,
+                format!(
+                    "Permission Denial: service from com.example asks to run as user {user} but is calling from uid u0a123; this requires {FULL}{suffix}"
+                )
+            );
+            assert_eq!(
+                resolve_mode(mode, 1_010_123, USER_CURRENT_OR_SELF, "", false),
+                Ok(10)
+            );
+        }
+    }
+
     #[test]
     fn incoming_user_denial_uses_user_handle_format_uid() {
         for (uid, formatted) in [
@@ -110,10 +257,16 @@ mod tests {
                     uid,
                     USER_ALL,
                     true,
-                    full,
+                    if full {
+                        AllowMode::FullOnly
+                    } else {
+                        AllowMode::NonFull
+                    },
                     Some("registerPackageMonitorCallback"),
+                    None,
                     || Ok(false),
                     |_| Ok(false),
+                    || Ok(false),
                     |_| panic!("permission denied first"),
                 )
                 .unwrap_err();
@@ -144,10 +297,12 @@ mod tests {
                 SHELL_UID,
                 user,
                 true,
-                true,
+                AllowMode::FullOnly,
+                None,
                 None,
                 || Ok(false),
                 |_| Ok(true),
+                || Ok(false),
                 |checked| {
                     assert_eq!(checked, target);
                     Ok(true)
@@ -166,11 +321,13 @@ mod tests {
                 SHELL_UID,
                 10,
                 true,
-                true,
+                AllowMode::FullOnly,
+                None,
                 None,
                 || Ok(false),
                 |_| Ok(true),
-                |_| Err(error.clone()),
+                || Ok(false),
+                |_| Err(error.clone())
             ),
             Err(error)
         );
@@ -186,8 +343,13 @@ mod tests {
                 uid,
                 user,
                 all,
-                full,
+                if full {
+                    AllowMode::FullOnly
+                } else {
+                    AllowMode::NonFull
+                },
                 Some("test"),
+                None,
                 || Ok(recents),
                 |p| {
                     Ok(match granted {
@@ -196,6 +358,7 @@ mod tests {
                         _ => false,
                     })
                 },
+                || Ok(false),
                 |_| Ok(restricted),
             )
         };
@@ -273,10 +436,12 @@ mod tests {
                 1_010_123,
                 USER_CURRENT_OR_SELF,
                 true,
-                true,
+                AllowMode::FullOnly,
+                None,
                 None,
                 || panic!("different profile group"),
                 |_| Err(error.clone()),
+                || Ok(false),
                 |_| panic!("not shell")
             ),
             Err(error)
