@@ -96,7 +96,10 @@ pub fn export(directory: &Path) {
             if let Some(p) = setting {
                 fs::write(
                     directory.join(format!("factory-event-{index}-{name}.permissions")),
-                    factories[name].project(p.app_id, &[10, 0]).unwrap().bytes(),
+                    factories[&Some(name.into())]
+                        .project(p.app_id, &[10, 0])
+                        .unwrap()
+                        .bytes(),
                 )
                 .unwrap();
             }
@@ -117,4 +120,39 @@ pub fn export(directory: &Path) {
             }
         }
     }
+}
+
+// Paired with LegacyRestoreOracle.verifyNullableFactoryNames; original execution
+// is supplied by the existing ART oracle, never by a native replacement.
+pub fn verify_nullable(directory: &Path) {
+    use aim_services::package::settings::{FactoryRef, native_read::NativeReaders};
+    let xml = b"<packages><updated-package codePath='/system/app/first' userId='10003' version='1'/><updated-package name='' codePath='/system/app/empty' userId='10004' version='2'/><updated-package codePath='/system/app/last' userId='10005' version='3'/></packages>";
+    let mut settings = Settings::default();
+    settings
+        .read_owned_document(
+            xml,
+            &mut AppIds::default(),
+            &mut PackageReadAttempt::default(),
+            true,
+            &mut NativeReaders::new(vec![]).unwrap(),
+        )
+        .unwrap();
+    let Some(FactoryRef::Unnamed(null)) = settings.disabled_system_package(None) else {
+        panic!("missing native null factory")
+    };
+    let Some(FactoryRef::Named(empty)) = settings.disabled_system_package(Some("")) else {
+        panic!("missing native empty factory")
+    };
+    assert_eq!((null.version_code, empty.version_code), (3, 2));
+    assert_eq!(
+        fs::read_to_string(directory.join("nullable-factory-original.metadata")).unwrap(),
+        format!(
+            "{}|{}|{}|{}",
+            null.app_id, null.code_path, empty.app_id, empty.code_path
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(directory.join("nullable-factory-original.write-status")).unwrap(),
+        "null-input"
+    );
 }

@@ -3212,3 +3212,43 @@ fn data_inodes_follow_the_name_as_the_original_writes_them() {
     let names: Vec<&str> = pkg.attrs.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["name", "ceDataInode", "stopped"]);
 }
+
+#[test]
+fn null_factory_write_fails_without_touching_input_and_publication_is_explicit() {
+    use crate::package::{
+        scan::SigningScan,
+        settings::{Settings, native_read},
+    };
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let path = data.0.join("system/packages.xml");
+    let bytes = b"<packages><updated-package codePath='/system/app/null' userId='10003'/><updated-package name='' codePath='/system/app/empty' userId='10004'/></packages>";
+    fs::write(&path, bytes).unwrap();
+    let mut store = Store::open(&data.0, &[]).unwrap().unwrap();
+    let mut scan = SigningScan::new(&Default::default(), &store.state.settings, 36).unwrap();
+    let root = aim_android_xml::read(bytes).unwrap();
+    let error = store.commit_package_document(root.clone()).unwrap_err();
+    assert!(!error.committed);
+    assert_eq!(error.message, "factory name is null (NullPointerException)");
+    assert_eq!(
+        scan_settings::replace(&root, &scan).unwrap_err(),
+        "factory name is null (NullPointerException)"
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let error = native_read::attach_reader_graph(
+        &native_read::SharedReaders::new(vec![0]).unwrap(),
+        &mut scan,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, recovery::ReadError::Owner(ref message) if message.contains("UnsupportedOperation") && message.contains("#917"))
+    );
+    assert!(scan.settings.unnamed_disabled_system_package.is_some());
+    scan.settings.unnamed_disabled_system_package = None;
+    let empty_root = aim_android_xml::read(b"<packages><updated-package name='' codePath='/system/app/empty' userId='10004'/></packages>").unwrap();
+    let written = scan_settings::replace(&empty_root, &scan).unwrap();
+    assert_eq!(
+        Settings::parse(&written).unwrap().disabled_system_packages[0].name,
+        ""
+    );
+}

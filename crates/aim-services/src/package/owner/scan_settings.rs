@@ -12,6 +12,9 @@ use std::collections::BTreeSet;
 /// Write the complete native Settings owners; the whole-document round trip
 /// rejects unresolved changes.
 pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element, String> {
+    if scan.settings.unnamed_disabled_system_package.is_some() {
+        return Err("factory name is null (NullPointerException)".into());
+    }
     if !scan.capture_ready() {
         return Err("cannot persist unfinished scan metadata".into());
     }
@@ -76,7 +79,10 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
                     continue;
                 }
             }
-            if package.name.is_empty() || package.code_path.is_empty() || package.app_id <= 0 {
+            if (active && package.name.is_empty())
+                || package.code_path.is_empty()
+                || package.app_id <= 0
+            {
                 return Err("invalid persisted package identity".into());
             }
             let previous = original.children().find(|e| {

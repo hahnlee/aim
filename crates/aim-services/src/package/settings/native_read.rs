@@ -31,7 +31,7 @@ pub struct NativeRead {
 pub struct NativeReaders {
     pub users: Vec<i32>,
     pub packages: BTreeMap<String, Migration>,
-    pub factories: BTreeMap<String, Migration>,
+    pub factories: BTreeMap<Option<String>, Migration>,
     pub shared_users: BTreeMap<String, Migration>,
     pub remaining: NativeRead,
     pub retained_shared: BTreeMap<String, crate::package::owner::shared_users::SharedUser>,
@@ -607,6 +607,11 @@ pub fn attach_reader_graph(
     readers: &SharedReaders,
     scan: &mut crate::package::scan::SigningScan,
 ) -> Result<(), ReadError> {
+    if scan.settings.unnamed_disabled_system_package.is_some() {
+        return Err(ReadError::Owner(
+            "UnsupportedOperation: nullable factory permission publication requires nullable scan owners (#917)".into(),
+        ));
+    }
     let readers = readers.locked()?;
     let mut candidate = scan.clone();
     candidate.identities.ids = readers.completed_ids.clone().ok_or_else(|| {
@@ -654,7 +659,7 @@ pub fn attach_reader_graph(
             let migration = if factory {
                 readers
                     .factories
-                    .get(&setting.name)
+                    .get(&Some(setting.name.clone()))
                     .cloned()
                     .ok_or_else(|| ReadError::Owner("factory migration owner missing".into()))?
             } else if setting.shared_user {

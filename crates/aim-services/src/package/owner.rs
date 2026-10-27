@@ -628,6 +628,11 @@ impl Store {
     ) -> Result<(), WriteError> {
         let root = verifier::replace(&root, self.state.settings.verifier.as_deref());
         let mut persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
+        if persisted.unnamed_disabled_system_package.is_some() {
+            return Err(WriteError::before(
+                "factory name is null (NullPointerException)",
+            ));
+        }
         if let Some(key_sets) = key_sets {
             persisted.key_sets.reference_counts = key_sets.reference_counts;
         } else if persisted.key_sets.key_sets == self.state.settings.key_sets.key_sets {
