@@ -28,6 +28,7 @@
 
 pub mod codes;
 pub mod cursor;
+pub mod hotplug;
 pub mod keymap;
 pub mod server;
 pub mod translate;

@@ -852,6 +852,57 @@ fn uevents() {
     assert!(ok && out.contains("PASS"), "t_uevent failed:\n{out}");
 }
 
+#[test]
+fn uevents_hotplug() {
+    use aim_host_display::input::{device_dir, devices, server::Devices};
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_uevent_hotplug");
+    let prog = g.build(&clang, "t_uevent");
+    let socket = g.runtime.join("display.sock");
+    let dir = device_dir(&socket);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (mut host, guest) = UnixStream::pair().unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let controller = std::thread::spawn(move || {
+        let mut live = None;
+        let mut commands = Vec::new();
+        let mut command = [0];
+        while host.read(&mut command).unwrap() == 1 {
+            commands.push(command[0]);
+            match command[0] {
+                b'a' => {
+                    live = Some(Devices::create(&dir, devices(1080, 1920, 254.0, 254.0)).unwrap())
+                }
+                b'r' => drop(live.take().unwrap()),
+                b'q' => {
+                    // The lifetime must not be lost if a directory watcher
+                    // would see the same empty directory before and after.
+                    drop(Devices::create(&dir, devices(1080, 1920, 254.0, 254.0)).unwrap());
+                }
+                _ => panic!("unexpected hotplug command"),
+            }
+            host.write_all(&command).unwrap();
+        }
+        commands
+    });
+    let (ok, out) = g.run_with(
+        &["--display", socket.to_str().unwrap(), &prog, "hotplug"],
+        vec![guest.into()],
+    );
+    assert_eq!(controller.join().unwrap(), b"arq");
+    println!("{out}");
+    assert!(
+        ok && out.contains("PASS"),
+        "t_uevent hotplug failed:\n{out}"
+    );
+}
+
 unsafe extern "C" {
     fn pthread_fchdir_np(fd: libc::c_int) -> libc::c_int;
 }

@@ -246,6 +246,12 @@ pub fn socket(ty: u64, proto: u64) -> Result<(i32, Socket), i64> {
     {
         return Err(-93); // EPROTONOSUPPORT
     }
+    if proto == NETLINK_KOBJECT_UEVENT {
+        // Drain earlier owner records before this socket can join a group:
+        // Linux does not replay existing devices when a listener binds.
+        super::evdev::watch()
+            .map_err(|e| -(errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)) as i64))?;
+    }
     // SAFETY: a plain datagram socket.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM, 0) };
     if fd < 0 {
@@ -314,6 +320,9 @@ impl Socket {
         let (ty, proto) = (r.u64(), r.u64());
         let (portid, groups, cap_ack) = (r.u32(), r.u32(), r.u32());
         let path = PathBuf::from(String::from_utf8_lossy(&r.bytes()).into_owned());
+        if proto == NETLINK_KOBJECT_UEVENT {
+            listening(proto, groups);
+        }
         Socket {
             ty,
             proto,
@@ -331,6 +340,11 @@ impl Socket {
 fn listening(proto: u64, groups: u32) {
     if proto == NETLINK_ROUTE && groups & GRP_LINK != 0 {
         super::uplink::watch(netif::refresh);
+    }
+    if proto == NETLINK_KOBJECT_UEVENT && groups & 1 != 0 {
+        if let Err(e) = super::evdev::watch() {
+            crate::diag!("[linux-abi] input hotplug listener: {e}");
+        }
     }
 }
 

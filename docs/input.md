@@ -300,6 +300,14 @@ codes the open file's masks drop (they are never queued).
   sysfs root, as for a Linux virtual device (no batteries, lights or HID
   country code). The `realpath` works because a synthesized `/proc` or
   `/sys` directory fd stats and reads back (`/proc/self/fd`) as its path.
+- Each input core device has `inputN/uevent` with its product, name,
+  properties, capabilities and modalias; its evdev child's attribute keeps
+  the character device numbers and name. The display's device owner records
+  lifetimes beside its socket directory, including stale-server removal;
+  linux-abi consumes them with a boot-shared cursor and emits parent/child
+  add uevents and child/parent remove uevents once, with kernel credentials.
+  A short-lived device is retained even if it disappears before a listener
+  reads the record; joining a group does not replay existing devices.
 
 ## Evidence
 
@@ -309,6 +317,7 @@ codes the open file's masks drop (they are never queued).
 | `aim-host-display` `tests/cursor.rs`, `aim-display`'s unit test | a cursor buffer the module passes on (`FN_CURSOR`) reaches a window host as the pointer's image with the hot spot under its resting mouse, and no cursor as the default one; the `NSCursor` is the image's pixels at their size in points, the hot spot in points |
 | `aim-linux-abi` `tests/input.rs` | the original `getevent -lpi` lists the three devices with their capabilities and held state (`BTN_TOUCH*`, `KEY_A*`, the mouse's axes and `INPUT_PROP_POINTER`), and `getevent -l` prints the packets `translate::Input` makes from a touch, a drag clamped at the edge, a key (AppKit repeat dropped), right Shift, a hover, a right click, a wheel line and a trackpad's horizontal pixels; `getevent -t` opens devices hotplugged under its inotify watch, with the event's own monotonic time; a dead server's nodes are removed when getevent lists them |
 | `tests/ndk.rs` `evdev` (`t_evdev.c`, Linux UAPI headers) | every ioctl above with Linux's return values and errnos (masks filtering one open file's queue while its key state still has the masked key; axes changed for another open file; keymap by scan code and index, remapped and restored; a clock change dropping the queue for `SYN_DROPPED`), read/write/poll/epoll semantics, clocks, grab, revoke, the open file across `execve` (non-blocking, clock, grab, `/proc/self/fd`), stat/fstat/readdir/`/proc/self/fd`, `realpath` of `/sys/dev/char` |
+| `tests/ndk.rs` `uevents`, `uevents_hotplug` (`t_uevent.c`) | input core attributes against evdev ioctls, synthetic events through sysfs class links, kernel credentials and groups; two guest processes receive identical sequences for add/remove and an immediately removed/recreated device set, without duplicate broadcasts |
 | `tests/ndk.rs` `eventhub` (`t_eventhub.cpp`) | the image's `libinputreader.so` EventHub scans `/dev/input`, classifies `TOUCH \| TOUCH_MT`, `KEYBOARD \| ALPHAKEY` (built-in keyboard, from its `.idc`; `Generic.kl`, `Generic.kcm`) and the mouse `TOUCH`, finds sysfs root `/sys/devices/virtual`, and reads a key written into the keyboard |
 | A window-mode boot ([boot-status.md](boot-status.md), "Pointer, scrolling and shortcuts") | the mouse in pointer mode with source `MOUSE`; hover highlighting a Settings row, two-finger scrolling of Settings and both axes in `getevent -lt`, a right click opening a text field's context menu, Cmd+A/C/V duplicating its text, a pinch with rotation as two pointers, a rightward swipe as Back with no scrolling; the pointer sprite `CURSOR` in the composer and absent from the presented frame |
 

@@ -4,11 +4,14 @@
 // uevent_kernel_recv checks them (source port 0, a group, SCM_CREDENTIALS).
 // Runs as root (all capabilities).
 #include <fcntl.h>
+#include <linux/input.h>
 #include <linux/netlink.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -22,6 +25,13 @@
   } while (0)
 
 static const char* ATTR = "/sys/devices/virtual/input/input0/event0/uevent";
+
+// input_print_bitmap: unsigned long words, high first, no leading zeros.
+static void bitmap(char* out, const unsigned long* bits, size_t count) {
+  while (count > 1 && bits[count - 1] == 0) count--;
+  int at = sprintf(out, "%lx", bits[--count]);
+  while (count) at += sprintf(out + at, " %lx", bits[--count]);
+}
 
 static int uevent_socket(unsigned pid, unsigned groups) {
   int s = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT);
@@ -83,6 +93,8 @@ static int has(const struct received* r, const char* var) {
 static void sockets(void) {
   int s = uevent_socket(0, 0xffffffff);
   CHECK(s >= 0);
+  // Existing devices are not replayed when a process subscribes.
+  CHECK(receive(s, 50).n < 0);
   struct sockaddr_nl a;
   socklen_t len = sizeof a;
   CHECK(getsockname(s, (struct sockaddr*)&a, &len) == 0);
@@ -145,6 +157,148 @@ static void synthetic(void) {
   close(s);
 }
 
+// The input core's attributes describe the same live capabilities as evdev;
+// absent event types have no corresponding variable (not an empty bitmap).
+static void input_attributes(void) {
+  for (int i = 0; i < 3; i++) {
+    char path[128];
+    snprintf(path, sizeof path, "/dev/input/event%d", i);
+    int dev = open(path, O_RDONLY);
+    MUST(dev >= 0);
+    struct input_id id;
+    char name[80];
+    MUST(ioctl(dev, EVIOCGID, &id) == 0 && ioctl(dev, EVIOCGNAME(sizeof name), name) > 0);
+    snprintf(path, sizeof path, "/sys/class/input/input%d/uevent", i);
+    int fd = open(path, O_RDONLY);
+    MUST(fd >= 0);
+    struct received attr = {.n = 1};
+    int n = read(fd, attr.buf + 1, sizeof attr.buf - 2);
+    MUST(n > 0);
+    close(fd);
+    attr.n += n;
+    // Use the message variable reader on the newline-separated attribute.
+    for (int j = 1; j <= n; j++) if (attr.buf[j] == '\n') attr.buf[j] = 0;
+    char want[1024];
+    snprintf(want, sizeof want, "PRODUCT=%x/%x/%x/%x", id.bustype, id.vendor, id.product, id.version);
+    CHECK(has(&attr, want));
+    snprintf(want, sizeof want, "NAME=\"%s\"", name);
+    CHECK(has(&attr, want));
+    unsigned long ev = 0, prop = 0;
+    MUST(ioctl(dev, EVIOCGBIT(0, sizeof ev), &ev) > 0);
+    MUST(ioctl(dev, EVIOCGPROP(sizeof prop), &prop) > 0);
+    snprintf(want, sizeof want, "PROP=%lx", prop);
+    CHECK(has(&attr, want));
+    snprintf(want, sizeof want, "EV=%lx", ev);
+    CHECK(has(&attr, want));
+    const int types[] = {EV_KEY, EV_REL, EV_ABS, EV_MSC, EV_LED, EV_SND, EV_FF, EV_SW};
+    const char* keys[] = {"KEY=", "REL=", "ABS=", "MSC=", "LED=", "SND=", "FF=", "SW="};
+    for (int j = 0; j < 8; j++) {
+      const char* v = value(&attr, keys[j]);
+      CHECK((v != NULL) == !!(ev & (1UL << types[j])));
+      if (v) {
+        unsigned long bits[KEY_CNT / (8 * sizeof(long))] = {0};
+        int size = ioctl(dev, EVIOCGBIT(types[j], sizeof bits), bits);
+        MUST(size > 0);
+        bitmap(want, bits, (size + sizeof(long) - 1) / sizeof(long));
+        CHECK(strcmp(v, want) == 0);
+      }
+    }
+    CHECK(value(&attr, "MAJOR=") == NULL && value(&attr, "DEVNAME=") == NULL);
+    CHECK(value(&attr, "PHYS=") == NULL && value(&attr, "UNIQ=") == NULL);
+    const char* modalias = value(&attr, "MODALIAS=");
+    CHECK(modalias && strncmp(modalias, "input:b0006v0000p0000e0001-e0,", 28) == 0);
+    close(dev);
+
+    int s = uevent_socket(0, 1);
+    MUST(s >= 0);
+    fd = open(path, O_WRONLY);
+    MUST(fd >= 0 && write(fd, "add\n", 4) == 4);
+    close(fd);
+    struct received m = receive(s, 2000);
+    CHECK(m.n > 0 && has(&m, "SYNTH_UUID=0"));
+    for (int at = 1; at < attr.n; at += strlen(attr.buf + at) + 1) {
+      CHECK(has(&m, attr.buf + at));
+    }
+    close(s);
+  }
+}
+
+// Both processes must receive each owner transition exactly once with the
+// same sequence numbers, including devices created and removed before a scan.
+static void hotplug_messages(int s, unsigned long* seq, int count) {
+  for (int j = 0; j < count; j++) {
+    int added = j < 6;
+    int index = (j % 6) / 2;
+    int event = added ? j % 2 : !(j % 2);
+    char path[128], want[160];
+    snprintf(path, sizeof path, "/devices/virtual/input/input%d", index);
+    if (event) snprintf(path + strlen(path), sizeof path - strlen(path), "/event%d", index);
+    snprintf(want, sizeof want, "%s@%s", added ? "add" : "remove", path);
+    struct received m = receive(s, 5000);
+    MUST(m.n > 0 && strcmp(m.buf, want) == 0);
+    MUST(m.from.nl_pid == 0 && m.from.nl_groups == 1);
+    MUST(m.has_cred && m.cred.pid == 0 && m.cred.uid == 0 && m.cred.gid == 0);
+    MUST(has(&m, "SUBSYSTEM=input") && value(&m, "SYNTH_UUID=") == NULL);
+    if (event) {
+      MUST(has(&m, "MAJOR=13"));
+      snprintf(want, sizeof want, "MINOR=%d", 64 + index);
+      MUST(has(&m, want));
+      snprintf(want, sizeof want, "DEVNAME=input/event%d", index);
+      MUST(has(&m, want));
+    } else {
+      MUST(has(&m, "PRODUCT=6/0/0/1") && value(&m, "NAME=") && value(&m, "EV="));
+    }
+    MUST(value(&m, "SEQNUM=") != NULL);
+    seq[j] = strtoul(value(&m, "SEQNUM="), NULL, 10);
+    if (j) MUST(seq[j] == seq[j - 1] + 1);
+  }
+}
+
+static void hotplug(void) {
+  int s = uevent_socket(0, 1), p[2];
+  MUST(s >= 0 && pipe(p) == 0);
+  pid_t child = fork();
+  MUST(child >= 0);
+  if (child == 0) {
+    close(p[0]);
+    close(s);
+    s = uevent_socket(0, 1);
+    MUST(s >= 0 && write(p[1], "!", 1) == 1);
+    unsigned long seq[24];
+    hotplug_messages(s, seq, 12);
+    hotplug_messages(s, seq + 12, 12);
+    MUST(write(p[1], seq, sizeof seq) == sizeof seq);
+    close(s);
+    _exit(0);
+  }
+  close(p[1]);
+  char ack;
+  MUST(read(p[0], &ack, 1) == 1);
+  // fd 3 is a private control channel to the host test's Devices owner.
+  MUST(write(3, "a", 1) == 1 && read(3, &ack, 1) == 1);
+  unsigned long seq[24], other[24];
+  // Ask for removal before consuming: add records still retain identity.
+  MUST(write(3, "r", 1) == 1 && read(3, &ack, 1) == 1);
+  hotplug_messages(s, seq, 12);
+  MUST(write(3, "q", 1) == 1 && read(3, &ack, 1) == 1);
+  hotplug_messages(s, seq + 12, 12);
+  MUST(receive(s, 100).n < 0);
+  MUST(read(p[0], other, sizeof other) == sizeof other);
+  CHECK(memcmp(seq, other, sizeof seq) == 0);
+  int fd = open("/sys/kernel/uevent_seqnum", O_RDONLY);
+  char last[32] = {0};
+  MUST(fd >= 0 && read(fd, last, sizeof last - 1) > 0);
+  CHECK(strtoul(last, NULL, 10) == seq[23]);
+  close(fd);
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  close(p[0]);
+  close(s);
+  CHECK(open(ATTR, O_RDONLY) < 0 && errno == ENOENT);
+  CHECK(open("/sys/class/input/input0/uevent", O_RDONLY) < 0 && errno == ENOENT);
+  close(3);
+}
+
 // A root process may send to the group; members other than the sender
 // receive it from the sender's port with its credentials.
 static void multicast(void) {
@@ -205,9 +359,14 @@ static void device_trees(void) {
   CHECK(stat(ATTR, &st) == 0 && S_ISREG(st.st_mode));
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "hotplug") == 0) {
+    RUN(hotplug);
+    DONE();
+  }
   RUN(sockets);
   RUN(synthetic);
+  RUN(input_attributes);
   RUN(multicast);
   RUN(injected);
   RUN(device_trees);
