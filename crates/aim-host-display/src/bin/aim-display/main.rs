@@ -44,6 +44,7 @@ mod stats;
 mod status;
 mod system_icons;
 mod text_input;
+mod titlebar;
 mod toast;
 mod un;
 mod vsync;

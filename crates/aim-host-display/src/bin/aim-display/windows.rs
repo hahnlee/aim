@@ -138,6 +138,8 @@ struct Info {
     /// The activity it was started with, `package/class`.
     activity: String,
     title: String,
+    primary_color: u32,
+    background_color: u32,
     /// Its bounds and caption, once it has a window.
     bounds: Option<([i32; 4], i32)>,
     /// The window host that shows it (in the server).
@@ -151,6 +153,16 @@ struct Info {
 }
 
 impl Info {
+    fn color_record(&self, task: i32) -> Record {
+        Record {
+            op: window::COLORS,
+            task,
+            primary_color: self.primary_color,
+            background_color: self.background_color,
+            ..Default::default()
+        }
+    }
+
     /// The window title: the task's label, else as a launcher names it:
     /// the window host's name, or (in the server) its launcher activity's
     /// or app's label from the shims; else its package.
@@ -305,6 +317,10 @@ fn note(s: &mut State, r: &Record) -> Info {
         window::PACKAGE => info.package = r.text().to_string(),
         window::ACTIVITY => info.activity = r.text().to_string(),
         window::TITLE => info.title = r.text().to_string(),
+        window::COLORS => {
+            info.primary_color = r.primary_color;
+            info.background_color = r.background_color;
+        }
         window::TASK => info.bounds = Some((r.bounds, r.caption)),
         window::ORIENTATION => info.orientation = r.orientation,
         window::PINNED => info.pinned = true,
@@ -393,6 +409,11 @@ fn apply(r: &Record) {
             }
         }
         window::FRONT => front(r.task),
+        window::COLORS => {
+            if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
+                crate::titlebar::set(w, r.primary_color, r.background_color);
+            }
+        }
         window::ORIENTATION => orient(r.task, r.orientation),
         window::HIDE => hide(r.task),
         window::PINNED | window::UNPINNED => float(r.task),
@@ -440,6 +461,7 @@ fn route(task: i32) -> bool {
             h.send_window(&text(window::PACKAGE, &info.package));
             h.send_window(&text(window::ACTIVITY, &info.activity));
             h.send_window(&text(window::TITLE, &info.title));
+            h.send_window(&info.color_record(task));
             if let Some((bounds, caption)) = info.bounds {
                 h.send_window(&Record {
                     op: window::TASK,
@@ -606,10 +628,10 @@ fn follow(task: i32) {
 
 /// A new task window over the task's content.
 fn create(task: i32, b: [i32; 4], caption: i32) {
-    let Some((screen, device, title)) = with(|s| {
+    let Some((screen, device, info)) = with(|s| {
         s.applying = true;
-        let title = s.infos.get(&task).map(Info::title).unwrap_or_default();
-        (s.screen, s.device, title)
+        let info = s.infos.get(&task).cloned().unwrap_or_default();
+        (s.screen, s.device, info)
     }) else {
         return;
     };
@@ -674,7 +696,8 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         moved: None,
         user: None,
     };
-    send!(w, c"setTitle:" => (), Id = nsstring(&title));
+    send!(w, c"setTitle:" => (), Id = nsstring(&info.title()));
+    crate::titlebar::set(w, info.primary_color, info.background_color);
     with(|s| {
         s.tasks.insert(task, t);
     });
@@ -1345,4 +1368,78 @@ fn delegate() -> Id {
         }
         send!(cls, c"new" => Id) as usize
     }) as Id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_colors_survive_bounds_updates_and_host_handoff() {
+        let mut state = State {
+            screen: Screen {
+                width: 1920.0,
+                height: 1080.0,
+                scale: 2.0,
+            },
+            device: std::ptr::null_mut(),
+            tasks: HashMap::new(),
+            infos: HashMap::new(),
+            front: None,
+            held: None,
+            generation: 0,
+            applying: false,
+            splash: None,
+        };
+        let colors = Record {
+            op: window::COLORS,
+            task: 42,
+            primary_color: 0xff123456,
+            background_color: 0xffabcdef,
+            ..Default::default()
+        };
+        note(&mut state, &colors);
+        // Colors can arrive before the task has bounds, and survive a
+        // subsequent resize. A new window owner gets both, even unset.
+        let info = note(
+            &mut state,
+            &Record {
+                op: window::TASK,
+                task: 42,
+                bounds: [100, 200, 900, 1000],
+                ..Default::default()
+            },
+        );
+        assert_eq!(info.color_record(42), colors);
+        assert_eq!(
+            note(
+                &mut state,
+                &Record {
+                    task: 43,
+                    ..Default::default()
+                }
+            )
+            .primary_color,
+            0
+        );
+        let clear = Record {
+            primary_color: 0,
+            background_color: 0,
+            ..colors
+        };
+        assert_eq!(note(&mut state, &clear).color_record(42), clear);
+        // A removed task's metadata is dropped by the routing owner.
+        state.infos.remove(&42);
+        assert_eq!(
+            note(
+                &mut state,
+                &Record {
+                    task: 42,
+                    ..Default::default()
+                }
+            )
+            .primary_color,
+            0
+        );
+    }
 }
