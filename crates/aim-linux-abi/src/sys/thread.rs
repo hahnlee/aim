@@ -7,15 +7,11 @@
 //! starts exactly as Linux starts a clone child and takes pending signals
 //! first.
 //!
-//! Tids: the main thread's is the pid. Others are `TID_BASE + (pid << 12) +
-//! n` (n in 1..4096): unique across processes and never a Darwin pid (those
-//! stay below 100000), and below 2^30 as `FUTEX_TID_MASK` requires. When
-//! aimd owns the pid space (ADR 0012, section 7) it assigns them.
+//! The main thread's tid is its pid; other tids come from the namespace's
+//! cyclic allocator (`pidns::tids`), below its advertised pid_max.
 
 use std::collections::HashMap;
-use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst,
-};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use super::park::Parker;
@@ -24,12 +20,6 @@ use super::signal::ThreadSignals;
 use crate::context::{self, GuestContext, HostStacks};
 use crate::errno::{EAGAIN, EINVAL, ENOSYS, ESRCH};
 
-/// A clone's tid is TID_BASE + (pid << TID_SHIFT) + n, above every host
-/// pid (at most 99999) and, like a Linux tid, below 2^28, the most a CPU
-/// clock id (`~tid << 3`) can encode.
-const TID_BASE: i32 = 1 << 17;
-const TID_SHIFT: u32 = 11;
-const TIDS_PER_PROCESS: u32 = (1 << TID_SHIFT) - 1;
 /// Host stack of a clone thread (the syscall layer runs on it).
 const HOST_STACK: usize = 512 << 10;
 
@@ -79,6 +69,7 @@ pub struct Sched {
 
 pub struct Thread {
     pub tid: i32,
+    _reservation: Option<super::pidns::tids::Reservation>,
     /// The host pthread_t; 0 until the thread runs.
     pthread: AtomicUsize,
     ctx: *mut GuestContext,
@@ -99,9 +90,15 @@ unsafe impl Send for Thread {}
 unsafe impl Sync for Thread {}
 
 impl Thread {
-    fn new(tid: i32, ctx: *mut GuestContext, mask: u64) -> Self {
+    fn new(
+        tid: i32,
+        ctx: *mut GuestContext,
+        mask: u64,
+        reservation: Option<super::pidns::tids::Reservation>,
+    ) -> Self {
         Thread {
             tid,
+            _reservation: reservation,
             pthread: AtomicUsize::new(0),
             ctx,
             sig: ThreadSignals::new(mask),
@@ -134,7 +131,6 @@ impl Thread {
 /// pthread_kill, so an exclusive lock let a signal flood starve the
 /// target's own lookups (sched_getscheduler) for good (#219).
 static THREADS: LazyLock<RwLock<HashMap<i32, Arc<Thread>>>> = LazyLock::new(Default::default);
-static NEXT_TID: AtomicU32 = AtomicU32::new(0);
 /// The main thread's exit code once it has called `exit` (the process
 /// exits with it when the last thread does), else -1.
 static LEADER_EXIT: AtomicI32 = AtomicI32::new(-1);
@@ -336,11 +332,7 @@ pub fn set_name_of(tid: i32, name: [u8; 16]) -> bool {
 
 /// The process a tid belongs to (a pid is its own main thread's tid).
 pub fn owner(tid: i32) -> i32 {
-    if tid >= TID_BASE {
-        (tid - TID_BASE) >> TID_SHIFT
-    } else {
-        tid
-    }
+    super::pidns::tids::owner(tid).unwrap_or(0)
 }
 
 /// The `comm` of a new program, the base name of the file it was executed
@@ -351,15 +343,6 @@ pub fn name_program(filename: &[u8]) {
     let n = base.len().min(15);
     name[..n].copy_from_slice(&base[..n]);
     set_name_of(host_tid() as i32, name);
-}
-
-/// The slot of this process's thread `tid` in its record (`procrec`).
-pub fn slot(tid: i32) -> usize {
-    if tid == pid() {
-        0
-    } else {
-        ((tid - TID_BASE) as u32 & TIDS_PER_PROCESS) as usize
-    }
 }
 
 /// Host thread id of a running pthread.
@@ -417,24 +400,28 @@ pub fn poke_main_from_handler(sig: i32) {
     }
 }
 
-fn alloc_tid(t: &HashMap<i32, Arc<Thread>>) -> Option<i32> {
-    let base = TID_BASE + (pid() << TID_SHIFT);
-    (0..TIDS_PER_PROCESS)
-        .map(|_| base + (NEXT_TID.fetch_add(1, SeqCst) % TIDS_PER_PROCESS) as i32 + 1)
-        .find(|tid| !t.contains_key(tid))
+fn alloc_tid(
+    t: &HashMap<i32, Arc<Thread>>,
+) -> Result<super::pidns::tids::Reservation, crate::errno::Errno> {
+    // The process record has a bounded number of thread slots. Like a host
+    // pthread resource limit, exhausting them makes clone return EAGAIN.
+    if t.len() >= super::procrec::SLOTS {
+        return Err(EAGAIN);
+    }
+    super::pidns::tids::allocate()
 }
 
 /// Make the calling host thread a guest thread with context `ctx` (which
 /// has no thread yet): the first becomes the main thread (tid = pid).
 pub fn register_current(ctx: *mut GuestContext, stacks: HostStacks) {
     let th = with_table_mut(|t| {
-        let tid = if t.contains_key(&pid()) {
-            alloc_tid(t).expect("no free tid")
-        } else {
-            pid()
-        };
-        let th = Arc::new(Thread::new(tid, ctx, 0));
+        let reservation = t
+            .contains_key(&pid())
+            .then(|| alloc_tid(t).expect("no free tid"));
+        let tid = reservation.as_ref().map_or(pid(), |r| r.tid);
+        let th = Arc::new(Thread::new(tid, ctx, 0, reservation));
         t.insert(tid, th.clone());
+        super::procrec::thread(tid, 0, &[0; 16]);
         th
     });
     th.sched.host_stale.store(true, SeqCst);
@@ -442,7 +429,7 @@ pub fn register_current(ctx: *mut GuestContext, stacks: HostStacks) {
     // SAFETY: pthread_self is always valid.
     th.pthread
         .store(unsafe { libc::pthread_self() } as usize, SeqCst);
-    super::procrec::thread(th.tid, host_id(th.pthread.load(SeqCst)), &[0; 16]);
+    super::procrec::running(th.tid, host_id(th.pthread.load(SeqCst)));
     if th.tid == pid() {
         MAIN_PTHREAD.store(th.pthread.load(SeqCst), SeqCst);
         MAIN_THREAD.store(Arc::as_ptr(&th) as usize, SeqCst);
@@ -518,8 +505,14 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     }
     let inherited_nice = super::cred::thread_nice(parent.tid);
     let th = with_table_mut(|t| {
-        let tid = alloc_tid(t)?;
-        let th = Arc::new(Thread::new(tid, child_ctx, parent.sig.mask()));
+        let reservation = alloc_tid(t)?;
+        let tid = reservation.tid;
+        let th = Arc::new(Thread::new(
+            tid,
+            child_ctx,
+            parent.sig.mask(),
+            Some(reservation),
+        ));
         *th.name.lock().unwrap() = *parent.name.lock().unwrap();
         for (d, s) in [
             (&th.sched.nice, &parent.sched.nice),
@@ -535,12 +528,15 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         th.sched.host_stale.store(true, SeqCst);
         t.insert(tid, th.clone());
         super::procrec::thread(tid, 0, &th.name.lock().unwrap());
-        Some(th)
+        Ok::<_, crate::errno::Errno>(th)
     });
-    let Some(th) = th else {
-        // SAFETY: never handed out.
-        drop(unsafe { Box::from_raw(child_ctx) });
-        return -(EAGAIN as i64);
+    let th = match th {
+        Ok(th) => th,
+        Err(error) => {
+            // SAFETY: never handed out.
+            drop(unsafe { Box::from_raw(child_ctx) });
+            return -(error as i64);
+        }
     };
     let tid = th.tid;
     super::cgroup::thread_created(parent.tid, tid);
@@ -586,10 +582,10 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     };
     if !ok {
         with_table_mut(|t| {
+            super::procrec::gone(tid);
             t.remove(&tid);
             super::cred::forget_nice(tid);
         });
-        super::procrec::gone(tid);
         super::cgroup::thread_gone(tid);
         super::ptrace::forget(tid);
         // SAFETY: the child never started; reclaim what it would own.
@@ -646,11 +642,11 @@ pub fn exit(a: [u64; 6]) -> ! {
     let main = th.tid == pid();
     // Out of the table before a joiner wakes: its tid is gone for tgkill.
     let left = with_table_mut(|t| {
+        super::procrec::gone(th.tid);
         t.remove(&th.tid);
         super::cred::forget_nice(th.tid);
         t.len()
     });
-    super::procrec::gone(th.tid);
     super::cgroup::thread_gone(th.tid);
     if left > 0 {
         super::ptrace::thread_ended(th.tid, code << 8);
