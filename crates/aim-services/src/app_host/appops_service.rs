@@ -28,9 +28,10 @@
 //! watchers hear an op's first start and last finish, started watchers
 //! each start. A change of a client's user restriction tells the op's mode
 //! watchers (`startWatchingModeWithFlags`, kept until they die) and pauses
-//! or resumes its started ops; the modes and the other restrictions do not
-//! change while the app host runs (#1594); foreground changes are not watched
-//! (#1529). Each attributed op keeps its last access and rejection by uid
+//! or resumes its started ops. PermissionPolicy commits permission-derived
+//! modes through the access owner and updates watchers and started ops;
+//! the other mode writers remain unsupported (#1594). Each attributed op
+//! keeps its last access and rejection by uid
 //! state and flags, a finished start's with its duration
 //! (`appops_history.rs`), which `getPackagesForOps(ForDevice)`,
 //! `getOpsForPackage`, `getUidOps` and `isProxying` read; noted watchers
@@ -388,6 +389,10 @@ fn default_mode(sys: &dyn System, info: &AppOpInfo) -> Result<i32, Exception> {
             }
         }
     })
+}
+
+pub(super) fn policy_default_mode(host: &AppHost, code: i32) -> Result<i32, Exception> {
+    default_mode(&Host(host), &APP_OP_INFOS[code as usize])
 }
 
 /// `AppOpsManager.resolvePackageName`.
@@ -1432,6 +1437,59 @@ struct Ops<'a, L> {
 }
 
 impl<L> Ops<'_, L> {
+    /// Re-evaluate started ops after PermissionPolicy changes a switch mode.
+    fn permission_mode_changed(&mut self, uid: i32, code: i32) -> Result<(), Exception> {
+        let mut keys: Vec<_> = self
+            .started
+            .ops
+            .keys()
+            .filter(|(id, _, op)| *id == uid && APP_OP_INFOS[*op as usize].switch_code == code)
+            .cloned()
+            .collect();
+        keys.sort();
+        for key in keys {
+            let (_, package, op) = &key;
+            let mut tags: Vec<_> = self.started.ops[&key].keys().cloned().collect();
+            tags.sort();
+            for tag in tags {
+                let verified = verify_and_get_bypass(
+                    self.sys,
+                    SYSTEM_UID,
+                    uid,
+                    Some(package),
+                    tag.as_deref(),
+                    None,
+                )?;
+                let mode = if let Verified::Bypass(bypass, _) = verified {
+                    let info = &APP_OP_INFOS[*op as usize];
+                    if restricted(self.sys, uid, info, bypass, package, tag.as_deref(), false)?
+                        || (OPS_RESTRICTED_ON_SUSPEND.contains(op)
+                            && self
+                                .sys
+                                .package(package, uid / PER_USER_RANGE)?
+                                .is_some_and(|p| p.suspended))
+                    {
+                        MODE_IGNORED
+                    } else if allowed_for_uid(self.sys, uid)? {
+                        MODE_ALLOWED
+                    } else {
+                        eval(self.sys, uid, persisted_mode(self.sys, uid, package, info)?)
+                    }
+                } else {
+                    MODE_IGNORED
+                };
+                if mode == MODE_ALLOWED {
+                    if !self.started.ops[&key][&tag].paused.is_empty() {
+                        self.started.resume(&key, &tag, &mut self.effects);
+                    }
+                } else if !self.started.ops[&key][&tag].running.is_empty() {
+                    self.started.pause(&key, &tag, &mut self.effects);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `updateStartedOpModeForUserForDefaultDevice`: the started ops of
     /// `code` of the user (`USER_ALL`: of any) whose package mode allows
     /// them, paused where now restricted, resumed where no restriction is
@@ -2373,6 +2431,30 @@ pub(super) fn package_added(host: &AppHost, package: &str, app_id: i32) -> Resul
     let mut started = host.app_ops.started.lock().unwrap();
     for user in users {
         started.package_added(package, user * PER_USER_RANGE + app_id);
+    }
+    Ok(())
+}
+
+/// AppOpsCheckingService's mode notifications after an access-owner commit.
+pub(super) fn permission_modes_changed(
+    host: &AppHost,
+    uid: i32,
+    codes: &[i32],
+    packages: &[String],
+) -> Result<(), Exception> {
+    for &code in codes {
+        with_ops(host, SYSTEM_UID, |ops| {
+            ops.permission_mode_changed(uid, code)
+        })?;
+        let changes = host
+            .app_ops
+            .mode_watchers
+            .lock()
+            .unwrap()
+            .uid_packages_changes(code, uid, packages, false);
+        for (change, package) in changes {
+            notify_op_changed(host, change, uid, &package);
+        }
     }
     Ok(())
 }
@@ -5154,6 +5236,49 @@ mod tests {
             .1
             .is_empty()
         );
+    }
+
+    #[test]
+    fn permission_modes_pause_and_resume_started_ops() {
+        let mut f = fake();
+        let mut started = Started::default();
+        started.watch(Watch::Active, WATCHER, &[OP_CAMERA], APP, APP, || {
+            Binder::Handle(WATCHER)
+        });
+        start(
+            &f,
+            &mut started,
+            CLIENT,
+            &own(OP_CAMERA, APP, "app"),
+            NO_CHAIN,
+        );
+        f.uid_modes.insert((APP, "android:camera"), MODE_IGNORED);
+        let (result, effects, _) = run(&f, SYSTEM_UID, &mut started, |ops| {
+            ops.permission_mode_changed(APP, OP_CAMERA)
+        });
+        result.unwrap();
+        assert_eq!(
+            effects.notices,
+            [active(OP_CAMERA, APP, "app", false, vec![(WATCHER, APP)])]
+        );
+        assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        f.uid_modes.remove(&(APP, "android:camera"));
+        let (result, effects, _) = run(&f, SYSTEM_UID, &mut started, |ops| {
+            ops.permission_mode_changed(APP, OP_CAMERA)
+        });
+        result.unwrap();
+        assert_eq!(
+            effects.notices,
+            [active(OP_CAMERA, APP, "app", true, vec![(WATCHER, APP)])]
+        );
+        assert!(is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        f.global.insert(OP_CAMERA);
+        run(&f, SYSTEM_UID, &mut started, |ops| {
+            ops.permission_mode_changed(APP, OP_CAMERA)
+        })
+        .0
+        .unwrap();
+        assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
     }
 
     /// A start the mode rejects starts nothing; a default mode starts only

@@ -376,12 +376,94 @@ pub fn with_app_id_permissions(
     Ok(root)
 }
 
+/// `AppIdAppOpPersistence` / `PackageAppOpPersistence.serializeUserState`.
+pub fn with_app_ops(mut root: Element, user: &AccessUser) -> Result<Element, String> {
+    use aim_android_xml::{Node, Value};
+    access(&root)?;
+    for (section, tag, key, entries) in [
+        (
+            "app-id-app-ops",
+            "app-id",
+            "id",
+            user.app_id_app_ops
+                .iter()
+                .map(|(id, ops)| (Value::Int(*id), ops))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "package-app-ops",
+            "package",
+            "name",
+            user.package_app_ops
+                .iter()
+                .map(|(name, ops)| (Value::Interned(name.clone()), ops))
+                .collect(),
+        ),
+    ] {
+        let written = Node::Element(Element {
+            name: section.into(),
+            attrs: Vec::new(),
+            content: entries
+                .into_iter()
+                .map(|(value, ops)| {
+                    Node::Element(Element {
+                        name: tag.into(),
+                        attrs: vec![(key.into(), value)],
+                        content: ops
+                            .iter()
+                            .map(|(name, mode)| {
+                                Node::Element(Element {
+                                    name: "app-op".into(),
+                                    attrs: vec![
+                                        ("name".into(), Value::Interned(name.clone())),
+                                        ("mode".into(), Value::Int(*mode)),
+                                    ],
+                                    content: Vec::new(),
+                                })
+                            })
+                            .collect(),
+                    })
+                })
+                .collect(),
+        });
+        if let Some(node) = root
+            .content
+            .iter_mut()
+            .find(|n| matches!(n, Node::Element(e) if e.name == section))
+        {
+            *node = written;
+        } else {
+            root.content.push(written);
+        }
+    }
+    Ok(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const CAMERA: &str = "android.permission.CAMERA";
     const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
+
+    #[test]
+    fn app_op_modes_round_trip_without_changing_other_policies() {
+        let root = aim_android_xml::read(br#"<access><app-id-permissions><app-id id="10100"><permission name="android.permission.CAMERA" flags="16"/></app-id></app-id-permissions><extension value="kept"/></access>"#).unwrap();
+        let mut user = AccessUser::parse(&root).unwrap();
+        user.app_id_app_ops = vec![(10100, vec![("android:camera".into(), 1)])];
+        user.package_app_ops = vec![("p".into(), vec![("android:camera".into(), 2)])];
+        let written = with_app_ops(root.clone(), &user).unwrap();
+        let encoded = aim_android_xml::abx::write(&written).unwrap();
+        let decoded = aim_android_xml::read(&encoded).unwrap();
+        assert_eq!(AccessUser::parse(&decoded).unwrap(), user);
+        assert_eq!(decoded.content[..2], root.content);
+        user.app_id_app_ops.clear();
+        user.package_app_ops.clear();
+        assert_eq!(
+            AccessUser::parse(&with_app_ops(decoded, &user).unwrap()).unwrap(),
+            user
+        );
+    }
 
     #[test]
     fn flags_are_set_in_their_maps_order() {
