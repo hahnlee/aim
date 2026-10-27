@@ -235,6 +235,10 @@ static void queue_errors(void) {
   CHECK(clock_gettime(CLOCK_MONOTONIC, &after) == 0);
   double elapsed = after.tv_sec - before.tv_sec + (after.tv_nsec - before.tv_nsec) / 1e9;
   CHECK(elapsed >= 0.015 && elapsed < 1);
+  // The signal must arrive well before the send timeout, even on a loaded host.
+  timeout.tv_sec = 2;
+  timeout.tv_usec = 0;
+  CHECK(setsockopt(a, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) == 0);
   struct sigaction action = {.sa_handler = alarm_handler};
   CHECK(sigemptyset(&action.sa_mask) == 0 && sigaction(SIGALRM, &action, NULL) == 0);
   struct itimerval timer = {.it_value = {.tv_usec = 10000}};
@@ -242,9 +246,6 @@ static void queue_errors(void) {
   CHECK(send(a, data, sizeof data, 0) == -1 && errno == EINTR && alarm_seen);
   timer.it_value.tv_usec = 0;
   CHECK(setitimer(ITIMER_REAL, &timer, NULL) == 0);
-  timeout.tv_sec = 2;
-  timeout.tv_usec = 0;
-  CHECK(setsockopt(a, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) == 0);
   pid_t child = fork();
   CHECK(child >= 0);
   if (!child) {

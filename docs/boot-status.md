@@ -8036,6 +8036,13 @@ by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
   Its "No such process (3)" warnings (#257), DnsResolver's ESRCH for a
   network with no nameservers, are gone.
 
+User netlink unicast waits on a full peer queue until space, a pending
+signal or SO_SNDTIMEO expiry (#370, 2026-10-28). Nonblocking host sends
+leave the wait to the syscall layer's signal-aware parker; spurious wakes
+retry without resetting the timeout. The NDK `netlink_user_unicast` test
+passes 50 consecutive runs with the signal's 2 s send timeout set before
+its 10 ms alarm. No guest boot was run for this change.
+
 ### Fixed on the way
 
 - #268's syscall surfaces are implemented: the three interval timers,
