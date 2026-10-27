@@ -8061,8 +8061,7 @@ signal is pending or SO_SNDTIMEO expires.
   failed (DhcpClient).
 - The emulator's vendor overlay made `eth0` a restricted network; it goes
   from the derived image.
-- DhcpClient's UDP socket took the Mac's port 68, so a second guest (or
-  the NDK network tests) failed to bind it; the port is `eth0`'s (#334).
+- UDP port 68 binds on `eth0` stay separate from the Mac's port, enforce guest namespace address/reuse conflicts and receive virtual router replies alongside packet sockets.
 
 ## Memory pressure (2026-09-29, #277)
 
