@@ -286,12 +286,15 @@ pub fn send(s: &Socket, frame: &[u8], ifindex: u32) -> i64 {
 }
 
 /// Hand `frame`, sent on `eth0`, to the virtual router, and its answer to
-/// the packet sockets.
+/// the packet sockets and the link's bound UDP sockets.
 fn to_router(frame: &[u8]) {
     if let Some(lease) = uplink::lease()
         && let Some(reply) = dhcp::answer(frame, &lease)
     {
         deliver(&reply, netif::ETH0, Way::In);
+        if let Err(error) = super::net::deliver_link_udp(&reply) {
+            crate::diag!("[linux-abi] net: router UDP reply dropped: errno {error}");
+        }
     }
 }
 

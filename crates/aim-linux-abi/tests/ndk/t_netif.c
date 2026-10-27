@@ -327,6 +327,58 @@ static void socket_options(void) {
   close(s);
 }
 
+// socket(7): both binders must opt into SO_REUSEADDR, including across
+// processes, and a bind remains owned until its last dup/fork alias closes.
+static int udp_client(int reuse) {
+  int s = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_UDP);
+  if (s < 0 || setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "eth0", 5) != 0 ||
+      setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse) != 0) return -1;
+  return s;
+}
+
+static int udp_read(int fd, void* data, size_t size) {
+  struct pollfd ready = {.fd = fd, .events = POLLIN};
+  return poll(&ready, 1, 2000) == 1 ? read(fd, data, size) : -1;
+}
+
+static void udp_binds(void) {
+  struct sockaddr_in any = {.sin_family = AF_INET, .sin_port = htons(68)};
+  for (int first = 0; first < 2; first++) {
+    for (int next = 0; next < 2; next++) {
+      int a = udp_client(first), b = udp_client(next);
+      CHECK(a >= 0 && b >= 0);
+      CHECK(bind(a, (struct sockaddr*)&any, sizeof any) == 0);
+      int r = bind(b, (struct sockaddr*)&any, sizeof any);
+      CHECK(first && next ? r == 0 : r == -1 && errno == EADDRINUSE);
+      close(a);
+      if (!(first && next)) CHECK(bind(b, (struct sockaddr*)&any, sizeof any) == 0);
+      close(b);
+    }
+  }
+  int a = udp_client(0), b = udp_client(0), pipes[2];
+  CHECK(a >= 0 && b >= 0 && pipe(pipes) == 0);
+  CHECK(bind(a, (struct sockaddr*)&any, sizeof any) == 0);
+  int alias = dup(a);
+  close(a);
+  CHECK(bind(b, (struct sockaddr*)&any, sizeof any) == -1 && errno == EADDRINUSE);
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    close(b);
+    close(pipes[1]);
+    char c;
+    _exit(read(pipes[0], &c, 1) == 1 ? 0 : 1);
+  }
+  close(alias);
+  close(pipes[0]);
+  CHECK(bind(b, (struct sockaddr*)&any, sizeof any) == -1 && errno == EADDRINUSE);
+  CHECK(write(pipes[1], "x", 1) == 1);
+  close(pipes[1]);
+  int status;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(bind(b, (struct sockaddr*)&any, sizeof any) == 0);
+  close(b);
+}
+
 // An IPv4 ping socket receives the ICMP message without the IP header.
 static void ping_socket(void) {
   int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_ICMP);
@@ -400,10 +452,37 @@ static void dhcp(void) {
   udp[5] = 8 + 244;
   unsigned char* b = udp + 8;
   b[0] = 1, b[1] = 1, b[2] = 6;
+  b[10] = 0x80;  // BOOTP broadcast flag.
   memcpy(b + 4, "\x12\x34\x56\x78", 4);
   memcpy(b + 28, mac, 6);
   memcpy(b + 236, "\x63\x82\x53\x63", 4);
   memcpy(b + 240, "\x35\x01\x01\xff", 4);
+  int u = udp_client(1), u2 = udp_client(1), zero = 0;
+  CHECK(u >= 0 && u2 >= 0);
+  struct sockaddr_in any = {.sin_family = AF_INET, .sin_port = htons(68)};
+  CHECK(setsockopt(u, SOL_SOCKET, SO_RCVBUF, &zero, sizeof zero) == 0);
+  CHECK(bind(u, (struct sockaddr*)&any, sizeof any) == 0);
+  CHECK(bind(u2, (struct sockaddr*)&any, sizeof any) == 0);
+  int sync[2];
+  CHECK(pipe(sync) == 0);
+  FORK_OR_SKIP(child);
+  if (child == 0) {
+    close(u);
+    close(u2);
+    close(p);
+    close(sync[0]);
+    int receiver = udp_client(1);
+    if (receiver < 0 || bind(receiver, (struct sockaddr*)&any, sizeof any) != 0 ||
+        write(sync[1], "x", 1) != 1) _exit(1);
+    struct pollfd ready = {.fd = receiver, .events = POLLIN};
+    unsigned char reply[2048];
+    int n = poll(&ready, 1, 2000) == 1 ? recv(receiver, reply, sizeof reply, 0) : -1;
+    _exit(n >= 244 && reply[0] == 2 && memcmp(reply + 4, "\x12\x34\x56\x78", 4) == 0 ? 0 : 1);
+  }
+  close(sync[1]);
+  char started;
+  CHECK(read(sync[0], &started, 1) == 1);
+  close(sync[0]);
   ll.sll_halen = 6;
   memset(ll.sll_addr, 0xff, 6);
   if (sendto(p, f, sizeof f, 0, (struct sockaddr*)&ll, sizeof ll) == -1 && errno == ENETDOWN) {
@@ -417,11 +496,95 @@ static void dhcp(void) {
   socklen_t fl = sizeof from;
   int n = recvfrom(p, r, sizeof r, 0, (struct sockaddr*)&from, &fl);
   CHECK(n > 14 + 20 + 8 + 240);
-  CHECK(memcmp(r, mac, 6) == 0 && from.sll_ifindex == 2 && from.sll_protocol == htons(ETH_P_IP) &&
-        from.sll_pkttype == PACKET_HOST);
+  CHECK(r[0] == 0xff && from.sll_ifindex == 2 && from.sll_protocol == htons(ETH_P_IP) &&
+        from.sll_pkttype == PACKET_BROADCAST);
   unsigned char* rb = r + 14 + 20 + 8;
   CHECK(rb[0] == 2 && memcmp(rb + 4, "\x12\x34\x56\x78", 4) == 0 && rb[16] != 0);  // yiaddr
   CHECK(rb[240] == 53 && rb[242] == 2);                                             // OFFER
+  // The same broadcast reaches both UDP readers, even with SO_RCVBUF 0.
+  struct pollfd ready[2] = {{.fd = u, .events = POLLIN}, {.fd = u2, .events = POLLIN}};
+  CHECK(poll(ready, 2, 2000) == 2);
+  int available = 0;
+  CHECK(ioctl(u, FIONREAD, &available) == 0 && available == n - 42);
+  unsigned char payload[2048];
+  struct sockaddr_in src;
+  fl = sizeof src;
+  CHECK(recvfrom(u, payload, 3, MSG_PEEK | MSG_TRUNC, (struct sockaddr*)&src, &fl) == n - 42);
+  CHECK(src.sin_family == AF_INET && src.sin_port == htons(67) &&
+        memcmp(&src.sin_addr, r + 26, 4) == 0 && memcmp(payload, rb, 3) == 0);
+  struct iovec v[2] = {{payload, 7}, {payload + 7, sizeof payload - 7}};
+  struct msghdr m = {.msg_iov = v, .msg_iovlen = 2};
+  CHECK(recvmsg(u, &m, 0) == n - 42 && m.msg_flags == 0 && memcmp(payload, rb, n - 42) == 0);
+  CHECK(udp_read(u2, payload, sizeof payload) == n - 42 && memcmp(payload, rb, n - 42) == 0);
+  CHECK(recv(u, payload, sizeof payload, 0) == -1 && errno == EAGAIN);
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  // A forked alias retains the virtual receive transport and shares its queue.
+  CHECK(pipe(sync) == 0);
+  FORK_OR_SKIP(reader);
+  if (reader == 0) {
+    close(u2);
+    close(p);
+    close(sync[0]);
+    if (write(sync[1], "x", 1) != 1) _exit(1);
+    struct pollfd ready = {.fd = u, .events = POLLIN};
+    int got = poll(&ready, 1, 2000) == 1 ? recv(u, payload, sizeof payload, 0) : -1;
+    _exit(got == n - 42 && memcmp(payload, rb, n - 42) == 0 ? 0 : 1);
+  }
+  close(sync[1]);
+  CHECK(read(sync[0], &started, 1) == 1);
+  close(sync[0]);
+  CHECK(sendto(p, f, sizeof f, 0, (struct sockaddr*)&ll, sizeof ll) == sizeof f);
+  CHECK(udp_read(u2, payload, sizeof payload) == n - 42);
+  CHECK(waitpid(reader, &status, 0) == reader && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(recv(u, payload, sizeof payload, 0) == -1 && errno == EAGAIN);
+  // Connected UDP input accepts only the configured remote endpoint.
+  struct sockaddr_in server = {.sin_family = AF_INET, .sin_port = htons(67),
+                               .sin_addr.s_addr = inet_addr("192.0.2.254")};
+  CHECK(connect(u, (struct sockaddr*)&server, sizeof server) == 0);
+  CHECK(sendto(p, f, sizeof f, 0, (struct sockaddr*)&ll, sizeof ll) == sizeof f);
+  CHECK(recv(u, payload, sizeof payload, 0) == -1 && errno == EAGAIN);
+  CHECK(udp_read(u2, payload, sizeof payload) == n - 42);
+  // A UDP request takes the same router/input path as the packet request.
+  memcpy(&server.sin_addr, r + 26, 4);
+  CHECK(connect(u, (struct sockaddr*)&server, sizeof server) == 0);
+  CHECK(write(u, b, 244) == 244);
+  CHECK(udp_read(u, payload, sizeof payload) == n - 42 && memcmp(payload, rb, n - 42) == 0);
+  CHECK(udp_read(u2, payload, sizeof payload) == n - 42);
+  // AF_UNSPEC disconnect clears the peer filter without releasing the bind.
+  struct sockaddr disconnect = {.sa_family = AF_UNSPEC};
+  CHECK(connect(u, &disconnect, sizeof disconnect) == 0);
+  fl = sizeof server;
+  CHECK(getpeername(u, (struct sockaddr*)&server, &fl) == -1 && errno == ENOTCONN);
+  // Unicast is local IP input only after the leased address is configured.
+  b[10] = 0;
+  CHECK(sendto(p, f, sizeof f, 0, (struct sockaddr*)&ll, sizeof ll) == sizeof f);
+  CHECK(recv(u, payload, sizeof payload, 0) == -1 && errno == EAGAIN);
+  CHECK(recv(u2, payload, sizeof payload, 0) == -1 && errno == EAGAIN);
+  int nl = rtnl(0);
+  CHECK(nl >= 0);
+  char leased[INET_ADDRSTRLEN];
+  CHECK(inet_ntop(AF_INET, rb + 16, leased, sizeof leased));
+  struct addr_req assigned;
+  addr(&assigned, RTM_NEWADDR, leased, 32);
+  assigned.h.nlmsg_flags = NLM_F_CREATE | NLM_F_EXCL;
+  CHECK(ack(nl, &assigned.h) == 0);
+  CHECK(sendto(p, f, sizeof f, 0, (struct sockaddr*)&ll, sizeof ll) == sizeof f);
+  // SO_REUSEADDR unicast chooses one eligible socket; broadcasts fan out.
+  CHECK(poll(ready, 2, 2000) > 0);
+  int received = 0;
+  for (int k = 0; k < 2; k++) {
+    int fd = k ? u2 : u;
+    int got = recv(fd, payload, sizeof payload, 0);
+    CHECK(got == n - 42 || (got == -1 && errno == EAGAIN));
+    received += got > 0;
+  }
+  CHECK(received == 1);
+  addr(&assigned, RTM_DELADDR, leased, 32);
+  CHECK(ack(nl, &assigned.h) == 0);
+  close(nl);
+  close(u);
+  close(u2);
   close(p);
 }
 
@@ -432,6 +595,7 @@ int main(void) {
   RUN(lifetimes);
   RUN(across_processes);
   RUN(socket_options);
+  RUN(udp_binds);
   RUN(ping_socket);
   RUN(dhcp);
   DONE();
