@@ -34,7 +34,7 @@
 //!   locked) is removed when a client finds it: opening it, listing the
 //!   directory, or reading a device that hung up.
 
-use std::os::fd::{AsFd, IntoRawFd};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -46,6 +46,7 @@ use aim_host_display::input::{
     mask_codes, record_bytes, server, test_bit,
 };
 use aim_host_display::wire;
+use aim_storage::private_fd::PrivateFd;
 
 use super::clock::Base;
 use super::dir::{self, Entry};
@@ -83,6 +84,84 @@ pub struct Evdev {
     dir: PathBuf,
     writable: bool,
     client: Mutex<Client>,
+    /// Cache the transport, never mutable device capabilities or axis values.
+    description: Mutex<Description>,
+}
+
+enum Description {
+    New,
+    Connected(PrivateFd),
+    Gone,
+}
+
+impl Description {
+    fn connect(dir: &std::path::Path, index: u32) -> std::io::Result<PrivateFd> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let socket = PrivateFd::allocate(|| {
+            let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+            if raw < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let s = std::os::unix::net::UnixStream::from(unsafe { OwnedFd::from_raw_fd(raw) });
+            if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            s.set_read_timeout(Some(Duration::from_secs(5)))?;
+            s.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let on = 1i32;
+            // A removed device must return ENODEV, not signal the guest.
+            if unsafe {
+                libc::setsockopt(
+                    s.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_NOSIGPIPE,
+                    (&on as *const i32).cast(),
+                    size_of::<i32>() as libc::socklen_t,
+                )
+            } < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(s.into())
+        })?;
+        // Register the private allocation before any blocking IPC.
+        aim_host_display::unixsock::connect_fd_at(
+            socket.as_raw_fd(),
+            dir,
+            &format!("event{index}"),
+        )?;
+        Ok(socket)
+    }
+
+    fn query(&mut self, dir: &std::path::Path, index: u32) -> Result<Descriptor, i64> {
+        if matches!(self, Self::New) {
+            let socket = Self::connect(dir, index).map_err(|e| match e.raw_os_error() {
+                // The node may outlive its device, just as an evdev fd can.
+                Some(libc::ENOENT | libc::ECONNREFUSED) => neg(ENODEV),
+                e => neg(errno::from_darwin(e.unwrap_or(libc::EIO))),
+            })?;
+            *self = Self::Connected(socket);
+        }
+        let Self::Connected(s) = self else {
+            return Err(neg(ENODEV));
+        };
+        let hello = Hello {
+            version: VERSION,
+            op: OP_DESCRIBE,
+            ..Default::default()
+        };
+        match wire::send(s.as_fd(), wire::bytes(&hello), None)
+            .and_then(|()| wire::recv_record::<Descriptor>(s.as_fd()))
+        {
+            Ok(Some(d)) if d.index == index => Ok(d),
+            _ => {
+                // A disconnected device is ENODEV in evdev_ioctl. Never
+                // reconnect this open file to a replacement at the same node.
+                *self = Self::Gone;
+                Err(neg(ENODEV))
+            }
+        }
+    }
 }
 
 struct Client {
@@ -275,7 +354,10 @@ impl Evdev {
 
     /// The device as it is now, its state the device's.
     fn live(&self) -> Result<Descriptor, i64> {
-        describe(&self.dir, self.desc.index).ok_or(neg(ENODEV))
+        self.description
+            .lock()
+            .unwrap()
+            .query(&self.dir, self.desc.index)
     }
 
     /// The masks of event type `kind` and of the types (0), as this file
@@ -510,6 +592,7 @@ pub fn adopt(fd: i32) {
         },
         dir: dir.to_owned(),
         writable: tv.tv_usec >> 4 & 1 != 0,
+        description: Mutex::new(Description::New),
         client: Mutex::new(Client {
             state: live.state,
             clock: (tv.tv_usec & 0xf) - 1,
@@ -608,6 +691,7 @@ pub fn open(r: &Resolved, flags: u64) -> Option<i64> {
             desc,
             dir,
             writable,
+            description: Mutex::new(Description::New),
             client: Mutex::new(Client {
                 state: desc.state,
                 clock: CLOCK_REALTIME,
@@ -1136,5 +1220,90 @@ mod tests {
         // makedev(13, 66) in Darwin's encoding.
         assert_eq!(st.st_rdev as u32, (13 << 24) | 66);
         assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFCHR);
+    }
+
+    #[test]
+    fn description_reuses_one_connection() {
+        use std::os::unix::net::UnixListener;
+        if fdtab::isolated_kernel_test("sys::evdev::tests::description_reuses_one_connection") {
+            return;
+        }
+        fdtab::install_storage_registrar().unwrap();
+        let dir = std::env::temp_dir().join(format!("ev-query-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let listener = UnixListener::bind(dir.join("event0")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            for value in 0..320 {
+                let hello = wire::recv_record::<Hello>(s.as_fd()).unwrap().unwrap();
+                assert_eq!((hello.version, hello.op), (VERSION, OP_DESCRIBE));
+                let mut d = Descriptor::default();
+                d.state.abs[0] = value;
+                wire::send(s.as_fd(), wire::bytes(&d), None).unwrap();
+            }
+            assert!(wire::recv_record::<Hello>(s.as_fd()).unwrap().is_none());
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        });
+        let mut query = Description::New;
+        for value in 0..320 {
+            assert_eq!(query.query(&dir, 0).unwrap().state.abs[0], value);
+        }
+        let Description::Connected(ref socket) = query else {
+            panic!("no query connection")
+        };
+        let raw = socket.as_raw_fd();
+        assert!(fdtab::is_hidden(raw));
+        assert!(!fdtab::visible(raw));
+        assert!(fdtab::pin_guest(raw).is_err());
+        drop(query);
+        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn description_stays_current_and_removal_is_terminal() {
+        use aim_host_display::input::{KEYBOARD, MOUSE, devices, server::Devices};
+        let dir = std::env::temp_dir().join(format!("ev-live-{}", std::process::id()));
+        let devs = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
+        let mut query = Description::New;
+        let start = std::time::Instant::now();
+        for _ in 0..320 {
+            describe(&dir, MOUSE).unwrap();
+        }
+        let old = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..320 {
+            query.query(&dir, MOUSE).unwrap();
+        }
+        println!(
+            "320 descriptions: one-shot {old:?}, cached transport {:?}",
+            start.elapsed()
+        );
+        // A cached session must survive the initial hello's five-second timeout.
+        std::thread::sleep(Duration::from_millis(5100));
+        devs.emit(MOUSE, 1, &[(EV_ABS, ABS_X, 42)]);
+        assert_eq!(
+            query.query(&dir, MOUSE).unwrap().state.abs[ABS_X as usize],
+            42
+        );
+        let mut keys = Description::New;
+        assert!(test_bit(&keys.query(&dir, KEYBOARD).unwrap().bits.key, 30));
+        assert!(devs.remap(KEYBOARD, 0x70004, 44));
+        let d = keys.query(&dir, KEYBOARD).unwrap();
+        assert!(!test_bit(&d.bits.key, 30));
+        assert!(test_bit(&d.bits.key, 44));
+        devs.close();
+        assert!(matches!(query.query(&dir, MOUSE), Err(r) if r == neg(ENODEV)));
+        drop(devs);
+        let _replacement = Devices::create(&dir, devices(100, 200, 160.0, 160.0)).unwrap();
+        assert!(matches!(query.query(&dir, MOUSE), Err(r) if r == neg(ENODEV)));
+        drop(_replacement);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
