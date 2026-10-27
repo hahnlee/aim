@@ -7347,6 +7347,10 @@ lmkd reacting to the Mac's memory pressure, not from the guest.
 
 ## Other processes in /proc (2026-09-30, #238, #379)
 
+Guest TIDs are allocated across the pid namespace below Linux's `pid_max`
+(4194304), cyclically, and reclaimed at thread exit; a process entered
+without a namespace table is its own namespace.
+
 Each process keeps a record beside its by-pid entry
 (`docs/guest-init-contract.md` section 4): its threads, and the stack
 pages of its argument strings, mapped from the record. Another

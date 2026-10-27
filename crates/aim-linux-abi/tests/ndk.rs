@@ -494,6 +494,11 @@ fn fatal_fault_report() {
 }
 
 #[test]
+fn task_ids() {
+    check("t_tid", &[]);
+}
+
+#[test]
 fn clocks() {
     check("t_clock", &[]);
 }

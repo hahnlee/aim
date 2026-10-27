@@ -30,8 +30,8 @@ use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU8, AtomicU64, Ordering::*};
 
 use super::procfs::StackInfo;
 
-/// One slot per possible thread of a process (`thread::slot`).
-const SLOTS: usize = 2048;
+/// Local thread slots, independent of the namespace-wide task IDs.
+pub(super) const SLOTS: usize = 2048;
 /// Then slots for threads that run as processes of their own.
 const FOREIGN: usize = 16;
 /// Offset of the string pages in the record.
@@ -292,12 +292,7 @@ fn table() -> Option<&'static Table> {
 
 fn slot(tid: i32) -> Option<&'static Slot> {
     let t = table()?;
-    // SAFETY: trivial.
-    if super::thread::owner(tid) == unsafe { libc::getpid() } {
-        t.slots.get(super::thread::slot(tid))
-    } else {
-        t.slots[SLOTS..].iter().find(|s| s.tid.load(Acquire) == tid)
-    }
+    t.slots.iter().find(|s| s.tid.load(Acquire) == tid)
 }
 
 /// Process `tid` is a thread of this one, named `name` (a fork's own-files
@@ -348,9 +343,17 @@ pub fn traced(tid: i32, tracer: i32) {
 /// Thread `tid` exists, named `name`, on host thread `host` (0 until it
 /// runs).
 pub fn thread(tid: i32, host: u64, name: &[u8; 16]) {
-    if let Some(s) = slot(tid) {
+    // Called under the thread table lock, including when republishing at
+    // exec: a new local slot cannot be claimed by two threads concurrently.
+    if let Some(s) = slot(tid).or_else(|| {
+        table()?.slots[..SLOTS]
+            .iter()
+            .find(|s| s.tid.load(Acquire) == 0)
+    }) {
         s.host.store(host, Relaxed);
-        named(tid, name);
+        for (d, &b) in s.name.iter().zip(name) {
+            d.store(b, Relaxed);
+        }
         s.tid.store(tid, Release);
     }
 }
