@@ -11,12 +11,20 @@ pub struct Admission {
     pub old_package: Option<AndroidPackage>,
 }
 impl SigningScan {
+    pub fn permission_admissions(&self) -> Result<Vec<&Admission>, String> {
+        let registry = self.package_registry()?;
+        ordered_admissions(
+            &registry.ordered_package_names(),
+            &self.permission_admissions,
+        )
+    }
+
     /// The current registered view replaces earlier admissions of the same name;
     /// the last receipt still owns its actual pre-replacement package.
     pub fn permission_admissions_record(&self) -> Result<Vec<u8>, String> {
         let registry = self.package_registry()?;
         let names = registry.ordered_package_names();
-        let admissions = ordered_admissions(&names, &self.permission_admissions)?;
+        let admissions = self.permission_admissions()?;
         let mut parcel = Parcel::new();
         parcel.write_i32(1);
         parcel.write_i32(

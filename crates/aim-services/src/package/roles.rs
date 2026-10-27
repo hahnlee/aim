@@ -427,6 +427,13 @@ impl Owner {
         result
     }
 
+    pub(crate) fn permission_known_package(&self, kind: i32, name: &str) -> Option<bool> {
+        self.known
+            .as_ref()?
+            .get(&kind)
+            .map(|names| names.iter().any(|value| value.as_deref() == Some(name)))
+    }
+
     pub fn known_packages(
         &self,
         query: &Query<'_>,

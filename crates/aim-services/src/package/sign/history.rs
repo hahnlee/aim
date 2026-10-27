@@ -85,6 +85,22 @@ impl<'a> History<'a> {
         self.check_capability(old, 0)
     }
 
+    /// SigningDetails.hasCommonSignerWithCapability: this source's lineage
+    /// must trust a current or past signer of the requester with the capability.
+    pub fn has_common_signer_with_capability(&self, other: &Self, flags: i32) -> bool {
+        if !self.known(other) {
+            return false;
+        }
+        if self.current.len() > 1 || other.current.len() > 1 {
+            return self.exact(other);
+        }
+        self.certificate(&other.current[0], flags)
+            || other
+                .past_certificates()
+                .iter()
+                .any(|(cert, _)| self.certificate(cert, flags))
+    }
+
     /// Sharing a signer is insufficient when the overlapping histories
     /// disagree before it. Capability flags do not affect ancestry.
     pub fn has_common_ancestor(&self, other: &Self) -> bool {
@@ -215,6 +231,15 @@ mod tests {
         };
         let old = History::saved(&a);
         let new = History::saved(&b);
+        assert!(old.has_common_signer_with_capability(&new, 31));
+        assert!(new.has_common_signer_with_capability(&old, SHARED_USER_ID));
+        assert!(!new.has_common_signer_with_capability(&old, 4));
+        assert!(!History::saved(&revoked).has_common_signer_with_capability(&old, 4));
+        assert!(
+            History::saved(&multi)
+                .has_common_signer_with_capability(&History::saved(&reversed), 31)
+        );
+        assert!(!History::saved(&unknown).has_common_signer_with_capability(&old, 0));
         assert!(new.check_capability(&old, INSTALLED_DATA | SHARED_USER_ID));
         assert!(!new.check_capability(&old, ROLLBACK));
         assert!(new.check_capability(&new, 31));

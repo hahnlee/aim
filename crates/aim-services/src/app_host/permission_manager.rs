@@ -24,6 +24,7 @@
 //! states are not implemented (#1508).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+mod boot;
 mod install;
 mod removal;
 
@@ -1472,6 +1473,8 @@ pub struct PermissionManager {
     host: Arc<AppHost>,
     /// The sole mutable access owner; readers retain immutable states.
     owner: Mutex<AccessOwner>,
+    #[cfg(test)]
+    access_writes: Mutex<Vec<String>>,
     installs: Mutex<BTreeMap<u64, install::Candidate>>,
     groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
     listeners: Mutex<Vec<Binder>>,
@@ -1484,6 +1487,8 @@ impl PermissionManager {
         PermissionManager {
             host,
             owner: Mutex::new(AccessOwner::default()),
+            #[cfg(test)]
+            access_writes: Mutex::new(Vec::new()),
             installs: Mutex::new(BTreeMap::new()),
             groups: Mutex::new(None),
             listeners: Mutex::new(Vec::new()),
@@ -1841,6 +1846,8 @@ impl PermissionManager {
         if let Err(e) = write(&path.with_extension("abx.reservecopy")) {
             eprintln!("app host: permissionmgr: Failed to write the reserve copy: {e}");
         }
+        #[cfg(test)]
+        self.access_writes.lock().unwrap().push(relative.to_owned());
         Ok(())
     }
 
