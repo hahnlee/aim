@@ -74,7 +74,19 @@ fn attr_value(name: &str) -> Vec<u8> {
 }
 
 /// A write to an attribute file: a whole context, NUL-terminated or not.
-fn write_attr(name: &'static str, bytes: &[u8]) {
+pub(super) fn write_attr(
+    opener: i32,
+    name: &str,
+    bytes: &[u8],
+) -> Result<Option<Vec<u8>>, crate::errno::Errno> {
+    // Linux proc_pid_attr_write requires the opener's mm; fork has a new one.
+    if opener != super::process::getpid() as i32 {
+        return Err(crate::errno::EPERM);
+    }
+    let name = ATTRS
+        .into_iter()
+        .find(|a| *a == name)
+        .ok_or(crate::errno::EINVAL)?;
     let text = bytes
         .split(|&b| b == 0 || b == b'\n')
         .next()
@@ -90,6 +102,11 @@ fn write_attr(name: &'static str, bytes: &[u8]) {
         written.retain(|(n, _)| *n != name);
         written.push((name, text.to_vec()));
     }
+    Ok(None)
+}
+
+pub(super) fn access_reply() -> Vec<u8> {
+    ALLOW_ALL.to_vec()
 }
 
 const O_CLOEXEC: u64 = 0o2000000;
@@ -102,10 +119,11 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
     if let Some(name) = own_attr(guest) {
         let value = attr_value(name);
         return Some(if flags & O_ACCMODE != 0 {
-            super::knob::open(&value, cloexec, move |req| {
-                write_attr(name, req);
-                Ok(None)
-            })
+            super::knob::open(
+                &value,
+                cloexec,
+                super::knob::Knob::SelinuxAttr(super::process::getpid() as i32, name.into()),
+            )
         } else {
             super::procfs::content_fd(&value, cloexec)
         });
@@ -118,11 +136,17 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
             page[0..4].copy_from_slice(&1u32.to_le_bytes());
             Some(super::procfs::content_fd(&page, cloexec))
         }
-        "/access" => Some(super::knob::open(b"", cloexec, |_| {
-            Ok(Some(ALLOW_ALL.to_vec()))
-        })),
+        "/access" => Some(super::knob::open(
+            b"",
+            cloexec,
+            super::knob::Knob::SelinuxAccess,
+        )),
         // With no policy loaded every context is valid.
-        "/context" => Some(super::knob::open(b"", cloexec, |_| Ok(None))),
+        "/context" => Some(super::knob::open(
+            b"",
+            cloexec,
+            super::knob::Knob::SelinuxContext,
+        )),
         _ => None,
     }
 }
