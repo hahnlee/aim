@@ -33,6 +33,8 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
+
 The app host image ([app-host.md](app-host.md)) boots without
 system_server: with `--only` its 33 services and one-shots, zygote accepts
 commands 4.2-4.3 s after guest-init starts (odsign is done at 2.36 s,

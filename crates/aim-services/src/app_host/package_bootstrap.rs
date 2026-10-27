@@ -172,6 +172,9 @@ impl PackageBootstrap {
                 Arc::downgrade(&host),
             )))
             .expect("new package observer epoch is open");
+        observers
+            .add_observer(host.background_install_control())
+            .expect("new package observer epoch is open");
         let previous = std::mem::replace(
             &mut *host.package_observers.lock().unwrap(),
             Arc::downgrade(&observers),

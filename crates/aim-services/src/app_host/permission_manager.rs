@@ -2077,6 +2077,20 @@ impl PermissionManager {
         self.access(|access| access.holds(uid, permission))
     }
 
+    /// PermissionManagerServiceInternal.checkPermission for a native subscriber.
+    pub(super) fn package_holds(
+        &self,
+        package: &str,
+        permission: &str,
+        user: i32,
+    ) -> Result<bool, Exception> {
+        self.access(|access| {
+            access
+                .check_permission(SYSTEM_UID, package, permission, user)
+                .map(|result| result == GRANTED)
+        })
+    }
+
     /// The protection level of `permission` as `getPermissionInfo` gives
     /// it to the system server; none for one not defined.
     pub(super) fn protection_level(&self, permission: &str) -> Result<Option<i32>, Exception> {
