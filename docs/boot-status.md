@@ -152,6 +152,12 @@ process's main thread, also with Bluetooth on and after the process is
 restarted (2026-10-21); Phone stops at `carrier_config`, as on any device
 without telephony (#1919, #1923).
 
+App-host incoming-user checks share the pinned UserController port, including
+CURRENT_OR_SELF fallback, special-user validation, Recents and shell restrictions.
+Service lookups select the original profile-dependent allow mode; each user is
+its own profile group on this host. This consolidation is checked without a guest
+boot (#2170).
+
 ## Native system services (2026-09-29, ADR 0013)
 
 `image/native-services` lists the system services implemented natively

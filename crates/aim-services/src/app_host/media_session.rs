@@ -35,6 +35,7 @@ use aim_service_aidl::android_media_session_iactivesessionslistener as active_li
 use aim_service_aidl::android_media_session_ionmediakeyeventsessionchangedlistener as key_listener;
 use aim_service_aidl::android_media_session_isessionmanager as sm;
 
+use super::activity_user::AllowMode;
 use super::kept::{KeptBundle, RawBundle};
 use super::media_session_record::{Record, Token};
 use super::pending_intents::{
@@ -49,11 +50,9 @@ use crate::package::intent::{ComponentName, Intent};
 
 const STATUS_BAR_SERVICE: &str = "android.permission.STATUS_BAR_SERVICE";
 const MEDIA_CONTENT_CONTROL: &str = "android.permission.MEDIA_CONTENT_CONTROL";
-const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
 const SYSTEM_UID: i32 = 1000;
-/// `UserHandle.ALL`, `UserHandle.CURRENT`, and the user the app host runs.
+/// `UserHandle.ALL` and the user the app host runs.
 const USER_ALL: i32 = -1;
-const USER_CURRENT: i32 = -2;
 const CURRENT_USER: i32 = 0;
 /// `Settings.Secure.MEDIA_BUTTON_RECEIVER`.
 const MEDIA_BUTTON_RECEIVER: &str = "media_button_receiver";
@@ -589,25 +588,6 @@ impl MediaSession {
         Ok(())
     }
 
-    /// `handleIncomingUser`.
-    fn incoming_user(&self, uid: i32, user: i32, package: Option<&str>) -> Result<i32, Exception> {
-        let calling = uid / PER_USER_RANGE as i32;
-        if user == calling {
-            return Ok(user);
-        }
-        if self.held(INTERACT_ACROSS_USERS_FULL, uid)? {
-            return Ok(if user == USER_CURRENT {
-                CURRENT_USER
-            } else {
-                user
-            });
-        }
-        Err(Exception::security(format!(
-            "Permission denied while calling from {} with user id: {user}; Need to run as either the calling user id ({calling}), or with {INTERACT_ACROSS_USERS_FULL} permission",
-            package.unwrap_or("null")
-        )))
-    }
-
     /// `enforceMediaPermissions`.
     fn enforce_media_permissions(
         &self,
@@ -653,7 +633,9 @@ impl MediaSession {
         if package.is_some() {
             self.enforce_package_name(package, uid)?;
         }
-        let user = self.incoming_user(uid, user, package)?;
+        let user =
+            self.host
+                .handle_incoming_user(uid, user, true, AllowMode::FullOnly, None, package)?;
         self.enforce_media_permissions(package, uid, user)?;
         Ok(user)
     }
@@ -1332,7 +1314,15 @@ impl Service for MediaSession {
                     self.enforce_package_name(a.package_name.as_deref(), uid)
                         .map_err(Ok)?;
                     let user = self
-                        .incoming_user(uid, a.user_id, a.package_name.as_deref())
+                        .host
+                        .handle_incoming_user(
+                            uid,
+                            a.user_id,
+                            true,
+                            AllowMode::FullOnly,
+                            None,
+                            a.package_name.as_deref(),
+                        )
                         .map_err(Ok)?;
                     let Some(Binder::Handle(cb)) = a.session_cb else {
                         return Err(Ok(Exception::illegal_argument(
@@ -1475,7 +1465,7 @@ impl Service for MediaSession {
                         eprintln!("app host: media_session: addSession2TokensListener: listener is null, ignoring");
                         return Ok(());
                     };
-                    let user = self.incoming_user(uid, a.user_id, None)?;
+                    let user = self.host.handle_incoming_user(uid, a.user_id, true, AllowMode::FullOnly, None, None)?;
                     if self.listeners.lock().unwrap().session2_tokens.contains_key(&handle) {
                         eprintln!("app host: media_session: addSession2TokensListener: listener is already added, ignoring");
                         return Ok(());

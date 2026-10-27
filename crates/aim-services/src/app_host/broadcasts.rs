@@ -658,20 +658,20 @@ impl Broadcasts {
         let Some((start_seq, package, uid, pid)) = host.app_of_thread(args.caller) else {
             return Ok(None);
         };
-        let caller_package = args.caller_package.unwrap_or_default();
+        let caller_package = args.caller_package.as_deref().unwrap_or_default();
         if !is_core(uid) && caller_package != package {
             return Err(Exception::security(format!(
                 "Given caller package {caller_package} is not running in process {pid}:{package}/{uid}"
             )));
         }
-        let instant_app = host.instant_app(&caller_package, uid / PER_USER_RANGE as i32)?;
+        let instant_app = host.instant_app(caller_package, uid / PER_USER_RANGE as i32)?;
         let user = host.handle_incoming_user(
             uid,
             args.user,
             true,
             AllowMode::FullOnly,
             Some("registerReceiver"),
-            Some(&caller_package),
+            args.caller_package.as_deref(),
         )?;
         // System internals hear these before apps unless they chose.
         // (An unset priority is no system one.)
@@ -831,7 +831,7 @@ impl Broadcasts {
             .unwrap();
         receiver.filters.push(Filter {
             filter,
-            package: caller_package,
+            package: caller_package.to_string(),
             feature_id: args.feature_id,
             receiver_id: args.receiver_id,
             permission: args.permission,

@@ -469,7 +469,7 @@ impl AppHost {
             false,
             activity_user::AllowMode::NonFull,
             Some(name),
-            None,
+            calling_package,
         )
     }
 
@@ -546,7 +546,7 @@ impl AppHost {
             false,
             activity_user::AllowMode::NonFull,
             Some("clearBroadcastResponseStats"),
-            None,
+            calling_package,
         )?;
         self.broadcast_responses
             .state
