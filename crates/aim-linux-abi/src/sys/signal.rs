@@ -629,7 +629,8 @@ fn frame(th: &Thread, cpu: &Cpu, t: &Taken, uc_mask: u64, esr: u64, fault: u64) 
     };
     // SAFETY: the guest stack (or alternate stack) the frame goes on is the
     // guest's own; a bad one faults like Linux's forced SIGSEGV.
-    let e = unsafe { sigframe::setup(cpu, &d, &mut lock(&th.sig.alt)) };
+    let e = unsafe { sigframe::setup(cpu, &d, &mut lock(&th.sig.alt)) }
+        .unwrap_or_else(|_| die(sigframe::SIGSEGV));
     let mut add = t.act.mask;
     if t.act.flags & SA_NODEFER == 0 {
         add |= bit(sig);
@@ -817,6 +818,7 @@ thread_local! {
 /// Every main, clone, and spawned fork thread binds before running guest code.
 pub(crate) fn initialize_verity_fault_slot() {
     VERITY_FAULT.with(|_| {});
+    super::user_memory::initialize_fault_slot();
 }
 
 fn defer_verity_fault(ctx: *mut GuestContext, si_addr: u64, m: &mut DarwinMcontext) -> bool {
@@ -974,6 +976,13 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
         if matches!(hsig, libc::SIGSEGV | libc::SIGBUS) && super::jit::fault(ctx, m) {
             return None;
         }
+        // A copy can also fault while this handler builds a guest frame;
+        // its pager continuation must preserve the interrupted host stack.
+        if matches!(hsig, libc::SIGSEGV | libc::SIGBUS)
+            && super::user_memory::recover_fault(m, si.si_addr as u64)
+        {
+            return None;
+        }
         if matches!(hsig, libc::SIGSEGV | libc::SIGBUS)
             && defer_verity_fault(ctx, si.si_addr as u64, m)
         {
@@ -1089,6 +1098,13 @@ fn host_action(hsig: i32, handler: libc::sighandler_t, flags: i32) {
         sa.sa_sigaction = handler;
         sa.sa_flags = flags;
         libc::sigfillset(&mut sa.sa_mask);
+        // Building a guest signal frame uses fault-contained user copies too.
+        // Let their synchronous faults reach the exception table recursively.
+        libc::sigdelset(&mut sa.sa_mask, libc::SIGSEGV);
+        libc::sigdelset(&mut sa.sa_mask, libc::SIGBUS);
+        if matches!(hsig, libc::SIGSEGV | libc::SIGBUS) {
+            sa.sa_flags |= libc::SA_NODEFER;
+        }
         libc::sigaction(hsig, &sa, std::ptr::null_mut());
     }
 }
@@ -1160,22 +1176,21 @@ pub fn rt_sigaction(a: [u64; 6]) -> i64 {
     if act != 0 && (sig == SIGKILL || sig == SIGSTOP) {
         return -(EINVAL as i64);
     }
-    let new = {
+    let requested = if act != 0 {
+        let mut new = user_read!(act, KSigaction);
+        new.mask &= !UNBLOCKABLE;
+        Some(new)
+    } else {
+        None
+    };
+    let (old, new) = {
         let mut t = ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
         let slot = &mut t[sig as usize - 1];
-        // SAFETY: guest sigaction buffers.
-        unsafe {
-            let old = *slot;
-            if act != 0 {
-                let mut new = (act as *const KSigaction).read_unaligned();
-                new.mask &= !UNBLOCKABLE;
-                *slot = new;
-            }
-            if oact != 0 {
-                (oact as *mut KSigaction).write_unaligned(old);
-            }
+        let old = *slot;
+        if let Some(new) = requested {
+            *slot = new;
         }
-        *slot
+        (old, *slot)
     };
     if act != 0 {
         mirror_on_host(sig, &new);
@@ -1187,6 +1202,9 @@ pub fn rt_sigaction(a: [u64; 6]) -> i64 {
                 lock(&th.sig.pending).flush(sig);
             }
         }
+    }
+    if oact != 0 {
+        user_write!(oact, KSigaction, old);
     }
     0
 }
@@ -1204,7 +1222,7 @@ pub fn rt_sigprocmask(a: [u64; 6]) -> i64 {
     let old = th.sig.mask();
     if set != 0 {
         // SAFETY: guest sigset.
-        let s = unsafe { (set as *const u64).read_unaligned() };
+        let s = user_read!(set, u64);
         let new = match how {
             0 => old | s,
             1 => old & !s,
@@ -1219,7 +1237,7 @@ pub fn rt_sigprocmask(a: [u64; 6]) -> i64 {
     }
     if oset != 0 {
         // SAFETY: guest sigset.
-        unsafe { (oset as *mut u64).write_unaligned(old) };
+        user_write!(oset, u64, old);
     }
     0
 }
@@ -1232,7 +1250,7 @@ pub fn rt_sigpending(a: [u64; 6]) -> i64 {
     drain_external();
     let pending = (lock(&th.sig.pending).set | process().set) & th.sig.mask();
     // SAFETY: guest sigset.
-    unsafe { (a[0] as *mut u64).write_unaligned(pending) };
+    user_write!(a[0], u64, pending);
     0
 }
 
@@ -1242,7 +1260,7 @@ pub fn rt_sigsuspend(a: [u64; 6]) -> i64 {
     }
     let th = current();
     // SAFETY: guest sigset.
-    let new = unsafe { (a[0] as *const u64).read_unaligned() } & !UNBLOCKABLE;
+    let new = user_read!(a[0], u64) & !UNBLOCKABLE;
     lock(&th.sig.saved_mask).get_or_insert(th.sig.mask());
     th.sig.mask.store(new, SeqCst);
     th.sig.attn.store(1, SeqCst);
@@ -1284,13 +1302,13 @@ pub fn rt_sigtimedwait(a: [u64; 6]) -> i64 {
     };
     let th = current();
     // SAFETY: guest sigset.
-    let set = unsafe { (set as *const u64).read_unaligned() } & !UNBLOCKABLE;
+    let set = user_read!(set, u64) & !UNBLOCKABLE;
     th.sig.waitset.store(set, SeqCst);
     let r = loop {
         if let Some(i) = dequeue(th, set) {
             if info != 0 {
                 // SAFETY: guest siginfo buffer.
-                unsafe { i.write(info) };
+                user_try!(unsafe { i.write(info) });
             }
             break i.signo as i64;
         }
@@ -1519,11 +1537,11 @@ pub fn tgkill(nr: u64, a: [u64; 6]) -> i64 {
 
 /// The guest's siginfo for rt_(tg)sigqueueinfo. Linux lets a process claim
 /// any si_code towards itself only.
-fn queued_info(sig: i32, p: u64) -> Siginfo {
+fn queued_info(sig: i32, p: u64) -> Result<Siginfo, i32> {
     // SAFETY: guest siginfo.
-    let mut info = unsafe { Siginfo::read(p) };
+    let mut info = unsafe { Siginfo::read(p) }?;
     info.signo = sig;
-    info
+    Ok(info)
 }
 
 /// Send `info` to thread `tid` (0: the whole process) of another process
@@ -1582,9 +1600,9 @@ pub fn rt_sigqueueinfo(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     if tgid != my_pid() {
-        return queued_to_peer(tgid as i32, 0, queued_info(sig, a[2]));
+        return queued_to_peer(tgid as i32, 0, user_try!(queued_info(sig, a[2])));
     }
-    send_process(queued_info(sig, a[2]))
+    send_process(user_try!(queued_info(sig, a[2])))
 }
 
 /// rt_tgsigqueueinfo(tgid, tid, sig, info).
@@ -1605,13 +1623,13 @@ pub fn rt_tgsigqueueinfo(a: [u64; 6]) -> i64 {
     }
     let (tgid, tid) = (a[0] as i32, a[1] as i32);
     if tgid > 0 && tid > 0 && tgid as i64 != my_pid() && thread::owner(tid) == tgid {
-        return queued_to_peer(tgid, tid, queued_info(sig, a[3]));
+        return queued_to_peer(tgid, tid, user_try!(queued_info(sig, a[3])));
     }
     let th = match target(Some(tgid as i64), tid as i64, sig) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    send_thread(&th, queued_info(sig, a[3]))
+    send_thread(&th, user_try!(queued_info(sig, a[3])))
 }
 
 /// Linux `stack_t`: { void *ss_sp; int ss_flags; size_t ss_size; }.
@@ -1623,11 +1641,11 @@ pub fn sigaltstack(ctx: &GuestContext, a: [u64; 6]) -> i64 {
     let cur = *alt;
     if ss != 0 {
         // SAFETY: guest stack_t.
-        let (sp, flags, size) = unsafe {
+        let (sp, flags, size) = {
             (
-                (ss as *const u64).read_unaligned(),
-                ((ss + 8) as *const i32).read_unaligned(),
-                ((ss + 16) as *const u64).read_unaligned(),
+                user_read!(ss, u64),
+                user_read!(ss + 8, i32),
+                user_read!(ss + 16, u64),
             )
         };
         if on {
@@ -1658,10 +1676,10 @@ pub fn sigaltstack(ctx: &GuestContext, a: [u64; 6]) -> i64 {
             0
         } | cur.flags & SS_AUTODISARM;
         // SAFETY: guest stack_t.
-        unsafe {
-            (old as *mut u64).write_unaligned(cur.sp);
-            ((old + 8) as *mut i32).write_unaligned(flags);
-            ((old + 16) as *mut u64).write_unaligned(cur.size);
+        {
+            user_write!(old, u64, cur.sp);
+            user_write!(old + 8, i32, flags);
+            user_write!(old + 16, u64, cur.size);
         }
     }
     0

@@ -305,29 +305,12 @@ fn write_at(open: &Open, input: &[u8], offset: u64) -> i64 {
     }
 }
 
-fn gather(iov: &[libc::iovec]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for v in iov {
-        // SAFETY: guest buffers prepare_iov checked.
-        out.extend_from_slice(unsafe {
-            std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len)
-        });
-    }
-    out
+fn gather(iov: &[libc::iovec]) -> Result<Vec<u8>, i32> {
+    super::user_memory::gather(iov)
 }
 
-fn scatter(iov: &[libc::iovec], bytes: &[u8]) -> usize {
-    let mut at = 0;
-    for v in iov {
-        let n = v.iov_len.min(bytes.len() - at);
-        // SAFETY: guest buffers prepare_iov checked.
-        unsafe { std::ptr::copy_nonoverlapping(bytes[at..].as_ptr(), v.iov_base as *mut u8, n) };
-        at += n;
-        if at == bytes.len() {
-            break;
-        }
-    }
-    at
+fn scatter(iov: &[libc::iovec], bytes: &[u8]) -> Result<usize, i32> {
+    super::user_memory::scatter(iov, bytes)
 }
 
 /// A read at `pos` (the file's position when None).
@@ -338,7 +321,7 @@ pub fn read(open: &Open, iov: &[libc::iovec], pos: Option<u64>) -> i64 {
     };
     let mut cur = open.pos.lock().unwrap();
     let at = pos.unwrap_or(*cur).min(bytes.len() as u64) as usize;
-    let n = scatter(iov, &bytes[at..]);
+    let n = user_try!(scatter(iov, &bytes[at..]));
     if pos.is_none() {
         *cur = (at + n) as u64;
     }
@@ -348,7 +331,7 @@ pub fn read(open: &Open, iov: &[libc::iovec], pos: Option<u64>) -> i64 {
 /// A write at `pos` (the file's position when None): each one is a value
 /// of its own (`cgroup_file_write`).
 pub fn write(open: &Open, iov: &[libc::iovec], pos: Option<u64>) -> i64 {
-    let input = gather(iov);
+    let input = user_try!(gather(iov));
     let mut cur = open.pos.lock().unwrap();
     let offset = pos.unwrap_or(*cur);
     let r = write_at(open, &input, offset);

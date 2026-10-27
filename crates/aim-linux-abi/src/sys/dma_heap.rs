@@ -178,11 +178,11 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             // SAFETY: guest struct dma_heap_allocation_data { u64 len; u32
             // fd; u32 fd_flags; u64 heap_flags; }.
             let data = arg as *mut u8;
-            let (len, fd_flags, heap_flags) = unsafe {
+            let (len, fd_flags, heap_flags) = {
                 (
-                    (data as *const u64).read_unaligned(),
-                    (data.add(12) as *const u32).read_unaligned() as u64,
-                    (data.add(16) as *const u64).read_unaligned(),
+                    user_read!(data, u64),
+                    user_read!(arg + 12, u32) as u64,
+                    user_read!(arg + 16, u64),
                 )
             };
             if fd_flags & !VALID_FD_FLAGS != 0 || heap_flags != 0 {
@@ -195,13 +195,18 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             let buffer = marked_file(size, fd_flags & O_CLOEXEC != 0);
             if buffer >= 0 {
                 // SAFETY: the guest struct's fd field.
-                unsafe { (data.add(8) as *mut u32).write_unaligned(buffer as u32) };
+                if let Err(error) =
+                    unsafe { super::user_memory::write_value(arg + 8, &(buffer as u32)) }
+                {
+                    super::fs::close([buffer as u64, 0, 0, 0, 0, 0]);
+                    return Some(-(error as i64));
+                }
             }
             if buffer < 0 { buffer } else { 0 }
         }
         (Kind::Buffer, BUF_SYNC) => {
             // SAFETY: guest struct dma_buf_sync { u64 flags; }.
-            let flags = unsafe { (arg as *const u64).read_unaligned() };
+            let flags = user_read!(arg, u64);
             if flags & !(SYNC_RW | SYNC_END) != 0 || flags & SYNC_RW == 0 {
                 -(EINVAL as i64)
             } else {
@@ -212,7 +217,7 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             // `strndup_user(buf, DMA_BUF_NAME_LEN)`: a string that does not
             // end within the length is EINVAL.
             // SAFETY: guest string of up to DMA_BUF_NAME_LEN bytes.
-            let bytes = unsafe { std::slice::from_raw_parts(arg as *const u8, NAME_LEN) };
+            let bytes = user_try!(crate::sys::user_memory::read_exact(arg, NAME_LEN));
             let Some(end) = bytes.iter().position(|&c| c == 0) else {
                 return Some(-(EINVAL as i64));
             };

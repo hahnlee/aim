@@ -60,7 +60,7 @@ pub fn status_from_host(st: i32) -> i32 {
 
 /// Linux arm64 `struct rusage` (timevals with 64-bit microseconds, the
 /// maximum RSS in KiB).
-fn put_rusage(ru: &libc::rusage, out: u64) {
+fn put_rusage(ru: &libc::rusage, out: u64) -> Result<(), crate::errno::Errno> {
     let mut w = [0i64; 18];
     w[0] = ru.ru_utime.tv_sec;
     w[1] = ru.ru_utime.tv_usec as i64;
@@ -84,7 +84,8 @@ fn put_rusage(ru: &libc::rusage, out: u64) {
     ];
     w[4..].copy_from_slice(&rest);
     // SAFETY: guest struct rusage (144 bytes).
-    unsafe { (out as *mut [i64; 18]).write_unaligned(w) };
+    user_write!(out, [i64; 18], w);
+    Ok(())
 }
 
 pub(super) fn put_rusage_of(who: i32, out: u64) -> i64 {
@@ -93,7 +94,7 @@ pub(super) fn put_rusage_of(who: i32, out: u64) -> i64 {
     if unsafe { libc::getrusage(who, &mut ru) } < 0 {
         return -(errno::last() as i64);
     }
-    put_rusage(&ru, out);
+    user_try!(put_rusage(&ru, out));
     0
 }
 
@@ -122,11 +123,11 @@ pub fn wait4(a: [u64; 6]) -> i64 {
             Ok(st) => {
                 if let Some(st) = st.filter(|_| status != 0) {
                     // SAFETY: guest int.
-                    unsafe { (status as *mut i32).write_unaligned(st) };
+                    user_write!(status, i32, st);
                 }
                 if rusage != 0 {
                     // SAFETY: guest struct rusage.
-                    unsafe { std::ptr::write_bytes(rusage as *mut u8, 0, 144) };
+                    user_try!(super::user_memory::write_exact(rusage, &[0; 144]));
                 }
                 st.map_or(0, |_| pid as i64)
             }
@@ -157,10 +158,10 @@ pub fn wait4(a: [u64; 6]) -> i64 {
         }
         if status != 0 {
             // SAFETY: guest int.
-            unsafe { (status as *mut i32).write_unaligned(status_from_host(st)) };
+            user_write!(status, i32, status_from_host(st));
         }
         if rusage != 0 {
-            put_rusage(&ru, rusage);
+            user_try!(put_rusage(&ru, rusage));
         }
     }
     if r > 0 {
@@ -175,7 +176,10 @@ pub fn wait4(a: [u64; 6]) -> i64 {
 /// The Linux `siginfo_t` fields `waitid` writes.
 /// `uid` is the child's real uid in the guest's model (the host one is not
 /// it).
-fn put_wait_siginfo(out: u64, info: Option<(&libc::siginfo_t, u32)>) {
+fn put_wait_siginfo(
+    out: u64,
+    info: Option<(&libc::siginfo_t, u32)>,
+) -> Result<(), crate::errno::Errno> {
     let (signo, code, pid, uid, status) = match info {
         Some((i, uid)) if i.si_pid != 0 => {
             let status = if i.si_code == libc::CLD_EXITED {
@@ -194,11 +198,12 @@ fn put_wait_siginfo(out: u64, info: Option<(&libc::siginfo_t, u32)>) {
         _ => (0, 0, 0, 0, 0),
     };
     // SAFETY: guest siginfo_t (128 bytes).
-    unsafe {
+    {
         let p = out as *mut u8;
-        (p as *mut [i32; 3]).write_unaligned([signo, 0, code]);
-        (p.add(16) as *mut [i32; 3]).write_unaligned([pid, uid as i32, status]);
+        user_write!(p, [i32; 3], [signo, 0, code]);
+        user_write!(out + 16, [i32; 3], [pid, uid as i32, status]);
     }
+    Ok(())
 }
 
 pub fn waitid(a: [u64; 6]) -> i64 {
@@ -281,11 +286,11 @@ pub fn waitid(a: [u64; 6]) -> i64 {
         let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
         let flags = libc::WNOHANG | libc::WUNTRACED | libc::WCONTINUED;
         if unsafe { libc::wait4(info.si_pid, &mut st, flags, &mut ru) } > 0 {
-            put_rusage(&ru, rusage);
+            user_try!(put_rusage(&ru, rusage));
         }
     } else if rusage != 0 {
         // SAFETY: guest struct rusage.
-        unsafe { std::ptr::write_bytes(rusage as *mut u8, 0, 144) };
+        user_try!(super::user_memory::write_exact(rusage, &[0; 144]));
     }
     let ended = matches!(
         info.si_code,
@@ -296,7 +301,7 @@ pub fn waitid(a: [u64; 6]) -> i64 {
         super::cred::forget(info.si_pid);
     }
     if infop != 0 {
-        put_wait_siginfo(infop, Some((&info, uid)));
+        user_try!(put_wait_siginfo(infop, Some((&info, uid))));
     }
     0
 }
@@ -495,7 +500,7 @@ pub fn pidfd_send_signal(a: [u64; 6]) -> i64 {
     }
     if info != 0 {
         // SAFETY: guest siginfo_t; si_signo must name the signal sent.
-        if unsafe { (info as *const i32).read_unaligned() } != sig {
+        if user_read!(info, i32) != sig {
             return -(EINVAL as i64);
         }
     }

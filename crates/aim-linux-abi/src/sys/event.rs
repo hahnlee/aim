@@ -145,7 +145,7 @@ impl EventFd {
                 };
                 if let Some(v) = v {
                     // SAFETY: guest buffer of at least 8 bytes.
-                    unsafe { (buf as *mut u64).write_unaligned(v) };
+                    user_write!(buf, u64, v);
                     trace_event(fd, "read", v, self.semaphore);
                     return 8;
                 }
@@ -165,7 +165,7 @@ impl EventFd {
             return -(EINVAL as i64);
         }
         // SAFETY: guest buffer of at least 8 bytes.
-        let v = unsafe { (buf as *const u64).read_unaligned() };
+        let v = user_read!(buf, u64);
         if v == u64::MAX {
             return -(EINVAL as i64);
         }
@@ -469,7 +469,7 @@ impl TimerFd {
                     drop(s);
                     rearm();
                     // SAFETY: guest buffer of at least 8 bytes.
-                    unsafe { (buf as *mut u64).write_unaligned(n) };
+                    user_write!(buf, u64, n);
                     return 8;
                 }
             }
@@ -563,7 +563,7 @@ pub fn timerfd_settime(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest struct itimerspec.
-    let v = unsafe { (new as *const [i64; 4]).read_unaligned() };
+    let v = user_read!(new, [i64; 4]);
     let (Some(interval), Some(value)) = (ns_of([v[0], v[1]]), ns_of([v[2], v[3]])) else {
         return -(EINVAL as i64);
     };
@@ -571,7 +571,7 @@ pub fn timerfd_settime(a: [u64; 6]) -> i64 {
     if old != 0 {
         let now = s.clock.now();
         // SAFETY: guest struct itimerspec.
-        unsafe { (old as *mut [i64; 4]).write_unaligned(current(&s, now)) };
+        user_write!(old, [i64; 4], current(&s, now));
     }
     let absolute = flags & TFD_TIMER_ABSTIME != 0;
     let absolute_realtime = t.base == Base::Realtime && absolute;
@@ -604,7 +604,7 @@ pub fn timerfd_gettime(a: [u64; 6]) -> i64 {
     };
     let s = t.state.lock().unwrap();
     // SAFETY: guest struct itimerspec.
-    unsafe { (a[1] as *mut [i64; 4]).write_unaligned(current(&s, s.clock.now())) };
+    user_write!(a[1], [i64; 4], current(&s, s.clock.now()));
     0
 }
 

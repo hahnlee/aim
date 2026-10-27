@@ -148,10 +148,10 @@ pub fn ptrace(a: [u64; 6]) -> i64 {
         ),
         PTRACE_GETREGSET => getregset(pid, tid, addr as u32, data),
         PTRACE_GETEVENTMSG => {
-            call_result(pid, &request(agent::MESSAGE, |w| w.i32(tid))).map(|b| {
+            call_result(pid, &request(agent::MESSAGE, |w| w.i32(tid))).and_then(|b| {
                 // SAFETY: the guest's unsigned long.
-                unsafe { (data as *mut u64).write_unaligned(Reader::new(&b).u64()) };
-                Vec::new()
+                user_write!(data, u64, Reader::new(&b).u64());
+                Ok(Vec::new())
             })
         }
         PTRACE_PEEKTEXT | PTRACE_PEEKDATA => call_result(
@@ -161,11 +161,11 @@ pub fn ptrace(a: [u64; 6]) -> i64 {
                 w.u64(addr);
             }),
         )
-        .map(|b| {
+        .and_then(|b| {
             // SAFETY: the guest's word (the raw syscall stores the word
             // through `data`).
-            unsafe { (data as *mut u64).write_unaligned(Reader::new(&b).u64()) };
-            Vec::new()
+            user_write!(data, u64, Reader::new(&b).u64());
+            Ok(Vec::new())
         }),
         _ => call_result(pid, &request(agent::STOPPED, |w| w.i32(tid))).and(Err(-(EIO as i64))),
     };
@@ -209,15 +209,17 @@ fn getregset(pid: i32, tid: i32, nt: u32, iov: u64) -> Result<Vec<u8>, i64> {
     // Element sizes of the regsets (NT_PRFPREG's is a u32).
     let unit = if nt == 2 { 4 } else { 8 };
     // SAFETY: the guest's struct iovec.
-    let [base, len] = unsafe { (iov as *const [u64; 2]).read_unaligned() };
+    let [base, len] = user_read!(iov, [u64; 2]);
     if len % unit != 0 {
         return Err(-(EINVAL as i64));
     }
     let n = (len as usize).min(set.len());
     // SAFETY: the guest's buffer of `len` bytes and its iovec.
-    unsafe {
-        std::ptr::copy_nonoverlapping(set.as_ptr(), base as *mut u8, n);
-        (iov as *mut [u64; 2]).write_unaligned([base, n as u64]);
+    {
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(set.as_ptr() as *const u8, base as *mut u8, n)
+        });
+        user_write!(iov, [u64; 2], [base, n as u64]);
     }
     Ok(Vec::new())
 }
@@ -306,7 +308,11 @@ pub fn remote_vm(write: bool, pid: i32, local: &[(u64, u64)], remote: &[(u64, u6
         })
         .filter(|r| r.1 > 0)
         .collect();
-    let data = if write { gather(local) } else { Vec::new() };
+    let data = if write {
+        user_try!(gather(local))
+    } else {
+        Vec::new()
+    };
     let req = request(agent::VM, |w| {
         w.bool(write);
         w.seq(ranges.iter(), |w, &(a, n)| {
@@ -323,7 +329,7 @@ pub fn remote_vm(write: bool, pid: i32, local: &[(u64, u64)], remote: &[(u64, u6
         return -(libc::EFAULT as i64);
     }
     if !write {
-        scatter(&Reader::new(&rest).bytes(), local);
+        user_try!(scatter(&Reader::new(&rest).bytes(), local));
     }
     done
 }
@@ -405,22 +411,25 @@ pub fn remote_rlimit(pid: i32, res: u32, new: [u64; 2], may_raise: bool) -> Resu
     Ok([r.u64(), r.u64()])
 }
 
-fn gather(local: &[(u64, u64)]) -> Vec<u8> {
+fn gather(local: &[(u64, u64)]) -> Result<Vec<u8>, i32> {
     let mut v = Vec::new();
     for &(a, n) in local {
         // SAFETY: the guest's buffers.
-        v.extend_from_slice(unsafe { std::slice::from_raw_parts(a as *const u8, n as usize) });
+        v.extend_from_slice(&super::user_memory::read_exact(a, n as usize)?);
     }
-    v
+    Ok(v)
 }
 
-fn scatter(mut data: &[u8], local: &[(u64, u64)]) {
+fn scatter(mut data: &[u8], local: &[(u64, u64)]) -> Result<(), i32> {
     for &(a, n) in local {
         let k = (n as usize).min(data.len());
         // SAFETY: the guest's buffer of `n` bytes.
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), a as *mut u8, k) };
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(data.as_ptr() as *const u8, a as *mut u8, k)
+        });
         data = &data[k..];
     }
+    Ok(())
 }
 
 /// Queue `info` for thread `tid` (0: the process) of another process `pid`,

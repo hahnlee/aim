@@ -164,7 +164,7 @@ fn remaining(g: &Timers, which: usize) -> [u64; 2] {
 /// Linux `struct itimerval` { it_interval, it_value }, each a `timeval`.
 fn read_itimerval(p: u64) -> Result<[u64; 2], i64> {
     // SAFETY: guest struct itimerval (four longs).
-    let v = unsafe { (p as *const [i64; 4]).read_unaligned() };
+    let v = user_read!(p, [i64; 4]);
     let ns = |sec: i64, usec: i64| {
         if sec < 0 || !(0..1_000_000).contains(&usec) {
             return Err(-(EINVAL as i64));
@@ -182,10 +182,11 @@ fn timeval(ns: u64) -> [i64; 2] {
     [(us / 1_000_000) as i64, (us % 1_000_000) as i64]
 }
 
-fn write_itimerval(p: u64, v: [u64; 2]) {
+fn write_itimerval(p: u64, v: [u64; 2]) -> Result<(), crate::errno::Errno> {
     let (i, r) = (timeval(v[0]), timeval(v[1]));
     // SAFETY: guest struct itimerval.
-    unsafe { (p as *mut [i64; 4]).write_unaligned([i[0], i[1], r[0], r[1]]) };
+    user_write!(p, [i64; 4], [i[0], i[1], r[0], r[1]]);
+    Ok(())
 }
 
 fn which(w: u64) -> Result<usize, i64> {
@@ -212,7 +213,7 @@ pub fn setitimer(a: [u64; 6]) -> i64 {
     };
     let old = set(w, interval, value);
     if a[2] != 0 {
-        write_itimerval(a[2], old);
+        user_try!(write_itimerval(a[2], old));
     }
     0
 }
@@ -226,7 +227,7 @@ pub fn getitimer(a: [u64; 6]) -> i64 {
     if a[1] == 0 {
         return -(EFAULT as i64);
     }
-    write_itimerval(a[1], remaining(&timers(), w));
+    user_try!(write_itimerval(a[1], remaining(&timers(), w)));
     0
 }
 
@@ -274,7 +275,7 @@ mod tests {
             read_itimerval(v.as_ptr() as u64),
             Ok([250_000_000, 1_500_001_000])
         );
-        write_itimerval(v.as_mut_ptr() as u64, [1, 1_500_001_000]);
+        write_itimerval(v.as_mut_ptr() as u64, [1, 1_500_001_000]).unwrap();
         assert_eq!(v, [0, 1, 1, 500_001]);
         let bad = [0i64, 1_000_000, 0, 0];
         assert_eq!(read_itimerval(bad.as_ptr() as u64), Err(-(EINVAL as i64)));

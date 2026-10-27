@@ -64,9 +64,8 @@ unsafe extern "C" {
     fn __ulock_wake(op: u32, addr: *mut libc::c_void, wake_value: u64) -> i32;
 }
 
-fn word(addr: u64) -> &'static AtomicU32 {
-    // SAFETY: an aligned guest futex word; guest memory outlives the call.
-    unsafe { AtomicU32::from_ptr(addr as *mut u32) }
+fn word(addr: u64) -> super::user_memory::UserWord {
+    super::user_memory::UserWord(addr)
 }
 
 // ---- waiter table ---------------------------------------------------------------
@@ -292,7 +291,7 @@ fn table_requeue(addr: u64, nwake: u32, nreq: u32, addr2: u64, cmp: Option<u32>)
     let mut wakes = Wakes(Vec::new());
     let moved = {
         let _l = Locked::two(b1, b2);
-        if cmp.is_some_and(|v| word(addr).load(SeqCst) != v) {
+        if cmp.is_some() && Some(user_try!(word(addr).load(SeqCst))) != cmp {
             return -(EAGAIN as i64);
         }
         let mut left = nwake as u64 + nreq as u64;
@@ -346,7 +345,7 @@ fn wake_op_apply(addr2: u64, enc: u32) -> Result<u32, i64> {
     if op > 4 {
         return Err(-(ENOSYS as i64));
     }
-    Ok(w.fetch_update(SeqCst, SeqCst, f).unwrap_or(0))
+    Ok(user_try!(w.fetch_update(SeqCst, SeqCst, f)).unwrap_or(0))
 }
 
 fn wake_op_cmp(old: u32, enc: u32) -> bool {
@@ -369,33 +368,40 @@ fn wake_op_cmp(old: u32, enc: u32) -> bool {
 ///
 /// # Safety
 /// As `drain`.
-unsafe fn pi_handoff(b: &Bucket, addr: u64, keep: u32, none: u32, wakes: &mut Wakes) {
-    let mut first = true;
-    // SAFETY: caller contract.
-    let got = unsafe {
-        drain(b, |w| {
-            let hit = first && w.pi && w.addr.load(SeqCst) == addr;
-            first &= !hit;
-            hit
-        })
-    };
-    let Some(&w) = got.first() else {
-        word(addr).store(none, SeqCst);
-        return;
-    };
+unsafe fn pi_handoff(
+    b: &Bucket,
+    addr: u64,
+    keep: u32,
+    none: u32,
+    wakes: &mut Wakes,
+) -> Result<(), i32> {
+    let mut first: *mut Waiter = std::ptr::null_mut();
     let mut more = false;
-    // SAFETY: under the lock.
+    // SAFETY: caller holds the bucket lock; this pass leaves the list intact.
     unsafe {
-        drain(b, |x| {
-            more |= x.pi && x.addr.load(SeqCst) == addr;
+        drain(b, |w| {
+            if w.pi && w.addr.load(SeqCst) == addr {
+                if first.is_null() {
+                    first = w as *const Waiter as *mut Waiter;
+                } else {
+                    more = true;
+                }
+            }
             false
         })
     };
-    // SAFETY: `w` is unlinked and alive until claimed.
-    let tid = unsafe { (*(*w).thread).tid } as u32;
-    word(addr).store(tid | keep | if more { FUTEX_WAITERS } else { 0 }, SeqCst);
-    // SAFETY: unlinked under the lock.
-    unsafe { wakes.claim(w) };
+    if first.is_null() {
+        return word(addr).store(none, SeqCst);
+    }
+    // SAFETY: the waiter is live and still linked under the lock.
+    let tid = unsafe { (*(*first).thread).tid } as u32;
+    word(addr).store(tid | keep | if more { FUTEX_WAITERS } else { 0 }, SeqCst)?;
+    // SAFETY: detach only after successful ownership transfer.
+    unsafe {
+        drain(b, |w| std::ptr::eq(w, first));
+        wakes.claim(first);
+    }
+    Ok(())
 }
 
 fn lock_pi(addr: u64, deadline: Option<Deadline>, try_only: bool) -> i64 {
@@ -407,10 +413,10 @@ fn lock_pi(addr: u64, deadline: Option<Deadline>, try_only: bool) -> i64 {
     // Runs under the bucket lock, so an unlock cannot slip between setting
     // FUTEX_WAITERS and queueing.
     let acquire = || loop {
-        let v = w.load(SeqCst);
+        let v = user_try!(w.load(SeqCst));
         if v & FUTEX_TID_MASK == 0 {
             let nv = tid | v & (FUTEX_OWNER_DIED | FUTEX_WAITERS);
-            if w.compare_exchange(v, nv, SeqCst, SeqCst).is_ok() {
+            if user_try!(w.compare_exchange(v, nv, SeqCst, SeqCst)).is_ok() {
                 return Some(0);
             }
             continue;
@@ -422,8 +428,7 @@ fn lock_pi(addr: u64, deadline: Option<Deadline>, try_only: bool) -> i64 {
             return Some(-(EAGAIN as i64));
         }
         if v & FUTEX_WAITERS != 0
-            || w.compare_exchange(v, v | FUTEX_WAITERS, SeqCst, SeqCst)
-                .is_ok()
+            || user_try!(w.compare_exchange(v, v | FUTEX_WAITERS, SeqCst, SeqCst)).is_ok()
         {
             return None;
         }
@@ -444,11 +449,11 @@ fn unlock_pi(addr: u64) -> i64 {
     let mut wakes = Wakes(Vec::new());
     {
         let _l = Locked::one(b);
-        if word(addr).load(SeqCst) & FUTEX_TID_MASK != th.tid as u32 {
+        if user_try!(word(addr).load(SeqCst)) & FUTEX_TID_MASK != th.tid as u32 {
             return -(EPERM as i64);
         }
         // SAFETY: under the lock.
-        unsafe { pi_handoff(b, addr, 0, 0, &mut wakes) };
+        user_try!(unsafe { pi_handoff(b, addr, 0, 0, &mut wakes) });
     }
     wakes.run();
     0
@@ -485,7 +490,7 @@ fn mapping_is_shared(addr: u64) -> bool {
 /// comes before the kernel wait is seen there or reaches it. The wait is
 /// one kernel wait, so no wake is lost to a gap between waits.
 fn shared_wait(addr: u64, val: u32, deadline: Option<Deadline>) -> i64 {
-    if word(addr).load(SeqCst) != val {
+    if user_try!(word(addr).load(SeqCst)) != val {
         return -(EAGAIN as i64);
     }
     let th = thread::current();
@@ -542,7 +547,7 @@ fn shared_wait(addr: u64, val: u32, deadline: Option<Deadline>) -> i64 {
                 if th.is_some_and(signal::interrupted) {
                     return -(EINTR as i64);
                 }
-                if word(addr).load(SeqCst) != val {
+                if user_try!(word(addr).load(SeqCst)) != val {
                     return 0;
                 }
             }
@@ -595,7 +600,7 @@ fn owner_died(uaddr: u64, tid: i32, pi: bool) {
         return;
     }
     let w = word(uaddr);
-    let Ok(old) = w.fetch_update(SeqCst, SeqCst, |v| {
+    let Ok(Ok(old)) = w.fetch_update(SeqCst, SeqCst, |v| {
         (v & FUTEX_TID_MASK == tid as u32).then_some(v & FUTEX_WAITERS | FUTEX_OWNER_DIED)
     }) else {
         return;
@@ -609,7 +614,7 @@ fn owner_died(uaddr: u64, tid: i32, pi: bool) {
         {
             let _l = Locked::one(b);
             // SAFETY: under the lock.
-            unsafe { pi_handoff(b, uaddr, FUTEX_OWNER_DIED, FUTEX_OWNER_DIED, &mut wakes) };
+            let _ = unsafe { pi_handoff(b, uaddr, FUTEX_OWNER_DIED, FUTEX_OWNER_DIED, &mut wakes) };
         }
         wakes.run();
     } else {
@@ -625,14 +630,18 @@ pub fn exit_robust_list(head: u64, tid: i32) {
     }
     // SAFETY: the guest-registered robust list head and its entries.
     unsafe {
-        let [list, off, pending] = (head as *const [u64; 3]).read_unaligned();
+        let Ok([list, off, pending]) = super::user_memory::read_value::<[u64; 3]>(head) else {
+            return;
+        };
         let futex = |e: u64| (e & !1).wrapping_add(off);
         let mut e = list;
         for _ in 0..ROBUST_LIST_LIMIT {
             if e == head || e & !1 == 0 {
                 break;
             }
-            let next = ((e & !1) as *const u64).read_unaligned();
+            let Ok(next) = super::user_memory::read_value::<u64>(e & !1) else {
+                return;
+            };
             if e != pending {
                 owner_died(futex(e), tid, e & 1 != 0);
             }
@@ -690,7 +699,10 @@ pub fn futex(a: [u64; 6]) -> i64 {
                 // its bits and waits again).
                 shared_wait(uaddr, val, d)
             } else {
-                let check = || (word(uaddr).load(SeqCst) != val).then_some(-(EAGAIN as i64));
+                let check = || {
+                    let current = user_try!(word(uaddr).load(SeqCst));
+                    (current != val).then_some(-(EAGAIN as i64))
+                };
                 table_wait(uaddr, bitset, false, d, check)
             }
         }
@@ -715,7 +727,7 @@ pub fn futex(a: [u64; 6]) -> i64 {
             let cmp = (op == FUTEX_CMP_REQUEUE).then_some(val3);
             if shared() {
                 // Darwin cannot move waiters: wake them all (spuriously).
-                if cmp.is_some_and(|v| word(uaddr).load(SeqCst) != v) {
+                if cmp.is_some() && Some(user_try!(word(uaddr).load(SeqCst))) != cmp {
                     return -(EAGAIN as i64);
                 }
                 shared_wake(uaddr, u32::MAX)
@@ -820,7 +832,7 @@ mod tests {
             )
         } as u64;
         let deadline = Box::leak(Box::new([0i64; 2])).as_mut_ptr() as u64;
-        park::write_timespec(deadline, park::after(10_000_000_000).ns);
+        park::write_timespec(deadline, park::after(10_000_000_000).ns).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let wait = move |bits: u64| {
             let tx = tx.clone();
@@ -841,7 +853,7 @@ mod tests {
             assert!(!on_1.is_finished() && !on_2.is_finished());
             std::thread::yield_now();
         }
-        word(word_addr).store(2, SeqCst);
+        word(word_addr).store(2, SeqCst).unwrap();
         futex([word_addr, FUTEX_WAKE_BITSET, 1, 0, 0, 2]);
         assert_eq!(on_2.join().unwrap(), 0, "the waiter on bit 2 timed out");
         // The other waiter wakes spuriously, which futex users tolerate.

@@ -167,7 +167,7 @@ pub fn parse_sockaddr(ptr: u64, len: u32) -> Result<(u16, u32), i64> {
         return Err(-(EINVAL as i64));
     }
     // SAFETY: a guest sockaddr of at least 12 bytes.
-    let b = unsafe { std::slice::from_raw_parts(ptr as *const u8, 12) };
+    let b = user_try!(crate::sys::user_memory::read_exact(ptr, 12));
     if u16::from_le_bytes([b[0], b[1]]) != L_AF_PACKET {
         return Err(-(EINVAL as i64));
     }
@@ -352,27 +352,23 @@ pub fn attach_filter(s: &Socket, val: u64, len: u32) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: the guest's struct sock_fprog { u16 len; sock_filter *filter; }.
-    let (n, p) = unsafe {
-        (
-            (val as *const u16).read_unaligned() as usize,
-            ((val + 8) as *const u64).read_unaligned(),
-        )
-    };
+    let (n, p) = { (user_read!(val, u16) as usize, user_read!(val + 8, u64)) };
     if n == 0 || n > 4096 || p == 0 {
         return -(EINVAL as i64);
     }
-    let prog: Vec<Insn> = (0..n)
+    let prog = (0..n)
         .map(|i| {
             // SAFETY: the guest's filter array of n entries.
-            let b = unsafe { std::slice::from_raw_parts((p + 8 * i as u64) as *const u8, 8) };
-            Insn {
+            let b = user_try!(super::user_memory::read_exact(p + 8 * i as u64, 8));
+            Ok(Insn {
                 code: u16::from_le_bytes([b[0], b[1]]),
                 jt: b[2],
                 jf: b[3],
                 k: u32::from_le_bytes(b[4..8].try_into().unwrap()),
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<Insn>, i32>>();
+    let prog = user_try!(prog);
     if !valid(&prog) {
         return -(EINVAL as i64);
     }

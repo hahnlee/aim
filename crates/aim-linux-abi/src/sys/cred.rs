@@ -1009,7 +1009,7 @@ pub fn getresid(nr: u64, a: [u64; 6]) -> i64 {
     }
     for (i, p) in a[..3].iter().enumerate() {
         // SAFETY: guest uid_t/gid_t pointers.
-        unsafe { (*p as *mut u32).write_unaligned(ids[i]) };
+        user_write!(*p, u32, ids[i]);
     }
     0
 }
@@ -1047,7 +1047,9 @@ pub fn getgroups(a: [u64; 6]) -> i64 {
             return -(EINVAL as i64);
         }
         // SAFETY: guest gid_t array of `size` entries.
-        unsafe { std::ptr::copy_nonoverlapping(id.groups.as_ptr(), list as *mut u32, n) };
+        user_try!(unsafe {
+            super::user_memory::copy_bytes(id.groups.as_ptr().cast(), list as *mut u8, n * 4)
+        });
         n as i64
     })
 }
@@ -1061,7 +1063,11 @@ pub fn setgroups(a: [u64; 6]) -> i64 {
     if size > 0 {
         // SAFETY: guest gid_t array of `size` entries.
         unsafe {
-            std::ptr::copy_nonoverlapping(list as *const u32, groups.as_mut_ptr(), groups.len())
+            user_try!(super::user_memory::copy_bytes(
+                list as *const u8,
+                groups.as_mut_ptr().cast(),
+                groups.len() * 4
+            ))
         };
     }
     with(|id| {
@@ -1084,18 +1090,13 @@ fn cap_header(hdr: u64) -> Result<(usize, i32), i64> {
         return Err(-(EFAULT as i64));
     }
     // SAFETY: guest header { u32 version; i32 pid; }.
-    let (version, pid) = unsafe {
-        (
-            (hdr as *const u32).read_unaligned(),
-            ((hdr + 4) as *const i32).read_unaligned(),
-        )
-    };
+    let (version, pid) = { (user_read!(hdr, u32), user_read!(hdr + 4, i32)) };
     let n = match version {
         CAP_V1 => 1,
         CAP_V2 | CAP_V3 => 2,
         _ => {
             // SAFETY: as above.
-            unsafe { (hdr as *mut u32).write_unaligned(CAP_V3) };
+            user_write!(hdr, u32, CAP_V3);
             return Err(-(EINVAL as i64));
         }
     };
@@ -1137,7 +1138,7 @@ pub fn capget(a: [u64; 6]) -> i64 {
             (inh >> (32 * i)) as u32,
         ];
         // SAFETY: guest array of `n` cap_user_data_t.
-        unsafe { ((a[1] + 12 * i as u64) as *mut [u32; 3]).write_unaligned(set) };
+        user_write!(a[1] + 12 * i as u64, [u32; 3], set);
     }
     0
 }
@@ -1156,7 +1157,7 @@ pub fn capset(a: [u64; 6]) -> i64 {
     let (mut eff, mut perm, mut inh) = (0u64, 0u64, 0u64);
     for i in 0..n {
         // SAFETY: guest array of `n` cap_user_data_t.
-        let [e, p, h] = unsafe { ((a[1] + 12 * i as u64) as *const [u32; 3]).read_unaligned() };
+        let [e, p, h] = user_read!(a[1] + 12 * i as u64, [u32; 3]);
         eff |= (e as u64) << (32 * i);
         perm |= (p as u64) << (32 * i);
         inh |= (h as u64) << (32 * i);
@@ -1263,15 +1264,6 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
         164 => (0, a[0], a[1], 0),
         _ => (a[0] as i32, a[1], a[2], a[3]),
     };
-    // The kernel copies in and out with EFAULT: Chromium's
-    // `AssertMemoryIsReadOnly` passes read-only memory as `old` and expects
-    // it (base/memory/protected_memory_posix.cc).
-    const RLIMIT_SIZE: u64 = 16;
-    if (new != 0 && !super::vmmap::accessible(new, RLIMIT_SIZE, libc::VM_PROT_READ as u32))
-        || (old != 0 && !super::vmmap::accessible(old, RLIMIT_SIZE, libc::VM_PROT_WRITE as u32))
-    {
-        return -(EFAULT as i64);
-    }
     if !is_self(pid) {
         return prlimit_other(pid, res, new, old);
     }
@@ -1279,13 +1271,17 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
         return super::process::prlimit(261, [0, res, new, old, 0, 0]);
     }
     // SAFETY: guest struct rlimit64.
-    let new = (new != 0).then(|| unsafe { (new as *const [u64; 2]).read_unaligned() });
+    let new = if new != 0 {
+        Some(user_read!(new, [u64; 2]))
+    } else {
+        None
+    };
     let may_raise = read(|id| id.capable(CAP_SYS_RESOURCE));
     match own_rlimit(res as u32, new, may_raise) {
         Ok(current) => {
             if old != 0 {
                 // SAFETY: guest struct rlimit64.
-                unsafe { (old as *mut [u64; 2]).write_unaligned(current) };
+                user_write!(old, [u64; 2], current);
             }
             0
         }
@@ -1352,13 +1348,13 @@ fn prlimit_other(pid: i32, res: u64, new: u64, old: u64) -> i64 {
     }
     if new != 0 {
         // SAFETY: guest struct rlimit64.
-        let new = unsafe { (new as *const [u64; 2]).read_unaligned() };
+        let new = user_read!(new, [u64; 2]);
         let may_raise = read(|id| id.capable(CAP_SYS_RESOURCE));
         return match super::ptrace::remote_rlimit(pid, res as u32, new, may_raise) {
             Ok(limit) => {
                 if old != 0 {
                     // SAFETY: guest struct rlimit64.
-                    unsafe { (old as *mut [u64; 2]).write_unaligned(limit) };
+                    user_write!(old, [u64; 2], limit);
                 }
                 0
             }
@@ -1378,7 +1374,7 @@ fn prlimit_other(pid: i32, res: u64, new: u64, old: u64) -> i64 {
             }
         };
         // SAFETY: guest struct rlimit64.
-        unsafe { (old as *mut [u64; 2]).write_unaligned(limit) };
+        user_write!(old, [u64; 2], limit);
     }
     0
 }
@@ -1739,6 +1735,12 @@ mod tests {
 
     #[test]
     fn prlimit_answers_efault_for_memory_it_cannot_copy() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::cred::tests::prlimit_answers_efault_for_memory_it_cannot_copy",
+        ) {
+            return;
+        }
+        crate::diag::install_signal_handlers();
         const RLIMIT_NPROC: u64 = 6;
         let page = 16384;
         // SAFETY: two fresh anonymous pages, unmapped below.

@@ -834,7 +834,7 @@ mod registration_tests {
         let mut queue = [0u8; 128];
         let info =
             super::super::sigframe::Siginfo::from_sender(15, -1, unsafe { libc::getpid() }, 0);
-        unsafe { info.write(queue.as_mut_ptr() as u64) };
+        unsafe { info.write(queue.as_mut_ptr() as u64) }.unwrap();
         assert_eq!(
             super::super::signal::rt_sigqueueinfo([1, 15, queue.as_ptr() as u64, 0, 0, 0]),
             -(crate::errno::EOPNOTSUPP as i64)

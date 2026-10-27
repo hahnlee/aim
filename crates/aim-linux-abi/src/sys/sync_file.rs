@@ -381,6 +381,7 @@ mod tests {
             );
             return;
         }
+        crate::diag::install_signal_handlers();
         init();
         let (a, wa) = guest_fence();
         let (b, wb) = guest_fence();

@@ -88,17 +88,17 @@ impl Siginfo {
     /// Read a guest siginfo.
     ///
     /// # Safety
-    /// `p` must point to 128 readable bytes.
-    pub unsafe fn read(p: u64) -> Self {
+    /// The returned value contains only integer ABI fields.
+    pub unsafe fn read(p: u64) -> Result<Self, i32> {
         // SAFETY: caller contract.
-        unsafe { (p as *const Siginfo).read_unaligned() }
+        unsafe { super::user_memory::read_value(p) }
     }
 
     /// # Safety
-    /// `p` must point to 128 writable bytes.
-    pub unsafe fn write(&self, p: u64) {
+    /// All bytes of this ABI value must be initialized.
+    pub unsafe fn write(&self, p: u64) -> Result<(), i32> {
         // SAFETY: caller contract.
-        unsafe { (p as *mut Siginfo).write_unaligned(*self) }
+        unsafe { super::user_memory::write_value(p, self) }
     }
 }
 
@@ -301,25 +301,28 @@ unsafe fn get<T>(p: u64) -> T {
 ///
 /// # Safety
 /// The chosen guest stack must be writable.
-pub unsafe fn setup(cpu: &Cpu, d: &Delivery, alt: &mut AltStack) -> Entry {
+pub unsafe fn setup(cpu: &Cpu, d: &Delivery, alt: &mut AltStack) -> Result<Entry, i32> {
     let saved_alt = *alt;
     let mut sp = cpu.sp;
     if d.act.flags & SA_ONSTACK != 0 && alt.enabled() && !alt.contains(sp) {
-        sp = alt.sp + alt.size;
+        sp = alt.sp.checked_add(alt.size).ok_or(crate::errno::EFAULT)?;
         if alt.flags & SS_AUTODISARM != 0 {
             *alt = AltStack::DISABLED;
         }
     }
-    let record = (sp - 16) & !15;
-    let f = (record - FRAME_SIZE) & !15;
+    let record = sp.checked_sub(16).ok_or(crate::errno::EFAULT)? & !15;
+    let f = record.checked_sub(FRAME_SIZE).ok_or(crate::errno::EFAULT)? & !15;
+    let mut bytes = vec![0u8; (record + 16 - f) as usize];
     // SAFETY: caller contract; everything written lies in [f, record + 16).
     unsafe {
+        let record = bytes.as_mut_ptr() as u64 + record - f;
+        let f = bytes.as_mut_ptr() as u64;
         std::ptr::write_bytes(
             f as *mut u8,
             0,
             (MC_RESERVED + 2 * FPSIMD_SIZE as u64) as usize,
         );
-        d.info.write(f);
+        put(f, *d.info);
         put(UC_STACK + f, saved_alt.sp);
         put(UC_STACK + f + 8, saved_alt.flags);
         put(UC_STACK + f + 16, saved_alt.size);
@@ -348,8 +351,9 @@ pub unsafe fn setup(cpu: &Cpu, d: &Delivery, alt: &mut AltStack) -> Entry {
         put(record, cpu.x[29]);
         put(record + 8, cpu.x[30]);
     }
+    super::user_memory::write_exact(f, &bytes)?;
     let siginfo = d.act.flags & SA_SIGINFO != 0;
-    Entry {
+    Ok(Entry {
         pc: d.act.handler,
         sp: f,
         x0: d.info.signo as u64,
@@ -361,7 +365,7 @@ pub unsafe fn setup(cpu: &Cpu, d: &Delivery, alt: &mut AltStack) -> Entry {
         } else {
             d.default_restorer
         },
-    }
+    })
 }
 
 /// Read the frame `rt_sigreturn` found at the guest sp: the registers to
@@ -374,7 +378,9 @@ pub unsafe fn restore(f: u64) -> Option<(Cpu, u64, AltStack)> {
     if f & 15 != 0 {
         return None;
     }
-    // SAFETY: caller contract.
+    let bytes = super::user_memory::read_exact(f, FRAME_SIZE as usize).ok()?;
+    let f = bytes.as_ptr() as u64;
+    // SAFETY: all frame accesses below refer to the owned snapshot.
     unsafe {
         let mut x = [0u64; 31];
         for (i, r) in x.iter_mut().enumerate() {
@@ -397,7 +403,7 @@ pub unsafe fn restore(f: u64) -> Option<(Cpu, u64, AltStack)> {
             if magic == 0 {
                 break;
             }
-            if size < 16 || size % 16 != 0 {
+            if size < 16 || size % 16 != 0 || p.checked_add(size as u64)? > end {
                 return None;
             }
             if magic == FPSIMD_MAGIC && size == FPSIMD_SIZE {
@@ -550,7 +556,7 @@ mod tests {
             default_restorer: 0,
         };
         // SAFETY: the frame goes into `stack`.
-        let e = unsafe { setup(&cpu, &d, &mut alt) };
+        let e = unsafe { setup(&cpu, &d, &mut alt) }.unwrap();
         assert_eq!(e.sp % 16, 0);
         assert!(e.sp + FRAME_SIZE <= e.fp && e.fp + 16 <= top);
         assert_eq!(
@@ -617,7 +623,7 @@ mod tests {
             default_restorer: 0x77,
         };
         // SAFETY: the frame goes into `altmem`.
-        let e = unsafe { setup(&cpu, &d, &mut alt) };
+        let e = unsafe { setup(&cpu, &d, &mut alt) }.unwrap();
         assert!(e.sp > alt_base && e.sp < alt_base + altmem.len() as u64);
         assert_eq!(e.lr, 0x77, "no SA_RESTORER: the layer's restorer");
         assert!(!alt.enabled(), "SS_AUTODISARM");

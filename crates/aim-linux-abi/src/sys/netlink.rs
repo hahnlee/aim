@@ -385,7 +385,7 @@ pub fn parse_sockaddr(ptr: u64, len: u32) -> Result<(u32, u32), i64> {
         return Err(-(EINVAL as i64));
     }
     // SAFETY: a guest sockaddr of at least 12 bytes.
-    let b = unsafe { std::slice::from_raw_parts(ptr as *const u8, 12) };
+    let b = user_try!(crate::sys::user_memory::read_exact(ptr, 12));
     if u16::from_le_bytes([b[0], b[1]]) != L_AF_NETLINK {
         return Err(-(EINVAL as i64));
     }

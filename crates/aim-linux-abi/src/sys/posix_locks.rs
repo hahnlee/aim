@@ -251,7 +251,7 @@ pub fn reset_fork() {
     *CURRENT.lock().unwrap() = None;
 }
 pub fn dispatch(fd: BorrowedFd<'_>, cmd: u64, arg: u64) -> i64 {
-    let input = unsafe { (arg as *const LinuxFlock).read_unaligned() };
+    let input = user_read!(arg, LinuxFlock);
     let result = current().and_then(|owner| {
         owner.lock(fd, cmd, input, || {
             super::thread::current().is_some_and(super::signal::interrupted)
@@ -260,8 +260,8 @@ pub fn dispatch(fd: BorrowedFd<'_>, cmd: u64, arg: u64) -> i64 {
     match result {
         Ok(output) => {
             if cmd == 5 {
-                unsafe {
-                    (arg as *mut LinuxFlock).write_unaligned(output);
+                {
+                    user_write!(arg, LinuxFlock, output);
                 }
             }
             0

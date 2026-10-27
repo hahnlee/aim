@@ -51,13 +51,16 @@ fn from_host(h: i16, asked: i16) -> i16 {
 
 /// Install `mask` (a guest sigset pointer, 0 for none) for the duration of a
 /// wait; returns the mask to restore.
-pub fn swap_sigmask(mask: u64) -> Option<u64> {
+pub fn swap_sigmask(mask: u64) -> Result<Option<u64>, i32> {
     if mask == 0 {
-        return None;
+        return Ok(None);
     }
     let mut old = 0u64;
-    super::signal::rt_sigprocmask([2, mask, &mut old as *mut u64 as u64, 8, 0, 0]);
-    Some(old)
+    let result = super::signal::rt_sigprocmask([2, mask, &mut old as *mut u64 as u64, 8, 0, 0]);
+    if result < 0 {
+        return Err(-result as i32);
+    }
+    Ok(Some(old))
 }
 
 pub fn restore_sigmask(old: Option<u64>) {
@@ -72,7 +75,7 @@ fn timeout_ms(ts: u64) -> Result<i32, i64> {
         return Ok(-1);
     }
     // SAFETY: guest struct timespec.
-    let t = unsafe { (ts as *const [i64; 2]).read_unaligned() };
+    let t = user_read!(ts, [i64; 2]);
     if t[0] < 0 || !(0..1_000_000_000).contains(&t[1]) {
         return Err(-(EINVAL as i64));
     }
@@ -87,20 +90,21 @@ fn now_ns() -> i64 {
 }
 
 /// Write back the time left of a guest timespec after waiting since `t0`.
-fn update_timeout(ts: u64, t0: i64) {
+fn update_timeout(ts: u64, t0: i64) -> Result<(), crate::errno::Errno> {
     if ts == 0 {
-        return;
+        return Ok(());
     }
     // SAFETY: guest struct timespec.
-    unsafe {
-        let t = (ts as *const [i64; 2]).read_unaligned();
+    {
+        let t = user_read!(ts, [i64; 2]);
         let left = (t[0] * 1_000_000_000 + t[1] - (now_ns() - t0)).max(0);
-        (ts as *mut [i64; 2]).write_unaligned([left / 1_000_000_000, left % 1_000_000_000]);
+        user_write!(ts, [i64; 2], [left / 1_000_000_000, left % 1_000_000_000]);
     }
+    Ok(())
 }
 
 fn host_poll(fds: &mut [libc::pollfd], ms: i32, mask: u64) -> i64 {
-    let old = swap_sigmask(mask);
+    let old = user_try!(swap_sigmask(mask));
     // SAFETY: a pollfd array we own.
     let fuse_ready = fds.iter().any(|descriptor| {
         super::fuse_device::readiness(descriptor.fd).is_some_and(|events| {
@@ -132,7 +136,10 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
     };
     // struct pollfd { int fd; short events; short revents; } on both.
     // SAFETY: guest pollfd array of nfds entries.
-    let guest = unsafe { std::slice::from_raw_parts_mut(fds as *mut libc::pollfd, nfds as usize) };
+    let mut guest = Vec::with_capacity(nfds as usize);
+    for index in 0..nfds {
+        guest.push(user_read!(fds + index * 8, libc::pollfd));
+    }
     let mut pins = Vec::with_capacity(guest.len());
     let mut ptys = Vec::with_capacity(guest.len());
     let mut invalid = false;
@@ -258,7 +265,10 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             }
         }
         if ready > 0 || n == 0 || left == 0 {
-            update_timeout(ts, t0);
+            user_try!(update_timeout(ts, t0));
+            for (index, entry) in guest.iter().enumerate() {
+                user_write!(fds + index as u64 * 8 + 6, i16, entry.revents);
+            }
             return ready;
         }
         for h in &mut host {
@@ -276,10 +286,15 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         Ok(ms) => ms,
         Err(e) => return e,
     };
-    let bit = |set: u64, fd: usize| -> bool {
-        // SAFETY: guest fd_set of at least nfds bits (u64 words).
-        set != 0 && unsafe { *(set as *const u64).add(fd / 64) } & (1 << (fd % 64)) != 0
-    };
+    let mut input_sets = Vec::new();
+    for set in sets {
+        let bytes = if set == 0 {
+            vec![0; nfds.div_ceil(64) * 8]
+        } else {
+            user_try!(super::user_memory::read_exact(set, nfds.div_ceil(64) * 8))
+        };
+        input_sets.push(bytes);
+    }
     let wanted = [POLLIN, POLLOUT, POLLPRI];
     let mut host = Vec::new();
     let mut pins = Vec::new();
@@ -287,8 +302,8 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
     let mut guest_fds = Vec::new();
     for fd in 0..nfds {
         let mut ev = 0;
-        for (s, w) in sets.iter().zip(wanted) {
-            if bit(*s, fd) {
+        for (s, w) in input_sets.iter().zip(wanted) {
+            if s[fd / 8] & (1 << (fd % 8)) != 0 {
                 ev |= w;
             }
         }
@@ -339,7 +354,7 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         0
     } else {
         // SAFETY: guest struct.
-        unsafe { (sig as *const u64).read_unaligned() }
+        user_read!(sig, u64)
     };
     if pins.iter().flatten().any(super::close_effects::observes) {
         if let Err(error) = super::close_effects::observe_socket() {
@@ -367,11 +382,8 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
     if host.iter().any(|p| p.revents & POLLNVAL != 0) {
         return -(EBADF as i64);
     }
-    update_timeout(ts, t0);
-    for s in sets.iter().filter(|&&s| s != 0) {
-        // SAFETY: clearing the guest fd_set words that cover nfds.
-        unsafe { std::ptr::write_bytes(*s as *mut u64, 0, nfds.div_ceil(64)) };
-    }
+    user_try!(update_timeout(ts, t0));
+    let mut output_sets = vec![vec![0u8; nfds.div_ceil(64) * 8]; 3];
     let mut count = 0;
     for (p, fd) in host.iter().zip(guest_fds) {
         let hits = [
@@ -379,12 +391,17 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
             p.revents & (POLLOUT | POLLERR) != 0,
             p.revents & POLLPRI != 0,
         ];
-        for ((s, w), hit) in sets.iter().zip(wanted).zip(hits) {
+        for (index, ((s, w), hit)) in sets.iter().zip(wanted).zip(hits).enumerate() {
             if *s != 0 && p.events & w != 0 && hit {
                 // SAFETY: guest fd_set word covering fd.
-                unsafe { *(*s as *mut u64).add(fd / 64) |= 1 << (fd % 64) };
+                output_sets[index][fd / 8] |= 1 << (fd % 8);
                 count += 1;
             }
+        }
+    }
+    for (set, bytes) in sets.iter().zip(&output_sets) {
+        if *set != 0 {
+            user_try!(super::user_memory::write_exact(*set, bytes));
         }
     }
     count

@@ -441,6 +441,12 @@ mod tests {
     }
     #[test]
     fn queries_preserve_linux_errno_and_authenticated_metadata() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::fsverity_ioctl::tests::queries_preserve_linux_errno_and_authenticated_metadata",
+        ) {
+            return;
+        }
+        crate::diag::install_signal_handlers();
         let (_view, root) = crate::vfs::test_view();
         let path = root.join("data/query-verity");
         std::fs::write(&path, b"actual verity bytes").unwrap();

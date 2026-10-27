@@ -295,7 +295,7 @@ fn guest_bytes(p: u64, len: usize) -> Result<Vec<u8>, i64> {
         return Err(-(EFAULT as i64));
     }
     // SAFETY: guest buffer of `len` bytes.
-    Ok(unsafe { std::slice::from_raw_parts(p as *const u8, len) }.to_vec())
+    Ok(user_try!(crate::sys::user_memory::read_exact(p, len)))
 }
 
 /// BPF_F_RDONLY_PROG: the kernel sets it on device maps.
@@ -385,7 +385,9 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
                 let _g = m.lock();
                 let v = m.find(&key).ok_or(-(ENOENT as i64))?;
                 // SAFETY: the value in the mapping, the guest's buffer.
-                unsafe { std::ptr::copy_nonoverlapping(v, value_p as *mut u8, vlen) };
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(v as *const u8, value_p as *mut u8, vlen)
+                });
                 Ok(0)
             }
             MAP_UPDATE_ELEM => {
@@ -449,8 +451,14 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
                         .to_vec()
                 };
                 // SAFETY: the guest's next-key buffer.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(next.as_ptr(), value_p as *mut u8, next.len())
+                {
+                    user_try!(unsafe {
+                        crate::sys::user_memory::copy_bytes(
+                            next.as_ptr() as *const u8,
+                            value_p as *mut u8,
+                            next.len(),
+                        )
+                    })
                 };
                 Ok(0)
             }
@@ -713,6 +721,7 @@ mod tests {
         ) {
             return;
         }
+        crate::diag::install_signal_handlers();
         let (_view, root) = vfs::test_view();
         let pin = root.join("data/bpf-publication-pin");
         let guest = std::ffi::CString::new("/data/bpf-publication-pin").unwrap();

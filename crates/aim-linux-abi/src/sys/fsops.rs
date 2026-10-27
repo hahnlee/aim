@@ -1618,7 +1618,7 @@ pub fn utimensat(a: [u64; 6]) -> i64 {
     }; 2];
     if times != 0 {
         // SAFETY: guest timespec[2].
-        let t = unsafe { (times as *const [i64; 4]).read_unaligned() };
+        let t = user_read!(times, [i64; 4]);
         for i in 0..2 {
             ts[i] = libc::timespec {
                 tv_sec: t[i * 2],

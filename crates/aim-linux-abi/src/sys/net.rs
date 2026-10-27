@@ -771,7 +771,7 @@ fn target_of(ptr: u64, len: u32, bind: bool) -> Result<(Target, Vec<u8>), i64> {
         return Err(-(EINVAL as i64));
     }
     // SAFETY: guest sockaddr of `len` bytes.
-    let g = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) }.to_vec();
+    let g = user_try!(crate::sys::user_memory::read_exact(ptr, len as usize));
     let fam = u16::from_le_bytes([g[0], g[1]]);
     match fam {
         L_AF_UNIX => {
@@ -890,16 +890,20 @@ fn linux_addr_of_host(sa: &libc::sockaddr_storage, len: u32) -> Option<Vec<u8>> 
 
 /// Store a Linux sockaddr into guest (addr, *addrlen), Linux-style: the
 /// length written back is the full length even when truncated.
-fn put_addr(addr: &[u8], out: u64, outlen: u64) {
-    if out == 0 || outlen == 0 {
-        return;
-    }
+fn put_addr(addr: &[u8], out: u64, outlen: u64) -> Result<(), i32> {
     // SAFETY: guest socklen_t and buffer of that many bytes.
-    unsafe {
-        let cap = (outlen as *const u32).read_unaligned() as usize;
-        std::ptr::copy_nonoverlapping(addr.as_ptr(), out as *mut u8, cap.min(addr.len()));
-        (outlen as *mut u32).write_unaligned(addr.len() as u32);
+    {
+        let cap = user_read!(outlen, u32) as usize;
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(
+                addr.as_ptr() as *const u8,
+                out as *mut u8,
+                cap.min(addr.len()),
+            )
+        });
+        user_write!(outlen, u32, addr.len() as u32);
     }
+    Ok(())
 }
 
 // ---- socket lifecycle -----------------------------------------------------
@@ -1104,7 +1108,12 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
         }
         if result.is_ok() {
             // SAFETY: guest int[2], before another thread can close its slots.
-            unsafe { (sv as *mut [i32; 2]).write_unaligned(fds) };
+            result = unsafe { super::user_memory::write_value(sv, &fds) };
+            if result.is_err() {
+                for &fd in &fds {
+                    fdtab::withdraw_guest(fd).expect("socketpair owns unpublished result");
+                }
+            }
         }
         result
     };
@@ -1246,7 +1255,7 @@ pub fn connect(a: [u64; 6]) -> i64 {
             Family::Netlink(n) => {
                 if a[1] != 0 && a[2] >= 2
                     // SAFETY: the guest address contains at least its family.
-                    && unsafe { std::ptr::read_unaligned(a[1] as *const u16) } == 0
+                    && user_read!(a[1], u16) == 0
                 {
                     return super::netlink::connect(n, None);
                 }
@@ -1552,15 +1561,23 @@ pub fn accept4(a: [u64; 6]) -> i64 {
         }
         return -(error as i64);
     }
+    if addr != 0
+        && let Some(p) = peer
+    {
+        if let Err(error) = put_addr(&p, addr, addrlen) {
+            fdtab::on_close(nfd);
+            unsafe {
+                libc::close(nfd);
+            }
+            return -(error as i64);
+        }
+    }
     if let Err(error) = fdtab::publish_guest(nfd) {
         fdtab::on_close(nfd);
         unsafe {
             libc::close(nfd);
         }
         return -(error as i64);
-    }
-    if let Some(p) = peer {
-        put_addr(&p, addr, addrlen);
     }
     nfd as i64
 }
@@ -1605,7 +1622,7 @@ fn name_of(input: &SocketInput, peer: bool, out: u64, outlen: u64) -> i64 {
             Family::Unix | Family::Inet(_) => None,
         };
         if let Some(n) = name {
-            put_addr(&n, out, outlen);
+            user_try!(put_addr(&n, out, outlen));
             return 0;
         }
     }
@@ -1614,7 +1631,7 @@ fn name_of(input: &SocketInput, peer: bool, out: u64, outlen: u64) -> i64 {
         if let Some(n) = known.lock().unwrap().clone() {
             // A peer name is only valid while connected.
             if !peer || get_int(fd, 0, libc::LOCAL_PEERPID).is_some() {
-                put_addr(&n, out, outlen);
+                user_try!(put_addr(&n, out, outlen));
                 return 0;
             }
         }
@@ -1635,7 +1652,7 @@ fn name_of(input: &SocketInput, peer: bool, out: u64, outlen: u64) -> i64 {
     }
     match linux_addr_of_host(&sa, len) {
         Some(a) => {
-            put_addr(&a, out, outlen);
+            user_try!(put_addr(&a, out, outlen));
             0
         }
         None => -(EOPNOTSUPP),
@@ -1684,6 +1701,8 @@ struct HostControl {
     _sockets: Vec<socket_scm::Export>,
 }
 fn control_to_host(ptr: u64, len: usize) -> Result<HostControl, i64> {
+    let owned = user_try!(super::user_memory::read_exact(ptr, len));
+    let ptr = owned.as_ptr() as u64;
     let mut out = Vec::new();
     let mut exports = Vec::new();
     let mut regular = Vec::new();
@@ -1982,7 +2001,13 @@ fn control_to_guest(
         rec[12..16].copy_from_slice(&ty.to_le_bytes());
         rec[16..clen].copy_from_slice(&data);
         // SAFETY: inside the guest control buffer.
-        unsafe { std::ptr::copy_nonoverlapping(rec.as_ptr(), (out as *mut u8).add(w), rec.len()) };
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(
+                rec.as_ptr() as *const u8,
+                out.wrapping_add(w as u64) as *mut u8,
+                rec.len(),
+            )
+        });
         if ty == L_SCM_RIGHTS {
             for raw in data.chunks_exact(4) {
                 host.deliver(i32::from_ne_bytes(raw.try_into().unwrap()));
@@ -2082,7 +2107,13 @@ fn guest_iov(ptr: u64, n: u64) -> Result<Vec<libc::iovec>, i64> {
         return Ok(Vec::new());
     }
     // SAFETY: guest iovec array of n entries.
-    Ok(unsafe { std::slice::from_raw_parts(ptr as *const libc::iovec, n as usize) }.to_vec())
+    {
+        let mut vectors = Vec::with_capacity(n as usize);
+        for index in 0..n {
+            vectors.push(user_read!(ptr + index * 16, libc::iovec));
+        }
+        Ok(vectors)
+    }
 }
 
 fn iov_len(iov: &[libc::iovec]) -> usize {
@@ -2097,7 +2128,7 @@ fn advance(iov: &mut Vec<libc::iovec>, mut n: usize) {
             iov.remove(0);
         } else {
             // SAFETY: moving inside the same guest buffer.
-            iov[0].iov_base = unsafe { (iov[0].iov_base as *mut u8).add(n) }.cast();
+            iov[0].iov_base = (iov[0].iov_base as *mut u8).wrapping_add(n).cast();
             iov[0].iov_len -= n;
             n = 0;
         }
@@ -2136,8 +2167,9 @@ fn send(
         // SAFETY: the guest's sockaddr, which the send just read.
         let name = name
             .filter(|n| n.0 != 0)
-            .map(|(p, l)| unsafe { std::slice::from_raw_parts(p as *const u8, l as usize) });
-        traffic::account(&s, input.fd(), true, r, name);
+            .map(|(p, l)| crate::sys::user_memory::read_exact(p, l as usize));
+        let name = user_try!(name.transpose());
+        traffic::account(&s, input.fd(), true, r, name.as_deref());
     }
     r
 }
@@ -2237,15 +2269,7 @@ fn send_other(
     let fd = input.fd();
     let s = any_sock(&input)?;
     let name = name.filter(|n| n.0 != 0);
-    let gather = || -> Vec<u8> {
-        iov.iter()
-            .flat_map(|v| {
-                // SAFETY: the guest's iovec buffers.
-                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) }
-            })
-            .copied()
-            .collect()
-    };
+    let gather = || super::user_memory::gather(iov);
     Some(match &s.family {
         Family::Netlink(n) => {
             let dst = match name.map(|(p, l)| super::netlink::parse_sockaddr(p, l)) {
@@ -2253,7 +2277,7 @@ fn send_other(
                 Some(Err(e)) => return Some(e),
                 None => None,
             };
-            super::netlink::send(fd, n, &gather(), dst, host_send_flags(flags))
+            super::netlink::send(fd, n, &user_try!(gather()), dst, host_send_flags(flags))
         }
         Family::Packet(p) => {
             let ifindex = match name.map(|(a, l)| super::packet::parse_sockaddr(a, l)) {
@@ -2261,7 +2285,7 @@ fn send_other(
                 Some(Err(e)) => return Some(e),
                 None => 0,
             };
-            super::packet::send(p, &gather(), ifindex)
+            super::packet::send(p, &user_try!(gather()), ifindex)
         }
         Family::Inet(_) => return dhcp_to_router(fd, &s, iov, name),
         Family::Unix => return None,
@@ -2286,7 +2310,9 @@ fn dhcp_to_router(fd: i32, s: &Sock, iov: &[libc::iovec], name: Option<(u64, u32
     };
     let dst = match name {
         // SAFETY: a guest sockaddr of `l` bytes.
-        Some((p, l)) => inet(unsafe { std::slice::from_raw_parts(p as *const u8, l as usize) }),
+        Some((p, l)) => inet(&user_try!(crate::sys::user_memory::read_exact(
+            p, l as usize
+        ))),
         None if o.router.load(Ordering::Relaxed) => inet(s.peer.lock().unwrap().as_deref()?),
         None => host_inet_name(fd, true),
     };
@@ -2298,14 +2324,7 @@ fn dhcp_to_router(fd: i32, s: &Sock, iov: &[libc::iovec], name: Option<(u64, u32
         Some(local) => [local[4], local[5], local[6], local[7]],
         None => host_inet_name(fd, false).map_or([0; 4], |(_, a)| a),
     };
-    let msg: Vec<u8> = iov
-        .iter()
-        .flat_map(|v| {
-            // SAFETY: the guest's iovec buffers.
-            unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) }
-        })
-        .copied()
-        .collect();
+    let msg = user_try!(super::user_memory::gather(iov));
     Some(super::packet::udp_to_router(src.into(), dst.into(), &msg))
 }
 
@@ -2362,29 +2381,31 @@ fn recv_other(
         }
         Family::Packet(p) => {
             let mut buf = vec![0u8; iov_len(iov)];
-            super::packet::recv(p, fd, &mut buf, hflags, flags & L_MSG_TRUNC != 0).map(
+            super::packet::recv(p, fd, &mut buf, hflags, flags & L_MSG_TRUNC != 0).and_then(
                 |(n, truncated, name)| {
                     let filled = n.min(buf.len());
                     let mut at = 0;
                     for v in iov {
                         let k = v.iov_len.min(filled - at);
                         // SAFETY: the guest's iovec buffers.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                buf[at..].as_ptr(),
-                                v.iov_base as *mut u8,
-                                k,
-                            )
+                        {
+                            user_try!(unsafe {
+                                crate::sys::user_memory::copy_bytes(
+                                    buf[at..].as_ptr() as *const u8,
+                                    v.iov_base as *mut u8,
+                                    k,
+                                )
+                            })
                         };
                         at += k;
                     }
-                    Received {
+                    Ok(Received {
                         n: n as i64,
                         flags: if truncated { libc::MSG_TRUNC } else { 0 },
                         ctrl: IncomingControl::default(),
                         cred: None,
                         name: Some(name),
-                    }
+                    })
                 },
             )
         }
@@ -2445,7 +2466,13 @@ fn recv_ping(
     for v in iov {
         let k = v.iov_len.min(msg.len() - at);
         // SAFETY: the guest's iovec buffers.
-        unsafe { std::ptr::copy_nonoverlapping(msg[at..].as_ptr(), v.iov_base as *mut u8, k) };
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(
+                msg[at..].as_ptr() as *const u8,
+                v.iov_base as *mut u8,
+                k,
+            )
+        });
         at += k;
     }
     Ok(Received {
@@ -2705,14 +2732,21 @@ fn receive(
             let rest = n.saturating_sub(FRAME);
             for p in prefix(iov, rest) {
                 // SAFETY: bytes the kernel just wrote to the guest buffer.
-                data.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(p.iov_base as *const u8, p.iov_len)
-                });
+                data.extend_from_slice(&user_try!(super::user_memory::read_exact(
+                    p.iov_base as u64,
+                    p.iov_len
+                )));
             }
             let mut w = 0;
             for p in prefix(iov, data.len().min(cap)) {
                 // SAFETY: guest buffer.
-                unsafe { std::ptr::copy(data[w..].as_ptr(), p.iov_base as *mut u8, p.iov_len) };
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(
+                        data[w..].as_ptr() as *const u8,
+                        p.iov_base as *mut u8,
+                        p.iov_len,
+                    )
+                });
                 w += p.iov_len;
             }
             Ok(Received {
@@ -2786,12 +2820,14 @@ fn receive(
                 let mut w = 0;
                 for p in prefix(iov, n.saturating_sub(FRAME)) {
                     // SAFETY: guest buffer.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            buf[FRAME + w..].as_ptr(),
-                            p.iov_base as *mut u8,
-                            p.iov_len,
-                        )
+                    {
+                        user_try!(unsafe {
+                            crate::sys::user_memory::copy_bytes(
+                                buf[FRAME + w..].as_ptr() as *const u8,
+                                p.iov_base as *mut u8,
+                                p.iov_len,
+                            )
+                        })
                     };
                     w += p.iov_len;
                 }
@@ -2859,11 +2895,13 @@ pub fn recvfrom(a: [u64; 6]) -> i64 {
         }];
         match recv(&input, &iov, addr != 0, 0, flags) {
             Ok(r) => {
-                if let Some(n) = &r.name {
-                    put_addr(n, addr, addrlen);
+                if addr != 0
+                    && let Some(n) = &r.name
+                {
+                    user_try!(put_addr(n, addr, addrlen));
                 } else if addr != 0 && addrlen != 0 {
                     // SAFETY: guest socklen_t.
-                    unsafe { (addrlen as *mut u32).write_unaligned(0) };
+                    user_write!(addrlen, u32, 0);
                 }
                 r.n
             }
@@ -2904,7 +2942,7 @@ fn sendmsg_one(input: &SocketInput, m: &LinuxMsghdr, flags: u64) -> i64 {
 
 fn recvmsg_one(input: &SocketInput, mp: u64, flags: u64) -> i64 {
     // SAFETY: guest struct msghdr.
-    let mut m = unsafe { (mp as *const LinuxMsghdr).read_unaligned() };
+    let mut m = user_read!(mp, LinuxMsghdr);
     let iov = match guest_iov(m.iov, m.iovlen) {
         Ok(v) => v,
         Err(e) => return e,
@@ -2932,14 +2970,20 @@ fn recvmsg_one(input: &SocketInput, mp: u64, flags: u64) -> i64 {
             Some(n) => {
                 let k = n.len().min(m.namelen as usize);
                 // SAFETY: guest name buffer of namelen bytes.
-                unsafe { std::ptr::copy_nonoverlapping(n.as_ptr(), m.name as *mut u8, k) };
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(
+                        n.as_ptr() as *const u8,
+                        m.name as *mut u8,
+                        k,
+                    )
+                });
                 m.namelen = n.len() as u32;
             }
             None => m.namelen = 0,
         }
     }
     // SAFETY: guest struct msghdr.
-    unsafe { (mp as *mut LinuxMsghdr).write_unaligned(m) };
+    user_write!(mp, LinuxMsghdr, m);
     r.n
 }
 
@@ -2950,7 +2994,7 @@ pub fn sendmsg(a: [u64; 6]) -> i64 {
             Err(error) => return error,
         };
         // SAFETY: guest struct msghdr.
-        let m = unsafe { (a[1] as *const LinuxMsghdr).read_unaligned() };
+        let m = user_read!(a[1], LinuxMsghdr);
         sendmsg_one(&input, &m, a[2])
     })
 }
@@ -2978,13 +3022,13 @@ pub fn sendmmsg(a: [u64; 6]) -> i64 {
         for i in 0..n {
             let p = vec + i * MMSG;
             // SAFETY: guest mmsghdr array.
-            let m = unsafe { (p as *const LinuxMsghdr).read_unaligned() };
+            let m = user_read!(p, LinuxMsghdr);
             let r = sendmsg_one(&input, &m, flags);
             if r < 0 {
                 return if i > 0 { i as i64 } else { r };
             }
             // SAFETY: msg_len follows the msghdr.
-            unsafe { ((p + 56) as *mut u32).write_unaligned(r as u32) };
+            user_write!(p + 56, u32, r as u32);
         }
         n as i64
     })
@@ -3005,7 +3049,7 @@ pub fn recvmmsg(a: [u64; 6]) -> i64 {
                 return if i > 0 { i as i64 } else { r };
             }
             // SAFETY: msg_len follows the msghdr.
-            unsafe { ((p + 56) as *mut u32).write_unaligned(r as u32) };
+            user_write!(p + 56, u32, r as u32);
             if flags & L_MSG_WAITFORONE != 0 {
                 flags |= L_MSG_DONTWAIT;
             }
@@ -3228,11 +3272,13 @@ fn int_option(level: u64, opt: u64) -> Option<(i32, i32)> {
 
 fn put_opt(v: &[u8], out: u64, outlen: u64) -> i64 {
     // SAFETY: guest option buffer and socklen_t.
-    unsafe {
-        let cap = (outlen as *const u32).read_unaligned() as usize;
+    {
+        let cap = user_read!(outlen, u32) as usize;
         let n = cap.min(v.len());
-        std::ptr::copy_nonoverlapping(v.as_ptr(), out as *mut u8, n);
-        (outlen as *mut u32).write_unaligned(n as u32);
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(v.as_ptr() as *const u8, out as *mut u8, n)
+        });
+        user_write!(outlen, u32, n as u32);
     }
     0
 }
@@ -3248,7 +3294,7 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             None
         } else {
             // SAFETY: guest int option value.
-            Some(unsafe { (val as *const i32).read_unaligned() })
+            Some(unsafe { super::user_memory::read_value::<i32>(val) })
         }
     };
     if level == 1
@@ -3260,12 +3306,14 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
         let Some(v) = int() else {
             return -(EINVAL as i64);
         };
+        let v = user_try!(v);
         return set_buffer(fd, opt, v);
     }
     if let Some((l, o)) = int_option(level, opt) {
         let Some(v) = int() else {
             return -(EINVAL as i64);
         };
+        let v = user_try!(v);
         if l == libc::SOL_SOCKET
             && o == libc::SO_REUSEADDR
             && get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) == Some(libc::SOCK_DGRAM)
@@ -3305,6 +3353,7 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             let Some(v) = int() else {
                 return -(EINVAL as i64);
             };
+            let v = user_try!(v);
             // sock_set_timestamp; Darwin's SO_TIMESTAMP gives the time of
             // each, to the microsecond.
             let on = (v != 0) as i32;
@@ -3337,6 +3386,7 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             let Some(v) = int() else {
                 return -(EINVAL as i64);
             };
+            let v = user_try!(v);
             match any_sock(&input) {
                 Some(s) => s.passcred.store(v != 0, Ordering::Relaxed),
                 None => {
@@ -3352,7 +3402,7 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
                 return -(EINVAL as i64);
             }
             // SAFETY: guest struct timeval { i64, i64 }.
-            let t = unsafe { (val as *const [i64; 2]).read_unaligned() };
+            let t = user_read!(val, [i64; 2]);
             let tv = libc::timeval {
                 tv_sec: t[0],
                 tv_usec: t[1] as i32,
@@ -3400,11 +3450,15 @@ fn setsockopt_other(input: &SocketInput, level: u64, opt: u64, val: u64, len: u3
     let s = any_sock(&input);
     let int = || {
         // SAFETY: a guest int option value.
-        (len >= 4).then(|| unsafe { (val as *const u32).read_unaligned() })
+        if len >= 4 {
+            Some(unsafe { super::user_memory::read_value::<u32>(val) })
+        } else {
+            None
+        }
     };
     Some(match (level, opt, s.as_deref().map(|s| &s.family)) {
         (super::netlink::SOL_NETLINK, _, Some(Family::Netlink(n))) => match int() {
-            Some(v) => super::netlink::setsockopt(n, opt, v),
+            Some(v) => super::netlink::setsockopt(n, opt, user_try!(v)),
             None => -(EINVAL as i64),
         },
         (1, L_SO_ATTACH_FILTER, Some(Family::Packet(p))) => {
@@ -3448,7 +3502,7 @@ fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
             return -(EINVAL as i64);
         }
         // SAFETY: a guest int option value.
-        let v = unsafe { (val as *const i32).read_unaligned() };
+        let v = user_read!(val, i32);
         if v != 0 && !(TCP_MIN_MSS..=MAX_TCP_WINDOW).contains(&v) {
             return -(EINVAL as i64);
         }
@@ -3475,7 +3529,7 @@ fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
             return -(EINVAL as i64);
         }
         // SAFETY: a guest int option value.
-        let ms = unsafe { (val as *const i32).read_unaligned() };
+        let ms = user_read!(val, i32);
         if ms < 0 {
             return -(EINVAL as i64);
         }
@@ -3499,12 +3553,10 @@ fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
     if opt == L_IP_MULTICAST_ALL {
         // ip_setsockopt reads an int, or one byte from a shorter value.
         // SAFETY: the guest's option value of `len` bytes.
-        let v = unsafe {
-            match len {
-                0 => return -(EINVAL as i64),
-                1..4 => (val as *const u8).read() as i32,
-                _ => (val as *const i32).read_unaligned(),
-            }
+        let v = match len {
+            0 => return -(EINVAL as i64),
+            1..4 => user_read!(val, u8) as i32,
+            _ => user_read!(val, i32),
         };
         if v != 0 && v != 1 {
             return -(EINVAL as i64);
@@ -3520,14 +3572,14 @@ fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
             return -1; // EPERM
         }
         // SAFETY: a guest int option value.
-        o.mark.store(
-            unsafe { (val as *const u32).read_unaligned() },
-            Ordering::Relaxed,
-        );
+        o.mark.store(user_read!(val, u32), Ordering::Relaxed);
         return 0;
     }
     // SAFETY: the guest's device name of `len` bytes.
-    let name = unsafe { std::slice::from_raw_parts(val as *const u8, (len as usize).min(16)) };
+    let name = user_try!(crate::sys::user_memory::read_exact(
+        val,
+        (len as usize).min(16)
+    ));
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
     let name = String::from_utf8_lossy(&name[..end]).into_owned();
     let index = match super::netif::host_index_of(&name) {

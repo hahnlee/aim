@@ -472,7 +472,7 @@ pub fn clone3(ctx: &GuestContext, a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest struct clone_args (at least the version-0 64 bytes).
-    let c = unsafe { (a[0] as *const [u64; 8]).read_unaligned() };
+    let c = user_read!(a[0], [u64; 8]);
     let [
         flags,
         pidfd,
@@ -550,10 +550,12 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     // SAFETY: guest tid words.
     unsafe {
         if flags & CLONE_PARENT_SETTID != 0 {
-            (ptid as *mut i32).write_volatile(tid);
+            // Linux ignores a failed TID store during clone/exit.
+            let _ = super::user_memory::write_value(ptid, &(tid as i32));
         }
         if flags & CLONE_CHILD_SETTID != 0 {
-            (ctid as *mut i32).write_volatile(tid);
+            // Linux ignores a failed TID store during clone/exit.
+            let _ = super::user_memory::write_value(ctid, &(tid as i32));
         }
     }
     let tp = if flags & CLONE_SETTLS != 0 {
@@ -651,7 +653,8 @@ pub fn exit(a: [u64; 6]) -> ! {
     if ctid != 0 {
         // SAFETY: the guest tid word registered with CLONE_CHILD_CLEARTID or
         // set_tid_address.
-        unsafe { (ctid as *mut u32).write_volatile(0) };
+        // mm_release ignores put_user failure and still wakes the futex.
+        let _ = unsafe { super::user_memory::write_value(ctid, &0u32) };
         super::futex::wake_one(ctid);
     }
     if main {
@@ -732,9 +735,9 @@ pub fn get_robust_list(a: [u64; 6]) -> i64 {
         return -(ESRCH as i64);
     };
     // SAFETY: guest out-pointers.
-    unsafe {
-        (a[1] as *mut u64).write_unaligned(th.robust_list.load(SeqCst));
-        (a[2] as *mut u64).write_unaligned(24);
+    {
+        user_write!(a[1], u64, th.robust_list.load(SeqCst));
+        user_write!(a[2], u64, 24);
     }
     0
 }

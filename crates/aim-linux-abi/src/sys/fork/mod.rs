@@ -99,7 +99,8 @@ fn own_files_thread_started(pid: i32, r: &Request) {
     // SAFETY: guest word named by CLONE_CHILD_SETTID/CLEARTID.
     unsafe {
         if r.flags & CLONE_CHILD_SETTID != 0 {
-            (r.child_tid as *mut i32).write_volatile(pid);
+            // Linux ignores a failed TID store during clone/exit.
+            let _ = super::user_memory::write_value(r.child_tid, &(pid as i32));
         }
     }
     if r.flags & CLONE_CHILD_CLEARTID == 0 {
@@ -110,7 +111,8 @@ fn own_files_thread_started(pid: i32, r: &Request) {
         reap(pid);
         super::procrec::gone(pid);
         // SAFETY: the guest's tid word; the guest waits on it.
-        unsafe { (addr as *mut i32).write_volatile(0) };
+        // mm_release ignores put_user failure and still wakes the futex.
+        let _ = unsafe { super::user_memory::write_value(addr, &0i32) };
         super::futex::wake_one(addr);
     });
 }
@@ -123,12 +125,12 @@ fn reap(pid: i32) {
 }
 
 /// `struct clone_args` flags of a `clone3` call, for [`is_fork`].
-pub fn clone3_flags(a: [u64; 6]) -> u64 {
-    if a[0] == 0 || a[1] < 64 {
-        return 0;
+pub fn clone3_flags(a: [u64; 6]) -> Result<u64, i64> {
+    if a[1] < 64 {
+        return Ok(0);
     }
     // SAFETY: guest struct clone_args of at least 64 bytes.
-    unsafe { (a[0] as *const u64).read_unaligned() }
+    Ok(user_read!(a[0], u64))
 }
 
 struct Request {
@@ -164,11 +166,11 @@ pub fn clone(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
 /// clone3(args, size): struct clone_args { flags, pidfd, child_tid,
 /// parent_tid, exit_signal, stack, stack_size, tls, ... }.
 pub fn clone3(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
-    if a[0] == 0 || a[1] < 64 {
+    if a[1] < 64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest struct clone_args of at least 64 bytes.
-    let f = unsafe { (a[0] as *const [u64; 8]).read_unaligned() };
+    let f = user_read!(a[0], [u64; 8]);
     if f[0] & CSIGNAL != 0 || f[4] > 64 {
         return -(EINVAL as i64);
     }
@@ -201,6 +203,9 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
     // The exit signal (CSIGNAL) is always SIGCHLD on Darwin.
     if r.flags & (UNSUPPORTED | CLONE_NEWTIME) != 0 {
         return -(EINVAL as i64);
+    }
+    if r.flags & CLONE_PIDFD != 0 {
+        user_try!(super::user_memory::prepare_write(r.pidfd, 4));
     }
     let Some(runtime) = super::exec::launch_args() else {
         return -(libc::ENOEXEC as i64);
@@ -251,11 +256,18 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
     // SAFETY: guest pointers named by the caller's flags.
     unsafe {
         if r.flags & CLONE_PARENT_SETTID != 0 && r.parent_tid != 0 {
-            (r.parent_tid as *mut i32).write_unaligned(pid);
+            // copy_process does not fail a created child for parent_tid.
+            let _ = super::user_memory::write_value(r.parent_tid, &pid);
         }
-        if r.flags & CLONE_PIDFD != 0 && r.pidfd != 0 {
+        if r.flags & CLONE_PIDFD != 0 {
             let fd = super::wait::open_pidfd(pid, false);
-            (r.pidfd as *mut i32).write_unaligned(fd as i32);
+            if fd < 0 {
+                return fd;
+            }
+            if let Err(error) = super::user_memory::write_value(r.pidfd, &(fd as i32)) {
+                super::fs::close([fd as u64, 0, 0, 0, 0, 0]);
+                return -(error as i64);
+            }
         }
     }
     if let Some(e) = &traced {
@@ -284,7 +296,8 @@ fn child_started(ctx: &mut GuestContext, stack: u64, set_tid: u64, clear_tid: u6
     super::thread::set_tid_address([clear_tid, 0, 0, 0, 0, 0]);
     if set_tid != 0 {
         // SAFETY: guest pointer in the child's copy of memory.
-        unsafe { (set_tid as *mut i32).write_unaligned(pid) };
+        // Linux ignores a failed child TID store after creating the child.
+        let _ = unsafe { super::user_memory::write_value(set_tid, &pid) };
     }
     if stack != 0 {
         ctx.sp = stack;

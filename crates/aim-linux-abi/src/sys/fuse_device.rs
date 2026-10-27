@@ -34,12 +34,14 @@ pub fn rw(fd: i32, vectors: &[libc::iovec], write: bool) -> Option<i64> {
     let result = if write {
         let mut offset = 0;
         for vector in vectors {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    vector.iov_base.cast::<u8>(),
-                    packet[offset..].as_mut_ptr(),
-                    vector.iov_len,
-                );
+            {
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(
+                        vector.iov_base.cast::<u8>() as *const u8,
+                        packet[offset..].as_mut_ptr() as *mut u8,
+                        vector.iov_len,
+                    )
+                });
             }
             offset += vector.iov_len;
         }
@@ -58,12 +60,14 @@ pub fn rw(fd: i32, vectors: &[libc::iovec], write: bool) -> Option<i64> {
                 let mut offset = 0;
                 for vector in vectors {
                     let amount = vector.iov_len.min(count - offset);
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            packet[offset..].as_ptr(),
-                            vector.iov_base.cast::<u8>(),
-                            amount,
-                        );
+                    {
+                        user_try!(unsafe {
+                            crate::sys::user_memory::copy_bytes(
+                                packet[offset..].as_ptr() as *const u8,
+                                vector.iov_base.cast::<u8>() as *mut u8,
+                                amount,
+                            )
+                        });
                     }
                     offset += amount;
                     if offset == count {

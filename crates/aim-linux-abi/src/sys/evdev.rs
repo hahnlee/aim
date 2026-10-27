@@ -190,7 +190,7 @@ impl Evdev {
                     (r.kind as i64) | ((r.code as i64) << 16) | ((r.value as i64) << 32),
                 ];
                 // SAFETY: guest buffer of `len` bytes, room for `want`.
-                unsafe { ((buf as *mut [i64; 3]).add(out)).write_unaligned(ev) };
+                user_write!(buf + out as u64 * 24, [i64; 3], ev);
                 out += 1;
             }
             if out == 0 {
@@ -211,18 +211,21 @@ impl Evdev {
         if self.client.lock().unwrap().revoked {
             return neg(ENODEV);
         }
-        let recs: Vec<Record> = (0..len / EVENT)
+        let recs = (0..len / EVENT)
             .map(|i| {
                 // SAFETY: guest buffer of `len` bytes.
-                let ev = unsafe { ((buf as *const [i64; 3]).add(i)).read_unaligned() };
-                Record {
+                let ev = user_read!(buf + i as u64 * 24, [i64; 3]);
+                Ok(Record {
                     time_ns: 0,
                     kind: ev[2] as u16,
                     code: (ev[2] >> 16) as u16,
                     value: (ev[2] >> 32) as i32,
-                }
+                })
             })
             // Not events: the server's own records.
+            .collect::<Result<Vec<Record>, i32>>();
+        let recs: Vec<Record> = user_try!(recs)
+            .into_iter()
             .filter(|r| (r.kind as usize) < EV_CNT)
             .collect();
         // SAFETY: the fd is our socket for the duration of the call.
@@ -646,7 +649,9 @@ pub fn write(fd: i32, buf: u64, len: usize) -> Option<i64> {
 fn put_bits(bits: &[u8], max: u16, size: usize, arg: u64) -> i64 {
     let n = bitmap_bytes(max).min(bits.len()).min(size);
     // SAFETY: guest buffer of `size` bytes.
-    unsafe { std::ptr::copy_nonoverlapping(bits.as_ptr(), arg as *mut u8, n) };
+    user_try!(unsafe {
+        crate::sys::user_memory::copy_bytes(bits.as_ptr() as *const u8, arg as *mut u8, n)
+    });
     n as i64
 }
 
@@ -655,7 +660,7 @@ fn put<T: Copy>(arg: u64, v: T) -> i64 {
         return neg(EFAULT);
     }
     // SAFETY: guest buffer the ioctl names.
-    unsafe { (arg as *mut T).write_unaligned(v) };
+    user_try!(unsafe { super::user_memory::write_value(arg, &v) });
     0
 }
 
@@ -688,7 +693,7 @@ const KEYMAP_ENTRY: usize = 40;
 /// (`input_scancode_to_scalar`: a scan code is 1, 2 or 4 bytes).
 fn key_entry(arg: u64) -> Result<KeyEntry, i64> {
     // SAFETY: guest struct of KEYMAP_ENTRY bytes.
-    let ke = unsafe { (arg as *const [u8; KEYMAP_ENTRY]).read_unaligned() };
+    let ke = user_read!(arg, [u8; KEYMAP_ENTRY]);
     let (flags, len) = (ke[0], ke[1] as usize);
     if len > 32 {
         return Err(neg(EINVAL));
@@ -713,10 +718,10 @@ fn key_entry(arg: u64) -> Result<KeyEntry, i64> {
 }
 
 /// `struct input_mask` at `arg`: type, size and pointer of the codes.
-fn input_mask(arg: u64) -> (u32, usize, u64) {
+fn input_mask(arg: u64) -> Result<(u32, usize, u64), i32> {
     // SAFETY: guest struct of 16 bytes.
-    let m = unsafe { (arg as *const [u32; 4]).read_unaligned() };
-    (m[0], m[1] as usize, m[2] as u64 | (m[3] as u64) << 32)
+    let m = user_read!(arg, [u32; 4]);
+    Ok((m[0], m[1] as usize, m[2] as u64 | (m[3] as u64) << 32))
 }
 
 /// An evdev ioctl (`'E'`); None when `fd` is not an evdev fd or the
@@ -748,7 +753,7 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
         EVIOCGREP | EVIOCSREP => neg(ENOSYS),
         EVIOCGKEYCODE | EVIOCSKEYCODE => {
             // SAFETY: guest unsigned int[2].
-            let v = unsafe { (arg as *const [u32; 2]).read_unaligned() };
+            let v = user_read!(arg, [u32; 2]);
             let set = cmd == EVIOCSKEYCODE;
             let req = KeyEntry {
                 scancode: v[0],
@@ -768,12 +773,11 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             {
                 Ok(got) if !set => {
                     // SAFETY: the guest struct read above.
-                    unsafe {
-                        let p = arg as *mut u8;
-                        p.add(1).write(4);
-                        (p.add(2) as *mut u16).write_unaligned(got.index as u16);
-                        (p.add(4) as *mut u32).write_unaligned(got.keycode);
-                        (p.add(8) as *mut u32).write_unaligned(got.scancode);
+                    {
+                        user_write!(arg + 1, u8, 4);
+                        user_write!(arg + 2, u16, got.index as u16);
+                        user_write!(arg + 4, u32, got.keycode);
+                        user_write!(arg + 8, u32, got.scancode);
                     }
                     0
                 }
@@ -797,7 +801,7 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             0
         }
         EVIOCGMASK => {
-            let (kind, codes_size, codes) = input_mask(arg);
+            let (kind, codes_size, codes) = user_try!(input_mask(arg));
             let n = mask_codes(kind);
             let xfer = n.div_ceil(64) * 8;
             let xfer = xfer.min(codes_size);
@@ -812,9 +816,18 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             match mask {
                 Ok(m) => {
                     // SAFETY: guest buffer of `codes_size` bytes.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(m.0.as_ptr(), codes as *mut u8, xfer);
-                        std::ptr::write_bytes((codes as *mut u8).add(xfer), 0, codes_size - xfer);
+                    {
+                        user_try!(unsafe {
+                            crate::sys::user_memory::copy_bytes(
+                                m.0.as_ptr() as *const u8,
+                                codes as *mut u8,
+                                xfer,
+                            )
+                        });
+                        user_try!(super::user_memory::write_exact(
+                            codes + xfer as u64,
+                            &vec![0; codes_size - xfer]
+                        ));
                     }
                     0
                 }
@@ -822,7 +835,7 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             }
         }
         EVIOCSMASK => {
-            let (kind, codes_size, codes) = input_mask(arg);
+            let (kind, codes_size, codes) = user_try!(input_mask(arg));
             let n = mask_codes(kind);
             if n == 0 {
                 return Some(0);
@@ -833,7 +846,13 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             let mut m = Mask::default();
             let len = (n.div_ceil(64) * 8).min(codes_size);
             // SAFETY: guest buffer of `codes_size` bytes.
-            unsafe { std::ptr::copy_nonoverlapping(codes as *const u8, m.0.as_mut_ptr(), len) };
+            user_try!(unsafe {
+                crate::sys::user_memory::copy_bytes(
+                    codes as *const u8,
+                    m.0.as_mut_ptr() as *mut u8,
+                    len,
+                )
+            });
             match e.request::<Mask>(OP_MASK, MASK_SET | kind as u64, wire::bytes(&m)) {
                 Ok(_) => {
                     if let Some(masks) = &mut c.masks {
@@ -846,7 +865,7 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
         }
         EVIOCSCLOCKID => {
             // SAFETY: guest int.
-            let id = unsafe { (arg as *const i32).read_unaligned() };
+            let id = user_read!(arg, i32);
             if ![CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_BOOTTIME].contains(&id) {
                 return Some(neg(EINVAL));
             }
@@ -862,12 +881,14 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
             let mut info = AbsInfo::default();
             let n = size.min(size_of::<AbsInfo>());
             // SAFETY: guest buffer of `size` bytes.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    arg as *const u8,
-                    (&mut info as *mut AbsInfo).cast::<u8>(),
-                    n,
-                )
+            {
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(
+                        arg as *const u8,
+                        (&mut info as *mut AbsInfo).cast::<u8>() as *mut u8,
+                        n,
+                    )
+                })
             };
             e.command(OP_SET_ABS, (nr & ABS_MAX) as u64, wire::bytes(&info))
         }
@@ -880,7 +901,9 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                 let mut v = name.to_vec();
                 v.push(0);
                 // SAFETY: guest buffer of `size` bytes.
-                unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), arg as *mut u8, n) };
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(v.as_ptr() as *const u8, arg as *mut u8, n)
+                });
                 n as i64
             }
             // EVIOCGPHYS, EVIOCGUNIQ: virtual devices have neither.
@@ -927,12 +950,14 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
                         };
                         let n = size.min(size_of_val(&info));
                         // SAFETY: guest buffer of `size` bytes.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                (&info as *const AbsInfo).cast::<u8>(),
-                                arg as *mut u8,
-                                n,
-                            )
+                        {
+                            user_try!(unsafe {
+                                crate::sys::user_memory::copy_bytes(
+                                    (&info as *const AbsInfo).cast::<u8>() as *const u8,
+                                    arg as *mut u8,
+                                    n,
+                                )
+                            })
                         };
                         0
                     }
@@ -948,7 +973,7 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
 /// `EVIOCGMTSLOTS`: `{ u32 code; i32 values[] }`, one value per slot.
 fn mt_slots(d: &Descriptor, state: &State, size: usize, arg: u64) -> i64 {
     // SAFETY: guest u32.
-    let code = unsafe { (arg as *const u32).read_unaligned() };
+    let code = user_read!(arg, u32);
     if d.mt_slots == 0 || code > u16::MAX as u32 || !is_mt_axis(code as u16) {
         return neg(EINVAL);
     }
@@ -956,7 +981,7 @@ fn mt_slots(d: &Descriptor, state: &State, size: usize, arg: u64) -> i64 {
     for slot in 0..(d.mt_slots as usize).min(room) {
         let v = state.mt_value(slot, code as u16);
         // SAFETY: guest buffer of `size` bytes, room for `room` values.
-        unsafe { ((arg + 4) as *mut i32).add(slot).write_unaligned(v) };
+        user_write!(arg + 4 + slot as u64 * 4, i32, v);
     }
     0
 }
