@@ -190,15 +190,23 @@ mod tests {
         extras(&callback_intent(&result), None, None, 0);
     }
 
+    fn node(host: &Arc<AppHost>) -> aim_binder_host::local::LocalService {
+        let process = &host.process;
+        let Binder::Local(ptr) = process.add_service(Arc::new(InternalEvents::new(host.clone())))
+        else {
+            unreachable!()
+        };
+        process.local_service(ptr).unwrap()
+    }
+
     #[test]
-    fn internal_event_records_match_the_java_bridge() {
+    fn restarted_intent_matches_the_java_bridge_for_each_stay_stopped_flag() {
         let Some(root) = aim_paths::original_image_with("system/framework/framework-res.apk")
         else {
             return;
         };
         for stay_stopped in [false, true] {
-            let process = crate::test_process(1000);
-            let host = AppHost::new(process.clone());
+            let host = AppHost::new(crate::test_process(1000));
             let mut framework =
                 super::super::resources::Framework::load(&root, 320, "en-US").unwrap();
             framework
@@ -206,12 +214,7 @@ mod tests {
                 .flags
                 .insert("android.content.pm.stay_stopped".into(), stay_stopped);
             assert!(host.framework.set(framework).is_ok());
-            let Binder::Local(ptr) =
-                process.add_service(Arc::new(InternalEvents::new(host.clone())))
-            else {
-                unreachable!()
-            };
-            let node = process.local_service(ptr).unwrap();
+            let node = node(&host);
             let mut request = Parcel::new();
             events::PrepareRestarted {
                 package_name: Some("a.b".into()),
@@ -245,99 +248,113 @@ mod tests {
                     matches!(values["android.intent.extra.TIME"], Value::Long(t) if t >= 0 && t <= super::super::alarm_service::elapsed_ms())
                 );
             }
-            for restore in [false, true] {
-                for instant in [false, true] {
-                    let mut request = Parcel::new();
-                    events::PrepareDataCleared {
-                        package_name: Some("a.b".into()),
-                        uid: -1,
-                        user_id: 10,
-                        restore,
-                        instant,
-                    }
-                    .write(&mut request);
-                    let reply = node
-                        .transact(events::PREPARE_DATA_CLEARED, &request, false)
-                        .unwrap();
-                    let bytes = events::read_prepare_data_cleared_reply(&mut reply.reader())
-                        .unwrap()
-                        .unwrap()
-                        .unwrap();
-                    let (intent, asynchronous) = read_record(&bytes);
-                    assert!(!asynchronous);
-                    let values = extras(
-                        &intent,
-                        Some("android.intent.action.PACKAGE_DATA_CLEARED"),
-                        Some("package:a.b"),
-                        0x05000000,
-                    );
-                    assert_eq!(values["android.intent.extra.UID"], Value::Int(-1));
-                    assert_eq!(values["android.intent.extra.user_handle"], Value::Int(10));
-                    assert_eq!(
-                        values.get("android.intent.extra.IS_RESTORE"),
-                        restore.then_some(&Value::Bool(true))
-                    );
-                    assert_eq!(
-                        values.contains_key("android.intent.extra.PACKAGE_NAME"),
-                        instant
-                    );
-                }
-            }
-            for code in [events::PREPARE_RESTARTED, events::PREPARE_DATA_CLEARED] {
-                let mut request = Parcel::new();
-                if code == events::PREPARE_RESTARTED {
-                    events::PrepareRestarted {
-                        package_name: None,
-                        uid: 10123,
-                        flags: 0,
-                    }
-                    .write(&mut request);
-                } else {
-                    events::PrepareDataCleared {
-                        package_name: None,
-                        uid: 10123,
-                        user_id: 0,
-                        restore: false,
-                        instant: false,
-                    }
-                    .write(&mut request);
-                }
-                let reply = node.transact(code, &request, false).unwrap();
-                let error = reply.reader().read_exception().unwrap().unwrap_err();
-                assert_eq!(error.code, EX_NULL_POINTER);
-                assert_eq!(error.message, "ssp");
-            }
-            let mut request = Parcel::new();
-            events::Broadcast {
-                intent: Some(Vec::new()),
-                user_id: 0,
-                instant: false,
-                allow_list: None,
-            }
-            .write(&mut request);
-            let reply = node.transact(events::BROADCAST, &request, false).unwrap();
-            let error = reply.reader().read_exception().unwrap().unwrap_err();
-            assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
-            assert!(error.message.contains("#2167"));
-            let mut call = Call {
-                code: events::BROADCAST,
-                flags: 0,
-                sender_pid: 42,
-                sender_euid: 10123,
-                data: request.reader(),
-            };
-            assert_eq!(
-                InternalEvents::new(host)
-                    .transact(&mut call)
-                    .unwrap()
-                    .reader()
-                    .read_exception()
-                    .unwrap()
-                    .unwrap_err()
-                    .code,
-                EX_SECURITY
-            );
         }
+    }
+
+    #[test]
+    fn data_cleared_intent_matches_the_java_bridge_for_restore_and_instant_apps() {
+        let process = crate::test_process(1000);
+        let host = AppHost::new(process);
+        let node = node(&host);
+        for restore in [false, true] {
+            for instant in [false, true] {
+                let mut request = Parcel::new();
+                events::PrepareDataCleared {
+                    package_name: Some("a.b".into()),
+                    uid: -1,
+                    user_id: 10,
+                    restore,
+                    instant,
+                }
+                .write(&mut request);
+                let reply = node
+                    .transact(events::PREPARE_DATA_CLEARED, &request, false)
+                    .unwrap();
+                let bytes = events::read_prepare_data_cleared_reply(&mut reply.reader())
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let (intent, asynchronous) = read_record(&bytes);
+                assert!(!asynchronous);
+                let values = extras(
+                    &intent,
+                    Some("android.intent.action.PACKAGE_DATA_CLEARED"),
+                    Some("package:a.b"),
+                    0x05000000,
+                );
+                assert_eq!(values["android.intent.extra.UID"], Value::Int(-1));
+                assert_eq!(values["android.intent.extra.user_handle"], Value::Int(10));
+                assert_eq!(
+                    values.get("android.intent.extra.IS_RESTORE"),
+                    restore.then_some(&Value::Bool(true))
+                );
+                assert_eq!(
+                    values.contains_key("android.intent.extra.PACKAGE_NAME"),
+                    instant
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn internal_events_reject_null_packages_unserved_broadcasts_and_foreign_callers() {
+        let process = crate::test_process(1000);
+        let host = AppHost::new(process);
+        let node = node(&host);
+        for code in [events::PREPARE_RESTARTED, events::PREPARE_DATA_CLEARED] {
+            let mut request = Parcel::new();
+            if code == events::PREPARE_RESTARTED {
+                events::PrepareRestarted {
+                    package_name: None,
+                    uid: 10123,
+                    flags: 0,
+                }
+                .write(&mut request);
+            } else {
+                events::PrepareDataCleared {
+                    package_name: None,
+                    uid: 10123,
+                    user_id: 0,
+                    restore: false,
+                    instant: false,
+                }
+                .write(&mut request);
+            }
+            let reply = node.transact(code, &request, false).unwrap();
+            let error = reply.reader().read_exception().unwrap().unwrap_err();
+            assert_eq!(error.code, EX_NULL_POINTER);
+            assert_eq!(error.message, "ssp");
+        }
+        let mut request = Parcel::new();
+        events::Broadcast {
+            intent: Some(Vec::new()),
+            user_id: 0,
+            instant: false,
+            allow_list: None,
+        }
+        .write(&mut request);
+        let reply = node.transact(events::BROADCAST, &request, false).unwrap();
+        let error = reply.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
+        assert!(error.message.contains("#2167"));
+        let mut call = Call {
+            code: events::BROADCAST,
+            flags: 0,
+            sender_pid: 42,
+            sender_euid: 10123,
+            data: request.reader(),
+        };
+        assert_eq!(
+            InternalEvents::new(host)
+                .transact(&mut call)
+                .unwrap()
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_SECURITY
+        );
     }
 
     fn read_record(bytes: &[u8]) -> (Vec<u8>, bool) {
