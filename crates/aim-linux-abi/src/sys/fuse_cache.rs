@@ -1212,7 +1212,7 @@ mod tests {
             self.device.take();
             self.daemon.take().unwrap().join().unwrap();
             self.broker.take().unwrap().join().unwrap().unwrap();
-            fs::remove_dir_all(self.key.transport().parent().unwrap()).unwrap();
+            assert!(!self.key.transport().parent().unwrap().exists());
         }
     }
     fn wait(condition: impl Fn() -> bool) {

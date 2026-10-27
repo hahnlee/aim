@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 mod broker;
+mod transport;
 pub const FUSE_DEV_IOC_CLONE: u64 = 0x8004e500;
 pub const DEVICE_MARKER: i32 = 0x4655;
 pub const FILE_MARKER: i32 = 0x4656;
@@ -259,71 +260,29 @@ pub fn session_for_fd(fd: RawFd) -> Result<SessionKey, Errno> {
     let text = String::from_utf8(body).map_err(|_| EIO)?;
     Ok(SessionKey(PathBuf::from(text)))
 }
-/// Allocate transport independently of the possibly long guest runtime path.
-/// The local descriptor address has the longest suffix; validate it as well.
-fn transport_directory() -> Result<PathBuf, Errno> {
-    use std::os::unix::ffi::OsStrExt;
-    let capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
-        .sun_path
-        .len();
-    let candidates = [std::env::temp_dir(), PathBuf::from("/tmp")];
-    for base in candidates {
-        for _ in 0..16 {
-            let directory = base.join(format!("af-{:016x}", id()?));
-            let local = directory.join("c.dffffffffffffffff");
-            if local.as_os_str().as_bytes().len() >= capacity {
-                break;
-            }
-            match fs::create_dir(&directory) {
-                Ok(()) => {
-                    if let Err(error) =
-                        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-                    {
-                        let _ = fs::remove_dir(&directory);
-                        return Err(io_error(error));
-                    }
-                    return Ok(directory);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(io_error(error)),
-            }
-        }
-    }
-    Err(36)
-}
 struct TransportAllocation {
-    directory: PathBuf,
+    directory: transport::Directory,
     entry: Option<PathBuf>,
-    identity: (u64, u64),
     connections: PathBuf,
 }
 impl Drop for TransportAllocation {
     fn drop(&mut self) {
-        use std::os::unix::fs::MetadataExt;
         if let Some(entry) = &self.entry {
             let _ = fs::remove_file(entry);
         }
         if let Some(number) = self
             .directory
+            .path
             .file_name()
             .and_then(|name| name.to_str())
             .and_then(|name| name.strip_prefix("af-"))
             .and_then(|name| u64::from_str_radix(name, 16).ok())
         {
             let record = self.connections.join(number.to_string());
-            let expected = self.directory.join("c.sock");
+            let expected = self.directory.path.join("c.sock");
             if fs::read(&record).is_ok_and(|bytes| bytes == expected.as_os_str().as_encoded_bytes())
             {
                 let _ = fs::remove_file(record);
-            }
-        }
-        if fs::symlink_metadata(&self.directory).is_ok_and(|metadata| {
-            metadata.is_dir() && (metadata.dev(), metadata.ino()) == self.identity
-        }) {
-            if let Err(error) = fs::remove_dir_all(&self.directory) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("owned FUSE transport cleanup: {error}");
-                }
             }
         }
     }
@@ -344,18 +303,15 @@ pub fn open_device(runtime_dir: &Path, flags: i32) -> Result<RawFd, Errno> {
 }
 fn open_device_with_helper(runtime_dir: &Path, flags: i32, helper: &Path) -> Result<RawFd, Errno> {
     fs::create_dir_all(runtime_dir).map_err(io_error)?;
-    let directory = transport_directory()?;
-    use std::os::unix::fs::MetadataExt;
-    let metadata = fs::symlink_metadata(&directory).map_err(io_error)?;
+    let directory = transport::allocate()?;
     let mut allocation = TransportAllocation {
-        directory: directory.clone(),
+        directory,
         entry: None,
-        identity: (metadata.dev(), metadata.ino()),
         connections: runtime_dir.join("fuse-connections"),
     };
     let registry = runtime_dir.join("fuse-sessions");
     fs::create_dir_all(&registry).map_err(io_error)?;
-    let entry = registry.join(directory.file_name().ok_or(EINVAL)?);
+    let entry = registry.join(allocation.directory.path.file_name().ok_or(EINVAL)?);
     allocation.entry = Some(entry.clone());
     use std::os::unix::fs::OpenOptionsExt;
     let mut record = fs::OpenOptions::new()
@@ -365,10 +321,13 @@ fn open_device_with_helper(runtime_dir: &Path, flags: i32, helper: &Path) -> Res
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&entry)
         .map_err(io_error)?;
-    std::io::Write::write_all(&mut record, directory.as_os_str().as_encoded_bytes())
-        .map_err(io_error)?;
+    std::io::Write::write_all(
+        &mut record,
+        allocation.directory.path.as_os_str().as_encoded_bytes(),
+    )
+    .map_err(io_error)?;
     record.sync_all().map_err(io_error)?;
-    let key = SessionKey(directory.join("c.sock"));
+    let key = SessionKey(allocation.directory.path.join("c.sock"));
     // The explicit helper CLI starts before guest loader/global state initialization.
     let mut child = std::process::Command::new(helper)
         .arg("--fuse-broker")
@@ -392,6 +351,9 @@ fn open_device_with_helper(runtime_dir: &Path, flags: i32, helper: &Path) -> Res
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    // Only the broker needs a lifetime lock after startup. Do not carry the
+    // opener's lease into guest forks; the reaper retains cleanup identity.
+    allocation.directory.release();
     let result = open_on_key(&key, flags, OPEN_DEVICE, &[]);
     if result.is_err() {
         let _ = rpc(&key, ABORT, 0, &[]);
