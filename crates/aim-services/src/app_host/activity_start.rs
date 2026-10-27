@@ -566,13 +566,7 @@ impl AppHost {
         let (task, new) = match existing {
             Some(task) => (task, None),
             None => {
-                let id = self.new_task(
-                    uid,
-                    package,
-                    &request.class,
-                    super::freeform::Activity::from(&info),
-                    request.source_task,
-                )?;
+                let id = self.new_task(uid, package, &request.class, &info, request.source_task)?;
                 let task = stack::Task {
                     id,
                     affinity: affinity.clone(),

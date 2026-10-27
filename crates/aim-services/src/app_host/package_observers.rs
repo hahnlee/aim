@@ -378,9 +378,30 @@ mod tests {
         let owner = crate::package::observers::Owner::new(ServiceOwner::Local(
             process.local_service(ptr).unwrap(),
         ));
+        let params = host.tasks.launch_params(host.data().unwrap()).unwrap();
+        let saved = host
+            .data()
+            .unwrap()
+            .join("system_ce/0/launch_params/a.b-.Main.xml");
+        std::fs::create_dir_all(saved.parent().unwrap().parent().unwrap()).unwrap();
+        params
+            .save(
+                0,
+                &crate::package::preferred::unflatten("a.b/.Main").unwrap(),
+                super::super::launch_params::Params {
+                    windowing_mode: 5,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        params.flush();
+        assert!(saved.exists());
         owner.added("a.b", 10123).unwrap();
         owner.changed("a.b", 1010123).unwrap();
+        assert!(saved.exists());
         owner.removed("a.b", 1010123).unwrap();
+        params.flush();
+        assert!(!saved.exists());
         assert_eq!(
             *observer.log.lock().unwrap(),
             vec![
@@ -447,7 +468,8 @@ mod tests {
             .transact(events::PACKAGE_ADDED, &p, false)
             .unwrap();
         assert_eq!(p.reader().read_exception().unwrap(), Err(closed()));
-        // Discovery, permission policy, background install control and the test observer.
-        assert_eq!(next.snapshot().unwrap().len(), 4);
+        // Discovery, permission policy, background install control, launch
+        // params and the test observer.
+        assert_eq!(next.snapshot().unwrap().len(), 5);
     }
 }

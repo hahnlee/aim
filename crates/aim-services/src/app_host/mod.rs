@@ -90,6 +90,7 @@ pub mod job_scheduler;
 pub mod job_store;
 pub mod kept;
 pub(crate) mod launch_inputs;
+mod launch_params;
 pub mod legacy_permission;
 pub mod locale_manager;
 pub mod lock_settings;

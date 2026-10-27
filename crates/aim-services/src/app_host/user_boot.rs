@@ -136,8 +136,8 @@ impl AppHost {
     /// system user, `LOCKED_BOOT_COMPLETED` while it is locked, its unlock,
     /// and the rest of its boot as `UserController` goes through it.
     /// `unlocking` runs the services' `onUserUnlocking`
-    /// (`USER_UNLOCK_MSG`); none of the app host's has an
-    /// `onUserUnlocked`.
+    /// (`USER_UNLOCK_MSG`); the activity-task owner's `onUserUnlocked`
+    /// follows in `finish_user_unlocked_completed` (`USER_UNLOCKED_MSG`).
     pub(super) fn finish_booting(
         self: &Arc<Self>,
         user: StartedUser,
@@ -205,6 +205,11 @@ impl AppHost {
     fn finish_user_unlocked_completed(self: &Arc<Self>, user: StartedUser) {
         if let Err(e) = self.user_logged_in(&user) {
             eprintln!("app host: user: logged in: {e}");
+        }
+        // `finishUserUnlockedCompleted` queues USER_UNLOCKED_MSG after
+        // `onUserLoggedIn`, before posting BOOT_COMPLETED.
+        if let Err(e) = self.activity_task_user_unlocked(USER) {
+            eprintln!("app host: activity task: user unlocked: {}", e.message);
         }
         eprintln!("app host: Posting BOOT_COMPLETED user #{USER}");
         self.broadcasts.send_from_system_with(

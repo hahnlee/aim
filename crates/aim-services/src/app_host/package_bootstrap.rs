@@ -163,6 +163,11 @@ impl PackageBootstrap {
     pub fn new(host: Arc<AppHost>) -> Self {
         let observers = Arc::new(super::package_observers::Registry::default());
         observers
+            .add_observer(Arc::new(super::launch_params::Observer(Arc::downgrade(
+                &host,
+            ))))
+            .expect("new package observer epoch is open");
+        observers
             .add_observer(Arc::new(super::package_observers::Discoveries(
                 Arc::downgrade(&host),
             )))
