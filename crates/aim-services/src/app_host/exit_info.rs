@@ -775,7 +775,7 @@ pub(super) fn fields(
 /// `ProtoOutputStream`'s writes: a scalar field only when it is not zero
 /// or empty, a repeated message always.
 #[derive(Default)]
-struct ProtoWriter(Vec<u8>);
+pub(super) struct ProtoWriter(pub(super) Vec<u8>);
 
 impl ProtoWriter {
     fn raw_varint(&mut self, mut value: u64) {
@@ -787,7 +787,7 @@ impl ProtoWriter {
     }
 
     /// An `int32` (sign-extended) or `int64` field.
-    fn varint(&mut self, number: u64, value: i64) {
+    pub(super) fn varint(&mut self, number: u64, value: i64) {
         if value != 0 {
             self.raw_varint(number << 3);
             self.raw_varint(value as u64);
@@ -800,11 +800,11 @@ impl ProtoWriter {
         }
     }
 
-    fn string(&mut self, number: u64, value: Option<&str>) {
+    pub(super) fn string(&mut self, number: u64, value: Option<&str>) {
         self.bytes(number, value.unwrap_or_default().as_bytes());
     }
 
-    fn message(&mut self, number: u64, value: &[u8]) {
+    pub(super) fn message(&mut self, number: u64, value: &[u8]) {
         self.raw_varint(number << 3 | 2);
         self.raw_varint(value.len() as u64);
         self.0.extend_from_slice(value);
