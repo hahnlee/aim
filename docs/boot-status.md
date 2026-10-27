@@ -3495,11 +3495,12 @@ A late reserve-finalization failure publishes the committed main and the next
 write restores the reserve. Original ResilientAtomicFile agrees on partial main
 failure, empty retained reserve, descriptor-open failure and successful retry. Domain validation failures leave the directory unwritten, complete
 user XML survives, and a successful main commit changes the owner to restoration
-mode. An explicit exclusive recovery plan claims regular settings inputs with
-pinned descriptors/exact bytes and directory roles with pinned identity/timestamps,
-then follows original backup/main/reserve selection and failRead cleanup (#912).
-Backup directories fail open and fall through to main; unused reserve directories
-are not parsed. Backup selection attempts main/reserve cleanup before parsing:
+mode. Exclusive settings recovery now claims unopened roles by identity/metadata and
+reads only the selected stream, follows backup-open fallback without reading
+unused unreadable roles, preserves claims through initial-write retry, and
+reports selected nonregular streams or inaccessible inventory parents as
+UnsupportedOperation (#912).
+Backup selection attempts main/reserve cleanup before parsing:
 empty directories are removed, while nonempty directory deletion failure is
 recorded and the directory is preserved, as original File.delete does. Selected
 main/reserve directories expose their open error. Four additional original ART
@@ -5521,18 +5522,11 @@ flags and the original disabled domain ID, does not register a UID, reads only
 permissions/static/SDK-library children, and replaces the disabled setting only
 after the body completes. Each factory own migration state is fresh; shared
 permissions affect the UID owner visible at that event even if a later file error
-prevents factory publication. Factory fixed markers remain false. Missing code
-paths are FatalInput; nullable factory names remain an explicit unavailable owner
-(#975). Actual original Settings reads null and empty factory names as separate
-keys and replaces duplicate null keys with the last path/appId/version. Original
-PackageSetting.getPackageName retains null; writeDisabledSysPackageLPr fails on
-that name with NullPointerException. A direct original read/get/write probe now
-records this contract. Native nullable identity representation is still missing
-and #975 remains open; the native Owner error preserves selected input. The
-expanded original ART contract probe passes without skips (58.79s), including
-null/empty identity separation, last-null-key replacement and original serializer
-NullPointerException. This turn changes fixture/contract evidence only; native
-read/query representation still requires an explicit nullable factory model. Complete factory/group post-read binding, detached/retained object/user
+prevents factory publication. Factory fixed markers remain false. Native factory read/query preserves distinct null/empty identities and last-
+null-key replacement, missing code paths remain FatalInput, null-name
+serialization fails as original, and nullable factory scan/permission
+publication remains explicit UnsupportedOperation (#917).
+Complete factory/group post-read binding, detached/retained object/user
 identity and native PMS/SystemServer lifecycle remain #914/#858/#798.
 Fifteen text/ABX factory fixtures agree with actual original Settings.readSettingsLPw
 on SYSTEM/priv-app flags, appId/shared status, disabled domain ID, version/path,

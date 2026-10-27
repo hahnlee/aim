@@ -44,6 +44,8 @@ pub struct Settings {
     pub packages: Vec<Package>,
     /// `mDisabledSysPackages`: the system packages an update replaces.
     pub disabled_system_packages: Vec<Package>,
+    /// The distinct null key accepted by mDisabledSysPackages.
+    pub unnamed_disabled_system_package: Option<PackageSetting<()>>,
     pub shared_users: Vec<SharedUser>,
     /// `mRenamedPackages`: new name, old name.
     pub renamed_packages: Vec<(String, String)>,
@@ -52,6 +54,21 @@ pub struct Settings {
     /// Imported IntentFilterVerificationInfo statuses, keyed by the Settings owner
     /// name (not the child XML packageName). Only used for legacy migration.
     pub legacy_domain_info: std::collections::BTreeMap<String, i32>,
+}
+
+/// Borrowed factory owners retain their original nullable identity.
+pub enum FactoryRef<'a> {
+    Named(&'a Package),
+    Unnamed(&'a PackageSetting<()>),
+}
+
+impl FactoryRef<'_> {
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Named(package) => Some(&package.name),
+            Self::Unnamed(_) => None,
+        }
+    }
 }
 
 /// `Settings.VersionInfo`.
@@ -87,12 +104,14 @@ pub enum PermissionOwner {
 
 /// A `PackageSetting`: a `<package>`, or an `<updated-package>` (the
 /// system package an update replaced), whose flags the reader derives.
+pub type Package = PackageSetting<String>;
+
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Package {
+pub struct PackageSetting<N> {
     /// SettingBase runtime marker; not serialized in packages.xml.
     pub install_permissions_fixed: bool,
     pub transient: super::owner::transient::State,
-    pub name: String,
+    pub name: N,
     pub real_name: Option<String>,
     pub code_path: String,
     pub legacy_native_library_path: Option<String>,
@@ -151,7 +170,56 @@ pub struct Package {
     pub split_versions: Vec<(String, i32)>,
 }
 
-impl Package {
+impl<N> PackageSetting<N> {
+    fn with_name<M>(self, name: M) -> PackageSetting<M> {
+        PackageSetting {
+            name,
+            install_permissions_fixed: self.install_permissions_fixed,
+            transient: self.transient,
+            real_name: self.real_name,
+            code_path: self.code_path,
+            legacy_native_library_path: self.legacy_native_library_path,
+            primary_cpu_abi: self.primary_cpu_abi,
+            secondary_cpu_abi: self.secondary_cpu_abi,
+            cpu_abi_override: self.cpu_abi_override,
+            flags: self.flags,
+            private_flags: self.private_flags,
+            last_modified_time: self.last_modified_time,
+            last_update_time: self.last_update_time,
+            legacy_first_install_time: self.legacy_first_install_time,
+            version_code: self.version_code,
+            target_sdk_version: self.target_sdk_version,
+            restrict_update_hash: self.restrict_update_hash,
+            scanned_as_stopped_system_app: self.scanned_as_stopped_system_app,
+            app_id: self.app_id,
+            shared_user: self.shared_user,
+            shared_user_app_id: self.shared_user_app_id,
+            is_sdk_library: self.is_sdk_library,
+            install_source: self.install_source,
+            volume_uuid: self.volume_uuid,
+            category_hint: self.category_hint,
+            update_available: self.update_available,
+            force_queryable: self.force_queryable,
+            pending_restore: self.pending_restore,
+            debuggable: self.debuggable,
+            leaving_shared_user: self.leaving_shared_user,
+            old_paths: self.old_paths,
+            base_revision_code: self.base_revision_code,
+            page_size_compat: self.page_size_compat,
+            loading_progress: self.loading_progress,
+            loading_completed_time: self.loading_completed_time,
+            domain_set_id: self.domain_set_id,
+            app_metadata_file_path: self.app_metadata_file_path,
+            app_metadata_source: self.app_metadata_source,
+            uses_sdk_libraries: self.uses_sdk_libraries,
+            uses_static_libraries: self.uses_static_libraries,
+            signatures: self.signatures,
+            key_set_data: self.key_set_data,
+            mime_groups: self.mime_groups,
+            split_versions: self.split_versions,
+        }
+    }
+
     /// packages.xml uses one sharedUserId for both IDs; initial APEX scans
     /// later change only appId to INVALID_UID, leaving the group relationship.
     pub fn shared_app_id(&self) -> Option<i32> {
@@ -614,27 +682,12 @@ impl Settings {
         reader: &mut aim_android_xml::pull::Reader<'_>,
         start: &Element,
         mut permissions: impl FnMut(
-            &mut Package,
+            &mut PackageSetting<Option<String>>,
             &mut aim_android_xml::pull::Reader<'_>,
         ) -> Result<(), ReadError>,
-    ) -> Result<usize, ReadError> {
+    ) -> Result<Option<String>, ReadError> {
         use aim_android_xml::pull::Event;
-        if string(start, "codePath").is_none() {
-            return Err(ReadError::FatalInput("factory code path is null".into()));
-        }
-        let mut package = package_attributes(start)?.ok_or_else(|| {
-            ReadError::Owner("nullable factory package identity is not represented".into())
-        })?;
-        package.flags = FLAG_SYSTEM;
-        package.private_flags = if package.code_path.contains("/priv-app/") {
-            PRIVATE_FLAG_PRIVILEGED
-        } else {
-            0
-        };
-        package.domain_set_id = Some("00000000-0000-0000-0000-000000000000".into());
-        if defaulted(start.int("userId"), 0) <= 0 {
-            package.shared_user_app_id = Some(package.app_id);
-        }
+        let mut package = factory_attributes(start)?;
         let outer = reader.depth();
         loop {
             match reader.next()? {
@@ -651,18 +704,39 @@ impl Settings {
         Ok(self.put_factory(package))
     }
 
-    fn put_factory(&mut self, package: Package) -> usize {
-        let index = self
-            .disabled_system_packages
-            .iter()
-            .position(|p| p.name == package.name)
-            .unwrap_or(self.disabled_system_packages.len());
-        if index == self.disabled_system_packages.len() {
-            self.disabled_system_packages.push(package);
-        } else {
-            self.disabled_system_packages[index] = package;
+    /// getDisabledSystemPkgLPr: null and empty are different map keys.
+    pub fn disabled_system_package(&self, name: Option<&str>) -> Option<FactoryRef<'_>> {
+        match name {
+            None => self
+                .unnamed_disabled_system_package
+                .as_ref()
+                .map(FactoryRef::Unnamed),
+            Some(name) => self
+                .disabled_system_packages
+                .iter()
+                .find(|package| package.name == name)
+                .map(FactoryRef::Named),
         }
-        index
+    }
+
+    fn put_factory(&mut self, package: PackageSetting<Option<String>>) -> Option<String> {
+        let name = package.name.clone();
+        if let Some(name) = &name {
+            let package = package.with_name(name.clone());
+            let index = self
+                .disabled_system_packages
+                .iter()
+                .position(|p| p.name == *name)
+                .unwrap_or(self.disabled_system_packages.len());
+            if index == self.disabled_system_packages.len() {
+                self.disabled_system_packages.push(package);
+            } else {
+                self.disabled_system_packages[index] = package;
+            }
+        } else {
+            self.unnamed_disabled_system_package = Some(package.with_name(()));
+        }
+        name
     }
 
     /// Preserve the complete consumed persistence document while applying its
@@ -1199,6 +1273,9 @@ impl Settings {
         for p in &mut s.disabled_system_packages {
             p.shared_user |= shared.contains(&p.app_id);
         }
+        if let Some(package) = &mut s.unnamed_disabled_system_package {
+            package.shared_user |= shared.contains(&package.app_id);
+        }
         Ok(s)
     }
 }
@@ -1279,7 +1356,15 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
     let (Some(name), Some(code_path)) = (string(e, "name"), string(e, "codePath")) else {
         return Ok(None);
     };
-    let mut p = Package {
+    Ok(Some(common_package_attributes(e, name, code_path)))
+}
+
+fn common_package_attributes<N: Default>(
+    e: &Element,
+    name: N,
+    code_path: String,
+) -> PackageSetting<N> {
+    let mut p = PackageSetting {
         name,
         real_name: string(e, "realName"),
         code_path,
@@ -1301,7 +1386,7 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
         category_hint: CATEGORY_UNDEFINED,
         // readPackageLPw/readDisabledSysPackageLPw construct a fresh setting.
         leaving_shared_user: Some(false),
-        ..Package::default()
+        ..PackageSetting::default()
     };
     // `userId` and `sharedUserId` are the app id's historical names.
     p.app_id = defaulted(e.int("userId"), 0);
@@ -1309,11 +1394,11 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
         p.app_id = defaulted(e.int("sharedUserId"), 0);
         p.shared_user = p.app_id > 0;
     }
-    Ok(Some(p))
+    p
 }
 
 /// The elements both kinds of package hold.
-fn libraries(p: &mut Package, child: &Element) -> Result<bool, String> {
+fn libraries<N>(p: &mut PackageSetting<N>, child: &Element) -> Result<bool, String> {
     match child.name.as_str() {
         "uses-static-lib" => {
             let version = defaulted(child.long("version"), -1);
@@ -1344,13 +1429,29 @@ fn libraries(p: &mut Package, child: &Element) -> Result<bool, String> {
     Ok(true)
 }
 
-/// `readDisabledSysPackageLPw`.
-fn updated_package(e: &Element) -> Result<Package, String> {
-    let mut p = package_attributes(e)?.ok_or("an updated package without a name or code path")?;
-    p.flags = FLAG_SYSTEM;
-    if p.code_path.contains("/priv-app/") {
-        p.private_flags = PRIVATE_FLAG_PRIVILEGED;
+fn factory_attributes(start: &Element) -> Result<PackageSetting<Option<String>>, ReadError> {
+    let code_path = string(start, "codePath")
+        .ok_or_else(|| ReadError::FatalInput("factory code path is null".into()))?;
+    let mut package = common_package_attributes(start, string(start, "name"), code_path);
+    package.flags = FLAG_SYSTEM;
+    package.private_flags = if package.code_path.contains("/priv-app/") {
+        PRIVATE_FLAG_PRIVILEGED
+    } else {
+        0
+    };
+    package.domain_set_id = Some("00000000-0000-0000-0000-000000000000".into());
+    if defaulted(start.int("userId"), 0) <= 0 {
+        package.shared_user_app_id = Some(package.app_id);
     }
+    Ok(package)
+}
+
+/// `readDisabledSysPackageLPw`.
+fn updated_package(e: &Element) -> Result<PackageSetting<Option<String>>, String> {
+    let mut p = factory_attributes(e).map_err(|error| error.to_string())?;
+    // Persistence projection excludes runtime domain/group bindings.
+    p.domain_set_id = None;
+    p.shared_user_app_id = None;
     for child in e.children() {
         libraries(&mut p, child)?;
     }
@@ -2232,5 +2333,137 @@ mod incremental_package_tests {
         assert!(read(b"<package><proper-signing-keyset identifier='2'/><defined-keyset identifier='bad'/></package>", &mut actual, &mut refs).is_err());
         assert_eq!(actual.key_set_data.proper_signing_key_set, 2);
         assert_eq!(refs, BTreeMap::from([(2, 1)]));
+    }
+}
+
+#[cfg(test)]
+mod factory_identity_tests {
+    use super::*;
+    use crate::package::owner::app_ids::AppIds;
+
+    #[test]
+    fn null_and_empty_factory_names_keep_distinct_owners_and_replace_null_keys() {
+        // The same records as LegacyRestoreOracle.verifyNullableFactoryNames,
+        // pinned to actual original Settings.readSettingsLPw/getDisabledSystemPkgLPr.
+        let xml = b"<packages><updated-package codePath='/system/app/first' userId='10003' version='1'/><updated-package name='' codePath='/system/app/empty' userId='10004' version='2'/><updated-package codePath='/system/app/last' userId='10005' version='3'/></packages>";
+        let root = aim_android_xml::read(xml).unwrap();
+        let mut explicit_null = root.clone();
+        for node in &mut explicit_null.content {
+            if let aim_android_xml::Node::Element(child) = node
+                && !child.attrs.iter().any(|(name, _)| name == "name")
+            {
+                child
+                    .attrs
+                    .push(("name".into(), aim_android_xml::Value::Null));
+            }
+        }
+        for bytes in [
+            xml.to_vec(),
+            aim_android_xml::abx::write(&root).unwrap(),
+            aim_android_xml::abx::write(&explicit_null).unwrap(),
+        ] {
+            let mut settings = Settings::default();
+            let mut ids = AppIds::default();
+            let mut attempt = PackageReadAttempt::default();
+            let mut owners = native_read::NativeReaders::new(vec![0]).unwrap();
+            settings
+                .read_owned_document(&bytes, &mut ids, &mut attempt, true, &mut owners)
+                .unwrap();
+            assert_eq!(ids, AppIds::default());
+            assert_eq!(settings.disabled_system_package(None).unwrap().name(), None);
+            assert_eq!(
+                settings.disabled_system_package(Some("")).unwrap().name(),
+                Some("")
+            );
+            assert_eq!(settings.disabled_system_packages.len(), 1);
+            assert_eq!(owners.factories.len(), 2);
+            assert!(owners.factories.contains_key(&None));
+            assert!(owners.factories.contains_key(&Some(String::new())));
+            let Some(FactoryRef::Unnamed(null)) = settings.disabled_system_package(None) else {
+                panic!("missing null-key owner");
+            };
+            assert!(std::ptr::eq(
+                null,
+                settings.unnamed_disabled_system_package.as_ref().unwrap()
+            ));
+            assert_eq!(
+                (null.app_id, null.code_path.as_str(), null.version_code),
+                (10005, "/system/app/last", 3)
+            );
+            assert!(!null.install_permissions_fixed);
+            let Some(FactoryRef::Named(empty)) = settings.disabled_system_package(Some("")) else {
+                panic!("missing empty-key owner");
+            };
+            assert!(std::ptr::eq(empty, &settings.disabled_system_packages[0]));
+            assert_eq!(
+                (
+                    empty.name.as_str(),
+                    empty.app_id,
+                    empty.code_path.as_str(),
+                    empty.version_code
+                ),
+                ("", 10004, "/system/app/empty", 2)
+            );
+            let imported = Settings::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+            assert_eq!(
+                imported
+                    .unnamed_disabled_system_package
+                    .as_ref()
+                    .unwrap()
+                    .app_id,
+                10005
+            );
+            assert_eq!(imported.disabled_system_packages[0].name, "");
+        }
+    }
+
+    #[test]
+    fn factory_permissions_are_nullable_and_failed_records_do_not_replace_the_owner() {
+        let mut settings = Settings::default();
+        let mut ids = AppIds::default();
+        let mut attempt = PackageReadAttempt::default();
+        let mut owners = native_read::NativeReaders::new(vec![0, 10]).unwrap();
+        let xml = b"<packages><updated-package codePath='/old' userId='10003'><perms><item name='old' granted='true'/></perms></updated-package><updated-package name='' codePath='/empty' userId='10004'><perms><item name='empty' granted='true'/></perms></updated-package><updated-package codePath='/new' userId='10005'><perms><item name='new' granted='true'/></perms></updated-package></packages>";
+        settings
+            .read_owned_document(xml, &mut ids, &mut attempt, true, &mut owners)
+            .unwrap();
+        for user in [0, 10] {
+            assert!(
+                owners.factories[&None]
+                    .permission(user, Some("new"))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                owners.factories[&None]
+                    .permission(user, Some("old"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                owners.factories[&Some("".into())]
+                    .permission(user, Some("empty"))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let before = settings.clone();
+        let error = settings.read_owned_document(b"<packages><updated-package codePath='/failed' userId='10006'><perms><item name='failed'/></perms><broken", &mut ids, &mut attempt, true, &mut owners).unwrap_err();
+        assert!(matches!(error, ReadError::File(_)));
+        assert_eq!(settings, before);
+        let error = settings
+            .read_owned_document(
+                b"<packages><updated-package/></packages>",
+                &mut ids,
+                &mut attempt,
+                true,
+                &mut owners,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            ReadError::FatalInput("factory code path is null".into())
+        );
+        assert_eq!(settings, before);
     }
 }
