@@ -8,7 +8,8 @@ use aim_service_aidl::{
 
 pub struct Runtime {
     owner: ServiceOwner,
-    policy: Arc<Owner>,
+    /// Keeps the policy's strong owner alive so the Weak callback can upgrade it.
+    _policy: Arc<Owner>,
     callback: Binder,
     started: Mutex<Option<Result<()>>>,
     closed: std::sync::atomic::AtomicBool,
@@ -147,7 +148,7 @@ impl System {
         }));
         let runtime = Arc::new(Runtime {
             owner: node,
-            policy,
+            _policy: policy,
             callback,
             started: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),

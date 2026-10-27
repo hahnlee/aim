@@ -55,7 +55,8 @@ pub struct Installed {
     pub installer_workers: crate::system::InstallerWorkers,
     pub runtime_worker: owner::runtime_metadata::worker::Worker,
     pub retained_versions: Vec<package::settings::Version>,
-    lease: DataLease,
+    /// Keeps the exclusive package-writer lock alive and runs its cleanup on drop.
+    _lease: DataLease,
 }
 struct DataLease {
     path: PathBuf,
@@ -469,7 +470,7 @@ pub fn install(
         installer_workers,
         runtime_worker,
         retained_versions,
-        lease,
+        _lease: lease,
     })
 }
 /// Runtime metadata is restored against the actual native scan before the root

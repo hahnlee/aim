@@ -72,9 +72,8 @@ impl Record<'_> {
 /// Concrete capability retained by native records and captured views. A typed
 /// producer must construct this after obtaining getIdentityHash from the lease.
 pub struct RecordLease {
-    /// The lease: another process's node, or this process's own where it
-    /// serves the bootstrap bridge.
-    owner: crate::system::ServiceOwner,
+    /// Keeps the record's Binder reference alive for native records and captured views.
+    _owner: crate::system::ServiceOwner,
     binder: Binder,
     pub hash: i32,
     pub kind: i32,
@@ -90,7 +89,7 @@ impl RecordLease {
             return Err("unknown preferred record lease kind".into());
         }
         Ok(Self {
-            owner,
+            _owner: owner,
             binder,
             hash,
             kind,
