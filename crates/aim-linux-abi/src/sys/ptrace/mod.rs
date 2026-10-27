@@ -390,6 +390,16 @@ pub(super) fn mem_io(
     }
 }
 
+/// Read or set a remote thread's nice value at its owner. The reply uses
+/// getpriority's positive `20 - nice` encoding, or zero for a change.
+pub fn remote_priority(pid: i32, tid: i32, nice: Option<i32>) -> i64 {
+    let req = request(agent::PRIORITY, |w| {
+        w.i32(tid);
+        w.opt(nice, |w, n| w.i32(n));
+    });
+    call(pid, &req).map_or_else(|e| e, |(r, _)| r)
+}
+
 /// prlimit64 setting another process's limit `res`, which the process
 /// applies (`cred::own_rlimit`): the limit before. The caller has checked
 /// `check_prlimit_permission`; `may_raise` is its CAP_SYS_RESOURCE.

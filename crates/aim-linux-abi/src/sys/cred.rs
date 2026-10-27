@@ -259,15 +259,6 @@ impl Identity {
         self.cap_eff & (1 << cap) != 0
     }
 
-    /// `can_nice`: lowering the nice value to `nice` needs CAP_SYS_NICE or
-    /// an RLIMIT_NICE of at least `20 - nice` (init sets 40, which lets
-    /// every service and app go down to -20). An unrecorded limit is the
-    /// one getrlimit reports, unlimited.
-    fn can_nice(&self, nice: i32) -> bool {
-        let limit = self.rlimits[RLIMIT_NICE].map_or(u64::MAX, |l| l.0);
-        self.capable(CAP_SYS_NICE) || (20 - nice) as u64 <= limit
-    }
-
     /// Credentials after execve of a file with no capabilities and no
     /// set-id bits (`cap_bprm_creds_from_file`).
     pub fn exec_transform(&mut self) {
@@ -655,13 +646,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     let entry = ENTRY.lock().unwrap().as_ref().map(|e| e.0.as_raw_fd());
     w.opt(entry, |w, fd| w.i32(fd));
     let tid = super::thread::gettid() as i32;
-    let nice = THREAD_NICE
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|t| t.0 == tid)
-        .map(|t| t.1);
-    w.opt(nice, |w, n| w.i32(n));
+    w.opt(Some(thread_nice(tid)), |w, n| w.i32(n));
     // The child has the parent's signal struct.
     let [adj, min] = super::procrec::oom();
     w.i32(adj);
@@ -669,18 +654,14 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
 }
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
-    let id = Identity::parse(&r.str()).unwrap_or_default();
+    let mut id = Identity::parse(&r.str()).unwrap_or_default();
     let by_pid = r.opt(|r| r.path());
     if let Some(fd) = r.opt(|r| r.i32()) {
         // SAFETY: the parent's entry fd, inherited and unused here.
         unsafe { libc::close(fd) };
     }
     if let Some(nice) = r.opt(|r| r.i32()) {
-        // SAFETY: trivial.
-        THREAD_NICE
-            .lock()
-            .unwrap()
-            .push((unsafe { libc::getpid() }, nice));
+        id.priority = nice;
     }
     let oom = [r.i32(), r.i32()];
     init(id, by_pid);
@@ -716,7 +697,7 @@ pub struct PeerCred {
 
 /// The identity of host process `pid`: this process's, or its entry in the
 /// process table.
-fn identity_of(pid: i32) -> Option<Identity> {
+pub(super) fn identity_of(pid: i32) -> Option<Identity> {
     // SAFETY: trivial.
     if pid == unsafe { libc::getpid() } {
         return Some(current());
@@ -1392,29 +1373,13 @@ const PRIO_USER: u64 = 2;
 /// so the guest sees what it set.
 static THREAD_NICE: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
 
-/// A thread of this process other than the main thread.
-fn other_thread(who: u64) -> Option<i32> {
-    let tid = who as i32;
-    (tid > 0 && !is_self(tid) && super::thread::find(tid).is_some()).then_some(tid)
-}
-
-/// The `who` of a call: for PRIO_PROCESS, 0 is the calling thread, as on
-/// Linux, and a thread of another process (true) is looked up as that
-/// process (Darwin has no per-thread nice value to reach).
-fn prio_who(a: &[u64; 6]) -> (u64, bool) {
-    if a[0] != PRIO_PROCESS {
-        return (a[1], false);
-    }
-    let who = if a[1] == 0 {
+/// PRIO_PROCESS names a thread; zero names the calling thread.
+fn prio_who(who: u64) -> i32 {
+    if who == 0 {
         super::thread::gettid() as i32
     } else {
-        a[1] as i32
-    };
-    let owner = super::thread::owner(who);
-    if owner != who && !is_self(owner) {
-        return (owner as u64, true);
+        who as i32
     }
-    (who as u32 as u64, false)
 }
 
 /// The processes a PRIO_PGRP or PRIO_USER call names, in the guest's pid
@@ -1429,7 +1394,7 @@ fn prio_targets(which: u64, who: u64) -> Option<Vec<i32>> {
         } else {
             who as i32
         };
-        return super::pidns::group(pgrp);
+        return super::pidns::group(pgrp).map(priority_threads);
     }
     // SAFETY: trivial.
     let me = unsafe { libc::getpid() };
@@ -1439,24 +1404,44 @@ fn prio_targets(which: u64, who: u64) -> Option<Vec<i32>> {
         who as u32
     };
     let members = super::pidns::members().unwrap_or_else(|| vec![me]);
-    Some(
+    Some(priority_threads(
         members
             .into_iter()
             .filter(|&p| identity_of(p).is_some_and(|id| id.uid[0] == uid))
             .collect(),
-    )
+    ))
 }
 
-/// The nice value of process `p`: this process's own, the host's for
-/// another.
+/// Linux's group/user priority calls visit every task, including workers.
+fn priority_threads(processes: Vec<i32>) -> Vec<i32> {
+    processes
+        .into_iter()
+        .flat_map(|p| {
+            if is_self(p) {
+                super::thread::with_table(|t| {
+                    if t.is_empty() {
+                        vec![p]
+                    } else {
+                        t.keys().copied().collect()
+                    }
+                })
+            } else {
+                super::procrec::threads(p)
+                    .map_or_else(|| vec![p], |t| t.into_iter().map(|t| t.tid).collect())
+            }
+        })
+        .collect()
+}
+
+/// The nice value of thread `p`, read at its owner.
 fn process_nice(p: i32) -> Result<i32, i64> {
     let r = getpriority([PRIO_PROCESS, p as u64, 0, 0, 0, 0]);
     if r < 0 { Err(r) } else { Ok(20 - r as i32) }
 }
 
 /// getpriority (141): the kernel's `20 - nice` for this process's (or one
-/// of its threads') priority; the host's for another process, and the
-/// highest of a group's or user's processes.
+/// of its threads') priority, and the highest of a group's or user's
+/// processes. Another process's agent reads its own per-thread state.
 pub fn getpriority(a: [u64; 6]) -> i64 {
     let mut a = a;
     if a[0] == PRIO_PROCESS {
@@ -1477,25 +1462,24 @@ pub fn getpriority(a: [u64; 6]) -> i64 {
             .min()
             .map_or(-(ESRCH as i64), |nice| 20 - nice as i64);
     }
-    let a = [a[0], prio_who(&a).0, a[2], a[3], a[4], a[5]];
-    if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
-        return 20 - read(|id| id.priority) as i64;
-    }
-    if a[0] == PRIO_PROCESS
-        && let Some(tid) = other_thread(a[1])
-    {
-        let nice = THREAD_NICE
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|t| t.0 == tid)
-            .map(|t| t.1);
-        return 20 - nice.unwrap_or_else(|| read(|id| id.priority)) as i64;
-    }
-    if a[0] == PRIO_PROCESS
-        && let Err(e) = super::pidns::check(a[1] as i32)
-    {
-        return e;
+    if a[0] == PRIO_PROCESS {
+        let tid = prio_who(a[1]);
+        let owner = super::thread::owner(tid);
+        if is_self(owner) {
+            return own_priority(tid, None, &current());
+        }
+        if let Err(e) = super::pidns::check(owner) {
+            return e;
+        }
+        if tid != owner {
+            return super::ptrace::remote_priority(owner, tid, None);
+        }
+        if let Some(id) = identity_of(owner) {
+            return 20 - id.priority as i64;
+        }
+        // A native namespace owner has no guest nice state or agent;
+        // Darwin owns its scheduling, so read that task's actual value.
+        a[1] = tid as u32 as u64;
     }
     // SAFETY: errno is cleared first because -1 is a valid priority.
     unsafe {
@@ -1526,26 +1510,83 @@ pub fn thread_nice(tid: i32) -> i32 {
 /// changed to `nice`: set now for the calling thread, by `tid` itself at its
 /// next syscall otherwise.
 fn nice_changed(tid: i32, nice: i32) {
-    if tid == super::thread::gettid() as i32 {
-        let policy = super::thread::current().map_or(0, |t| t.sched.policy.load(Ordering::SeqCst));
+    if let Some(th) = super::thread::current()
+        && th.tid == tid
+    {
+        let policy = th.sched.policy.load(Ordering::SeqCst);
         super::process::apply_host_sched(nice, policy);
     } else if let Some(th) = super::thread::find(tid) {
         th.sched.host_stale.store(true, Ordering::SeqCst);
     }
 }
 
-/// `set_one_prio`'s checks for another process `p`: the owner rule, then
-/// a lower nice value needs CAP_SYS_NICE or `p`'s RLIMIT_NICE.
-fn may_set_prio(p: i32, nice: i32) -> Result<(), i64> {
-    super::pidns::check(p)?;
-    if !may_renice(p) {
+/// Linux `set_one_prio_perm` followed by `can_nice`: ownership is
+/// checked even for an unchanged value; RLIMIT_NICE belongs to the target.
+fn renice_permission(caller: &Identity, target: &Identity, old: i32, nice: i32) -> Result<(), i64> {
+    if !caller.capable(CAP_SYS_NICE)
+        && caller.uid[1] != target.uid[0]
+        && caller.uid[1] != target.uid[1]
+    {
         return Err(-(EPERM as i64));
     }
-    let limit = target(p).rlimits[RLIMIT_NICE].map_or(u64::MAX, |l| l.0);
-    if nice < process_nice(p)? && !capable(CAP_SYS_NICE) && (20 - nice) as u64 > limit {
+    let limit = target.rlimits[RLIMIT_NICE].map_or(u64::MAX, |l| l.0);
+    if nice < old && !caller.capable(CAP_SYS_NICE) && (20 - nice) as u64 > limit {
         return Err(-(EACCES as i64));
     }
     Ok(())
+}
+
+/// Read or change a thread of this process, including calls from its
+/// agent. Success stores the value here and schedules the host update on
+/// the target thread; Darwin refuses remote raises of task importance.
+pub(super) fn own_priority(tid: i32, new: Option<i32>, caller: &Identity) -> i64 {
+    let th = super::thread::find(tid);
+    if !is_self(tid) && th.is_none() {
+        return -(ESRCH as i64);
+    }
+    let result = with(|id| {
+        let mut table = THREAD_NICE.lock().unwrap();
+        let old = if is_self(tid) {
+            id.priority
+        } else {
+            table
+                .iter()
+                .find(|t| t.0 == tid)
+                .map_or(id.priority, |t| t.1)
+        };
+        let Some(nice) = new else {
+            return 20 - old as i64;
+        };
+        if let Err(e) = renice_permission(caller, id, old, nice) {
+            return e;
+        }
+        if is_self(tid) {
+            id.priority = nice;
+        } else {
+            table.retain(|t| t.0 != tid);
+            table.push((tid, nice));
+        }
+        0
+    });
+    if result == 0
+        && let Some(nice) = new
+    {
+        nice_changed(tid, nice);
+    }
+    result
+}
+
+/// A clone inherits the creating thread's nice value, independently of
+/// later changes to the process leader.
+pub(super) fn inherit_nice(tid: i32, nice: i32) {
+    let mut table = THREAD_NICE.lock().unwrap();
+    table.retain(|t| t.0 != tid);
+    table.push((tid, nice));
+}
+
+/// A thread's nice state ends with its task, before its tid is reused.
+pub(super) fn forget_nice(tid: i32) {
+    THREAD_NICE.lock().unwrap().retain(|t| t.0 != tid);
 }
 
 /// setpriority (140). A thread's nice value also sets its host scheduling
@@ -1577,63 +1618,67 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
         }
         return err;
     }
-    let (who, foreign) = prio_who(&a);
-    if (foreign || (a[0] == PRIO_PROCESS && !is_self(who as i32) && other_thread(who).is_none()))
-        && let Err(e) = may_set_prio(who as i32, nice)
-    {
-        return e;
-    }
-    if foreign {
-        // Accepted for a live process; not kept.
-        let r = getpriority([PRIO_PROCESS, who, 0, 0, 0, 0]);
-        return if r < 0 { r } else { 0 };
-    }
-    let a = [a[0], who, a[2], a[3], a[4], a[5]];
-    if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
-        let r = with(|id| {
-            if nice < id.priority && !id.can_nice(nice) {
-                return -(EACCES as i64);
-            }
-            id.priority = nice;
-            // Raising the host nice value always works; lowering it is
-            // best effort.
-            // SAFETY: plain setpriority.
-            unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
-            nice_changed(a[1] as i32, nice);
-            0
-        });
-        if r == 0 {
-            super::process::task_priority_changed();
+    if a[0] == PRIO_PROCESS {
+        let tid = prio_who(a[1]);
+        let owner = super::thread::owner(tid);
+        if is_self(owner) {
+            return own_priority(tid, Some(nice), &current());
         }
-        return r;
-    }
-    if a[0] == PRIO_PROCESS
-        && let Some(tid) = other_thread(a[1])
-    {
-        let mut table = THREAD_NICE.lock().unwrap();
-        let current = table.iter().find(|t| t.0 == tid).map(|t| t.1);
-        let (priority, allowed) = read(|id| (id.priority, id.can_nice(nice)));
-        if nice < current.unwrap_or(priority) && !allowed {
-            return -(EACCES as i64);
+        if let Err(e) = super::pidns::check(owner) {
+            return e;
         }
-        table.retain(|t| t.0 != tid && super::thread::find(t.0).is_some());
-        table.push((tid, nice));
-        drop(table);
-        nice_changed(tid, nice);
-        return 0;
+        return super::ptrace::remote_priority(owner, tid, Some(nice));
     }
-    if a[0] == PRIO_PROCESS
-        && let Err(e) = super::pidns::check(a[1] as i32)
-    {
-        return e;
-    }
-    // SAFETY: plain setpriority.
+    // SAFETY: a process group outside a guest namespace.
     crate::errno::check(unsafe { libc::setpriority(a[0] as i32, a[1] as u32, nice) } as i64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renicing_checks_owner_then_target_limit() {
+        let caller = Identity {
+            uid: [10050; 4],
+            cap_eff: 0,
+            ..Identity::default()
+        };
+        let mut target = caller.clone();
+        target.rlimits[RLIMIT_NICE] = Some((20, 40));
+        assert_eq!(renice_permission(&caller, &target, 10, 0), Ok(()));
+        assert_eq!(
+            renice_permission(&caller, &target, 10, -1),
+            Err(-(EACCES as i64))
+        );
+        assert_eq!(renice_permission(&caller, &target, -4, -4), Ok(()));
+        assert_eq!(renice_permission(&caller, &target, -4, 19), Ok(()));
+        target.uid = [10051; 4];
+        assert_eq!(
+            renice_permission(&caller, &target, 10, 10),
+            Err(-(EPERM as i64))
+        );
+        target.uid[1] = caller.uid[1];
+        assert_eq!(renice_permission(&caller, &target, 10, 0), Ok(()));
+        target.uid[1] = 10051;
+        target.uid[2] = caller.uid[1];
+        assert_eq!(
+            renice_permission(&caller, &target, 10, 19),
+            Err(-(EPERM as i64))
+        );
+        let privileged = Identity {
+            cap_eff: 1 << CAP_SYS_NICE,
+            ..caller
+        };
+        assert_eq!(renice_permission(&privileged, &target, 19, -20), Ok(()));
+        target.uid = privileged.uid;
+        target.rlimits[RLIMIT_NICE] = Some((40, 40));
+        let unprivileged = Identity {
+            cap_eff: 0,
+            ..privileged
+        };
+        assert_eq!(renice_permission(&unprivileged, &target, 19, -20), Ok(()));
+    }
 
     const LOGD: &str = "# aim-guest-init identity v1\nservice\tlogd\nuid\t1036\ngid\t1036\n\
         groups\t1000 1032 3009\ncap_effective\t0x440000000\ncap_permitted\t0x440000000\n\
