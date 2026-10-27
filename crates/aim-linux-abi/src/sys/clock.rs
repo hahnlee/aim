@@ -448,7 +448,7 @@ fn read(id: u64) -> Result<u64, i64> {
 pub fn clock_gettime(a: [u64; 6]) -> i64 {
     match read(a[0]) {
         Ok(ns) => {
-            write_timespec(a[1], ns);
+            user_try!(write_timespec(a[1], ns));
             0
         }
         Err(e) => e,
@@ -471,7 +471,7 @@ pub fn clock_getres(a: [u64; 6]) -> i64 {
         },
     };
     if a[1] != 0 {
-        write_timespec(a[1], res);
+        user_try!(write_timespec(a[1], res));
     }
     0
 }
@@ -480,13 +480,17 @@ pub fn gettimeofday(a: [u64; 6]) -> i64 {
     if a[1] != 0 {
         // SAFETY: guest struct timezone { int; int }: UTC, no DST, as
         // Android's kernel timezone stays.
-        unsafe { (a[1] as *mut [i32; 2]).write_unaligned([0, 0]) };
+        user_write!(a[1], [i32; 2], [0, 0]);
     }
     if a[0] != 0 {
         let ns = realtime_ns();
         // SAFETY: guest struct timeval is { i64; i64 }.
-        unsafe {
-            (a[0] as *mut [i64; 2]).write_unaligned([ns / 1_000_000_000, ns % 1_000_000_000 / 1000])
+        {
+            user_write!(
+                a[0],
+                [i64; 2],
+                [ns / 1_000_000_000, ns % 1_000_000_000 / 1000]
+            )
         };
     }
     0

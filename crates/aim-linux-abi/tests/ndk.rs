@@ -195,6 +195,11 @@ fn check(name: &str, args: &[&str]) {
 }
 
 #[test]
+fn user_memory_faults() {
+    check("t_user_memory", &[]);
+}
+
+#[test]
 fn events() {
     check("t_event", &[]);
 }

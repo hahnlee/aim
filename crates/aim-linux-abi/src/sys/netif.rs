@@ -1100,10 +1100,14 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
 fn ifreq(arg: u64, f: impl FnOnce(&mut [u8; IFREQ]) -> Result<(), Errno>) -> Result<(), Errno> {
     let mut req = [0u8; IFREQ];
     // SAFETY: the guest's struct ifreq.
-    unsafe { std::ptr::copy_nonoverlapping(arg as *const u8, req.as_mut_ptr(), IFREQ) };
+    user_try!(unsafe {
+        crate::sys::user_memory::copy_bytes(arg as *const u8, req.as_mut_ptr() as *mut u8, IFREQ)
+    });
     f(&mut req)?;
     // SAFETY: as above.
-    unsafe { std::ptr::copy_nonoverlapping(req.as_ptr(), arg as *mut u8, IFREQ) };
+    user_try!(unsafe {
+        crate::sys::user_memory::copy_bytes(req.as_ptr() as *const u8, arg as *mut u8, IFREQ)
+    });
     Ok(())
 }
 
@@ -1184,12 +1188,7 @@ fn named(cmd: u64, req: &mut [u8; IFREQ]) -> Result<(), Errno> {
 fn ifconf(arg: u64) -> Result<(), Errno> {
     // Linux arm64 struct ifconf: int ifc_len, then the buffer pointer at 8.
     // SAFETY: the guest's struct ifconf.
-    let (len, buf) = unsafe {
-        (
-            (arg as *const i32).read_unaligned(),
-            ((arg + 8) as *const u64).read_unaligned(),
-        )
-    };
+    let (len, buf) = { (user_read!(arg, i32), user_read!(arg + 8, u64)) };
     let mut out = Vec::new();
     for l in links() {
         for a in &l.addrs {
@@ -1207,11 +1206,13 @@ fn ifconf(arg: u64) -> Result<(), Errno> {
     } else {
         let fit = (len.max(0) as usize / IFREQ * IFREQ).min(out.len());
         // SAFETY: the guest's buffer of ifc_len bytes.
-        unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), buf as *mut u8, fit) };
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(out.as_ptr() as *const u8, buf as *mut u8, fit)
+        });
         fit
     };
     // SAFETY: as above.
-    unsafe { (arg as *mut i32).write_unaligned(n as i32) };
+    user_write!(arg, i32, n as i32);
     Ok(())
 }
 

@@ -525,11 +525,11 @@ pub fn rw(fd: i32, iov: &[libc::iovec], position: Option<i64>, write: bool) -> O
             continue;
         }
         let data = if write {
-            unsafe { std::slice::from_raw_parts(vector.iov_base.cast::<u8>(), size) }
+            user_try!(super::user_memory::read_exact(vector.iov_base as u64, size))
         } else {
-            &[]
+            Vec::new()
         };
-        match super::fuse::description_io_at(fd, write, explicit, data, size) {
+        match super::fuse::description_io_at(fd, write, explicit, &data, size) {
             Ok(reply) => {
                 let bytes = reply.body;
                 let count = if write {
@@ -541,12 +541,14 @@ pub fn rw(fd: i32, iov: &[libc::iovec], position: Option<i64>, write: bool) -> O
                     if bytes.len() > size {
                         return Some(-(EIO as i64));
                     }
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            bytes.as_ptr(),
-                            vector.iov_base.cast::<u8>(),
-                            bytes.len(),
-                        );
+                    {
+                        user_try!(unsafe {
+                            crate::sys::user_memory::copy_bytes(
+                                bytes.as_ptr() as *const u8,
+                                vector.iov_base.cast::<u8>() as *mut u8,
+                                bytes.len(),
+                            )
+                        });
                     }
                     bytes.len()
                 };
@@ -663,8 +665,14 @@ pub fn getdents(fd: i32, buffer: u64, count: usize) -> Option<i64> {
         output.resize(output.len() + record - (19 + length), 0);
         at = (end + 7) & !7;
     }
-    unsafe {
-        std::ptr::copy_nonoverlapping(output.as_ptr(), buffer as *mut u8, output.len());
+    {
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(
+                output.as_ptr() as *const u8,
+                buffer as *mut u8,
+                output.len(),
+            )
+        });
     }
     Some(output.len() as i64)
 }
@@ -913,16 +921,16 @@ pub fn xattr_syscall(nr: u64, args: [u64; 6]) -> Option<i64> {
         return Some(-(crate::errno::E2BIG as i64));
     }
     let value = if opcode == 21 && size != 0 {
-        unsafe { std::slice::from_raw_parts(buffer as *const u8, size as usize) }
+        user_try!(crate::sys::user_memory::read_exact(buffer, size as usize))
     } else {
-        &[]
+        Vec::new()
     };
     match xattr(
         &route,
         node,
         opcode,
         &name,
-        value,
+        &value,
         size as u32,
         args[4] as u32,
     ) {
@@ -940,8 +948,14 @@ pub fn xattr_syscall(nr: u64, args: [u64; 6]) -> Option<i64> {
             if bytes.len() > size as usize {
                 return Some(-(crate::errno::ERANGE as i64));
             }
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, bytes.len());
+            {
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(
+                        bytes.as_ptr() as *const u8,
+                        buffer as *mut u8,
+                        bytes.len(),
+                    )
+                });
             }
             Some(bytes.len() as i64)
         }
@@ -1044,7 +1058,7 @@ pub fn ioctl(file: &Open, command: u32, argument: u64) -> Result<i32, Errno> {
     put32(&mut data, input as u32);
     put32(&mut data, output as u32);
     if input != 0 {
-        data.extend(unsafe { std::slice::from_raw_parts(argument as *const u8, input) });
+        data.extend(super::user_memory::read_exact(argument, input)?);
     }
     let reply = request(&file.route, 39, file.node, &data)?;
     if reply.len() < 16 {
@@ -1061,13 +1075,7 @@ pub fn ioctl(file: &Open, command: u32, argument: u64) -> Result<i32, Errno> {
         return Err(EIO);
     }
     if reply.len() > 16 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                reply[16..].as_ptr(),
-                argument as *mut u8,
-                reply.len() - 16,
-            );
-        }
+        super::user_memory::write_exact(argument, &reply[16..])?;
     }
     Ok(u32_at(&reply, 0)? as i32)
 }

@@ -649,28 +649,12 @@ pub fn opened(fd: i32, flags: u64) -> Result<(), Errno> {
     }
 }
 
-fn gather(iov: &[libc::iovec]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for v in iov {
-        // SAFETY: guest buffers prepare_iov checked.
-        out.extend_from_slice(unsafe {
-            std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len)
-        });
-    }
-    out
+fn gather(iov: &[libc::iovec]) -> Result<Vec<u8>, i32> {
+    super::user_memory::gather(iov)
 }
 
-fn scatter(iov: &[libc::iovec], bytes: &[u8]) {
-    let mut at = 0;
-    for v in iov {
-        let n = v.iov_len.min(bytes.len() - at);
-        // SAFETY: guest buffers prepare_iov checked.
-        unsafe { std::ptr::copy_nonoverlapping(bytes[at..].as_ptr(), v.iov_base as *mut u8, n) };
-        at += n;
-        if at == bytes.len() {
-            break;
-        }
-    }
+fn scatter(iov: &[libc::iovec], bytes: &[u8]) -> Result<usize, i32> {
+    super::user_memory::scatter(iov, bytes)
 }
 
 /// `devkmsg_write`: the whole write is one record, its `<N>` prefix the
@@ -695,7 +679,7 @@ pub fn write(open: &Open, iov: &[libc::iovec]) -> i64 {
         }
         l.printed += 1;
     }
-    let line = gather(iov);
+    let line = user_try!(gather(iov));
     let (facility, level, text) = parse_prefix(&line);
     match with_ring(|ring| ring.append(facility, level, text)) {
         Ok(()) => total as i64,
@@ -735,7 +719,7 @@ pub fn read(fd: i32, open: &Open, iov: &[libc::iovec]) -> i64 {
                 return Err(EAGAIN);
             }
             let bytes = syslog_read(ring, len)?;
-            scatter(iov, &bytes);
+            user_try!(scatter(iov, &bytes));
             Ok(bytes.len() as i64)
         }
     });
@@ -763,7 +747,7 @@ fn dev_read(
             if line.len() > len {
                 return Err(EINVAL);
             }
-            scatter(iov, &line);
+            user_try!(scatter(iov, &line));
             // SAFETY: the description's own offset.
             unsafe { libc::lseek(fd, next as i64, libc::SEEK_SET) };
             return Ok(line.len() as i64);

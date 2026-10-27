@@ -1184,9 +1184,17 @@ pub fn rw(fd: i32, buf: u64, len: usize, pos: Option<i64>, write: bool) -> Optio
     // SAFETY: inside the memfd's memory and the guest buffer.
     unsafe {
         if write {
-            std::ptr::copy_nonoverlapping(buf as *const u8, (base + at) as *mut u8, n as usize);
+            user_try!(super::user_memory::copy_bytes(
+                buf as *const u8,
+                (base + at) as *mut u8,
+                n as usize
+            ));
         } else {
-            std::ptr::copy_nonoverlapping((base + at) as *const u8, buf as *mut u8, n as usize);
+            user_try!(super::user_memory::copy_bytes(
+                (base + at) as *const u8,
+                buf as *mut u8,
+                n as usize
+            ));
         }
         if write && at + n > st.st_size as u64 {
             libc::ftruncate(fd, (at + n) as i64);

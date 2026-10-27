@@ -216,7 +216,13 @@ pub fn getdents64(a: [u64; 6]) -> i64 {
         rec[18] = e.ty;
         rec[DIRENT_HEADER..DIRENT_HEADER + e.name.len()].copy_from_slice(&e.name);
         // SAFETY: guest buffer of `count` bytes.
-        unsafe { std::ptr::copy_nonoverlapping(rec.as_ptr(), (buf as *mut u8).add(off), reclen) };
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(
+                rec.as_ptr() as *const u8,
+                buf.wrapping_add(off as u64) as *mut u8,
+                reclen,
+            )
+        });
         off += reclen;
         pos += 1;
     }

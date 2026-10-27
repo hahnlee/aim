@@ -7,6 +7,8 @@ from.
 
 `linux-run` embeds the **AIM Runtime** macOS privacy identity and establishes its own process responsibility before initialization ([host privacy](host-privacy.md), #2190).
 
+Syscall user-memory copies and futex atomics initialize host fault recovery before direct arm64 accesses, including calls without guest context setup; exception-table fixups retry pager-owned faults and return EFAULT for invalid or concurrently revoked mappings (#495; host-buffer and fault-recovery unit checks, 2026-10-28).
+
 ## How to reproduce
 
 ```

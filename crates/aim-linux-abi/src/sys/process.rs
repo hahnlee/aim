@@ -259,7 +259,7 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
         120 => get(|s| s.policy.load(SeqCst)) as i64,
         121 => {
             // SAFETY: guest struct sched_param { int sched_priority; }.
-            unsafe { (a[1] as *mut i32).write_unaligned(get(|s| s.priority.load(SeqCst))) };
+            user_write!(a[1], i32, get(|s| s.priority.load(SeqCst)));
             0
         }
         _ => {
@@ -273,7 +273,7 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
                 return -(EINVAL as i64);
             }
             // SAFETY: guest struct sched_param.
-            let prio = unsafe { (param as *const i32).read_unaligned() };
+            let prio = user_read!(param, i32);
             match priority_range(policy) {
                 Some((lo, hi)) if (lo..=hi).contains(&prio) => {
                     if th.is_none()
@@ -342,7 +342,9 @@ pub fn sched_getaffinity(a: [u64; 6]) -> i64 {
         words[cpu / 64] |= 1 << (cpu % 64);
     }
     // SAFETY: guest cpu_set_t of at least `bytes` bytes.
-    unsafe { std::ptr::copy_nonoverlapping(words.as_ptr() as *const u8, mask as *mut u8, bytes) };
+    user_try!(unsafe {
+        crate::sys::user_memory::copy_bytes(words.as_ptr() as *const u8, mask as *mut u8, bytes)
+    });
     bytes as i64
 }
 
@@ -391,7 +393,7 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     let Some(hres) = rlimit_to_host(res) else {
         if old != 0 {
             // SAFETY: guest rlimit64 buffer.
-            unsafe { (old as *mut [u64; 2]).write_unaligned([LINUX_RLIM_INFINITY; 2]) };
+            user_write!(old, [u64; 2], [LINUX_RLIM_INFINITY; 2]);
         }
         return if res < 16 { 0 } else { -(EINVAL as i64) };
     };
@@ -405,11 +407,14 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
             return -(errno::last() as i64);
         }
         if old != 0 {
-            (old as *mut [u64; 2])
-                .write_unaligned([lim_from_host(cur.rlim_cur), lim_from_host(cur.rlim_max)]);
+            user_write!(
+                old,
+                [u64; 2],
+                [lim_from_host(cur.rlim_cur), lim_from_host(cur.rlim_max)]
+            );
         }
         if new != 0 {
-            let [c, m] = (new as *const [u64; 2]).read_unaligned();
+            let [c, m] = user_read!(new, [u64; 2]);
             let l = libc::rlimit {
                 rlim_cur: lim_to_host(c),
                 rlim_max: lim_to_host(m),

@@ -3,6 +3,33 @@
 //! The syscall number is in x8, arguments in x0-x5; the result (or -errno,
 //! with Linux errno values) goes back in x0. Each subsystem owns its calls.
 
+// User-copy errors leave the syscall through its existing return convention.
+macro_rules! user_try {
+    ($copy:expr) => {
+        match $copy {
+            Ok(value) => value,
+            Err(error) => return $crate::sys::user_memory::CopyError::copy_error(error),
+        }
+    };
+}
+macro_rules! user_read {
+    ($address:expr, $ty:ty) => {{
+        // SAFETY: syscall ABI fields contain only integer bit patterns.
+        #[allow(unused_unsafe)]
+        let copied = unsafe { $crate::sys::user_memory::read_value::<$ty>($address as u64) };
+        user_try!(copied)
+    }};
+}
+macro_rules! user_write {
+    ($address:expr, $ty:ty, $value:expr) => {{
+        let value: $ty = $value;
+        // SAFETY: syscall ABI output has initialized bytes, including padding.
+        #[allow(unused_unsafe)]
+        let copied = unsafe { $crate::sys::user_memory::write_value($address as u64, &value) };
+        user_try!(copied)
+    }};
+}
+
 mod addrconf;
 mod arena;
 mod ashmem;
@@ -365,7 +392,13 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         99 => thread::set_robust_list(a),
         100 => thread::get_robust_list(a),
         220 => thread::clone(ctx, a),
-        435 if fork::is_fork(fork::clone3_flags(a)) => fork::clone3(ctx, a),
+        435 if fork::is_fork(match fork::clone3_flags(a) {
+            Ok(flags) => flags,
+            Err(error) => return error,
+        }) =>
+        {
+            fork::clone3(ctx, a)
+        }
         435 => thread::clone3(ctx, a),
         163 | 164 | 261 => cred::prlimit(nr, a),
         172 => process::getpid_tgid(),

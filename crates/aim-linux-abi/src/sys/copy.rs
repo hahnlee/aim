@@ -18,11 +18,11 @@ fn copy(fin: i32, off_in: u64, fout: i32, off_out: u64, len: usize, once: bool) 
         let p = buf.as_mut_ptr() as u64;
         let n = if off_in != 0 {
             // SAFETY: guest loff_t.
-            let o = unsafe { (off_in as *const i64).read_unaligned() };
+            let o = user_read!(off_in, i64);
             let n = fs::pread64([fin as u64, p, want as u64, o as u64, 0, 0]);
             if n > 0 {
                 // SAFETY: guest loff_t.
-                unsafe { (off_in as *mut i64).write_unaligned(o + n) };
+                user_write!(off_in, i64, o + n);
             }
             n
         } else {
@@ -37,11 +37,11 @@ fn copy(fin: i32, off_in: u64, fout: i32, off_out: u64, len: usize, once: bool) 
             let left = (n as usize - w) as u64;
             let m = if off_out != 0 {
                 // SAFETY: guest loff_t.
-                let o = unsafe { (off_out as *const i64).read_unaligned() };
+                let o = user_read!(off_out, i64);
                 let m = fs::pwrite64([fout as u64, q, left, o as u64, 0, 0]);
                 if m > 0 {
                     // SAFETY: guest loff_t.
-                    unsafe { (off_out as *mut i64).write_unaligned(o + m) };
+                    user_write!(off_out, i64, o + m);
                 }
                 m
             } else {

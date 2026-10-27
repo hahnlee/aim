@@ -328,7 +328,7 @@ fn change_ranges(v: &mut Vec<(u64, u64)>, a: u64, b: u64, add: bool) {
 fn pin(fd: i32, st: &libc::stat, req: u64, arg: u64) -> i64 {
     let size = st.st_size as u64;
     // SAFETY: guest struct ashmem_pin { u32 offset, len; }.
-    let [off, len] = unsafe { (arg as *const [u32; 2]).read_unaligned() }.map(|v| v as u64);
+    let [off, len] = user_read!(arg, [u32; 2]).map(|v| v as u64);
     update(fd, st, |s| {
         if !s.mapped {
             return -(EINVAL as i64);
@@ -367,7 +367,7 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
     Some(match req {
         SET_NAME => {
             // SAFETY: guest buffer of up to ASHMEM_NAME_LEN bytes.
-            let name = unsafe { std::slice::from_raw_parts(arg as *const u8, NAME_LEN) };
+            let name = user_try!(crate::sys::user_memory::read_exact(arg, NAME_LEN));
             let len = name.iter().position(|&c| c == 0).unwrap_or(NAME_LEN - 1);
             update(fd, &st, |s| {
                 if s.mapped {
@@ -386,8 +386,14 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
             };
             // SAFETY: guest buffer of ASHMEM_NAME_LEN bytes.
             unsafe {
-                std::ptr::copy_nonoverlapping(name.as_ptr(), arg as *mut u8, name.len());
-                (arg as *mut u8).add(name.len()).write(0);
+                user_try!({
+                    crate::sys::user_memory::copy_bytes(
+                        name.as_ptr() as *const u8,
+                        arg as *mut u8,
+                        name.len(),
+                    )
+                });
+                user_write!(arg.wrapping_add(name.len() as u64), u8, 0);
             }
             0
         }
@@ -413,7 +419,7 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
         PURGE_ALL_CACHES => 0,
         GET_FILE_ID => {
             // SAFETY: guest unsigned long.
-            unsafe { (arg as *mut u64).write_unaligned(st.st_ino) };
+            user_write!(arg, u64, st.st_ino);
             0
         }
         _ => -(libc::ENOTTY as i64),

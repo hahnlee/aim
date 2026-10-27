@@ -140,32 +140,13 @@ struct Guest {
     sockets: Vec<(i32, super::net::BinderSocketExport)>,
 }
 
-/// Nothing maps below 4 GiB on macOS arm64 (`__PAGEZERO`), so a pointer
-/// there, null included, is EFAULT as copy_from_user would make it. A copy
-/// of nothing touches no memory and succeeds whatever the pointer, as on
-/// Linux: an empty Parcel (a ping, a void reply) has a null data pointer.
-fn check_user(address: u64, len: usize) -> Result<(), i32> {
-    if len > 0 && address < 1 << 32 {
-        Err(14)
-    } else {
-        Ok(())
-    }
-}
-
 impl UserMemory for Guest {
     fn read(&mut self, address: u64, len: usize) -> Result<Vec<u8>, i32> {
-        check_user(address, len)?;
-        let mut v = vec![0u8; len];
-        // SAFETY: guest memory the guest passed to the ioctl.
-        unsafe { std::ptr::copy_nonoverlapping(address as *const u8, v.as_mut_ptr(), len) };
-        Ok(v)
+        super::user_memory::read_exact(address, len)
     }
 
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), i32> {
-        check_user(address, data.len())?;
-        // SAFETY: as above.
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len()) };
-        Ok(())
+        super::user_memory::write_exact(address, data)
     }
 
     fn installed(&mut self, fd: i32) {

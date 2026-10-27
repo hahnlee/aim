@@ -182,12 +182,12 @@ pub fn timer_create(a: [u64; 6]) -> i64 {
         (None, SIGALRM, SIGEV_SIGNAL, 0)
     } else {
         // SAFETY: guest struct sigevent.
-        unsafe {
+        {
             (
-                Some((a[1] as *const u64).read_unaligned()),
-                ((a[1] + 8) as *const i32).read_unaligned(),
-                ((a[1] + 12) as *const i32).read_unaligned(),
-                ((a[1] + 16) as *const i32).read_unaligned(),
+                Some(user_read!(a[1], u64)),
+                user_read!(a[1] + 8, i32),
+                user_read!(a[1] + 12, i32),
+                user_read!(a[1] + 16, i32),
             )
         }
     };
@@ -210,6 +210,8 @@ pub fn timer_create(a: [u64; 6]) -> i64 {
         return -(ENOMEM as i64);
     }
     let id = (0..).find(|i| !t.iter().any(|tm| tm.id == *i)).unwrap_or(0);
+    // Reserve the id under the timer lock, but publish no timer on EFAULT.
+    user_write!(a[2], i32, id);
     t.push(Timer {
         id,
         base,
@@ -224,8 +226,6 @@ pub fn timer_create(a: [u64; 6]) -> i64 {
         queued: false,
         armed: None,
     });
-    // SAFETY: guest timer_t (int).
-    unsafe { (a[2] as *mut i32).write_unaligned(id) };
     0
 }
 
@@ -247,9 +247,10 @@ fn itimerspec(tm: &Timer) -> [u64; 2] {
     [tm.interval, left]
 }
 
-fn write_itimerspec(p: u64, v: [u64; 2]) {
-    park::write_timespec(p, v[0]);
-    park::write_timespec(p + 16, v[1]);
+fn write_itimerspec(p: u64, v: [u64; 2]) -> Result<(), crate::errno::Errno> {
+    user_try!(park::write_timespec(p, v[0]));
+    user_try!(park::write_timespec(p + 16, v[1]));
+    Ok(())
 }
 
 /// timer_settime(id, flags, new, old).
@@ -260,7 +261,7 @@ pub fn timer_settime(a: [u64; 6]) -> i64 {
     }
     let (interval, value) = match (park::read_timespec(new), park::read_timespec(new + 16)) {
         (Ok(i), Ok(v)) => (i, v),
-        _ => return -(EINVAL as i64),
+        (Err(e), _) | (_, Err(e)) => return e,
     };
     let (prev, rearm) = {
         let mut t = timers();
@@ -274,7 +275,7 @@ pub fn timer_settime(a: [u64; 6]) -> i64 {
             Err(_) => return -(ESRCH as i64),
         };
         if old != 0 {
-            write_itimerspec(old, itimerspec(tm));
+            user_try!(write_itimerspec(old, itimerspec(tm)));
         }
         tm.interval = interval;
         tm.clock = clock;
@@ -309,7 +310,7 @@ pub fn timer_gettime(a: [u64; 6]) -> i64 {
     let Some(tm) = t.iter().find(|t| t.id == a[0] as i32) else {
         return -(EINVAL as i64);
     };
-    write_itimerspec(a[1], itimerspec(tm));
+    user_try!(write_itimerspec(a[1], itimerspec(tm)));
     0
 }
 

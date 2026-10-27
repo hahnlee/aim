@@ -142,9 +142,10 @@ pub fn write(fd: i32, k: &Knob, iov: &[libc::iovec]) -> i64 {
     let mut req = Vec::new();
     for v in iov {
         // SAFETY: guest buffers.
-        req.extend_from_slice(unsafe {
-            std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len)
-        });
+        req.extend_from_slice(&user_try!(super::user_memory::read_exact(
+            v.iov_base as u64,
+            v.iov_len
+        )));
     }
     let reply = match k.request(&req) {
         Ok(reply) => reply,

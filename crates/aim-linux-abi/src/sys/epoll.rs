@@ -446,15 +446,17 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     if matches!(st.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFDIR) {
         return -(EPERM as i64);
     }
-    let new = (op != EPOLL_CTL_DEL).then(|| {
+    let new = if op != EPOLL_CTL_DEL {
         // SAFETY: guest struct epoll_event (arm64: u32 events, u64 data at 8).
-        let raw = unsafe { (ev as *const [u64; 2]).read_unaligned() };
-        Interest {
+        let raw = user_read!(ev, [u64; 2]);
+        Some(Interest {
             events: raw[0] as u32,
             data: raw[1],
             disabled: false,
-        }
-    });
+        })
+    } else {
+        None
+    };
     // The flag's own rules precede the interest list's EEXIST and ENOENT;
     // refusing to modify an exclusive attachment needs the attachment.
     let epoll = matches!(fdtab::get(fd), Some(Kind::Epoll(_)));
@@ -594,7 +596,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
                 tv_nsec: ns % 1_000_000_000,
             }
         });
-        let old_mask = super::poll::swap_sigmask(mask);
+        let old_mask = user_try!(super::poll::swap_sigmask(mask));
         // SAFETY: output array with capacity `fetch`.
         let n = unsafe {
             libc::kevent(
@@ -622,11 +624,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
     apply(epfd, &rearm);
     for (n, (_, b, data)) in out.iter().enumerate() {
         // SAFETY: guest array of `maxevents` 16-byte struct epoll_event.
-        unsafe {
-            (events as *mut [u64; 2])
-                .add(n)
-                .write_unaligned([*b as u64, *data])
-        };
+        user_write!(events + n as u64 * 16, [u64; 2], [*b as u64, *data]);
     }
     trace_wait(epfd, &kevs, &out);
     out.len() as i64
@@ -771,14 +769,16 @@ pub fn epoll_pwait(a: [u64; 6]) -> i64 {
 }
 
 pub fn epoll_pwait2(a: [u64; 6]) -> i64 {
-    let timeout = (a[3] != 0).then(|| {
+    let timeout = if a[3] != 0 {
         // SAFETY: guest struct timespec.
-        let t = unsafe { (a[3] as *const [i64; 2]).read_unaligned() };
-        libc::timespec {
+        let t = user_read!(a[3], [i64; 2]);
+        Some(libc::timespec {
             tv_sec: t[0],
             tv_nsec: t[1],
-        }
-    });
+        })
+    } else {
+        None
+    };
     if timeout.is_some_and(|t| t.tv_sec < 0 || !(0..1_000_000_000).contains(&t.tv_nsec)) {
         return -(EINVAL as i64);
     }

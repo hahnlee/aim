@@ -31,9 +31,10 @@ pub fn rw(fd: i32, iov: &[libc::iovec], pos: Option<i64>, write: bool) -> i64 {
         for v in iov {
             let count = v.iov_len.min(length - input.len());
             // SAFETY: the syscall caller supplied this guest iovec.
-            input.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(v.iov_base.cast::<u8>(), count)
-            });
+            input.extend_from_slice(&user_try!(super::user_memory::read_exact(
+                v.iov_base as u64,
+                count
+            )));
             if input.len() == length {
                 break;
             }
@@ -57,12 +58,14 @@ pub fn rw(fd: i32, iov: &[libc::iovec], pos: Option<i64>, write: bool) -> i64 {
         for v in iov {
             let count = v.iov_len.min(data.len() - consumed);
             // SAFETY: validated guest iovec, bounded by returned bytes.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr().add(consumed),
-                    v.iov_base.cast::<u8>(),
-                    count,
-                );
+            {
+                user_try!(unsafe {
+                    crate::sys::user_memory::copy_bytes(
+                        data.as_ptr().add(consumed) as *const u8,
+                        v.iov_base.cast::<u8>() as *mut u8,
+                        count,
+                    )
+                });
             }
             consumed += count;
             if consumed == data.len() {

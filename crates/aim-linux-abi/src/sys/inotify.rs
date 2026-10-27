@@ -535,7 +535,13 @@ pub fn read(fd: i32, buf: u64, len: usize) -> Option<i64> {
             break;
         }
         // SAFETY: guest buffer of `len` bytes.
-        unsafe { std::ptr::copy_nonoverlapping(e.as_ptr(), (buf as *mut u8).add(off), e.len()) };
+        user_try!(unsafe {
+            crate::sys::user_memory::copy_bytes(
+                e.as_ptr() as *const u8,
+                buf.wrapping_add(off as u64) as *mut u8,
+                e.len(),
+            )
+        });
         off += e.len();
         s.queue.pop_front();
     }

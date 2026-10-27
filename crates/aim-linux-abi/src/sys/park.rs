@@ -44,7 +44,7 @@ pub fn monotonic() -> u64 {
 /// A guest `struct timespec` in nanoseconds, or -EINVAL.
 pub fn read_timespec(p: u64) -> Result<u64, i64> {
     // SAFETY: guest timespec { i64 tv_sec; i64 tv_nsec; }.
-    let [sec, nsec] = unsafe { (p as *const [i64; 2]).read_unaligned() };
+    let [sec, nsec] = user_read!(p, [i64; 2]);
     if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
         return Err(-(EINVAL as i64));
     }
@@ -53,10 +53,11 @@ pub fn read_timespec(p: u64) -> Result<u64, i64> {
         .saturating_add(nsec as u64))
 }
 
-pub fn write_timespec(p: u64, ns: u64) {
+pub fn write_timespec(p: u64, ns: u64) -> Result<(), crate::errno::Errno> {
     let v = [(ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as i64];
     // SAFETY: guest timespec.
-    unsafe { (p as *mut [i64; 2]).write_unaligned(v) };
+    user_write!(p, [i64; 2], v);
+    Ok(())
 }
 
 /// A monotonic deadline `ns` from now.
@@ -303,7 +304,7 @@ pub fn nanosleep(a: [u64; 6]) -> i64 {
         Ok(()) => 0,
         Err(left) => {
             if a[1] != 0 {
-                write_timespec(a[1], left);
+                user_try!(write_timespec(a[1], left));
             }
             -(EINTR as i64)
         }
@@ -345,7 +346,7 @@ pub fn clock_nanosleep(a: [u64; 6]) -> i64 {
         Ok(()) => 0,
         Err(left) => {
             if !abs && rem != 0 {
-                write_timespec(rem, left);
+                user_try!(write_timespec(rem, left));
             }
             -(EINTR as i64)
         }

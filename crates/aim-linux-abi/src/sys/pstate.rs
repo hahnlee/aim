@@ -139,13 +139,12 @@ pub fn getrusage(a: [u64; 6]) -> i64 {
         && let Some((u, s)) = thread_times()
     {
         // SAFETY: guest struct rusage: two leading { i64, i64 } timevals.
-        unsafe {
-            (a[1] as *mut [i64; 4]).write_unaligned([
-                u.tv_sec,
-                u.tv_usec as i64,
-                s.tv_sec,
-                s.tv_usec as i64,
-            ])
+        {
+            user_write!(
+                a[1],
+                [i64; 4],
+                [u.tv_sec, u.tv_usec as i64, s.tv_sec, s.tv_usec as i64,]
+            )
         };
     }
     r
@@ -180,7 +179,7 @@ pub fn times(a: [u64; 6]) -> i64 {
             ticks(kids.ru_stime),
         ];
         // SAFETY: guest struct tms of four clock_t.
-        unsafe { (a[0] as *mut [i64; 4]).write_unaligned(t) };
+        user_write!(a[0], [i64; 4], t);
     }
     (uptime() / (1_000_000_000 / USER_HZ as u64)) as i64
 }
@@ -254,7 +253,9 @@ pub fn uname(a: [u64; 6]) -> i64 {
         out[i * 65..i * 65 + n].copy_from_slice(&f[..n]);
     }
     // SAFETY: guest utsname buffer.
-    unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), a[0] as *mut u8, out.len()) };
+    user_try!(unsafe {
+        crate::sys::user_memory::copy_bytes(out.as_ptr() as *const u8, a[0] as *mut u8, out.len())
+    });
     0
 }
 
@@ -281,7 +282,7 @@ pub fn sysinfo(a: [u64; 6]) -> i64 {
     // totalhigh and freehigh are 0; mem_unit is 1.
     w[13] = 1;
     // SAFETY: guest struct sysinfo.
-    unsafe { (a[0] as *mut [u64; 14]).write_unaligned(w) };
+    user_write!(a[0], [u64; 14], w);
     0
 }
 
@@ -293,12 +294,12 @@ pub fn getcpu(a: [u64; 6]) -> i64 {
     let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
     let cpu = ((tp & 0xfff) % ncpu) as u32;
     // SAFETY: guest unsigned ints.
-    unsafe {
+    {
         if a[0] != 0 {
-            (a[0] as *mut u32).write_unaligned(cpu);
+            user_write!(a[0], u32, cpu);
         }
         if a[1] != 0 {
-            (a[1] as *mut u32).write_unaligned(0);
+            user_write!(a[1], u32, 0);
         }
     }
     0

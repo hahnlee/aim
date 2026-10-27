@@ -1808,7 +1808,8 @@ pub fn mincore(a: [u64; 6]) -> i64 {
     }
     for i in 0..(len / PAGE) as usize {
         // SAFETY: inside the guest vector; Linux reports only residency.
-        unsafe { *(vec as *mut u8).add(i) &= 1 };
+        let byte = user_read!(vec + i as u64, u8);
+        user_write!(vec + i as u64, u8, byte & 1);
     }
     0
 }
@@ -1928,14 +1929,17 @@ pub fn process_vm_rw(write: bool, a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest iovec arrays of the given counts.
-    let iov = |p: u64, n: u64| unsafe {
-        std::slice::from_raw_parts(p as *const libc::iovec, n as usize)
-            .iter()
-            .map(|v| (v.iov_base as u64, v.iov_len as u64))
-            .filter(|v| v.1 > 0)
-            .collect::<Vec<_>>()
+    let iov = |p: u64, n: u64| -> Result<Vec<(u64, u64)>, i32> {
+        let mut vectors = Vec::new();
+        for index in 0..n {
+            let vector = user_read!(p + index * 16, [u64; 2]);
+            if vector[1] != 0 {
+                vectors.push((vector[0], vector[1]));
+            }
+        }
+        Ok(vectors)
     };
-    let (l, r) = (iov(local, lcnt), iov(remote, rcnt));
+    let (l, r) = (user_try!(iov(local, lcnt)), user_try!(iov(remote, rcnt)));
     let owner = super::thread::owner(pid);
     // SAFETY: trivial.
     if pid <= 0 || owner != unsafe { libc::getpid() } {

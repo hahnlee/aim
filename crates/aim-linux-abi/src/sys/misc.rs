@@ -14,12 +14,24 @@ pub fn getrandom(a: [u64; 6]) -> i64 {
     let mut done = 0;
     while done < len {
         let n = (len - done).min(256);
-        // SAFETY: guest buffer of `len` bytes.
-        if unsafe { libc::getentropy((buf as *mut u8).add(done).cast(), n) } < 0 {
+        let mut bytes = [0u8; 256];
+        // SAFETY: getentropy writes only our owned buffer.
+        if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), n) } < 0 {
             return if done > 0 {
                 done as i64
             } else {
-                -(EFAULT as i64)
+                -(crate::errno::last() as i64)
+            };
+        }
+        if let Err(error) = buf
+            .checked_add(done as u64)
+            .ok_or(EFAULT)
+            .and_then(|address| super::user_memory::write_exact(address, &bytes[..n]))
+        {
+            return if done > 0 {
+                done as i64
+            } else {
+                -(error as i64)
             };
         }
         done += n;
@@ -99,7 +111,7 @@ pub fn prctl(a: [u64; 6]) -> i64 {
         }
         PR_GET_PDEATHSIG => {
             // SAFETY: guest int.
-            unsafe { (a[1] as *mut i32).write_unaligned(PDEATHSIG.load(Relaxed) as i32) };
+            user_write!(a[1], i32, PDEATHSIG.load(Relaxed) as i32);
             0
         }
         PR_SET_KEEPCAPS if a[1] <= 1 => {
@@ -143,7 +155,9 @@ pub fn prctl(a: [u64; 6]) -> i64 {
         PR_GET_NAME => {
             let n = super::thread::name();
             // SAFETY: guest 16-byte buffer.
-            unsafe { std::ptr::copy_nonoverlapping(n.as_ptr(), a[1] as *mut u8, 16) };
+            user_try!(unsafe {
+                crate::sys::user_memory::copy_bytes(n.as_ptr() as *const u8, a[1] as *mut u8, 16)
+            });
             0
         }
         _ => -(EINVAL as i64),

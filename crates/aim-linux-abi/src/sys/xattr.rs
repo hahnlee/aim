@@ -212,7 +212,13 @@ fn get(t: Target, name: u64, value: u64, size: u64) -> i64 {
         return -(ERANGE as i64);
     }
     // SAFETY: guest buffer of `size` bytes.
-    unsafe { std::ptr::copy_nonoverlapping(label.as_ptr(), value as *mut u8, label.len()) };
+    user_try!(unsafe {
+        crate::sys::user_memory::copy_bytes(
+            label.as_ptr() as *const u8,
+            value as *mut u8,
+            label.len(),
+        )
+    });
     label.len() as i64
 }
 
@@ -316,7 +322,13 @@ fn list(t: Target, buf: u64, size: u64) -> i64 {
         return -(ERANGE as i64);
     }
     // SAFETY: guest buffer of `size` bytes.
-    unsafe { std::ptr::copy_nonoverlapping(names.as_ptr(), buf as *mut u8, names.len()) };
+    user_try!(unsafe {
+        crate::sys::user_memory::copy_bytes(
+            names.as_ptr() as *const u8,
+            buf as *mut u8,
+            names.len(),
+        )
+    });
     names.len() as i64
 }
 
