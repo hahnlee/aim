@@ -8082,7 +8082,7 @@ Measured on a loaded host (load average 90, other agents' boots running),
   an event while the level read warn for a minute. The module polls the
   level every 250 ms instead.
 
-ActivityManager's process groups now constrain Darwin CPU/QoS and disk policy through the cgroup controllers, with freezer explicitly unavailable (#297; NDK tests, no guest boot). Kills name their process: another process's
+ActivityManager's process groups now constrain Darwin CPU/QoS and disk policy through the cgroup controllers, with freezer explicitly unavailable. Kills name their process: another process's
 `/proc/<pid>/cmdline` and `comm` come from its record (#238).
 
 **Morning check** (one boot slot, after the throttle is lifted):
