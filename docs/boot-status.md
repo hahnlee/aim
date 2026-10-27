@@ -210,9 +210,10 @@ signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app
 launches, and `pm uninstall` removes its code and data; each survives a
 reboot. Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
-does. Without `access.abx`, the permission manager migrates the legacy
-permission definitions and trees from `packages.xml`; the user state's
-migration is #2201. Archiving (#1757), shutdown statistics (#2167) and the
+does. Without `access.abx`, the permission manager migrates legacy definitions
+and trees from `packages.xml` and runtime user grants, flags and package versions
+from Settings, persists migrated state, and leaves a user with no legacy runtime
+file empty and unwritten. Archiving (#1757), shutdown statistics (#2167) and the
 remaining bootstrap owners (#2022) are open.
 
 The current native CTS runtime restores active PackageSettings whose code was
