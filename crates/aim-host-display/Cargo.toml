@@ -18,7 +18,3 @@ libc.workspace = true
 
 [dev-dependencies]
 aim-paths.workspace = true
-
-[[test]]
-name = "windows"
-harness = false
