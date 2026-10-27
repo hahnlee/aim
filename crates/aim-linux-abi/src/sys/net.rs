@@ -39,11 +39,13 @@ use super::fdtab::{self, Kind};
 use crate::errno::{self, EAGAIN, EBADF, EINVAL};
 use crate::vfs;
 
+mod link_udp;
 mod proc_table;
 mod regular_scm;
 mod socket_inode;
 mod socket_scm;
 mod traffic;
+pub(super) use link_udp::deliver as deliver_link_udp;
 pub(super) use proc_table::{
     SocketMetadata, metadata as proc_metadata, socket_identity as proc_socket_identity,
     table as proc_table,
@@ -127,6 +129,10 @@ pub struct InetOpts {
     user_mss: std::sync::atomic::AtomicU32,
     port_zero: AtomicBool,
     router: AtomicBool,
+    /// A UDP receive queue on the virtual link, rather than the host network.
+    link_udp: AtomicBool,
+    /// SO_REUSEPORT as requested (host SO_REUSEADDR also enables it).
+    reuseport: AtomicBool,
     icmp4: AtomicBool,
     /// Linux's `SS_CONNECTING`: a connect started (EINPROGRESS, or a
     /// blocking one interrupted) whose result no connect has reported yet.
@@ -205,6 +211,8 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
             w.bytes(o.device.lock().unwrap().as_bytes());
             w.bool(o.port_zero.load(Ordering::Relaxed));
             w.bool(o.router.load(Ordering::Relaxed));
+            w.bool(o.link_udp.load(Ordering::Relaxed));
+            w.bool(o.reuseport.load(Ordering::Relaxed));
             w.bool(o.icmp4.load(Ordering::Relaxed));
             w.bool(o.multicast_own.load(Ordering::Relaxed));
             w.u32(o.user_timeout.load(Ordering::Relaxed));
@@ -254,6 +262,8 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
             *o.device.lock().unwrap() = String::from_utf8_lossy(&r.bytes()).into_owned();
             o.port_zero.store(r.bool(), Ordering::Relaxed);
             o.router.store(r.bool(), Ordering::Relaxed);
+            o.link_udp.store(r.bool(), Ordering::Relaxed);
+            o.reuseport.store(r.bool(), Ordering::Relaxed);
             o.icmp4.store(r.bool(), Ordering::Relaxed);
             o.multicast_own.store(r.bool(), Ordering::Relaxed);
             o.user_timeout.store(r.u32(), Ordering::Relaxed);
@@ -1253,6 +1263,15 @@ pub fn connect(a: [u64; 6]) -> i64 {
             Family::Unix | Family::Inet(_) => {}
         }
     }
+    if a[1] != 0 && (2..=128).contains(&a[2]) {
+        // SAFETY: a sockaddr of the checked length, as target_of reads below.
+        let name = unsafe { std::slice::from_raw_parts(a[1] as *const u8, a[2] as usize) };
+        if name[..2] == [0, 0] {
+            if let Some(result) = connect_to_router(&input, name) {
+                return result;
+            }
+        }
+    }
     let (mut t, name) = match target_of(a[1], a[2] as u32, false) {
         Ok(t) => t,
         Err(e) => return e,
@@ -1394,14 +1413,33 @@ fn connect_to_router(input: &SocketInput, name: &[u8]) -> Option<i64> {
     let Family::Inet(o) = &s.family else {
         return None;
     };
+    if o.link_udp.load(Ordering::Relaxed)
+        && name.len() >= 2
+        && u16::from_le_bytes([name[0], name[1]]) == 0
+    {
+        if let Err(error) = link_udp::update(fd, Some(None), None) {
+            return Some(-(error as i64));
+        }
+        o.router.store(false, Ordering::Relaxed);
+        *s.peer.lock().unwrap() = None;
+        return Some(0);
+    }
     let server = name.len() >= 8
         && u16::from_le_bytes([name[0], name[1]]) == L_AF_INET
         && u16::from_be_bytes([name[2], name[3]]) == super::dhcp::SERVER_PORT;
     let routed = server && on_link(fd, o);
-    o.router.store(routed, Ordering::Relaxed);
     if !routed {
+        o.router.store(false, Ordering::Relaxed);
         return None;
     }
+    if o.link_udp.load(Ordering::Relaxed) {
+        let addr = name[4..8].try_into().unwrap();
+        let port = u16::from_be_bytes([name[2], name[3]]);
+        if let Err(error) = link_udp::update(fd, Some(Some((addr, port))), None) {
+            return Some(-(error as i64));
+        }
+    }
+    o.router.store(true, Ordering::Relaxed);
     *s.peer.lock().unwrap() = Some(name.to_vec());
     Some(0)
 }
@@ -1409,7 +1447,7 @@ fn connect_to_router(input: &SocketInput, name: &[u8]) -> Option<i64> {
 /// A datagram socket bound to a device other than the loopback that binds
 /// the DHCP client port (DhcpClient) is bound on the device's virtual link
 /// only, as the local name it reports: its DHCP messages go to the virtual
-/// router (`dhcp_to_router`), which answers on the packet sockets, and
+/// router (`dhcp_to_router`), which answers both UDP and packet sockets, and
 /// nothing from the Mac's network reaches it. A host bind would take the
 /// Mac's UDP port 68 from the Mac and from other guests. None: an ordinary
 /// bind.
@@ -1429,6 +1467,20 @@ fn bind_on_link(input: &SocketInput, name: &[u8]) -> Option<i64> {
     if local.is_some() || host_inet_name(fd, false).is_some_and(|(port, _)| port != 0) {
         return Some(-(EINVAL as i64));
     }
+    let addr: [u8; 4] = name[4..8].try_into().unwrap();
+    if addr != [0; 4]
+        && !super::netif::links().iter().any(|l| {
+            l.addrs
+                .iter()
+                .any(|a| a.ip == std::net::IpAddr::V4(addr.into()))
+        })
+    {
+        return Some(-99); // EADDRNOTAVAIL: inet_addr_type_table must be RTN_LOCAL.
+    }
+    if let Err(error) = link_udp::bind(fd, addr, o.reuseport.load(Ordering::Relaxed)) {
+        return Some(-(error as i64));
+    }
+    o.link_udp.store(true, Ordering::Relaxed);
     *local = Some(name[..name.len().min(16)].to_vec());
     Some(0)
 }
@@ -2377,6 +2429,9 @@ fn recv_other(
         Family::Inet(o) if o.icmp4.load(Ordering::Relaxed) => {
             recv_ping(fd, iov, ctrl_cap, hflags, flags)
         }
+        Family::Inet(o) if o.link_udp.load(Ordering::Relaxed) => {
+            link_udp::recv(fd, iov, ctrl_cap, flags)
+        }
         Family::Unix | Family::Inet(_) => return None,
     })
 }
@@ -2507,6 +2562,11 @@ pub(super) fn fionread(fd: i32) -> Option<Result<i32, i64>> {
         return None;
     };
     match (&s.family, s.ty) {
+        (Family::Inet(o), _) if o.link_udp.load(Ordering::Relaxed) => Some(
+            get_int(fd, libc::SOL_SOCKET, libc::SO_NREAD)
+                .map(|n| (n - 16).max(0))
+                .ok_or_else(|| -(errno::last() as i64)),
+        ),
         (Family::Netlink(_), _) => Some(Err(-(crate::errno::ENOTTY as i64))),
         (Family::Unix, _) if s.listening.load(Ordering::Relaxed) => Some(Err(-(EINVAL as i64))),
         (Family::Unix, SockType::Dgram) => Some(next_datagram(fd)),
@@ -3020,6 +3080,7 @@ pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i6
     let s = any_sock(&input)?;
     if let Family::Inet(o) = &s.family
         && !o.icmp4.load(Ordering::Relaxed)
+        && !o.link_udp.load(Ordering::Relaxed)
     {
         // SAFETY: the guest's iovec buffers.
         let r =
@@ -3271,6 +3332,18 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             errno::check(
                 unsafe { libc::setsockopt(fd, l, o, (&v as *const i32).cast(), 4) } as i64,
             );
+        if result == 0 && level == 1 && opt == L_SO_REUSEPORT {
+            if let Some(s) = any_sock(&input) {
+                if let Family::Inet(o) = &s.family {
+                    if o.link_udp.load(Ordering::Relaxed) {
+                        if let Err(error) = link_udp::update(fd, None, Some(v != 0)) {
+                            return -(error as i64);
+                        }
+                    }
+                    o.reuseport.store(v != 0, Ordering::Relaxed);
+                }
+            }
+        }
         if result == 0 && l == libc::SOL_SOCKET && o == libc::SO_KEEPALIVE && v != 0 {
             if let Some(socket) = any_sock(&input) {
                 if let Some(owner) = socket.inet_owner.lock().unwrap().as_mut() {
@@ -3520,7 +3593,12 @@ fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
         Ok(i) => i,
         Err(e) => return -(e as i64),
     };
-    if let Err(e) = bind_host_interface(fd, index) {
+    let host_index = if o.link_udp.load(Ordering::Relaxed) {
+        0
+    } else {
+        index
+    };
+    if let Err(e) = bind_host_interface(fd, host_index) {
         return -(e as i64);
     }
     let bound = !name.is_empty();
@@ -3566,6 +3644,9 @@ pub(super) fn rebind_devices(uplink: u32) {
     for (fd, kind) in bound {
         let Kind::Sock(s) = kind else { continue };
         let Family::Inet(o) = &s.family else { continue };
+        if o.link_udp.load(Ordering::Relaxed) {
+            continue;
+        }
         let name = o.device.lock().unwrap().clone();
         let rebound =
             super::netif::host_index_with(&name, uplink).and_then(|i| bind_host_interface(fd, i));
