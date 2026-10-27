@@ -854,7 +854,7 @@ impl AppHost {
             ),
             ("permissionmgr", permission_manager.clone()),
             // SystemServer's optional_background_install_control flag is on;
-            // the image leaves backgound_install_control_enabled at true.
+            // the image leaves background_install_control_enabled at true.
             (
                 "background_install_control",
                 self.background_install_control(),
