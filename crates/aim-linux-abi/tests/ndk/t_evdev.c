@@ -1,6 +1,8 @@
 // Evdev devices (/dev/input/eventN, docs/input.md), against the Linux UAPI
 // headers: the display server's touchscreen (event0), keyboard (event1,
 // KEY_A held by the harness) and mouse (event2).
+// Mutable queries follow Linux v6.12 drivers/input/evdev.c:
+// evdev_do_ioctl (EVIOCGABS/EVIOCSABS) and handle_eviocgbit (EV_KEY).
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -272,6 +274,7 @@ static void axes(void) {
   CHECK(fd >= 0 && other >= 0);
   struct input_absinfo abs, set = {.value = 5, .minimum = 0, .maximum = 99, .resolution = 4};
   CHECK(ioctl(fd, EVIOCGABS(ABS_X), &abs) == 0 && abs.maximum == 1079 && abs.resolution == 10);
+  CHECK(ioctl(other, EVIOCGABS(ABS_X), &abs) == 0 && abs.maximum == 1079);
   // Every open file sees the change, value included.
   CHECK(ioctl(fd, EVIOCSABS(ABS_X), &set) == 0);
   CHECK(ioctl(other, EVIOCGABS(ABS_X), &abs) == 0 && abs.maximum == 99 && abs.value == 5 &&
@@ -281,6 +284,7 @@ static void axes(void) {
   CHECK(ioctl(other, EVIOCGABS(ABS_X), &abs) == 0 && abs.resolution == 0);
   set = (struct input_absinfo){.maximum = 1079, .resolution = 10};
   CHECK(ioctl(fd, EVIOCSABS(ABS_X), &set) == 0);
+  CHECK(ioctl(fd, EVIOCGABS(ABS_X), &abs) == 0 && abs.maximum == 1079 && abs.value == 0);
   // The slots are fixed; a device without axes has none to set.
   int ts = open("/dev/input/event0", O_RDONLY);
   int kb = open("/dev/input/event1", O_RDONLY);
@@ -301,7 +305,10 @@ static void axes(void) {
 
 static void keycodes(void) {
   int kb = open("/dev/input/event1", O_RDONLY);
-  CHECK(kb >= 0);
+  int other = open("/dev/input/event1", O_RDONLY);
+  CHECK(kb >= 0 && other >= 0);
+  uint8_t bits[96];
+  CHECK(ioctl(other, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && TEST_BIT(bits, KEY_B));
   // Scan codes are HID usages, as hid-input's.
   unsigned int map[2] = {0x70004, 0};
   CHECK(ioctl(kb, EVIOCGKEYCODE, map) == 0 && map[1] == KEY_A);
@@ -323,18 +330,40 @@ static void keycodes(void) {
   CHECK(ioctl(kb, EVIOCSKEYCODE, map) == -1 && errno == EINVAL);
   map[1] = KEY_X;
   CHECK(ioctl(kb, EVIOCSKEYCODE, map) == 0);
-  uint8_t bits[96];
   CHECK(ioctl(kb, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && !TEST_BIT(bits, KEY_B) &&
+        TEST_BIT(bits, KEY_X));
+  CHECK(ioctl(other, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && !TEST_BIT(bits, KEY_B) &&
         TEST_BIT(bits, KEY_X));
   ke = (struct input_keymap_entry){.len = 4, .keycode = KEY_B};
   memcpy(ke.scancode, &map[0], 4);
   CHECK(ioctl(kb, EVIOCSKEYCODE_V2, &ke) == 0);
   CHECK(ioctl(kb, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && TEST_BIT(bits, KEY_B));
+  CHECK(ioctl(other, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && TEST_BIT(bits, KEY_B));
+  close(other);
   close(kb);
   // A device without a keymap.
   int ts = open("/dev/input/event0", O_RDONLY);
   CHECK(ioctl(ts, EVIOCGKEYCODE, map) == -1 && errno == EINVAL);
   close(ts);
+}
+
+// EventHub's opening sequence asks for keys and each axis independently.
+static void query_batch(void) {
+  int fd = open("/dev/input/event0", O_RDONLY);
+  CHECK(fd >= 0);
+  uint8_t bits[96];
+  struct input_absinfo abs;
+  const int axes[] = {ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID};
+  for (int sample = 0; sample < 3; ++sample) {
+    int64_t start = now_ns(CLOCK_MONOTONIC);
+    for (int n = 0; n < 64; ++n) {
+      CHECK(ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && TEST_BIT(bits, BTN_TOUCH));
+      for (unsigned i = 0; i < sizeof(axes) / sizeof(axes[0]); ++i)
+        CHECK(ioctl(fd, EVIOCGABS(axes[i]), &abs) == 0);
+    }
+    printf("query_batch: 320 ioctls in %lld ns\n", (long long)(now_ns(CLOCK_MONOTONIC) - start));
+  }
+  close(fd);
 }
 
 static void clock_flush(void) {
@@ -386,6 +415,8 @@ static int exec_child(int fd) {
   if (n <= 0) return 5;
   target[n] = 0;
   if (strcmp(target, "/dev/input/event1")) return 6;
+  uint8_t bits[96];
+  if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) != 96 || !TEST_BIT(bits, KEY_B)) return 7;
   return 0;
 }
 
@@ -396,16 +427,20 @@ static void across_exec(void) {
   CHECK(fd >= 0);
   int clk = CLOCK_MONOTONIC;
   CHECK(ioctl(fd, EVIOCSCLOCKID, &clk) == 0);
+  uint8_t bits[96];
+  CHECK(ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && TEST_BIT(bits, KEY_B));
   char arg[16];
   snprintf(arg, sizeof(arg), "%d", fd);
   FORK_OR_SKIP(pid);
   if (pid == 0) {
+    if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) != 96 || !TEST_BIT(bits, KEY_B)) _exit(98);
     execl(self, self, "exec", arg, (char*)NULL);
     _exit(99);
   }
   int status;
   CHECK(waitpid(pid, &status, 0) == pid);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) == 96 && TEST_BIT(bits, KEY_B));
   close(fd);
 }
 
@@ -484,6 +519,7 @@ int main(int argc, char** argv) {
   RUN(masks);
   RUN(axes);
   RUN(keycodes);
+  RUN(query_batch);
   RUN(clock_flush);
   RUN(across_exec);
   RUN(nodes);
