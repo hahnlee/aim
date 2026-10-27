@@ -384,7 +384,7 @@ fn serve(sock: &mut UnixStream) {
                 if w.op == window::TASK && BACKGROUND.swap(false, Ordering::Relaxed) {
                     on_main(|| set_policy(REGULAR));
                 }
-                on_main(move || crate::windows::on_host_record(&w));
+                on_main(move || crate::windows::on_host_record(&w, r.id as isize));
             }
             host::CURSOR => {
                 let i = r.import;

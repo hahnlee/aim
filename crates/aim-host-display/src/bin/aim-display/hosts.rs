@@ -87,18 +87,6 @@ pub fn showing(task: i32) -> Option<Arc<Host>> {
         .cloned()
 }
 
-/// The task a host's window `number` shows.
-pub fn task_of_window(number: isize) -> Option<i32> {
-    HOSTS.lock().unwrap().iter().find_map(|h| {
-        h.numbers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|&(_, &n)| n == number)
-            .map(|(&t, _)| t)
-    })
-}
-
 impl Host {
     /// The pointer's image (None: the arrow), its pixels after the record.
     fn send_cursor(&self, image: Option<&Image>) {
@@ -185,9 +173,18 @@ impl Host {
 
     /// Pass a task record on.
     pub fn send_window(&self, r: &Record) {
+        self.send_window_relative(r, 0);
+    }
+
+    pub fn send_window_relative(&self, r: &Record, relative: isize) {
         self.send(
             &Rec {
                 op: host::WINDOW,
+                id: if r.op == window::FRONT {
+                    relative as u64
+                } else {
+                    0
+                },
                 window: *r,
                 ..Default::default()
             },
@@ -387,6 +384,10 @@ pub fn serve(sock: OwnedFd) {
                     .lock()
                     .unwrap()
                     .insert(r.flag as i32, r.id as isize);
+                let h = h.clone();
+                on_main(move || {
+                    crate::windows::host_window_number(&h, r.flag as i32, r.id as isize)
+                });
             }
             host::RESTACK => on_main(crate::windows::restack),
             host::NOTIFY => match aim_host_display::notify::Message::read(&mut sock) {
