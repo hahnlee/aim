@@ -10,19 +10,6 @@ mod common {
 }
 use common::runtime::{Boot, Data, run};
 
-struct TransferGuard {
-    transfer: std::sync::Arc<aim_services::package::installer::file_bridge::Transfer>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-impl Drop for TransferGuard {
-    fn drop(&mut self) {
-        self.transfer.stop();
-        if let Some(worker) = self.worker.take() {
-            worker.join().unwrap();
-        }
-    }
-}
-
 #[test]
 #[ignore = "requires original pinned image, aimctl, JDK and d8; explicit test owners only"]
 fn installer_user_policy_record_matches_original_parcel() {
@@ -104,13 +91,11 @@ fn installer_user_policy_record_matches_original_parcel() {
     fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
     let target_path = data.0.join("filebridge-target");
     let target = fs::File::create(&target_path).unwrap();
-    let transfer =
-        std::sync::Arc::new(aim_services::package::installer::file_bridge::Transfer::default());
-    let (socket, worker) = transfer.start(target).unwrap();
-    let guard = TransferGuard {
-        transfer: transfer.clone(),
-        worker: Some(worker),
-    };
+    let registry =
+        std::sync::Arc::new(aim_services::package::installer::file_bridge::Registry::default());
+    let guard = registry.take_guard().unwrap();
+    let transfer = registry.register(7).unwrap();
+    let socket = registry.start(7, transfer.clone(), target).unwrap();
     let input: std::os::fd::OwnedFd = socket.into();
     let output = boot.client(1000).args([
         "/system/bin/app_process",
