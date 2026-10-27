@@ -10,11 +10,11 @@ use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::android_app_trust_itrustmanager as trust;
 
+use super::activity_user::AllowMode;
 use super::{AppHost, reply};
 
-/// `Context.DEVICE_ID_DEFAULT`, `UserHandle.USER_ALL`.
+/// `Context.DEVICE_ID_DEFAULT`.
 const DEVICE_ID_DEFAULT: i32 = 0;
-const USER_ALL: i32 = -1;
 
 pub struct TrustManager {
     host: Arc<AppHost>,
@@ -50,14 +50,14 @@ impl Service for TrustManager {
                     if a.device_id != DEVICE_ID_DEFAULT {
                         return Ok(false);
                     }
-                    if a.user_id == USER_ALL {
-                        return Err(Exception::illegal_argument(format!(
-                            "Call does not support special user #{}",
-                            a.user_id
-                        )));
-                    }
-                    self.host
-                        .incoming_user(call.sender_euid as i32, a.user_id, false)?;
+                    self.host.handle_incoming_user(
+                        call.sender_euid as i32,
+                        a.user_id,
+                        false,
+                        AllowMode::FullOnly,
+                        Some("isDeviceSecure"),
+                        None,
+                    )?;
                     aim_host_lock::secure().map_err(|code| {
                         Exception::new(
                             EX_ILLEGAL_STATE,

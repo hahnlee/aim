@@ -46,6 +46,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::activity_start::Component;
+use super::activity_user::AllowMode;
 use super::appops_service::{self as appops, MODE_ALLOWED, MODE_DEFAULT};
 use super::broadcasts::filter_equals;
 use super::fgs_types::{self, Check};
@@ -56,6 +57,21 @@ use super::{AppHost, PER_USER_RANGE, PROCESS_STATE_TOP, STOCK_PM_FLAGS};
 use crate::bundle::Value;
 use crate::package::info::{ServiceInfo, java_hash};
 use crate::package::list_slice::Slice;
+
+/// `ActiveServices.getAllowMode`.
+fn service_allow_mode(service: &RawIntent, calling_package: Option<&str>) -> AllowMode {
+    if calling_package.is_some_and(|p| {
+        service
+            .intent
+            .component
+            .as_ref()
+            .is_some_and(|c| p == c.package)
+    }) {
+        AllowMode::ProfilesOrNonFull
+    } else {
+        AllowMode::NonFullInProfile
+    }
+}
 
 /// `Context.BIND_AUTO_CREATE`; `BIND_EXTERNAL_SERVICE` (both forms).
 const BIND_AUTO_CREATE: i64 = 0x1;
@@ -995,7 +1011,14 @@ impl AppHost {
                 "Unable to find app for caller when starting service",
             ));
         }
-        let user = self.incoming_user(uid, user, false)?;
+        let user = self.handle_incoming_user(
+            uid,
+            user,
+            false,
+            service_allow_mode(&intent, calling_package),
+            Some("service"),
+            calling_package,
+        )?;
         let info = match self.retrieve_service(
             &intent,
             resolved_type.as_deref(),
@@ -1112,7 +1135,14 @@ impl AppHost {
                 "File descriptors passed in Intent",
             ));
         }
-        let user = self.incoming_user(uid, user, false)?;
+        let user = self.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFullInProfile,
+            Some("service"),
+            None,
+        )?;
         let info = match self.retrieve_service(
             &intent,
             resolved_type.as_deref(),
@@ -1246,7 +1276,14 @@ impl AppHost {
                 "a binding into a shared isolated process (#1492)",
             ));
         }
-        let user = self.incoming_user(uid, user, false)?;
+        let user = self.handle_incoming_user(
+            uid,
+            user,
+            false,
+            service_allow_mode(&intent, calling_package.as_deref()),
+            Some("service"),
+            calling_package.as_deref(),
+        )?;
         let info = match self.retrieve_service(
             &intent,
             resolved_type.as_deref(),
@@ -3063,6 +3100,28 @@ fn next_id(last: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_user_mode_requires_an_explicit_own_package_component() {
+        let service = RawIntent::with_data(Some("test"), None, Some("com.example"), 0, &[]);
+        assert_eq!(
+            service_allow_mode(&service, Some("com.example")),
+            AllowMode::NonFullInProfile
+        );
+        let explicit = service.with_component("com.example", "Service");
+        assert_eq!(
+            service_allow_mode(&explicit, Some("com.example")),
+            AllowMode::ProfilesOrNonFull
+        );
+        assert_eq!(
+            service_allow_mode(&explicit, Some("com.other")),
+            AllowMode::NonFullInProfile
+        );
+        assert_eq!(
+            service_allow_mode(&explicit, None),
+            AllowMode::NonFullInProfile
+        );
+    }
 
     /// `scheduleServiceRestartLocked`'s delays: one second, then four
     /// times the last while it keeps dying soon, one second again once it

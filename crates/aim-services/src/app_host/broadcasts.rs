@@ -33,6 +33,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::activity_user::AllowMode;
 use super::app_op_infos::{APP_OP_INFOS, NUM_OP};
 use super::appops_service::{self, MODE_ALLOWED, MODE_IGNORED};
 use super::kept::{By, KeptBundle, RawBundle, RawIntent};
@@ -664,7 +665,14 @@ impl Broadcasts {
             )));
         }
         let instant_app = host.instant_app(&caller_package, uid / PER_USER_RANGE as i32)?;
-        let user = host.incoming_user(uid, args.user, false)?;
+        let user = host.handle_incoming_user(
+            uid,
+            args.user,
+            true,
+            AllowMode::FullOnly,
+            Some("registerReceiver"),
+            Some(&caller_package),
+        )?;
         // System internals hear these before apps unless they chose.
         // (An unset priority is no system one.)
         if is_core(uid) && filter.priority == 0 {
@@ -1028,7 +1036,14 @@ impl Broadcasts {
                 intent.intent.action.as_deref().unwrap_or("null")
             )));
         }
-        let user = host.incoming_user(calling_uid, args.user_id, true)?;
+        let user = host.handle_incoming_user(
+            calling_uid,
+            args.user_id,
+            true,
+            AllowMode::NonFull,
+            Some("broadcast"),
+            caller_package.as_deref(),
+        )?;
         let denied = |permission: &str| {
             Exception::security(format!(
                 "Permission Denial: {} broadcast from {} (pid={}, uid={calling_uid}) requires {permission}",
@@ -2236,7 +2251,14 @@ impl Broadcasts {
                 "File descriptors passed in Intent",
             ));
         }
-        let user = host.incoming_user(uid, user, true)?;
+        let user = host.handle_incoming_user(
+            uid,
+            user,
+            true,
+            AllowMode::NonFull,
+            Some("removeStickyBroadcast"),
+            None,
+        )?;
         if !host.check_component_permission(Some(BROADCAST_STICKY), uid, -1, true)? {
             return Err(Exception::security(format!(
                 "Permission Denial: unbroadcastIntent() from pid={}, uid={uid} requires {BROADCAST_STICKY}",

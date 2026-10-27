@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use aim_binder_host::local::{Call, Strong};
 use aim_binder_host::parcel::{Binder, Exception, Parcel};
 
+use super::activity_user::AllowMode;
 use super::{AppHost, PER_USER_RANGE, appops_service};
 
 /// `ActivityManager.UID_OBSERVER_*`.
@@ -320,7 +321,14 @@ impl AppHost {
         package: Option<&str>,
     ) -> Result<i32, Exception> {
         self.enforce_usage_stats(call, package, "getUidProcessState")?;
-        self.incoming_user(call.sender_euid as i32, uid / PER_USER_RANGE as i32, false)?;
+        self.handle_incoming_user(
+            call.sender_euid as i32,
+            uid / PER_USER_RANGE as i32,
+            false,
+            AllowMode::FullOnly,
+            Some("getUidProcessState"),
+            package,
+        )?;
         Ok(if self.uid_runs(uid) {
             PROCESS_STATE_TOP
         } else {

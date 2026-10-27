@@ -22,6 +22,7 @@ use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
 use aim_service_aidl::android_content_iintentsender as sender;
 
 use super::activity_start::StartArgs;
+use super::activity_user::AllowMode;
 use super::broadcasts::filter_equals;
 use super::kept::{By, KeptIntent, RawBundle, RawIntent};
 use super::{AppHost, PER_USER_RANGE};
@@ -271,11 +272,18 @@ impl AppHost {
                 "File descriptors passed in options",
             ));
         }
+        let user = self.handle_incoming_user(
+            uid,
+            req.user,
+            req.kind == INTENT_SENDER_BROADCAST,
+            AllowMode::NonFull,
+            Some("getIntentSender"),
+            None,
+        )?;
         let user = if req.user == USER_CURRENT {
-            self.incoming_user(uid, 0, true)?;
             USER_CURRENT
         } else {
-            self.incoming_user(uid, req.user, true)?
+            user
         };
         let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
         if app_id != 0 && app_id != 1000 && !self.owns_package(uid, &package)? {

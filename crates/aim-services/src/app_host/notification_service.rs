@@ -39,6 +39,7 @@ use aim_service_aidl::android_service_notification_inotificationlistener as list
 use aim_service_aidl::android_service_notification_istatusbarnotificationholder as holder;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::activity_user::AllowMode;
 use super::notification_channels::{
     CHANNEL_CLASS, Channel, DEFAULT_CHANNEL_ID, Defaults, GROUP_CLASS, Group, GroupParcel,
     IMPORTANCE_NONE, IMPORTANCE_UNSPECIFIED, Preferences, SYSTEM_RESERVED_IDS,
@@ -1189,9 +1190,14 @@ impl NotificationManager {
     /// foreground service's (`NotificationManagerInternal
     /// .enqueueNotification`, which ActivityManager posts as the app).
     pub(super) fn enqueue_internal(&self, e: Enqueue) -> Result<(), Exception> {
-        let user = self
-            .host
-            .incoming_user(e.calling_uid, e.incoming_user, true)?;
+        let user = self.host.handle_incoming_user(
+            e.calling_uid,
+            e.incoming_user,
+            true,
+            AllowMode::NonFull,
+            Some("enqueueNotification"),
+            Some(&e.package),
+        )?;
         let uid = self.notification_uid(&e.op_package, &e.package, e.calling_uid, user)?;
         let mut n = e.notification.n.clone();
         if n.allowlist_token.is_some_and(|t| t != self.token) {
@@ -2280,7 +2286,14 @@ impl NotificationManager {
     fn app_active(&self, call: &Call<'_>, package: &str, user: i32) -> Result<Parcel, Exception> {
         let uid = call.sender_euid as i32;
         self.check_system_or_same_app(uid, package)?;
-        let user = self.host.incoming_user(uid, user, true)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            true,
+            AllowMode::NonFull,
+            Some("getAppActiveNotifications"),
+            Some(package),
+        )?;
         let guard = self.state()?;
         let sbns: Vec<Sbn> = guard
             .as_ref()
@@ -2549,7 +2562,14 @@ impl Service for NotificationManager {
                 let package = a.pkg.unwrap_or_default();
                 let op = a.op_pkg.unwrap_or_else(|| package.clone());
                 empty((|| {
-                    let user = self.host.incoming_user(uid, a.user_id, true)?;
+                    let user = self.host.handle_incoming_user(
+                        uid,
+                        a.user_id,
+                        true,
+                        AllowMode::NonFull,
+                        Some("cancelNotificationWithTag"),
+                        Some(&package),
+                    )?;
                     let notification_uid = self.notification_uid(&op, &package, uid, user)?;
                     let _ = notification_uid;
                     let must_not_have = if is_system(uid) {
@@ -2582,7 +2602,14 @@ impl Service for NotificationManager {
                 let package = a.pkg.unwrap_or_default();
                 empty((|| {
                     self.check_system_or_same_app(uid, &package)?;
-                    let user = self.host.incoming_user(uid, a.user_id, true)?;
+                    let user = self.host.handle_incoming_user(
+                        uid,
+                        a.user_id,
+                        true,
+                        AllowMode::NonFull,
+                        Some("cancelAllNotifications"),
+                        Some(&package),
+                    )?;
                     let mut guard = self.state()?;
                     self.cancel(
                         guard.as_mut().unwrap(),

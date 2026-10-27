@@ -3530,7 +3530,14 @@ impl AppHost {
     ) -> Result<Option<providers::Holder>, Exception> {
         self.external_provider_access(call)?;
         let uid = call.sender_euid as i32;
-        let user = self.incoming_user(uid, user, false)?;
+        let user = self.handle_incoming_user(
+            uid,
+            user,
+            false,
+            activity_user::AllowMode::FullOnly,
+            Some("getContentProvider"),
+            None,
+        )?;
         match name {
             Some("settings") => self.settings_holder(),
             Some(name) => self.provider(None, uid, name, user, true),
@@ -3565,7 +3572,14 @@ impl AppHost {
             return Ok(None);
         };
         if name != SETTINGS_AUTHORITY {
-            let user = self.incoming_user(uid, user, false)?;
+            let user = self.handle_incoming_user(
+                uid,
+                user,
+                false,
+                activity_user::AllowMode::NonFull,
+                Some(&format!("checkContentProviderPermissionLocked {name}")),
+                None,
+            )?;
             let client = self
                 .apps
                 .lock()

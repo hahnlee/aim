@@ -18,6 +18,7 @@ use aim_service_aidl::android_content_pm_ipackagedataobserver as data_observer;
 use aim_service_aidl::android_security_maintenance_ikeystoremaintenance as maintenance;
 use aim_service_aidl::android_system_keystore2_domain as domain;
 
+use super::activity_user::AllowMode;
 use super::app_data::{FLAG_STORAGE_CE, FLAG_STORAGE_DE};
 use super::job_scheduler::{INTERNAL_STOP_REASON_DATA_CLEARED, STOP_REASON_USER};
 use super::{AppHost, PER_USER_RANGE};
@@ -102,7 +103,14 @@ impl AppHost {
                 "Isolated process not allowed to call clearApplicationUserData",
             ));
         }
-        let user = self.incoming_user(uid, user, false)?;
+        let user = self.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::FullOnly,
+            Some("clearApplicationUserData"),
+            None,
+        )?;
         if user < 0 {
             return Err(Exception::illegal_argument(format!(
                 "Call does not support special user #{user}"

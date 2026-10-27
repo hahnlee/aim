@@ -38,6 +38,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::android_content_icontentprovider as cp;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
+use super::activity_user::AllowMode;
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
 use super::content_service::NOTIFY_SYNC_TO_NETWORK;
 use super::cursor::{BulkCursor, Rows};
@@ -2509,12 +2510,14 @@ impl SettingsProvider {
         if requesting == caller.user() {
             return Ok(requesting);
         }
-        let user = self.host.incoming_user(caller.uid, requesting, false)?;
-        if user < 0 {
-            return Err(Exception::illegal_argument(format!(
-                "Call does not support special user #{user}"
-            )));
-        }
+        let user = self.host.handle_incoming_user(
+            caller.uid,
+            requesting,
+            false,
+            AllowMode::FullOnly,
+            Some("get/set setting for user"),
+            None,
+        )?;
         Ok(user)
     }
 
