@@ -5456,7 +5456,7 @@ impl Service for Control {
                 // The system user started, its DE storage prepared.
                 let user = match host.start_storage() {
                     Ok(user) => user,
-                    Err(e) => return eprintln!("app host: external storage: {e}"),
+                    Err(e) => return eprintln!("app host: user storage: {e}"),
                 };
                 // BluetoothService's `onUserStarting` of the system user.
                 if let Some(bluetooth) = host.bluetooth.get() {
@@ -5483,7 +5483,7 @@ impl Service for Control {
                     if let Some(text_services) = services.text_services.get() {
                         text_services.on_user_unlocking(0);
                     }
-                    // Apps' storage is mounted: the persisted jobs are read
+                    // The user's CE storage is prepared: persisted jobs are read
                     // and run (JobSchedulerService's
                     // `PHASE_THIRD_PARTY_APPS_CAN_START`, its jobs of
                     // encryption unaware apps runnable once the user is

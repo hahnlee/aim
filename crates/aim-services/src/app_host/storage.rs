@@ -1,6 +1,6 @@
 //! `mount`: StorageManager for the app host, as StorageManagerService
 //! keeps external storage at `android-16.0.0_r1`. It connects vold
-//! (`setListener`, `reset`, user 0's addition and start), has the agent
+//! (`setListener`, `reset`, user 0's addition and start at unlock), has the agent
 //! mount user 0's emulated volume (`aim-app-host-agent`, which serves its
 //! FUSE connection in MediaProvider's place), follows the volume's state
 //! from vold's listener calls, answers apps' `getVolumeList`,
@@ -210,8 +210,7 @@ pub(super) struct StartedUser {
 
 impl AppHost {
     /// StorageManagerService's start: vold connected and reset, user 0
-    /// added and started, its DE storage prepared and its emulated volume
-    /// mounted by the agent; with
+    /// added and its DE storage prepared; with
     /// PackageManagerService's and UserManagerService's preparation of the
     /// user's and its apps' data (`app_data`). Its CE storage is unlocked
     /// later (`unlock_user_storage`), as `finishUserBoot` unlocks it.
@@ -270,10 +269,25 @@ impl AppHost {
             updated,
         };
         self.prepare_user_storage(&started, super::app_data::FLAG_STORAGE_DE)?;
-        call(ON_USER_STARTED, "onUserStarted", &|p| p.write_i32(USER))?;
-        // The started user's emulated volume, mounted while the user is
-        // locked (`onUserStarted` → `mount`).
         *self.storage.vold.lock().unwrap() = Some(self.process.strong(vold.handle));
+        Ok(started)
+    }
+
+    /// StorageManagerService's `onUserUnlocking`: vold creates the
+    /// emulated volume on `onUserStarted`, then `H_VOLUME_MOUNT` mounts it.
+    /// The user's CE storage already exists (`onBeforeUnlockUser`).
+    fn mount_user_storage(&self, vold: &Strong) -> Result<(), String> {
+        let mut data = Parcel::new();
+        data.write_interface_token(VOLD_DESCRIPTOR);
+        data.write_i32(USER);
+        let reply = vold
+            .transact(ON_USER_STARTED, &data, false)
+            .map_err(|e| format!("vold onUserStarted: {e}"))?;
+        reply
+            .reader()
+            .read_exception()
+            .map_err(|e| format!("vold onUserStarted: {e}"))?
+            .map_err(|e| format!("vold onUserStarted: {e:?}"))?;
         let daemon = self.media_provider_uid().map_err(|e| format!("{e:?}"))?;
         self.call_agent(MOUNT_STORAGE, "mountStorage", |p| {
             p.write_i32(USER);
@@ -282,7 +296,7 @@ impl AppHost {
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))?;
         eprintln!("app host: {VOLUME} mounted");
-        Ok(started)
+        Ok(())
     }
 
     /// The user's and its apps' data of the storage of `flags`
@@ -316,10 +330,20 @@ impl AppHost {
 
     /// `finishUserUnlocking` of user 0: UserManagerService's
     /// `onBeforeUnlockUser`, its CE storage and apps' data, then the user
-    /// unlocking.
+    /// unlocking, then StorageManagerService's `onUserUnlocking`.
     pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<(), String> {
         self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE)?;
-        self.user_unlocking(USER).map_err(|e| e.message)
+        self.finish_storage_unlock(&user.vold)
+    }
+
+    fn finish_storage_unlock(&self, vold: &Strong) -> Result<(), String> {
+        self.user_unlocking(USER).map_err(|e| e.message)?;
+        // StorageManagerService logs onUserStarted/mount exceptions and
+        // lets UserController finish unlocking and send BOOT_COMPLETED.
+        if let Err(e) = self.mount_user_storage(vold) {
+            eprintln!("app host: external storage: {e}");
+        }
+        Ok(())
     }
 
     /// `finishUserUnlockedCompleted`: UserManagerService's
@@ -1663,6 +1687,127 @@ impl Service for TrimListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnlockStorage {
+        host: std::sync::Weak<AppHost>,
+        agent: bool,
+        fail: bool,
+        calls: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl Service for UnlockStorage {
+        fn descriptor(&self) -> &str {
+            if self.agent {
+                super::super::AGENT_DESCRIPTOR
+            } else {
+                VOLD_DESCRIPTOR
+            }
+        }
+
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            call.data.enforce_interface(self.descriptor())?;
+            assert_eq!(
+                call.code,
+                if self.agent {
+                    MOUNT_STORAGE
+                } else {
+                    ON_USER_STARTED
+                }
+            );
+            assert_eq!(call.data.read_i32()?, USER);
+            let host = self.host.upgrade().unwrap();
+            assert!(host.ce_storage_prepared(USER));
+            assert!(host.user_unlocking_or_unlocked(USER).unwrap());
+            assert!(host.data().unwrap().join("media/0").is_dir());
+            if self.agent {
+                assert_eq!(call.data.read_i32()?, 10100);
+            }
+            assert_eq!(call.data.remaining(), 0);
+            self.calls.lock().unwrap().push(call.code);
+            let mut reply = Parcel::new();
+            if self.fail {
+                reply.write_exception(&Exception::new(EX_SERVICE_SPECIFIC, "storage unavailable"));
+            } else {
+                if self.agent {
+                    std::fs::create_dir(host.data().unwrap().join("media/0/Android")).unwrap();
+                }
+                reply.write_no_exception();
+            }
+            Ok(reply)
+        }
+    }
+
+    /// UserController.finishUserUnlocking (CE, then unlocking) precedes
+    /// StorageManagerService.onUserUnlocking (onUserStarted, then mount).
+    /// SMS logs either external-storage failure and user boot continues.
+    #[test]
+    fn emulated_storage_starts_at_unlock_and_failures_do_not_abort_it() {
+        for failure in [None, Some(ON_USER_STARTED), Some(MOUNT_STORAGE)] {
+            crate::system::with_discovery_binders(|host, publish, _, export| {
+                publish(&mut |package| {
+                    if package.package_name == "p" {
+                        let mut provider = crate::package::pkg::Provider {
+                            main: package.activities[0].main.clone(),
+                            authority: Some("media".into()),
+                            ..Default::default()
+                        };
+                        provider.main.component.name = "p.Media".into();
+                        package.providers.push(provider);
+                    }
+                });
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                let service = |agent| {
+                    export(Arc::new(UnlockStorage {
+                        host: Arc::downgrade(host),
+                        agent,
+                        fail: failure
+                            == Some(if agent {
+                                MOUNT_STORAGE
+                            } else {
+                                ON_USER_STARTED
+                            }),
+                        calls: calls.clone(),
+                    }))
+                };
+                let vold = service(false);
+                *host.agent.lock().unwrap() = Some(service(true));
+                assert!(!host.data().unwrap().join("media/0").exists());
+                assert!(!host.ce_storage_prepared(USER));
+                assert!(!host.user_unlocking_or_unlocked(USER).unwrap());
+
+                // A failed CE preparation must leave vold's user unstarted.
+                let user = StartedUser {
+                    vold: host.process.strong(vold.handle),
+                    installd: host.process.strong(vold.handle),
+                    fingerprint: String::new(),
+                    updated: false,
+                };
+                assert!(host.unlock_user_storage(&user).is_err());
+                assert!(calls.lock().unwrap().is_empty());
+                assert!(!host.user_unlocking_or_unlocked(USER).unwrap());
+
+                // Vold's prepareUserStorage(CE) owns this directory, before
+                // UserController dispatches the services' unlocking callbacks.
+                std::fs::create_dir_all(host.data().unwrap().join("media/0")).unwrap();
+                host.storage.prepared_users.lock().unwrap().insert(USER, 3);
+                host.finish_storage_unlock(&vold).unwrap();
+                assert!(host.user_unlocking_or_unlocked(USER).unwrap());
+                assert_eq!(
+                    *calls.lock().unwrap(),
+                    if failure == Some(ON_USER_STARTED) {
+                        vec![ON_USER_STARTED]
+                    } else {
+                        vec![ON_USER_STARTED, MOUNT_STORAGE]
+                    }
+                );
+                assert_eq!(
+                    host.data().unwrap().join("media/0/Android").exists(),
+                    failure.is_none()
+                );
+                assert!(host.storage.volume.lock().unwrap().is_none());
+            });
+        }
+    }
 
     /// StorageManager's CE fact precedes UserController's unlocking state.
     /// Both the internal bridge and the public storage API must agree.
