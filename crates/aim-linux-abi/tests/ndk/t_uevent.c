@@ -345,6 +345,29 @@ static void injected(void) {
   close(s);
 }
 
+// A device attribute opened before fork still synthesizes a kernel event.
+static void inherited_attribute(void) {
+  int s = uevent_socket(0, 1);
+  int fd = open(ATTR, O_WRONLY | O_CLOEXEC);
+  CHECK(s >= 0 && fd >= 0);
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    errno = 0;
+    if (pwrite(fd, "bogus", 5, 0) != -1 || errno != EINVAL) _exit(1);
+    if (write(fd, "change", 6) != 6) _exit(2);
+    _exit(0);
+  }
+  int status;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  struct received m = receive(s, 2000);
+  CHECK(m.n > 0 && !strcmp(m.buf, "change@/devices/virtual/input/input0/event0"));
+  CHECK(has(&m, "ACTION=change") && has(&m, "SUBSYSTEM=input"));
+  CHECK(has(&m, "MAJOR=13") && has(&m, "DEVNAME=input/event0"));
+  CHECK(m.from.nl_pid == 0 && m.has_cred && m.cred.pid == 0);
+  close(fd);
+  close(s);
+}
+
 // sysfs's device trees hold the modeled devices only, and create nothing.
 static void device_trees(void) {
   struct stat st;
@@ -369,6 +392,7 @@ int main(int argc, char** argv) {
   RUN(input_attributes);
   RUN(multicast);
   RUN(injected);
+  RUN(inherited_attribute);
   RUN(device_trees);
   DONE();
 }

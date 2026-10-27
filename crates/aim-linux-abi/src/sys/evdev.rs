@@ -1207,7 +1207,7 @@ pub fn uevent_device(devpath: &str) -> Option<super::uevent::Device> {
 fn event_device(i: u32) -> super::uevent::Device {
     super::uevent::Device {
         devpath: format!("/devices/virtual/input/input{i}/event{i}"),
-        subsystem: "input",
+        subsystem: "input".into(),
         env: vec![
             format!("MAJOR={INPUT_MAJOR}"),
             format!("MINOR={}", EVDEV_MINOR_BASE + i),
@@ -1282,7 +1282,7 @@ fn input_device(d: &Descriptor) -> super::uevent::Device {
     env.push(format!("MODALIAS={alias}"));
     super::uevent::Device {
         devpath: format!("/devices/virtual/input/input{}", d.index),
-        subsystem: "input",
+        subsystem: "input".into(),
         env,
     }
 }
