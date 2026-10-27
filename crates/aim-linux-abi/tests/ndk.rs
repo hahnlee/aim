@@ -434,6 +434,11 @@ fn ashmem() {
 }
 
 #[test]
+fn audio_input_open() {
+    check("t_audio", &[]);
+}
+
+#[test]
 fn jit() {
     check("t_jit", &[]);
 }

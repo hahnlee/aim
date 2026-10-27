@@ -296,7 +296,7 @@ fn record(module: &Strong<dyn IModule>, ports: &[AudioPort], ms: i64) {
         .profiles
         .first()
         .and_then(|p| p.sampleRates.first().copied())
-        .unwrap_or(RATE);
+        .expect("input mix port must advertise a sample rate");
     let (config, patch) = connect(
         module,
         mix,
@@ -329,7 +329,7 @@ fn record(module: &Strong<dyn IModule>, ports: &[AudioPort], ms: i64) {
         got += (n / s.frame_bytes) as i64;
     }
     println!(
-        "input read {got} frames in {:.0} ms, peak {peak:.5}",
+        "input read {got} frames in {:.0} ms, rate {rate} Hz, peak {peak:.5}",
         started.elapsed().as_secs_f64() * 1000.0
     );
     s.expect(PAUSE, 0, STATE_PAUSED);
