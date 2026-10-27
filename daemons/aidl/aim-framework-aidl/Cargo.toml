@@ -1,0 +1,10 @@
+[package]
+name = "aim-framework-aidl"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Framework transaction tables generated from the pinned AIDL and checked against the image, for guest daemons"
+
+[lib]
+path = "../../../target/aim/gen/service-aidl/codes.rs"

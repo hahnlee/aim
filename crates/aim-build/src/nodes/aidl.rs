@@ -9,8 +9,8 @@
 //!    them with the pinned SDK `aidl --lang=rust` into the crates that
 //!    `hal/aidl/*` and `daemons/aidl/*` point at (`target/aim/gen`).
 //! 4. The framework AIDL of the native system services is generated into
-//!    the crate `crates/aim-services/aidl` points at, and checked against
-//!    the image ([`super::service_aidl`]).
+//!    the crates `crates/aim-services/aidl` and `daemons/aidl/aim-framework-aidl`
+//!    point at, and checked against the image ([`super::service_aidl`]).
 //! 5. The crate roots `hal/binder` and `hal/binder-ndk-sys` build from are
 //!    copies of the binder crate's, in `target/aim/gen/binder-root`, beside
 //!    links to the rest of their directories, with each out-of-line module
@@ -56,7 +56,7 @@ pub fn node() -> Node {
             binder_roots_out(),
         ],
         tools: vec![Tool::Aidl, Tool::Python],
-        recipe: 7,
+        recipe: 8,
         action: Action::AidlGen,
         boot: true,
     }

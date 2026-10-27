@@ -4,12 +4,15 @@
 //! `IActivityTaskManager`, `IWindowManager` and `ITaskStackListener` are
 //! Java AIDL interfaces of the platform, with no NDK or Rust backend: their
 //! methods take Java-only parcelables. The few calls the bridge makes are
-//! written here by hand, with the transaction codes of the pinned image's
-//! AIDL (`android-16.0.0_r1`, first method = 1, in declaration order; the
-//! image's `framework.jar` stubs have the same `TRANSACTION_*` values).
+//! encoded here over AOSP's `binder::Parcel`, using transaction tables
+//! generated from the pinned AIDL and checked against `framework.jar`.
 //! A class associated with each remote binder writes the interface token,
 //! as a generated proxy's does.
 
+use aim_framework_aidl::{
+    android_app_iactivitytaskmanager as atm, android_app_itaskstacklistener as listener,
+    android_view_iwindowmanager as wm,
+};
 use aim_windows_core::{Error, Orientation, Read, TaskInfo, write};
 use binder::binder_impl::{
     AssociateClass, BorrowedParcel, IBinderInternal, Proxy, Remotable, TransactionCode,
@@ -18,36 +21,6 @@ use binder::{
     BinderFeatures, ExceptionCode, Interface, SpIBinder, Status, StatusCode, Strong,
     declare_binder_interface,
 };
-
-/// `IActivityTaskManager` transaction codes.
-mod atm {
-    pub const START_ACTIVITY_AND_WAIT: u32 = 6;
-    pub const SET_FOCUSED_TASK: u32 = 20;
-    pub const REMOVE_TASK: u32 = 22;
-    pub const GET_TASK_BOUNDS: u32 = 32;
-    pub const REGISTER_TASK_STACK_LISTENER: u32 = 45;
-    pub const RESIZE_TASK: u32 = 48;
-}
-
-/// `IWindowManager` transaction codes.
-mod wm {
-    pub const GET_BASE_DISPLAY_SIZE: u32 = 6;
-    pub const GET_BASE_DISPLAY_DENSITY: u32 = 10;
-    pub const GET_WINDOWING_MODE: u32 = 98;
-    pub const SET_WINDOWING_MODE: u32 = 99;
-}
-
-/// `ITaskStackListener` transaction codes (all oneway).
-mod listener {
-    pub const ON_TASK_STACK_CHANGED: u32 = 1;
-    pub const ON_TASK_CREATED: u32 = 9;
-    pub const ON_TASK_REMOVED: u32 = 10;
-    pub const ON_TASK_MOVED_TO_FRONT: u32 = 11;
-    pub const ON_TASK_DESCRIPTION_CHANGED: u32 = 12;
-    pub const ON_ACTIVITY_REQUESTED_ORIENTATION_CHANGED: u32 = 13;
-    pub const ON_TASK_FOCUS_CHANGED: u32 = 23;
-    pub const ON_TASK_MOVED_TO_BACK: u32 = 26;
-}
 
 /// `WindowConfiguration.WINDOWING_MODE_*`.
 pub const WINDOWING_MODE_FULLSCREEN: i32 = 1;
@@ -78,14 +51,14 @@ pub(crate) fn unused<I: ?Sized>(
 }
 
 declare_binder_interface! {
-    IActivityTaskManager["android.app.IActivityTaskManager"] {
+    IActivityTaskManager[atm::DESCRIPTOR] {
         native: BnActivityTaskManager(unused),
         proxy: BpActivityTaskManager,
     }
 }
 
 declare_binder_interface! {
-    IWindowManager["android.view.IWindowManager"] {
+    IWindowManager[wm::DESCRIPTOR] {
         native: BnWindowManager(unused),
         proxy: BpWindowManager,
     }
@@ -300,7 +273,7 @@ pub trait ITaskStackListener: Interface {
 }
 
 declare_binder_interface! {
-    ITaskStackListener["android.app.ITaskStackListener"] {
+    ITaskStackListener[listener::DESCRIPTOR] {
         native: BnTaskStackListener(on_transact),
         proxy: BpTaskStackListener,
     }
@@ -404,4 +377,64 @@ pub fn new_listener<T: ITaskStackListener + Sync + Send + 'static>(
     inner: T,
 ) -> Strong<dyn ITaskStackListener> {
     BnTaskStackListener::new_binder(inner, BinderFeatures::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use binder::binder_impl::Parcel;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Listener(Mutex<Vec<Event>>);
+
+    impl Interface for Listener {}
+    impl ITaskStackListener for Listener {
+        fn event(&self, event: Event) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    fn dispatch(listener: &Listener, code: u32, words: &[i32]) -> Wire<()> {
+        let mut data = Parcel::new();
+        for word in words {
+            data.borrowed().write(word)?;
+        }
+        // SAFETY: rewind to the start of the initialized parcel.
+        unsafe { data.borrowed().set_data_position(0) }?;
+        on_transact(
+            listener,
+            code,
+            data.borrowed_ref(),
+            &mut Parcel::new().borrowed(),
+        )
+    }
+
+    // Run against the image's libbinder_ndk with the NDK guest test harness.
+    #[test]
+    fn generated_listener_codes_dispatch_parcels() {
+        let listener = Listener::default();
+        dispatch(&listener, listener::ON_TASK_CREATED, &[42, 0]).unwrap();
+        dispatch(&listener, listener::ON_TASK_FOCUS_CHANGED, &[42, 0]).unwrap();
+        dispatch(&listener, listener::ON_TASK_FOCUS_CHANGED, &[42, 1]).unwrap();
+        dispatch(&listener, listener::ON_TASK_REMOVED, &[42]).unwrap();
+        assert!(matches!(
+            &listener.0.lock().unwrap()[..],
+            [
+                Event::Created(42, None),
+                Event::Focused(42),
+                Event::Removed(42)
+            ]
+        ));
+    }
+
+    #[test]
+    fn malformed_listener_parcel_returns_the_ndk_error() {
+        let listener = Listener::default();
+        assert_eq!(
+            dispatch(&listener, listener::ON_TASK_FOCUS_CHANGED, &[42]),
+            Err(StatusCode::NOT_ENOUGH_DATA)
+        );
+        assert!(listener.0.lock().unwrap().is_empty());
+    }
 }

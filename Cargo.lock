@@ -130,6 +130,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-framework-aidl"
+version = "0.1.0"
+
+[[package]]
 name = "aim-gralloc"
 version = "0.1.0"
 
@@ -267,6 +271,7 @@ version = "0.1.0"
 name = "aim-keyboard"
 version = "0.1.0"
 dependencies = [
+ "aim-framework-aidl",
  "binder",
  "daemon-log",
  "log",
@@ -393,6 +398,7 @@ dependencies = [
 name = "aim-windows"
 version = "0.1.0"
 dependencies = [
+ "aim-framework-aidl",
  "aim-hostcall",
  "aim-windows-core",
  "binder",
