@@ -342,10 +342,60 @@ static void views_in_other_processes(void) {
   CHECK(pread(fd, &c, 1, 0) == 1 && c == 'c');
   CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
   close(fd);
+  // An executable view is backed by shared anonymous memory on Darwin.
+  // It still belongs to this memfd for i_mmap_writable.
+  fd = memfd_create("executable-view", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+  FORK_OR_SKIP(executable);
+  if (executable == 0) {
+    char* rx = mmap(NULL, PAGE, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    if (rx == MAP_FAILED || write(up[1], "x", 1) != 1) _exit(2);
+    close(fd);
+    if (read(down[0], &c, 1) != 1) _exit(3);
+    _exit(0);
+  }
+  CHECK(read(up[0], &c, 1) == 1);
+  errno = 0;
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == -1 && errno == EBUSY);
+  CHECK(write(down[1], "g", 1) == 1);
+  CHECK(waitpid(executable, &status, 0) == executable && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
+  close(fd);
   close(up[0]);
   close(up[1]);
   close(down[0]);
   close(down[1]);
+}
+
+static void seal_races_mmap(void) {
+  for (int i = 0; i < 24; ++i) {
+    int fd = memfd_create("race", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    int sv[2];
+    CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) == 0);
+    FORK_OR_SKIP(pid);
+    if (pid == 0) {
+      char c;
+      close(sv[0]);
+      if (read(sv[1], &c, 1) != 1) _exit(2);
+      char* v = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      c = v != MAP_FAILED ? 'm' : errno == EPERM ? 's' : 'e';
+      if (write(sv[1], &c, 1) != 1 || read(sv[1], &c, 1) != 1) _exit(3);
+      _exit(0);
+    }
+    close(sv[1]);
+    CHECK(write(sv[0], "g", 1) == 1);
+    int sealed = fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE);
+    int error = errno;
+    char c;
+    CHECK(read(sv[0], &c, 1) == 1);
+    CHECK((sealed == 0 && c == 's') || (sealed == -1 && error == EBUSY && c == 'm'));
+    CHECK(write(sv[0], "g", 1) == 1);
+    int status;
+    CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(sv[0]);
+    close(fd);
+  }
 }
 
 // F_SEAL_EXEC: the exec bits cannot change (shmem_setattr); the rest can.
@@ -375,6 +425,7 @@ int main(void) {
   RUN(seals_across_scm_rights);
   RUN(seals_and_views);
   RUN(views_in_other_processes);
+  RUN(seal_races_mmap);
   RUN(exec_seal_chmod);
   DONE();
 }
