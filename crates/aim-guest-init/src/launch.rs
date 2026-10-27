@@ -866,6 +866,11 @@ fn spawn(
         let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
         libc::posix_spawn_file_actions_init(&mut actions);
         libc::posix_spawnattr_init(&mut attr);
+        if let Err(error) = aim_process::disclaim(&mut attr) {
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+            libc::posix_spawnattr_destroy(&mut attr);
+            return Err(format!("spawn responsibility: {error}"));
+        }
         libc::posix_spawnattr_setflags(
             &mut attr,
             (libc::POSIX_SPAWN_SETPGROUP

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.aim.linux-run</string>
+    <key>CFBundleName</key>
+    <string>AIM Runtime</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Android apps use Bluetooth to discover and connect to nearby devices.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Android apps use the Mac's camera to take photos and record video.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Android apps use the Mac's microphone to record audio.</string>
+    <key>NSLocationUsageDescription</key>
+    <string>Android apps use the Mac's location to provide location services.</string>
+</dict>
+</plist>

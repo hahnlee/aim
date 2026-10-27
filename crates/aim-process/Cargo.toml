@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "aim-process"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "macOS process responsibility for host device access"
+
+[dependencies]
+libc.workspace = true

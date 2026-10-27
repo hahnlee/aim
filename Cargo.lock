@@ -145,6 +145,7 @@ dependencies = [
  "aim-host-sensors",
  "aim-hostcall",
  "aim-paths",
+ "aim-process",
  "aim-services",
  "aim-storage",
  "flate2",
@@ -156,6 +157,7 @@ name = "aim-host-audio"
 version = "0.1.0"
 dependencies = [
  "aim-hostcall",
+ "aim-process",
  "libc",
 ]
 
@@ -293,6 +295,7 @@ dependencies = [
  "aim-host-vulkan",
  "aim-hostcall",
  "aim-paths",
+ "aim-process",
  "aim-storage",
  "aim-sync-file",
  "aim-uplink",
@@ -307,6 +310,13 @@ version = "0.1.0"
 [[package]]
 name = "aim-paths"
 version = "0.1.0"
+
+[[package]]
+name = "aim-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "aim-service-aidl"
