@@ -8266,7 +8266,7 @@ CtsMediaProjection* wait for SystemUI's dialog (#632).
 
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
-Input device lifetimes now emit kernel add/remove uevents for `inputN` and `eventN`, and `inputN/uevent` reports the live identity and capability bitmaps (#368, verified by NDK tests without a guest boot).
+Input device lifetimes now emit kernel add/remove uevents for `inputN` and `eventN`, and `inputN/uevent` reports the live identity and capability bitmaps.
 
 A window-mode boot of the derived image with the mouse device
 ([input.md](input.md)); the input went through the server's path for a
