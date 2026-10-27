@@ -376,6 +376,12 @@ fn procfs() {
 
 /// ptrace, process_vm_readv/writev and another process's `/proc`, as
 /// debuggerd's crash_dump uses them.
+/// Inherited kernel files keep their owners rather than becoming content files.
+#[test]
+fn kernel_knob_inheritance() {
+    check("t_knob", &[]);
+}
+
 #[test]
 fn ptrace() {
     check("t_ptrace", &[]);

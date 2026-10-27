@@ -688,7 +688,11 @@ mod publication_tests {
         assert!(pidfd >= 0, "pidfd {pidfd}");
         let content = super::super::procfs::content_fd(b"native content", true);
         assert!(content >= 0);
-        let knob = super::super::knob::open(b"native knob", true, |_| Ok(None));
+        let knob = super::super::knob::open(
+            b"native knob",
+            true,
+            super::super::knob::Knob::SelinuxContext,
+        );
         assert!(knob >= 0);
         assert!(matches!(fdtab::get(knob as i32), Some(Kind::Knob(_))));
         for fd in [

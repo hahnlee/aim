@@ -688,23 +688,29 @@ pub fn open_noexec(write: bool, cloexec: bool) -> i64 {
     if !write {
         return super::procfs::content_fd(format!("{scope}\n").as_bytes(), cloexec);
     }
-    super::knob::open(format!("{scope}\n").as_bytes(), cloexec, |bytes| {
-        if !cred::capable(CAP_SYS_ADMIN) {
-            return Err(EPERM);
-        }
-        let value = parse_noexec(bytes)?;
-        let _guard = state_lock().map_err(|error| -error as i32)?;
-        let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);
-        if area != crate::vfs::Area::Kernfs {
-            return Err(errno::EACCES);
-        }
-        let store = || -> std::io::Result<()> {
-            std::fs::create_dir_all(host.parent().unwrap())?;
-            std::fs::write(&host, format!("{value}\n"))
-        };
-        store().map_err(|e| errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
-        Ok(Some(format!("{value}\n").into_bytes()))
-    })
+    super::knob::open(
+        format!("{scope}\n").as_bytes(),
+        cloexec,
+        super::knob::Knob::MemfdNoexec,
+    )
+}
+
+pub(super) fn write_noexec(bytes: &[u8]) -> Result<Option<Vec<u8>>, errno::Errno> {
+    if !cred::capable(CAP_SYS_ADMIN) {
+        return Err(EPERM);
+    }
+    let value = parse_noexec(bytes)?;
+    let _guard = state_lock().map_err(|error| -error as i32)?;
+    let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);
+    if area != crate::vfs::Area::Kernfs {
+        return Err(errno::EACCES);
+    }
+    let store = || -> std::io::Result<()> {
+        std::fs::create_dir_all(host.parent().unwrap())?;
+        std::fs::write(&host, format!("{value}\n"))
+    };
+    store().map_err(|e| errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+    Ok(Some(format!("{value}\n").into_bytes()))
 }
 
 /// `check_sysctl_memfd_noexec`: a memfd asked for with neither MFD_EXEC

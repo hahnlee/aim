@@ -311,23 +311,29 @@ pub fn open(rest: &str, read_access: bool, write: bool, cloexec: bool) -> Option
         Err(e) if read_access => return Some(-(e as i64)),
         Err(_) => Vec::new(),
     };
-    Some(super::knob::open(&contents, cloexec, move |b| {
-        let (_, mtu) = netif::conf6(scope)?;
-        if name == "stable_secret" {
-            return set_secret(scope, b).map(|()| None);
-        }
-        let value = checked(
-            name,
-            parse_int(b)?,
-            if matches!(scope, Scope::Dev(_)) {
-                mtu
-            } else {
-                0
-            },
-        )?;
-        netif::set_conf6(scope, name, value)?;
-        Ok(Some(format!("{value}\n").into_bytes()))
-    }))
+    Some(super::knob::open(
+        &contents,
+        cloexec,
+        super::knob::Knob::Ipv6(scope, name.into()),
+    ))
+}
+
+pub(super) fn write(scope: Scope, name: &str, b: &[u8]) -> Result<Option<Vec<u8>>, Errno> {
+    let (_, mtu) = netif::conf6(scope)?;
+    if name == "stable_secret" {
+        return set_secret(scope, b).map(|()| None);
+    }
+    let value = checked(
+        name,
+        parse_int(b)?,
+        if matches!(scope, Scope::Dev(_)) {
+            mtu
+        } else {
+            0
+        },
+    )?;
+    netif::set_conf6(scope, name, value)?;
+    Ok(Some(format!("{value}\n").into_bytes()))
 }
 
 /// `addrconf_sysctl_stable_secret`'s write: an IPv6 address; `all` has
