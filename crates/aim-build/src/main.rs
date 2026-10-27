@@ -361,9 +361,11 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
                 return Err("service AIDL inputs changed during generation".into());
             }
             let output = nodes::service_aidl::out().join("lib.rs");
+            let codes = nodes::service_aidl::out().join("codes.rs");
             let receipt = serde_json::json!({
                 "original_image": image, "inputs": before,
-                "output": output, "output_sha256": hash::sha256_file(&output).map_err(|error| error.to_string())?
+                "output": output, "output_sha256": hash::sha256_file(&output).map_err(|error| error.to_string())?,
+                "codes_output": codes, "codes_output_sha256": hash::sha256_file(&codes).map_err(|error| error.to_string())?
             });
             fs::write(
                 nodes::service_aidl::out().join("direct-provenance.json"),

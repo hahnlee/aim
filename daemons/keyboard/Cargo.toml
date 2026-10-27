@@ -11,6 +11,7 @@ description = "The built-in keyboard's layout as the Mac's, through InputManager
 program = "aim-keyboard"
 
 [dependencies]
+aim-framework-aidl = { path = "../aidl/aim-framework-aidl" }
 binder = { workspace = true, features = ["system"] }
 daemon-log.workspace = true
 log.workspace = true

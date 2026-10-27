@@ -7,18 +7,17 @@
 //! init runs it with the Mac's layout (`vendor.aim.mac.keyboard_layout`,
 //! docs/mac-settings.md), as a device's vendor would set its keyboard's
 //! layout. `IInputManager` is a Java AIDL interface with no NDK or Rust
-//! backend: the one call is written by hand with the transaction code of
-//! the pinned image's AIDL (`android-16.0.0_r1`, first method = 1; the
-//! image's `framework.jar` stub has the same `TRANSACTION_*` value).
+//! backend: the call is encoded over AOSP's `binder::Parcel`, using the
+//! transaction table generated from the pinned AIDL and checked against
+//! the image's `framework.jar` stub.
 
+use aim_framework_aidl::android_hardware_input_iinputmanager as input;
 use binder::binder_impl::{
     AssociateClass, BorrowedParcel, IBinderInternal, Remotable, TransactionCode,
 };
 use binder::{Interface, Status, StatusCode, declare_binder_interface};
 use sha1::{Digest, Sha1};
 
-/// `IInputManager.setKeyboardLayoutOverrideForInputDevice`.
-const SET_KEYBOARD_LAYOUT_OVERRIDE: u32 = 19;
 /// The InputDevices package's layouts are `package/receiver/name`.
 const LAYOUTS: &str = "com.android.inputdevices/com.android.inputdevices.InputDeviceReceiver/";
 /// The display server's keyboard (`aim_host_display::input::keyboard`).
@@ -36,7 +35,7 @@ fn unused(
 }
 
 declare_binder_interface! {
-    IInputManager["android.hardware.input.IInputManager"] {
+    IInputManager[input::DESCRIPTOR] {
         native: BnInputManager(unused),
         proxy: BpInputManager,
     }
@@ -77,7 +76,11 @@ fn set_layout(layout: &str) -> Result<(), Status> {
     p.write(&0i32)?;
     p.write(&0i32)?;
     p.write(format!("{LAYOUTS}{layout}").as_str())?;
-    let reply = input.submit_transact(SET_KEYBOARD_LAYOUT_OVERRIDE, data, 0)?;
+    let reply = input.submit_transact(
+        input::SET_KEYBOARD_LAYOUT_OVERRIDE_FOR_INPUT_DEVICE,
+        data,
+        0,
+    )?;
     let status: Status = reply.read()?;
     if status.is_ok() { Ok(()) } else { Err(status) }
 }

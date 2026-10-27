@@ -11,6 +11,7 @@ description = "The task bridge: ActivityTaskManager's tasks as the display serve
 program = "aim-windows"
 
 [dependencies]
+aim-framework-aidl = { path = "../aidl/aim-framework-aidl" }
 aim-hostcall.workspace = true
 aim-windows-core = { path = "core" }
 binder = { workspace = true, features = ["system"] }
