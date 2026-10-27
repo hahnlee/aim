@@ -7,7 +7,7 @@
 //! `Intent.writeToParcel` (with `android.security.prevent_intent_redirect`,
 //! which the image enables), `ComponentName`, `Uri`, `BaseBundle` and
 //! `ActivityManager.TaskDescription`. Only the leading fields are read: the
-//! task, its display, its activities' packages and its label. A base
+//! task, its display, its activities' packages, label and colors. A base
 //! intent carrying `ClipData` is not read further (its layout is long and
 //! a launched task's intent does not have one).
 //!
@@ -23,6 +23,11 @@ pub trait Read {
     fn string16(&mut self) -> Result<Option<String>, Error>;
     /// Step over a strong binder.
     fn binder(&mut self) -> Result<(), Error>;
+    /// Step over an arm64 `flat_binder_object` of type BINDER_TYPE_FD.
+    /// The source Parcel retains ownership; this reader never duplicates it.
+    fn fd(&mut self) -> Result<(), Error> {
+        self.skip(24)
+    }
     /// Step over `n` bytes of plain data.
     fn skip(&mut self, n: usize) -> Result<(), Error>;
 
@@ -73,6 +78,8 @@ pub struct TaskInfo {
     pub activity: Option<String>,
     /// `taskDescription.getLabel()`.
     pub label: Option<String>,
+    pub primary_color: u32,
+    pub background_color: u32,
 }
 
 /// What an activity's requested orientation asks of its window.
@@ -184,8 +191,16 @@ pub fn running_task_info(r: &mut impl Read) -> Result<Option<TaskInfo>, Error> {
     r.int()?; // numActivities
     r.long()?; // lastActiveTime
     let mut label = None;
-    if r.int()? != 0 && r.int()? != 0 {
-        label = r.string16()?;
+    let (mut primary_color, mut background_color) = (0, 0);
+    if r.int()? != 0 {
+        if r.int()? != 0 {
+            label = r.string16()?;
+        }
+        if r.int()? != 0 {
+            icon(r)?;
+        }
+        primary_color = r.int()? as u32;
+        background_color = r.int()? as u32;
     }
     Ok(Some(TaskInfo {
         task_id,
@@ -194,7 +209,85 @@ pub fn running_task_info(r: &mut impl Read) -> Result<Option<TaskInfo>, Error> {
         package: base.or(real.clone()).map(|(p, _)| p),
         activity: orig.or(real).map(|(p, c)| format!("{p}/{c}")),
         label,
+        primary_color,
+        background_color,
     }))
+}
+
+/// `Icon.writeToParcel`, skipped so its following task colors are read
+/// at the same position for every icon type (pinned android-16.0.0_r1).
+fn icon(r: &mut impl Read) -> Result<(), Error> {
+    match r.int()? {
+        1 | 5 => bitmap(r, 0)?,
+        2 => {
+            r.string16()?; // resource package
+            r.skip(12)?; // id, monochrome, inset scale
+        }
+        3 => {
+            r.int()?; // data length
+            let len = r.int()?; // writeBlob's length
+            if len >= 0 {
+                match r.int()? {
+                    0 => r.skip((len as usize).div_ceil(4) * 4)?,
+                    1 | 2 => r.fd()?,
+                    _ => return Err(Error::Malformed),
+                }
+            }
+        }
+        4 | 6 => {
+            r.string16()?; // URI
+        }
+        _ => return Err(Error::Malformed),
+    }
+    if r.int()? != 0 {
+        // ColorStateList: state specs (int arrays), then colors.
+        for _ in 0..r.int()?.max(0) {
+            byte_array(r, 4)?;
+        }
+        byte_array(r, 4)?;
+    }
+    r.int()?; // blend mode
+    Ok(())
+}
+
+fn byte_array(r: &mut impl Read, size: usize) -> Result<(), Error> {
+    let len = r.int()?;
+    if len > 0 {
+        r.skip((len as usize * size).div_ceil(4) * 4)?;
+    }
+    Ok(())
+}
+
+/// `Bitmap_writeToParcel`, then Bitmap's optional typed Gainmap. Pixels
+/// may be inline or in a ParcelFileDescriptor; no image is decoded.
+fn bitmap(r: &mut impl Read, depth: usize) -> Result<(), Error> {
+    if depth >= 8 {
+        return Err(Error::Malformed);
+    }
+    r.skip(12)?; // mutable, color type, alpha type
+    byte_array(r, 1)?; // color space
+    r.skip(24)?; // width, height, row bytes, density, id (long)
+    match r.int()? {
+        0 => byte_array(r, 1)?,
+        1 => {
+            r.int()?; // size
+            if r.int()? != 0 {
+                let comm = r.int()?;
+                r.fd()?;
+                if comm != 0 {
+                    r.fd()?;
+                }
+            }
+        }
+        _ => return Err(Error::Malformed),
+    }
+    if r.int()? != 0 && r.int()? != 0 {
+        if r.int()? != 0 {
+            bitmap(r, depth + 1)?;
+        }
+        r.skip(18 * 4)?; // gainmap metadata
+    }
+    Ok(())
 }
 
 /// Encodes what Java's `Parcel` writes, for tests and for the few values
@@ -393,8 +486,9 @@ mod tests {
             Some(l) => o.int(1).string16(Some(l)),
             None => o.int(0),
         };
-        // The rest of the task description and the task info.
-        o.int(0).int(-1).int(0);
+        // No icon, followed by primary/background colors. The reader
+        // stops before TaskDescription's remaining bars and size fields.
+        o.int(0).int(0xff123456u32 as i32).int(0xffabcdefu32 as i32);
         o.0
     }
 
@@ -411,12 +505,99 @@ mod tests {
                 package: Some("org.example".into()),
                 activity: Some("org.example/org.example.Main".into()),
                 label: Some("Settings — Wi‑Fi".into()),
+                primary_color: 0xff123456,
+                background_color: 0xffabcdef,
             }
         );
         let bytes = task(None, Some(12));
         let info = running_task_info(&mut Bytes(&bytes)).unwrap().unwrap();
         assert_eq!(info.label, None);
+        assert_eq!(info.primary_color, 0xff123456);
+        assert_eq!(info.background_color, 0xffabcdef);
         assert_eq!(info.package.as_deref(), Some("org.example"));
+    }
+
+    #[test]
+    fn task_colors_follow_every_icon_type() {
+        let mut icons = Vec::new();
+        for ty in [1, 5] {
+            for ashmem in [false, true] {
+                let mut o = Out::default();
+                o.int(ty).int(0).int(4).int(1).int(-1); // bitmap, no color space
+                o.int(1).int(1).int(4).int(160).long(1);
+                if ashmem {
+                    o.int(1).int(4).int(1).int(0);
+                    o.0.extend([0u8; 24]); // fd object, still owned by the source parcel
+                } else {
+                    o.int(0).int(4).int(-1); // four inline pixel bytes
+                }
+                o.int(0); // no gainmap
+                icons.push(o);
+            }
+        }
+        let mut resource = Out::default();
+        resource
+            .int(2)
+            .string16(Some("org.example"))
+            .int(123)
+            .int(0)
+            .int(0);
+        icons.push(resource);
+        for shared in [false, true] {
+            let mut data = Out::default();
+            data.int(3).int(3).int(3);
+            if shared {
+                data.int(1);
+                data.0.extend([0u8; 24]);
+            } else {
+                data.int(0).int(0xabcdef); // padded three-byte blob
+            }
+            icons.push(data);
+        }
+        for ty in [4, 6] {
+            let mut uri = Out::default();
+            uri.int(ty).string16(Some("content://example/icon"));
+            icons.push(uri);
+        }
+        for (i, mut icon) in icons.into_iter().enumerate() {
+            // A typed ColorStateList with two state specs, then two colors.
+            icon.int(1)
+                .int(2)
+                .int(1)
+                .int(42)
+                .int(0)
+                .int(2)
+                .int(-1)
+                .int(0);
+            icon.int(3); // blend mode
+            let mut bytes = task(None, None);
+            bytes.truncate(bytes.len() - 12); // replace absent icon and colors
+            bytes.extend(1i32.to_le_bytes());
+            bytes.extend(icon.0);
+            bytes.extend(0xff123456u32.to_le_bytes());
+            bytes.extend(0xffabcdefu32.to_le_bytes());
+            let info = running_task_info(&mut Bytes(&bytes)).unwrap().unwrap();
+            assert_eq!(
+                (info.primary_color, info.background_color),
+                (0xff123456, 0xffabcdef),
+                "icon {i}"
+            );
+            for end in bytes.len() - 8..bytes.len() {
+                assert_eq!(
+                    running_task_info(&mut Bytes(&bytes[..end])),
+                    Err(Error::Malformed)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn task_colors_may_be_unset_or_cleared() {
+        let mut bytes = task(None, None);
+        let len = bytes.len();
+        bytes[len - 8..].fill(0);
+        let info = running_task_info(&mut Bytes(&bytes)).unwrap().unwrap();
+        assert_eq!((info.primary_color, info.background_color), (0, 0));
     }
 
     #[test]

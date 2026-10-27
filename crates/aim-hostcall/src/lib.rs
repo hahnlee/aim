@@ -263,7 +263,7 @@ pub mod gpu {
 /// Asynchronous events (vsync) arrive as [`Event`] records on a descriptor
 /// the guest reads, since host code never calls guest code.
 pub mod display {
-    pub const VERSION: u32 = 5;
+    pub const VERSION: u32 = 6;
 
     /// Connect to the display server and describe display
     /// [`Connect::display`]. Returns a new guest fd that yields [`Event`]
@@ -536,6 +536,9 @@ pub mod display {
         pub const PINNED: u32 = 11;
         /// Guest: the task left picture-in-picture.
         pub const UNPINNED: u32 = 12;
+        /// Guest: the task description's ARGB primary and background
+        /// colors. Zero means unset; an update may clear both.
+        pub const COLORS: u32 = 13;
         /// Server: move or resize the task to [`super::Window::bounds`].
         pub const SET_BOUNDS: u32 = 16;
         /// Server: make the task the top (focused) one.
@@ -569,6 +572,9 @@ pub mod display {
         pub caption: i32,
         /// One of [`orientation`], with [`window::ORIENTATION`].
         pub orientation: u32,
+        /// Task description colors, with [`window::COLORS`].
+        pub primary_color: u32,
+        pub background_color: u32,
         /// UTF-8, NUL-padded (cut at a character boundary).
         pub text: [u8; 224],
     }
@@ -581,6 +587,8 @@ pub mod display {
                 bounds: [0; 4],
                 caption: 0,
                 orientation: 0,
+                primary_color: 0,
+                background_color: 0,
                 text: [0; 224],
             }
         }
@@ -615,7 +623,7 @@ pub mod display {
 
     const _: () = assert!(core::mem::size_of::<Connect>() == 32);
     const _: () = assert!(core::mem::size_of::<Windows>() == 8);
-    const _: () = assert!(core::mem::size_of::<Window>() == 256);
+    const _: () = assert!(core::mem::size_of::<Window>() == 264);
     const _: () = assert!(core::mem::size_of::<Import>() == 40);
     const _: () = assert!(core::mem::size_of::<Layer>() == 104);
     const _: () = assert!(core::mem::size_of::<Layers>() == 40);

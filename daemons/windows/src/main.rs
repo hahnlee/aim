@@ -88,6 +88,8 @@ struct Task {
     /// The activity it was started with, `package/class`.
     activity: Option<String>,
     label: Option<String>,
+    primary_color: u32,
+    background_color: u32,
     /// An activity of it has run (it came to the front or had focus).
     running: bool,
     /// The bounds last reported, while the task has a window.
@@ -183,6 +185,7 @@ impl Bridge {
                     if let Some(l) = &t.label {
                         out.push(Window::with_text(window::TITLE, task, l));
                     }
+                    out.push(color_record(task, t.primary_color, t.background_color));
                     out.push(self.task_record(task, b));
                     if t.orientation != Orientation::Any {
                         out.push(orientation_record(task, t.orientation));
@@ -349,6 +352,14 @@ impl Bridge {
                     out.push(Window::with_text(window::TITLE, task, label));
                 }
             }
+            if (t.primary_color, t.background_color) != (info.primary_color, info.background_color)
+            {
+                t.primary_color = info.primary_color;
+                t.background_color = info.background_color;
+                if shown {
+                    out.push(color_record(task, t.primary_color, t.background_color));
+                }
+            }
         }
         for w in &out {
             self.send(w);
@@ -512,6 +523,16 @@ impl Bridge {
         if let Err(e) = r {
             log::warn!("request {} for task {task}: {e}", w.op);
         }
+    }
+}
+
+fn color_record(task: i32, primary_color: u32, background_color: u32) -> Window {
+    Window {
+        op: window::COLORS,
+        task,
+        primary_color,
+        background_color,
+        ..Default::default()
     }
 }
 
