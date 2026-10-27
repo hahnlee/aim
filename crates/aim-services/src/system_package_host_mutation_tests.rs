@@ -135,6 +135,103 @@ fn transact(service: &dyn Service, uid: u32, code: u32, data: &Parcel) -> Parcel
         })
         .unwrap()
 }
+fn ok(reply: Parcel) {
+    reply.reader().read_exception().unwrap().unwrap();
+}
+fn enabled_request(class: Option<&str>, new_state: i32, flags: i32) -> (u32, Parcel) {
+    let mut request = Parcel::new();
+    let code = if let Some(class) = class {
+        pm::SetComponentEnabledSetting {
+            component_name: Some(crate::package::intent::ComponentName {
+                package: "p".into(),
+                class: class.into(),
+            }),
+            new_state,
+            flags,
+            user_id: 0,
+            calling_package: None,
+        }
+        .write(&mut request);
+        pm::SET_COMPONENT_ENABLED_SETTING
+    } else {
+        pm::SetApplicationEnabledSetting {
+            package_name: Some("p".into()),
+            new_state,
+            flags,
+            user_id: 0,
+            calling_package: None,
+        }
+        .write(&mut request);
+        pm::SET_APPLICATION_ENABLED_SETTING
+    };
+    (code, request)
+}
+fn wait_events(system: &System, timeout: i64) {
+    assert!(
+        system
+            .package_events()
+            .unwrap()
+            .wait(timeout, false)
+            .unwrap()
+    );
+}
+fn register_monitor(fixture: &Fixture, services: &[&dyn Service]) -> mpsc::Receiver<()> {
+    let (send, receive) = mpsc::channel();
+    let monitor = fixture.native.add_service(Arc::new(Monitor(send)));
+    let mut request = Parcel::new();
+    pm::RegisterPackageMonitorCallback {
+        callback: Some(monitor),
+        user_id: 0,
+    }
+    .write(&mut request);
+    for service in services {
+        ok(transact(
+            *service,
+            1000,
+            pm::REGISTER_PACKAGE_MONITOR_CALLBACK,
+            &request,
+        ));
+    }
+    receive
+}
+fn complete_owner(owner: &mut crate::package::scan::SigningScan) {
+    let names = ["p", "q"];
+    owner
+        .assign_seinfo_at_boot(
+            &crate::package::owner::seinfo::Policy::parse(&[]).unwrap(),
+            &mut |_: &crate::package::pkg::AndroidPackage| Ok(36),
+        )
+        .unwrap();
+    owner
+        .complete_library_dependencies(&|_, _| {
+            Ok(crate::package::libraries::Policy {
+                enforce_native_dependencies: false,
+                sdk_library_independence: false,
+            })
+        })
+        .unwrap();
+    owner
+        .rebuild_shared_processes_from_native_members()
+        .unwrap();
+    owner
+        .capture_replica_runtime(
+            names
+                .map(|name| {
+                    (
+                        (name.into(), false),
+                        crate::package::scan::ReplicaRuntime {
+                            usage: [0; 8],
+                            seinfo: owner.seinfo(name).unwrap().map(str::to_owned),
+                            override_seinfo: None,
+                            library_files: vec![],
+                            libraries: vec![],
+                        },
+                    )
+                })
+                .into(),
+        )
+        .unwrap();
+}
 fn publish_code(
     fixture: &Fixture,
     bridge: &Arc<crate::package::bootstrap::Bridge>,
@@ -228,41 +325,7 @@ fn publish_code(
             ..Default::default()
         });
     }
-    owner
-        .assign_seinfo_at_boot(
-            &crate::package::owner::seinfo::Policy::parse(&[]).unwrap(),
-            &mut |_: &crate::package::pkg::AndroidPackage| Ok(36),
-        )
-        .unwrap();
-    owner
-        .complete_library_dependencies(&|_, _| {
-            Ok(crate::package::libraries::Policy {
-                enforce_native_dependencies: false,
-                sdk_library_independence: false,
-            })
-        })
-        .unwrap();
-    owner
-        .rebuild_shared_processes_from_native_members()
-        .unwrap();
-    owner
-        .capture_replica_runtime(
-            names
-                .map(|name| {
-                    (
-                        (name.into(), false),
-                        crate::package::scan::ReplicaRuntime {
-                            usage: [0; 8],
-                            seinfo: owner.seinfo(name).unwrap().map(str::to_owned),
-                            override_seinfo: None,
-                            library_files: vec![],
-                            libraries: vec![],
-                        },
-                    )
-                })
-                .into(),
-        )
-        .unwrap();
+    complete_owner(&mut owner);
     fixture
         .system
         .publish_package_scan_with_queries(
@@ -368,65 +431,54 @@ fn session() -> Session {
     }
 }
 #[test]
-fn cached_host_enabled_writes_publish_and_notify_one_registry() {
+fn cached_host_enabled_writes_preserve_caller_identity() {
     let Session {
-        fixture,
-        host,
+        fixture: _fixture,
         cached,
-        bridge,
-        old,
         workers,
-        dependencies,
-        grants,
         ..
     } = session();
-    let old_launch = host.launch_inputs("p").unwrap();
-    assert!(Arc::ptr_eq(&old_launch.capture, &old));
-    let data = fixture.root.join("data");
-    let (send, receive) = mpsc::channel();
-    let monitor = fixture.native.add_service(Arc::new(Monitor(send)));
-    let (public, _) = crate::package::service::PackageQueries::from_system(&fixture.system);
-    let mut request = Parcel::new();
-    pm::RegisterPackageMonitorCallback {
-        callback: Some(monitor),
-        user_id: 0,
-    }
-    .write(&mut request);
-    for service in [&cached as &dyn Service, public.as_ref()] {
-        transact(
-            service,
-            1000,
-            pm::REGISTER_PACKAGE_MONITOR_CALLBACK,
-            &request,
-        )
-        .reader()
-        .read_exception()
-        .unwrap()
-        .unwrap();
-    }
-    let setting = |class: &str, new_state, flags| {
-        let mut request = Parcel::new();
-        pm::SetComponentEnabledSetting {
-            component_name: Some(crate::package::intent::ComponentName {
-                package: "p".into(),
-                class: class.into(),
-            }),
-            new_state,
-            flags,
-            user_id: 0,
-            calling_package: None,
-        }
-        .write(&mut request);
-        request
-    };
-    // Binder identity is preserved for the cached front's denied caller.
-    let request = setting("p.Main", 2, 0);
+    let (_, request) = enabled_request(Some("p.Main"), 2, 0);
     let denied = transact(&cached, 10101, pm::SET_COMPONENT_ENABLED_SETTING, &request)
         .reader()
         .read_exception()
         .unwrap()
         .unwrap_err();
     assert_eq!(denied.code, aim_binder_host::parcel::EX_SECURITY);
+    drop(workers);
+}
+
+#[test]
+fn cached_and_public_hosts_share_one_monitor_registry() {
+    let Session {
+        fixture,
+        cached,
+        workers,
+        ..
+    } = session();
+    let (public, _) = crate::package::service::PackageQueries::from_system(&fixture.system);
+    let receive = register_monitor(&fixture, &[&cached, public.as_ref()]);
+    let (code, request) = enabled_request(Some("p.Main"), 2, 0);
+    ok(transact(&cached, 1000, code, &request));
+    receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait_events(&fixture.system, 2000);
+    assert!(
+        receive.try_recv().is_err(),
+        "a callback registered through both handles fires once"
+    );
+    drop(workers);
+}
+
+#[test]
+fn cached_host_enabled_writes_publish_and_persist_without_losing_runtime_state() {
+    let Session {
+        fixture,
+        host,
+        cached,
+        old,
+        workers,
+        ..
+    } = session();
     host.grant_implicit_access(10100, 10101).unwrap();
     fixture
         .system
@@ -437,18 +489,9 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         runtime.state().system.implicit_access,
         old.state().system.implicit_access
     );
-    transact(&cached, 1000, pm::SET_COMPONENT_ENABLED_SETTING, &request)
-        .reader()
-        .read_exception()
-        .unwrap()
-        .unwrap();
-    receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    let events = fixture.system.package_events().unwrap();
-    assert!(events.wait(2000, false).unwrap());
-    assert!(
-        receive.try_recv().is_err(),
-        "a callback registered through both handles fires once"
-    );
+    let (code, request) = enabled_request(Some("p.Main"), 2, 0);
+    ok(transact(&cached, 1000, code, &request));
+    let data = fixture.root.join("data");
     let current = fixture.system.capture_package_queries().unwrap();
     let (state, resolution) = host.packages().unwrap();
     assert!(Arc::ptr_eq(&state, current.state()));
@@ -482,8 +525,6 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         current.state().system.implicit_access,
         runtime.state().system.implicit_access
     );
-    // The reset path is also a session publication; its pending effect is real.
-    // Exercise it through the native bridge's host Writes owner below.
     let persisted = crate::package::State::read(&data, &[0]).unwrap().unwrap();
     assert_eq!(
         persisted.users[0]
@@ -498,6 +539,39 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
             .as_deref(),
         Some(["p.Main".to_string()].as_slice())
     );
+    fixture
+        .system
+        .internal_remove_isolated_uid(99001, 1000, 0)
+        .unwrap();
+    drop(workers);
+}
+
+#[test]
+fn permission_refresh_updates_launch_inputs_and_preserves_enabled_state() {
+    let Session {
+        fixture,
+        host,
+        cached,
+        bridge,
+        old,
+        grants,
+        workers,
+        ..
+    } = session();
+    let old_launch = host.launch_inputs("p").unwrap();
+    assert!(Arc::ptr_eq(&old_launch.capture, &old));
+    host.grant_implicit_access(10100, 10101).unwrap();
+    fixture
+        .system
+        .internal_add_isolated_uid(99001, 10100, 1000, 0)
+        .unwrap();
+    let runtime = fixture.system.capture_package_queries().unwrap();
+    assert_ne!(
+        runtime.state().system.implicit_access,
+        old.state().system.implicit_access
+    );
+    let (code, request) = enabled_request(Some("p.Main"), 2, 0);
+    ok(transact(&cached, 1000, code, &request));
     grants.store(true, Ordering::SeqCst);
     fixture
         .system
@@ -545,13 +619,34 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
     assert!(Arc::ptr_eq(&revoked_launch.capture, &revoked));
     assert!(revoked_launch.permission_gids.is_empty());
     assert_eq!(granted_launch.permission_gids, [3003]);
-    // A delayed enable is visible before its callback, then delivers once.
-    let request = setting("p.Main", 0, 1);
-    transact(&cached, 1000, pm::SET_COMPONENT_ENABLED_SETTING, &request)
-        .reader()
-        .read_exception()
-        .unwrap()
+    fixture
+        .system
+        .internal_remove_isolated_uid(99001, 1000, 0)
         .unwrap();
+    drop(workers);
+}
+
+#[test]
+fn delayed_enable_publishes_before_its_single_callback() {
+    let Session {
+        fixture,
+        host,
+        cached,
+        workers,
+        ..
+    } = session();
+    let receive = register_monitor(&fixture, &[&cached]);
+    let (code, request) = enabled_request(Some("p.Main"), 2, 0);
+    ok(transact(&cached, 1000, code, &request));
+    receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait_events(&fixture.system, 2000);
+    let (_, request) = enabled_request(Some("p.Main"), 0, 1);
+    ok(transact(
+        &cached,
+        1000,
+        pm::SET_COMPONENT_ENABLED_SETTING,
+        &request,
+    ));
     assert!(
         host.packages().unwrap().0.packages["p"].users[&0]
             .disabled_components
@@ -559,61 +654,92 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
     );
     assert!(receive.try_recv().is_err());
     receive.recv_timeout(Duration::from_secs(12)).unwrap();
-    assert!(events.wait(2000, false).unwrap());
+    wait_events(&fixture.system, 2000);
     assert!(receive.try_recv().is_err());
-    // Retained same-value single requests must not repeat effects after rebasing.
-    for application in [false, true] {
-        let base = fixture.system.capture_package_queries().unwrap();
-        let resolution = base.resolution().unwrap();
-        let query = crate::package::query::Query {
-            state: base.state(),
-            filter: &resolution.apps_filter,
-            calling_uid: 1000,
-        };
-        let (code, request) = if application {
-            let mut data = Parcel::new();
-            pm::SetApplicationEnabledSetting {
-                package_name: Some("p".into()),
-                new_state: 3,
-                flags: 0,
-                user_id: 0,
-                calling_package: None,
-            }
-            .write(&mut data);
-            (pm::SET_APPLICATION_ENABLED_SETTING, data)
-        } else {
-            (pm::SET_COMPONENT_ENABLED_SETTING, setting("p.Main", 2, 0))
-        };
-        let first = crate::package::mutation_dispatch::prepare(
-            code,
-            &mut request.reader(),
-            &query,
-            77,
-            &dependencies,
-        )
-        .unwrap()
-        .unwrap();
-        let second = crate::package::mutation_dispatch::prepare(
-            code,
-            &mut request.reader(),
-            &query,
-            77,
-            &dependencies,
-        )
-        .unwrap()
-        .unwrap();
-        for prepared in [first, second] {
-            fixture
-                .system
-                .publish_prepared_package_mutation(&bridge, &base, prepared, &dependencies, 1000)
-                .unwrap();
-        }
+    drop(workers);
+}
+
+fn retained_enabled_setter_notifies_once(application: bool) {
+    let Session {
+        fixture,
+        cached,
+        bridge,
+        dependencies,
+        workers,
+        ..
+    } = session();
+    let receive = register_monitor(&fixture, &[&cached]);
+    let base = fixture.system.capture_package_queries().unwrap();
+    let resolution = base.resolution().unwrap();
+    let query = crate::package::query::Query {
+        state: base.state(),
+        filter: &resolution.apps_filter,
+        calling_uid: 1000,
+    };
+    let (code, request) = enabled_request(
+        (!application).then_some("p.Main"),
+        if application { 3 } else { 2 },
+        0,
+    );
+    let first = crate::package::mutation_dispatch::prepare(
+        code,
+        &mut request.reader(),
+        &query,
+        77,
+        &dependencies,
+    )
+    .unwrap()
+    .unwrap();
+    let second = crate::package::mutation_dispatch::prepare(
+        code,
+        &mut request.reader(),
+        &query,
+        77,
+        &dependencies,
+    )
+    .unwrap()
+    .unwrap();
+    for prepared in [first, second] {
+        fixture
+            .system
+            .publish_prepared_package_mutation(&bridge, &base, prepared, &dependencies, 1000)
+            .unwrap();
+    }
+    receive.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait_events(&fixture.system, 2000);
+    assert!(
+        receive.try_recv().is_err(),
+        "idempotent retained setter repeats no monitor effect"
+    );
+    drop(workers);
+}
+
+#[test]
+fn retained_component_enabled_setter_notifies_once() {
+    retained_enabled_setter_notifies_once(false);
+}
+
+#[test]
+fn retained_application_enabled_setter_notifies_once() {
+    retained_enabled_setter_notifies_once(true);
+}
+
+#[test]
+fn component_reset_publishes_and_notifies_without_resetting_application() {
+    let Session {
+        fixture,
+        cached,
+        bridge,
+        workers,
+        ..
+    } = session();
+    let receive = register_monitor(&fixture, &[&cached]);
+    for class in [Some("p.Main"), None] {
+        let (code, request) = enabled_request(class, if class.is_some() { 2 } else { 3 }, 0);
+        ok(transact(&cached, 1000, code, &request));
         receive.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(events.wait(2000, false).unwrap());
-        assert!(
-            receive.try_recv().is_err(),
-            "idempotent retained setter repeats no monitor effect"
-        );
+        wait_events(&fixture.system, 2000);
+        assert!(receive.try_recv().is_err());
     }
     let before_reset = fixture.system.capture_package_queries().unwrap();
     let plans = crate::package::application_data::reset_components(before_reset.state(), "p", 0);
@@ -633,12 +759,8 @@ fn cached_host_enabled_writes_publish_and_notify_one_registry() {
         ["p.Main"]
     );
     receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(events.wait(2000, false).unwrap());
+    wait_events(&fixture.system, 2000);
     assert!(receive.try_recv().is_err());
-    fixture
-        .system
-        .internal_remove_isolated_uid(99001, 1000, 0)
-        .unwrap();
     drop(workers);
 }
 
@@ -825,39 +947,25 @@ fn cached_host_data_clear_completes_after_session_publication_and_reports_failur
         user_id: 0,
     }
     .write(&mut register);
-    transact(
+    ok(transact(
         &cached,
         1000,
         pm::REGISTER_PACKAGE_MONITOR_CALLBACK,
         &register,
-    )
-    .reader()
-    .read_exception()
-    .unwrap()
-    .unwrap();
+    ));
     let denied = transact(&cached, 10101, pm::CLEAR_APPLICATION_USER_DATA, &clear("p"));
     assert_eq!(
         denied.reader().read_exception().unwrap().unwrap_err().code,
         aim_binder_host::parcel::EX_SECURITY
     );
     assert!(receive.try_recv().is_err());
-    let mut request = Parcel::new();
-    pm::SetComponentEnabledSetting {
-        component_name: Some(crate::package::intent::ComponentName {
-            package: "p".into(),
-            class: "p.Main".into(),
-        }),
-        new_state: 2,
-        flags: 0,
-        user_id: 0,
-        calling_package: None,
-    }
-    .write(&mut request);
-    transact(&cached, 1000, pm::SET_COMPONENT_ENABLED_SETTING, &request)
-        .reader()
-        .read_exception()
-        .unwrap()
-        .unwrap();
+    let (_, request) = enabled_request(Some("p.Main"), 2, 0);
+    ok(transact(
+        &cached,
+        1000,
+        pm::SET_COMPONENT_ENABLED_SETTING,
+        &request,
+    ));
     let base = fixture.system.capture_package_queries().unwrap();
     event_receive.recv_timeout(Duration::from_secs(2)).unwrap();
     grants.store(true, Ordering::SeqCst);
@@ -870,11 +978,12 @@ fn cached_host_data_clear_completes_after_session_publication_and_reports_failur
         before.state().packages["p"].users[&0].disabled_components,
         ["p.Main"]
     );
-    transact(&cached, 1000, pm::CLEAR_APPLICATION_USER_DATA, &clear("p"))
-        .reader()
-        .read_exception()
-        .unwrap()
-        .unwrap();
+    ok(transact(
+        &cached,
+        1000,
+        pm::CLEAR_APPLICATION_USER_DATA,
+        &clear("p"),
+    ));
     assert_eq!(
         receive.recv_timeout(Duration::from_secs(3)).unwrap(),
         (Some("p".into()), true)
@@ -916,21 +1025,15 @@ fn cached_host_data_clear_completes_after_session_publication_and_reports_failur
         (991, 992)
     );
     event_receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(
-        fixture
-            .system
-            .package_events()
-            .unwrap()
-            .wait(3000, false)
-            .unwrap()
-    );
+    wait_events(&fixture.system, 3000);
     assert!(event_receive.try_recv().is_err());
     fail_clear.store(true, Ordering::SeqCst);
-    transact(&cached, 1000, pm::CLEAR_APPLICATION_USER_DATA, &clear("p"))
-        .reader()
-        .read_exception()
-        .unwrap()
-        .unwrap();
+    ok(transact(
+        &cached,
+        1000,
+        pm::CLEAR_APPLICATION_USER_DATA,
+        &clear("p"),
+    ));
     assert_eq!(
         receive.recv_timeout(Duration::from_secs(3)).unwrap(),
         (Some("p".into()), false)
@@ -953,29 +1056,18 @@ fn cached_host_data_clear_completes_after_session_publication_and_reports_failur
             .iter()
             .any(|error| error.contains("injected installd failure"))
     );
-    transact(
+    ok(transact(
         &cached,
         1000,
         pm::CLEAR_APPLICATION_USER_DATA,
         &clear("missing"),
-    )
-    .reader()
-    .read_exception()
-    .unwrap()
-    .unwrap();
+    ));
     assert_eq!(
         receive.recv_timeout(Duration::from_secs(3)).unwrap(),
         (Some("missing".into()), false)
     );
     assert!(receive.try_recv().is_err());
-    assert!(
-        fixture
-            .system
-            .package_events()
-            .unwrap()
-            .wait(3000, false)
-            .unwrap()
-    );
+    wait_events(&fixture.system, 3000);
     drop(data_worker);
     drop(instant_worker);
     drop(dependencies);
@@ -1026,23 +1118,13 @@ fn host_user_unlocking_publishes_and_survives_enabled_and_permission_updates() {
         &unlocked,
         &fixture.system.capture_package_queries().unwrap()
     ));
-    let mut request = Parcel::new();
-    pm::SetComponentEnabledSetting {
-        component_name: Some(crate::package::intent::ComponentName {
-            package: "p".into(),
-            class: "p.Main".into(),
-        }),
-        new_state: 2,
-        flags: 0,
-        user_id: 0,
-        calling_package: None,
-    }
-    .write(&mut request);
-    transact(&cached, 1000, pm::SET_COMPONENT_ENABLED_SETTING, &request)
-        .reader()
-        .read_exception()
-        .unwrap()
-        .unwrap();
+    let (_, request) = enabled_request(Some("p.Main"), 2, 0);
+    ok(transact(
+        &cached,
+        1000,
+        pm::SET_COMPONENT_ENABLED_SETTING,
+        &request,
+    ));
     grants.store(true, Ordering::SeqCst);
     fixture
         .system
@@ -1060,14 +1142,7 @@ fn host_user_unlocking_publishes_and_survives_enabled_and_permission_updates() {
     );
     assert_eq!(after.state().packages["p"].users[&0].ce_data_inode, 991);
     assert!(Arc::ptr_eq(&host.packages().unwrap().0, after.state()));
-    assert!(
-        fixture
-            .system
-            .package_events()
-            .unwrap()
-            .wait(3000, false)
-            .unwrap()
-    );
+    wait_events(&fixture.system, 3000);
     drop(workers);
 }
 
@@ -1140,41 +1215,7 @@ pub(crate) fn with_discovery_session(
             }
             owner.load_test_code(package);
         }
-        owner
-            .assign_seinfo_at_boot(
-                &crate::package::owner::seinfo::Policy::parse(&[]).unwrap(),
-                &mut |_: &crate::package::pkg::AndroidPackage| Ok(36),
-            )
-            .unwrap();
-        owner
-            .complete_library_dependencies(&|_, _| {
-                Ok(crate::package::libraries::Policy {
-                    enforce_native_dependencies: false,
-                    sdk_library_independence: false,
-                })
-            })
-            .unwrap();
-        owner
-            .rebuild_shared_processes_from_native_members()
-            .unwrap();
-        owner
-            .capture_replica_runtime(
-                ["p", "q"]
-                    .map(|name| {
-                        (
-                            (name.into(), false),
-                            crate::package::scan::ReplicaRuntime {
-                                usage: [0; 8],
-                                seinfo: owner.seinfo(name).unwrap().map(str::to_owned),
-                                override_seinfo: None,
-                                library_files: vec![],
-                                libraries: vec![],
-                            },
-                        )
-                    })
-                    .into(),
-            )
-            .unwrap();
+        complete_owner(&mut owner);
         let mut context = (**base.context()).clone();
         context.scan_version = base.scan().version() + 1;
         fixture
@@ -1199,48 +1240,13 @@ pub(crate) fn with_discovery_session(
     };
     let enabled = |class: Option<&str>, new_state| {
         let before = fixture.system.capture_package_queries().unwrap();
-        let mut request = Parcel::new();
-        let code = if let Some(class) = class {
-            pm::SetComponentEnabledSetting {
-                component_name: Some(crate::package::intent::ComponentName {
-                    package: "p".into(),
-                    class: class.into(),
-                }),
-                new_state,
-                flags: 0,
-                user_id: 0,
-                calling_package: None,
-            }
-            .write(&mut request);
-            pm::SET_COMPONENT_ENABLED_SETTING
-        } else {
-            pm::SetApplicationEnabledSetting {
-                package_name: Some("p".into()),
-                new_state,
-                flags: 0,
-                user_id: 0,
-                calling_package: None,
-            }
-            .write(&mut request);
-            pm::SET_APPLICATION_ENABLED_SETTING
-        };
-        transact(&cached, 1000, code, &request)
-            .reader()
-            .read_exception()
-            .unwrap()
-            .unwrap();
+        let (code, request) = enabled_request(class, new_state, 0);
+        ok(transact(&cached, 1000, code, &request));
         assert!(!Arc::ptr_eq(
             &before,
             &fixture.system.capture_package_queries().unwrap()
         ));
-        assert!(
-            fixture
-                .system
-                .package_events()
-                .unwrap()
-                .wait(3000, false)
-                .unwrap()
-        );
+        wait_events(&fixture.system, 3000);
     };
     test(&host, &mut publish, &enabled);
     drop(workers);
