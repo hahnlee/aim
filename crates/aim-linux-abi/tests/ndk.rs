@@ -541,6 +541,11 @@ fn netlink_audit_and_generic() {
 }
 
 #[test]
+fn netlink_user_unicast() {
+    check("t_nlunicast", &[]);
+}
+
+#[test]
 fn ip_receive_options() {
     check("t_ipopts", &[]);
 }

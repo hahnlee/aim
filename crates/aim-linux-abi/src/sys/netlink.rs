@@ -5,7 +5,8 @@
 //! NetlinkMonitors); and NETLINK_KOBJECT_UEVENT, whose one group carries
 //! the kernel's uevents (`uevent`) and the ones a privileged process hands
 //! the kernel to announce; NETLINK_AUDIT (`netlink_audit`) and
-//! NETLINK_GENERIC (`genetlink`). Other netlink families are
+//! NETLINK_GENERIC (`genetlink`), and NETLINK_USERSOCK for user protocols.
+//! Other netlink families are
 //! EPROTONOSUPPORT.
 //!
 //! A netlink socket is a host AF_UNIX datagram socket bound to
@@ -30,6 +31,7 @@
 //!   router advertisement's RDNSS).
 
 use std::net::IpAddr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -39,6 +41,7 @@ use super::netif::{self, Addr, Event, Link};
 use crate::errno::{self, EINVAL, ENODEV, EPERM, Errno};
 
 pub const NETLINK_ROUTE: u64 = 0;
+pub const NETLINK_USERSOCK: u64 = 2;
 pub const NETLINK_KOBJECT_UEVENT: u64 = 15;
 pub const NETLINK_GENERIC: u64 = 16;
 use super::netlink_audit::NETLINK_AUDIT;
@@ -123,6 +126,7 @@ const NETLINK_GET_STRICT_CHK: u64 = 12;
 const EOPNOTSUPP: Errno = 95;
 const ECONNREFUSED: Errno = 111;
 const EADDRINUSE: Errno = 98;
+const ENOBUFS: Errno = 105;
 const CAP_NET_ADMIN: u32 = 12;
 const CAP_SYS_ADMIN: u32 = 21;
 /// The largest uevent the kernel sends.
@@ -238,6 +242,7 @@ fn new_portid(proto: u64) -> u32 {
 pub fn socket(ty: u64, proto: u64) -> Result<(i32, Socket), i64> {
     if ![
         NETLINK_ROUTE,
+        NETLINK_USERSOCK,
         NETLINK_AUDIT,
         NETLINK_KOBJECT_UEVENT,
         NETLINK_GENERIC,
@@ -378,6 +383,9 @@ pub fn parse_sockaddr(ptr: u64, len: u32) -> Result<(u32, u32), i64> {
 
 /// `bind`: a port id of 0 keeps the socket's; groups replace its groups.
 pub fn bind(s: &Socket, portid: u32, groups: u32) -> i64 {
+    if s.proto == NETLINK_USERSOCK && groups != 0 && admin().is_err() {
+        return -(EPERM as i64);
+    }
     let portid = if portid == 0 {
         s.portid.load(Ordering::Relaxed)
     } else {
@@ -397,13 +405,80 @@ pub fn bind(s: &Socket, portid: u32, groups: u32) -> i64 {
     }
 }
 
-/// `connect`: only the kernel (port 0) is reachable.
-pub fn connect(portid: u32) -> i64 {
-    if portid == 0 {
-        0
-    } else {
-        -(ECONNREFUSED as i64)
+/// The connected peer is inode metadata, shared by fork/exec and received
+/// descriptors, like the backing socket's receive queue. A single xattr
+/// update publishes the connection state, port id and lowest group together.
+const PEER: &std::ffi::CStr = c"dev.aim.netlink-peer";
+
+fn peer(path: &std::path::Path) -> Result<Option<(u32, u32)>, Errno> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| EINVAL)?;
+    let mut b = [0u8; 12];
+    // SAFETY: a live pathname and a writable buffer of the supplied size.
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            PEER.as_ptr(),
+            b.as_mut_ptr().cast(),
+            b.len(),
+            0,
+            0,
+        )
+    };
+    if n < 0 {
+        return match errno::last() {
+            errno::ENODATA => Ok(None),
+            e => Err(e),
+        };
     }
+    if n != b.len() as isize {
+        return Err(errno::EIO);
+    }
+    let word = |i| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    Ok((word(0) != 0).then(|| (word(4), word(8))))
+}
+
+pub fn peer_name(s: &Socket) -> Result<Vec<u8>, Errno> {
+    let (portid, groups) = peer(&s.path.lock().unwrap())?.unwrap_or((0, 0));
+    Ok(sockaddr_nl(portid, groups))
+}
+
+fn allowed(s: &Socket, portid: u32, groups: u32) -> Result<(), Errno> {
+    // netlink(7), NL_CFG_F_NONROOT_SEND: only USERSOCK among our families
+    // allows a non-admin sender to address other user sockets or groups.
+    if s.proto != NETLINK_USERSOCK && (portid != 0 || groups != 0) {
+        admin()?;
+    }
+    Ok(())
+}
+
+/// `netlink_connect`: no destination lookup until send; AF_UNSPEC clears
+/// both the default destination and the incoming unicast peer restriction.
+pub fn connect(s: &Socket, dst: Option<(u32, u32)>) -> i64 {
+    let (portid, groups) = dst.unwrap_or((0, 0));
+    if let Err(e) = allowed(s, portid, groups) {
+        return -(e as i64);
+    }
+    let mut b = Vec::with_capacity(12);
+    for v in [
+        u32::from(dst.is_some()),
+        portid,
+        groups & groups.wrapping_neg(),
+    ] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    let path = s.path.lock().unwrap();
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a live pathname and an initialized attribute buffer.
+    errno::check(unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            PEER.as_ptr(),
+            b.as_ptr().cast(),
+            b.len(),
+            0,
+            0,
+        )
+    } as i64)
 }
 
 pub fn setsockopt(s: &Socket, opt: u64, v: u32) -> i64 {
@@ -473,36 +548,45 @@ pub fn parse_meta(m: &[u8; META]) -> (Vec<u8>, [u32; 3]) {
 /// failure. A full queue drops the message, as Linux drops a broadcast to
 /// a full receiver.
 fn deliver(p: &std::path::Path, group: u32, from: (u32, [u32; 3]), msg: &[u8]) -> Option<Errno> {
+    deliver_on(sender(), p, group, from, msg, 0).err()
+}
+
+fn deliver_on(
+    fd: i32,
+    p: &std::path::Path,
+    group: u32,
+    from: (u32, [u32; 3]),
+    msg: &[u8],
+    flags: i32,
+) -> Result<(), Errno> {
     let mut d = Vec::with_capacity(META + msg.len());
     for v in [group, from.0, from.1[0], from.1[1], from.1[2]] {
         d.extend_from_slice(&v.to_le_bytes());
     }
     d.extend_from_slice(msg);
-    let fd = sender();
     let r = super::net::with_target(&super::net::host_target_of_path(p), |sa, len| {
         // SAFETY: sending our buffer to a named socket.
-        errno::check(unsafe { libc::sendto(fd, d.as_ptr().cast(), d.len(), 0, sa, len) } as i64)
+        errno::check(unsafe { libc::sendto(fd, d.as_ptr().cast(), d.len(), flags, sa, len) } as i64)
     });
-    (r < 0).then_some(-r as Errno)
+    if r < 0 { Err(-r as Errno) } else { Ok(()) }
 }
 
 /// Send each `(group, message)` to the sockets of `proto` bound to its
-/// group, except the socket named `except` (a sender does not hear its own
-/// broadcast).
+/// group, except the sender and unicast destination in `except`.
 fn broadcast(
     proto: u64,
     msgs: &[(u32, Vec<u8>)],
     from: (u32, [u32; 3]),
-    except: Option<&std::path::Path>,
+    except: Option<(u32, u32)>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir()) else {
         return;
     };
     for e in entries.flatten() {
-        let Some((p, _, groups)) = e.file_name().to_str().and_then(parse_name) else {
+        let Some((p, id, groups)) = e.file_name().to_str().and_then(parse_name) else {
             continue;
         };
-        if p != proto || except == Some(e.path().as_path()) {
+        if p != proto || except.is_some_and(|(sender, dst)| id == sender || id == dst) {
             continue;
         }
         for (g, m) in msgs {
@@ -950,19 +1034,30 @@ fn inject(body: &[u8], cred: [u32; 3]) -> Errno {
 }
 
 /// A message the socket sent to `dst` (port id and groups; the kernel when
-/// None). A group named in it gets the message, as does the kernel, which
-/// handles each request in it and queues the replies on the socket.
-/// Sockets of other processes are not reachable by port id. Returns the
-/// bytes consumed.
-pub fn send(s: &Socket, data: &[u8], dst: Option<(u32, u32)>) -> i64 {
+/// None: the connected destination, initially the kernel). Unicast data
+/// stays opaque, as on Linux; only port 0 interprets requests.
+pub fn send(fd: i32, s: &Socket, data: &[u8], dst: Option<(u32, u32)>, flags: i32) -> i64 {
+    if flags & libc::MSG_OOB != 0 {
+        return -(EOPNOTSUPP as i64);
+    }
+    if data.is_empty() {
+        return -(errno::ENODATA as i64);
+    }
     let portid = s.portid.load(Ordering::Relaxed);
-    let (dst_portid, groups) = dst.unwrap_or((0, 0));
+    let (dst_portid, groups) = match dst {
+        Some(dst) => {
+            if let Err(e) = allowed(s, dst.0, dst.1) {
+                return -(e as i64);
+            }
+            dst
+        }
+        None => match peer(&s.path.lock().unwrap()) {
+            Ok(dst) => dst.unwrap_or((0, 0)),
+            Err(e) => return -(e as i64),
+        },
+    };
     // Linux sends to the lowest group named.
     let group = groups & groups.wrapping_neg();
-    // Neither family lets an unprivileged process name a destination.
-    if (dst_portid != 0 || group != 0) && admin().is_err() {
-        return -(EPERM as i64);
-    }
     let path = s.path.lock().unwrap().clone();
     let c = super::cred::peer(super::process::getpid() as i32);
     let cred = [c.pid as u32, c.uid, c.gid];
@@ -971,10 +1066,18 @@ pub fn send(s: &Socket, data: &[u8], dst: Option<(u32, u32)>) -> i64 {
             s.proto,
             &[(group, data.to_vec())],
             (portid, cred),
-            Some(&path),
+            Some((portid, dst_portid)),
         );
     }
     if dst_portid != 0 {
+        return match send_user(fd, s.proto, dst_portid, group, (portid, cred), data, flags) {
+            Ok(()) => data.len() as i64,
+            Err(e) => -(e as i64),
+        };
+    }
+    if s.proto == NETLINK_USERSOCK {
+        // Linux's USERSOCK kernel endpoint has no input handler, so it
+        // refuses unicast to port 0 even after a multicast was delivered.
         return -(ECONNREFUSED as i64);
     }
     let cap_ack = s.cap_ack.load(Ordering::Relaxed) != 0;
@@ -1017,9 +1120,224 @@ pub fn send(s: &Socket, data: &[u8], dst: Option<(u32, u32)>) -> i64 {
     data.len() as i64
 }
 
+fn send_user(
+    fd: i32,
+    proto: u64,
+    portid: u32,
+    group: u32,
+    from: (u32, [u32; 3]),
+    data: &[u8],
+    flags: i32,
+) -> Result<(), Errno> {
+    // Darwin AF_UNIX reports a full receive queue as ENOBUFS, even on a
+    // blocking send, and POLLOUT does not track the destination's queue.
+    // Linux netlink waits interruptibly, or returns EAGAIN for a
+    // nonblocking send / expired SO_SNDTIMEO. Retry with an interruptible
+    // poll timeout because the host provides no peer-queue writable event.
+    let nonblock = flags & libc::MSG_DONTWAIT != 0 || super::fdtab::nonblocking(fd);
+    let mut timeout: libc::timeval = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of_val(&timeout) as u32;
+    // SAFETY: reading a timeval socket option into local storage.
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            (&mut timeout as *mut libc::timeval).cast(),
+            &mut len,
+        )
+    } < 0
+    {
+        return Err(errno::last());
+    }
+    let timeout = std::time::Duration::from_secs(timeout.tv_sec as u64)
+        + std::time::Duration::from_micros(timeout.tv_usec as u64);
+    let start = std::time::Instant::now();
+    loop {
+        match send_user_once(fd, proto, portid, group, from, data, flags) {
+            Err(ENOBUFS | errno::EAGAIN) => {
+                if nonblock || (!timeout.is_zero() && start.elapsed() >= timeout) {
+                    return Err(errno::EAGAIN);
+                }
+                // SAFETY: poll with no fds is an interruptible timeout.
+                if unsafe { libc::poll(std::ptr::null_mut(), 0, 1) } < 0 {
+                    return Err(errno::last());
+                }
+            }
+            result => return result,
+        }
+    }
+}
+
+fn send_user_once(
+    fd: i32,
+    proto: u64,
+    portid: u32,
+    group: u32,
+    from: (u32, [u32; 3]),
+    data: &[u8],
+    flags: i32,
+) -> Result<(), Errno> {
+    let entries = std::fs::read_dir(dir())
+        .map_err(|e| errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+        if !entry
+            .file_name()
+            .to_str()
+            .and_then(parse_name)
+            .is_some_and(|(p, id, _)| (p, id) == (proto, portid))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let result = (|| {
+            // netlink_getsockbyportid: a connected receiver refuses
+            // unicast from every port other than its connected peer.
+            if peer(&path)?.is_some_and(|(id, _)| id != from.0) {
+                return Err(ECONNREFUSED);
+            }
+            // Use the caller's socket, so O_NONBLOCK, MSG_DONTWAIT and
+            // SO_SNDTIMEO govern a full queue; broadcasts use sender().
+            deliver_on(fd, &path, group, from, data, flags)
+        })();
+        return result.map_err(|e| if e == errno::ENOENT { ECONNREFUSED } else { e });
+    }
+    Err(ECONNREFUSED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn usersock() -> (OwnedFd, Socket) {
+        let (fd, s) = socket(2, NETLINK_USERSOCK).unwrap();
+        // SAFETY: socket returned a new descriptor owned by this test.
+        (unsafe { OwnedFd::from_raw_fd(fd) }, s)
+    }
+
+    #[test]
+    fn user_unicast_preserves_payload_and_metadata_and_checks_peer() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::netlink::tests::user_unicast_preserves_payload_and_metadata_and_checks_peer",
+        ) {
+            return;
+        }
+        let (_view, _) = crate::vfs::test_view();
+        let (a, sa) = usersock();
+        let (b, sb) = usersock();
+        let (c, sc) = usersock();
+        let aid = sa.portid.load(Ordering::Relaxed);
+        let bid = sb.portid.load(Ordering::Relaxed);
+        let cid = sc.portid.load(Ordering::Relaxed);
+        let from = (aid, [123, 456, 789]);
+        assert_eq!(connect(&sb, Some((aid, 0))), 0);
+        assert_eq!(
+            send_user(a.as_raw_fd(), NETLINK_USERSOCK, bid, 0, from, b"opaque", 0),
+            Ok(())
+        );
+        let mut buf = [0u8; META + 6];
+        // SAFETY: receiving into a live local buffer on our socket.
+        assert_eq!(
+            unsafe { libc::recv(b.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) },
+            buf.len() as isize
+        );
+        assert_eq!(&buf[META..], b"opaque");
+        assert_eq!(
+            parse_meta(buf[..META].try_into().unwrap()),
+            (sockaddr_nl(aid, 0), from.1)
+        );
+        assert_eq!(
+            send_user(
+                c.as_raw_fd(),
+                NETLINK_USERSOCK,
+                bid,
+                0,
+                (cid, [0; 3]),
+                b"x",
+                0
+            ),
+            Err(ECONNREFUSED)
+        );
+        assert_eq!(connect(&sb, None), 0);
+        assert_eq!(
+            send_user(
+                c.as_raw_fd(),
+                NETLINK_USERSOCK,
+                bid,
+                0,
+                (cid, [0; 3]),
+                b"x",
+                0
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            send_user(a.as_raw_fd(), NETLINK_GENERIC, bid, 0, from, b"x", 0),
+            Err(ECONNREFUSED)
+        );
+        drop(b);
+        assert_eq!(
+            send_user(a.as_raw_fd(), NETLINK_USERSOCK, bid, 0, from, b"x", 0),
+            Err(ECONNREFUSED)
+        );
+    }
+
+    #[test]
+    fn connected_destination_is_shared_by_adoption_and_fork_state() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::netlink::tests::connected_destination_is_shared_by_adoption_and_fork_state",
+        ) {
+            return;
+        }
+        let (_view, _) = crate::vfs::test_view();
+        let (_fd, s) = usersock();
+        assert_eq!(connect(&s, Some((123, 0b1100))), 0);
+        assert_eq!(peer_name(&s), Ok(sockaddr_nl(123, 4)));
+        let mut w = super::super::fork_state::Writer::default();
+        s.save(&mut w);
+        let bytes = w.into_bytes();
+        let copy = Socket::load(&mut super::super::fork_state::Reader::new(&bytes));
+        assert_eq!(peer_name(&copy), Ok(sockaddr_nl(123, 4)));
+        assert_eq!(connect(&copy, Some((456, 0))), 0);
+        assert_eq!(peer_name(&s), Ok(sockaddr_nl(456, 0)));
+        let mut adopted = adopt(s.path.lock().unwrap().file_name().unwrap()).unwrap();
+        assert_eq!(peer_name(&adopted), Ok(sockaddr_nl(456, 0)));
+        assert_eq!(connect(&adopted, None), 0);
+        assert_eq!(peer_name(&s), Ok(sockaddr_nl(0, 0)));
+        adopted.owner = 0;
+    }
+
+    #[test]
+    fn full_user_queue_reports_eagain() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::netlink::tests::full_user_queue_reports_eagain",
+        ) {
+            return;
+        }
+        let (_view, _) = crate::vfs::test_view();
+        let (a, sa) = usersock();
+        let (_b, sb) = usersock();
+        let from = (sa.portid.load(Ordering::Relaxed), [0; 3]);
+        let bid = sb.portid.load(Ordering::Relaxed);
+        let mut result = Ok(());
+        for _ in 0..4096 {
+            result = send_user(
+                a.as_raw_fd(),
+                NETLINK_USERSOCK,
+                bid,
+                0,
+                from,
+                &[0; 1024],
+                libc::MSG_DONTWAIT,
+            );
+            if result.is_err() {
+                break;
+            }
+        }
+        assert_eq!(result, Err(errno::EAGAIN));
+    }
 
     #[test]
     fn attributes_round_trip() {

@@ -1243,9 +1243,15 @@ pub fn connect(a: [u64; 6]) -> i64 {
     }
     if let Some(s) = any_sock(&input) {
         match &s.family {
-            Family::Netlink(_) => {
+            Family::Netlink(n) => {
+                if a[1] != 0 && a[2] >= 2
+                    // SAFETY: the guest address contains at least its family.
+                    && unsafe { std::ptr::read_unaligned(a[1] as *const u16) } == 0
+                {
+                    return super::netlink::connect(n, None);
+                }
                 return match super::netlink::parse_sockaddr(a[1], a[2] as u32) {
-                    Ok((portid, _)) => super::netlink::connect(portid),
+                    Ok(dst) => super::netlink::connect(n, Some(dst)),
                     Err(e) => e,
                 };
             }
@@ -1563,7 +1569,10 @@ fn name_of(input: &SocketInput, peer: bool, out: u64, outlen: u64) -> i64 {
     let fd = input.fd();
     if let Some(s) = any_sock(&input) {
         let name = match &s.family {
-            Family::Netlink(_) if peer => Some(super::netlink::sockaddr_nl(0, 0)),
+            Family::Netlink(n) if peer => match super::netlink::peer_name(n) {
+                Ok(name) => Some(name),
+                Err(e) => return -(e as i64),
+            },
             Family::Netlink(n) => Some(n.local_name()),
             Family::Packet(_) if peer => return -107, // ENOTCONN
             Family::Packet(p) => Some(p.local_name()),
@@ -2141,7 +2150,7 @@ fn transmit(
     flags: u64,
 ) -> i64 {
     let fd = input.fd();
-    if let Some(r) = send_other(&input, iov, name) {
+    if let Some(r) = send_other(&input, iov, name, flags) {
         return r;
     }
     let s = sock(&input);
@@ -2219,7 +2228,12 @@ fn transmit(
 
 /// A send on a netlink or packet socket, which the layer handles. None:
 /// another family.
-fn send_other(input: &SocketInput, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<i64> {
+fn send_other(
+    input: &SocketInput,
+    iov: &[libc::iovec],
+    name: Option<(u64, u32)>,
+    flags: u64,
+) -> Option<i64> {
     let fd = input.fd();
     let s = any_sock(&input)?;
     let name = name.filter(|n| n.0 != 0);
@@ -2239,7 +2253,7 @@ fn send_other(input: &SocketInput, iov: &[libc::iovec], name: Option<(u64, u32)>
                 Some(Err(e)) => return Some(e),
                 None => None,
             };
-            super::netlink::send(n, &gather(), dst)
+            super::netlink::send(fd, n, &gather(), dst, host_send_flags(flags))
         }
         Family::Packet(p) => {
             let ifindex = match name.map(|(a, l)| super::packet::parse_sockaddr(a, l)) {
