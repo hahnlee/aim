@@ -203,7 +203,14 @@ the guest reaches BOOT_COMPLETED. Every package read and write of the app
 host goes through the native session: there is no `Packages::load` join or
 host package model, and process starts, domains, permissions and the
 services' package discoveries read the session's capture. The published
-`package` front answers the shell's `pm`. A shell install session
+`package` front answers the shell's `pm`. Fresh host-only image scans retain
+Calendar's 40 activities; after compressed Chrome and Trichrome expansion,
+the launcher query resolves 19 activities for unlocked user 0. The same scan
+resolves only Settings, Clock and Dialer while locked, as Android's direct-boot
+policy requires (#2222). `aimctl` readiness now asks UserManager for user 0's
+unlocking state instead of treating agent startup as readiness. No guest boot
+or app launch was run for this change.
+A shell install session
 (`pm install-create`, `-write`, `-commit`) of an ordinary APK installs it
 (Success), a same-signer update keeps its uid and data (Success), another
 signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app

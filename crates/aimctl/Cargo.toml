@@ -9,5 +9,6 @@ description = "The user's manager of a resident guest: start, stop and inspect i
 [dependencies]
 aim-apps = { path = "../aim-apps" }
 aim-paths.workspace = true
+aim-service-aidl = { path = "../aim-services/aidl" }
 aim-storage.workspace = true
 libc.workspace = true
