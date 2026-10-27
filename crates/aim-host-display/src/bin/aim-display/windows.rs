@@ -908,8 +908,14 @@ fn front(task: i32) {
         let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
         let key = send!(w, c"isKeyWindow" => bool);
         let minimized = send!(w, c"isMiniaturized" => bool);
-        if send!(app, c"isActive" => bool) && !key && !minimized {
-            send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
+        if !minimized {
+            if !send!(app, c"isActive" => bool) {
+                // Cooperating task hosts must agree on stacking even while
+                // inactive, without taking the Mac's keyboard focus.
+                send!(w, c"orderFrontRegardless" => ());
+            } else if !key {
+                send!(w, c"makeKeyAndOrderFront:" => (), Id = std::ptr::null_mut());
+            }
         }
         with(|s| s.applying = false);
     }

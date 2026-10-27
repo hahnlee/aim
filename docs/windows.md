@@ -198,7 +198,9 @@ visibility included). It connects to the display server itself
   layer shows the task one pixel per pixel from the top left, unstretched.
 - **Focus and stacking.** The key window's task is the focused one
   (`FOCUS`), and a task Android brings to the front makes its window key
-  while the app is active. A press in a window whose task is not in front
+  while the app is active; while inactive it orders the window in front
+  without activating the app or changing the Mac's key window, leaving
+  minimized windows minimized. A press in a window whose task is not in front
   focuses the task first and holds the touch until Android reports it in
   front (250 ms at most), so it lands on that task.
 - **Orientation.** An activity's `setRequestedOrientation` of a
