@@ -5,10 +5,7 @@ use super::{
     query::Query,
     scan_snapshot::query_state::Capture,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagemaintenancebridge as api;
 use std::{collections::BTreeMap, sync::Arc};
 

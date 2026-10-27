@@ -5,10 +5,7 @@ use super::{
     scan::{LibraryCompatibility, PolicyBridgeError},
     system_config::SystemConfig,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 mod apex;
@@ -17,7 +14,7 @@ mod query;
 mod read_ahead;
 pub(crate) use query::{
     application_query_filtering_call, domain_verification_restricted_call,
-    granted_permissions_call, installed_permissions_call,
+    installed_permissions_call,
 };
 mod preferred;
 mod runtime;

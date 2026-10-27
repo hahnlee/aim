@@ -116,7 +116,7 @@ impl aim_binder_host::local::Service for Changed {
         call: &mut aim_binder_host::local::Call<'_>,
     ) -> aim_binder_host::local::Reply {
         use aim_binder_host::parcel::{BAD_VALUE, PERMISSION_DENIED, Parcel, UNKNOWN_TRANSACTION};
-        use aim_service_aidl::{ReadParcelable, dev_aim_server_iwebinstantappschanged as aidl};
+        use aim_service_aidl::dev_aim_server_iwebinstantappschanged as aidl;
         if call.code != aidl::CHANGED {
             return Err(UNKNOWN_TRANSACTION);
         }

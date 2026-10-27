@@ -3,7 +3,7 @@
 use super::{
     Parameters, Record, Session,
     codec::SessionParams,
-    pipeline::{self, Owners, PreparedInstall},
+    pipeline::{self, Owners},
 };
 use crate::package::{
     installer::native::QuerySource,

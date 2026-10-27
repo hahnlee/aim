@@ -2,7 +2,6 @@
 use super::*;
 use aim_service_aidl::dev_aim_server_ipermissionpersistencebridge as permission_api;
 use std::{
-    collections::BTreeMap,
     sync::Condvar,
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -454,7 +453,7 @@ impl System {
         // native Settings read restores its actual persisted legacy objects;
         // a computed live permission export is a separate query owner.
         let install = self.package_install_guard();
-        let mut disk = disk.lock().unwrap();
+        let disk = disk.lock().unwrap();
         let mut state = self.package_bootstrap.lock().unwrap();
         let current = state
             .current
@@ -561,6 +560,7 @@ mod latest_settings_tests {
         scan::{CapturedUsers, SigningScan},
         settings::{Package, Settings},
     };
+    use std::collections::BTreeMap;
     #[test]
     fn permission_definition_merge_retains_latest_package_and_app_data_fields() {
         let mut latest = SigningScan::new(

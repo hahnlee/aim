@@ -2,7 +2,7 @@
 //! authentication. Package reads and resolution remain the native public owner.
 use super::*;
 use aim_service_aidl::{
-    ReadParcelable, dev_aim_server_ipackagebootstrapbridge as bootstrap,
+    dev_aim_server_ipackagebootstrapbridge as bootstrap,
     dev_aim_server_ipackageshellreadleaf as leaf,
 };
 

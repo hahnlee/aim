@@ -1,10 +1,7 @@
 //! PackageList observer references stay in their service owner: Java
 //! LocalServices in system_server, or the native registry in the app host.
 //! Publication sends only names and affected UIDs, outside publication locks.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{BAD_VALUE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackageobservereventsbridge as api;
 use std::sync::{
     Arc,

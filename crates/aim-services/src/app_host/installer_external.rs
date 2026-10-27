@@ -151,7 +151,7 @@ impl InstallerExternal {
     /// `persist.sys.timezone`, GMT where unset or not in the image's
     /// tzdata.
     fn install_environment(&self) -> Result<Vec<u8>, Exception> {
-        self.open()?;
+        drop(self.open()?);
         let root = self.host.root()?;
         let tzdata = std::fs::read(root.join(crate::tzdata::PATH.trim_start_matches('/')))
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("tzdata: {e}")))?;

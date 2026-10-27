@@ -5,10 +5,7 @@ use super::{
     effects, installer::native::QuerySource, lifecycle, moves, pkg::booleans, query::Query,
     resolve::Resolver,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_ipackagerelocationbridge as api;
 use std::{
     path::PathBuf,

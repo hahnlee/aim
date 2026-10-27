@@ -12,7 +12,7 @@ use crate::{
     system_package_lifecycle::{LifecycleFacts, Production, Restored},
 };
 use aim_android_init::props::{PropertyService, area::AreaMemory};
-use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bootstrap;
 use std::{
     path::Path,

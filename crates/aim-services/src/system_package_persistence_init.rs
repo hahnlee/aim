@@ -108,7 +108,7 @@ pub fn prepare(
     inputs: &Inputs,
     config: &package::system_config::SystemConfig,
     readers: &mut impl ReadOwners,
-    mut complete: ReadCompletion,
+    complete: ReadCompletion,
 ) -> Result<Prepared, Exception> {
     let facts = PersistenceFacts::original(bridge)?;
     prepare_native(

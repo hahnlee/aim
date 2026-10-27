@@ -3880,7 +3880,6 @@ fn verify_boot_scan(
                     bridge,
                     &mut list_store,
                     &query,
-                    &inodes,
                     before_request
                 )
                 .unwrap()
@@ -3895,7 +3894,7 @@ fn verify_boot_scan(
         let before_retry =
             std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap();
         let error = system
-            .process_due_runtime_permission_requests(bridge, &mut list_store, &query, &inodes, due)
+            .process_due_runtime_permission_requests(bridge, &mut list_store, &query, due)
             .unwrap_err();
         assert_eq!(error.user, 0);
         assert!(!error.error.committed);
@@ -3922,13 +3921,7 @@ fn verify_boot_scan(
         assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
         assert_eq!(
             system
-                .process_due_runtime_permission_requests(
-                    bridge,
-                    &mut list_store,
-                    &query,
-                    &inodes,
-                    due
-                )
+                .process_due_runtime_permission_requests(bridge, &mut list_store, &query, due)
                 .unwrap(),
             [0]
         );

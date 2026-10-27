@@ -5878,7 +5878,6 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         store: &mut crate::package::owner::Store,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
-        inodes: &std::collections::BTreeMap<u32, aim_storage::guest_inode::GuestInode>,
         now: std::time::Instant,
     ) -> std::result::Result<Vec<u32>, crate::package::owner::runtime_metadata::FlushError> {
         let fail = |error: Exception| crate::package::owner::runtime_metadata::FlushError {
@@ -5961,7 +5960,6 @@ impl System {
                     &bridge,
                     &mut store.lock().unwrap(),
                     &capture,
-                    &std::collections::BTreeMap::new(),
                     now,
                 )
             })

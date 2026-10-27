@@ -3,7 +3,6 @@
 use super::{
     apps_filter, effects,
     intent::ComponentName,
-    model,
     owner::{self, user_runtime},
     parse::{
         Platform,

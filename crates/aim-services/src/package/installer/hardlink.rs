@@ -1,8 +1,5 @@
 //! Original guest VFS/SELinux leaves. Native host paths never cross this boundary.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackageinstallerfiles as aidl;
 use std::sync::{
     Arc,

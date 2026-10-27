@@ -525,7 +525,6 @@ impl Service for PackageQueries {
                 pm::GET_INSTALLED_APPLICATIONS | pm::GET_INSTALLED_PACKAGES
             ) {
             Some((|| -> Result<Parcel, QueryError> {
-                use aim_service_aidl::ReadParcelable;
                 let process = self
                     .system
                     .as_ref()

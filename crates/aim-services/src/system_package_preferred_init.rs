@@ -4,7 +4,7 @@ use super::*;
 use crate::package::{
     preferred::{
         self, Mutation,
-        registry::{ActionError, Actions, Handle},
+        registry::{ActionError, Handle},
     },
     query::preferred::Owner,
 };

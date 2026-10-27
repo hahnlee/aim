@@ -171,7 +171,7 @@ impl System {
         &self,
         package: Option<String>,
         version: i64,
-        user: i32,
+        _: i32,
         sender: Option<crate::package::diagnostics::IntentSender>,
         flags: i32,
         uid: i32,

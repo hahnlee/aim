@@ -1,8 +1,6 @@
 //! Original image LauncherApps/AppOps/graphics leaves for native archive queries.
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
-use aim_service_aidl::{
-    ReadParcelable, WriteParcelable, dev_aim_server_iinstallerarchivequerybridge as api,
-};
+use aim_service_aidl::{ReadParcelable, dev_aim_server_iinstallerarchivequerybridge as api};
 use std::{path::Path, sync::Arc};
 fn error(message: impl Into<String>) -> Exception {
     Exception::new(EX_ILLEGAL_STATE, message)

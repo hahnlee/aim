@@ -679,7 +679,7 @@ impl Service for Endpoint {
                 if lease.comparison_id.is_none() {
                     static NEXT: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(1);
-                    let id = match NEXT.fetch_update(
+                    let id = match NEXT.try_update(
                         std::sync::atomic::Ordering::Relaxed,
                         std::sync::atomic::Ordering::Relaxed,
                         |id| id.checked_add(1).filter(|next| *next <= i64::MAX as u64),

@@ -4,7 +4,6 @@ use aim_service_aidl::{
     ReadParcelable, dev_aim_server_ipackagebootstrapbridge as bootstrap,
     dev_aim_server_ipackageshellinstallpolicy as api,
 };
-use std::os::fd::AsFd;
 struct InputFile(aim_binder_driver::File);
 impl aim_service_aidl::WriteParcelable for InputFile {
     fn write_to(&self, p: &mut Parcel) {

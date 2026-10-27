@@ -6,7 +6,6 @@ use crate::package::{
     mutation_dispatch::Dependencies,
     preferred::registry::{Identity, IdentityProvider, Registry},
     scan_snapshot::query_state::Capture,
-    write::mutation::{Change, Plan},
 };
 use aim_service_aidl::{
     android_content_pm_ipackagemanager as pm, android_os_iremotecallback as callback,

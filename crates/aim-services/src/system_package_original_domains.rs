@@ -3,7 +3,7 @@
 use super::*;
 use crate::package::domain_verification::{self as domain, original_bridge};
 use aim_service_aidl::{
-    ReadParcelable, dev_aim_server_ipackagebootstrapbridge as bootstrap,
+    dev_aim_server_ipackagebootstrapbridge as bootstrap,
     dev_aim_server_ipackagedomainsettings as leaf,
     dev_aim_server_ipackagedomainsettingschanged as callback,
 };

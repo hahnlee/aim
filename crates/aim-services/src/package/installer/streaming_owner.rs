@@ -1,7 +1,6 @@
 //! Concrete streaming DataLoaderManager state and owned stage FD writes.
 use super::{
     Record, Session,
-    codec::Object,
     native::{Publisher, StreamPreparation},
     storage,
 };
@@ -9,14 +8,11 @@ use aim_binder_host::{
     local::{Call, LocalProcess, Reply, Service},
     parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
 };
-use aim_service_aidl::{
-    ReadParcelable, WriteParcelable, dev_aim_server_iinstallerpreparationbridge as api,
-};
+use aim_service_aidl::{ReadParcelable, dev_aim_server_iinstallerpreparationbridge as api};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
     sync::{Arc, Mutex, Weak},
-    time::{Duration, Instant},
 };
 pub type Resume = Arc<dyn Fn(i32) -> Result<(), Exception> + Send + Sync>;
 pub type Failure = Arc<dyn Fn(i32, i32, String) -> Result<(), Exception> + Send + Sync>;
@@ -190,7 +186,6 @@ impl Owner {
         );
         let mut params_reader = Reader::new(&params.bytes, &params.objects);
         params_reader.read_string16().map_err(transport)?;
-        let start = params_reader.position();
         let size = params_reader.read_i32().map_err(transport)?;
         if size < 8 {
             return Err(transport(BAD_VALUE));

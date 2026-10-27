@@ -1,8 +1,5 @@
 //! Legacy domain mutation and v1 verifier responses, AOSP android-16.0.0_r1.
-use super::{
-    domain_verification::{self, enforcer},
-    owner::Store,
-};
+use super::{domain_verification::enforcer, owner::Store};
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 use std::{
     collections::{BTreeMap, BTreeSet},

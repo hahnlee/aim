@@ -413,7 +413,7 @@ impl System {
     pub fn finish_raw_native_package_scan(
         self: &Arc<Self>,
         bridge: &Arc<Bridge>,
-        mut begin: Begun,
+        begin: Begun,
         mut original: crate::package::scan_snapshot::boot_context::Original,
         runtime_system: model::System,
         classes: Arc<aim_android_image::linkage::Hierarchy>,
