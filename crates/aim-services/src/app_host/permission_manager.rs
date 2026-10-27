@@ -1585,7 +1585,7 @@ impl PermissionManager {
                 .ok_or_else(|| {
                     self.host.unimplemented_named(
                         "permissionmgr",
-                        "AppIdPermissionMigration.migrateUserState (#1508)",
+                        "AppIdPermissionMigration.migrateUserState (#2201)",
                     )
                 })?;
             owner.user0 = Some(Arc::new(user));
