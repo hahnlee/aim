@@ -12,14 +12,16 @@ classes, not Linux CFS shares, utilization percentages or arm64 CPU binding.
 
 | Effective controller setting (including ancestors) | Darwin policy |
 | --- | --- |
-| `cpu.uclamp.max` <= 25% or a cpuset smaller than the online set | Background |
-| `cpu.uclamp.max` <= 50% | Utility ceiling |
+| `cpu.uclamp.max` <= 50% | Remove the cgroup boost, preserving Linux scheduling priority |
+| cpuset masks, including a subset of the online set | Preserve scheduling and disk policy; Darwin has no arm64 CPU binding API |
 | `cpu.idle=1` / `cpu.shares` < 1024 | Background / utility ceiling for fair-class threads |
 | `cpu.uclamp.min` > 0 or `cpu.uclamp.latency_sensitive=1` | User-initiated floor |
 | `cpu.uclamp.min` >= 50% | User-interactive floor |
 | `blkio.prio.class=restrict-to-be` / `idle` / `promote-to-rt` or `none-to-rt` | Utility / throttled / important disk I/O |
 
 Ancestor uclamp bounds cap descendant requests; ceilings win over floors.
+Uclamp and cpusets guide Linux frequency/placement, not scheduling class;
+neither can select Darwin Background or Utility or throttle disk I/O.
 The mapping composes with each thread's nice and SCHED_BATCH/IDLE settings. When every guest thread is background,
 `task_policy_set(TASK_SUPPRESSION_POLICY)` immediately constrains
 the entire host task with XNU's low-priority CPU and disk policy, including
@@ -34,6 +36,15 @@ and lower shares for dex2oat; the original task profiles select them.
 The original's identical initial cpuset masks alone cannot distinguish
 background from foreground. This is policy configuration, not a name
 check in the syscall layer.
+
+The pinned audioserver and the vendor audio HAL request
+`ProcessCapacityHigh HighPerformance`: `task_profiles.json` selects
+cpuset/foreground and cpu/foreground. Init copies the root CPU mask and
+leaves CPU shares at 1024, idle at 0 and uclamp at 0/max; neither profile
+changes blkio's neutral root policy. These values preserve normal, negative
+nice and real-time thread scheduling. Smaller CPU masks or lower utilization
+maxima likewise cannot demote those scheduling classes. The CoreAudio helper
+enters `--audio-io` before guest/cgroup initialization.
 
 The unified hierarchy exposes process membership, population and empty
 controller/subtree-control lists; migrations check the common ancestor's

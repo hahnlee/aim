@@ -82,7 +82,10 @@ int main(void) {
   step("thread", 0);
   put("/dev/cpuctl/value/cpu.idle", "0");
   put("/dev/cpuctl/value/cpu.uclamp.max", "50");
-  step("utility", 0);
+  step("utilization", 0);
+  if (write(command[1][1], "f", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
+  step("capped-realtime", 0);
+  if (write(command[1][1], "n", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
   put("/dev/cpuctl/value/cpu.uclamp.max", "max");
   put("/dev/cpuctl/value/cpu.shares", "512");
   step("shares", 0);

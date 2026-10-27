@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering::SeqCst;
 
 const BACKGROUND: i32 = 9;
 const UTILITY: i32 = 17;
-#[cfg(test)]
 const DEFAULT: i32 = 21;
 const INITIATED: i32 = 25;
 const INTERACTIVE: i32 = 33;
@@ -41,8 +40,8 @@ fn number(dir: &Path, name: &str) -> Result<f64, Errno> {
     v.trim().parse().map_err(|_| EINVAL)
 }
 
-/// Linux's effective uclamp bounds are constrained by ancestors; an idle
-/// ancestor or a restricted cpuset also constrains every descendant.
+/// Ancestors constrain utilization hints and fair-class CPU weights.
+/// Placement/frequency limits must not lower a thread's scheduling class.
 fn constrain(p: &mut Policy, c: Controller, dir: &Path, root: &Path) -> Result<(), Errno> {
     match c {
         Controller::Cpu if dir != root => {
@@ -55,16 +54,13 @@ fn constrain(p: &mut Policy, c: Controller, dir: &Path, root: &Path) -> Result<(
             } else {
                 0
             });
-            let cap = if max <= 25.0 {
-                BACKGROUND
-            } else if max <= 50.0 {
-                UTILITY
-            } else {
-                INTERACTIVE
-            };
+            // Uclamp caps performance points, not scheduling priority. A
+            // low maximum can remove our boost, never demote Linux priority
+            // or bring Darwin's background disk/timer throttling with it.
+            let cap = if max <= 50.0 { DEFAULT } else { INTERACTIVE };
             p.max = p.max.min(cap);
             // cpu.idle and CFS shares affect only fair-class threads;
-            // utilization clamps apply to real-time threads as well.
+            // utilization hints must preserve real-time scheduling priority.
             p.fair_max = p.fair_max.min(if number(dir, "cpu.idle")? != 0.0 {
                 BACKGROUND
             } else if number(dir, "cpu.shares")? < 1024.0 {
@@ -73,15 +69,9 @@ fn constrain(p: &mut Policy, c: Controller, dir: &Path, root: &Path) -> Result<(
                 INTERACTIVE
             });
         }
-        Controller::Cpuset if dir != root => {
-            let cpus = cgroup_v1::parse_list(value(dir, "cpus")?.trim(), 32)?;
-            let online = cgroup_v1::parse_list(value(root, "cpus")?.trim(), 32)?;
-            // Darwin has no CPU binding API on arm64. A reduced CPU set is
-            // a capacity restriction, represented by background scheduling.
-            if !cpus.is_empty() && cpus.len() < online.len() {
-                p.max = BACKGROUND;
-            }
-        }
+        // A cpuset restricts placement, not priority or I/O. Darwin has no
+        // arm64 CPU binding API; Background is not an equivalent policy.
+        Controller::Cpuset => {}
         Controller::Blkio => {
             let io = match value(dir, "blkio.prio.class")?.trim() {
                 "idle" => 3,
@@ -323,13 +313,13 @@ mod tests {
         constrain(&mut p, Controller::Cpu, &child, &root).unwrap();
         assert_eq!(p.min, INTERACTIVE);
         constrain(&mut p, Controller::Cpu, &dir, &root).unwrap();
-        assert_eq!(p.max, BACKGROUND);
+        assert_eq!(p.max, DEFAULT);
         assert_eq!(p.min, 0);
-        assert_eq!(qos(DEFAULT, p.min, p.max) as i32, BACKGROUND);
+        assert_eq!(qos(DEFAULT, p.min, p.max) as i32, DEFAULT);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn cpuset_and_io_values_have_host_effects() {
+    fn cpuset_preserves_priority_and_io_values_have_host_effects() {
         let root = std::env::temp_dir().join(format!("aim-297-controllers-{}", me()));
         let cpus = root.join("cpus");
         let child = cpus.join("any-name");
@@ -342,12 +332,106 @@ mod tests {
         std::fs::write(child.join("cpus"), "0-1\n").unwrap();
         let mut p = Policy::default();
         constrain(&mut p, Controller::Cpuset, &child, &cpus).unwrap();
-        assert_eq!(p.max, BACKGROUND);
+        assert_eq!(p, Policy::default());
         cgroup_v1::populate(Controller::Blkio, &io, None).unwrap();
         for (value, want) in [("promote-to-rt", 1), ("restrict-to-be", 4), ("idle", 3)] {
             std::fs::write(io.join("blkio.prio.class"), value).unwrap();
             constrain(&mut p, Controller::Blkio, &io, &io).unwrap();
             assert_eq!(p.io, want);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn audio_profiles_keep_linux_scheduling_class() {
+        // android-16.0.0_r1 audioserver.rc and our audio HAL's rc both use
+        // ProcessCapacityHigh + HighPerformance. task_profiles.json joins
+        // cpuset/foreground and cpu/foreground; init.rc copies the root CPU
+        // mask and leaves shares=1024, idle=0, uclamp=0/max. Neither profile
+        // joins blkio/background (restrict-to-be); the root is no-change.
+        for rc in [
+            include_str!(
+                "../../../../aim-android-init/tests/golden/image/system/etc/init/audioserver.rc"
+            ),
+            include_str!("../../../../../hal/audio/android.hardware.audio.service-aidl.aim.rc"),
+        ] {
+            assert!(rc.lines().any(|line| {
+                line.trim() == "task_profiles ProcessCapacityHigh HighPerformance"
+            }));
+        }
+        let root = std::env::temp_dir().join(format!("aim-297-audio-profiles-{}", me()));
+        for c in Controller::ALL {
+            std::fs::create_dir_all(root.join(c.name())).unwrap();
+            cgroup_v1::populate(c, &root.join(c.name()), None).unwrap();
+        }
+        // Native init parses task_profiles but does not attach them at
+        // launch yet; also check the root memberships before a guest move.
+        let mut initial = Policy::default();
+        for c in Controller::ALL {
+            let dir = root.join(c.name());
+            constrain(&mut initial, c, &dir, &dir).unwrap();
+        }
+        assert_eq!(initial, Policy::default());
+        let cpu = root.join("cpu");
+        let cpuset = root.join("cpuset");
+        for c in [Controller::Cpu, Controller::Cpuset] {
+            let parent = root.join(c.name());
+            let group = parent.join("foreground");
+            std::fs::create_dir_all(&group).unwrap();
+            cgroup_v1::populate(c, &group, Some(&parent)).unwrap();
+        }
+        let foreground = cpu.join("foreground");
+        let mask = cpuset.join("foreground/cpus");
+        std::fs::copy(cpuset.join("cpus"), &mask).unwrap();
+        let policy = || {
+            let mut p = Policy {
+                min: INTERACTIVE,
+                ..Policy::default()
+            };
+            constrain(&mut p, Controller::Cpu, &foreground, &cpu).unwrap();
+            constrain(&mut p, Controller::Cpu, &cpu, &cpu).unwrap();
+            constrain(
+                &mut p,
+                Controller::Cpuset,
+                &cpuset.join("foreground"),
+                &cpuset,
+            )
+            .unwrap();
+            constrain(
+                &mut p,
+                Controller::Blkio,
+                &root.join("blkio"),
+                &root.join("blkio"),
+            )
+            .unwrap();
+            p.min = p.min.min(p.max);
+            p
+        };
+        assert_eq!(policy(), Policy::default());
+
+        // Device CPU masks and utilization caps can change without changing
+        // these profiles. They cannot demote normal or urgent audio threads,
+        // nor request task suppression (max/fair_max == BACKGROUND).
+        std::fs::write(cpuset.join("cpus"), "0-3\n").unwrap();
+        std::fs::write(&mask, "0-1\n").unwrap();
+        for max in ["max", "50", "25", "0"] {
+            std::fs::write(foreground.join("cpu.uclamp.max"), max).unwrap();
+            let p = policy();
+            assert!(p.max >= DEFAULT && p.fair_max >= DEFAULT, "{max}: {p:?}");
+            assert_eq!(p.io, 0, "{max}");
+            for (nice, sched) in [
+                (0, 0),
+                (-19, 0),
+                (0, 1),
+                (0, 2),
+                (10, 0),
+                (19, 0),
+                (0, 3),
+                (0, 5),
+            ] {
+                let qos = super::super::super::process::host_qos(nice, sched) as i32;
+                assert_eq!(super::qos(qos, p.min, p.max) as i32, qos, "{max}");
+            }
         }
         std::fs::remove_dir_all(root).unwrap();
     }

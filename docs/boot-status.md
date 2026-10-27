@@ -8082,7 +8082,14 @@ Measured on a loaded host (load average 90, other agents' boots running),
   an event while the level read warn for a minute. The module polls the
   level every 250 ms instead.
 
-ActivityManager's process groups now constrain Darwin CPU/QoS and disk policy through the cgroup controllers, with freezer explicitly unavailable. Kills name their process: another process's
+ActivityManager's process groups constrain Darwin CPU/QoS and disk policy
+through the cgroup controllers, with freezer explicitly unavailable. Cpuset
+masks and uclamp maxima preserve Linux scheduling class: reduced placement
+or frequency hints cannot background foreground/system audio or throttle its
+I/O (#297). The audio profiles' neutral controller defaults and reduced-mask/
+uclamp cases have mapping unit coverage; the CoreAudio integration gate is
+unverified here because the sandbox denies the shared original-image lock
+(2026-10-28). Kills name their process: another process's
 `/proc/<pid>/cmdline` and `comm` come from its record (#238).
 
 **Morning check** (one boot slot, after the throttle is lifted):
