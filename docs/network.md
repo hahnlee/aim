@@ -224,13 +224,28 @@ LinkProperties; its UDP and TCP queries are host sockets. DNS-over-TLS
 validation against those servers runs and fails over to cleartext, as on
 a network whose resolver has no DoT.
 
+**Socket options and interval timers (#268).** IP_RECVTTL/IP_RECVTOS and
+SO_TIMESTAMP/SO_TIMESTAMPNS translate Darwin's receive control messages,
+including ping replies; IP_RETOPTS is Darwin's IP_RECVRETOPTS (#2152).
+TCP_MAXSEG keeps Linux's user MSS before connect and applies it when
+Darwin permits. The three interval timers deliver SIGALRM, SIGVTALRM and
+SIGPROF through the signal owner. The NDK option and timer tests pass
+(2026-10-28); ping and toybox nc have not been rechecked in a boot.
+
 **Traffic statistics** come from the eBPF maps. The socket layer counts
 each AF_INET/AF_INET6 send and receive into netd's per-uid maps
 (`stats_map_A`/`B`, `app_uid_stats_map`) as its cgroup skb programs
 would, with the socket's uid, tag, counter set and interface (`lo` for
 loopback addresses, `eth0` for the rest). One call counts as one packet
 behind its headers, split at the MTU as the programs split a GSO skb;
-TCP's control packets are not counted. The interface counters are #1720.
+TCP's control packets are not counted. The guest-only interface counters
+are #1720. `/proc/net/dev` lists `netif`'s devices in Linux's format, with
+Darwin's 64-bit interface totals (`NET_RT_IFLIST2`): `lo0` for `lo`, the
+current uplink for `eth0`. These include host traffic and Darwin's rounding
+of byte totals. Unsupported fields and a device without a backing host
+interface have zero counters. NDK tests cover the proc aliases, headers,
+fields and fresh counters after loopback UDP traffic; the original toybox
+`ifconfig -a` lists both devices without a boot (2026-10-28).
 
 ## IPv6 (#267)
 
@@ -371,7 +386,4 @@ sockets. What it takes, below the original stack:
   with an IPv6 address, default route and DNS on eth0, `ping6`);
 - #260 Chrome's renderer: "V8 process OOM (Failed to reserve virtual
   memory for CodeRange)";
-- #268 socket options: IP_RECVTTL, IP_RETOPTS, SO_TIMESTAMP (iputils
-  ping), TCP_MAXSEG before connect (DnsResolver's DoT), and `setitimer`
-  (toybox `nc -w`); `/proc/net/dev` for `ifconfig`;
 - #224 traffic statistics.

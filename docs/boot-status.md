@@ -8032,6 +8032,12 @@ by DHCP. First boot, `cargo aim boot`, on a Mac on Wi-Fi:
 
 ### Fixed on the way
 
+- #268's syscall surfaces are implemented: the three interval timers,
+  TTL/TOS and timestamp receive control messages, TCP_MAXSEG before
+  connect, and `/proc/net/dev` in Linux's format. The latter reads the
+  backing host interfaces' 64-bit counters, including host traffic;
+  unavailable fields are zero (guest-only interface accounting is #1720);
+  the original toybox `ifconfig -a` lists `lo` and `eth0` (2026-10-28).
 - Java's `bind`/`connect` of AF_INET sockets failed with EINVAL: libcore
   tries a v4-mapped IPv6 address first and falls back on EAFNOSUPPORT,
   which Darwin does not return.

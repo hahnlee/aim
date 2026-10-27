@@ -53,6 +53,7 @@ pub const ARPHRD_ETHER: u16 = 1;
 pub const ARPHRD_LOOPBACK: u16 = 772;
 
 const EADDRNOTAVAIL: Errno = 99;
+const ENXIO: Errno = 6;
 const EEXIST: Errno = 17;
 const EACCES: Errno = 13;
 const CAP_NET_ADMIN: u32 = 12;
@@ -624,6 +625,155 @@ pub fn links() -> Vec<Link> {
     transact(|d, _| d.links.clone())
 }
 
+/// `/proc/net/dev`, as `dev_seq_show`/`dev_seq_printf_stats` in Linux's
+/// net/core/net-procfs.c. These are the backing host devices' totals,
+/// including host traffic; guest-only eBPF interface accounting is #1720.
+pub fn proc_dev() -> Result<Vec<u8>, Errno> {
+    let links = links();
+    let uplink = uplink::current().map_or(0, |u| u.index);
+    let lo = uplink::host_index("lo0");
+    let mut out = String::from(concat!(
+        "Inter-|   Receive                                                |  Transmit\n",
+        " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
+    ));
+    for l in links {
+        let index = if l.loopback() { lo } else { uplink };
+        let counters = host_counters(index)?;
+        out.push_str(&dev_line(&l.name, counters));
+    }
+    Ok(out.into_bytes())
+}
+
+/// NET_RT_IFLIST2 supplies Darwin's 64-bit interface counters. A device
+/// without a backing interface has none; other sysctl errors reach the reader.
+fn host_counters(index: u32) -> Result<[u64; 16], Errno> {
+    if index == 0 {
+        return Ok([0; 16]);
+    }
+    let mut mib = [
+        libc::CTL_NET,
+        libc::PF_ROUTE,
+        0,
+        0,
+        libc::NET_RT_IFLIST2,
+        index as i32,
+    ];
+    let mut table = Vec::new();
+    loop {
+        let mut len = 0;
+        // SAFETY: sizing call, with no output buffer.
+        if unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                6,
+                std::ptr::null_mut(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        } < 0
+        {
+            let error = crate::errno::last();
+            return if error == ENXIO || error == crate::errno::ENOENT {
+                Ok([0; 16])
+            } else {
+                Err(error)
+            };
+        }
+        table.resize(len, 0u8);
+        // SAFETY: sysctl writes at most len bytes into our table.
+        if unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                6,
+                table.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        } == 0
+        {
+            table.truncate(len);
+            return counters_from_iflist(&table, index);
+        }
+        let error = crate::errno::last();
+        if error != crate::errno::ENOMEM {
+            return if error == ENXIO || error == crate::errno::ENOENT {
+                Ok([0; 16])
+            } else {
+                Err(error)
+            };
+        }
+        // Addresses may have been added between sizing and reading.
+    }
+}
+
+fn counters_from_iflist(mut table: &[u8], index: u32) -> Result<[u64; 16], Errno> {
+    while !table.is_empty() {
+        let prefix = table.get(..4).ok_or(crate::errno::EIO)?;
+        let len = u16::from_ne_bytes([prefix[0], prefix[1]]) as usize;
+        if len < 4 || len > table.len() {
+            return Err(crate::errno::EIO);
+        }
+        if prefix[2] as i32 == libc::RTM_VERSION && prefix[3] as i32 == libc::RTM_IFINFO2 {
+            if len < std::mem::size_of::<libc::if_msghdr2>() {
+                return Err(crate::errno::EIO);
+            }
+            // SAFETY: the whole header is inside this routing message.
+            let h = unsafe { table.as_ptr().cast::<libc::if_msghdr2>().read_unaligned() };
+            if h.ifm_index as u32 == index {
+                return Ok(dev_counters(&h));
+            }
+        }
+        table = &table[len..];
+    }
+    Ok([0; 16])
+}
+
+fn dev_counters(data: &libc::if_msghdr2) -> [u64; 16] {
+    let d = data.ifm_data;
+    [
+        d.ifi_ibytes,
+        d.ifi_ipackets,
+        d.ifi_ierrors,
+        d.ifi_iqdrops,
+        0,
+        0,
+        0,
+        d.ifi_imcasts,
+        d.ifi_obytes,
+        d.ifi_opackets,
+        d.ifi_oerrors,
+        data.ifm_snd_drops as u32 as u64,
+        0,
+        d.ifi_collisions,
+        0,
+        0,
+    ]
+}
+
+fn dev_line(name: &str, c: [u64; 16]) -> String {
+    format!(
+        "{name:>6}: {:7} {:7} {:4} {:4} {:4} {:5} {:10} {:9} {:8} {:7} {:4} {:4} {:4} {:5} {:7} {:10}\n",
+        c[0],
+        c[1],
+        c[2],
+        c[3],
+        c[4],
+        c[5],
+        c[6],
+        c[7],
+        c[8],
+        c[9],
+        c[10],
+        c[11],
+        c[12],
+        c[13],
+        c[14],
+        c[15],
+    )
+}
+
 fn state_path() -> &'static std::path::Path {
     static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     PATH.get_or_init(|| kernel_dir("net").join("links"))
@@ -1068,6 +1218,96 @@ fn ifconf(arg: u64) -> Result<(), Errno> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proc_dev_maps_host_counters_without_truncation() {
+        let mut data: libc::if_msghdr2 = unsafe { std::mem::zeroed() };
+        data.ifm_data.ifi_ibytes = 1 << 40;
+        data.ifm_data.ifi_ipackets = 2;
+        data.ifm_data.ifi_ierrors = 3;
+        data.ifm_data.ifi_iqdrops = 4;
+        data.ifm_data.ifi_imcasts = 8;
+        data.ifm_data.ifi_obytes = (1 << 40) + 9;
+        data.ifm_data.ifi_opackets = 10;
+        data.ifm_data.ifi_oerrors = 11;
+        data.ifm_snd_drops = 12;
+        data.ifm_data.ifi_collisions = 14;
+        data.ifm_msglen = std::mem::size_of_val(&data) as u16;
+        data.ifm_version = libc::RTM_VERSION as u8;
+        data.ifm_type = libc::RTM_IFINFO2 as u8;
+        data.ifm_index = 1;
+        // SAFETY: a byte view of our initialized routing-message header.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&data as *const libc::if_msghdr2).cast::<u8>(),
+                std::mem::size_of_val(&data),
+            )
+        };
+        assert_eq!(counters_from_iflist(bytes, 1), Ok(dev_counters(&data)));
+        assert_eq!(counters_from_iflist(bytes, 2), Ok([0; 16]));
+        assert_eq!(counters_from_iflist(&bytes[..3], 1), Err(crate::errno::EIO));
+        assert_eq!(
+            counters_from_iflist(&bytes[..bytes.len() - 1], 1),
+            Err(crate::errno::EIO)
+        );
+        assert_eq!(counters_from_iflist(&[0; 4], 1), Err(crate::errno::EIO));
+        assert_eq!(
+            dev_counters(&data),
+            [
+                1 << 40,
+                2,
+                3,
+                4,
+                0,
+                0,
+                0,
+                8,
+                (1 << 40) + 9,
+                10,
+                11,
+                12,
+                0,
+                14,
+                0,
+                0
+            ]
+        );
+        assert_eq!(host_counters(0), Ok([0; 16]));
+        assert_eq!(host_counters(u16::MAX as u32), Ok([0; 16]));
+    }
+
+    #[test]
+    fn proc_dev_has_linux_field_widths() {
+        assert_eq!(
+            dev_line("lo", [0; 16]),
+            "    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n"
+        );
+        // Widths are minima, including for names and 64-bit totals.
+        let line = dev_line("long-interface", [u64::MAX; 16]);
+        assert!(line.starts_with("long-interface: "));
+        assert_eq!(line.split_whitespace().count(), 17);
+        assert_eq!(line.matches("18446744073709551615").count(), 16);
+    }
+
+    #[test]
+    fn proc_dev_reads_live_loopback_counters() {
+        let lo = uplink::host_index("lo0");
+        assert_ne!(lo, 0);
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let before = host_counters(lo).unwrap();
+        // Darwin may round the exported byte totals to KiB.
+        sender
+            .send_to(&[0; 4096], receiver.local_addr().unwrap())
+            .unwrap();
+        assert_eq!(receiver.recv(&mut [0; 4096]).unwrap(), 4096);
+        let after = host_counters(lo).unwrap();
+        assert!(after[0] >= before[0] + 4096 && after[8] >= before[8] + 4096);
+        assert!(after[1] > before[1] && after[9] > before[9]);
+    }
 
     #[test]
     fn state_round_trips() {
