@@ -37,6 +37,7 @@ pub(super) const STOPPED: u32 = 14;
 pub(super) const SIGNAL: u32 = 15;
 pub(super) const SMAPS: u32 = 17;
 pub(super) const RLIMIT: u32 = 18;
+pub(super) const PRIORITY: u32 = 19;
 
 const NT_PRSTATUS: u32 = 1;
 const NT_PRFPREG: u32 = 2;
@@ -497,6 +498,16 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
         }
         MAPS => reply(0, |w| w.str(&procfs::maps())),
         SMAPS => reply(0, |w| w.str(&smaps::smaps(r.bool()))),
+        PRIORITY => {
+            let (tid, nice) = (r.i32(), r.opt(|r| r.i32()));
+            if !crate::sys::pidns::contains(peer) {
+                return err(ESRCH);
+            }
+            let Some(caller) = crate::sys::cred::identity_of(peer) else {
+                return err(ESRCH);
+            };
+            reply(crate::sys::cred::own_priority(tid, nice, &caller), |_| {})
+        }
         RLIMIT => {
             let res = r.u32();
             let new = [r.u64(), r.u64()];

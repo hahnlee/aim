@@ -637,6 +637,58 @@ fn background_qos() {
     qos_steps(&g, &prog, 5);
 }
 
+/// A peer changes both the leader and a worker's nice values; each
+/// target applies them to its Darwin thread when it leaves a syscall.
+#[test]
+fn remote_nice_changes_host_thread_priority() {
+    use std::io::{BufRead, Write};
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_remote_nice");
+    let prog = g.build(&clang, "t_remote_nice");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_linux-run"))
+        .arg("--path-map")
+        .arg(&g.map)
+        .arg("--cache")
+        .arg(&g.cache)
+        .arg(&prog)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let pid: u32 = line
+        .trim()
+        .strip_prefix("target ")
+        .expect(&line)
+        .parse()
+        .unwrap();
+    let mut differences = Vec::new();
+    for name in ["main", "worker"] {
+        for (nice, want) in [(19, 4), (10, 20), (-2, 33), (-19, 47), (0, 31)] {
+            line.clear();
+            out.read_line(&mut line).unwrap();
+            let got = thread_priority(pid, &format!("remote-{name}"));
+            if line.trim() != format!("{name} {nice}") || got != Some(want) {
+                differences.push(format!("{line:?}: host {got:?}, expected {want}"));
+            }
+            writeln!(stdin).unwrap();
+        }
+    }
+    let mut rest = String::new();
+    out.read_to_string(&mut rest).unwrap();
+    assert!(
+        child.wait().unwrap().success() && rest.contains("PASS"),
+        "{rest}"
+    );
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
 /// t_qos's steps with linux-run started `renice` above this process's
 /// nice value.
 fn qos_steps(g: &Guest, prog: &str, renice: i32) {

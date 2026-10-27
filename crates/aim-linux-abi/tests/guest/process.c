@@ -1156,7 +1156,11 @@ static void app_permissions(void) {
         "own process's limit %lu", (unsigned long)rl.rlim_cur);
   CHECK(prlimit(own, RLIMIT_NOFILE, NULL, &rl) == 0 && rl.rlim_cur > 0, "an inherited limit");
   CHECK(syscall(SYS_prlimit64, own, 99, NULL, &rl) == -1 && errno == EINVAL, "bad resource");
-  CHECK(setpriority(PRIO_PROCESS, own, 5) == 0, "renice own");
+  CHECK(setpriority(PRIO_PROCESS, own, 5) == 0 && getpriority(PRIO_PROCESS, own) == 5,
+        "renice own");
+  CHECK(setpriority(PRIO_PROCESS, own, 0) == 0 && getpriority(PRIO_PROCESS, own) == 0,
+        "target RLIMIT_NICE allows a raise");
+  CHECK(setpriority(PRIO_PROCESS, own, 5) == 0, "renice own again");
   CHECK(setpriority(PRIO_PROCESS, own, -1) == -1 && errno == EACCES, "below RLIMIT_NICE");
   CHECK(sched_setscheduler(own, SCHED_BATCH, &sp) == 0, "own scheduling");
   // It sets its own processes' limits, but raises no hard limit.
@@ -1177,6 +1181,8 @@ static void system_permissions(void) {
   struct sched_param sp = {0};
   CHECK(kill(perm_system, 0) == 0, "same uid");
   CHECK(setpriority(PRIO_PROCESS, perm_other, 10) == 0, "CAP_SYS_NICE renices an app");
+  CHECK(setpriority(PRIO_PROCESS, perm_other, -19) == 0 &&
+        getpriority(PRIO_PROCESS, perm_other) == -19, "CAP_SYS_NICE raises another uid");
   CHECK(sched_setscheduler(perm_other, SCHED_BATCH, &sp) == 0, "and schedules it");
   CHECK(kill(perm_other, 0) == 0 && kill(getppid(), 0) == 0, "CAP_KILL");
   struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, 0};
