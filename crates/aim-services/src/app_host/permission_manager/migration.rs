@@ -1,10 +1,142 @@
-//! System migration from android-16.0.0_r1 AccessPersistence,
-//! AppIdPermissionMigration and PermissionMigrationHelperImpl.
+//! Migration from android-16.0.0_r1 AccessPersistence,
+//! AppIdPermissionMigration, PermissionMigrationHelperImpl and PackageVersionMigration.
 //! Copyright (C) 2023 The Android Open Source Project, Apache License 2.0.
 use super::*;
 use crate::package::settings;
 
 impl PermissionManager {
+    pub(super) fn migrate_user(
+        &self,
+        user: i32,
+        path: &str,
+        system: &AccessSystem,
+    ) -> Result<AccessUser, Exception> {
+        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let data = self.host.data()?;
+        let configured = self.host.configured.get().expect("configured");
+        let config = crate::package::system_config::SystemConfig::read(
+            self.host.root()?,
+            &configured.properties,
+        );
+        let root = crate::package::resilient(
+            &data.join("system/packages.xml"),
+            &data.join("system/packages-backup.xml"),
+            |root| Ok(root.clone()),
+        )
+        .map_err(fail)?
+        .unwrap_or_else(|| aim_android_xml::read(b"<packages/>").expect("empty settings"));
+        let runtime = crate::package::atomic(
+            &data.join(format!(
+                "misc_de/{user}/apexdata/com.android.permission/runtime-permissions.xml"
+            )),
+            permissions::RuntimePermissions::parse,
+        )
+        .map_err(fail)?;
+        let state = crate::package::State {
+            settings: settings::Settings::parse_with_config(&root, &config).map_err(fail)?,
+            list: Vec::new(),
+            access: None,
+            users: vec![(
+                user as u32,
+                crate::package::User {
+                    restrictions: Default::default(),
+                    access: None,
+                    runtime_permissions: runtime,
+                },
+            )],
+        };
+        // Use the same Settings restore as the original helper's input, including
+        // install states and the pre-APEX runtime-permissions.xml fallback.
+        let legacy = crate::package::owner::legacy_permissions::restore::read_document(
+            data, &state, &config, &root,
+        )
+        .map_err(fail)?;
+        let version = match legacy.metadata.users[&user].version.unwrap_or(0) {
+            -1 => 0,
+            0 => return Ok(AccessUser::default()),
+            version if version < -1 => return Ok(AccessUser::default()),
+            version => version,
+        };
+        let version = package_version(version, legacy_app_op_version(data));
+        let mut migrated = AccessUser::default();
+        // getLegacyPermissionStates ignores empty rows and packages with shared
+        // UIDs; the shared owner supplies their one map. The legacy fingerprint
+        // belongs to Settings and is not copied by AppIdPermissionMigration.
+        let mut app_ids = BTreeMap::new();
+        for package in &state.settings.packages {
+            if !package.shared_user {
+                let rows = legacy.packages[&(package.name.clone(), false)]
+                    .permissions(user)
+                    .map_err(fail)?;
+                if !rows.is_empty() {
+                    app_ids.insert(package.app_id, rows);
+                }
+            }
+        }
+        let owners =
+            crate::package::owner::shared_users::Bootstrap::restore(&config, &state.settings)
+                .map_err(|e| fail(format!("legacy shared users: {e:?}")))?;
+        for (name, owner) in &owners.shared_users {
+            let rows = legacy.shared_users[name].permissions(user).map_err(fail)?;
+            if !rows.is_empty() {
+                app_ids.insert(owner.app_id, rows);
+            }
+        }
+        for (app_id, rows) in app_ids {
+            let packages: Vec<_> = state
+                .settings
+                .packages
+                .iter()
+                .filter(|p| p.app_id == app_id)
+                .collect();
+            if packages.is_empty() {
+                continue;
+            }
+            let flags = rows
+                .iter()
+                .filter_map(|row| {
+                    let name = row.name.as_deref()?;
+                    let permission = system.permissions.iter().find(|p| p.name == name)?;
+                    let grant = match permission.protection_level & PROTECTION_MASK_BASE {
+                        0 => {
+                            if row.granted {
+                                INSTALL_GRANTED
+                            } else {
+                                INSTALL_REVOKED
+                            }
+                        }
+                        PROTECTION_SIGNATURE | 4 if row.granted => {
+                            PROTECTION_GRANTED
+                                | if permission.protection_level
+                                    & (PROTECTION_FLAG_DEVELOPMENT | PROTECTION_FLAG_ROLE)
+                                    != 0
+                                {
+                                    RUNTIME_GRANTED
+                                } else {
+                                    0
+                                }
+                        }
+                        PROTECTION_DANGEROUS if row.granted => RUNTIME_GRANTED,
+                        _ => 0,
+                    };
+                    Some((
+                        name.to_owned(),
+                        update_flags(0, grant, row.flags, row.flags),
+                    ))
+                })
+                .collect();
+            // Migration keeps zero flags and even an empty app-ID map, unlike
+            // the subsequent setPermissionFlags mutation's putWithDefault.
+            migrated.app_id_permissions.push((app_id, flags));
+            migrated
+                .package_versions
+                .extend(packages.into_iter().map(|p| (p.name.clone(), version)));
+        }
+        migrated.package_versions = info::array_order(migrated.package_versions, |(name, _)| name);
+        self.write_user(path, &migrated)?;
+        Ok(migrated)
+    }
+
     /// AccessPersistence.readSystemState: migrate only when modern state is absent,
     /// then serialize through the same owner as later permission mutations.
     pub(super) fn migrate_system(&self) -> Result<AccessSystem, Exception> {
@@ -18,6 +150,51 @@ impl PermissionManager {
         .unwrap_or_default();
         self.write_system(&system)?;
         Ok(system)
+    }
+}
+
+/// AppOpMigrationHelperImpl's version input to PackageVersionMigration.
+fn legacy_app_op_version(data: &std::path::Path) -> i32 {
+    let path = data.join("system/appops.xml");
+    let backup = path.with_extension("xml.bak");
+    let path = if backup.exists() { backup } else { path };
+    let read = || -> Result<i32, String> {
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let root = aim_android_xml::read(&bytes)?;
+        Ok(match root.int("v")?.unwrap_or(-1) {
+            -2 => -1,
+            -1 => 0,
+            version => version,
+        })
+    };
+    match read() {
+        Ok(version) => version,
+        Err(e) => {
+            // LegacyAppOpStateParser catches failed reads and starts empty.
+            eprintln!("app host: permissionmgr: No legacy app ops: {e}");
+            -1
+        }
+    }
+}
+
+/// PackageVersionMigration.getVersion, called only with legacy permission state.
+fn package_version(permission: i32, app_op: i32) -> i32 {
+    match (permission, app_op) {
+        (11.., 3..) => 15,
+        (10.., 3..) => 14,
+        (10.., 1..) => 13,
+        (9, 1..) => 12,
+        (8, 1..) => 11,
+        (7, 1..) => 10,
+        (6, 1..) => 9,
+        (5, 1..) => 8,
+        (4, 1..) => 7,
+        (3, 1..) => 6,
+        (2, 1..) => 5,
+        (1, 1..) => 4,
+        (0.., 1..) => 3,
+        (0.., 0..) => 2,
+        _ => 0,
     }
 }
 
@@ -56,7 +233,7 @@ fn legacy_system(root: &aim_android_xml::Element) -> Result<AccessSystem, String
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::tests::{BOOT_USER, PersistedAccess};
     use super::*;
 
@@ -187,5 +364,225 @@ mod tests {
         std::fs::remove_dir(path.with_extension("abx.new")).unwrap();
         assert_eq!(*manager.system().unwrap(), AccessSystem::default());
         assert!(path.is_file());
+    }
+
+    const USER_PACKAGES: &[u8] = br#"<packages>
+        <version sdkVersion="36" databaseVersion="3"/>
+        <package name="app" codePath="/data/app/app" userId="10100">
+            <perms><item name="normal" granted="true" flags="0"/></perms>
+        </package>
+        <shared-user name="group" userId="10101"/>
+        <package name="member.one" codePath="/data/app/one" sharedUserId="10101"/>
+        <package name="member.two" codePath="/data/app/two" sharedUserId="10101"/>
+        <package name="empty" codePath="/data/app/empty" userId="10102"/>
+        <package name="unknown.only" codePath="/data/app/unknown" userId="10103"/>
+    </packages>"#;
+
+    const USER_SYSTEM: &[u8] = br#"<access><permissions>
+        <permission name="camera" packageName="android" protectionLevel="1" type="0"/>
+        <permission name="contacts" packageName="android" protectionLevel="1" type="0"/>
+        <permission name="normal" packageName="android" protectionLevel="0" type="0"/>
+        <permission name="signature" packageName="android" protectionLevel="2" type="0"/>
+        <permission name="development" packageName="android" protectionLevel="22" type="0"/>
+        <permission name="role" packageName="android" protectionLevel="4000004" type="0"/>
+    </permissions></access>"#;
+
+    pub(crate) const RUNTIME: &[u8] = br#"<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+    <runtime-permissions version="11" fingerprint="partition?pc_version=123">
+        <package name="app">
+            <permission name="camera" granted="false" flags="0"/>
+            <permission name="camera" granted="true" flags="3"/>
+            <permission name="contacts" granted="false" flags="14"/>
+            <permission name="signature" granted="false" flags="0"/>
+            <permission name="development" granted="true" flags="0"/>
+            <permission name="role" granted="true" flags="8000"/>
+            <permission name="unknown" granted="true" flags="1"/>
+        </package>
+        <package name="member.one"><permission name="contacts" granted="true" flags="0"/></package>
+        <shared-user name="group"><permission name="camera" granted="false" flags="40"/></shared-user>
+        <package name="empty"/>
+        <package name="unknown.only"><permission name="unknown" granted="true" flags="0"/></package>
+        <package name="gone"><permission name="camera" granted="true" flags="0"/></package>
+        <shared-user name="gone"><permission name="camera" granted="true" flags="0"/></shared-user>
+    </runtime-permissions>"#;
+
+    pub(crate) fn user_fixture() -> PersistedAccess {
+        let fixture = PersistedAccess::new();
+        fixture.write("system/packages.xml", USER_PACKAGES);
+        fixture.write(SYSTEM_ACCESS, USER_SYSTEM);
+        fixture
+    }
+
+    pub(crate) fn write_runtime(
+        fixture: &PersistedAccess,
+        user: i32,
+        bytes: &[u8],
+    ) -> std::path::PathBuf {
+        let path = fixture.data.join(format!(
+            "misc_de/{user}/apexdata/com.android.permission/runtime-permissions.xml"
+        ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn legacy_user_grants_flags_shared_uid_persist_and_reload() {
+        let fixture = user_fixture();
+        let legacy = write_runtime(&fixture, 0, RUNTIME);
+        std::fs::write(fixture.data.join("system/appops.xml"), b"<app-ops v='3'/>").unwrap();
+        let manager = PermissionManager::new(fixture.host.clone());
+        let user = manager.user0().unwrap();
+        assert_eq!(
+            user.permission_flags(10100, "camera"),
+            RUNTIME_GRANTED | USER_SET | USER_FIXED
+        );
+        assert_eq!(
+            user.permission_flags(10100, "contacts"),
+            POLICY_FIXED | SYSTEM_FIXED
+        );
+        assert_eq!(user.permission_flags(10100, "normal"), INSTALL_GRANTED);
+        assert_eq!(
+            user.permission_flags(10100, "development"),
+            PROTECTION_GRANTED | RUNTIME_GRANTED
+        );
+        assert_eq!(
+            user.permission_flags(10100, "role"),
+            PROTECTION_GRANTED | RUNTIME_GRANTED | ROLE
+        );
+        assert!(
+            user.app_id_permissions[0]
+                .1
+                .contains(&("signature".into(), 0))
+        );
+        assert_eq!(user.permission_flags(10101, "camera"), IMPLICIT);
+        assert_eq!(user.permission_flags(10101, "contacts"), 0);
+        assert_eq!(user.app_id_permissions.len(), 3);
+        assert_eq!(user.app_id_permissions[2], (10103, vec![]));
+        assert_eq!(
+            user.package_versions,
+            info::array_order(
+                vec![
+                    ("app".into(), 15),
+                    ("member.one".into(), 15),
+                    ("member.two".into(), 15),
+                    ("unknown.only".into(), 15),
+                ],
+                |(name, _): &(String, i32)| name
+            )
+        );
+        assert_eq!(user.default_permission_grant_fingerprint, None);
+        assert_eq!(std::fs::read(&legacy).unwrap(), RUNTIME);
+        let path = fixture.data.join(USER0_ACCESS);
+        let persisted = std::fs::read(&path).unwrap();
+        assert_eq!(&persisted[..4], b"ABX\0");
+        assert_eq!(
+            AccessUser::parse(&aim_android_xml::read(&persisted).unwrap()).unwrap(),
+            *user
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("abx.reservecopy")).unwrap(),
+            persisted
+        );
+        assert_eq!(*manager.access_writes.lock().unwrap(), [USER0_ACCESS]);
+        std::fs::write(legacy, b"broken").unwrap();
+        std::fs::write(fixture.data.join("system/packages.xml"), b"broken").unwrap();
+        let reloaded = PermissionManager::new(fixture.host.clone());
+        assert_eq!(*reloaded.user0().unwrap(), *user);
+        assert!(reloaded.access_writes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_user_versions_and_fingerprint_follow_original_helpers() {
+        for (version, app_ops, expected, writes) in [
+            (None, None, 0, true),
+            (Some(-1), None, 0, true),
+            (Some(0), Some(3), 0, false),
+            (Some(-2), None, 0, false),
+            (Some(11), None, 0, true),
+            (None, Some(1), 3, true),
+            (Some(7), Some(1), 10, true),
+            (Some(10), Some(3), 14, true),
+            (Some(11), Some(3), 15, true),
+            (Some(11), Some(0), 2, true),
+        ] {
+            let fixture = user_fixture();
+            let version = version
+                .map(|v| format!(" version='{v}'"))
+                .unwrap_or_default();
+            let xml = format!(
+                "<runtime-permissions{version} fingerprint='legacy'><package name='app'><permission name='camera' granted='true' flags='0'/></package></runtime-permissions>"
+            );
+            write_runtime(&fixture, 0, xml.as_bytes());
+            if let Some(v) = app_ops {
+                std::fs::write(
+                    fixture.data.join("system/appops.xml"),
+                    format!("<app-ops v='{v}'/>"),
+                )
+                .unwrap();
+            }
+            let manager = PermissionManager::new(fixture.host.clone());
+            let user = manager.user0().unwrap();
+            assert_eq!(
+                user.package_versions,
+                if writes {
+                    vec![("app".into(), expected)]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(user.default_permission_grant_fingerprint, None);
+            assert_eq!(fixture.data.join(USER0_ACCESS).exists(), writes);
+        }
+    }
+
+    #[test]
+    fn missing_legacy_user_leaves_empty_state_unwritten_but_old_file_migrates() {
+        let fixture = user_fixture();
+        let manager = PermissionManager::new(fixture.host.clone());
+        assert_eq!(*manager.user0().unwrap(), AccessUser::default());
+        assert!(!fixture.data.join(USER0_ACCESS).exists());
+        assert!(manager.access_writes.lock().unwrap().is_empty());
+        let old = fixture.data.join("system/users/0/runtime-permissions.xml");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(old, b"<runtime-permissions fingerprint='old'><package name='app'><item name='camera' granted='false' flags='2'/></package></runtime-permissions>").unwrap();
+        let migrated = PermissionManager::new(fixture.host.clone())
+            .user0()
+            .unwrap();
+        assert_eq!(migrated.permission_flags(10100, "camera"), USER_FIXED);
+        assert_eq!(migrated.package_versions, [("app".into(), 0)]);
+        assert_eq!(migrated.default_permission_grant_fingerprint, None);
+        assert!(fixture.data.join(USER0_ACCESS).is_file());
+    }
+
+    #[test]
+    fn first_write_after_missing_legacy_creates_user_state() {
+        let fixture = user_fixture();
+        let manager = PermissionManager::new(fixture.host.clone());
+        let mut user = (*manager.user0().unwrap()).clone();
+        user.set_permission_flags(10100, "camera", RUNTIME_GRANTED);
+        manager.write_user0(&user).unwrap();
+        let reloaded = PermissionManager::new(fixture.host.clone());
+        assert_eq!(*reloaded.user0().unwrap(), user);
+    }
+
+    #[test]
+    fn legacy_user_atomic_recovery_and_failed_write_does_not_publish() {
+        let fixture = user_fixture();
+        let legacy = write_runtime(&fixture, 0, b"broken");
+        std::fs::write(legacy.with_extension("xml.bak"), RUNTIME).unwrap();
+        let manager = PermissionManager::new(fixture.host.clone());
+        let path = fixture.data.join(USER0_ACCESS);
+        std::fs::create_dir(path.with_extension("abx.new")).unwrap();
+        assert_eq!(manager.user0().unwrap_err().code, EX_ILLEGAL_STATE);
+        assert!(manager.owner.lock().unwrap().user0.is_none());
+        assert!(!path.exists());
+        std::fs::remove_dir(path.with_extension("abx.new")).unwrap();
+        std::fs::write(legacy.with_extension("xml.bak"), b"broken").unwrap();
+        std::fs::write(legacy.with_extension("xml.reservecopy"), RUNTIME).unwrap();
+        assert_eq!(
+            manager.user0().unwrap().permission_flags(10100, "camera"),
+            RUNTIME_GRANTED | USER_SET | USER_FIXED
+        );
     }
 }

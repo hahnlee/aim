@@ -7,7 +7,7 @@ use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 use std::collections::BTreeSet;
 mod migration;
 mod read;
-pub(in crate::package) mod restore;
+pub(crate) mod restore;
 pub use migration::Migration;
 pub use read::InstallRead;
 pub use restore::{Metadata, UserMetadata};

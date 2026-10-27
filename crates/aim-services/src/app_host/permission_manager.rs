@@ -1580,14 +1580,18 @@ impl PermissionManager {
     fn user0(&self) -> Result<Arc<AccessUser>, Exception> {
         let mut owner = self.owner.lock().unwrap();
         if owner.user0.is_none() {
-            let user = self
-                .read_access(USER0_ACCESS, AccessUser::parse)?
-                .ok_or_else(|| {
-                    self.host.unimplemented_named(
-                        "permissionmgr",
-                        "AppIdPermissionMigration.migrateUserState (#2201)",
-                    )
-                })?;
+            let user = match self.read_access(USER0_ACCESS, AccessUser::parse)? {
+                Some(user) => user,
+                None => {
+                    drop(owner);
+                    let system = self.system()?;
+                    owner = self.owner.lock().unwrap();
+                    if let Some(user) = &owner.user0 {
+                        return Ok(user.clone());
+                    }
+                    self.migrate_user(0, USER0_ACCESS, &system)?
+                }
+            };
             owner.user0 = Some(Arc::new(user));
         }
         Ok(owner.user0.as_ref().unwrap().clone())
@@ -1859,11 +1863,14 @@ impl PermissionManager {
 
     fn write_user(&self, relative: &str, state: &AccessUser) -> Result<(), Exception> {
         let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{relative}: {e}"));
-        let path = self.host.data()?.join(relative);
-        let backup = path.with_extension("abx.bak");
-        let read = if backup.exists() { &backup } else { &path };
-        let bytes = std::fs::read(read).map_err(|e| fail(e.to_string()))?;
-        let root = aim_android_xml::read(&bytes).map_err(fail)?;
+        let root = self
+            .read_access(relative, |root| Ok(root.clone()))?
+            .unwrap_or_else(|| {
+                aim_android_xml::read(
+                    b"<access><app-id-permissions/><app-id-device-permissions/></access>",
+                )
+                .expect("empty user state")
+            });
         let root = permissions::with_app_id_permissions(root, &state.app_id_permissions)
             .and_then(|root| permissions::with_package_versions(root, &state.package_versions))
             .and_then(|root| permissions::with_app_ops(root, state))
@@ -2756,13 +2763,7 @@ mod tests {
             fixture.write(&format!("{path}.reservecopy"), xml);
             read().unwrap();
             std::fs::remove_file(fixture.data.join(path)).unwrap();
-            if path == SYSTEM_ACCESS {
-                read().unwrap();
-            } else {
-                let missing = read().unwrap_err();
-                assert_eq!(missing.code, EX_UNSUPPORTED_OPERATION);
-                assert!(missing.message.contains("migrateUserState"));
-            }
+            read().unwrap();
         }
     }
 

@@ -29,7 +29,7 @@ pub struct Metadata {
     pub users: BTreeMap<i32, UserMetadata>,
 }
 
-pub(in crate::package) struct Restored {
+pub(crate) struct Restored {
     pub users: Vec<i32>,
     pub packages: BTreeMap<(String, bool), Migration>,
     pub shared_users: BTreeMap<String, Migration>,
@@ -59,12 +59,6 @@ fn read_inner(
     config: &SystemConfig,
     document: Option<&Element>,
 ) -> Result<Restored, String> {
-    let users = state
-        .users
-        .iter()
-        .map(|(id, _)| i32::try_from(*id).map_err(|_| "legacy user ID out of range".to_owned()))
-        .collect::<Result<Vec<_>, _>>()?;
-    validate(0, &users).map_err(|e| format!("legacy user inventory: {e:?}"))?;
     let system = data.join("system");
     let root = crate::package::resilient(
         &system.join("packages.xml"),
@@ -81,9 +75,26 @@ fn read_inner(
         },
     )?
     .ok_or("Settings disappeared before legacy restoration")?;
-    let mut restored = from_settings(&root, state, config, &users)?;
+    read_document(data, state, config, &root)
+}
+
+/// Restore the original Settings inputs already selected by a migration owner.
+pub(crate) fn read_document(
+    data: &Path,
+    state: &State,
+    config: &SystemConfig,
+    root: &Element,
+) -> Result<Restored, String> {
+    let system = data.join("system");
+    let users = state
+        .users
+        .iter()
+        .map(|(id, _)| i32::try_from(*id).map_err(|_| "legacy user ID out of range".to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate(0, &users).map_err(|e| format!("legacy user inventory: {e:?}"))?;
+    let mut restored = from_settings(root, state, config, &users)?;
     let mut internal_sdk = 0;
-    for entry in settings::records(&root) {
+    for entry in settings::records(root) {
         if entry.name == "version" && entry.string("volumeUuid").is_none() {
             internal_sdk = entry
                 .int("sdkVersion")?

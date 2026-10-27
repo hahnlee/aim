@@ -220,12 +220,10 @@ impl PermissionManager {
         // serialized by the same permission owner and AtomicFile writer.
         for user in other_users {
             let path = format!("misc_de/{user}/apexdata/com.android.permission/access.abx");
-            let before = self.read_access(&path, AccessUser::parse)?.ok_or_else(|| {
-                self.host.unimplemented_named(
-                    "permissionmgr",
-                    "AppIdPermissionMigration.migrateUserState (#2201)",
-                )
-            })?;
+            let before = match self.read_access(&path, AccessUser::parse)? {
+                Some(state) => state,
+                None => self.migrate_user(*user, &path, &before_system)?,
+            };
             let mut after = before.clone();
             trim(&mut after);
             if after != before {
@@ -565,6 +563,38 @@ mod tests {
                 .unwrap();
             assert!(!disk.settings.packages.iter().any(|p| p.name == "p"));
         });
+    }
+    #[test]
+    fn boot_removal_migrates_other_user_before_trimming() {
+        let fixture = super::super::migration::tests::user_fixture();
+        fixture.write(USER0_ACCESS, super::super::tests::BOOT_USER);
+        super::super::migration::tests::write_runtime(
+            &fixture,
+            10,
+            super::super::migration::tests::RUNTIME,
+        );
+        let manager = PermissionManager::new(fixture.host.clone());
+        manager
+            .commit_removal("app", 10100, true, true, None, &[10])
+            .unwrap();
+        let path = "misc_de/10/apexdata/com.android.permission/access.abx";
+        let user = manager
+            .read_access(path, AccessUser::parse)
+            .unwrap()
+            .unwrap();
+        assert!(!user.app_id_permissions.iter().any(|(id, _)| *id == 10100));
+        assert!(!user.package_versions.iter().any(|(name, _)| name == "app"));
+        assert_eq!(user.permission_flags(10101, "camera"), IMPLICIT);
+        assert_eq!(
+            manager
+                .access_writes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| *p == path)
+                .count(),
+            2
+        );
     }
 }
 
