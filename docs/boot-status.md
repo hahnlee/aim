@@ -6317,9 +6317,13 @@ then retires the package's signing/alias keyset references. Shared sets and publ
 keys remain until their last owner disappears; upgrade aliases add no separate
 references and last-issued IDs never rewind (#823). KeySetData now restores
 KEYSET_UNASSIGNED=-1, including the original unversioned-settings reset. A keyset
-owner failure leaves the earlier domain removal in place. The scan then stops at
-unconnected filter/preferred/keystore and setting/permission cleanup stages
-(#798/#822). Between keyset retirement and that boundary, the scan now removes
+owner failure leaves the earlier domain removal in place. Boot removal clears
+implicit visibility and persisted preferred choices, posts keystore cleanup,
+removes setting/UID membership, reconciles modern permissions through the app host
+owner, then converts eligible shared UIDs and removes renamed-package mappings,
+with pre-ready home updates skipped and posted preferred-change broadcasts
+delivered by the app host's boot-completion owner (#798/#822).
+Between keyset retirement and visibility cleanup, the scan removes
 the deleted provider from native update-ownership denylist relations, preserving
 other providers for overlapping targets. Repeated additions accumulate, matching
 UpdateOwnershipHelper; empty additions do not withdraw old contributions. Accepted
@@ -6351,10 +6355,8 @@ installer/originator/update-owner references and attribution, retaining the
 initiator name/signatures with its uninstalled flag and marking installer
 orphans. Original Settings compares independent/shared/disabled-reserved UID
 removal, repeated missing removal and installer source effects (19.35s). All 338
-units pass (3.10s), and image API linkage passes (13.1s). This in-memory stage is
-not yet called by boot cleanup: full side-owner ordering, permission uninstall
-reconciliation and publication remain #822/#798. The native store now persists
-that completed setting removal and its installer-source effects, rejecting
+units pass (3.10s), and image API linkage passes (13.1s). The native store now
+persists that completed setting removal and its installer-source effects, rejecting
 unrelated metadata changes before writing. A last shared-UID group is removed
 only without an active or disabled factory member; unknown XML stays intact.
 Certificate references are materialized before deleting their defining owner,
@@ -6398,8 +6400,7 @@ renamed-package real-name key, preserving mappings whose values name the same
 old package, after permission uninstall/shared-UID conversion. Named, absent,
 null and repeated map removals match original Settings; disk reopening preserves
 the native change and unrelated XML. All 338 units pass (3.10s), the combined
-original fixture passes (19.35s), and new image APIs link (14.0s). These stages
-are not yet orchestrated by boot deletion (#798/#822). All eight Java-oracle DEX
+original fixture passes (19.35s), and new image APIs link (14.0s). All eight Java-oracle DEX
 build paths now check references against the original boot classpath and the
 client's explicit services.jar before starting a guest (#830). A separate
 all-oracle compilation/linkage test passes (2.83s), and a JDK API regression

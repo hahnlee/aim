@@ -143,6 +143,25 @@ impl AppHost {
         user: StartedUser,
         unlocking: impl FnOnce(),
     ) -> Result<(), String> {
+        let capture = self.package_capture().map_err(|error| error.message)?;
+        capture
+            .state()
+            .system
+            .lifecycle
+            .as_ref()
+            .ok_or("boot preferred broadcast lifecycle unavailable")?
+            .complete_boot_preferred_activity_changes(|| {
+                self.broadcasts.send_from_system_as_user(
+                    self,
+                    RawIntent::new(
+                        "android.intent.action.ACTION_PREFERRED_ACTIVITY_CHANGED",
+                        0x0400_0000,
+                        &[("android.intent.extra.user_handle", Value::Int(USER_ALL))],
+                    ),
+                    USER_ALL,
+                );
+                Ok(())
+            })?;
         // "Tell anyone interested that we are done booting!"
         self.set_property("sys.boot_completed", "1");
         self.set_property("dev.bootcomplete", "1");

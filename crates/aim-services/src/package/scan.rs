@@ -46,7 +46,9 @@ mod boot_settings;
 mod completion;
 mod data;
 mod disabled;
-pub use data::{DataCandidateOutcome, DataImagePackages, DataImageScanInputs, DataScanInputs};
+pub use data::{
+    BootRemovalOwners, DataCandidateOutcome, DataImagePackages, DataImageScanInputs, DataScanInputs,
+};
 mod updated_boot;
 pub use boot::{
     FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan,

@@ -72,6 +72,94 @@ impl PermissionManager {
         let removed = !state.packages.contains_key(&package.name);
         let clear_user0 = user == 0
             || (user == -1 && super::super::user_service::user_ids(&self.host, true)?.contains(&0));
+        let (before_system, changes) = self.commit_removal(
+            &package.name,
+            package.app_id,
+            removed,
+            clear_user0,
+            None,
+            &[],
+        )?;
+        self.grants_changed()?;
+        let effects = self.permission_effects(
+            &before_system.permissions,
+            &changes,
+            Some(KILL_APP_REASON_PERMISSIONS_REVOKED),
+        );
+        let audio = self.host.refresh_audio_permissions();
+        effects?;
+        audio
+    }
+
+    /// PermissionService.onPackageUninstalled(USER_ALL), before the initial
+    /// Computer exists. Use the scan's current setting/UID inventory, never a
+    /// live uninstall scope or the later volume-admission batch.
+    pub(crate) fn remove_boot_permissions(
+        &self,
+        scan: &crate::package::scan::SigningScan,
+        package: &crate::package::settings::Package,
+        users: &[crate::package::scan::User],
+    ) -> Result<(), Exception> {
+        if scan
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == package.name)
+            || scan
+                .settings
+                .disabled_system_packages
+                .iter()
+                .any(|p| p.name == package.name)
+        {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "boot permission removal precedes setting removal",
+            ));
+        }
+        let app_id = package.uid_owner_id();
+        let remaining: Vec<_> = scan
+            .settings
+            .packages
+            .iter()
+            .filter(|p| p.uid_owner_id() == app_id)
+            .collect();
+        let requests: BTreeSet<_> = remaining
+            .iter()
+            .filter_map(|p| scan.loaded_packages().get(&p.name))
+            .flat_map(|p| p.runtime_package().requested_permissions.iter().cloned())
+            .collect();
+        // As at volume admission, a retained setting without parsed code has
+        // no current request inventory to trim yet.
+        let trim = remaining.is_empty()
+            || remaining
+                .iter()
+                .any(|p| scan.loaded_packages().contains_key(&p.name));
+        self.commit_removal(
+            &package.name,
+            app_id,
+            true,
+            remaining.is_empty(),
+            trim.then_some(&requests),
+            &users
+                .iter()
+                .map(|user| user.id)
+                .filter(|id| *id != 0)
+                .collect::<Vec<_>>(),
+        )?;
+        // No live query generation or application listeners exist during scan;
+        // initial publication projects this same committed access owner.
+        Ok(())
+    }
+
+    fn commit_removal(
+        &self,
+        package: &str,
+        removed_app_id: i32,
+        removed: bool,
+        clear_user0: bool,
+        remaining_requests: Option<&BTreeSet<String>>,
+        other_users: &[i32],
+    ) -> Result<(Arc<AccessSystem>, Vec<FlagsChanged>), Exception> {
         self.retained_access()?;
         let mut held = self.owner.lock().unwrap();
         let before_system = held.system.clone().expect("loaded");
@@ -82,38 +170,43 @@ impl PermissionManager {
         if removed {
             // AppIdPermissionPolicy.trimPermissions and onAppIdRemoved.
             system.permissions.retain(|p| {
-                if p.package == package.name {
+                if p.package == package {
                     names.insert(p.name.clone());
                     false
                 } else {
                     true
                 }
             });
-            system
-                .permission_trees
-                .retain(|p| p.package != package.name);
-            after
-                .package_versions
-                .retain(|(name, _)| *name != package.name);
+            system.permission_trees.retain(|p| p.package != package);
         }
-        let mut changes = Vec::new();
-        for (app_id, flags) in &mut after.app_id_permissions {
-            flags.retain(|(name, old)| {
-                let remove = (clear_user0 && *app_id == package.app_id) || names.contains(name);
-                if remove && *old != 0 {
-                    changes.push(FlagsChanged {
-                        app_id: *app_id,
-                        permission: name.clone(),
-                        old: *old,
-                        new: 0,
-                    });
-                }
-                !remove
-            });
-        }
-        after
-            .app_id_permissions
-            .retain(|(_, flags)| !flags.is_empty());
+        let trim = |user: &mut AccessUser| {
+            if removed {
+                user.package_versions.retain(|(name, _)| name != package);
+            }
+            let mut changes = Vec::new();
+            for (app_id, flags) in &mut user.app_id_permissions {
+                flags.retain(|(name, old)| {
+                    let remove = (*app_id == removed_app_id
+                        && (clear_user0
+                            || remaining_requests
+                                .is_some_and(|requests| !requests.contains(name))))
+                        || names.contains(name);
+                    if remove && *old != 0 {
+                        changes.push(FlagsChanged {
+                            app_id: *app_id,
+                            permission: name.clone(),
+                            old: *old,
+                            new: 0,
+                        });
+                    }
+                    !remove
+                });
+            }
+            user.app_id_permissions
+                .retain(|(_, flags)| !flags.is_empty());
+            changes
+        };
+        let changes = trim(&mut after);
         if system != *before_system {
             self.write_system(&system)?;
             held.system = Some(Arc::new(system));
@@ -122,16 +215,20 @@ impl PermissionManager {
             self.write_user0(&after)?;
             held.user0 = Some(Arc::new(after));
         }
+        // Boot USER_ALL includes pre-created users as well as user 0. These
+        // users have no live app-host projection; their access files remain
+        // serialized by the same permission owner and AtomicFile writer.
+        for user in other_users {
+            let path = format!("misc_de/{user}/apexdata/com.android.permission/access.abx");
+            let before = self.read_access(&path, AccessUser::parse)?;
+            let mut after = before.clone();
+            trim(&mut after);
+            if after != before {
+                self.write_user(&path, &after)?;
+            }
+        }
         drop(held);
-        self.grants_changed()?;
-        let effects = self.permission_effects(
-            &before_system.permissions,
-            &changes,
-            Some(KILL_APP_REASON_PERMISSIONS_REVOKED),
-        );
-        let audio = self.host.refresh_audio_permissions();
-        effects?;
-        audio
+        Ok((before_system, changes))
     }
 }
 
