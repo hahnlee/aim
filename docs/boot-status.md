@@ -8167,6 +8167,14 @@ their data. Look for a data image left attached by a crash with
 
 ## Window mode (2026-09-29, #294)
 
+Android FRONT reorders inactive task windows directly above the frontmost
+AIM task window, using the server and shims' reported window numbers
+(#353). AIM windows behind another Mac app stay behind it; the active
+host still makes its task key, and minimized windows stay minimized.
+The native regression covers a cooperating shim and a separate non-AIM
+window, but was not run here (no Metal device). The 42 display library unit
+tests pass; no guest boot was run for this change.
+
 `cargo aim boot --windows` ([windows.md](windows.md)): the display is the
 Mac's main screen (3840×2160 at 2×, plus the bar margin: 3840×2352), the
 default display runs freeform windowing, and the task bridge reports its
