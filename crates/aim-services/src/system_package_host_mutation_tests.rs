@@ -13,6 +13,8 @@ use aim_service_aidl::{
 };
 use std::sync::mpsc;
 use std::time::Duration;
+#[path = "system_package_shell_permission_tests.rs"]
+mod shell_permission_tests;
 
 struct NoIdentities;
 impl IdentityProvider for NoIdentities {
@@ -44,7 +46,13 @@ impl Service for Effects {
         }
     }
 }
-struct Bridge(Binder, Arc<std::sync::atomic::AtomicBool>, Binder, Binder);
+struct Bridge(
+    Binder,
+    Arc<std::sync::atomic::AtomicBool>,
+    Binder,
+    Binder,
+    Binder,
+);
 // Fixture-only export of a service in the original process to the native host.
 const EXPORT_TEST_BINDER: u32 = 0xffff_fffe;
 impl Service for Bridge {
@@ -60,6 +68,10 @@ impl Service for Bridge {
             bootstrap::GET_PACKAGE_INTERNAL_EVENTS_BRIDGE => {
                 bootstrap::GetPackageInternalEventsBridge::read(&mut call.data)?;
                 bootstrap::write_get_package_internal_events_bridge_reply(&mut reply, Some(self.3));
+            }
+            bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE => {
+                bootstrap::GetPackageShellPolicyBridge::read(&mut call.data)?;
+                bootstrap::write_get_package_shell_policy_bridge_reply(&mut reply, Some(self.4));
             }
             bootstrap::GET_PACKAGE_MUTATION_BRIDGE => {
                 bootstrap::GetPackageMutationBridge::read(&mut call.data)?;
@@ -358,7 +370,9 @@ struct Session {
     fail_clear: Arc<std::sync::atomic::AtomicBool>,
 }
 fn session() -> Session {
-    let mut fixture = Fixture::new();
+    session_with_fixture(Fixture::new())
+}
+fn session_with_fixture(mut fixture: Fixture) -> Session {
     let host = AppHost::new(fixture.native.clone());
     let cached = PackageService::new(host.clone());
     host.set_system(fixture.system.clone());
@@ -377,7 +391,12 @@ fn session() -> Session {
             original.add_service(Arc::new(Effects(PackageEffects::new(host_leaf.clone())))),
             bridge_grants,
             original.add_service(primitives),
-            original.add_service(Arc::new(crate::app_host::InternalEvents::new(host_leaf))),
+            original.add_service(Arc::new(crate::app_host::InternalEvents::new(
+                host_leaf.clone(),
+            ))),
+            original.add_service(Arc::new(
+                crate::app_host::package_shell_policy::ShellPolicy(host_leaf),
+            )),
         ))
     });
     let old = publish_code(&fixture, &bridge);

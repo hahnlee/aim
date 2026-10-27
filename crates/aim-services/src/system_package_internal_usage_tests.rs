@@ -61,6 +61,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_context(|process, system| {
+            Arc::new(crate::service_host::ServiceHost::new(
+                process.clone(),
+                system,
+            ))
+        })
+    }
+    fn with_context(
+        context: impl FnOnce(&Arc<LocalProcess>, &Arc<System>) -> Arc<dyn Service>,
+    ) -> Self {
         let root = crate::app_host::test_temp_dir("usage-epoch");
         std::fs::create_dir(root.join("image")).unwrap();
         std::fs::create_dir(root.join("data")).unwrap();
@@ -75,9 +85,7 @@ impl Fixture {
             },
         );
         let system = System::new(native.clone(), &[]);
-        let Binder::Local(pointer) = native.add_service(Arc::new(
-            crate::service_host::ServiceHost::new(native.clone(), &system),
-        )) else {
+        let Binder::Local(pointer) = native.add_service(context(&native, &system)) else {
             panic!("local host expected")
         };
         let mut object = FlatBinderObject {

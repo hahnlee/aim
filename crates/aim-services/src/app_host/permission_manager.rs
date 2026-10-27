@@ -1782,6 +1782,69 @@ impl PermissionManager {
         })
     }
 
+    /// PackageShellPolicyBridge's ordered filter over
+    /// `getAllPermissionsWithProtection(PROTECTION_DANGEROUS)`.
+    pub(super) fn runtime_permissions(
+        &self,
+        requested: Option<&[Option<String>]>,
+    ) -> Result<Vec<Option<String>>, Exception> {
+        let requested = requested.ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
+        let system = self.system()?;
+        let dangerous: BTreeSet<&str> = system
+            .permissions
+            .iter()
+            .filter(|p| is_runtime(p))
+            .map(|p| p.name.as_str())
+            .collect();
+        let mut result = Vec::new();
+        for name in requested {
+            let name = name
+                .as_ref()
+                .ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
+            if dangerous.contains(name.as_str()) {
+                result.push(Some(name.clone()));
+            }
+        }
+        Ok(result)
+    }
+
+    /// LegacyPermissionManagerService.Internal.resetRuntimePermissions:
+    /// authorize the forwarded shell caller, then delegate each parsed package
+    /// with an app ID to PermissionManagerServiceInternal for every user.
+    pub(super) fn reset_all_runtime_permissions(
+        &self,
+        pid: i32,
+        caller: i32,
+    ) -> Result<(), Exception> {
+        if pid <= 0 || caller < 0 {
+            return Err(Exception::illegal_argument("Invalid shell caller"));
+        }
+        self.access(|access| {
+            access.enforce(
+                caller,
+                REVOKE_RUNTIME_PERMISSIONS,
+                "revokeRuntimePermission",
+            )?;
+            if !matches!(caller, ROOT_UID | SYSTEM_UID) {
+                access.enforce(
+                    caller,
+                    INTERACT_ACROSS_USERS_FULL,
+                    "resetRuntimePermissions",
+                )?;
+            }
+            Ok(())
+        })?;
+        let capture = self.host.package_capture()?;
+        for &user in capture.state().users.keys() {
+            for ps in capture.state().packages.values() {
+                if ps.pkg.as_ref().is_some_and(|pkg| pkg.uid != -1) {
+                    self.reset_runtime_permissions(&ps.name, user)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `AccessPersistence.writeUserState` of user 0 through `AtomicFile`
     /// with its reserve copy: the document as read with its
     /// `<app-id-permissions>` written anew.

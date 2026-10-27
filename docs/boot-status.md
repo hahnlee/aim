@@ -127,7 +127,8 @@ downloads start in DownloadProvider (its jobs get their network,
 search page. An app's runtime permission request shows PermissionController's
 dialog (YouTube's notification permission; `ecm_enhanced_confirmation`,
 `getPermissionPolicy`), and the permission service grants, revokes and
-persists runtime permissions; YouTube itself still dies on
+persists runtime permissions, also for `pm grant`, `pm revoke` and
+`pm reset-permissions`; YouTube itself still dies on
 `finishActivityAffinity` (#1861). Clock asks the app host nothing it does
 not answer but battery stats (#1513); usage stats now persist, with
 their configuration changes answered and reported. Settings' home shows the storage used and free

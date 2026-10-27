@@ -1,8 +1,8 @@
-//! Package shell's property and UserManager owners (android-16.0.0_r1,
+//! Package shell's property, permission and UserManager owners (android-16.0.0_r1,
 //! PackageShellPolicyBridge / UserManagerServiceShellCommand, AOSP Apache-2.0).
 use super::{AppHost, reply};
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel, Reader};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::{ReadParcelable, dev_aim_server_ipackageshellpolicybridge as policy};
 use std::sync::Arc;
 
@@ -16,6 +16,15 @@ impl ReadParcelable for Descriptor {
     }
 }
 pub struct ShellPolicy(pub Arc<AppHost>);
+impl ShellPolicy {
+    fn permissions(&self) -> Result<&super::permission_manager::PermissionManager, Exception> {
+        self.0
+            .permission_manager
+            .get()
+            .map(Arc::as_ref)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable"))
+    }
+}
 impl Service for ShellPolicy {
     fn descriptor(&self) -> &str {
         policy::DESCRIPTOR
@@ -55,6 +64,22 @@ impl Service for ShellPolicy {
             Err(Exception::security("the bridge serves the system uid only"))
         } else {
             match call.code {
+                policy::RUNTIME_PERMISSIONS => {
+                    let a =
+                        policy::RuntimePermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    self.permissions()
+                        .and_then(|owner| owner.runtime_permissions(a.requested.as_deref()))
+                        .map(|names| policy::write_runtime_permissions_reply(&mut p, &Some(names)))
+                }
+                policy::RESET_RUNTIME_PERMISSIONS => {
+                    let a = policy::ResetRuntimePermissions::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    self.permissions()
+                        .and_then(|owner| {
+                            owner.reset_all_runtime_permissions(a.caller_pid, a.caller_uid)
+                        })
+                        .map(|()| policy::write_reset_runtime_permissions_reply(&mut p))
+                }
                 policy::BOOT_COMPLETED => {
                     policy::BootCompleted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                     policy::write_boot_completed_reply(
