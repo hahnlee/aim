@@ -1815,6 +1815,22 @@ fn publish_plain_open(fd: i32) -> i64 {
     fd as i64
 }
 
+pub(super) fn write_comm(tid: i32, b: &[u8]) -> Result<(), errno::Errno> {
+    // Linux takes up to 15 bytes as they are, newline included.
+    let mut name = [0u8; 16];
+    let len = b
+        .iter()
+        .take(15)
+        .position(|&c| c == 0)
+        .unwrap_or(b.len().min(15));
+    name[..len].copy_from_slice(&b[..len]);
+    if !super::thread::set_name_of(tid, name) {
+        // proc_pid_comm refuses a task outside the writer's thread group.
+        return Err(errno::EINVAL);
+    }
+    Ok(())
+}
+
 pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     if let Some(result) = super::fuse_sysfs::open(guest, flags) {
         return Some(result);
@@ -1855,7 +1871,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         return Some(super::knob::open(
             format!("{value}\n").as_bytes(),
             cloexec,
-            move |b| super::cred::write_oom_score_adj(p, b).map(|()| None),
+            super::knob::Knob::OomScoreAdj(p),
         ));
     }
     if let Some((host, st)) = recorded(guest)
@@ -1881,24 +1897,15 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         return Some(super::knob::open(
             format!("{name}\n").as_bytes(),
             cloexec,
-            move |b| {
-                // Linux takes up to 15 bytes as they are, newline included.
-                let mut n = [0u8; 16];
-                let len = b
-                    .iter()
-                    .take(15)
-                    .position(|&c| c == 0)
-                    .unwrap_or(b.len().min(15));
-                n[..len].copy_from_slice(&b[..len]);
-                super::thread::set_name_of(tid, n);
-                Ok(None)
-            },
+            super::knob::Knob::Comm(tid),
         ));
     }
     if write && let Some(dev) = super::uevent::attribute(&canon) {
-        return Some(super::knob::open(&dev.attribute(), cloexec, move |b| {
-            super::uevent::synthesize(&dev, b).map(|()| None)
-        }));
+        return Some(super::knob::open(
+            &dev.attribute(),
+            cloexec,
+            super::knob::Knob::Uevent(dev),
+        ));
     }
     // /proc/<pid>/fd/N reopens the file behind fd N.
     if let Some(n) = canon

@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -486,16 +487,16 @@ static void noexec_defaults(void) {
 }
 
 static void noexec_sysctl_permissions(void) {
+  int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+  CHECK(fd >= 0);
   FORK_OR_SKIP(pid);
   if (pid == 0) {
-    int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
-    if (fd < 0) _exit(1);
     struct __user_cap_header_struct h = {.version = _LINUX_CAPABILITY_VERSION_3};
     struct __user_cap_data_struct d[2] = {{0}};
     if (syscall(SYS_capget, &h, d) != 0) _exit(2);
     d[CAP_SYS_ADMIN / 32].effective &= ~(1U << (CAP_SYS_ADMIN % 32));
     if (syscall(SYS_capset, &h, d) != 0) _exit(3);
-    // Losing the capability after open must deny writes, before parsing.
+    // The inherited fd uses the writer's capabilities, before parsing.
     errno = 0;
     if (pwrite(fd, "0", 1, 0) != -1 || errno != EPERM) _exit(4);
     errno = 0;
@@ -513,7 +514,45 @@ static void noexec_sysctl_permissions(void) {
   }
   int status = 0;
   CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  close(fd);
   noexec_sysctl_read();
+}
+
+// fork(2): dup aliases keep their file operations through nested forks.
+static void noexec_sysctl_fork(void) {
+  int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+  CHECK(fd >= 0);
+  int alias = dup(fd);
+  CHECK(alias >= 0);
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    errno = 0;
+    if (pwrite(fd, "junk", 4, 0) != -1 || errno != EINVAL) _exit(1);
+    if (pwrite(alias, "1", 1, 0) != 1) _exit(2);
+    pid_t grandchild = fork();
+    if (grandchild < 0) _exit(3);
+    if (grandchild == 0) {
+      struct iovec parts[] = {{"2", 1}, {"\n", 1}};
+      if (writev(fd, parts, 2) != 2) _exit(4);
+      _exit(0);
+    }
+    int status;
+    if (waitpid(grandchild, &status, 0) != grandchild || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) _exit(5);
+    _exit(0);
+  }
+  int status;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  int original = scope;
+  scope = 2;
+  noexec_sysctl_read();
+  noexec_defaults();
+  char value = '0' + original;
+  CHECK(pwrite(alias, &value, 1, 0) == 1);
+  scope = original;
+  noexec_sysctl_read();
+  close(alias);
+  close(fd);
 }
 
 static void noexec_sysctl_write(void) {
@@ -545,6 +584,7 @@ int main(int argc, char** argv) {
     RUN(noexec_sysctl_read);
     RUN(noexec_defaults);
     RUN(noexec_sysctl_permissions);
+    RUN(noexec_sysctl_fork);
     RUN(noexec_sysctl_write);
     DONE();
   }

@@ -1605,8 +1605,8 @@ pub fn is_hidden(fd: i32) -> bool {
 
 /// Fork: every fd's kind, with fds that share an object (dup'ed ones)
 /// sharing it again in the child, and the layer's hidden fds. The fds
-/// themselves are inherited. Content, knob, evdev and binder fds stay plain
-/// fds: a content file is the parent's to reuse, a knob's action is code,
+/// themselves are inherited. Knobs retain their typed owners. Content,
+/// evdev and binder fds stay plain fds: a content file is the parent's to reuse,
 /// an input device is opened again, and a binder file is the parent's
 /// process of the driver.
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
@@ -1625,6 +1625,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
             Kind::Kmsg(a) => Arc::as_ptr(a) as *const (),
             Kind::Cgroup(a) => Arc::as_ptr(a) as *const (),
+            Kind::Knob(a) => Arc::as_ptr(a) as *const (),
             Kind::Memfd(_)
             | Kind::SyncFile
             | Kind::Random
@@ -1632,7 +1633,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             | Kind::ProxyFile
             | Kind::ProcMem(_)
             | Kind::Path(_) => std::ptr::null(),
-            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => continue,
+            Kind::Content | Kind::Evdev(_) | Kind::Binder(_) => continue,
         };
         let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
             Some(i) => (i, false),
@@ -1718,11 +1719,15 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                 w.u32(14);
                 w.bool(matches!(**open, super::kmsg::Open::Proc));
             }
+            Kind::Knob(owner) => {
+                w.u32(17);
+                knob::save(owner, w);
+            }
             Kind::Cgroup(open) => {
                 w.u32(15);
                 super::cgroup::save_open(w, open);
             }
-            Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
+            Kind::Content | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
     // Private targets are installed from the explicit fork receipt before the
@@ -1764,6 +1769,10 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             // A group removed since keeps its open files as plain ones.
             15 => match super::cgroup::restore_open(r) {
                 Some(open) => Kind::Cgroup(open),
+                None => return (fd, None),
+            },
+            17 => match knob::load(r) {
+                Some(owner) => Kind::Knob(owner),
                 None => return (fd, None),
             },
             10 => Kind::Path(PathDescription::new(r.u64())),

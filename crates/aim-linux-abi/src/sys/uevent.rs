@@ -16,11 +16,12 @@ use std::os::fd::AsRawFd;
 use crate::errno::{EINVAL, Errno};
 
 /// A device as its uevents describe it.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Device {
     /// Its sysfs directory below `/sys`, e.g.
     /// `/devices/virtual/input/input3/event3`.
     pub devpath: String,
-    pub subsystem: &'static str,
+    pub subsystem: String,
     /// What its `uevent` attribute lists (`MAJOR=13`, ...).
     pub env: Vec<String>,
 }
@@ -174,7 +175,7 @@ mod tests {
     fn dev() -> Device {
         Device {
             devpath: "/devices/virtual/input/input1/event1".into(),
-            subsystem: "input",
+            subsystem: "input".into(),
             env: vec![
                 "MAJOR=13".into(),
                 "MINOR=65".into(),

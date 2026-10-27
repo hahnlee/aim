@@ -1,7 +1,7 @@
 //! Linux fusectl exposes real mounted connections, not unmounted device opens.
 use super::{
     dir::{self, Entry},
-    fuse::{self, Client, SessionKey},
+    fuse::{Client, SessionKey},
     procfs::Node,
 };
 use crate::{
@@ -143,9 +143,6 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
     Some(super::knob::open(
         &[],
         flags & 0o2000000 != 0,
-        move |_bytes| {
-            fuse::abort(&key)?;
-            Ok(None)
-        },
+        super::knob::Knob::FuseAbort(key),
     ))
 }
