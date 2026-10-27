@@ -691,7 +691,17 @@ pub fn seal_view(fd: i32, base: u64, len: u64, prot: i32) {
         && seals(fd).is_some_and(|s| s & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0)
     {
         // SAFETY: lowering the maximum protection of our own new view.
-        unsafe { crate::patch::vm::mach_vm_protect(crate::patch::vm::task(), base, len, 1, prot) };
+        if let Some(view) = vmmap::info_at(base) {
+            unsafe {
+                crate::patch::vm::mach_vm_protect(
+                    crate::patch::vm::task(),
+                    base,
+                    len,
+                    1,
+                    view.max_prot as i32 & !libc::PROT_WRITE,
+                )
+            };
+        }
     }
 }
 
@@ -890,6 +900,16 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
         super::mem::remap_shared(v.start, base + v.offset, v.end - v.start)?;
         // SAFETY: restoring the view's protection.
         unsafe { libc::mprotect(v.start as *mut _, (v.end - v.start) as usize, v.prot as i32) };
+        // Conversion must keep VM_MAYWRITE, including a write seal's denial.
+        unsafe {
+            crate::patch::vm::mach_vm_protect(
+                crate::patch::vm::task(),
+                v.start,
+                v.end - v.start,
+                1,
+                v.usage.max_prot as i32,
+            )
+        };
     }
     with(|m| {
         if let Some(f) = m.get_mut(&k) {

@@ -267,6 +267,14 @@ static void seals_and_views(void) {
   CHECK(ro != MAP_FAILED);
   errno = 0;
   CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
+  CHECK(mprotect(ro, PAGE, PROT_NONE) == 0);
+  CHECK(mprotect(ro, PAGE, PROT_READ) == 0);
+  errno = 0;
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE | PROT_EXEC) == -1 && errno == EACCES);
+  // Conversion to executable-capable memory keeps the write denial.
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_EXEC) == 0);
+  errno = 0;
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
   munmap(ro, PAGE);
   close(fd);
   // F_SEAL_FUTURE_WRITE alike, and a view mapped before the seal stays

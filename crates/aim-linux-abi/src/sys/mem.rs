@@ -872,6 +872,14 @@ fn mprotect_owned(a: [u64; 6]) -> i64 {
     if window::touches_reserved(addr, addr + len) {
         return -(ENOMEM as i64);
     }
+    // Check VM_MAYWRITE before executable/JIT replacement can raise the
+    // host maximum protection of a read-only shared mapping.
+    if prot & PROT_WRITE != 0
+        && vmmap::regions(addr, addr + len)
+            .any(|r| r.shared && r.usage.max_prot & libc::PROT_WRITE as u32 == 0)
+    {
+        return -(errno::EACCES as i64);
+    }
     let ranges = super::verity_pager::covered(addr, len);
     if !ranges.is_empty() {
         if let Err(error) = super::verity_pager::validate_protection(addr, len, host_prot(prot)) {
