@@ -58,6 +58,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use super::cred::{self, CAP_DAC_OVERRIDE, CAP_SYS_ADMIN};
 use super::fdtab::{self, Kind};
 use super::vmmap;
 use crate::errno::{self, EINVAL, EPERM};
@@ -676,8 +677,8 @@ fn parse_noexec(bytes: &[u8]) -> Result<u32, errno::Errno> {
 }
 
 pub fn open_noexec(write: bool, cloexec: bool) -> i64 {
-    let id = super::cred::current();
-    if write && id.uid[super::attrs::FS] != 0 && id.cap_eff & (1 << 1) == 0 {
+    let id = cred::current();
+    if write && id.uid[super::attrs::FS] != 0 && !cred::capable(CAP_DAC_OVERRIDE) {
         return -(errno::EACCES as i64);
     }
     let scope = match noexec_scope() {
@@ -688,6 +689,9 @@ pub fn open_noexec(write: bool, cloexec: bool) -> i64 {
         return super::procfs::content_fd(format!("{scope}\n").as_bytes(), cloexec);
     }
     super::knob::open(format!("{scope}\n").as_bytes(), cloexec, |bytes| {
+        if !cred::capable(CAP_SYS_ADMIN) {
+            return Err(EPERM);
+        }
         let value = parse_noexec(bytes)?;
         let _guard = state_lock().map_err(|error| -error as i32)?;
         let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);

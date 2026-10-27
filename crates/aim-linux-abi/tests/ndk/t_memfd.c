@@ -4,9 +4,11 @@
 // fd or the process.
 #include <fcntl.h>
 #include <stdlib.h>
+#include <sys/capability.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -483,6 +485,37 @@ static void noexec_defaults(void) {
   CHECK(make(MFD_EXEC | MFD_NOEXEC_SEAL, &seals) == -1 && errno == EINVAL);
 }
 
+static void noexec_sysctl_permissions(void) {
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) _exit(1);
+    struct __user_cap_header_struct h = {.version = _LINUX_CAPABILITY_VERSION_3};
+    struct __user_cap_data_struct d[2] = {{0}};
+    if (syscall(SYS_capget, &h, d) != 0) _exit(2);
+    d[CAP_SYS_ADMIN / 32].effective &= ~(1U << (CAP_SYS_ADMIN % 32));
+    if (syscall(SYS_capset, &h, d) != 0) _exit(3);
+    // Losing the capability after open must deny writes, before parsing.
+    errno = 0;
+    if (pwrite(fd, "0", 1, 0) != -1 || errno != EPERM) _exit(4);
+    errno = 0;
+    if (pwrite(fd, "junk", 4, 0) != -1 || errno != EPERM) _exit(5);
+    // UID 0 can still open the 0644 file without CAP_SYS_ADMIN.
+    int again = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
+    if (again < 0) _exit(6);
+    errno = 0;
+    if (write(again, "0", 1) != -1 || errno != EPERM) _exit(7);
+    if (setresuid(10001, 10001, 10001) != 0) _exit(8);
+    errno = 0;
+    if (open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC) != -1 || errno != EACCES)
+      _exit(9);
+    _exit(0);
+  }
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  noexec_sysctl_read();
+}
+
 static void noexec_sysctl_write(void) {
   int fd = open("/proc/sys/vm/memfd_noexec", O_WRONLY | O_CLOEXEC);
   CHECK(fd >= 0);
@@ -499,6 +532,7 @@ static void noexec_sysctl_write(void) {
   }
   scope = 2;
   noexec_sysctl_read();
+  // The root pid namespace's parent scope is 0, so root can lower it.
   CHECK(pwrite(fd, "0", 1, 0) == 1);
   close(fd);
   scope = 0;
@@ -510,6 +544,7 @@ int main(int argc, char** argv) {
     scope = argc > 2 ? atoi(argv[2]) : 0;
     RUN(noexec_sysctl_read);
     RUN(noexec_defaults);
+    RUN(noexec_sysctl_permissions);
     RUN(noexec_sysctl_write);
     DONE();
   }
