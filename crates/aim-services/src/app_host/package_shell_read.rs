@@ -386,13 +386,7 @@ mod tests {
             aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
         );
     }
-}
 
-#[cfg(test)]
-mod positional_tests {
-    use super::*;
-    use crate::package::{intent::Intent, intent_filter::Plain};
-    use aim_binder_host::parcel::Reader;
     #[test]
     fn positional_package_and_component_use_the_pinned_fill_in_rules() {
         for (args, action, category, package, class) in [
