@@ -118,6 +118,10 @@ mod tests {
         assert!(!release.at_least_checked("Future").unwrap());
         assert!(release.at_least_checked("").is_err());
         assert!(release.at_least_checked("３６").unwrap());
+        assert!(release.at_most_checked("Baklava").is_err());
+        assert!(release.at_most_checked("Future").unwrap());
+        assert!(release.at_most_checked("invalid").is_err());
+        assert!(release.at_most_checked("３６").unwrap());
         assert!(preview.at_least("36"));
         assert!(!preview.at_most("36"));
         assert!(preview.at_most("37"));
@@ -167,19 +171,30 @@ impl Sdk {
     }
 
     fn at_most(&self, version: &str) -> bool {
-        if version.starts_with(char::is_uppercase) {
+        // SystemConfig catches IllegalArgumentException as true.
+        self.at_most_checked(version).unwrap_or(true)
+    }
+
+    /// UnboundedSdkLevel's `isAtMost`, with its exceptions.
+    pub(crate) fn at_most_checked(&self, version: &str) -> Result<bool, String> {
+        let first = version.encode_utf16().next().ok_or("empty SDK version")?;
+        if char::from_u32(u32::from(first)).is_some_and(char::is_uppercase) {
             let version = version.split('.').next().unwrap();
-            self.codename == "REL"
-                || !self.known.iter().any(|v| v == version)
-                || self.codename == version
-        } else {
-            // SystemConfig catches IllegalArgumentException as true.
-            version.parse::<i32>().map_or(true, |v| {
-                if self.codename == "REL" {
-                    self.version <= v
-                } else {
-                    self.version < v
+            let known = self.known.iter().any(|v| v == version);
+            if self.codename == "REL" {
+                if known {
+                    return Err(format!("known codename {version} requires a finalized SDK"));
                 }
+                return Ok(true);
+            }
+            Ok(!known || self.codename == version)
+        } else {
+            let sdk =
+                super::decimal_uid(version).ok_or_else(|| format!("invalid SDK {version}"))?;
+            Ok(if self.codename == "REL" {
+                self.version <= sdk
+            } else {
+                self.version < sdk
             })
         }
     }

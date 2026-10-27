@@ -6,7 +6,7 @@ impl Bridge {
         bridge::InvalidatePackagesForUidCache {}.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::INVALIDATE_PACKAGES_FOR_UID_CACHE, &request, false)
+            .transact_as_owner(bridge::INVALIDATE_PACKAGES_FOR_UID_CACHE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         bridge::read_invalidate_packages_for_uid_cache_reply(&mut reader)
@@ -32,7 +32,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::IS_AUTO_REVOKE_WHITELISTED, &request, false)
+            .transact_as_owner(bridge::IS_AUTO_REVOKE_WHITELISTED, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let result = bridge::read_is_auto_revoke_whitelisted_reply(&mut reader)
@@ -60,7 +60,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::PACKAGE_MONITOR_USER, &request, false)
+            .transact_as_owner(bridge::PACKAGE_MONITOR_USER, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let result = bridge::read_package_monitor_user_reply(&mut reader)
@@ -94,7 +94,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::LOG_PACKAGE_PROCESS_START, &request, false)
+            .transact_as_owner(bridge::LOG_PACKAGE_PROCESS_START, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         bridge::read_log_package_process_start_reply(&mut reader)
@@ -112,7 +112,7 @@ impl Bridge {
         bridge::WaitPackageBackgroundHandler { timeout_millis }.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::WAIT_PACKAGE_BACKGROUND_HANDLER, &request, false)
+            .transact_as_owner(bridge::WAIT_PACKAGE_BACKGROUND_HANDLER, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let result = bridge::read_wait_package_background_handler_reply(&mut reader)

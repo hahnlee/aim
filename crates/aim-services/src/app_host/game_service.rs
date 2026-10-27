@@ -11,6 +11,7 @@ use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
 use aim_service_aidl::android_app_igamemanagerservice as gm;
 
+use super::activity_user;
 use super::{AppHost, reply};
 
 /// `GameManager.GAME_MODE_UNSUPPORTED`; `ApplicationInfo.CATEGORY_GAME`;
@@ -35,9 +36,7 @@ impl GameManager {
         };
         Ok(self
             .host
-            .inputs()?
-            .packages
-            .application_info(package, MATCH_ALL)
+            .application_info(package, MATCH_ALL, None)?
             .is_some_and(|ai| ai.category == CATEGORY_GAME))
     }
 
@@ -50,8 +49,14 @@ impl GameManager {
         user: i32,
         name: &str,
     ) -> Result<i32, Exception> {
-        self.host
-            .handle_incoming_user(uid, user, false, true, Some(name))?;
+        self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            activity_user::AllowMode::FullOnly,
+            Some(name),
+            None,
+        )?;
         if !self.is_game(package)? {
             return Ok(GAME_MODE_UNSUPPORTED);
         }
@@ -87,8 +92,9 @@ impl Service for GameManager {
                         uid,
                         a.user_id,
                         false,
-                        true,
+                        activity_user::AllowMode::FullOnly,
                         Some("notifyGraphicsEnvironmentSetup"),
+                        None,
                     )?;
                     let package = a.package_name.as_deref().unwrap_or_default();
                     if !self.host.owns_package(uid, package)? {

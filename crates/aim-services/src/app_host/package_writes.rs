@@ -1,9 +1,7 @@
-//! PackageManager's enabled settings in the app host
+//! PackageManager's enabled effects in the app host
 //! (`PackageManagerService.setEnabledSettings` at `android-16.0.0_r1`):
-//! each setting decided by the native write model
-//! (`package::write::enabled`), the model's state replaced with the
-//! change, user 0's `package-restrictions.xml` written by the native owner
-//! (`package::owner::Store`), and `ACTION_PACKAGE_CHANGED` sent as
+//! settings committed and published by the native session, then
+//! `ACTION_PACKAGE_CHANGED` sent as
 //! `BroadcastHelper.sendPackageChangedBroadcast` sends it, to registered
 //! receivers and package monitors (`PackageMonitorCallbackHelper`), at
 //! once unless `DONT_KILL_APP` defers it (`mPendingBroadcasts`). The
@@ -14,37 +12,25 @@
 //! decodes it. A package's data cleared (`clear_data`) is sent as
 //! `sendPackageRestartedBroadcast` and `sendPackageDataClearedBroadcast`
 //! send it, its `ACTION_PACKAGE_DATA_CLEARED` also to the services that
-//! receive it in the system server; installs and removals: #1757.
+//! receive it in the system server. The removal leaf also sends the package
+//! removal intents and notifies the native discovery monitors once.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use aim_binder_host::local::{Call, LocalService, Strong};
-use aim_binder_host::parcel::{
-    Binder, DEAD_OBJECT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, StatusCode,
-};
+use aim_binder_host::parcel::{Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
-use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
-use super::AppHost;
 use super::kept::RawIntent;
+use super::{AppHost, PER_USER_RANGE, USER_ALL};
 use crate::bundle::{self, Value};
-use crate::package::apps_filter::{NotModelled, SYSTEM_UID, app_id, uid, user_id};
+use crate::package::apps_filter::{app_id, uid, user_id};
 use crate::package::info::user_state;
-use crate::package::model::{PackageState, State};
-use crate::package::owner::Store;
-use crate::package::pkg::booleans::RESET_ENABLED_SETTINGS_ON_APP_DATA_CLEARED;
-use crate::package::query::Query;
+use crate::package::model::PackageState;
 use crate::package::uri::Uri;
-use crate::package::write::Enabled;
-use crate::package::write::enabled::{Policy, Setting, decide_with_policy};
-use crate::package::write::mutation::{Change, Plan};
 
-/// `PackageManager.DONT_KILL_APP`.
-const DONT_KILL_APP: i32 = 0x1;
 /// `PackageManagerService.BROADCAST_DELAY` and
 /// `BROADCAST_DELAY_DURING_STARTUP`, the latter in the first minute
 /// (`mServiceStartWithDelay`).
@@ -74,39 +60,9 @@ const ACCESS_INSTANT_APPS: &str = "android.permission.ACCESS_INSTANT_APPS";
 const REDUCE_BROADCASTS: &str = "android.content.pm.reduce_broadcasts_for_component_state_changes";
 const STAY_STOPPED: &str = "android.content.pm.stay_stopped";
 const PLATFORM_PACKAGE: &str = "android";
-/// `UserHandle.USER_ALL`.
-const USER_ALL: i32 = -1;
 
-type Job = Box<dyn FnOnce() + Send>;
 /// `mPendingBroadcasts`: by user and package, the changed components.
 type Pending = BTreeMap<(i32, String), Vec<String>>;
-/// Each changed package's state, and the settings that change one.
-type Decided = (BTreeMap<String, Enabled>, Vec<usize>);
-
-/// A registered `IRemoteCallback` of a package monitor, with its user and
-/// uid (`PackageMonitorCallbackHelper.RegisterUser`).
-struct Monitor {
-    binder: Binder,
-    callback: Arc<Callback>,
-    user: i32,
-    uid: i32,
-}
-
-/// A monitor's callback: an app's, linked to its death, or one of the app
-/// host's own services' (`RemoteCallbackList` takes either).
-enum Callback {
-    Remote(Arc<Strong>, u64),
-    Local(LocalService),
-}
-
-impl Callback {
-    fn transact(&self, code: u32, data: &Parcel) -> Result<(), StatusCode> {
-        match self {
-            Callback::Remote(strong, _) => strong.transact(code, data, true).map(drop),
-            Callback::Local(service) => service.transact(code, data, true).map(drop),
-        }
-    }
-}
 
 /// `ACTION_PACKAGE_CHANGED` as `PackageMonitor.doHandlePackageEvent`
 /// reads it: the package, the changing user and the changed components
@@ -115,6 +71,7 @@ pub(super) struct PackageChanged<'a> {
     pub package: &'a str,
     pub user: i32,
     pub components: &'a [String],
+    pub removed: bool,
 }
 
 impl PackageChanged<'_> {
@@ -140,7 +97,9 @@ pub(super) struct DataCleared<'a> {
 /// users): an event it does not take is ignored, as `PackageMonitor`'s
 /// callbacks do nothing by default.
 pub(super) trait PackageMonitor: Send + Sync {
-    fn package_changed(&self, _change: &PackageChanged<'_>) {}
+    fn package_changed(&self, _change: &PackageChanged<'_>) -> Result<(), Exception> {
+        Ok(())
+    }
     fn package_data_cleared(&self, _cleared: &DataCleared<'_>) {}
 }
 
@@ -173,115 +132,59 @@ pub(super) struct Writes {
     /// The pending broadcasts, and whether their sending is scheduled.
     pending: Mutex<(Pending, bool)>,
     started: Instant,
-    /// `mHandler`, which sends the broadcasts in order.
-    handler: Mutex<mpsc::Sender<Job>>,
-    monitors: Mutex<Vec<Monitor>>,
 }
 
 impl Writes {
     pub(super) fn new(host: Arc<AppHost>) -> Arc<Writes> {
-        let (sender, jobs) = mpsc::channel::<Job>();
-        std::thread::Builder::new()
-            .name("package-handler".into())
-            .spawn(move || jobs.into_iter().for_each(|job| job()))
-            .expect("the package handler's thread");
         Arc::new(Writes {
             host,
             pending: Mutex::default(),
             started: Instant::now(),
-            handler: Mutex::new(sender),
-            monitors: Mutex::default(),
         })
     }
 
-    /// `mHandler.post`.
-    pub(super) fn post(&self, job: impl FnOnce() + Send + 'static) {
-        if self.handler.lock().unwrap().send(Box::new(job)).is_err() {
-            eprintln!("app host: the package handler stopped");
-        }
-    }
-
-    /// `setEnabledSettings` of `settings` (of one user) by `call`'s caller.
-    pub(super) fn set_enabled(
-        self: &Arc<Self>,
-        call: &Call<'_>,
-        settings: &[Setting],
-    ) -> Result<(), Exception> {
-        let mut store = self.host.package_store.lock().unwrap();
-        let writer = self.host.model_writer.lock().unwrap();
-        let (before, resolution) = self.host.packages()?;
-        let query = Query {
-            state: &before,
-            filter: &resolution.apps_filter,
-            calling_uid: call.sender_euid as i32,
-        };
-        let (after, changed) = match decide(&query, settings, call.sender_pid, &|package| {
-            self.protected(package)
-        }) {
-            Err(NotModelled(reason)) => {
-                return Err(self
-                    .host
-                    .unimplemented_named("package", &format!("{reason} (#1425)")));
-            }
-            Ok(decided) => match decided? {
-                Some(decided) => decided,
-                // `UserManager.exists`: no such user, nothing to do.
-                None => return Ok(()),
-            },
-        };
-        if changed.is_empty() {
-            return Ok(());
-        }
-        let user = settings[changed[0]].user;
-        let error = self.commit(&mut store, &before, user, &after)?;
-        drop(writer);
-        drop(store);
-        if let Some(e) = error {
-            return Err(e);
-        }
-        let send_now = {
-            let mut pending = self.pending.lock().unwrap();
-            let (send_now, deferred) = partition(settings, &changed, &mut pending.0);
-            if deferred {
-                let delay = if self.started.elapsed() > STARTUP {
-                    BROADCAST_DELAY
-                } else {
-                    BROADCAST_DELAY_DURING_STARTUP
-                };
-                self.schedule_pending(&mut pending, delay);
-            }
-            send_now
-        };
-        for (package, components) in send_now {
-            let app_id = before.packages[&package].app_id;
-            self.package_changed(&package, false, components, uid(user, app_id));
-        }
-        Ok(())
-    }
-
-    /// `after`, the packages' changed states in `user`, written to the
-    /// restrictions (the store opened by the first write) and the model
-    /// changed with what was written: the write's error.
-    fn commit(
+    /// `InstallerRemovalBridge.sendRemovedBroadcast`: native discovery
+    /// monitors and guest package broadcasts share this leaf.
+    pub(super) fn removed(
         &self,
-        store: &mut Option<Store>,
-        before: &Arc<State>,
+        package: &str,
+        app_id: i32,
         user: i32,
-        after: &BTreeMap<String, Enabled>,
-    ) -> Result<Option<Exception>, Exception> {
-        if store.is_none() {
-            let state =
-                |e: String| Exception::new(EX_ILLEGAL_STATE, format!("package restrictions: {e}"));
-            *store = Some(
-                Store::open(self.host.data()?, &[user as u32])
-                    .map_err(state)?
-                    .ok_or_else(|| state("no package state".into()))?,
-            );
+        data_removed: bool,
+        fully_removed: bool,
+        uid_removed: bool,
+    ) -> Result<(), Exception> {
+        let uid = uid(user, app_id);
+        let mut failure = self
+            .host
+            .notify_package_discoveries(&PackageChanged {
+                package,
+                user,
+                components: &[package.to_owned()],
+                removed: true,
+            })
+            .err();
+        for intent in removed_intents(package, uid, data_removed, fully_removed, uid_removed) {
+            if let Err(e) =
+                self.host
+                    .broadcasts
+                    .try_send_from_package_manager(&self.host, intent.clone(), user)
+            {
+                failure.get_or_insert(e);
+            }
+            if let Err(e) = self.invoke_callbacks(&intent, user, None) {
+                failure.get_or_insert(e);
+            }
         }
-        let (written, error) = persist(store.as_mut().expect("opened"), user, after);
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// `mHandler.post`.
+    pub(super) fn post(&self, job: impl FnOnce() + Send + 'static) -> Result<(), Exception> {
         self.host
-            .user_states_changed(before, Arc::new(applied(before, user, &written)))?;
-        Ok(error)
+            .package_system()?
+            .package_events()?
+            .post(false, Box::new(job))
     }
 
     /// `sendMessageDelayed(SEND_PENDING_BROADCAST, delay)` unless one is
@@ -298,60 +201,36 @@ impl Writes {
         });
     }
 
-    /// `resetComponentEnabledSettingsIfNeededLPw` once `package`'s data in
-    /// `user` was cleared: a package that asks for it
-    /// (`resetEnabledSettingsOnAppDataCleared`) has its components' states
-    /// restored to their defaults (`restoreComponentLPw`), the restrictions
-    /// written and the change sent as a pending one.
-    pub(super) fn reset_components_on_data_cleared(
+    /// The native writer has committed before admitting this effect.
+    pub(super) fn changed(
         self: &Arc<Self>,
         package: &str,
-        user: i32,
+        uid: i32,
+        dont_kill: bool,
+        components: Vec<String>,
+        delayed: bool,
+        reason: Option<&str>,
     ) -> Result<(), Exception> {
-        let mut store = self.host.package_store.lock().unwrap();
-        let writer = self.host.model_writer.lock().unwrap();
-        let (before, _) = self.host.packages()?;
-        let Some(ps) = before.packages.get(package) else {
-            return Ok(());
-        };
-        let Some(pkg) = ps
-            .pkg
-            .as_deref()
-            .filter(|pkg| pkg.is(RESET_ENABLED_SETTINGS_ON_APP_DATA_CLEARED))
-        else {
-            return Ok(());
-        };
-        let mut enabled = Enabled::of(ps, user);
-        let mut updated = Vec::new();
-        let classes = pkg
-            .activities
-            .iter()
-            .chain(&pkg.receivers)
-            .map(|c| &c.main.component.name)
-            .chain(pkg.services.iter().map(|c| &c.main.component.name))
-            .chain(pkg.providers.iter().map(|c| &c.main.component.name));
-        for class in classes {
-            let disabled = enabled.disabled_components.remove(class);
-            if enabled.enabled_components.remove(class) | disabled {
-                updated.push(class.clone());
-            }
-        }
-        if updated.is_empty() {
-            return Ok(());
-        }
-        let after = BTreeMap::from([(package.to_string(), enabled)]);
-        let error = self.commit(&mut store, &before, user, &after)?;
-        drop(writer);
-        drop(store);
-        if let Some(e) = error {
-            return Err(e);
-        }
+        self.host.package_system()?.package_events()?;
         let mut pending = self.pending.lock().unwrap();
-        let components = pending.0.entry((user, package.to_string())).or_default();
-        for class in updated {
-            add(components, class);
+        if delayed {
+            let names = pending.0.entry((user_id(uid), package.into())).or_default();
+            for name in components {
+                add(names, name);
+            }
+            let delay = if reason == Some("reset_component_state_changed")
+                || self.started.elapsed() > STARTUP
+            {
+                BROADCAST_DELAY
+            } else {
+                BROADCAST_DELAY_DURING_STARTUP
+            };
+            self.schedule_pending(&mut pending, delay);
+        } else {
+            pending.0.remove(&(user_id(uid), package.into()));
+            drop(pending);
+            self.package_changed(package, dont_kill, components, uid)?;
         }
-        self.schedule_pending(&mut pending, BROADCAST_DELAY);
         Ok(())
     }
 
@@ -381,20 +260,8 @@ impl Writes {
             .flags
             .iter()
             .any(|(n, on)| n == STAY_STOPPED && *on);
-        let mut extras = vec![(EXTRA_UID, Value::Int(uid))];
-        if stay_stopped {
-            extras.push((EXTRA_TIME, Value::Long(super::alarm_service::elapsed_ms())));
-        }
-        extras.push((EXTRA_USER_HANDLE, Value::Int(user)));
-        let data = Uri::preferred_opaque("package", package);
         // `mProcessesReady`: the app host runs once the processes are.
-        let intent = RawIntent::with_data(
-            Some(ACTION_PACKAGE_RESTARTED),
-            Some(&data),
-            None,
-            FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
-            &extras,
-        );
+        let intent = restarted_intent(package, uid, 0, stay_stopped);
         let me = self.clone();
         let monitor_intent = intent.clone();
         let monitor_allow_list = allow_list.clone();
@@ -408,14 +275,17 @@ impl Writes {
             );
         };
         if stay_stopped {
-            self.post(send);
+            if let Err(error) = self.post(send) {
+                eprintln!("app host: package restarted: {}", error.message);
+            }
         } else {
             send();
         }
-        let me = self.clone();
-        self.post(move || {
-            me.invoke_callbacks(&monitor_intent, user, monitor_allow_list.as_deref());
-        });
+        if let Err(error) =
+            self.invoke_callbacks(&monitor_intent, user, monitor_allow_list.as_deref())
+        {
+            eprintln!("app host: package restarted monitors: {}", error.message);
+        }
     }
 
     /// `sendPackageDataClearedBroadcast` of `package` (of `uid`, -1 for
@@ -445,24 +315,7 @@ impl Writes {
                     .apps_filter
                     .visibility_allow_list(&state, ps, user)
             });
-        let mut extras = vec![
-            (EXTRA_UID, Value::Int(uid)),
-            (EXTRA_USER_HANDLE, Value::Int(user)),
-        ];
-        if is_restore {
-            extras.push((EXTRA_IS_RESTORE, Value::Bool(true)));
-        }
-        if instant {
-            extras.push((EXTRA_PACKAGE_NAME, Value::String(Some(package.into()))));
-        }
-        let data = Uri::preferred_opaque("package", package);
-        let intent = RawIntent::with_data(
-            Some(ACTION_PACKAGE_DATA_CLEARED),
-            Some(&data),
-            None,
-            FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
-            &extras,
-        );
+        let intent = data_cleared_intent(package, uid, user, is_restore, instant);
         let required: Vec<String> = if instant {
             vec![ACCESS_INSTANT_APPS.into()]
         } else {
@@ -479,8 +332,9 @@ impl Writes {
         for monitor in self.host.package_monitors.of(user) {
             monitor.package_data_cleared(&cleared);
         }
-        let me = self.clone();
-        self.post(move || me.invoke_callbacks(&intent, user, allow_list.as_deref()));
+        if let Err(error) = self.invoke_callbacks(&intent, user, allow_list.as_deref()) {
+            eprintln!("app host: data cleared monitors: {}", error.message);
+        }
     }
 
     /// `ProtectedPackages.isPackageStateProtected` in the app host: the
@@ -492,8 +346,7 @@ impl Writes {
         }
         let provisioning = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("config_deviceProvisioningPackage");
         Ok(Some(provisioning.as_deref() == Some(package)))
     }
@@ -517,7 +370,11 @@ impl Writes {
             let Some(ps) = state.packages.get(&package) else {
                 continue;
             };
-            self.package_changed(&package, true, components, uid(user, ps.app_id));
+            if let Err(error) =
+                self.package_changed(&package, true, components, uid(user, ps.app_id))
+            {
+                eprintln!("app host: pending package change: {}", error.message);
+            }
         }
     }
 
@@ -529,16 +386,10 @@ impl Writes {
         dont_kill: bool,
         components: Vec<String>,
         package_uid: i32,
-    ) {
-        let (state, resolution) = match self.host.packages() {
-            Ok(packages) => packages,
-            Err(e) => {
-                eprintln!("app host: {package} changed: {}", e.message);
-                return;
-            }
-        };
+    ) -> Result<(), Exception> {
+        let (state, resolution) = self.host.packages()?;
         let Some(ps) = state.packages.get(package).filter(|ps| ps.pkg.is_some()) else {
-            return;
+            return Ok(());
         };
         let user = user_id(package_uid);
         let instant = user_state(ps, user).instant_app;
@@ -586,8 +437,10 @@ impl Writes {
             for (components, target) in change.broadcasts(reduce, &not_exported, &shared) {
                 me.send(&change, &components, target.as_deref());
             }
-            me.notify_monitors(&change);
-        });
+            if let Err(error) = me.notify_monitors(&change) {
+                eprintln!("app host: package change monitors: {}", error.message);
+            }
+        })
     }
 
     /// `sendPackageChangedBroadcastWithPermissions` of `components`, to
@@ -628,235 +481,93 @@ impl Writes {
 
     /// `PackageMonitorCallbackHelper.notifyPackageChanged`: each monitor
     /// of the user that may see the package is sent the intent.
-    fn notify_monitors(&self, change: &Changed) {
+    fn notify_monitors(&self, change: &Changed) -> Result<(), Exception> {
         // The system's own monitors may see every package.
         let changed = PackageChanged {
             package: &change.package,
             user: change.user,
             components: &change.components,
+            removed: false,
         };
-        for monitor in self.host.package_monitors.of(change.user) {
-            monitor.package_changed(&changed);
-        }
+        let failure = self.host.notify_package_discoveries(&changed).err();
         self.invoke_callbacks(
             &change.monitor_intent(),
             change.user,
             change.allow_list.as_deref(),
-        );
+        )?;
+        failure.map_or(Ok(()), Err)
     }
 
-    /// `PackageMonitorCallbackHelper.doNotifyCallbacks`: each callback of
-    /// `user` whose uid may see the package (the system's always) is sent
-    /// `intent` (`invokeCallback`).
-    fn invoke_callbacks(&self, intent: &RawIntent, user: i32, allow_list: Option<&[i32]>) {
-        let mut request = Parcel::new();
-        remote_callback::SendResult {
-            data: Some(BundleOf(&callback_result(intent))),
-        }
-        .write(&mut request);
-        let targets: Vec<(Binder, Arc<Callback>)> = self
-            .monitors
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| m.user == USER_ALL || m.user == user)
-            .filter(|m| {
-                allow_list
-                    .is_none_or(|allowed| app_id(m.uid) == SYSTEM_UID || allowed.contains(&m.uid))
-            })
-            .map(|m| (m.binder, m.callback.clone()))
-            .collect();
-        for (binder, callback) in targets {
-            if callback
-                .transact(remote_callback::SEND_RESULT, &request)
-                .err()
-                == Some(DEAD_OBJECT)
-            {
-                self.unregister_monitor(Some(binder));
-            }
-        }
-    }
-
-    /// `registerPackageMonitorCallback`: the callback is kept for the
-    /// user `handleIncomingUser` resolves, until it dies.
-    pub(super) fn register_monitor(
-        self: &Arc<Self>,
-        call: &Call<'_>,
-        callback: Option<Binder>,
+    /// All public handles register with the session's native event registry.
+    pub(super) fn invoke_callbacks(
+        &self,
+        intent: &RawIntent,
         user: i32,
+        allow_list: Option<&[i32]>,
     ) -> Result<(), Exception> {
-        let uid = call.sender_euid as i32;
-        let user = self.host.incoming_user(uid, user, false)?;
-        let Some(binder) = callback else {
-            return Err(Exception::new(EX_NULL_POINTER, "callback"));
-        };
-        let mut monitors = self.monitors.lock().unwrap();
-        if monitors.iter().any(|m| m.binder == binder) {
-            return Ok(());
-        }
-        let callback = match binder {
-            Binder::Handle(handle) => {
-                let strong = Arc::new(self.host.process.strong(handle));
-                let me = Arc::downgrade(self);
-                let death = self.host.process.link_to_death(
-                    &strong,
-                    Box::new(move || {
-                        if let Some(me) = me.upgrade() {
-                            me.monitors.lock().unwrap().retain(|m| m.binder != binder);
-                        }
-                    }),
-                );
-                Callback::Remote(strong, death)
-            }
-            Binder::Local(ptr) => match self.host.process.local_service(ptr) {
-                Some(service) => Callback::Local(service),
-                None => return Err(Exception::new(EX_NULL_POINTER, "callback")),
-            },
-        };
-        monitors.push(Monitor {
-            binder,
-            callback: Arc::new(callback),
+        let bytes = callback_bundle(intent);
+        let action = intent
+            .intent
+            .action
+            .as_deref()
+            .expect("package event action");
+        self.host.package_system()?.package_events()?.notify(
+            action,
             user,
-            uid,
-        });
-        Ok(())
-    }
-
-    /// `unregisterPackageMonitorCallback`.
-    pub(super) fn unregister_monitor(&self, callback: Option<Binder>) {
-        let Some(binder) = callback else { return };
-        let mut monitors = self.monitors.lock().unwrap();
-        if let Some(at) = monitors.iter().position(|m| m.binder == binder)
-            && let Callback::Remote(strong, death) = &*monitors.remove(at).callback
-        {
-            self.host.process.clear_death(strong, *death);
-        }
+            allow_list.map(<[i32]>::to_vec),
+            Arc::new(move |_| {
+                let mut payload = Parcel::new();
+                payload.write_raw(&bytes, &[]);
+                Ok(Some(payload))
+            }),
+        )
     }
 }
 
-/// The checks and state changes of `settings` (of one user), each
-/// package's state as the settings before it leave it: each changed
-/// package's state and the settings that change one; `None` when the
-/// user does not exist. `protected` is `isPackageStateProtected`, `None`
-/// where not modelled.
-fn decide(
-    query: &Query<'_>,
-    settings: &[Setting],
-    calling_pid: i32,
-    protected: &dyn Fn(&str) -> Result<Option<bool>, Exception>,
-) -> Result<Result<Option<Decided>, Exception>, NotModelled> {
-    let mut after: BTreeMap<String, Enabled> = BTreeMap::new();
-    let mut changed = Vec::new();
-    for (i, setting) in settings.iter().enumerate() {
-        let policy = Policy {
-            protected: match protected(&setting.package) {
-                Ok(protected) => protected,
-                Err(e) => return Ok(Err(e)),
-            },
-            shell_restricted: None,
-            compressed_enabled: None,
-            suspension_cleanup: false,
-        };
-        let current = |ps: &PackageState, user: i32| {
-            after
-                .get(&ps.name)
-                .cloned()
-                .unwrap_or_else(|| Enabled::of(ps, user))
-        };
-        let was = query
-            .state
-            .packages
-            .get(&setting.package)
-            .map(|ps| current(ps, setting.user));
-        let enabled = match decide_with_policy(query, setting, calling_pid, &current, Some(policy))?
-        {
-            Ok(Some(enabled)) => enabled,
-            Ok(None) => return Ok(Ok(None)),
-            Err(e) => return Ok(Err(e)),
-        };
-        if was.as_ref() != Some(&enabled) {
-            after.insert(setting.package.clone(), enabled);
-            changed.push(i);
-        }
+/// The Java removal bridge's actions and extras, without PMS broadcast additions.
+fn removed_intents(
+    package: &str,
+    uid: i32,
+    data_removed: bool,
+    fully_removed: bool,
+    uid_removed: bool,
+) -> Vec<RawIntent> {
+    let data = Uri::preferred_opaque("package", package);
+    let mut intents = vec![RawIntent::with_data(
+        Some("android.intent.action.PACKAGE_REMOVED"),
+        Some(&data),
+        None,
+        0,
+        &[
+            (EXTRA_UID, Value::Int(uid)),
+            (
+                "android.intent.extra.DATA_REMOVED",
+                Value::Bool(data_removed),
+            ),
+            (EXTRA_DONT_KILL_APP, Value::Bool(false)),
+            ("android.intent.extra.USER_INITIATED", Value::Bool(true)),
+        ],
+    )];
+    if fully_removed && data_removed {
+        intents.push(RawIntent::with_data(
+            Some("android.intent.action.PACKAGE_FULLY_REMOVED"),
+            Some(&data),
+            None,
+            0,
+            &[
+                (EXTRA_UID, Value::Int(uid)),
+                ("android.intent.extra.DATA_REMOVED", Value::Bool(true)),
+            ],
+        ));
     }
-    Ok(Ok(Some((after, changed))))
-}
-
-/// Writes `after`, the packages' changed states in `user`, to its
-/// `package-restrictions.xml` as `Settings.writePackageRestrictionsLPr`
-/// writes them: the states written (a failed write may have written its
-/// file), and the error.
-fn persist(
-    store: &mut Store,
-    user: i32,
-    after: &BTreeMap<String, Enabled>,
-) -> (Vec<(String, Enabled)>, Option<Exception>) {
-    let mut written = Vec::new();
-    for (package, enabled) in after {
-        if let Err(e) = store.commit_enabled(package, user as u32, enabled) {
-            if e.committed {
-                written.push((package.clone(), enabled.clone()));
-            }
-            return (
-                written,
-                Some(Exception::new(
-                    EX_ILLEGAL_STATE,
-                    format!("package restrictions: {}", e.message),
-                )),
-            );
-        }
-        written.push((package.clone(), enabled.clone()));
+    if uid_removed {
+        intents.push(RawIntent::new(
+            "android.intent.action.UID_REMOVED",
+            0,
+            &[(EXTRA_UID, Value::Int(uid))],
+        ));
     }
-    (written, None)
-}
-
-/// `before` with `written`, packages' states in `user`.
-fn applied(before: &State, user: i32, written: &[(String, Enabled)]) -> State {
-    let mut state = before.clone();
-    for (package, enabled) in written {
-        Plan {
-            package: package.clone(),
-            user: Some(user),
-            change: Change::Enabled(enabled.clone()),
-        }
-        .apply(&mut state);
-    }
-    state
-}
-
-/// The changes of the settings `changed` to send now, by package, and
-/// whether the others were added to `pending` (`mPendingBroadcasts`): a
-/// component's class, or the package's name for its own state.
-fn partition(
-    settings: &[Setting],
-    changed: &[usize],
-    pending: &mut Pending,
-) -> (Vec<(String, Vec<String>)>, bool) {
-    let mut send_now: Vec<(String, Vec<String>)> = Vec::new();
-    let mut deferred = false;
-    for setting in changed.iter().map(|&i| &settings[i]) {
-        let name = setting
-            .class
-            .clone()
-            .unwrap_or_else(|| setting.package.clone());
-        let key = (setting.user, setting.package.clone());
-        if setting.flags & DONT_KILL_APP == 0 {
-            let at = match send_now.iter().position(|(p, _)| *p == setting.package) {
-                Some(at) => at,
-                None => {
-                    send_now.push((setting.package.clone(), Vec::new()));
-                    send_now.len() - 1
-                }
-            };
-            add(&mut send_now[at].1, name);
-            // A pending one is purged: this one is sent now.
-            pending.remove(&key);
-        } else {
-            add(pending.entry(key).or_default(), name);
-            deferred = true;
-        }
-    }
-    (send_now, deferred)
+    intents
 }
 
 /// `ArrayList.add` unless `list.contains(name)`.
@@ -1007,31 +718,213 @@ fn callback_result(intent: &RawIntent) -> [(&'static str, Value); 1] {
     )]
 }
 
-/// A bundle of `entries`, as `Bundle.writeToParcel` writes it.
-struct BundleOf<'a>(&'a [(&'a str, Value)]);
+/// `NativePackageMonitorPayload.serialize`: the callback's Intent, with
+/// its uid translated to the receiving user, in the callback Bundle.
+pub(super) fn monitor_result(
+    action: Option<&str>,
+    package: Option<&str>,
+    user: i32,
+    package_uid: i32,
+    replacing: bool,
+) -> Vec<u8> {
+    let package_uid = if package_uid >= 0 && user_id(package_uid) != user {
+        user.wrapping_mul(PER_USER_RANGE as i32)
+            .wrapping_add(app_id(package_uid))
+    } else {
+        package_uid
+    };
+    let data = package.map(|p| Uri::preferred_opaque("package", p));
+    let intent = RawIntent::with_data(
+        action,
+        data.as_ref(),
+        None,
+        0,
+        &[
+            (EXTRA_UID, Value::Int(package_uid)),
+            ("android.intent.extra.REPLACING", Value::Bool(replacing)),
+            (EXTRA_USER_HANDLE, Value::Int(user)),
+        ],
+    );
+    callback_bundle(&intent)
+}
 
-impl WriteParcelable for BundleOf<'_> {
-    fn write_to(&self, p: &mut Parcel) {
-        bundle::write(p, self.0);
+pub(super) fn callback_bundle(intent: &RawIntent) -> Vec<u8> {
+    let mut p = Parcel::new();
+    bundle::write(&mut p, &callback_result(intent));
+    p.data().to_vec()
+}
+
+/// `PackageInternalEventsBridge.prepareRestarted` and
+/// `PackageManagerService.sendPackageRestartedBroadcast`'s Intent.
+pub(super) fn restarted_intent(
+    package: &str,
+    uid: i32,
+    flags: i32,
+    stay_stopped: bool,
+) -> RawIntent {
+    let mut extras = vec![
+        (EXTRA_UID, Value::Int(uid)),
+        (EXTRA_USER_HANDLE, Value::Int(user_id(uid))),
+    ];
+    if stay_stopped {
+        extras.push((EXTRA_TIME, Value::Long(super::alarm_service::elapsed_ms())));
     }
+    RawIntent::with_data(
+        Some(ACTION_PACKAGE_RESTARTED),
+        Some(&Uri::preferred_opaque("package", package)),
+        None,
+        flags | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
+        &extras,
+    )
+}
+
+/// `PackageInternalEventsBridge.prepareDataCleared` and
+/// `PackageManagerService.sendPackageDataClearedBroadcast`'s Intent.
+pub(super) fn data_cleared_intent(
+    package: &str,
+    uid: i32,
+    user: i32,
+    restore: bool,
+    instant: bool,
+) -> RawIntent {
+    let mut extras = vec![
+        (EXTRA_UID, Value::Int(uid)),
+        (EXTRA_USER_HANDLE, Value::Int(user)),
+    ];
+    if restore {
+        extras.push((EXTRA_IS_RESTORE, Value::Bool(true)));
+    }
+    if instant {
+        extras.push((EXTRA_PACKAGE_NAME, Value::String(Some(package.into()))));
+    }
+    RawIntent::with_data(
+        Some(ACTION_PACKAGE_DATA_CLEARED),
+        Some(&Uri::preferred_opaque("package", package)),
+        None,
+        FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
+        &extras,
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    use aim_binder_host::parcel::{EX_SECURITY, Reader};
+    use aim_binder_host::parcel::Reader;
 
     use super::*;
     use crate::package::apps_filter::{AppsFilter, Config};
-    use crate::package::model::{PackageUserState, User};
+    use crate::package::model::{PackageUserState, State, User};
     use crate::package::pkg::{Activity, AndroidPackage};
 
     const APP: &str = "org.example.app";
     const OTHER: &str = "org.example.other";
     const MAIN: &str = "org.example.app.Main";
     const RECEIVER: &str = "org.example.app.Receiver";
+
+    #[test]
+    fn removal_intents_follow_the_java_actions_data_and_extras() {
+        let intents = removed_intents(APP, 10100, true, true, true);
+        assert_eq!(
+            intents
+                .iter()
+                .map(|i| i.intent.action.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "android.intent.action.PACKAGE_REMOVED",
+                "android.intent.action.PACKAGE_FULLY_REMOVED",
+                "android.intent.action.UID_REMOVED"
+            ]
+        );
+        assert_eq!(
+            intents[0].intent.data.as_ref().unwrap().as_str(),
+            "package:org.example.app"
+        );
+        assert_eq!(intents[1].intent.data, intents[0].intent.data);
+        assert!(intents[2].intent.data.is_none());
+        let extras = intents[0].test_extras();
+        assert_eq!(extras.len(), 4);
+        assert_eq!(extras[EXTRA_UID], Value::Int(10100));
+        assert_eq!(
+            extras["android.intent.extra.DATA_REMOVED"],
+            Value::Bool(true)
+        );
+        assert_eq!(extras[EXTRA_DONT_KILL_APP], Value::Bool(false));
+        assert_eq!(
+            extras["android.intent.extra.USER_INITIATED"],
+            Value::Bool(true)
+        );
+        assert_eq!(intents[1].test_extras().len(), 2);
+        assert_eq!(intents[2].test_extras().len(), 1);
+        assert_eq!(removed_intents(APP, 10100, false, true, false).len(), 1);
+        assert_eq!(removed_intents(APP, 10100, true, false, false).len(), 1);
+    }
+
+    struct RemovalSeen(Mutex<Vec<(String, i32, bool)>>);
+    impl PackageMonitor for RemovalSeen {
+        fn package_changed(&self, change: &PackageChanged<'_>) -> Result<(), Exception> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((change.package.into(), change.user, change.removed));
+            Ok(())
+        }
+    }
+    struct RemovalCallback(std::sync::mpsc::Sender<RawIntent>);
+    impl aim_binder_host::local::Service for RemovalCallback {
+        fn descriptor(&self) -> &str {
+            "android.os.IRemoteCallback"
+        }
+        fn transact(
+            &self,
+            call: &mut aim_binder_host::local::Call<'_>,
+        ) -> aim_binder_host::local::Reply {
+            call.data.enforce_interface(self.descriptor())?;
+            assert_eq!(call.data.read_i32()?, 1);
+            let values = bundle::read(&mut call.data)?.unwrap();
+            let Value::Lazy { start, .. } = values[EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT] else {
+                panic!("intent callback");
+            };
+            call.data.set_position(start);
+            assert_eq!(
+                call.data.read_string16()?.as_deref(),
+                Some("android.content.Intent")
+            );
+            self.0
+                .send(aim_service_aidl::ReadParcelable::read_from(&mut call.data)?)
+                .unwrap();
+            Ok(Parcel::new())
+        }
+    }
+
+    #[test]
+    fn removal_notifies_native_and_callback_monitors_once() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let native = Arc::new(RemovalSeen(Mutex::default()));
+            host.package_monitors.register(
+                0,
+                Arc::downgrade(&(native.clone() as Arc<dyn PackageMonitor>)),
+            );
+            let (send, receive) = std::sync::mpsc::channel();
+            let callback = host.process.add_service(Arc::new(RemovalCallback(send)));
+            let events = host.package_system().unwrap().package_events().unwrap();
+            events.register(Some(callback), 0, 1000).unwrap();
+            Writes::new(host.clone())
+                .removed("p", 10100, 0, true, true, true)
+                .unwrap();
+            assert!(events.wait(2000, false).unwrap());
+            assert_eq!(*native.0.lock().unwrap(), [("p".into(), 0, true)]);
+            let actions: Vec<_> = receive
+                .try_iter()
+                .map(|i| i.intent.action.unwrap())
+                .collect();
+            assert_eq!(
+                actions,
+                [
+                    "android.intent.action.PACKAGE_REMOVED",
+                    "android.intent.action.UID_REMOVED"
+                ]
+            );
+        });
+    }
 
     fn component(name: &str, exported: bool) -> Activity {
         let mut a = Activity::default();
@@ -1082,185 +975,6 @@ mod tests {
             )]),
             ..State::default()
         }
-    }
-
-    fn setting(class: Option<&str>, new_state: i32, flags: i32) -> Setting {
-        Setting {
-            package: APP.into(),
-            class: class.map(Into::into),
-            new_state,
-            flags,
-            user: 0,
-            calling_package: APP.into(),
-        }
-    }
-
-    fn decided(
-        state: &State,
-        uid: i32,
-        settings: &[Setting],
-        protected: Option<bool>,
-    ) -> Result<Result<Option<Decided>, Exception>, NotModelled> {
-        let filter = AppsFilter::new(state, &Config::default()).unwrap();
-        let query = Query {
-            state,
-            filter: &filter,
-            calling_uid: uid,
-        };
-        decide(&query, settings, 77, &|_| Ok(protected))
-    }
-
-    /// `setEnabledSettings`: an app changes its own components; another
-    /// without CHANGE_COMPONENT_ENABLED_STATE may not, and one with it may
-    /// not change a protected package.
-    #[test]
-    fn an_app_changes_its_own_components_only() {
-        let state = state();
-        let settings = [
-            setting(Some(RECEIVER), 2, DONT_KILL_APP),
-            setting(Some(MAIN), 0, 0),
-        ];
-        let (after, changed) = decided(&state, 10100, &settings, None)
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        // Restoring the default of a component in neither list changes nothing.
-        assert_eq!(changed, [0]);
-        assert_eq!(
-            after[APP].disabled_components,
-            [RECEIVER.to_string()].into()
-        );
-        let e = decided(&state, 10101, &settings, Some(false))
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(e.code, EX_SECURITY);
-        assert_eq!(
-            e.message,
-            format!(
-                "Attempt to change component state; pid=77, uid=10101, component=ComponentInfo{{{APP}/{RECEIVER}}}"
-            )
-        );
-        // One that holds the permission and sees the package (`<queries>`).
-        let mut granted = state.clone();
-        let other = granted.packages.get_mut(OTHER).unwrap();
-        other.users.get_mut(&0).unwrap().granted_permissions =
-            vec!["android.permission.CHANGE_COMPONENT_ENABLED_STATE".into()];
-        Arc::make_mut(other.pkg.as_mut().unwrap()).queries_packages = vec![APP.into()];
-        let e = decided(&granted, 10101, &settings, Some(true))
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(
-            e.message,
-            format!("Cannot disable a protected package: {APP}")
-        );
-        assert!(decided(&granted, 10101, &settings, None).is_err());
-        assert_eq!(
-            decided(&granted, 10101, &settings, Some(false))
-                .unwrap()
-                .unwrap()
-                .unwrap()
-                .1,
-            [0]
-        );
-        // A user that does not exist: nothing to do.
-        let mut absent = setting(Some(RECEIVER), 2, 0);
-        absent.user = 10;
-        assert!(
-            decided(&state, 10100, &[absent], None)
-                .unwrap()
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    /// A disposable `/data` with the package's settings and user 0's
-    /// restrictions.
-    struct Data(PathBuf);
-
-    impl Data {
-        fn new() -> Data {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "aim-package-writes-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir_all(path.join("system/users/0")).unwrap();
-            std::fs::write(
-                path.join("system/packages.xml"),
-                format!("<packages><package name='{APP}' codePath='/data/app/example' userId='10100' it='12' /></packages>"),
-            )
-            .unwrap();
-            std::fs::write(
-                path.join("system/users/0/package-restrictions.xml"),
-                format!("<package-restrictions><pkg name='{APP}' stopped='true' inst='true' /></package-restrictions>"),
-            )
-            .unwrap();
-            Data(path)
-        }
-    }
-
-    impl Drop for Data {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
-
-    /// The change is written to `package-restrictions.xml` (ABX) as the
-    /// original writes it, and the model's state takes it.
-    #[test]
-    fn a_change_is_persisted_and_applied() {
-        let data = Data::new();
-        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
-        let enabled = Enabled {
-            disabled_components: [RECEIVER.to_string()].into(),
-            ..Enabled::default()
-        };
-        let after = BTreeMap::from([(APP.to_string(), enabled.clone())]);
-        let (written, error) = persist(&mut store, 0, &after);
-        assert!(error.is_none());
-        assert_eq!(written, [(APP.to_string(), enabled)]);
-        let path = data.0.join("system/users/0/package-restrictions.xml");
-        assert!(
-            std::fs::read(&path)
-                .unwrap()
-                .starts_with(aim_android_xml::abx::MAGIC)
-        );
-        let reread = crate::package::State::read(&data.0, &[0]).unwrap().unwrap();
-        let user = &reread.users[0].1.restrictions.packages[0].1;
-        assert!(user.stopped && user.installed);
-        assert_eq!(
-            user.disabled_components.as_deref(),
-            Some([RECEIVER.to_string()].as_slice())
-        );
-        let before = state();
-        let applied = applied(&before, 0, &written);
-        assert_eq!(
-            user_state(&applied.packages[APP], 0).disabled_components,
-            [RECEIVER.to_string()]
-        );
-        assert_eq!(applied.packages[OTHER], before.packages[OTHER]);
-    }
-
-    /// `DONT_KILL_APP` defers a change; one without it is sent now and
-    /// purges the package's deferred one.
-    #[test]
-    fn dont_kill_app_defers_the_broadcast() {
-        let settings = [
-            setting(Some(RECEIVER), 2, DONT_KILL_APP),
-            setting(Some(MAIN), 2, 0),
-            setting(None, 2, 0),
-        ];
-        let mut pending = BTreeMap::new();
-        let (now, deferred) = partition(&settings, &[0], &mut pending);
-        assert!(now.is_empty() && deferred);
-        assert_eq!(pending[&(0, APP.to_string())], [RECEIVER]);
-        let (now, deferred) = partition(&settings, &[1, 2], &mut pending);
-        assert!(!deferred && pending.is_empty());
-        assert_eq!(
-            now,
-            [(APP.to_string(), vec![MAIN.to_string(), APP.to_string()])]
-        );
     }
 
     fn changed(components: &[&str], allow_list: Option<Vec<i32>>) -> Changed {
@@ -1393,12 +1107,13 @@ mod tests {
     struct Seen(Mutex<Vec<(String, i32, bool)>>);
 
     impl PackageMonitor for Seen {
-        fn package_changed(&self, change: &PackageChanged<'_>) {
+        fn package_changed(&self, change: &PackageChanged<'_>) -> Result<(), Exception> {
             self.0.lock().unwrap().push((
                 change.package.into(),
                 change.user,
                 change.some_packages_changed(),
             ));
+            Ok(())
         }
     }
 
@@ -1428,11 +1143,12 @@ mod tests {
             package: "org.example.app",
             user: 0,
             components: &components,
+            removed: false,
         };
         let of_user_0 = monitors.of(0);
         assert_eq!(of_user_0.len(), 1);
         for m in of_user_0 {
-            m.package_changed(&changed);
+            m.package_changed(&changed).unwrap();
         }
         assert_eq!(
             *all.0.lock().unwrap(),
@@ -1452,7 +1168,23 @@ mod tests {
             package: "org.example.app",
             user: 0,
             components: &components,
+            removed: false,
         };
         assert!(!changed.some_packages_changed());
+    }
+}
+
+impl AppHost {
+    pub(super) fn notify_package_discoveries(
+        &self,
+        change: &PackageChanged<'_>,
+    ) -> Result<(), Exception> {
+        let mut failure = self.refresh_audio_permissions().err();
+        for monitor in self.package_monitors.of(change.user) {
+            if let Err(error) = monitor.package_changed(change) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 }

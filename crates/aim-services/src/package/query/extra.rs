@@ -1876,7 +1876,7 @@ impl Query<'_> {
         Ok(Ok(None))
     }
 
-    pub(super) fn instrumentations(
+    pub(crate) fn instrumentations(
         &self,
         target: Option<&str>,
         flags: i64,
@@ -4065,7 +4065,7 @@ impl aim_service_aidl::WriteParcelable for Library {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Instrumentation(pub(super) info::InstrumentationInfo);
+pub(crate) struct Instrumentation(pub(crate) info::InstrumentationInfo);
 impl aim_service_aidl::WriteParcelable for Instrumentation {
     fn write_to(&self, p: &mut Parcel) {
         self.0.write(p);

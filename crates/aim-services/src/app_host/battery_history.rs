@@ -1040,9 +1040,13 @@ pub fn paths(system: &Path) -> (PathBuf, PathBuf) {
 pub(super) mod tests {
     use super::*;
 
-    pub(in crate::app_host) fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("aim-battery-history-{name}-{}", std::process::id()));
+    pub(crate) fn temp_dir(name: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "aim-battery-history-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

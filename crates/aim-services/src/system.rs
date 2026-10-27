@@ -47,6 +47,10 @@ mod internal_suspension;
 #[cfg(test)]
 #[path = "system_package_internal_usage_tests.rs"]
 mod internal_usage_tests;
+#[cfg(test)]
+pub(crate) use internal_usage_tests::host_mutations::{
+    install_publication, with_discovery_session,
+};
 mod legacy_domain;
 #[path = "system_package_original_domains.rs"]
 pub mod original_domains;
@@ -117,6 +121,7 @@ use aim_service_aidl::{
 
 use crate::mirror::Mirror;
 use crate::nonces::Nonces;
+use crate::package::bootstrap::BootPolicy;
 
 /// The nonce of `PermissionManager`'s caches (`getPackageInfoCacheKey`
 /// with `pic_separate_permission_notifications`, on in this image).
@@ -176,6 +181,36 @@ pub enum ServiceOwner {
     Local(LocalService),
 }
 impl ServiceOwner {
+    /// A node `reply` carries, retained in the process that received it:
+    /// another process's, or this process's own.
+    pub fn retain(
+        reply: &Received,
+        binder: Binder,
+    ) -> std::result::Result<Self, aim_binder_host::parcel::StatusCode> {
+        match binder {
+            Binder::Local(ptr) => reply
+                .local_service(ptr)
+                .map(Self::Local)
+                .ok_or(aim_binder_host::parcel::BAD_VALUE),
+            remote => reply
+                .retain_remote_binder(remote)
+                .map(|strong| Self::Remote(Arc::new(strong))),
+        }
+    }
+
+    /// An internal owner call, with the service process's identity. Remote
+    /// Binder calls already carry it; a local BBinder call otherwise inherits
+    /// the public caller. Explicit caller arguments remain unchanged.
+    pub fn transact_as_owner(
+        &self,
+        code: u32,
+        data: &Parcel,
+        oneway: bool,
+    ) -> std::result::Result<Received, aim_binder_host::parcel::StatusCode> {
+        let _identity = aim_binder_host::local::clear_calling_identity();
+        self.transact(code, data, oneway)
+    }
+
     pub fn transact(
         &self,
         code: u32,
@@ -189,6 +224,16 @@ impl ServiceOwner {
     }
 }
 
+/// How a diagnostic names the node: its handle, or this process's own.
+impl std::fmt::Display for ServiceOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Remote(service) => write!(f, "handle={}", service.handle),
+            Self::Local(_) => f.write_str("local"),
+        }
+    }
+}
+
 /// The services whose originals are added with `allowIsolated` at
 /// `android-16.0.0_r1`: `activity` (`ActivityManagerService
 /// .setSystemProcess`), `display` (`DisplayManagerService.onStart`),
@@ -197,6 +242,8 @@ const ALLOW_ISOLATED: &[&str] = &["activity", "display", "webviewupdate"];
 
 pub struct System {
     diagnostic_self: Weak<Self>,
+    native_permissions:
+        std::sync::OnceLock<Weak<crate::app_host::permission_manager::PermissionManager>>,
     process: Arc<LocalProcess>,
     services: Mutex<HashMap<&'static str, Arc<Strong>>>,
     listeners: Listeners,
@@ -541,6 +588,23 @@ struct Listeners {
 type Result<T> = std::result::Result<T, Exception>;
 
 impl System {
+    pub(crate) fn set_native_permissions(
+        &self,
+        owner: &Arc<crate::app_host::permission_manager::PermissionManager>,
+    ) {
+        let retained = self
+            .native_permissions
+            .get_or_init(|| Arc::downgrade(owner));
+        assert!(
+            retained.ptr_eq(&Arc::downgrade(owner)),
+            "native permission owner replaced"
+        );
+    }
+    pub(crate) fn native_permissions(
+        &self,
+    ) -> Option<Arc<crate::app_host::permission_manager::PermissionManager>> {
+        self.native_permissions.get().and_then(Weak::upgrade)
+    }
     /// `ops` are the app ops the service decides by.
     pub fn new(process: Arc<LocalProcess>, ops: &[i32]) -> Arc<Self> {
         let (notes, noted) = mpsc::channel::<Note>();
@@ -575,6 +639,7 @@ impl System {
             };
             Self {
                 diagnostic_self: this.clone(),
+                native_permissions: std::sync::OnceLock::new(),
                 process: process.clone(),
                 services: Mutex::new(HashMap::new()),
                 listeners,
@@ -854,9 +919,15 @@ impl System {
 
     /// Synchronous early package-owner attachment, independent of late listeners.
     pub fn attach_package_bootstrap(self: &Arc<Self>, handle: u32) -> Result<()> {
-        let bridge = Arc::new(crate::package::bootstrap::Bridge::new(
+        self.attach_package_bootstrap_owner(ServiceOwner::Remote(Arc::new(
             self.process.strong(handle),
-        )?);
+        )))
+    }
+
+    /// The package bootstrap bridge attached: system_server's, or this
+    /// process's own where it serves the bridge.
+    pub fn attach_package_bootstrap_owner(self: &Arc<Self>, owner: ServiceOwner) -> Result<()> {
+        let bridge = Arc::new(crate::package::bootstrap::Bridge::new(owner)?);
         let mut signing = self.package_signing.lock().unwrap();
         match signing.as_ref() {
             Some(owner) if owner.is_debuggable() != bridge.signing_debuggable => {
@@ -1084,8 +1155,12 @@ impl System {
             }
             drop(previous);
         }
+        // This process's own bridge dies with it.
+        let ServiceOwner::Remote(owner) = &bridge.owner else {
+            return Ok(());
+        };
         self.process.link_to_death(
-            &bridge.owner,
+            owner,
             Box::new(move || {
                 if let Some(attached) = attached.upgrade() {
                     attached.died();
@@ -3261,7 +3336,7 @@ impl System {
                 "enable owner trailing bytes",
             ));
         }
-        let transport = reply.retain_remote_binder(binder).map_err(|status| {
+        let transport = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("enable owner lifetime: {status}"),
@@ -3355,6 +3430,35 @@ impl System {
         code: u32,
         write: impl FnOnce(&mut Parcel),
     ) -> Result<Strong> {
+        match self.package_bootstrap_node_with(bridge, code, write)? {
+            // A new reference: the leaf's only owner.
+            ServiceOwner::Remote(owner) => Arc::try_unwrap(owner).map_err(|_| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package owner reference shared",
+                )
+            }),
+            ServiceOwner::Local(_) => Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "package owner is this process's own node",
+            )),
+        }
+    }
+    /// The bridge's leaf `code`, another process's node or, where this
+    /// process serves the bridge, its own.
+    pub(crate) fn package_bootstrap_node(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        code: u32,
+    ) -> Result<ServiceOwner> {
+        self.package_bootstrap_node_with(bridge, code, |_| {})
+    }
+    pub(crate) fn package_bootstrap_node_with(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        code: u32,
+        write: impl FnOnce(&mut Parcel),
+    ) -> Result<ServiceOwner> {
         self.check_package_bootstrap(bridge)?;
         let mut request = Parcel::new();
         request.write_interface_token(
@@ -3363,7 +3467,7 @@ impl System {
         write(&mut request);
         let reply = bridge
             .owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|status| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
@@ -3397,7 +3501,7 @@ impl System {
                 "package owner reply trailing bytes",
             ));
         }
-        let owner = reply.retain_remote_binder(binder).map_err(|status| {
+        let owner = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("package owner lifetime: {status}"),
@@ -3464,13 +3568,13 @@ impl System {
         kernel: Arc<crate::package::kernel_mappings::Owner>,
     ) -> Result<crate::package::installer::internal_installs::Worker> {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bootstrap;
-        let permission = self
-            .package_bootstrap_binder_leaf(bridge, bootstrap::GET_PERMISSION_PERSISTENCE_BRIDGE)?;
+        let permission =
+            self.package_bootstrap_node(bridge, bootstrap::GET_PERMISSION_PERSISTENCE_BRIDGE)?;
         let persistence =
             internal_persistence::Runtime::start(self, bridge.clone(), permission, kernel)?;
         self.install_internal_persistence(persistence)?;
-        let apex = self
-            .package_bootstrap_binder_leaf(bridge, bootstrap::GET_PACKAGE_APEX_UNINSTALL_BRIDGE)?;
+        let apex =
+            self.package_bootstrap_node(bridge, bootstrap::GET_PACKAGE_APEX_UNINSTALL_BRIDGE)?;
         self.initialize_package_internal_installs(bridge, apex)
     }
 
@@ -4884,7 +4988,7 @@ impl System {
                 "confirmation leaf trailing bytes",
             ));
         }
-        let leaf = reply.retain_remote_binder(binder).map_err(|status| {
+        let leaf = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("confirmation leaf lifetime: {status}"),
@@ -5083,13 +5187,13 @@ impl System {
                 "install preparation trailing bytes",
             ));
         }
-        let staged = reply.retain_remote_binder(binder).map_err(|status| {
+        let staged = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("staged owner lifetime: {status}"),
             )
         })?;
-        let stream = reply.retain_remote_binder(binder).map_err(|status| {
+        let stream = ServiceOwner::retain(&reply, binder).map_err(|status| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("stream owner lifetime: {status}"),
@@ -5157,9 +5261,22 @@ impl System {
                     drop(state);
                     continue;
                 }
-                current.set_queries(Some(capture));
-                if let Some(page) = &current.version_page {
-                    page.publish(latest.version());
+                let access = capture.context().access.clone();
+                let publish = || {
+                    current.set_queries(Some(capture));
+                    if let Some(page) = &current.version_page {
+                        page.publish(latest.version());
+                    }
+                    Ok::<(), String>(())
+                };
+                if let Some(owner) = system.native_permissions() {
+                    owner.commit_install(
+                        &latest,
+                        &access.ok_or("install capture access unavailable")?,
+                        publish,
+                    )?;
+                } else {
+                    publish()?;
                 }
                 state.version = latest.version();
                 break;
@@ -5761,7 +5878,6 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         store: &mut crate::package::owner::Store,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
-        inodes: &std::collections::BTreeMap<u32, aim_storage::guest_inode::GuestInode>,
         now: std::time::Instant,
     ) -> std::result::Result<Vec<u32>, crate::package::owner::runtime_metadata::FlushError> {
         let fail = |error: Exception| crate::package::owner::runtime_metadata::FlushError {
@@ -5844,7 +5960,6 @@ impl System {
                     &bridge,
                     &mut store.lock().unwrap(),
                     &capture,
-                    &std::collections::BTreeMap::new(),
                     now,
                 )
             })
@@ -7573,8 +7688,7 @@ impl System {
             system: self,
             bridge: bridge.clone(),
         };
-        let leaf =
-            self.package_bootstrap_binder_leaf(&bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
+        let leaf = self.package_bootstrap_node(&bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
         let initial = package_boot_scan::InitialOwner::new(leaf);
         let config = crate::package::system_config::SystemConfig::read(&image.image, &|name| {
             initial.property_value(name)
@@ -7624,8 +7738,7 @@ impl System {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as api;
         self.check_package_bootstrap(bridge)?;
         let image = self.native_package_image()?;
-        let leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
+        let leaf = self.package_bootstrap_node(bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
         let initial = package_boot_scan::InitialOwner::new(leaf);
         let area = self
             .package_property_area
@@ -7639,7 +7752,7 @@ impl System {
                 )
             })?;
         let properties = initial.runtime_properties(area);
-        let configuration_leaf = self.package_bootstrap_binder_leaf_with(
+        let configuration_leaf = self.package_bootstrap_node_with(
             bridge,
             api::GET_PACKAGE_BOOT_CONFIGURATION_LEAF,
             |parcel| parcel.write_bool(factory_test),
@@ -7700,7 +7813,7 @@ impl System {
             crate::system_package_persistence_init::construct_package_persistence_owned(
                 self, bridge, &inputs, &config,
             )?;
-        let ce = self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_LIFECYCLE_LEAF)?;
+        let ce = self.package_bootstrap_node(bridge, api::GET_PACKAGE_LIFECYCLE_LEAF)?;
         let mut begun = self.begin_native_package_scan(
             bridge,
             recovered.prepared,
@@ -7727,8 +7840,7 @@ impl System {
                 "initial scan uses another configured image owner",
             ));
         }
-        let context =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_BOOT_CONTEXT_LEAF)?;
+        let context = self.package_bootstrap_node(bridge, api::GET_PACKAGE_BOOT_CONTEXT_LEAF)?;
         begun.bind_original_context(context)?;
         let early_configuration = self
             .boot_configuration_for(bridge)?
@@ -7887,37 +7999,82 @@ impl System {
         base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let update = base
-            .prepare_permission_refresh(bridge)
-            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state
-            .current
-            .as_mut()
-            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
-            .ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "permission refresh bootstrap changed",
+        let failure =
+            |message: &str| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
+        loop {
+            let (capture, canonical) = {
+                let state = self.package_bootstrap.lock().unwrap();
+                let current = state
+                    .current
+                    .as_ref()
+                    .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+                    .ok_or_else(|| failure("permission refresh bootstrap changed"))?;
+                let capture = current
+                    .queries
+                    .clone()
+                    .ok_or_else(|| failure("permission refresh capture unavailable"))?;
+                if !base.scan().same_lineage(capture.scan()) {
+                    return Err(failure("permission refresh epoch changed"));
+                }
+                let canonical = current
+                    .snapshots
+                    .as_ref()
+                    .ok_or_else(|| failure("permission refresh scan unavailable"))?
+                    .capture();
+                (capture, canonical)
+            };
+            // RPCs can reenter the permission owner; hold no publication lock.
+            let access = self
+                .native_permissions()
+                .map(|owner| owner.retained_access())
+                .transpose()?;
+            let (view, update) = if Arc::ptr_eq(capture.scan(), &canonical) {
+                let update = capture
+                    .prepare_permission_refresh(bridge, access.clone())
+                    .map_err(|cause| failure(&cause))?;
+                (update.capture.clone(), Some(update))
+            } else {
+                (
+                    capture
+                        .permission_view(capture.scan().clone(), bridge, access)
+                        .map_err(|cause| failure(&cause))?,
+                    None,
                 )
-            })?;
-        if !current
-            .queries
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, base))
-        {
-            return Err(Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                "permission refresh generation changed",
-            ));
+            };
+            let mut state = self.package_bootstrap.lock().unwrap();
+            let current = state
+                .current
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+                .ok_or_else(|| failure("permission refresh bootstrap changed"))?;
+            if !current
+                .queries
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, &capture))
+                || !current
+                    .snapshots
+                    .as_ref()
+                    .is_some_and(|snapshots| Arc::ptr_eq(&snapshots.capture(), &canonical))
+            {
+                continue;
+            }
+            let access = view.context().access.clone();
+            let publish = || self.publish_internal_query_view(&mut state, &canonical, view, update);
+            let published = if let Some(owner) = self.native_permissions() {
+                let access =
+                    access.ok_or_else(|| failure("permission refresh access unavailable"))?;
+                let Some(result) = owner.if_current_access(&access, publish) else {
+                    continue;
+                };
+                result?
+            } else {
+                publish()?
+            };
+            if !published {
+                continue;
+            }
+            return Ok(());
         }
-        let update = current.publish_update(update)?;
-        current.set_queries(Some(update.capture.clone()));
-        if let Some(page) = &current.version_page {
-            page.publish(update.capture.scan().version());
-        }
-        state.version = update.capture.scan().version();
-        Ok(())
     }
 }
 

@@ -40,6 +40,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::android_app_iurigrantsmanager as ugm;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::activity_user;
 use super::content_service::ParcelUri;
 use super::kept::RawIntent;
 use super::{
@@ -1837,8 +1838,9 @@ impl UriGrantsManager {
             call.sender_euid as i32,
             target_user,
             false,
-            true,
+            activity_user::AllowMode::FullOnly,
             Some("grantUriPermissionFromOwner"),
+            None,
         )?;
         let owner = owner.map_or("null".to_string(), |b| format!("{b:?}"));
         Err(Exception::illegal_argument(format!(

@@ -33,6 +33,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::activity_user::AllowMode;
 use super::app_op_infos::{APP_OP_INFOS, NUM_OP};
 use super::appops_service::{self, MODE_ALLOWED, MODE_IGNORED};
 use super::kept::{By, KeptBundle, RawBundle, RawIntent};
@@ -657,14 +658,21 @@ impl Broadcasts {
         let Some((start_seq, package, uid, pid)) = host.app_of_thread(args.caller) else {
             return Ok(None);
         };
-        let caller_package = args.caller_package.unwrap_or_default();
+        let caller_package = args.caller_package.as_deref().unwrap_or_default();
         if !is_core(uid) && caller_package != package {
             return Err(Exception::security(format!(
                 "Given caller package {caller_package} is not running in process {pid}:{package}/{uid}"
             )));
         }
-        let instant_app = host.instant_app(&caller_package, uid / PER_USER_RANGE as i32)?;
-        let user = host.incoming_user(uid, args.user, false)?;
+        let instant_app = host.instant_app(caller_package, uid / PER_USER_RANGE as i32)?;
+        let user = host.handle_incoming_user(
+            uid,
+            args.user,
+            true,
+            AllowMode::FullOnly,
+            Some("registerReceiver"),
+            args.caller_package.as_deref(),
+        )?;
         // System internals hear these before apps unless they chose.
         // (An unset priority is no system one.)
         if is_core(uid) && filter.priority == 0 {
@@ -823,7 +831,7 @@ impl Broadcasts {
             .unwrap();
         receiver.filters.push(Filter {
             filter,
-            package: caller_package,
+            package: caller_package.to_string(),
             feature_id: args.feature_id,
             receiver_id: args.receiver_id,
             permission: args.permission,
@@ -1028,7 +1036,14 @@ impl Broadcasts {
                 intent.intent.action.as_deref().unwrap_or("null")
             )));
         }
-        let user = host.incoming_user(calling_uid, args.user_id, true)?;
+        let user = host.handle_incoming_user(
+            calling_uid,
+            args.user_id,
+            true,
+            AllowMode::NonFull,
+            Some("broadcast"),
+            caller_package.as_deref(),
+        )?;
         let denied = |permission: &str| {
             Exception::security(format!(
                 "Permission Denial: {} broadcast from {} (pid={}, uid={calling_uid}) requires {permission}",
@@ -1416,6 +1431,37 @@ impl Broadcasts {
         self.send_as_system(host, intent, user, allow_list, required_permissions);
     }
 
+    /// A synchronous package leaf propagates admission failures to its caller.
+    pub(super) fn try_send_from_package_manager(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+    ) -> Result<(), Exception> {
+        self.send_with(host, intent, user, None, Sender::system(&[]), None, None)
+    }
+
+    /// Package effects retain AppsFilter restrictions and BroadcastOptions.
+    pub(super) fn try_send_package_effect(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        allow_list: Option<&[i32]>,
+        permissions: &[String],
+        temp_allowlist: Option<TempAllowlist>,
+    ) -> Result<(), Exception> {
+        self.send_with(
+            host,
+            intent,
+            user,
+            allow_list,
+            Sender::system(permissions),
+            temp_allowlist,
+            None,
+        )
+    }
+
     fn send_as_system(
         &self,
         host: &AppHost,
@@ -1449,7 +1495,7 @@ impl Broadcasts {
         temp_allowlist: Option<TempAllowlist>,
         done: Option<Done>,
     ) {
-        self.send_with(
+        if let Err(e) = self.send_with(
             host,
             intent,
             user,
@@ -1457,7 +1503,9 @@ impl Broadcasts {
             Sender::system(required_permissions),
             temp_allowlist,
             done,
-        );
+        ) {
+            eprintln!("app host: a system broadcast: {e:?}");
+        }
     }
 
     fn send_as(
@@ -1468,7 +1516,9 @@ impl Broadcasts {
         allow_list: Option<&[i32]>,
         sender: Sender,
     ) {
-        self.send_with(host, intent, user, allow_list, sender, None, None);
+        if let Err(e) = self.send_with(host, intent, user, allow_list, sender, None, None) {
+            eprintln!("app host: a system broadcast: {e:?}");
+        }
     }
 
     /// A system service's broadcast: ordered when it has a `done`.
@@ -1482,7 +1532,7 @@ impl Broadcasts {
         sender: Sender,
         temp_allowlist: Option<TempAllowlist>,
         done: Option<Done>,
-    ) {
+    ) -> Result<(), Exception> {
         let mut flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let allowed_implicit = host.packages().map(|(model, _)| {
             intent
@@ -1491,7 +1541,16 @@ impl Broadcasts {
                 .as_ref()
                 .is_some_and(|a| model.system.allow_implicit_broadcasts.contains(a))
         });
-        if allowed_implicit.unwrap_or(false) {
+        let allowed_implicit = match allowed_implicit {
+            Ok(allowed) => allowed,
+            Err(e) => {
+                if let Some(done) = done {
+                    std::thread::spawn(done);
+                }
+                return Err(e);
+            }
+        };
+        if allowed_implicit {
             flags |= FLAG_RECEIVER_INCLUDE_BACKGROUND;
         }
         let extended = intent.intent.extended_flags;
@@ -1522,7 +1581,7 @@ impl Broadcasts {
                 if let Some(done) = done {
                     std::thread::spawn(done);
                 }
-                return eprintln!("app host: a system broadcast: {e:?}");
+                return Err(e);
             }
         };
         let mut st = self.state.lock().unwrap();
@@ -1578,10 +1637,10 @@ impl Broadcasts {
                 self.update_running(host, &mut st);
             }
             (Err(e), done) => {
-                eprintln!("app host: a system broadcast: {e:?}");
                 if let Some(done) = done {
                     std::thread::spawn(done);
                 }
+                return Err(e);
             }
         }
         drop(st);
@@ -1590,6 +1649,7 @@ impl Broadcasts {
         {
             host.update_time_zone();
         }
+        Ok(())
     }
 
     /// `collectReceiverComponents` for `intent`, then BroadcastSkipPolicy's
@@ -1815,20 +1875,21 @@ impl Broadcasts {
         intent: &Intent,
         s: &Sender,
     ) -> Result<bool, Exception> {
-        let signature = !s.required_null
-            && s.required_permissions.iter().all(|name| {
-                host.inputs().is_ok_and(|inputs| {
-                    inputs
-                        .packages
-                        .permissions()
-                        .iter()
-                        .find(|p| p.name == *name)
-                        .is_some_and(|p| {
-                            p.protection_level & (PROTECTION_MASK_BASE | PROTECTION_FLAG_PRIVILEGED)
-                                == PROTECTION_SIGNATURE
-                        })
-                })
-            });
+        let mut signature = !s.required_null;
+        if signature && !s.required_permissions.is_empty() {
+            let permissions = host.permission_manager.get().ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable")
+            })?;
+            for name in &s.required_permissions {
+                if !permissions.protection_level(name)?.is_some_and(|level| {
+                    level & (PROTECTION_MASK_BASE | PROTECTION_FLAG_PRIVILEGED)
+                        == PROTECTION_SIGNATURE
+                }) {
+                    signature = false;
+                    break;
+                }
+            }
+        }
         Ok(intent.flags & FLAG_RECEIVER_EXCLUDE_BACKGROUND != 0
             || intent.component.is_none()
                 && intent.package.is_none()
@@ -2190,7 +2251,14 @@ impl Broadcasts {
                 "File descriptors passed in Intent",
             ));
         }
-        let user = host.incoming_user(uid, user, true)?;
+        let user = host.handle_incoming_user(
+            uid,
+            user,
+            true,
+            AllowMode::NonFull,
+            Some("removeStickyBroadcast"),
+            None,
+        )?;
         if !host.check_component_permission(Some(BROADCAST_STICKY), uid, -1, true)? {
             return Err(Exception::security(format!(
                 "Permission Denial: unbroadcastIntent() from pid={}, uid={uid} requires {BROADCAST_STICKY}",

@@ -7,7 +7,7 @@ use std::{
     net::Shutdown,
     os::unix::net::UnixStream,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
@@ -16,7 +16,7 @@ use std::{
 pub struct Transfer {
     closed: AtomicBool,
     stop: AtomicBool,
-    server: Mutex<Option<UnixStream>>,
+    server: Mutex<Option<Arc<UnixStream>>>,
     proxy: Mutex<Option<Arc<aim_binder_host::proxy_file::Owner>>>,
     error: Mutex<Option<String>>,
 }
@@ -43,8 +43,9 @@ impl Transfer {
     pub fn error(&self) -> Option<String> {
         self.error.lock().unwrap().take()
     }
-    pub fn start(self: &Arc<Self>, mut target: File) -> io::Result<(UnixStream, JoinHandle<()>)> {
-        let (mut server, client) = UnixStream::pair()?;
+    fn start(self: &Arc<Self>, mut target: File) -> io::Result<(UnixStream, Worker)> {
+        let (server, client) = UnixStream::pair()?;
+        let socket = Arc::new(server);
         {
             let mut retained = self.server.lock().unwrap();
             if self.stop.load(Ordering::SeqCst) {
@@ -53,12 +54,14 @@ impl Transfer {
                     "installer write transfer stopped",
                 ));
             }
-            *retained = Some(server.try_clone()?);
+            *retained = Some(socket.clone());
         }
         let owner = self.clone();
+        let server = socket.clone();
         let worker = thread::Builder::new()
             .name("package-file-bridge".into())
             .spawn(move || {
+                let mut server = server.as_ref();
                 let run = (|| -> io::Result<()> {
                     let mut header = [0u8; 8];
                     let mut buffer = [0u8; 8192];
@@ -104,13 +107,24 @@ impl Transfer {
                 owner.server.lock().unwrap().take();
                 owner.closed.store(true, Ordering::SeqCst);
             })?;
-        Ok((client, worker))
+        Ok((
+            client,
+            Worker {
+                socket: Arc::downgrade(&socket),
+                thread: worker,
+            },
+        ))
     }
+}
+struct Worker {
+    // The worker owns the socket until exit, even after session removal.
+    socket: Weak<UnixStream>,
+    thread: JoinHandle<()>,
 }
 #[derive(Default)]
 pub struct Registry {
     transfers: Mutex<BTreeMap<i32, Vec<Arc<Transfer>>>>,
-    workers: Mutex<Vec<JoinHandle<()>>>,
+    workers: Mutex<Vec<Worker>>,
     proxies: Mutex<Vec<aim_binder_host::proxy_file::Worker>>,
     stopped: AtomicBool,
     guard_taken: AtomicBool,
@@ -194,6 +208,11 @@ impl Registry {
                 transfer.stop();
             }
         }
+        for worker in self.workers.lock().unwrap().iter() {
+            if let Some(socket) = worker.socket.upgrade() {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+        }
     }
     pub fn take_guard(self: &Arc<Self>) -> Option<IoWorkerGuard> {
         (!self.guard_taken.swap(true, Ordering::SeqCst)).then(|| IoWorkerGuard(self.clone()))
@@ -223,7 +242,7 @@ impl IoWorkerGuard {
             .lock()
             .unwrap()
             .iter()
-            .all(JoinHandle::is_finished)
+            .all(|worker| worker.thread.is_finished())
             && self
                 .0
                 .proxies
@@ -238,8 +257,8 @@ impl Drop for IoWorkerGuard {
         self.0.stop();
         self.0.proxies.lock().unwrap().clear();
         for worker in self.0.workers.lock().unwrap().drain(..) {
-            if worker.thread().id() != thread::current().id() {
-                worker.join().unwrap();
+            if worker.thread.thread().id() != thread::current().id() {
+                worker.thread.join().unwrap();
             }
         }
     }
@@ -286,6 +305,44 @@ mod tests {
         assert!(transfer.is_closed());
         assert!(guard.is_finished());
         drop(guard);
+    }
+    #[test]
+    fn guard_drop_stops_workers_with_a_client_clone_held_open() {
+        for registered in [true, false] {
+            let (_data, file) = target();
+            let registry = Arc::new(Registry::default());
+            let guard = registry.take_guard().unwrap();
+            let transfer = registry.register(7).unwrap();
+            let mut client = registry.start(7, transfer.clone(), file).unwrap();
+            client
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            command(&mut client, 2, 0);
+            let mut ack = [0u8; 8];
+            client.read_exact(&mut ack).unwrap();
+            assert_eq!(i32::from_be_bytes(ack[..4].try_into().unwrap()), 2);
+            let inherited = client.try_clone().unwrap();
+            drop(client);
+            if !registered {
+                registry.transfers.lock().unwrap().remove(&7);
+            }
+            let (done, finished) = std::sync::mpsc::channel();
+            let dropper = thread::spawn(move || {
+                drop(guard);
+                done.send(()).unwrap();
+            });
+            let result = finished.recv_timeout(std::time::Duration::from_secs(2));
+            // Wake the worker before joining even if the regression returns.
+            let _ = inherited.shutdown(Shutdown::Both);
+            drop(inherited);
+            dropper.join().unwrap();
+            assert!(
+                result.is_ok(),
+                "guard drop waited for client EOF (registered={registered})"
+            );
+            assert!(transfer.is_closed());
+            assert!(transfer.error().is_none());
+        }
     }
     #[test]
     fn fileport_client_writes_syncs_closes_and_acknowledges_original_headers() {

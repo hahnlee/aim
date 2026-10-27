@@ -101,6 +101,19 @@ pub struct Permission {
     pub dynamic: Option<(i32, Option<String>)>,
 }
 
+/// An immutable retained view of the permission manager's authoritative state.
+#[derive(Clone, Debug)]
+pub struct AccessView {
+    pub system: std::sync::Arc<AccessSystem>,
+    pub user0: std::sync::Arc<AccessUser>,
+}
+impl AccessView {
+    pub(crate) fn same_base(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.system, &other.system)
+            && std::sync::Arc::ptr_eq(&self.user0, &other.user0)
+    }
+}
+
 /// `Permission.TYPE_MANIFEST`, `TYPE_DYNAMIC`.
 const TYPE_MANIFEST: i32 = 0;
 const TYPE_DYNAMIC: i32 = 2;
@@ -186,9 +199,16 @@ impl AccessSystem {
                         .ok_or("a permission without a protection level")?,
                     dynamic,
                 };
-                list.retain(|q| q.name != permission.name);
-                list.push(permission);
+                if let Some(old) = list.iter_mut().find(|q| q.name == permission.name) {
+                    *old = permission;
+                } else {
+                    list.push(permission);
+                }
             }
+        }
+        // `MutableIndexedMap` is an ArrayMap: stable within a hash collision.
+        for list in [&mut s.permissions, &mut s.permission_trees] {
+            list.sort_by_key(|p| super::info::java_hash(&p.name));
         }
         Ok(s)
     }
@@ -409,4 +429,92 @@ mod tests {
         assert_eq!(read.permission_flags(1, "x"), 1);
         assert_eq!(read.permission_flags(10_100, CAMERA), ONE_TIME);
     }
+}
+
+/// `AppIdPermissionPersistence.serializeSystemState`, preserving other policies.
+pub fn with_system_permissions(
+    mut root: Element,
+    system: &AccessSystem,
+) -> Result<Element, String> {
+    use aim_android_xml::{Node, Value};
+    access(&root)?;
+    for (tag, definitions) in [
+        ("permissions", &system.permissions),
+        ("permission-trees", &system.permission_trees),
+    ] {
+        let section = Element {
+            name: tag.into(),
+            attrs: Vec::new(),
+            content: definitions
+                .iter()
+                .map(|p| {
+                    let mut attrs = vec![
+                        ("name".into(), Value::Interned(p.name.clone())),
+                        ("packageName".into(), Value::Interned(p.package.clone())),
+                        ("protectionLevel".into(), Value::Int(p.protection_level)),
+                        (
+                            "type".into(),
+                            Value::Int(if p.dynamic.is_some() {
+                                TYPE_DYNAMIC
+                            } else {
+                                TYPE_MANIFEST
+                            }),
+                        ),
+                    ];
+                    if let Some((icon, label)) = &p.dynamic {
+                        attrs.push(("icon".into(), Value::Int(*icon)));
+                        if let Some(label) = label {
+                            attrs.push(("label".into(), Value::String(label.clone())));
+                        }
+                    }
+                    Node::Element(Element {
+                        name: "permission".into(),
+                        attrs,
+                        content: Vec::new(),
+                    })
+                })
+                .collect(),
+        };
+        match root
+            .content
+            .iter_mut()
+            .find(|n| matches!(n, Node::Element(e) if e.name == tag))
+        {
+            Some(node) => *node = Node::Element(section),
+            None => root.content.push(Node::Element(section)),
+        }
+    }
+    Ok(root)
+}
+
+/// AccessPolicy's package-version owner alongside the user permission policy.
+pub fn with_package_versions(mut root: Element, versions: &Named) -> Result<Element, String> {
+    use aim_android_xml::{Node, Value};
+    access(&root)?;
+    let section = Node::Element(Element {
+        name: "package-versions".into(),
+        attrs: Vec::new(),
+        content: versions
+            .iter()
+            .map(|(name, version)| {
+                Node::Element(Element {
+                    name: "package".into(),
+                    attrs: vec![
+                        ("name".into(), Value::Interned(name.clone())),
+                        ("version".into(), Value::Int(*version)),
+                    ],
+                    content: Vec::new(),
+                })
+            })
+            .collect(),
+    });
+    match root
+        .content
+        .iter_mut()
+        .find(|n| matches!(n, Node::Element(e) if e.name == "package-versions"))
+    {
+        Some(node) => *node = section,
+        None => root.content.push(section),
+    }
+    Ok(root)
 }

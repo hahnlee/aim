@@ -26,7 +26,7 @@ fn read_art_reply(reader: &mut Reader<'_>) -> Result<i32> {
 }
 fn transact_art_command(
     process: &Arc<LocalProcess>,
-    owner: &Strong,
+    owner: &ServiceOwner,
     request: &Parcel,
 ) -> Result<i32> {
     if process.authenticated_inbound_identity().is_none() {
@@ -34,9 +34,15 @@ fn transact_art_command(
             "ART shell forwarding requires live inbound provenance",
         ));
     }
-    let reply = process
-        .transact_preserving_inbound(owner.handle, art::HANDLE_ART_SHELL_COMMAND, request)
-        .map_err(|status| failure(format!("ART shell transport: {status}")))?;
+    let reply = match owner {
+        ServiceOwner::Remote(owner) => process.transact_preserving_inbound(
+            owner.handle,
+            art::HANDLE_ART_SHELL_COMMAND,
+            request,
+        ),
+        ServiceOwner::Local(owner) => owner.transact(art::HANDLE_ART_SHELL_COMMAND, request, false),
+    }
+    .map_err(|status| failure(format!("ART shell transport: {status}")))?;
     read_art_reply(&mut reply.reader())
 }
 impl System {
@@ -57,7 +63,7 @@ impl System {
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
         let owner =
-            self.package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_MAINTENANCE_BRIDGE)?;
+            self.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_MAINTENANCE_BRIDGE)?;
         let mut request = Parcel::new();
         art::HandleArtShellCommand {
             input: Some(Descriptor(input.into_file_owner())),
@@ -300,7 +306,7 @@ mod tests {
         }
         struct Forward {
             process: Weak<LocalProcess>,
-            owner: Strong,
+            owner: ServiceOwner,
         }
         impl Service for Forward {
             fn descriptor(&self) -> &str {
@@ -355,12 +361,12 @@ mod tests {
         java.start();
         let shell = open(&driver, 190425, 2000);
         shell.start();
-        let owner = publish(
+        let owner = ServiceOwner::Remote(Arc::new(publish(
             &java,
             &native,
             "profile",
             java.add_service(Arc::new(CallerOwner)),
-        );
+        )));
         let mut request = Parcel::new();
         art::HandleArtShellCommand::<Descriptor> {
             input: None,

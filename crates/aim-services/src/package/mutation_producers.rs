@@ -13,7 +13,7 @@ use super::{
     scan_snapshot::Snapshot,
 };
 use aim_binder_host::{
-    local::{LocalProcess, Service, Strong},
+    local::{LocalProcess, Service},
     parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel},
 };
 use aim_service_aidl::{
@@ -33,10 +33,12 @@ use std::{
 };
 
 pub struct Bridge {
-    node: Strong,
+    /// The enable bridge: another process's node, or this process's own
+    /// where it serves the bootstrap bridge.
+    node: crate::system::ServiceOwner,
 }
 impl Bridge {
-    pub fn new(node: Strong) -> Arc<Self> {
+    pub fn new(node: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self { node })
     }
     pub fn quarantine_enabled(&self) -> Result<bool, Exception> {
@@ -44,7 +46,7 @@ impl Bridge {
         request.write_interface_token(api::DESCRIPTOR);
         let reply = self
             .node
-            .transact(api::QUARANTINE_ENABLED, &request, false)
+            .transact_as_owner(api::QUARANTINE_ENABLED, &request, false)
             .map_err(|code| illegal(format!("Quarantine flag owner: {code}")))?;
         let mut reader = reply.reader();
         reader
@@ -65,7 +67,7 @@ impl Bridge {
         aim_service_aidl::write_int_array(&mut request, Some(users));
         let reply = self
             .node
-            .transact(api::CLEAR_CODE_CACHE, &request, false)
+            .transact_as_owner(api::CLEAR_CODE_CACHE, &request, false)
             .map_err(|code| illegal(format!("Package code cache owner: {code}")))?;
         let mut reader = reply.reader();
         reader

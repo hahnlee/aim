@@ -253,6 +253,14 @@ impl NativeServices {
             }
         }
         if let Some(host) = &app_host {
+            host.set_system(system.clone());
+            let front = |name| services.iter().find(|(n, _)| n == name).map(|(_, b)| *b);
+            system
+                .retain_public_package_fronts(
+                    front("package").ok_or("app-host package front unavailable")?,
+                    front("package_native").ok_or("app-host native package front unavailable")?,
+                )
+                .map_err(|error| error.message)?;
             host.set_published(&services);
             let host = Arc::downgrade(host);
             system.set_window_manager_internal(Box::new(move |uid| {
@@ -439,6 +447,19 @@ impl Drop for NativeServices {
             eprintln!("{error}");
         }
     }
+}
+
+#[cfg(test)]
+fn test_process(euid: u32) -> Arc<LocalProcess> {
+    LocalProcess::open(
+        &aim_binder_driver::Driver::new(),
+        aim_binder_driver::Device::Binder,
+        aim_binder_driver::Credentials {
+            pid: std::process::id() as i32,
+            euid,
+            security_context: None,
+        },
+    )
 }
 
 #[cfg(test)]

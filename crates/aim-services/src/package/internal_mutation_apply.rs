@@ -4,7 +4,7 @@ use super::{
     internal_mutation_record::{Record, Setting, User},
     owner::usage::Usage,
     restrictions::UserState,
-    scan::{CapturedUsers, ReplicaRuntime, SigningScan},
+    scan::{CapturedUsers, SigningScan},
     scan_snapshot::Snapshot,
 };
 use std::collections::{BTreeMap, BTreeSet};

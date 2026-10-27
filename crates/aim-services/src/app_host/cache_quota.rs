@@ -374,9 +374,8 @@ fn service_component(host: &AppHost) -> Result<Option<(String, String)>, String>
         calling_uid: SYSTEM_UID,
     };
     let package = host
-        .inputs()
+        .framework()
         .map_err(|e| e.message)?
-        .packages
         .framework_string("config_servicesExtensionPackage")
         .filter(|p| !p.is_empty())
         .ok_or("config_servicesExtensionPackage is empty")?;

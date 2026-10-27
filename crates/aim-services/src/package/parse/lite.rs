@@ -16,6 +16,70 @@ pub struct Environment {
     pub codenames: Vec<String>,
     pub properties: BTreeMap<String, String>,
 }
+
+/// `ApkLite`'s inputs to `NativeLibraryHelper.Handle.createFd`.
+pub struct ApkLite {
+    pub multi_arch: bool,
+    pub extract_native_libs: bool,
+}
+
+/// The flags=0 lite parse over an already-open APK. Properties come from
+/// the live property owner, as `checkRequiredSystemProperties` reads them.
+pub fn apk_lite(
+    apk: &Apk,
+    path: &str,
+    sdk: i32,
+    codenames: Vec<String>,
+    property: impl Fn(&str) -> Option<String>,
+) -> Result<ApkLite> {
+    if let Some(bytes) = apk
+        .file_if_present("resources.arsc")
+        .map_err(|_| super::Error::Parse(format!("Failed to parse {path}")))?
+    {
+        super::resources::Table::parse(&bytes)
+            .map_err(|_| super::Error::Parse(format!("Failed to parse {path}")))?;
+    }
+    let manifest = apk
+        .manifest()
+        .map_err(|_| super::Error::Parse(format!("Failed to parse {path}")))?;
+    let properties = manifest
+        .children
+        .iter()
+        .filter(|child| child.name == "overlay")
+        .filter_map(|child| attr_value(child, ANDROID, "requiredSystemPropertyName"))
+        .flat_map(|names| {
+            java_split(&names)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .map(|name| {
+            let value = property(&name).unwrap_or_default();
+            (name, value)
+        })
+        .collect();
+    package_name_manifest_at(
+        &manifest,
+        &Environment {
+            sdk,
+            codenames,
+            properties,
+        },
+        path,
+    )?;
+    let mut lite = ApkLite {
+        multi_arch: false,
+        extract_native_libs: true,
+    };
+    for child in &manifest.children {
+        if child.name == "application" {
+            lite.multi_arch = super::attrs::attr_bool(child, ANDROID, "multiArch", false);
+            lite.extract_native_libs =
+                super::attrs::attr_bool(child, ANDROID, "extractNativeLibs", true);
+        }
+    }
+    Ok(lite)
+}
 fn integer(element: &Element, name: &str, default: i32) -> i32 {
     element
         .attrs
@@ -49,16 +113,27 @@ fn sdk(element: &Element, environment: &Environment) -> Result<()> {
             .iter()
             .any(|name| name == code.split('.').next().unwrap_or(code))
     };
+    let development_error = |code: &str| {
+        if environment.codenames.is_empty() {
+            format!("Requires development platform {code} but this is a release platform.")
+        } else {
+            format!(
+                "Requires development platform {code} (current platform is any of [{}])",
+                environment.codenames.join(", ")
+            )
+        }
+    };
     if let Some(code) = target_code {
         if !matches(code) {
-            return fail(format!("Requires development platform {code}"));
+            return fail(development_error(code));
         }
     }
     match min_code {
-        Some(code) if !matches(code) => fail(format!("Requires development platform {code}")),
-        None if min_version > environment.sdk => {
-            fail(format!("Requires newer sdk version #{min_version}"))
-        }
+        Some(code) if !matches(code) => fail(development_error(code)),
+        None if min_version > environment.sdk => fail(format!(
+            "Requires newer sdk version #{min_version} (current version is #{})",
+            environment.sdk
+        )),
         _ => Ok(()),
     }
 }
@@ -201,6 +276,20 @@ pub fn split_name(path: &Path, environment: &Environment) -> Result<Option<Strin
     Ok(attr_value(&manifest, "", "split").filter(|name| !name.is_empty()))
 }
 fn package_name_manifest(manifest: &Element, environment: &Environment) -> Result<String> {
+    package_name_manifest_at(manifest, environment, "")
+}
+fn package_name_manifest_at(
+    manifest: &Element,
+    environment: &Environment,
+    path: &str,
+) -> Result<String> {
+    if manifest.name == "manifest" {
+        match attr_value(manifest, "", "package").as_deref() {
+            None => return fail(format!("Failed to parse {path}")),
+            Some("") => return fail("Invalid manifest package: Invalid filename"),
+            _ => {}
+        }
+    }
     let (package, _, _) = cluster::names(manifest)?;
     let mut uses_split = false;
     let mut property_names = None;
@@ -222,24 +311,39 @@ fn package_name_manifest(manifest: &Element, environment: &Environment) -> Resul
                                 .is_none_or(|value| value.chars().all(java_whitespace))
                                 || version < 0
                             {
-                                return fail("Bad uses-sdk-library declaration");
+                                return fail(format!(
+                                    "Bad uses-sdk-library declaration name: {} version: {version}",
+                                    name.as_deref().unwrap_or("null")
+                                ));
                             }
                             if sdk_libraries.contains(&name) {
-                                return fail("Depending on multiple versions of SDK library");
+                                return fail(format!(
+                                    "Bad uses-sdk-library declaration. Depending on multiple versions of SDK library: {}",
+                                    name.as_deref().unwrap()
+                                ));
                             }
                             sdk_libraries.push(name);
                         }
                         "uses-static-library" => {
+                            let version = integer(entry, "version", -1);
+                            let digest = attr_value(entry, ANDROID, "certDigest");
                             if name
                                 .as_deref()
                                 .is_none_or(|value| value.chars().all(java_whitespace))
-                                || integer(entry, "version", -1) < 0
-                                || attr_value(entry, ANDROID, "certDigest").is_none()
+                                || version < 0
+                                || digest.is_none()
                             {
-                                return fail("Bad uses-static-library declaration");
+                                return fail(format!(
+                                    "Bad uses-static-library declaration name: {} version: {version} certDigest: {}",
+                                    name.as_deref().unwrap_or("null"),
+                                    digest.as_deref().unwrap_or("null")
+                                ));
                             }
                             if static_libraries.contains(&name) {
-                                return fail("Depending on multiple versions of static library");
+                                return fail(format!(
+                                    "Bad uses-sdk-library declaration. Depending on multiple versions of static library: {}",
+                                    name.as_deref().unwrap()
+                                ));
                             }
                             static_libraries.push(name);
                             let mut entries: Vec<_> = entry.children.iter().collect();
@@ -248,24 +352,37 @@ fn package_name_manifest(manifest: &Element, environment: &Environment) -> Resul
                                     && attr_value(cert, ANDROID, "certDigest")
                                         .is_none_or(|v| v.is_empty())
                                 {
-                                    return fail("Bad additional-certificate declaration");
+                                    return fail(format!(
+                                        "Bad additional-certificate declaration with empty certDigest:{}",
+                                        attr_value(cert, ANDROID, "certDigest")
+                                            .as_deref()
+                                            .unwrap_or("null")
+                                    ));
                                 }
                                 entries.extend(cert.children.iter());
                             }
                         }
                         "sdk-library" => {
-                            if name.is_none() || integer(entry, "versionMajor", -1) < 0 {
-                                return fail("Bad sdk-library declaration");
+                            let version = integer(entry, "versionMajor", -1);
+                            if name.is_none() || version < 0 {
+                                return fail(format!(
+                                    "Bad sdk-library declaration name: {} version: {version}",
+                                    name.as_deref().unwrap_or("null")
+                                ));
                             }
                         }
                         "static-library" => {
-                            if name.is_none() || integer(entry, "version", -1) < 0 {
-                                return fail("Bad static-library declaration");
+                            let version = integer(entry, "version", -1);
+                            if name.is_none() || version < 0 {
+                                return fail(format!(
+                                    "Bad static-library declaration name: {} version: {version}",
+                                    name.as_deref().unwrap_or("null")
+                                ));
                             }
                         }
                         "library" => {
                             if name.is_none() {
-                                return fail("Bad library declaration");
+                                return fail("Bad library declaration name: null");
                             }
                         }
                         _ => {}
@@ -274,7 +391,7 @@ fn package_name_manifest(manifest: &Element, environment: &Environment) -> Resul
             }
             "uses-split" if !uses_split => {
                 if attr_value(child, ANDROID, "name").is_none() {
-                    return fail("<uses-split> tag requires android:name");
+                    return fail("<uses-split> tag requires 'android:name' attribute");
                 }
                 uses_split = true;
             }
@@ -289,7 +406,7 @@ fn package_name_manifest(manifest: &Element, environment: &Environment) -> Resul
     let names = property_names.as_deref().unwrap_or("");
     let values = property_values.as_deref().unwrap_or("");
     if names.is_empty() != values.is_empty() {
-        return fail("Overlay has incomplete required system property condition");
+        return overlay_error(manifest, path, &property_names, &property_values);
     }
     if !names.is_empty() {
         let names = java_split(names);
@@ -304,10 +421,29 @@ fn package_name_manifest(manifest: &Element, environment: &Environment) -> Resul
                     != value
             })
         {
-            return fail("Overlay ignored due to required system property");
+            return overlay_error(manifest, path, &property_names, &property_values);
         }
     }
     Ok(package)
+}
+fn overlay_error<T>(
+    manifest: &Element,
+    path: &str,
+    names: &Option<String>,
+    values: &Option<String>,
+) -> Result<T> {
+    let target = manifest
+        .children
+        .iter()
+        .rev()
+        .find(|child| child.name == "overlay")
+        .and_then(|child| attr_value(child, ANDROID, "targetPackage"));
+    fail(format!(
+        "Skipping target and overlay pair {} and {path}: overlay ignored due to required system property: {} with value: {}",
+        target.as_deref().unwrap_or("null"),
+        names.as_deref().unwrap_or("null"),
+        values.as_deref().unwrap_or("null")
+    ))
 }
 fn convert_int(value: &str) -> Option<i32> {
     if value.is_empty() {

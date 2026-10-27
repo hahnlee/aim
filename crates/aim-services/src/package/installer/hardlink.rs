@@ -1,8 +1,5 @@
 //! Original guest VFS/SELinux leaves. Native host paths never cross this boundary.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackageinstallerfiles as aidl;
 use std::sync::{
     Arc,
@@ -10,11 +7,11 @@ use std::sync::{
 };
 
 pub struct Files {
-    bridge: Strong,
+    bridge: crate::system::ServiceOwner,
     closed: AtomicBool,
 }
 impl Files {
-    pub fn new(bridge: Strong) -> Arc<Self> {
+    pub fn new(bridge: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             bridge,
             closed: AtomicBool::new(false),
@@ -41,7 +38,7 @@ impl Files {
         self.current()?;
         let reply = self
             .bridge
-            .transact(code, parcel, false)
+            .transact_as_owner(code, parcel, false)
             .map_err(|status| {
                 Exception::new(
                     EX_ILLEGAL_STATE,

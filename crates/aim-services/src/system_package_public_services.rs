@@ -8,6 +8,21 @@ pub struct Pair {
     pub native: Binder,
 }
 impl System {
+    /// Startup's app-host fronts are also construction's original-name pair.
+    /// No second Binder registration may replace handles issued during boot.
+    pub(crate) fn retain_public_package_fronts(
+        &self,
+        public: Binder,
+        native: Binder,
+    ) -> Result<()> {
+        let mut slot = self.package_public_services.lock().unwrap();
+        if slot.is_some() {
+            return Err(registration_error("public package fronts already retained"));
+        }
+        *slot = Some(Pair { public, native });
+        Ok(())
+    }
+
     pub(crate) fn register_public_package_fronts(
         self: &Arc<Self>,
         bridge: &Arc<crate::package::bootstrap::Bridge>,

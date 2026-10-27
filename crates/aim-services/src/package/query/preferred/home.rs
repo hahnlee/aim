@@ -2,7 +2,6 @@
 //! bookkeeping. Default-home highest-priority fallback is an internal API only.
 use super::*;
 use crate::package::{
-    component_resolver::ResolveInfo,
     preferred::registry::{ActionError, Handle},
     resolve::{QueryError, Resolution, ResolutionError, preferred_owner::HomePlan},
 };

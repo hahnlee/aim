@@ -167,12 +167,10 @@ fn account_value(account: &Account) -> ParcelValue {
 
 /// `UUID.randomUUID().toString()`.
 fn random_uuid() -> String {
-    let mut b = [0u8; 16];
-    // SAFETY: fills the buffer it is given.
-    unsafe { libc::arc4random_buf(b.as_mut_ptr().cast(), b.len()) };
-    b[6] = b[6] & 0x0f | 0x40;
-    b[8] = b[8] & 0x3f | 0x80;
-    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let hex: String = super::boot_policy::random_uuid()
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
     format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],
@@ -384,6 +382,7 @@ struct UserAccounts {
 
 struct Accounts {
     db: AccountsDb,
+    authenticators: Option<Arc<Vec<Authenticator>>>,
     /// `accountCache`: the accounts by type, in the order they were read.
     accounts: Vec<(String, Vec<Account>)>,
     user_data: HashMap<Account, HashMap<String, Option<String>>>,
@@ -428,12 +427,18 @@ pub struct AccountManager {
 
 impl AccountManager {
     pub fn new(host: Arc<AppHost>) -> Arc<AccountManager> {
-        Arc::new_cyclic(|me| AccountManager {
+        let service = Arc::new_cyclic(|me| AccountManager {
             me: me.clone(),
             host,
             authenticators: Mutex::default(),
             users: Mutex::default(),
-        })
+        });
+        let monitor = service.clone() as Arc<dyn super::package_writes::PackageMonitor>;
+        service
+            .host
+            .package_monitors
+            .register(super::USER_ALL, Arc::downgrade(&monitor));
+        service
     }
 
     /// `mAuthenticatorCache.getAllServices(user)`.
@@ -495,9 +500,7 @@ impl AccountManager {
     fn target_sdk(&self, name: &str) -> Result<Option<i32>, Exception> {
         Ok(self
             .host
-            .inputs()?
-            .packages
-            .application_info(name, 0)
+            .application_info(name, 0, None)?
             .map(|ai| ai.target_sdk_version))
     }
 
@@ -682,10 +685,21 @@ impl AccountManager {
     /// `getUserAccounts`: `user`'s accounts, opened the first time.
     fn user_accounts(&self, user: i32) -> Result<Arc<UserAccounts>, Failure> {
         let mut users = self.users.lock().unwrap();
-        if let Some(accounts) = users.get(&user) {
-            return Ok(accounts.clone());
+        if let Some(accounts) = users.get(&user).cloned() {
+            drop(users);
+            let current = self.authenticators(user).map_err(Failure::Thrown)?;
+            let mut state = accounts.state.lock().unwrap();
+            if !state
+                .authenticators
+                .as_ref()
+                .is_some_and(|old| Arc::ptr_eq(old, &current))
+            {
+                self.validate(&mut state, user)?;
+            }
+            drop(state);
+            return Ok(accounts);
         }
-        let inputs = self.host.inputs().map_err(Failure::Thrown)?;
+        let inputs = self.host.platform().map_err(Failure::Thrown)?;
         let data = &inputs.data;
         let mut db = AccountsDb::open(
             &data.join(format!("system_de/{user}/accounts_de.db")),
@@ -705,6 +719,7 @@ impl AccountManager {
         }
         let mut accounts = Accounts {
             db,
+            authenticators: None,
             accounts: Vec::new(),
             user_data: HashMap::new(),
             auth_tokens: HashMap::new(),
@@ -751,9 +766,8 @@ impl AccountManager {
     /// gone would be deleted, which is not implemented (#1504); the check
     /// comes before any write.
     fn validate(&self, accounts: &mut Accounts, user: i32) -> Result<(), Failure> {
-        let mut known: Vec<(String, i32)> = self
-            .authenticators(user)
-            .map_err(Failure::Thrown)?
+        let authenticators = self.authenticators(user).map_err(Failure::Thrown)?;
+        let mut known: Vec<(String, i32)> = authenticators
             .iter()
             .map(|a| (a.description.kind.clone(), a.uid))
             .collect();
@@ -824,6 +838,7 @@ impl AccountManager {
         accounts
             .visibility
             .extend(accounts.db.find_all_visibility_values()?);
+        accounts.authenticators = Some(authenticators);
         Ok(())
     }
 
@@ -1267,6 +1282,28 @@ impl AccountManager {
     fn may_read_visibility(&self, kind: &str, uid: i32) -> Result<bool, Exception> {
         Ok(self.managed_by_caller(Some(kind), uid, user_of(uid))?
             || self.uid_package_is(uid, |ps| ps.is.system)?)
+    }
+}
+
+impl super::package_writes::PackageMonitor for AccountManager {
+    fn package_changed(
+        &self,
+        change: &super::package_writes::PackageChanged<'_>,
+    ) -> Result<(), Exception> {
+        {
+            let mut cache = self.authenticators.lock().unwrap();
+            let found = Arc::new(account_authenticators::generate(&self.host, change.user)?);
+            if cache.get(&change.user).is_some_and(|old| **old == *found) {
+                return Ok(());
+            }
+            cache.insert(change.user, found);
+        }
+        let accounts = self.users.lock().unwrap().get(&change.user).cloned();
+        if let Some(accounts) = accounts {
+            self.validate(&mut accounts.state.lock().unwrap(), change.user)
+                .map_err(Failure::exception)?;
+        }
+        Ok(())
     }
 }
 
@@ -1790,6 +1827,93 @@ impl Service for AccountManager {
 
 #[cfg(test)]
 mod tests {
+    /// RegisteredServicesCache.handlePackageEvent regenerates for every
+    /// PACKAGE_CHANGED, including a component-only enabled change.
+    #[test]
+    fn authenticators_track_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.base_apk_path = Some("/data/app/p/base.apk".into());
+                    let mut service = crate::package::pkg::Service::default();
+                    service.main.enabled = true;
+                    service.main.exported = true;
+                    service.main.component.name = "p.Authenticator".into();
+                    service.main.component.package_name = "p".into();
+                    service.main.component.meta_data = Some(crate::package::pkg::MetaData(vec![(
+                        "android.accounts.AccountAuthenticator".into(),
+                        crate::package::pkg::Value::Int(0x7f010000),
+                    )]));
+                    service.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec!["android.accounts.AccountAuthenticator".into()],
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                    pkg.services = vec![service];
+                }
+            });
+            let manager = AccountManager::new(host.clone());
+            let before = manager.authenticators(0).unwrap();
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].description.kind, "fixture.account");
+            for component in [Some("p.Authenticator"), None] {
+                enabled(component, 2);
+                assert!(manager.authenticators(0).unwrap().is_empty());
+                enabled(component, 1);
+                assert_eq!(*manager.authenticators(0).unwrap(), *before);
+            }
+        });
+    }
+
+    #[test]
+    fn authenticator_notices_replace_changed_lists_and_preserve_unchanged_lists() {
+        use super::super::package_writes::{PackageChanged, PackageMonitor};
+        crate::system::with_discovery_session(|host, _, _| {
+            let manager = AccountManager::new(host.clone());
+            let old = Arc::new(vec![Authenticator {
+                description: AuthenticatorDescription {
+                    kind: "retired".into(),
+                    package: "p".into(),
+                    label_id: 0,
+                    icon_id: 0,
+                    small_icon_id: 0,
+                    account_preferences_id: 0,
+                    custom_tokens: false,
+                },
+                uid: 10100,
+                class: "p.Authenticator".into(),
+            }]);
+            manager
+                .authenticators
+                .lock()
+                .unwrap()
+                .insert(0, old.clone());
+            manager
+                .package_changed(&PackageChanged {
+                    package: "p",
+                    user: 0,
+                    components: &[],
+                    removed: false,
+                })
+                .unwrap();
+            let current = manager.authenticators(0).unwrap();
+            assert!(!Arc::ptr_eq(&old, &current));
+            assert!(manager.users.lock().unwrap().is_empty());
+            assert!(current.is_empty());
+            manager
+                .package_changed(&PackageChanged {
+                    package: "q",
+                    user: 0,
+                    components: &[],
+                    removed: false,
+                })
+                .unwrap();
+            assert!(Arc::ptr_eq(&current, &manager.authenticators(0).unwrap()));
+        });
+    }
     use super::*;
 
     fn signatures(current: &[&[u8]], past: Option<&[(&[u8], i32)]>) -> Signatures {

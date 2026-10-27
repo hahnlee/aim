@@ -3107,7 +3107,9 @@ fn provider_info_uses_live_user_unlock_state_after_initial_locked_capture() {
     let mut state = state();
     state.users.get_mut(&0).unwrap().unlocking_or_unlocked = false;
     state.platform.settings_owner = Some(crate::package::resolve::settings::Owner::new(
-        Arc::new(client.strong(0)),
+        Arc::new(crate::system::ServiceOwner::Remote(Arc::new(
+            client.strong(0),
+        ))),
         false,
     ));
     let code = Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
@@ -3355,7 +3357,7 @@ fn uid_package_queries_distinguish_regular_isolated_compute_and_sdk_sandbox() {
     client.start();
     let mut state = state();
     state.system.resolution_policy = Some(crate::package::resolve::policy::Owner::new(
-        client.strong(0),
+        crate::system::ServiceOwner::Remote(std::sync::Arc::new(client.strong(0))),
     ));
     state.system.isolated_owners = vec![(99000, 10100), (99002, 10100)];
     state.packages.insert(

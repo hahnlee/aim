@@ -33,6 +33,7 @@ pub struct UserInputs {
 }
 #[derive(Clone, Debug)]
 pub struct Context {
+    pub access: Option<Arc<crate::package::permissions::AccessView>>,
     pub scan_version: u64,
     pub native_domains: Option<Arc<NativeDomains>>,
     pub boot_classes: Option<Arc<aim_android_image::linkage::Hierarchy>>,
@@ -625,23 +626,6 @@ impl Capture {
             store,
             capture,
         })
-    }
-
-    /// Prepare a complete replacement before any native mutation commits disk.
-    pub(crate) fn prepare_shared_package_snapshot(
-        self: &Arc<Self>,
-        next: Arc<Snapshot>,
-    ) -> Result<Arc<Self>, String> {
-        if next.version()
-            != self
-                .scan
-                .version()
-                .checked_add(1)
-                .ok_or("package generation exhausted")?
-        {
-            return Err("shared snapshot generation differs".into());
-        }
-        self.prepare_committed_package_snapshot(next)
     }
 
     pub(crate) fn prepare_committed_package_snapshot(
@@ -1882,6 +1866,7 @@ impl Capture {
     pub(crate) fn prepare_permission_refresh(
         self: &Arc<Self>,
         bridge: &crate::package::bootstrap::Bridge,
+        access: Option<Arc<crate::package::permissions::AccessView>>,
     ) -> Result<PackageUpdate, String> {
         let version = self
             .scan
@@ -1895,13 +1880,33 @@ impl Capture {
             version,
         )
         .map_err(|error| format!("permission refresh replica: {error:?}"))?;
+        let capture = self.permission_view(store.capture(), bridge, access)?;
+        Ok(PackageUpdate { store, capture })
+    }
+
+    pub(crate) fn permission_view(
+        &self,
+        scan: Arc<super::Snapshot>,
+        bridge: &crate::package::bootstrap::Bridge,
+        access: Option<Arc<crate::package::permissions::AccessView>>,
+    ) -> Result<Arc<Self>, String> {
         let mut context = (*self.context).clone();
-        context.scan_version = version;
-        let context = bridge
+        context.scan_version = scan.version();
+        let mut context = bridge
             .resolve_query_context(self.scan.owner(), context)
             .map_err(|error| format!("permission refresh original owner: {error:?}"))?;
-        let capture = Self::new(store.capture(), context)?;
-        Ok(PackageUpdate { store, capture })
+        if let Some(access) = access {
+            let config = &self
+                .domains
+                .as_ref()
+                .ok_or("native permission projection config unavailable")?
+                .config;
+            access.project_context(&mut context, &self.state, config);
+            context.access = Some(access);
+        }
+        let mut capture = Self::new(scan, context)?;
+        Arc::get_mut(&mut capture).unwrap().frozen = self.frozen.clone();
+        Ok(capture)
     }
 }
 impl Capture {
@@ -2005,16 +2010,6 @@ impl Capture {
         Self::new(self.scan.clone(), context)
     }
 }
-impl Capture {
-    pub(crate) fn prepare_isolated_owner_update(
-        self: &Arc<Self>,
-        isolated: i32,
-        owner: Option<i32>,
-    ) -> Result<PackageUpdate, String> {
-        self.prepare_isolated_owner_delta(isolated, owner)
-    }
-}
-
 impl Capture {
     pub(crate) fn apks_in_apex(
         &self,
@@ -2163,6 +2158,7 @@ mod resolver_tests {
         let capture = Capture::new(
             scan.clone(),
             Context {
+                access: None,
                 scan_version: scan.version(),
                 native_domains: None,
                 boot_classes: None,
@@ -2260,5 +2256,45 @@ mod resolver_tests {
                 .is_err()
         );
         assert_eq!(reads.load(Ordering::Acquire), 3);
+    }
+}
+
+impl Capture {
+    /// UserController's unlocking fact changes query policy, not Settings.
+    pub(crate) fn user_unlocking_view(
+        &self,
+        scan: Arc<Snapshot>,
+        user: i32,
+    ) -> Result<Arc<Self>, String> {
+        if !self.scan.same_lineage(&scan)
+            || self.scan.owner() != scan.owner()
+            || self.scan.usage() != scan.usage()
+        {
+            return Err("runtime user publication changed the package owner".into());
+        }
+        let mut context = (*self.context).clone();
+        let entry = context
+            .users
+            .get_mut(&user)
+            .filter(|entry| entry.id == user)
+            .ok_or("runtime user publication names an unknown user")?;
+        entry.unlocking_or_unlocked = true;
+        context.scan_version = scan.version();
+        let mut state = (*self.state).clone();
+        let entry = state
+            .users
+            .get_mut(&user)
+            .filter(|entry| entry.id == user)
+            .ok_or("runtime query user identity differs")?;
+        entry.unlocking_or_unlocked = true;
+        state.generation = scan.version();
+        Ok(Arc::new(Self {
+            scan,
+            state: Arc::new(state),
+            context: Arc::new(context),
+            domains: self.domains.clone(),
+            frozen: self.frozen.clone(),
+            resolver: Default::default(),
+        }))
     }
 }

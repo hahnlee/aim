@@ -55,7 +55,9 @@ pub struct Owner {
     killed: Mutex<BTreeMap<String, PendingObserver>>,
     queue: mpsc::Sender<Job>,
     errors: Mutex<Vec<String>>,
-    pub apex: Strong,
+    /// The APEX uninstall leaf: another process's node, or this process's
+    /// own where it serves the bootstrap bridge.
+    pub apex: crate::system::ServiceOwner,
 }
 pub struct Worker {
     owner: Arc<Owner>,
@@ -65,7 +67,7 @@ impl Owner {
     pub fn stop(&self) {
         let _ = self.queue.send(Job::Stop);
     }
-    pub fn start(apex: Strong) -> (Arc<Self>, Worker) {
+    pub fn start(apex: crate::system::ServiceOwner) -> (Arc<Self>, Worker) {
         let (queue, receiver) = mpsc::channel();
         let owner = Arc::new(Self {
             rollback: Mutex::new(BTreeMap::new()),

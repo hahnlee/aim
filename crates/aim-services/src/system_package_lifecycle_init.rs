@@ -12,7 +12,7 @@ use crate::{
     system_package_lifecycle::{LifecycleFacts, Production, Restored},
 };
 use aim_android_init::props::{PropertyService, area::AreaMemory};
-use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bootstrap;
 use std::{
     path::Path,
@@ -35,12 +35,6 @@ pub struct Published {
     pub capture: Arc<Capture>,
     pub persistence: Arc<Mutex<Store>>,
     pub recovery: Report,
-}
-fn transport(stage: &str, status: i32) -> Exception {
-    Exception::new(
-        EX_ILLEGAL_STATE,
-        format!("package lifecycle {stage}: {status}"),
-    )
 }
 impl<M: AreaMemory + Send + 'static> BeforeScan<M> {
     /// Execute the existing native Settings record dispatcher and bind lifecycle
@@ -78,27 +72,7 @@ impl<M: AreaMemory + Send + 'static> BeforeScan<M> {
     ) -> Result<Self, Exception> {
         system.check_package_bootstrap(&bridge)?;
         let restored = Restored::capture(settings, &recovery);
-        let mut request = Parcel::new();
-        bootstrap::GetPackageLifecycleLeaf {}.write(&mut request);
-        let reply = bridge
-            .owner
-            .transact(bootstrap::GET_PACKAGE_LIFECYCLE_LEAF, &request, false)
-            .map_err(|status| transport("CE leaf transport", status))?;
-        let mut reader = reply.reader();
-        let binder = bootstrap::read_get_package_lifecycle_leaf_reply(&mut reader)
-            .map_err(|status| transport("CE leaf reply", status))??
-            .ok_or_else(|| {
-                Exception::new(EX_ILLEGAL_STATE, "original CE lifecycle leaf unavailable")
-            })?;
-        if reader.remaining() != 0 {
-            return Err(Exception::new(
-                EX_ILLEGAL_STATE,
-                "CE lifecycle leaf reply tail",
-            ));
-        }
-        let leaf = reply
-            .retain_remote_binder(binder)
-            .map_err(|status| transport("CE leaf capability", status))?;
+        let leaf = system.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_LIFECYCLE_LEAF)?;
         let live = properties.clone();
         let production = Production::construct(
             restored,

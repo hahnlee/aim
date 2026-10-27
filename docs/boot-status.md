@@ -152,6 +152,12 @@ process's main thread, also with Bluetooth on and after the process is
 restarted (2026-10-21); Phone stops at `carrier_config`, as on any device
 without telephony (#1919, #1923).
 
+App-host incoming-user checks share the pinned UserController port, including
+CURRENT_OR_SELF fallback, special-user validation, Recents and shell restrictions.
+Service lookups select the original profile-dependent allow mode; each user is
+its own profile group on this host. This consolidation is checked without a guest
+boot (#2170).
+
 ## Native system services (2026-09-29, ADR 0013)
 
 `image/native-services` lists the system services implemented natively
@@ -170,10 +176,33 @@ reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
+Native Binder reference and reply cleanup survives host-thread TLS teardown
+(2026-10-28, #2189). If `Strong` or `Received` drops after the thread's Binder
+state, cleanup owns a temporary driver thread through `BINDER_THREAD_EXIT`
+rather than reading dead TLS. The regression forces that destruction order
+and verifies the remote callback is released; no guest boot was run.
+
 PackageManager remains original in the default image. Controlled slice C images
 redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
-planned methods are implemented; this is not conformance acceptance.
+planned methods are implemented; this is not conformance acceptance. On the
+app host image (2026-10-26) the native package boot runs its scans,
+construction and publication, the system process attaches once after it, and
+the guest reaches BOOT_COMPLETED. Every package read and write of the app
+host goes through the native session: there is no `Packages::load` join or
+host package model, and process starts, domains, permissions and the
+services' package discoveries read the session's capture. The published
+`package` front answers the shell's `pm`. A shell install session
+(`pm install-create`, `-write`, `-commit`) of an ordinary APK installs it
+(Success), a same-signer update keeps its uid and data (Success), another
+signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app
+launches, and `pm uninstall` removes its code and data; each survives a
+reboot. Installs are not dexopted: without ART Service (#2063) the
+completion reports the missing owner as the original's `observeException`
+does. `pm install <file>` (#2178), archiving (#1757), internal event delivery
+and shutdown statistics (#2167), permission state without `access.abx`
+(#2168), boot admissions into the permission policy (#2169) and the remaining
+bootstrap owners (#2022) are open.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

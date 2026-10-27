@@ -6,15 +6,18 @@
 //! as `dispatchUidsChangedForObserver` tells them (those of
 //! `registerUidObserverForUids` only of the uids they watch, which
 //! `addUidToObserver` and `removeUidFromObserver` change), and `isUidActive` and
-//! `getUidProcessState` answer from them.
+//! `getUidProcessState` answer from them. The app host's own services'
+//! `addOnUidImportanceListener` listeners hear every change, since each
+//! crosses any cutpoint: from none to top, and gone.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Strong};
 use aim_binder_host::parcel::{Binder, Exception, Parcel};
 
+use super::activity_user::AllowMode;
 use super::{AppHost, PER_USER_RANGE, appops_service};
 
 /// `ActivityManager.UID_OBSERVER_*`.
@@ -58,9 +61,16 @@ struct Observer {
     token: Option<Binder>,
 }
 
+/// An `OnUidImportanceListener` of this process, told the uid and its
+/// change.
+pub(super) type ImportanceListener = Arc<dyn Fn(i32, Change) + Send + Sync>;
+
 #[derive(Default)]
 pub struct UidObservers {
     observers: Mutex<Vec<Observer>>,
+    /// The importance listeners, by their registration.
+    importance: Mutex<Vec<(u64, ImportanceListener)>>,
+    next_importance: Mutex<u64>,
     /// The sequence of each state change (`procStateSeq`).
     seq: Mutex<i64>,
 }
@@ -249,6 +259,28 @@ impl AppHost {
         Ok(())
     }
 
+    /// `ActivityManager.addOnUidImportanceListener` in this process: its
+    /// registration, to remove it with.
+    pub(super) fn add_uid_importance_listener(&self, listener: ImportanceListener) -> u64 {
+        let mut next = self.uid_observers.next_importance.lock().unwrap();
+        *next += 1;
+        self.uid_observers
+            .importance
+            .lock()
+            .unwrap()
+            .push((*next, listener));
+        *next
+    }
+
+    /// `removeOnUidImportanceListener`.
+    pub(super) fn remove_uid_importance_listener(&self, id: u64) {
+        self.uid_observers
+            .importance
+            .lock()
+            .unwrap()
+            .retain(|(i, _)| *i != id);
+    }
+
     /// `unregisterUidObserver`.
     pub(super) fn unregister_uid_observer(&self, observer: Option<Binder>) {
         let Some(Binder::Handle(handle)) = observer else {
@@ -289,7 +321,14 @@ impl AppHost {
         package: Option<&str>,
     ) -> Result<i32, Exception> {
         self.enforce_usage_stats(call, package, "getUidProcessState")?;
-        self.incoming_user(call.sender_euid as i32, uid / PER_USER_RANGE as i32, false)?;
+        self.handle_incoming_user(
+            call.sender_euid as i32,
+            uid / PER_USER_RANGE as i32,
+            false,
+            AllowMode::FullOnly,
+            Some("getUidProcessState"),
+            package,
+        )?;
         Ok(if self.uid_runs(uid) {
             PROCESS_STATE_TOP
         } else {
@@ -318,6 +357,13 @@ impl AppHost {
             })
         {
             o.dispatch(uid, change, seq);
+        }
+        let listeners: Vec<ImportanceListener> = (self.uid_observers.importance.lock().unwrap())
+            .iter()
+            .map(|(_, l)| l.clone())
+            .collect();
+        for listener in listeners {
+            listener(uid, change);
         }
         // `noteUidProcessState` as a uid's first process comes
         // (`addProcessNameLocked`) and its last goes

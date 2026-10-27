@@ -52,14 +52,16 @@ const GRAMMATICAL_GENDER_PROPERTY: &str = "persist.sys.grammatical_gender";
 /// `Configuration.GRAMMATICAL_GENDER_UNDEFINED`.
 const UNDEFINED: i32 = -1;
 
-/// `checkSystemTermsOfAddressIsEnabled`.
+/// `checkSystemTermsOfAddressIsEnabled`: the image's framework flag,
+/// also needed by the global configuration before the package scan.
 fn enabled(host: &AppHost) -> Result<bool, Exception> {
-    let (state, _) = host.packages()?;
-    Ok(state
-        .system
+    Ok(host
+        .framework()?
+        .0
         .flags
-        .iter()
-        .any(|(n, on)| n == SYSTEM_TERMS_OF_ADDRESS_ENABLED && *on))
+        .get(SYSTEM_TERMS_OF_ADDRESS_ENABLED)
+        .copied()
+        .unwrap_or(false))
 }
 
 fn gender_dir(host: &AppHost, user: i32) -> Result<std::path::PathBuf, Exception> {

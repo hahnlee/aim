@@ -18,6 +18,7 @@ use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exce
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_usage_iusagestatsmanager as us;
 
+use super::activity_user::AllowMode;
 use super::usage_database::{self, DEFAULT_SELECTION_LOG_RETENTION_LEN, Init};
 use super::usage_events::{self, Clocks, Event, Extra, INTERVAL_DAILY, Notified, UserStats};
 use super::{AppHost, reply};
@@ -354,7 +355,14 @@ impl UsageStats {
         user: i32,
         calling_package: &str,
     ) -> Result<bool, Exception> {
-        let user = self.host.incoming_user(uid, user, false)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("isAppInactive"),
+            None,
+        )?;
         if package == calling_package {
             let (state, resolution) = self.host.packages()?;
             let query = Query {
@@ -386,7 +394,14 @@ impl UsageStats {
     /// `getAppStandbyBucket`: of the caller's own package, or any for a
     /// caller that may query usage (`hasQueryPermission`).
     fn app_standby_bucket(&self, uid: i32, package: &str, user: i32) -> Result<i32, Exception> {
-        let user = self.host.incoming_user(uid, user, false)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("getAppStandbyBucket"),
+            None,
+        )?;
         let (state, resolution) = self.host.packages()?;
         let query = Query {
             state: &state,
@@ -851,7 +866,14 @@ impl Service for UsageStats {
                 let stats = match self.has_query_permission(uid, package) {
                     Ok(true) => self
                         .host
-                        .incoming_user(uid, a.user_id, false)
+                        .handle_incoming_user(
+                            uid,
+                            a.user_id,
+                            false,
+                            AllowMode::FullOnly,
+                            Some("queryUsageStats"),
+                            Some(package),
+                        )
                         .and_then(|user| match user {
                             0 => {
                                 self.query_usage_stats(uid, a.bucket_type, a.begin_time, a.end_time)

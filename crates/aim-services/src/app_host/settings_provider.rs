@@ -38,6 +38,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::android_content_icontentprovider as cp;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
+use super::activity_user::AllowMode;
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
 use super::content_service::NOTIFY_SYNC_TO_NETWORK;
 use super::cursor::{BulkCursor, Rows};
@@ -267,9 +268,6 @@ pub struct SettingsProvider {
     host: Arc<AppHost>,
     generations: OnceLock<GenerationRegistry>,
     declared: OnceLock<Declared>,
-    /// `PackageManager.getSetupWizardPackageName`, cached as
-    /// `cacheSystemPackageNamesAndSystemSignature` caches it.
-    setup_wizard: OnceLock<Option<String>>,
     /// `mSyncConfigDisabledUntilReboot`.
     sync_disabled_until_reboot: AtomicBool,
     /// `mConfigMonitorCallback`.
@@ -762,7 +760,7 @@ impl SettingsProvider {
             return Ok(false);
         }
         // `getCallingApplicationInfoOrThrow`.
-        let info = package.and_then(|p| self.host.inputs().ok()?.packages.application_info(p, 0));
+        let info = package.and_then(|p| self.host.application_info(p, 0, None).ok().flatten());
         let Some(info) = info else {
             eprintln!(
                 "app host: settings: isValidMediaUri: cannot get calling app info for setting: {name} URI: {value}"
@@ -1552,7 +1550,6 @@ impl SettingsProvider {
             host,
             generations: OnceLock::new(),
             declared: OnceLock::new(),
-            setup_wizard: OnceLock::new(),
             sync_disabled_until_reboot: AtomicBool::new(false),
             monitor: Mutex::new(None),
         }
@@ -1624,7 +1621,7 @@ impl SettingsProvider {
             // `getAllConfigFlagNamespaces`, a `HashSet` put as a
             // serializable.
             "LIST_namespaces_config" => {
-                let flags = self.host.inputs()?.settings.config_flags(None)?;
+                let flags = self.host.platform()?.settings.config_flags(None)?;
                 let mut namespaces: Vec<String> = flags
                     .keys()
                     .filter_map(|n| n.find('/').filter(|&i| i != 0).map(|i| n[..i].to_string()))
@@ -1724,7 +1721,7 @@ impl SettingsProvider {
                 let prefix = string(PREFIX);
                 let mut flags: Vec<_> = self
                     .host
-                    .inputs()?
+                    .platform()?
                     .settings
                     .config_flags(prefix)?
                     .into_iter()
@@ -1818,7 +1815,7 @@ impl SettingsProvider {
             || self.has(caller, LOCAL_MAC_ADDRESS)?;
         // The app host keeps user 0's settings only (#1523).
         Ok(if accessible && user == 0 {
-            self.host.inputs()?.settings.setting(table, name)
+            self.host.platform()?.settings.setting(table, name)
         } else {
             None
         })
@@ -1843,7 +1840,7 @@ impl SettingsProvider {
                 .unimplemented_named("settings provider", "another user's settings (#1523)"));
         }
         let hidden = table == Table::Secure && !self.has(caller, LOCAL_MAC_ADDRESS)?;
-        let mut settings = self.host.inputs()?.settings.all(table);
+        let mut settings = self.host.platform()?.settings.all(table);
         settings.retain(|s| !(hidden && s.name == "bluetooth_address"));
         Ok(settings)
     }
@@ -1966,8 +1963,7 @@ impl SettingsProvider {
     fn window_size(&self) -> Result<usize, Exception> {
         let kib = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_integer("config_cursorWindowSize")
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no config_cursorWindowSize"))?;
         Ok(kib.max(0) as usize * 1024)
@@ -2045,9 +2041,11 @@ impl SettingsProvider {
         }
         let name = name.unwrap_or_default();
         enforce_system_mutation(caller.app_id(), &op, name, &|| {
-            let packages = &self.host.inputs()?.packages;
+            let (state, _) = self.host.packages()?;
             let info = package
-                .and_then(|p| packages.application_info(p, 0))
+                .map(|p| self.host.application_info(p, 0, Some(&state)))
+                .transpose()?
+                .flatten()
                 .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Calling package doesn't exist"))?;
             Ok((
                 info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
@@ -2107,7 +2105,7 @@ impl SettingsProvider {
                 .unimplemented_named("settings provider", "another user's settings (#1523)"));
         }
         let generations = self.generations()?;
-        let settings = &self.host.inputs()?.settings;
+        let settings = &self.host.platform()?.settings;
         let changed = match op {
             Op::Insert {
                 value,
@@ -2268,7 +2266,7 @@ impl SettingsProvider {
         let package = self.resolve_calling_package(caller)?;
         self.enforce_device_config_write(caller)?;
         let name = name.unwrap_or_default();
-        let settings = &self.host.inputs()?.settings;
+        let settings = &self.host.platform()?.settings;
         let change = Change {
             value,
             tag: None,
@@ -2300,7 +2298,7 @@ impl SettingsProvider {
         let name = name.unwrap_or_default();
         if !self
             .host
-            .inputs()?
+            .platform()?
             .settings
             .delete(Table::Config, name, false)
         {
@@ -2320,7 +2318,7 @@ impl SettingsProvider {
         prefix: Option<&str>,
     ) -> Result<(), Exception> {
         let package = self.resolve_calling_package(caller)?;
-        let settings = &self.host.inputs()?.settings;
+        let settings = &self.host.platform()?.settings;
         settings.config_flags(prefix)?;
         self.enforce_device_config_write(caller)?;
         if caller.app_id() != SHELL_UID {
@@ -2379,7 +2377,7 @@ impl SettingsProvider {
         let capacity = device_config::sized_capacity(flags.len());
         let mut flags = device_config::hash_map_order(flags, capacity);
         let caller_system = self.caller_system(caller, package.as_deref())?;
-        let settings = &self.host.inputs()?.settings;
+        let settings = &self.host.platform()?.settings;
         let Some(changed) =
             settings.set_config(prefix, &mut flags, package.as_deref(), caller_system)
         else {
@@ -2421,7 +2419,7 @@ impl SettingsProvider {
         } else {
             "0"
         };
-        let settings = &self.host.inputs()?.settings;
+        let settings = &self.host.platform()?.settings;
         let unset = !self.predefined(Table::Global, DEVICE_CONFIG_SYNC_DISABLED)?
             && settings
                 .setting(Table::Global, DEVICE_CONFIG_SYNC_DISABLED)
@@ -2452,7 +2450,7 @@ impl SettingsProvider {
         Ok(
             match self
                 .host
-                .inputs()?
+                .platform()?
                 .settings
                 .get(Table::Global, DEVICE_CONFIG_SYNC_DISABLED)
             {
@@ -2512,12 +2510,14 @@ impl SettingsProvider {
         if requesting == caller.user() {
             return Ok(requesting);
         }
-        let user = self.host.incoming_user(caller.uid, requesting, false)?;
-        if user < 0 {
-            return Err(Exception::illegal_argument(format!(
-                "Call does not support special user #{user}"
-            )));
-        }
+        let user = self.host.handle_incoming_user(
+            caller.uid,
+            requesting,
+            false,
+            AllowMode::FullOnly,
+            Some("get/set setting for user"),
+            None,
+        )?;
         Ok(user)
     }
 
@@ -2615,7 +2615,7 @@ impl SettingsProvider {
         if package == SYSTEM_PACKAGE_NAME || self.setup_wizard()?.as_deref() == Some(package) {
             return Ok(true);
         }
-        let Some(info) = self.host.inputs()?.packages.application_info(package, 0) else {
+        let Some(info) = self.host.application_info(package, 0, None)? else {
             return Ok(false);
         };
         Ok(info.uid < FIRST_APPLICATION_UID as i32
@@ -2625,10 +2625,7 @@ impl SettingsProvider {
 
     /// `getSetupWizardPackageName`: the package of the one system activity
     /// for `MAIN` in `SETUP_WIZARD`, if there is one.
-    fn setup_wizard(&self) -> Result<&Option<String>, Exception> {
-        if let Some(package) = self.setup_wizard.get() {
-            return Ok(package);
-        }
+    fn setup_wizard(&self) -> Result<Option<String>, Exception> {
         let (_, resolution) = self.host.packages()?;
         let intent = crate::package::intent::Intent {
             action: Some("android.intent.action.MAIN".into()),
@@ -2646,7 +2643,7 @@ impl SettingsProvider {
             [one] => Some(one.component().0.to_string()),
             _ => None,
         };
-        Ok(self.setup_wizard.get_or_init(|| package))
+        Ok(package)
     }
 
     /// `isSettingPreDefined`: every flag is.
@@ -2688,8 +2685,7 @@ impl SettingsProvider {
                 Some(users) => users,
                 None => self
                     .host
-                    .inputs()?
-                    .packages
+                    .framework()?
                     .framework_integer("config_multiuserMaximumUsers")
                     .ok_or_else(|| {
                         Exception::new(EX_ILLEGAL_STATE, "no config_multiuserMaximumUsers")
@@ -2705,6 +2701,88 @@ impl SettingsProvider {
 
 #[cfg(test)]
 mod tests {
+    /// PMS.getSetupWizardPackageNameImpl deliberately includes disabled
+    /// components and applications in the system-only setup-wizard query.
+    #[test]
+    fn setup_wizard_selection_follows_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.booleans |= crate::package::pkg::booleans::SYSTEM;
+                    pkg.activities[0].main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec!["android.intent.action.MAIN".into()],
+                                categories: Some(vec![
+                                    "android.intent.category.SETUP_WIZARD".into(),
+                                ]),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                }
+            });
+            let settings = SettingsProvider::new(host.clone());
+            let available = || {
+                let (_, resolution) = host.packages().unwrap();
+                let intent = crate::package::intent::Intent {
+                    action: Some("android.intent.action.MAIN".into()),
+                    categories: Some(vec!["android.intent.category.SETUP_WIZARD".into()]),
+                    ..Default::default()
+                };
+                resolution
+                    .query_intent_activities(
+                        &intent,
+                        None,
+                        flags::MATCH_SYSTEM_ONLY
+                            | flags::MATCH_DIRECT_BOOT_AWARE
+                            | flags::MATCH_DIRECT_BOOT_UNAWARE,
+                        0,
+                        SYSTEM_UID,
+                    )
+                    .unwrap()
+                    .len()
+            };
+            assert_eq!(available(), 1);
+            assert_eq!(settings.setup_wizard().unwrap().as_deref(), Some("p"));
+            for component in [Some("p.Main"), None] {
+                enabled(component, 2);
+                assert_eq!(available(), 0);
+                assert_eq!(settings.setup_wizard().unwrap().as_deref(), Some("p"));
+                enabled(component, 1);
+                assert_eq!(available(), 1);
+                assert_eq!(settings.setup_wizard().unwrap().as_deref(), Some("p"));
+            }
+        });
+    }
+
+    #[test]
+    fn setup_wizard_selection_tracks_published_code() {
+        crate::system::with_discovery_session(|host, publish, _| {
+            let settings = SettingsProvider::new(host.clone());
+            assert_eq!(settings.setup_wizard().unwrap(), None);
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.booleans |= crate::package::pkg::booleans::SYSTEM;
+                    let activity = &mut pkg.activities[0];
+                    activity.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec!["android.intent.action.MAIN".into()],
+                                categories: Some(vec![
+                                    "android.intent.category.SETUP_WIZARD".into(),
+                                ]),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                }
+            });
+            assert_eq!(settings.setup_wizard().unwrap().as_deref(), Some("p"));
+            publish(&mut |pkg| pkg.activities.clear());
+            assert_eq!(settings.setup_wizard().unwrap(), None);
+        });
+    }
     use super::*;
 
     /// `String.split("/")`, whose index 1 names a changed flag.

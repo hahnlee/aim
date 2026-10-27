@@ -51,6 +51,15 @@ pub struct Early {
     dependency_installer_enabled: bool,
     fix_system_apps_first_install_time: bool,
 }
+/// A file's owner and mode as the guest sees them (linux-abi's
+/// `attrs::apply`): a mode nobody recorded is the host file's.
+fn guest_view(recorded: GuestInode, host_mode: u32) -> GuestInode {
+    GuestInode {
+        mode: recorded.mode.or(Some(host_mode & 0o7777)),
+        ..recorded
+    }
+}
+
 impl Early {
     pub(crate) fn density_dpi(&self) -> i32 {
         self.density
@@ -106,9 +115,11 @@ impl Early {
                     if metadata.file_type().is_symlink() {
                         return Err("boot inode is a symlink".into());
                     }
-                    guest_inode::read(&host)
+                    let recorded = guest_inode::read(&host)
                         .map_err(|error| error.to_string())?
-                        .ok_or("boot inode guest metadata was not recorded")?
+                        .ok_or("boot inode guest metadata was not recorded")?;
+                    use std::os::unix::fs::PermissionsExt;
+                    guest_view(recorded, metadata.permissions().mode())
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     original.creation_inode(guest)?
@@ -286,7 +297,7 @@ pub struct Late {
 /// Concrete independent typed leaf adapter. Its resource configuration is the
 /// actual applied resource-owner value passed by the parent boot callback.
 pub struct Source {
-    node: Arc<aim_binder_host::local::Strong>,
+    node: Arc<crate::system::ServiceOwner>,
     data: PathBuf,
     configuration: Config,
     check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
@@ -328,7 +339,7 @@ impl Source {
         })
     }
     pub fn capture(
-        node: Arc<aim_binder_host::local::Strong>,
+        node: Arc<crate::system::ServiceOwner>,
         data: &Path,
         check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     ) -> Result<Self, String> {
@@ -490,7 +501,7 @@ fn original_root_inventory(image: &Path, supplied: &[PathBuf]) -> Result<Vec<Pat
     }
     Ok(roots)
 }
-fn decode_resources(bytes: &[u8]) -> Result<Config, String> {
+pub(crate) fn decode_resources(bytes: &[u8]) -> Result<Config, String> {
     let mut reader = aim_binder_host::parcel::Reader::new(bytes, &[]);
     let bad = |error| format!("original resource configuration record: {error}");
     if reader.read_i32().map_err(bad)? != 1 || reader.read_i32().map_err(bad)? != 24 {
@@ -531,7 +542,7 @@ fn decode_resources(bytes: &[u8]) -> Result<Config, String> {
     })
 }
 struct Rpc {
-    node: Arc<aim_binder_host::local::Strong>,
+    node: Arc<crate::system::ServiceOwner>,
     check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
 }
 impl Rpc {
@@ -655,4 +666,27 @@ pub(crate) fn epoch_fixture_early(
         dependency_installer_enabled: false,
         fix_system_apps_first_install_time: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recorded mode stands; one nobody recorded is the host file's
+    /// permission bits, as the guest's stat shows them.
+    #[test]
+    fn the_guest_view_of_a_file_takes_the_host_mode_when_none_is_recorded() {
+        let owner = GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: None,
+        };
+        assert_eq!(guest_view(owner, 0o100644).mode, Some(0o644));
+        assert_eq!(guest_view(owner, 0o100644).uid, Some(1000));
+        let recorded = GuestInode {
+            mode: Some(0o660),
+            ..owner
+        };
+        assert_eq!(guest_view(recorded, 0o100644).mode, Some(0o660));
+    }
 }

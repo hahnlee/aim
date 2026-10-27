@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     package::{
-        bootstrap::{Bridge, DataBootInputs, ScanPolicy},
+        bootstrap::{BootPolicy, Bridge, DataBootInputs, ScanPolicy},
         model,
         owner::{resources::CodeResources, usage::Usage},
         scan::{SavedSystemScanInputs, SigningScan, SystemImagePackages},
@@ -20,13 +20,14 @@ use super::package_boot_inputs::{PlatformFacts, ScanFacts};
 /// Root binds exactly one early original serializer, constructed independently
 /// of PMS after the original D2 UserManagerService singleton is installed.
 pub struct InitialOwner {
-    node: Arc<Strong>,
+    node: crate::system::ServiceOwner,
     error: Mutex<Option<Exception>>,
 }
 impl InitialOwner {
-    pub fn new(node: Strong) -> Arc<Self> {
+    /// The leaf at `node`: system_server's, or one this process serves.
+    pub fn new(node: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
-            node: Arc::new(node),
+            node,
             error: Mutex::new(None),
         })
     }
@@ -41,7 +42,7 @@ impl InitialOwner {
         fill(&mut data);
         let reply = self
             .node
-            .transact(code, &data, false)
+            .transact_as_owner(code, &data, false)
             .map_err(|code| failure(format!("initial owner transport: {code}")))?;
         let mut reader = reply.reader();
         reader
@@ -238,7 +239,7 @@ pub struct Begun {
     pub image: PathBuf,
     pub data: PathBuf,
     pub initial: Arc<InitialOwner>,
-    pub original_context: Option<Strong>,
+    pub original_context: Option<crate::system::ServiceOwner>,
     pub retained_readers: Option<crate::package::settings::native_read::SharedReaders>,
 }
 pub struct Scanned {
@@ -359,7 +360,7 @@ impl RawScanned {
     }
 }
 impl Begun {
-    pub fn bind_original_context(&mut self, context: Strong) -> Result<()> {
+    pub fn bind_original_context(&mut self, context: crate::system::ServiceOwner) -> Result<()> {
         if self.original_context.is_some() {
             return Err(failure("original boot context already bound"));
         }
@@ -377,7 +378,7 @@ impl System {
         image: &Path,
         data: &Path,
         initial: Arc<InitialOwner>,
-        ce_leaf: Strong,
+        ce_leaf: crate::system::ServiceOwner,
     ) -> Result<Begun> {
         self.check_package_bootstrap(bridge)?;
         let original = prepared.settings.clone();
@@ -412,7 +413,7 @@ impl System {
     pub fn finish_raw_native_package_scan(
         self: &Arc<Self>,
         bridge: &Arc<Bridge>,
-        mut begin: Begun,
+        begin: Begun,
         mut original: crate::package::scan_snapshot::boot_context::Original,
         runtime_system: model::System,
         classes: Arc<aim_android_image::linkage::Hierarchy>,
@@ -880,7 +881,12 @@ impl System {
             sdk_sandbox_package,
         };
         let input = original.populate(input).map_err(failure)?;
-        let context = crate::package::scan_snapshot::boot_context::build(input).map_err(failure)?;
+        let mut context =
+            crate::package::scan_snapshot::boot_context::build(input).map_err(failure)?;
+        context.access = self
+            .native_permissions()
+            .map(|owner| owner.retained_access())
+            .transpose()?;
         let values = begin.initial.clone();
         let props = |name: &str| values.property_value(name);
         begin.initial.check()?;

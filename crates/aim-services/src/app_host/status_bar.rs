@@ -17,6 +17,7 @@ use aim_service_aidl::com_android_internal_statusbar_istatusbar as bar_aidl;
 use aim_service_aidl::com_android_internal_statusbar_istatusbarservice as sb;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::activity_user;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::intent::ComponentName;
 
@@ -117,8 +118,9 @@ impl StatusBar {
                 uid,
                 user,
                 false,
-                false,
+                activity_user::AllowMode::NonFull,
                 Some(&component.package),
+                None,
             )?;
             // `checkCallingUidPackage`.
             let package_uid = self.host.package_uid(&component.package, 0, user)?;

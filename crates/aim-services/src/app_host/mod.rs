@@ -15,12 +15,14 @@ pub mod accounts_db;
 pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
+mod activity_user;
 pub mod alarm_service;
 pub mod apex_manager;
 mod app_data;
 mod app_op_infos;
 mod app_standby;
 pub mod app_widget;
+mod application_data;
 pub mod appops_history;
 pub mod appops_restrictions;
 pub mod appops_sampling;
@@ -36,6 +38,7 @@ pub mod battery_stats;
 pub mod bind;
 mod blob_store;
 pub mod bluetooth_manager;
+pub mod boot_policy;
 mod broadcast_response;
 pub mod broadcasts;
 pub mod bugreport;
@@ -70,11 +73,21 @@ pub mod hint_manager;
 pub mod input_manager;
 pub mod input_method;
 pub mod input_shell;
+mod installer_archive_queries;
+mod installer_completion;
+mod installer_confirmation;
+mod installer_external;
+mod installer_files;
+mod installer_permissions;
+mod installer_preparation;
+mod installer_recovery;
+mod installer_removal;
 pub mod job_content;
 pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod kept;
+pub(crate) mod launch_inputs;
 pub mod legacy_permission;
 pub mod locale_manager;
 pub mod lock_settings;
@@ -85,6 +98,7 @@ mod media_router2;
 pub mod media_session;
 mod media_session_record;
 pub mod memory_info;
+mod native_staging;
 pub mod netpolicy_service;
 pub mod netstats;
 pub mod network;
@@ -93,12 +107,34 @@ mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod overlay_service;
+mod package_app_data;
+pub mod package_boot;
+pub mod package_boot_configuration;
+pub mod package_boot_context;
+pub mod package_boot_lifecycle;
+pub mod package_bootstrap;
 mod package_checksums;
-pub mod package_installer;
+mod package_domain_settings;
+mod package_effects;
+#[cfg(test)]
+pub(crate) use package_effects::PackageEffects;
+mod package_enable;
+pub mod package_initial_context;
+mod package_installer_policy;
+mod package_internal_events;
+mod package_internal_leaves;
+mod package_internal_storage;
+mod package_launch;
+mod package_maintenance;
+mod package_moves;
+pub mod package_observers;
+mod package_policy;
+pub mod package_resolution_policy;
 pub mod package_service;
-pub mod package_shell;
+mod package_shell_install_policy;
+mod package_shell_policy;
+mod package_shell_read;
 mod package_writes;
-pub mod packages;
 pub mod pending_intents;
 pub mod permission_checker;
 pub mod permission_controller;
@@ -106,8 +142,10 @@ pub mod permission_manager;
 pub mod platform_compat;
 pub mod playback;
 pub mod power_service;
+mod preferred_records;
 pub mod providers;
 mod recovery_certificates;
+mod resources;
 pub mod restrictions_service;
 pub mod role_service;
 pub mod rollback_service;
@@ -147,6 +185,7 @@ pub mod user_service;
 pub mod user_types;
 pub mod volume;
 pub mod vpn_manager;
+mod web_instant_apps;
 pub mod webview_update;
 mod webview_zygote;
 pub mod wifi_config;
@@ -304,12 +343,12 @@ struct Configured {
     connect: Connect,
 }
 
-/// What the app host reads, loaded when the first process starts.
-struct Inputs {
+/// What the app host reads of the platform, apart from its packages:
+/// loaded on first use, before or without the package model.
+struct Platform {
     /// The guest's `/data`.
     data: PathBuf,
     compat: compat::CompatConfig,
-    packages: packages::Packages,
     settings: settings::Settings,
     /// `persist.sys.locale`.
     locales: String,
@@ -317,7 +356,19 @@ struct Inputs {
     serial: String,
     /// `ro.sf.lcd_density`, the processes' `DisplayMetrics.DENSITY_DEVICE`.
     device_density: i32,
-    shared_memory: bind::ApplicationSharedMemory,
+    shared_memory: OnceLock<bind::ApplicationSharedMemory>,
+}
+
+impl Platform {
+    fn application_shared_memory(&self) -> Result<&bind::ApplicationSharedMemory, Exception> {
+        if let Some(memory) = self.shared_memory.get() {
+            return Ok(memory);
+        }
+        let memory = bind::ApplicationSharedMemory::new().map_err(|e| {
+            Exception::new(EX_ILLEGAL_STATE, format!("application shared memory: {e}"))
+        })?;
+        Ok(self.shared_memory.get_or_init(|| memory))
+    }
 }
 
 /// A start's app data isolation (`zygote::Start`'s).
@@ -462,7 +513,9 @@ pub struct AppHost {
     me: Weak<AppHost>,
     process: Arc<LocalProcess>,
     configured: OnceLock<Configured>,
-    inputs: OnceLock<Inputs>,
+    platform: OnceLock<Arc<Platform>>,
+    /// The device's framework and APK resource context.
+    framework: OnceLock<resources::Framework>,
     loading: Mutex<()>,
     zygote: Mutex<Option<zygote::Session>>,
     next_seq: AtomicI64,
@@ -475,21 +528,13 @@ pub struct AppHost {
     /// user's system grammatical gender, read from its file once.
     grammatical_genders: Mutex<HashMap<i32, i32>>,
     unimplemented: Mutex<std::collections::HashSet<(String, u32)>>,
-    /// The package model's state, replaced as PackageManager's writes
-    /// change it.
-    model: Mutex<Option<Arc<crate::package::model::State>>>,
-    /// Held by each change of the package model from reading it to
-    /// storing the changed model, so that no change is lost to another.
-    model_writer: Mutex<()>,
-    /// The owner of PackageManager's persisted state, opened by its
-    /// first write (the package service's, the app data's inodes);
-    /// holding it serializes writes (`mLock`).
-    package_store: Mutex<Option<crate::package::owner::Store>>,
-    resolver: crate::package::resolve::Resolver,
+    /// The users unlocking or unlocked (`UserController`'s user states at
+    /// `STATE_RUNNING_UNLOCKING` or later).
+    unlocked_users: Mutex<std::collections::BTreeSet<i32>>,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
-    /// The settings provider and its connection token.
-    settings_provider: OnceLock<(Binder, Binder)>,
+    /// The settings provider, its binder and its connection token.
+    settings_provider: OnceLock<(Arc<settings_provider::SettingsProvider>, Binder, Binder)>,
     windows: window_manager::Windows,
     composer: OnceLock<surface::Composer>,
     agent: Mutex<Option<Strong>>,
@@ -500,6 +545,10 @@ pub struct AppHost {
     uri_grants: uri_grants::UriGrants,
     /// `permissionmgr`, which the app host's own permission checks ask.
     permission_manager: OnceLock<Arc<permission_manager::PermissionManager>>,
+    /// The native services' system, whose package boot the app host runs.
+    system: OnceLock<Arc<crate::system::System>>,
+    /// `startBootstrapServices` constructs PMS before `setSystemProcess`.
+    package_boot: OnceLock<Result<(), Exception>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -539,6 +588,8 @@ pub struct AppHost {
     device_idle: OnceLock<Arc<device_idle::DeviceIdle>>,
     /// The services' package monitors.
     package_monitors: package_writes::NativeMonitors,
+    /// The current native PackageList observer epoch, owned by its bridge.
+    package_observers: Mutex<Weak<package_observers::Registry>>,
     /// PackageManager's writes and their handler, the package service's.
     package_writes: OnceLock<Arc<package_writes::Writes>>,
     /// What DevicePolicyManagerService persisted, read once.
@@ -555,6 +606,8 @@ pub struct AppHost {
     sensor_privacy: OnceLock<sensor_privacy::Persisted>,
     /// audioserver, once it registered, and the stream volumes.
     audio_policy: OnceLock<audio_policy::AudioPolicy>,
+    audio_permission_update: Mutex<()>,
+    audio_permission_controller: Mutex<Option<(Arc<aim_binder_host::local::Strong>, u64)>>,
     volumes: Mutex<Option<volume::Volumes>>,
     /// The players and recorders apps made.
     playback: Mutex<playback::Playback>,
@@ -576,7 +629,8 @@ impl AppHost {
             me: me.clone(),
             process,
             configured: OnceLock::new(),
-            inputs: OnceLock::new(),
+            platform: OnceLock::new(),
+            framework: OnceLock::new(),
             loading: Mutex::new(()),
             zygote: Mutex::new(None),
             next_seq: AtomicI64::new(1),
@@ -585,10 +639,7 @@ impl AppHost {
             config_seq: AtomicI64::new(1),
             grammatical_genders: Mutex::new(HashMap::new()),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
-            model: Mutex::new(None),
-            model_writer: Mutex::new(()),
-            package_store: Mutex::new(None),
-            resolver: Default::default(),
+            unlocked_users: Mutex::new(Default::default()),
             activities: Default::default(),
             display: OnceLock::new(),
             settings_provider: OnceLock::new(),
@@ -600,6 +651,8 @@ impl AppHost {
             providers: Default::default(),
             uri_grants: Default::default(),
             permission_manager: OnceLock::new(),
+            system: OnceLock::new(),
+            package_boot: OnceLock::new(),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
@@ -633,6 +686,7 @@ impl AppHost {
             text_services: OnceLock::new(),
             device_idle: OnceLock::new(),
             package_monitors: Default::default(),
+            package_observers: Mutex::default(),
             package_writes: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
@@ -642,6 +696,8 @@ impl AppHost {
             system_user: OnceLock::new(),
             sensor_privacy: OnceLock::new(),
             audio_policy: OnceLock::new(),
+            audio_permission_update: Mutex::new(()),
+            audio_permission_controller: Mutex::new(None),
             volumes: Mutex::new(None),
             playback: Mutex::default(),
             focus: Mutex::default(),
@@ -653,6 +709,31 @@ impl AppHost {
 
     /// The binders of the services published with it, which
     /// `bindApplication` hands apps.
+    /// The native services' system, whose package boot this runs.
+    pub fn set_system(&self, system: Arc<crate::system::System>) {
+        if let Some(owner) = self.permission_manager.get() {
+            system.set_native_permissions(owner);
+        }
+        let _ = self.system.set(system);
+    }
+
+    pub(super) fn package_system(&self) -> Result<&Arc<crate::system::System>, Exception> {
+        self.system
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native package system unavailable"))
+    }
+
+    /// Retain one session generation for an operation's scan and query inputs.
+    pub(super) fn package_capture(
+        &self,
+    ) -> Result<Arc<package::scan_snapshot::query_state::Capture>, Exception> {
+        let system = self.package_system()?;
+        // PMS construction precedes its consumers in SystemServer. Construction
+        // itself uses System's captures and the bootstrap leaves, never this gate.
+        self.package_boot.wait().clone()?;
+        system.capture_package_queries()
+    }
+
     pub fn set_published(&self, services: &[(String, Binder)]) {
         *self.published.lock().unwrap() = services.to_vec();
     }
@@ -689,6 +770,7 @@ impl AppHost {
     pub fn services(self: &Arc<Self>) -> Vec<(&'static str, Arc<dyn Service>)> {
         let settings = Arc::new(settings_provider::SettingsProvider::new(self.clone()));
         let _ = self.settings_provider.set((
+            settings.clone(),
             self.process.add_service(settings.clone()),
             self.process.add_service(Arc::new(activity::Token)),
         ));
@@ -696,6 +778,9 @@ impl AppHost {
             .permission_manager
             .get_or_init(|| Arc::new(permission_manager::PermissionManager::new(self.clone())))
             .clone();
+        if let Some(system) = self.system.get() {
+            system.set_native_permissions(&permission_manager);
+        }
         // Published together, as `StatsCompanion.Lifecycle` publishes them.
         let stats = self
             .stats
@@ -711,6 +796,8 @@ impl AppHost {
             .text_services
             .get_or_init(|| text_services::TextServices::new(self.clone(), settings.clone()))
             .clone();
+        self.package_writes
+            .get_or_init(|| package_writes::Writes::new(self.clone()));
         vec![
             (
                 "activity",
@@ -723,6 +810,10 @@ impl AppHost {
             (
                 "package",
                 Arc::new(package_service::PackageService::new(self.clone())),
+            ),
+            (
+                "package_native",
+                Arc::new(package_service::PackageService::native(self.clone())),
             ),
             (
                 "display",
@@ -835,7 +926,7 @@ impl AppHost {
             ),
             (
                 "webviewupdate",
-                Arc::new(webview_update::WebViewUpdate::new(self.clone())),
+                webview_update::WebViewUpdate::new(self.clone()),
             ),
             (
                 "locale",
@@ -898,10 +989,7 @@ impl AppHost {
                     settings.clone(),
                 )),
             ),
-            (
-                "appwidget",
-                Arc::new(app_widget::AppWidgetService::new(self.clone())),
-            ),
+            ("appwidget", app_widget::AppWidgetService::new(self.clone())),
             (
                 "restrictions",
                 Arc::new(restrictions_service::RestrictionsManager::new(self.clone())),
@@ -1050,21 +1138,21 @@ impl AppHost {
         ]
     }
 
-    /// What starts read, loaded by the first.
-    fn inputs(&self) -> Result<&Inputs, Exception> {
+    /// What the services read of the platform, loaded by the first,
+    /// without the packages.
+    fn platform(&self) -> Result<&Arc<Platform>, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let configured = self
             .configured
             .get()
             .ok_or_else(|| state("app host not configured".into()))?;
-        if let Some(inputs) = self.inputs.get() {
-            return Ok(inputs);
+        if let Some(platform) = self.platform.get() {
+            return Ok(platform);
         }
         let _loading = self.loading.lock().unwrap();
-        if let Some(inputs) = self.inputs.get() {
-            return Ok(inputs);
+        if let Some(platform) = self.platform.get() {
+            return Ok(platform);
         }
-        let started = Instant::now();
         let property = |name: &str| {
             (configured.properties)(name).ok_or_else(|| state(format!("no property {name}")))
         };
@@ -1080,38 +1168,37 @@ impl AppHost {
             &property("ro.build.version.codename")?,
         )
         .map_err(state)?;
-        let device_density = number("ro.sf.lcd_density")?;
-        let packages = packages::Packages::load(
-            &configured.root,
-            &configured.data,
-            device_density,
-            &property("persist.sys.locale")?,
-            &|name| (configured.properties)(name),
-            // `SharedLibrariesImpl.ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES`.
-            &|name, target_sdk| compat.is_enabled(142_191_088, Some(name), target_sdk),
-            &apex_manager::inventory(&self.process).map_err(state)?,
-        )
-        .map_err(state)?;
         let settings =
             settings::Settings::load(&configured.data, &configured.root).map_err(state)?;
-        let shared_memory = bind::ApplicationSharedMemory::new()
-            .map_err(|e| state(format!("application shared memory: {e}")))?;
-        eprintln!(
-            "app host: {} packages loaded in {:?}",
-            packages.state().packages.len(),
-            started.elapsed()
-        );
-        let inputs = Inputs {
+        let platform = Platform {
             data: configured.data.clone(),
             compat,
-            packages,
             settings,
             locales: property("persist.sys.locale")?,
             serial: property("ro.serialno").unwrap_or_else(|_| "unknown".into()),
-            device_density,
-            shared_memory,
+            device_density: number("ro.sf.lcd_density")?,
+            shared_memory: OnceLock::new(),
         };
-        Ok(self.inputs.get_or_init(|| inputs))
+        Ok(self.platform.get_or_init(|| Arc::new(platform)))
+    }
+
+    /// The framework's resources as the device configures them, without
+    /// acquiring the package model.
+    fn framework(&self) -> Result<&resources::Framework, Exception> {
+        if let Some(framework) = self.framework.get() {
+            return Ok(framework);
+        }
+        let platform = self.platform()?;
+        let framework =
+            resources::Framework::load(self.root()?, platform.device_density, &platform.locales)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        Ok(self.framework.get_or_init(|| framework))
+    }
+
+    /// Compatibility accessor for platform/config consumers; package queries
+    /// acquire the native session through package_capture.
+    fn inputs(&self) -> Result<&Arc<Platform>, Exception> {
+        self.platform()
     }
 
     /// The launcher's start of package `name`'s activity `class`, user
@@ -1238,7 +1325,7 @@ impl AppHost {
         uid: u32,
         crash_handler: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<i32, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let configured = self
             .configured
             .get()
@@ -1298,7 +1385,12 @@ impl AppHost {
             "app host: Start proc {pid}:{process}/{uid} for {entry} in {:?}",
             started.elapsed()
         );
-        self.isolated_owners_changed(|owners| owners.push((uid as i32, SYSTEM_UID as i32)))?;
+        self.package_system()?.internal_add_isolated_uid(
+            uid as i32,
+            SYSTEM_UID as i32,
+            SYSTEM_UID as i32,
+            0,
+        )?;
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
@@ -1339,7 +1431,7 @@ impl AppHost {
         info: Arc<package::info::ApplicationInfo>,
         process: &str,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let owner = info.uid as u32;
         let package = info.item.package_name.clone().unwrap_or_default();
         let uid = self
@@ -1407,7 +1499,12 @@ impl AppHost {
             "app host: Start proc {pid}:{process}/{uid} by the WebView zygote in {:?}",
             started.elapsed()
         );
-        self.isolated_owners_changed(|owners| owners.push((uid as i32, owner as i32)))?;
+        self.package_system()?.internal_add_isolated_uid(
+            uid as i32,
+            owner as i32,
+            SYSTEM_UID as i32,
+            0,
+        )?;
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
@@ -1447,7 +1544,6 @@ impl AppHost {
         from_background: bool,
         isolated: bool,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
         // The system process (`setSystemProcess`) is the `android`
         // package's, `system` of the system uid, which `aim-system`
         // attaches (`attach_system_process`) and nothing starts: a
@@ -1455,9 +1551,8 @@ impl AppHost {
         // The `android` package's own components are system_server's
         // services' code, which the system process does not run (#1518).
         if process == SYSTEM_PROCESS && !isolated {
-            let uid = inputs
-                .packages
-                .application_info(name, STOCK_PM_FLAGS)
+            let uid = self
+                .application_info(name, STOCK_PM_FLAGS, None)?
                 .map(|ai| ai.uid as u32);
             if uid == Some(SYSTEM_UID) {
                 if is_system_server_code(name, process) {
@@ -1497,25 +1592,8 @@ impl AppHost {
         from_background: bool,
         isolated: bool,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
-        let state = package::State::read(&inputs.data, &[0])
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
-            .ok_or_else(|| {
-                Exception::new(
-                    EX_ILLEGAL_STATE,
-                    "no package state: Android never booted on this data",
-                )
-            })?;
-        let setting = state
-            .settings
-            .packages
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| Exception::illegal_argument(format!("unknown package {name}")))?;
-        let listed = state.list.iter().find(|e| e.name == name).ok_or_else(|| {
-            Exception::new(EX_ILLEGAL_STATE, format!("{name} not in packages.list"))
-        })?;
-        let owner = listed.uid;
+        let launch = self.launch_inputs(name)?;
+        let owner = launch.application.uid as u32;
         let uid = if isolated {
             self.isolated_uids
                 .lock()
@@ -1538,18 +1616,25 @@ impl AppHost {
             isolated,
             uid,
             owner,
-            setting,
-            listed,
+            launch,
         );
         if isolated {
             match &started {
-                Ok(_) => {
-                    self.isolated_owners_changed(|owners| owners.push((uid as i32, owner as i32)))?
-                }
+                Ok(_) => self.package_system()?.internal_add_isolated_uid(
+                    uid as i32,
+                    owner as i32,
+                    SYSTEM_UID as i32,
+                    0,
+                )?,
                 Err(_) => self.free_isolated_uid(uid)?,
             }
         }
         started
+    }
+
+    /// Retain the session generation used by this process start.
+    pub(crate) fn launch_inputs(&self, name: &str) -> Result<launch_inputs::Inputs, Exception> {
+        launch_inputs::Inputs::capture(self.package_capture()?, name)
     }
 
     /// The rest of `startProcessLocked` for the process `process` of
@@ -1564,10 +1649,9 @@ impl AppHost {
         isolated: bool,
         uid: u32,
         package_uid: u32,
-        setting: &package::settings::Package,
-        listed: &package::list::Entry,
+        launch: launch_inputs::Inputs,
     ) -> Result<(i64, i32), Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         if !isolated {
             let key = (process.to_string(), uid);
             let mut errors = self.app_errors.lock().unwrap();
@@ -1588,27 +1672,28 @@ impl AppHost {
         let (mount_external, gids) = if isolated {
             (zygote::MountExternal::None, Vec::new())
         } else {
-            let mount_external = self.mount_mode(uid as i32, name)?;
+            let mount_external = self.mount_mode(&launch.capture, uid as i32, name)?;
             let external_storage_access = self.has_external_storage_access(uid as i32, name)?;
             (
                 mount_external,
                 process_gids(
-                    listed.gids.clone(),
+                    launch.permission_gids,
                     uid,
                     mount_external,
                     external_storage_access,
                 ),
             )
         };
-        let target_sdk = setting.target_sdk_version;
-        let app_info = inputs
-            .packages
-            .application_info(name, STOCK_PM_FLAGS)
-            .ok_or_else(|| {
-                Exception::new(EX_ILLEGAL_STATE, format!("no application info of {name}"))
-            })?;
+        let app_info = &launch.application;
+        let target_sdk = app_info.target_sdk_version;
         let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let mut isolation = self.data_isolation(name, uid, target_sdk, mount_external)?;
+        let mut isolation = self.data_isolation(
+            launch.capture.state(),
+            name,
+            uid,
+            target_sdk,
+            mount_external,
+        )?;
         // An isolated process does not even mount its own app's data.
         if isolated {
             isolation.packages.clear();
@@ -1626,13 +1711,16 @@ impl AppHost {
                     .get(settings::Table::Global, "hidden_api_policy")
                     .as_deref(),
             ) << API_ENFORCEMENT_POLICY_SHIFT
-                | memory_safety(&inputs.compat, name, setting.flags, target_sdk),
+                | memory_safety(&inputs.compat, name, launch.flags, target_sdk),
             mount_external,
             target_sdk_version: target_sdk,
             nice_name: process.to_string(),
-            seinfo: format!("{}{SEINFO_COMPLETE}", listed.seinfo),
-            instruction_set: setting.primary_cpu_abi.as_deref().map(instruction_set),
-            app_data_dir: Some(listed.data_dir.clone()),
+            seinfo: format!(
+                "{}{SEINFO_COMPLETE}",
+                app_info.se_info.as_deref().expect("validated seInfo")
+            ),
+            instruction_set: app_info.primary_cpu_abi.as_deref().map(instruction_set),
+            app_data_dir: app_info.data_dir.clone(),
             start_child_zygote: false,
             package_name: Some(name.to_string()),
             is_top_app: true,
@@ -1728,12 +1816,13 @@ impl AppHost {
     /// (`persist.sys.vold_app_data_isolation_enabled`).
     fn data_isolation(
         &self,
+        state: &package::model::State,
         package: &str,
         uid: u32,
         target_sdk: i32,
         mount_external: zygote::MountExternal,
     ) -> Result<Isolation, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let configured = self
             .configured
             .get()
@@ -1741,7 +1830,6 @@ impl AppHost {
         let flag = |name: &str, default: bool| {
             system_boolean((configured.properties)(name).as_deref(), default)
         };
-        let (state, _) = self.packages()?;
         let user = (uid / PER_USER_RANGE) as i32;
         let app_id = uid % PER_USER_RANGE;
         let mut data_dirs = flag("persist.zygote.app_data_isolation", true)
@@ -1947,6 +2035,7 @@ impl AppHost {
                 "the system process is attached",
             ));
         }
+        self.package_boot.wait().clone()?;
         let config = self.global_configuration()?;
         let providers = self.process_providers(SYSTEM_PROCESS, SYSTEM_UID)?;
         let strong = self.process.strong(handle);
@@ -2226,17 +2315,43 @@ impl AppHost {
         uid: i32,
         user: i32,
         allow_all: bool,
-        require_full: bool,
+        mode: activity_user::AllowMode,
         name: Option<&str>,
+        caller_package: Option<&str>,
     ) -> Result<i32, Exception> {
-        let target = self.incoming_user(uid, user, !require_full)?;
-        if !allow_all && target < 0 {
-            return Err(Exception::illegal_argument(format!(
-                "Call does not support special user #{target}{}",
-                name.map(|n| format!(" ({n})")).unwrap_or_default()
-            )));
-        }
-        Ok(target)
+        activity_user::handle_incoming_user(
+            uid,
+            user,
+            allow_all,
+            mode,
+            name,
+            caller_package,
+            || {
+                self.recents_uid().map(|r| {
+                    r.is_some_and(|r| {
+                        r.rem_euclid(PER_USER_RANGE as i32) == uid.rem_euclid(PER_USER_RANGE as i32)
+                    })
+                })
+            },
+            |p| self.check_permission(Some(p), uid).map(|r| r == 0),
+            || {
+                permission_checker::preflight_source(
+                    self,
+                    "android.permission.INTERACT_ACROSS_PROFILES",
+                    &permission_checker::AttributionSourceState {
+                        pid: -1,
+                        uid,
+                        device_id: 0,
+                        package: caller_package.map(Into::into),
+                        tag: None,
+                        token: None,
+                        renounced: None,
+                        next: None,
+                    },
+                )
+            },
+            |target| self.has_user_restriction("no_debugging_features", target),
+        )
     }
 
     /// A guest property.
@@ -2514,6 +2629,11 @@ impl AppHost {
             || !self.user_unlocking_or_unlocked(user)?)
     }
 
+    /// `UserManagerService.hasUserRestriction` for the host's single user.
+    fn has_user_restriction(&self, key: &str, user: i32) -> Result<bool, Exception> {
+        Ok(user == user_service::SYSTEM_USER && self.user_restrictions()?.contains(key))
+    }
+
     /// User 0's base restrictions, as UserManagerService last persisted
     /// them (`/data/system/users/0.xml`'s `<restrictions>`).
     fn user_restrictions(&self) -> Result<&std::collections::BTreeSet<String>, Exception> {
@@ -2637,18 +2757,19 @@ impl AppHost {
     fn recents_uid(&self) -> Result<Option<i32>, Exception> {
         const MATCH_DISABLED_COMPONENTS: i64 = 0x200;
         const MATCH_UNINSTALLED_PACKAGES: i64 = 0x2000;
-        let packages = &self.inputs()?.packages;
-        let component = packages
+        let framework = self.framework()?;
+        let component = framework
             .framework_string("config_recentsComponentName")
             .unwrap_or_default();
         let Some((package, _)) = component.split_once('/') else {
             return Ok(None);
         };
-        Ok(packages
+        Ok(self
             .application_info(
                 package,
                 MATCH_UNINSTALLED_PACKAGES | MATCH_DISABLED_COMPONENTS,
-            )
+                None,
+            )?
             .map(|ai| ai.uid))
     }
 
@@ -2697,31 +2818,6 @@ impl AppHost {
             .transact(code, data, true)
             .map(|_| ())
             .map_err(|s| format!("{code}: {s}"))
-    }
-
-    /// `UserController.handleIncomingUser`: `USER_CURRENT` as user 0,
-    /// another user than the caller's, `USER_ALL` among them, only with
-    /// `INTERACT_ACROSS_USERS_FULL` (or, if `allow_non_full`,
-    /// `INTERACT_ACROSS_USERS`).
-    fn incoming_user(&self, uid: i32, user: i32, allow_non_full: bool) -> Result<i32, Exception> {
-        const USER_ALL: i32 = -1;
-        const USER_CURRENT: i32 = -2;
-        let user = if user == USER_CURRENT { 0 } else { user };
-        let has = |p: &str| self.check_permission(Some(p), uid).map(|r| r == 0);
-        if user < 0 && user != USER_ALL {
-            return Err(Exception::new(
-                EX_ILLEGAL_ARGUMENT,
-                format!("Invalid user: {user}"),
-            ));
-        } else if user != uid / PER_USER_RANGE as i32
-            && !has("android.permission.INTERACT_ACROSS_USERS_FULL")?
-            && !(allow_non_full && has("android.permission.INTERACT_ACROSS_USERS")?)
-        {
-            return Err(Exception::security(format!(
-                "Permission Denial: user {uid} is asking for user {user} but does not have INTERACT_ACROSS_USERS_FULL"
-            )));
-        }
-        Ok(user)
     }
 
     /// Sends the process of `start_seq` the transaction of `items`
@@ -2812,39 +2908,68 @@ impl AppHost {
     /// restarted) and its transient URI grants removed. Its activities,
     /// services, providers and receivers are not stopped (#1570).
     fn force_stop_package(&self, package: &str, app_id: i32, user: i32, reason: &str) {
+        if let Err(error) = self.kill_application(
+            package,
+            app_id,
+            user,
+            reason,
+            exit_info::REASON_USER_REQUESTED,
+        ) {
+            eprintln!("app host: force stopping {package}: {}", error.message);
+        }
+    }
+
+    /// `IActivityManager.killApplication` shares the force-stop path, carrying
+    /// the caller's exit reason. USER_ALL spans the activity owner's users.
+    fn kill_application(
+        &self,
+        package: &str,
+        app_id: i32,
+        user: i32,
+        reason: &str,
+        exit_reason: i32,
+    ) -> Result<(), Exception> {
+        if app_id < 0 {
+            return Ok(());
+        }
         eprintln!("app host: Force stopping {package} appid={app_id} user={user}: {reason}");
-        let uid = (user * PER_USER_RANGE as i32 + app_id) as u32;
+        let matches_uid = |uid: u32| {
+            (user == USER_ALL || uid / PER_USER_RANGE == user as u32)
+                && uid % PER_USER_RANGE == app_id as u32
+        };
         {
             let mut errors = self.app_errors.lock().unwrap();
-            errors.crash_times.retain(|(_, u), _| *u != uid);
-            errors.crash_counts.retain(|(_, u), _| *u != uid);
+            errors.crash_times.retain(|(_, uid), _| !matches_uid(*uid));
+            errors.crash_counts.retain(|(_, uid), _| !matches_uid(*uid));
         }
-        let starts: Vec<i64> = self
+        let starts: Vec<_> = self
             .apps
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, a)| {
-                a.uid / PER_USER_RANGE == uid / PER_USER_RANGE
-                    && (a.package == package && a.uid == uid
-                        || a.package_deps.iter().any(|d| d == package))
+            .filter(|(_, app)| {
+                (user == USER_ALL || app.uid / PER_USER_RANGE == user as u32)
+                    && (app.uid % PER_USER_RANGE == app_id as u32
+                        || app.package_deps.iter().any(|name| name == package))
             })
             .map(|(seq, _)| *seq)
             .collect();
+        let mut failure = None;
+        let subreason = if exit_reason == exit_info::REASON_USER_REQUESTED {
+            exit_info::SUBREASON_FORCE_STOP
+        } else {
+            exit_info::SUBREASON_UNKNOWN
+        };
         let description = format!("stop {package} due to {reason}");
         for seq in starts {
-            if let Err(e) = self.kill_process(
-                seq,
-                exit_info::REASON_USER_REQUESTED,
-                exit_info::SUBREASON_FORCE_STOP,
-                &description,
-            ) {
-                eprintln!("app host: killing {package}'s process of start {seq}: {e}");
+            if let Err(error) = self.kill_process(seq, exit_reason, subreason, &description) {
+                failure.get_or_insert_with(|| Exception::new(EX_ILLEGAL_STATE, error));
             }
         }
-        if let Err(e) = self.remove_uri_permissions_for_package(package, user, false, false) {
-            eprintln!("app host: {package}'s URI grants: {}", e.message);
+        if let Err(error) = self.remove_uri_permissions_for_package(package, user, false, false) {
+            failure.get_or_insert(error);
         }
+        failure.map_or(Ok(()), Err)
     }
 
     /// `killUidForPermissionChange`: the processes of `uid`
@@ -2976,9 +3101,8 @@ impl AppHost {
             return Ok(display.clone());
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let inputs = self.inputs()?;
         let display = display::Display::query(&self.process).map_err(state)?;
-        let packages = &inputs.packages;
+        let packages = self.framework()?;
         let integer = |name: &str| {
             packages
                 .framework_integer(name)
@@ -3253,63 +3377,79 @@ impl AppHost {
         }
     }
 
-    /// The package model's state and its resolution, made once.
-    fn packages(
+    /// The app host's trusted user-0 ApplicationInfo generator. Keep the
+    /// caller's flags unchanged; this is not an unprivileged public query.
+    /// Reuse a retained package acquisition when the operation has one.
+    fn application_info(
+        &self,
+        name: &str,
+        flags: i64,
+        acquired: Option<&package::model::State>,
+    ) -> Result<Option<package::info::ApplicationInfo>, Exception> {
+        let current;
+        let state = match acquired {
+            Some(state) => state,
+            None => {
+                current = self.packages()?.0;
+                &current
+            }
+        };
+        Ok((|| {
+            let ps = state.packages.get(name)?;
+            let target = package::info::Target {
+                sys: &state.system,
+                pkg: ps.pkg.as_deref()?,
+                ps,
+                state: ps.users.get(&0)?,
+                user: 0,
+            };
+            package::info::generate_application_info(&target, flags)
+        })())
+    }
+
+    /// Acquire the session's retained package state and its own resolver.
+    pub(super) fn packages(
         &self,
     ) -> Result<
         (
-            Arc<crate::package::model::State>,
-            Arc<crate::package::resolve::Resolution>,
+            Arc<package::model::State>,
+            Arc<package::resolve::Resolution>,
         ),
         Exception,
     > {
-        let inputs = self.inputs()?;
-        let state = self
-            .model
-            .lock()
-            .unwrap()
-            .get_or_insert_with(|| Arc::new(inputs.packages.state().clone()))
-            .clone();
-        let resolution = self
-            .resolver
-            .resolution(&state)
-            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "package resolution: MIME groups"))?;
-        Ok((state, resolution))
-    }
-
-    /// `PackageManagerInternal.addIsolatedUid`/`removeIsolatedUid`: the
-    /// package model's isolated uids and their owners, changed by `change`.
-    fn isolated_owners_changed(
-        &self,
-        change: impl FnOnce(&mut Vec<(i32, i32)>),
-    ) -> Result<(), Exception> {
-        let _writer = self.model_writer.lock().unwrap();
-        let (before, _) = self.packages()?;
-        let mut state = (*before).clone();
-        change(&mut state.system.isolated_owners);
-        self.user_states_changed(&before, Arc::new(state))
+        let capture = self.package_capture()?;
+        let resolution = package_resolution(&capture, "package")?;
+        Ok((capture.state().clone(), resolution))
     }
 
     /// `UserController.finishUserUnlocking`: `user`'s credential-encrypted
     /// storage is prepared, so it is unlocking and its components that are
     /// not direct-boot aware resolve.
-    fn user_unlocking(&self, user: i32) -> Result<(), Exception> {
-        let _writer = self.model_writer.lock().unwrap();
-        let (before, _) = self.packages()?;
-        let mut state = (*before).clone();
-        if let Some(u) = state.users.get_mut(&user) {
-            u.unlocking_or_unlocked = true;
+    pub(super) fn user_unlocking(&self, user: i32) -> Result<(), Exception> {
+        let system = self.package_system()?;
+        let capture = system.capture_package_queries()?;
+        if !capture.state().users.contains_key(&user) {
+            return Err(Exception::illegal_argument(
+                "unlocking names an unknown user",
+            ));
         }
-        self.user_states_changed(&before, Arc::new(state))
+        self.unlocked_users.lock().unwrap().insert(user);
+        system.publish_package_user_unlocking(user)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_user_unlocked_for_package_test(&self, user: i32, unlocked: bool) {
+        let mut users = self.unlocked_users.lock().unwrap();
+        if unlocked {
+            users.insert(user);
+        } else {
+            users.remove(&user);
+        }
     }
 
     /// `UserManagerInternal.isUserUnlockingOrUnlocked`.
     pub(super) fn user_unlocking_or_unlocked(&self, user: i32) -> Result<bool, Exception> {
-        let (state, _) = self.packages()?;
-        Ok(state
-            .users
-            .get(&user)
-            .is_some_and(|u| u.unlocking_or_unlocked))
+        Ok(self.unlocked_users.lock().unwrap().contains(&user))
     }
 
     /// `PackageManagerInternal.grantImplicitAccess(user, null,
@@ -3320,45 +3460,23 @@ impl AppHost {
         recipient: i32,
         visible: i32,
     ) -> Result<(), Exception> {
-        let _writer = self.model_writer.lock().unwrap();
-        let (before, resolution) = self.packages()?;
-        let query = crate::package::query::Query {
-            state: &before,
-            filter: &resolution.apps_filter,
-            calling_uid: recipient,
-        };
-        let grants = crate::package::visibility_mutation::MakeUidVisible { recipient, visible }
-            .grant(&query)
-            .map_err(|e| {
-                self.unimplemented_named("package", &format!("grantImplicitAccess: {}", e.0))
-            })??;
-        let Some(grants) = grants else { return Ok(()) };
-        let mut state = (*before).clone();
-        state.system.implicit_access = grants;
-        self.user_states_changed(&before, Arc::new(state))
+        self.package_system()?.internal_grant_implicit_access(
+            recipient / PER_USER_RANGE as i32,
+            None,
+            recipient % PER_USER_RANGE as i32,
+            visible,
+            true,
+            false,
+            SYSTEM_UID as i32,
+            0,
+        )
     }
 
-    /// The isolated uid `uid` is free again (`freeIsolatedUidLocked`), and
-    /// no longer has an owner.
+    /// The isolated uid is free again after its session owner is removed.
     fn free_isolated_uid(&self, uid: u32) -> Result<(), Exception> {
+        self.package_system()?
+            .internal_remove_isolated_uid(uid as i32, SYSTEM_UID as i32, 0)?;
         self.isolated_uids.lock().unwrap().used.remove(&uid);
-        self.isolated_owners_changed(|owners| {
-            owners.retain(|(isolated, _)| *isolated != uid as i32)
-        })
-    }
-
-    /// Replaces the package model's state `before` with `state`, which
-    /// differs from it in packages' user states only.
-    fn user_states_changed(
-        &self,
-        before: &Arc<crate::package::model::State>,
-        state: Arc<crate::package::model::State>,
-    ) -> Result<(), Exception> {
-        let mut model = self.model.lock().unwrap();
-        self.resolver
-            .user_states_changed(before, state.clone())
-            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "package resolution: MIME groups"))?;
-        *model = Some(state);
         Ok(())
     }
 
@@ -3389,7 +3507,14 @@ impl AppHost {
     ) -> Result<Option<providers::Holder>, Exception> {
         self.external_provider_access(call)?;
         let uid = call.sender_euid as i32;
-        let user = self.incoming_user(uid, user, false)?;
+        let user = self.handle_incoming_user(
+            uid,
+            user,
+            false,
+            activity_user::AllowMode::FullOnly,
+            Some("getContentProvider"),
+            None,
+        )?;
         match name {
             Some("settings") => self.settings_holder(),
             Some(name) => self.provider(None, uid, name, user, true),
@@ -3424,7 +3549,14 @@ impl AppHost {
             return Ok(None);
         };
         if name != SETTINGS_AUTHORITY {
-            let user = self.incoming_user(uid, user, false)?;
+            let user = self.handle_incoming_user(
+                uid,
+                user,
+                false,
+                activity_user::AllowMode::NonFull,
+                Some(&format!("checkContentProviderPermissionLocked {name}")),
+                None,
+            )?;
             let client = self
                 .apps
                 .lock()
@@ -3436,6 +3568,14 @@ impl AppHost {
             return self.provider(Some(client), uid, name, user, stable);
         }
         self.settings_holder()
+    }
+
+    /// The settings provider, once published.
+    fn settings_provider(&self) -> Result<&Arc<settings_provider::SettingsProvider>, Exception> {
+        self.settings_provider
+            .get()
+            .map(|(provider, ..)| provider)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no settings provider"))
     }
 
     /// The `settings` provider's holder: the app host's, a system provider.
@@ -3474,14 +3614,14 @@ impl AppHost {
                 return Err(state_error(format!("provider info: {reason}")));
             }
         };
-        let (provider, connection) = *self
+        let (_, provider, connection) = self
             .settings_provider
             .get()
             .ok_or_else(|| state_error("no settings provider binder".into()))?;
         Ok(Some(providers::Holder {
             info,
-            provider: Some(provider),
-            connection: Some(connection),
+            provider: Some(*provider),
+            connection: Some(*connection),
             no_release_needed: true,
             local: false,
         }))
@@ -3655,7 +3795,7 @@ impl AppHost {
     /// `CompatChanges.isChangeEnabled(change, uid)`: enabled for every
     /// package of the uid.
     pub(super) fn change_enabled(&self, change: i64, uid: i32) -> Result<bool, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let (state, resolution) = self.packages()?;
         let query = crate::package::query::Query {
             state: &state,
@@ -3672,14 +3812,18 @@ impl AppHost {
         if names.peek().is_none() {
             return Ok(inputs.compat.default_value(change));
         }
-        Ok(
-            names.all(|name| match inputs.packages.application_info(&name, 0) {
+        for name in names {
+            let enabled = match self.application_info(&name, 0, Some(&state))? {
                 Some(ai) => inputs
                     .compat
                     .is_enabled(change, Some(&name), ai.target_sdk_version),
                 None => inputs.compat.default_value(change),
-            }),
-        )
+            };
+            if !enabled {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// DeviceIdleController, made when first needed.
@@ -3719,7 +3863,7 @@ impl AppHost {
     /// settings hold, night as the Mac's appearance, at the current
     /// sequence number.
     fn global_configuration(&self) -> Result<config::Configuration, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let display = self.display()?.0.clone();
         Ok(config::Configuration::of(
             &display,
@@ -3843,19 +3987,18 @@ impl AppHost {
         app: &App,
         providers: Vec<package::info::ProviderInfo>,
     ) -> Result<(Parcel, config::Configuration), Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let info = match &app.application_info {
             Some(info) => (**info).clone(),
-            None => inputs
-                .packages
-                .application_info(&app.package, STOCK_PM_FLAGS)
+            None => self
+                .application_info(&app.package, STOCK_PM_FLAGS, None)?
                 .ok_or_else(|| state(format!("no application info of {}", app.package)))?,
         };
         let config = self.global_configuration()?;
         let compat_info = config::CompatibilityInfo::of(&info, &config, inputs.device_density);
-        let analog_clock_fps = inputs
-            .packages
+        let analog_clock_fps = self
+            .framework()?
             .framework_integer("config_defaultAnalogClockSecondsHandFps")
             .ok_or_else(|| state("no config_defaultAnalogClockSecondsHandFps".into()))?;
         let core_settings =
@@ -3923,7 +4066,7 @@ impl AppHost {
             serialized_system_font_map: None,
             application_shared_memory_fd: bind::RawFileDescriptor(
                 inputs
-                    .shared_memory
+                    .application_shared_memory()?
                     .file()
                     .map_err(|e| state(e.to_string()))?,
             ),
@@ -4159,6 +4302,15 @@ impl WriteParcelable for RunningAppProcessInfo {
         p.write_i32(self.is_focused as i32);
         p.write_i64(self.last_activity_time);
     }
+}
+
+fn package_resolution(
+    capture: &package::scan_snapshot::query_state::Capture,
+    context: &str,
+) -> Result<Arc<package::resolve::Resolution>, Exception> {
+    capture.resolution().map_err(|error| {
+        Exception::new(EX_ILLEGAL_STATE, format!("{context} resolution: {error:?}"))
+    })
 }
 
 fn reply(result: Result<Parcel, Exception>) -> Reply {
@@ -4739,8 +4891,13 @@ impl Service for Activity {
                             a.calling_uid,
                             a.user_id,
                             a.allow_all,
-                            a.require_full,
+                            if a.require_full {
+                                activity_user::AllowMode::FullOnly
+                            } else {
+                                activity_user::AllowMode::NonFull
+                            },
                             a.name.as_deref(),
+                            a.caller_package.as_deref(),
                         )
                         .map(|user| {
                             let mut p = Parcel::new();
@@ -5230,8 +5387,17 @@ impl Service for Control {
             // start, and not by the first start.
             let host = self.0.clone();
             std::thread::spawn(move || {
-                if let Err(e) = host.inputs().and_then(|_| host.packages()) {
-                    eprintln!("app host: loading its inputs: {e:?}");
+                match host.package_boot.get_or_init(|| {
+                    host.package_system().and_then(|system| {
+                        package_boot::run(&host, system)?;
+                        system.wait_native_package_app_data()
+                    })
+                }) {
+                    Ok(()) => eprintln!("app host: package boot: through its construction"),
+                    Err(e) => return eprintln!("app host: package boot: {e:?}"),
+                }
+                if let Err(e) = host.platform().and_then(|_| host.package_capture()) {
+                    return eprintln!("app host: package boot inputs: {e:?}");
                 }
                 // UserManagerService's construction: the system user
                 // recorded at first boot.
@@ -5358,6 +5524,36 @@ impl Service for Control {
             p
         }))
     }
+}
+
+#[cfg(test)]
+pub(crate) use battery_history::tests::temp_dir as test_temp_dir;
+
+#[cfg(test)]
+impl AppHost {
+    pub(crate) fn package_booted_for_test(&self) {
+        self.package_boot.set(Ok(())).unwrap();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn configure_test_host(
+    host: &AppHost,
+    root: &Path,
+    data: &Path,
+    runtime: &Path,
+    properties: Properties,
+) {
+    host.configure(
+        root,
+        data,
+        runtime,
+        runtime,
+        properties,
+        Box::new(|_, _| {}),
+        Box::new(|| Err(std::io::Error::other("no zygote"))),
+    )
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -5535,3 +5731,9 @@ mod tests {
         assert!(errors.crash_times.is_empty() && errors.bad.is_empty());
     }
 }
+
+#[cfg(test)]
+mod resources_tests;
+
+#[cfg(test)]
+mod application_info_tests;

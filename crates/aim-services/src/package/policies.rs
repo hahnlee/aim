@@ -2,7 +2,7 @@
 //! Settings/UserManager/DPM/external-source objects live in the typed original leaf.
 use super::{apps_filter::app_id, info::user_state, query::Query};
 use aim_binder_host::{
-    local::{Call, Reply, Strong},
+    local::{Call, Reply},
     parcel::{
         BAD_VALUE, EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader,
         Result as ParcelResult,
@@ -14,18 +14,18 @@ use aim_service_aidl::{
 };
 
 pub struct Owner {
-    bridge: Strong,
+    bridge: crate::system::ServiceOwner,
 }
 impl Owner {
-    pub fn new(bridge: Strong) -> Self {
+    pub fn new(bridge: crate::system::ServiceOwner) -> Self {
         Self { bridge }
     }
     /// Retain the concrete policy Binder returned by the current original bootstrap.
-    pub fn capture(bootstrap_owner: &Strong) -> Result<Self, Exception> {
+    pub fn capture(bootstrap_owner: &crate::system::ServiceOwner) -> Result<Self, Exception> {
         let mut p = Parcel::new();
         bootstrap::GetPackagePolicyBridge {}.write(&mut p);
         let reply = bootstrap_owner
-            .transact(bootstrap::GET_PACKAGE_POLICY_BRIDGE, &p, false)
+            .transact_as_owner(bootstrap::GET_PACKAGE_POLICY_BRIDGE, &p, false)
             .map_err(|error| {
                 Exception::new(
                     EX_ILLEGAL_STATE,
@@ -48,7 +48,7 @@ impl Owner {
                 "Trailing policy attach reply",
             ));
         }
-        let bridge = reply.retain_remote_binder(binder).map_err(|error| {
+        let bridge = crate::system::ServiceOwner::retain(&reply, binder).map_err(|error| {
             Exception::new(
                 EX_ILLEGAL_STATE,
                 format!("Policy capability retention: {error}"),
@@ -62,12 +62,15 @@ impl Owner {
         data: &Parcel,
         decode: impl FnOnce(&mut Reader<'_>) -> ParcelResult<Result<T, Exception>>,
     ) -> Result<T, Exception> {
-        let reply = self.bridge.transact(code, data, false).map_err(|error| {
-            Exception::new(
-                EX_ILLEGAL_STATE,
-                format!("Package policy transport: {error}"),
-            )
-        })?;
+        let reply = self
+            .bridge
+            .transact_as_owner(code, data, false)
+            .map_err(|error| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("Package policy transport: {error}"),
+                )
+            })?;
         let mut reader = reply.reader();
         let result = decode(&mut reader).map_err(|error| {
             Exception::new(EX_ILLEGAL_STATE, format!("Package policy parcel: {error}"))

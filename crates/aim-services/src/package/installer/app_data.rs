@@ -2,17 +2,16 @@
 use super::environment::{
     AppDataCommit, AppDataCreate, AppDataFlags, AppDataResult, AppDataRollback,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_ipackageappdatabridge as api;
 use std::sync::Arc;
 pub struct Owner {
-    bridge: Arc<Strong>,
+    /// The app-data bridge: another process's node, or this process's own
+    /// where it serves the bootstrap bridge.
+    bridge: Arc<crate::system::ServiceOwner>,
 }
 impl Owner {
-    pub fn new(bridge: Strong) -> Arc<Self> {
+    pub fn new(bridge: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             bridge: Arc::new(bridge),
         })
@@ -27,7 +26,7 @@ impl Owner {
         write(&mut request);
         let reply = self
             .bridge
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(transport)?;
         let mut reader = reply.reader();
         let value = read(&mut reader).map_err(transport)??;

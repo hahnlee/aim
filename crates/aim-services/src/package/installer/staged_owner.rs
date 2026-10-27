@@ -4,10 +4,7 @@ use super::{
     native::{LitePolicySource, StagedExecutor},
     pipeline, storage,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_iinstallerpreparationbridge as api;
 use std::{
     collections::BTreeMap,
@@ -23,7 +20,7 @@ pub struct Status {
 }
 pub type Records = Arc<dyn Fn() -> Vec<(Session, Record)> + Send + Sync>;
 pub struct Owner {
-    bridge: Strong,
+    bridge: crate::system::ServiceOwner,
     native: Arc<pipeline::Native>,
     lite: LitePolicySource,
     disk: Arc<Mutex<storage::Store>>,
@@ -37,7 +34,7 @@ fn transport(code: i32) -> Exception {
 }
 impl Owner {
     pub fn new(
-        bridge: Strong,
+        bridge: crate::system::ServiceOwner,
         native: Arc<pipeline::Native>,
         lite: LitePolicySource,
         disk: Arc<Mutex<storage::Store>>,
@@ -73,7 +70,7 @@ impl Owner {
         fill(&mut data);
         let reply = self
             .bridge
-            .transact(code, &data, false)
+            .transact_as_owner(code, &data, false)
             .map_err(transport)?;
         let mut reader = reply.reader();
         reader.read_exception().map_err(transport)??;

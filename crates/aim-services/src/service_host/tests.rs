@@ -2,7 +2,10 @@
 #[path = "../../tests/common/cohort.rs"]
 mod cohort;
 use crate::{
-    package::{owner::permission_gids::PermissionGidError, system_config::SystemConfig},
+    package::{
+        bootstrap::BootPolicy, owner::permission_gids::PermissionGidError,
+        system_config::SystemConfig,
+    },
     service_host::ServiceHost,
     system::System,
 };
@@ -921,6 +924,7 @@ fn query_context_for(
         );
     }
     Context {
+        access: None,
         scan_version: version,
         native_domains: None,
         boot_classes: None,
@@ -2978,10 +2982,18 @@ fn verify_boot_scan(
         write::Apks,
     };
     // A fresh wrapper around the same Binder is not the captured boot owner.
-    let Binder::Handle(handle) = bridge.owner.binder() else {
+    let crate::system::ServiceOwner::Remote(remote) = &bridge.owner else {
         unreachable!()
     };
-    let foreign = Arc::new(crate::package::bootstrap::Bridge::new(native.strong(handle)).unwrap());
+    let Binder::Handle(handle) = remote.binder() else {
+        unreachable!()
+    };
+    let foreign = Arc::new(
+        crate::package::bootstrap::Bridge::new(crate::system::ServiceOwner::Remote(Arc::new(
+            native.strong(handle),
+        )))
+        .unwrap(),
+    );
     assert!(system.check_package_bootstrap(&foreign).is_err());
     let original = aim_paths::original_image();
     let root = std::env::temp_dir().join(format!(
@@ -3868,7 +3880,6 @@ fn verify_boot_scan(
                     bridge,
                     &mut list_store,
                     &query,
-                    &inodes,
                     before_request
                 )
                 .unwrap()
@@ -3883,7 +3894,7 @@ fn verify_boot_scan(
         let before_retry =
             std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap();
         let error = system
-            .process_due_runtime_permission_requests(bridge, &mut list_store, &query, &inodes, due)
+            .process_due_runtime_permission_requests(bridge, &mut list_store, &query, due)
             .unwrap_err();
         assert_eq!(error.user, 0);
         assert!(!error.error.committed);
@@ -3910,13 +3921,7 @@ fn verify_boot_scan(
         assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
         assert_eq!(
             system
-                .process_due_runtime_permission_requests(
-                    bridge,
-                    &mut list_store,
-                    &query,
-                    &inodes,
-                    due
-                )
+                .process_due_runtime_permission_requests(bridge, &mut list_store, &query, due)
                 .unwrap(),
             [0]
         );
@@ -6795,8 +6800,10 @@ fn verify_installer_binding(
         "fixture_installer_effects",
         native.add_service(Arc::new(ExistingEffects)),
     );
-    let effects =
-        crate::package::effects::Owner::new(find(client, "fixture_installer_effects")).unwrap();
+    let effects = crate::package::effects::Owner::new(crate::system::ServiceOwner::Remote(
+        std::sync::Arc::new(find(client, "fixture_installer_effects")),
+    ))
+    .unwrap();
     system
         .new_existing_package_owner(
             bridge.clone(),

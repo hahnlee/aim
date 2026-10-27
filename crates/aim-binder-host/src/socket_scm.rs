@@ -639,13 +639,7 @@ impl Watermark {
         {
             return Err(io::Error::last_os_error());
         }
-        match set_watermark(fd, length as i32) {
-            Ok(()) => Ok(Some(Self { fd, previous })),
-            // XNU's sosetopt refuses any option once both directions are
-            // shut down: the peer is gone, and poll already reports EOF.
-            Err(failure) if failure.raw_os_error() == Some(libc::EINVAL) => Ok(None),
-            Err(failure) => Err(failure),
-        }
+        Ok(set_watermark(fd, length as i32)?.then_some(Self { fd, previous }))
     }
 }
 impl Drop for Watermark {
@@ -655,7 +649,11 @@ impl Drop for Watermark {
         }
     }
 }
-fn set_watermark(fd: i32, value: i32) -> io::Result<()> {
+/// Whether the socket still accepts a low water mark. XNU's sosetopt
+/// refuses every option after both directions shut down, including when
+/// the peer closes between raising the mark and restoring it. That socket
+/// is at EOF already and its mark no longer needs restoring.
+fn set_watermark(fd: i32, value: i32) -> io::Result<bool> {
     if unsafe {
         libc::setsockopt(
             fd,
@@ -666,9 +664,14 @@ fn set_watermark(fd: i32, value: i32) -> io::Result<()> {
         )
     } < 0
     {
-        return Err(io::Error::last_os_error());
+        let failure = io::Error::last_os_error();
+        return if failure.raw_os_error() == Some(libc::EINVAL) {
+            Ok(false)
+        } else {
+            Err(failure)
+        };
     }
-    Ok(())
+    Ok(true)
 }
 fn request(channel: i32, opcode: u8, descriptor: i32, receipt: Option<Receipt>) -> io::Result<()> {
     let mut bytes = [0; REQUEST];
@@ -791,6 +794,37 @@ pub(crate) mod tests {
     use super::*;
     use std::io::Read;
 
+    /// XNU's sosetopt rejects options after a full shutdown, including
+    /// when the peer closes after Watermark::set and before its restore.
+    #[test]
+    fn a_watermark_restore_accepts_peer_close_during_the_wait() {
+        const MARKER: &str = "SOCKET_WATERMARK_RESTORE_EXECUTED";
+        if isolated_exec_fixture(
+            "socket_scm::tests::a_watermark_restore_accepts_peer_close_during_the_wait",
+            MARKER,
+        ) {
+            return;
+        }
+        use std::os::unix::net::UnixStream;
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let watermark = Watermark::set(ours.as_raw_fd(), 16).unwrap().unwrap();
+        drop(theirs);
+        assert!(!set_watermark(ours.as_raw_fd(), watermark.previous).unwrap());
+        drop(watermark);
+        assert_eq!(
+            wait_frame(ours.as_raw_fd(), 16, 1000)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ECONNRESET)
+        );
+        assert!(Watermark::set(ours.as_raw_fd(), 16).unwrap().is_none());
+        assert_eq!(
+            set_watermark(-1, 1).unwrap_err().raw_os_error(),
+            Some(libc::EBADF)
+        );
+        println!("{MARKER}");
+    }
+
     /// A peer's EOF ends the wait at once; half a frame blocks, idle,
     /// until the rest, and the low water mark is put back.
     #[test]
@@ -805,6 +839,7 @@ pub(crate) mod tests {
         assert!(start.elapsed() < std::time::Duration::from_millis(200));
 
         let (ours, mut theirs) = UnixStream::pair().unwrap();
+        assert!(set_watermark(ours.as_raw_fd(), 3).unwrap());
         theirs.write_all(&[0; 8]).unwrap();
         let writer = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -833,7 +868,7 @@ pub(crate) mod tests {
                 &mut size,
             )
         };
-        assert_eq!(lowat, 1);
+        assert_eq!(lowat, 3);
         drop(writer.join().unwrap());
     }
     pub(crate) fn receive_ready(channel: i32) -> io::Result<Reply> {

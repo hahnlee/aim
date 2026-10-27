@@ -31,6 +31,7 @@ pub enum Finish {
     None,
     Single(Request),
     Enabled(Vec<enabled::Setting>),
+    ResetComponents(Vec<enabled::Setting>),
     Hidden {
         package: String,
         user: i32,
@@ -60,6 +61,35 @@ pub struct Prepared {
     pub reply: Parcel,
     pub distraction_cleanup: Vec<(Vec<String>, Vec<i32>, i32)>,
 }
+fn enabled_changed(
+    before: &super::model::State,
+    after: &super::model::State,
+    setting: &enabled::Setting,
+) -> bool {
+    let (Some(old), Some(new)) = (
+        before.packages.get(&setting.package),
+        after.packages.get(&setting.package),
+    ) else {
+        return false;
+    };
+    let old = info::user_state(old, setting.user);
+    let new = info::user_state(new, setting.user);
+    if let Some(class) = &setting.class {
+        let value = |state: &super::model::PackageUserState| {
+            if state.enabled_components.contains(class) {
+                1
+            } else if state.disabled_components.contains(class) {
+                2
+            } else {
+                0
+            }
+        };
+        value(&old) != value(&new)
+    } else {
+        old.enabled != new.enabled
+    }
+}
+
 impl Prepared {
     pub fn changes_state(&self) -> bool {
         self.global.is_some()
@@ -254,9 +284,10 @@ impl Prepared {
                         continue;
                     }
                     if let Request::Enabled(setting) = request {
-                        if matches!(plan.change, Change::Enabled(_)) {
-                            dependencies.changes.update(&plan.package, &[setting.user]);
+                        if !enabled_changed(before, after, setting) {
+                            continue;
                         }
+                        dependencies.changes.update(&plan.package, &[setting.user]);
                     }
                     dependencies
                         .effects
@@ -275,7 +306,7 @@ impl Prepared {
                     }
                 }
             }
-            Finish::Enabled(settings) => {
+            Finish::Enabled(settings) | Finish::ResetComponents(settings) => {
                 for plan in &self.plans {
                     if !matches!(plan.change, Change::Enabled(_)) {
                         continue;
@@ -289,28 +320,7 @@ impl Prepared {
                             if setting.package != plan.package {
                                 return false;
                             }
-                            let Some(old) = before.packages.get(&setting.package) else {
-                                return false;
-                            };
-                            let Some(new) = after.packages.get(&setting.package) else {
-                                return false;
-                            };
-                            let old = info::user_state(old, user);
-                            let new = info::user_state(new, user);
-                            if let Some(class) = &setting.class {
-                                let value = |state: &super::model::PackageUserState| {
-                                    if state.enabled_components.contains(class) {
-                                        1
-                                    } else if state.disabled_components.contains(class) {
-                                        2
-                                    } else {
-                                        0
-                                    }
-                                };
-                                value(&old) != value(&new)
-                            } else {
-                                old.enabled != new.enabled
-                            }
+                            enabled_changed(before, after, setting)
                         })
                         .collect();
                     let components: Vec<_> = matching
@@ -337,7 +347,8 @@ impl Prepared {
                         apps_filter::uid(user, package.app_id),
                         flags & 1 != 0,
                         &components,
-                        None,
+                        matches!(self.finish, Finish::ResetComponents(_))
+                            .then_some("reset_component_state_changed"),
                         uid,
                         flags & 1 != 0,
                     )?;
@@ -387,6 +398,53 @@ impl Prepared {
                         }
                     }
                 }
+            }
+        }
+        if matches!(self.finish, Finish::ResetComponents(_)) {
+            let mut unsuspended = std::collections::BTreeMap::<i32, (Vec<String>, Vec<i32>)>::new();
+            let mut distracted = std::collections::BTreeMap::<i32, (Vec<String>, Vec<i32>)>::new();
+            for plan in &self.plans {
+                let Some(user) = plan.user else {
+                    continue;
+                };
+                let (Some(old), Some(new)) = (
+                    before.packages.get(&plan.package),
+                    after.packages.get(&plan.package),
+                ) else {
+                    continue;
+                };
+                let old_user = info::user_state(old, user);
+                let new_user = info::user_state(new, user);
+                let target = match plan.change {
+                    Change::Suspensions(_)
+                        if old_user
+                            .suspensions
+                            .as_ref()
+                            .is_some_and(|values| !values.is_empty())
+                            && new_user.suspensions.as_ref().is_none_or(Vec::is_empty) =>
+                    {
+                        Some(&mut unsuspended)
+                    }
+                    Change::Distraction(0)
+                        if old_user.distraction_flags != 0 && new_user.distraction_flags == 0 =>
+                    {
+                        Some(&mut distracted)
+                    }
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    let (names, uids) = target.entry(user).or_default();
+                    names.push(plan.package.clone());
+                    uids.push(apps_filter::uid(user, new.app_id));
+                }
+            }
+            for (user, (names, uids)) in unsuspended {
+                dependencies
+                    .effects
+                    .removed_suspensions(&names, &uids, user)?;
+            }
+            for (user, (names, uids)) in distracted {
+                dependencies.effects.distraction(&names, &uids, user, 0)?;
             }
         }
         Ok(())

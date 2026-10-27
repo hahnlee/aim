@@ -23,6 +23,7 @@ use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
 use aim_service_aidl::android_os_ideviceidlecontroller as di;
 
+use super::activity_user::AllowMode;
 use super::kept::RawIntent;
 use super::settings::Table;
 use super::{AppHost, reply};
@@ -406,7 +407,14 @@ impl DeviceIdle {
             CHANGE_DEVICE_IDLE_TEMP_WHITELIST,
             Some("No permission to change device idle whitelist"),
         )?;
-        let user = self.host.incoming_user(uid, user, true)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("addPowerSaveTempWhitelistApp"),
+            None,
+        )?;
         let kind = Self::temp_allowlist_type(
             reason_code,
             TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,
@@ -515,7 +523,7 @@ impl DeviceIdle {
     /// (`UserSettingDeviceConfigMediator`), else the framework's default
     /// (`device_idle_<key>`).
     fn constant(&self, key: &str) -> Result<i64, Exception> {
-        let inputs = self.host.inputs()?;
+        let inputs = self.host.platform()?;
         let setting = inputs
             .settings
             .get(Table::Global, "device_idle_constants")
@@ -535,8 +543,8 @@ impl DeviceIdle {
         {
             return Ok(value);
         }
-        inputs
-            .packages
+        self.host
+            .framework()?
             .framework_integer(&format!("device_idle_{key}"))
             .map(i64::from)
             .ok_or_else(|| {

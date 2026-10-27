@@ -84,7 +84,7 @@ fn pre_boot_completed() -> RawIntent {
 impl AppHost {
     /// `ActivityManagerInternal.getBootTimeTempAllowListDuration`
     /// (DeviceConfig `activity_manager/boot_time_temp_allowlist_duration`).
-    fn boot_time_temp_allowlist(&self, reason: i32) -> TempAllowlist {
+    pub(super) fn boot_time_temp_allowlist(&self, reason: i32) -> TempAllowlist {
         let duration_ms = self
             .inputs()
             .ok()

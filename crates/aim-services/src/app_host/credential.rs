@@ -27,6 +27,7 @@ use aim_service_aidl::android_credentials_icredentialmanager as cm;
 use aim_service_aidl::android_credentials_isetenabledproviderscallback as enabled_callback;
 use aim_service_aidl::{WriteParcelable, write_typed};
 
+use super::activity_user::AllowMode;
 use super::settings_provider::{Caller, SettingsProvider};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::bundle::Value;
@@ -71,8 +72,6 @@ const PERMISSION_DENIED_ERROR: &str = "permission_denied";
 const PERMISSION_DENIED_WRITE_SECURE_SETTINGS_ERROR: &str =
     "Caller is missing WRITE_SECURE_SETTINGS permission";
 const SYSTEM_UID: i32 = 1000;
-/// `UserHandle.USER_CURRENT`.
-const USER_CURRENT: i32 = -2;
 /// `new HashMap<>()`'s and `new HashSet<>()`'s first table.
 const DEFAULT_CAPACITY: usize = 16;
 
@@ -262,18 +261,6 @@ impl CredentialManager {
             .map_or(default, |v| v.eq_ignore_ascii_case("true")))
     }
 
-    /// `ActivityManager.handleIncomingUser(pid, uid, user, false, false,
-    /// ...)`: no special user.
-    fn incoming_user(&self, uid: i32, user: i32) -> Result<i32, Exception> {
-        let user = if user == USER_CURRENT { 0 } else { user };
-        if user < 0 {
-            return Err(Exception::illegal_argument(format!(
-                "Call does not support special user #{user}"
-            )));
-        }
-        self.host.incoming_user(uid, user, true)
-    }
-
     /// `Settings.Secure.getStringForUser`.
     fn secure(&self, name: &str, user: i32) -> Result<Option<String>, Exception> {
         let caller = Caller {
@@ -308,7 +295,14 @@ impl CredentialManager {
 
     /// `getEnabledProvidersForUser`.
     fn enabled_providers(&self, uid: i32, user: i32) -> Result<Vec<ComponentName>, Exception> {
-        let user = self.incoming_user(uid, user)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("getEnabledProvidersForUser"),
+            None,
+        )?;
         Ok(component_names(
             self.secure(CREDENTIAL_SERVICE, user)?.as_deref(),
         ))
@@ -316,7 +310,14 @@ impl CredentialManager {
 
     /// `getPrimaryProvidersForUserId`.
     fn primary_providers(&self, uid: i32, user: i32) -> Result<Vec<ComponentName>, Exception> {
-        let user = self.incoming_user(uid, user)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("getPrimaryProvidersForUserId"),
+            None,
+        )?;
         Ok(component_names(
             self.secure(CREDENTIAL_SERVICE_PRIMARY, user)?.as_deref(),
         ))
@@ -452,9 +453,8 @@ impl CredentialManager {
             );
             return Ok(Default::default());
         };
-        let inputs = self.host.inputs()?;
-        let parsed = inputs
-            .packages
+        let inputs = self.host.platform()?;
+        let parsed = self.host.framework()?
             .xml_resource(self.host.root()?, &inputs.data, &pkg, id, |e, ctx| {
                 if e.name != "credential-provider" {
                     eprintln!(
@@ -608,7 +608,14 @@ impl CredentialManager {
             );
             return Ok(());
         }
-        let user = self.incoming_user(uid, a.user_id)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            a.user_id,
+            false,
+            AllowMode::NonFull,
+            Some("setEnabledProviders"),
+            None,
+        )?;
         let providers = a.providers.unwrap_or_default();
         let primary = a.primary_providers.unwrap_or_default();
         let enabled = join_enabled(&providers, &primary);

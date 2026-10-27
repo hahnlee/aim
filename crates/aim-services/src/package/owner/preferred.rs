@@ -34,8 +34,7 @@ impl Store {
         let (root, parsed, bytes) = self
             .preferred_stage_document(stage)
             .map_err(WriteError::before)?;
-        let original = self
-            .restrictions
+        self.restrictions
             .get(&user)
             .ok_or_else(|| WriteError::before("native preferred user document unavailable"))?;
         let dir = self.data.join("system/users").join(user.to_string());

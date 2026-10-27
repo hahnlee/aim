@@ -5,10 +5,7 @@ use super::{
     scan::{LibraryCompatibility, PolicyBridgeError},
     system_config::SystemConfig,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 mod apex;
@@ -17,7 +14,7 @@ mod query;
 mod read_ahead;
 pub(crate) use query::{
     application_query_filtering_call, domain_verification_restricted_call,
-    granted_permissions_call, installed_permissions_call,
+    installed_permissions_call,
 };
 mod preferred;
 mod runtime;
@@ -25,11 +22,11 @@ mod scan;
 pub use apex::{ActiveApex, ApexInventory, ApexPackage};
 pub use query::QueryContextError;
 pub use scan::{
-    BootError, BootOwners, DataBootInputs, SavedBootScan, SavedSystemPhase, ScanPolicy,
+    BootError, BootOwners, BootPolicy, DataBootInputs, SavedBootScan, SavedSystemPhase, ScanPolicy,
 };
 
 pub struct Bridge {
-    pub(crate) owner: Strong,
+    pub(crate) owner: crate::system::ServiceOwner,
     test_base_on_bcp: bool,
     pub(crate) signing_debuggable: bool,
     deaths: Deaths,
@@ -129,6 +126,26 @@ impl ScanUsers {
         }
         Ok(Self { users })
     }
+
+    /// The record `read_original_record` reads (`PackageScanUsers
+    /// .capture`): whether UserManager is initialized, then each user's id,
+    /// whether it is pre-created and whether ADB installs are disallowed.
+    pub fn write_original_record(&self) -> Vec<u8> {
+        let mut p = Parcel::new();
+        match &self.users {
+            None => p.write_i32(0),
+            Some(users) => {
+                p.write_i32(1);
+                p.write_i32(users.len() as i32);
+                for user in users {
+                    p.write_i32(user.id);
+                    p.write_bool(user.pre_created);
+                    p.write_bool(user.adb_install_disallowed);
+                }
+            }
+        }
+        p.data().to_vec()
+    }
 }
 
 fn read_shared_uid_migration(
@@ -217,7 +234,7 @@ impl Bridge {
         bridge::FormatPackageTimestamp { millis }.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::FORMAT_PACKAGE_TIMESTAMP, &data, false)
+            .transact_as_owner(bridge::FORMAT_PACKAGE_TIMESTAMP, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let value = bridge::read_format_package_timestamp_reply(&mut reader)
@@ -257,7 +274,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::IS_TEST_BASE_LIBRARY_CHANGE_ENABLED, &data, false)
+            .transact_as_owner(bridge::IS_TEST_BASE_LIBRARY_CHANGE_ENABLED, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let enabled = bridge::read_is_test_base_library_change_enabled_reply(&mut reader)
@@ -274,7 +291,7 @@ impl Bridge {
         bridge::IsSharedUidMigrationBestEffort {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::IS_SHARED_UID_MIGRATION_BEST_EFFORT, &data, false)
+            .transact_as_owner(bridge::IS_SHARED_UID_MIGRATION_BEST_EFFORT, &data, false)
             .map_err(OwnerError::Transport)?;
         read_shared_uid_migration(&mut reply.reader())
     }
@@ -292,7 +309,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::NOTIFY_APEX_SCAN_RESULTS, &data, false)
+            .transact_as_owner(bridge::NOTIFY_APEX_SCAN_RESULTS, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         bridge::read_notify_apex_scan_results_reply(&mut reader)
@@ -309,7 +326,7 @@ impl Bridge {
         bridge::GetApexBootInventory {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_APEX_BOOT_INVENTORY, &data, false)
+            .transact_as_owner(bridge::GET_APEX_BOOT_INVENTORY, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_get_apex_boot_inventory_reply(&mut reader)
@@ -330,7 +347,7 @@ impl Bridge {
         bridge::GetInstallerUserPolicy { user_id: user }.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_INSTALLER_USER_POLICY, &data, false)
+            .transact_as_owner(bridge::GET_INSTALLER_USER_POLICY, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_get_installer_user_policy_reply(&mut reader)
@@ -376,7 +393,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::ALLOCATE_INSTALLER_BYTES, &data, false)
+            .transact_as_owner(bridge::ALLOCATE_INSTALLER_BYTES, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         bridge::read_allocate_installer_bytes_reply(&mut reader)
@@ -403,7 +420,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::CHECK_PROVIDER_AUTHORITY_GRANTS, &request, false)
+            .transact_as_owner(bridge::CHECK_PROVIDER_AUTHORITY_GRANTS, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let result = bridge::read_check_provider_authority_grants_reply(&mut reader)
@@ -430,7 +447,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::IS_PROVIDER_CLONE_REDIRECTED, &request, false)
+            .transact_as_owner(bridge::IS_PROVIDER_CLONE_REDIRECTED, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let result = bridge::read_is_provider_clone_redirected_reply(&mut reader)
@@ -447,7 +464,7 @@ impl Bridge {
         bridge::GetInstantAppCookieLimit {}.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::GET_INSTANT_APP_COOKIE_LIMIT, &request, false)
+            .transact_as_owner(bridge::GET_INSTANT_APP_COOKIE_LIMIT, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let limit = bridge::read_get_instant_app_cookie_limit_reply(&mut reader)
@@ -463,7 +480,7 @@ impl Bridge {
         bridge::GetInstantAppIconDensity {}.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::GET_INSTANT_APP_ICON_DENSITY, &request, false)
+            .transact_as_owner(bridge::GET_INSTANT_APP_ICON_DENSITY, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let density = bridge::read_get_instant_app_icon_density_reply(&mut reader)
@@ -486,7 +503,7 @@ impl Bridge {
         bridge::GetPackageProfileParent { user_id: user }.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_PROFILE_PARENT, &request, false)
+            .transact_as_owner(bridge::GET_PACKAGE_PROFILE_PARENT, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let parent = bridge::read_get_package_profile_parent_reply(&mut reader)
@@ -503,7 +520,7 @@ impl Bridge {
         bridge::IsParentProfileAppLinkingAllowed { user_id: user }.write(&mut request);
         let reply = self
             .owner
-            .transact(
+            .transact_as_owner(
                 bridge::IS_PARENT_PROFILE_APP_LINKING_ALLOWED,
                 &request,
                 false,
@@ -528,7 +545,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_ROLE_HOLDERS, &request, false)
+            .transact_as_owner(bridge::GET_PACKAGE_ROLE_HOLDERS, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let holders = bridge::read_get_package_role_holders_reply(&mut reader)
@@ -544,12 +561,12 @@ impl Bridge {
             .collect()
     }
 
-    pub fn application_data(&self) -> Result<Strong, OwnerError> {
+    pub fn application_data(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut request = Parcel::new();
         bridge::GetApplicationDataBridge {}.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::GET_APPLICATION_DATA_BRIDGE, &request, false)
+            .transact_as_owner(bridge::GET_APPLICATION_DATA_BRIDGE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_application_data_bridge_reply(&mut reader)
@@ -559,17 +576,15 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_relocation(&self) -> Result<Strong, OwnerError> {
+    pub fn package_relocation(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut request = Parcel::new();
         bridge::GetPackageRelocationBridge {}.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_RELOCATION_BRIDGE, &request, false)
+            .transact_as_owner(bridge::GET_PACKAGE_RELOCATION_BRIDGE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_relocation_bridge_reply(&mut reader)
@@ -579,17 +594,15 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_moves(&self) -> Result<Strong, OwnerError> {
+    pub fn package_moves(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut request = Parcel::new();
         bridge::GetPackageMoveBridge {}.write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_MOVE_BRIDGE, &request, false)
+            .transact_as_owner(bridge::GET_PACKAGE_MOVE_BRIDGE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_move_bridge_reply(&mut reader)
@@ -599,17 +612,15 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_effects(&self) -> Result<Strong, OwnerError> {
+    pub fn package_effects(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageMutationBridge {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_MUTATION_BRIDGE, &data, false)
+            .transact_as_owner(bridge::GET_PACKAGE_MUTATION_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_mutation_bridge_reply(&mut reader)
@@ -619,17 +630,15 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_maintenance(&self) -> Result<Strong, OwnerError> {
+    pub fn package_maintenance(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageMaintenanceBridge {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_MAINTENANCE_BRIDGE, &data, false)
+            .transact_as_owner(bridge::GET_PACKAGE_MAINTENANCE_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_maintenance_bridge_reply(&mut reader)
@@ -639,17 +648,15 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn installer_external(&self) -> Result<Strong, OwnerError> {
+    pub fn installer_external(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetInstallerExternalBridge {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_INSTALLER_EXTERNAL_BRIDGE, &data, false)
+            .transact_as_owner(bridge::GET_INSTALLER_EXTERNAL_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_installer_external_bridge_reply(&mut reader)
@@ -659,17 +666,15 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn installer_files(&self) -> Result<Strong, OwnerError> {
+    pub fn installer_files(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageInstallerFiles {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_INSTALLER_FILES, &data, false)
+            .transact_as_owner(bridge::GET_PACKAGE_INSTALLER_FILES, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_installer_files_reply(&mut reader)
@@ -679,17 +684,15 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn staging_bridge(&self) -> Result<Strong, OwnerError> {
+    pub fn staging_bridge(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetNativeStagingBridge {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_NATIVE_STAGING_BRIDGE, &data, false)
+            .transact_as_owner(bridge::GET_NATIVE_STAGING_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_native_staging_bridge_reply(&mut reader)
@@ -699,9 +702,7 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
     pub fn package_monitor_result(
@@ -723,7 +724,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::PACKAGE_MONITOR_RESULT, &data, false)
+            .transact_as_owner(bridge::PACKAGE_MONITOR_RESULT, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_package_monitor_result_reply(&mut reader)
@@ -746,7 +747,7 @@ impl Bridge {
         bridge::AllocatePreferredResolverIdentity {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::ALLOCATE_PREFERRED_RESOLVER_IDENTITY, &data, false)
+            .transact_as_owner(bridge::ALLOCATE_PREFERRED_RESOLVER_IDENTITY, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_allocate_preferred_resolver_identity_reply(&mut reader)
@@ -782,7 +783,7 @@ impl Bridge {
         bridge::InstallerCloudCompilationVerificationEnabled {}.write(&mut data);
         let reply = self
             .owner
-            .transact(
+            .transact_as_owner(
                 bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED,
                 &data,
                 false,
@@ -804,7 +805,7 @@ impl Bridge {
         bridge::IsInstallerArtServiceV3Enabled {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::IS_INSTALLER_ART_SERVICE_V3ENABLED, &data, false)
+            .transact_as_owner(bridge::IS_INSTALLER_ART_SERVICE_V3ENABLED, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let enabled = bridge::read_is_installer_art_service_v3enabled_reply(&mut reader)
@@ -821,7 +822,7 @@ impl Bridge {
         bridge::GetInstallerDomainLimits {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_INSTALLER_DOMAIN_LIMITS, &data, false)
+            .transact_as_owner(bridge::GET_INSTALLER_DOMAIN_LIMITS, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let limits = bridge::read_get_installer_domain_limits_reply(&mut reader)
@@ -841,7 +842,7 @@ impl Bridge {
         bridge::IsInstallerRevocableFdEnabled {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::IS_INSTALLER_REVOCABLE_FD_ENABLED, &data, false)
+            .transact_as_owner(bridge::IS_INSTALLER_REVOCABLE_FD_ENABLED, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         reader
@@ -864,7 +865,7 @@ impl Bridge {
         bridge::IsShellDebuggingRestricted { user_id: user }.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::IS_SHELL_DEBUGGING_RESTRICTED, &data, false)
+            .transact_as_owner(bridge::IS_SHELL_DEBUGGING_RESTRICTED, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         reader
@@ -890,7 +891,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::RESTORE_INSTALLER_CONTEXT, &data, false)
+            .transact_as_owner(bridge::RESTORE_INSTALLER_CONTEXT, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         bridge::read_restore_installer_context_reply(&mut reader)
@@ -907,7 +908,7 @@ impl Bridge {
         bridge::GetCurrentPackageVersion {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_CURRENT_PACKAGE_VERSION, &data, false)
+            .transact_as_owner(bridge::GET_CURRENT_PACKAGE_VERSION, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_get_current_package_version_reply(&mut reader)
@@ -925,7 +926,7 @@ impl Bridge {
         bridge::GetPackageScanUsers {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_PACKAGE_SCAN_USERS, &data, false)
+            .transact_as_owner(bridge::GET_PACKAGE_SCAN_USERS, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_get_package_scan_users_reply(&mut reader)
@@ -943,7 +944,7 @@ impl Bridge {
         bridge::GenerateNewDomainId {}.write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GENERATE_NEW_DOMAIN_ID, &data, false)
+            .transact_as_owner(bridge::GENERATE_NEW_DOMAIN_ID, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_generate_new_domain_id_reply(&mut reader)
@@ -975,7 +976,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(bridge::GET_SE_INFO_TARGET_SDK_VERSION, &data, false)
+            .transact_as_owner(bridge::GET_SE_INFO_TARGET_SDK_VERSION, &data, false)
             .map_err(SeInfoError::Transport)?;
         let mut reader = reply.reader();
         let target = bridge::read_get_se_info_target_sdk_version_reply(&mut reader)
@@ -987,7 +988,7 @@ impl Bridge {
         Ok(target)
     }
 
-    pub(crate) fn new(owner: Strong) -> Result<Self, Exception> {
+    pub(crate) fn new(owner: crate::system::ServiceOwner) -> Result<Self, Exception> {
         // Binder's standard descriptor handshake, before retaining an endpoint.
         let reply = owner
             .transact(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
@@ -1333,7 +1334,7 @@ mod tests {
         server.start();
         client.start();
         let owner = Bridge {
-            owner: client.strong(0),
+            owner: crate::system::ServiceOwner::Remote(std::sync::Arc::new(client.strong(0))),
             test_base_on_bcp: false,
             signing_debuggable: false,
             deaths: Deaths::default(),
@@ -1488,7 +1489,7 @@ mod tests {
         server.start();
         client.start();
         let owner = Bridge {
-            owner: client.strong(0),
+            owner: crate::system::ServiceOwner::Remote(std::sync::Arc::new(client.strong(0))),
             test_base_on_bcp: false,
             signing_debuggable: false,
             deaths: Deaths::default(),

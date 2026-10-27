@@ -93,6 +93,13 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    #[cfg(test)]
+    pub(crate) fn load_test_code(&mut self, package: crate::package::pkg::AndroidPackage) {
+        let code = super::LoadedPackage::new(package.clone(), SigningDetails::unknown()).unwrap();
+        let code = Arc::new(code);
+        self.package_registry.register(code.clone()).unwrap();
+        self.loaded.insert(package.package_name.clone(), code);
+    }
     /// Domain attachment follows executable code, while DELETE_KEEP_DATA keeps
     /// its setting and persisted state for a later reinstall.
     pub(crate) fn domain_code_owner(

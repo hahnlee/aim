@@ -35,6 +35,7 @@ use aim_service_aidl::android_app_ialarmlistener as listener;
 use aim_service_aidl::android_app_ialarmmanager as alarm;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::activity_user::AllowMode;
 use super::kept::RawIntent;
 use super::power_service::WorkSource;
 use super::{AppHost, PER_USER_RANGE, reply};
@@ -372,8 +373,7 @@ impl AlarmManager {
         let (state, _) = self.host.packages()?;
         let Some(component) = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("config_systemUIServiceComponent")
         else {
             return Ok(None);
@@ -913,12 +913,24 @@ impl Service for AlarmManager {
             }
             alarm::GET_NEXT_ALARM_CLOCK => {
                 let a = alarm::GetNextAlarmClock::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.host.incoming_user(uid, a.user_id, true).map(|user| {
-                    let next = Self::next_alarm_clock(&self.shared.state.lock().unwrap(), user);
-                    let mut p = Parcel::new();
-                    alarm::write_get_next_alarm_clock_reply(&mut p, next.as_ref());
-                    p
-                }))
+                reply(
+                    self.host
+                        .handle_incoming_user(
+                            uid,
+                            a.user_id,
+                            false,
+                            AllowMode::NonFull,
+                            Some("getNextAlarmClock"),
+                            None,
+                        )
+                        .map(|user| {
+                            let next =
+                                Self::next_alarm_clock(&self.shared.state.lock().unwrap(), user);
+                            let mut p = Parcel::new();
+                            alarm::write_get_next_alarm_clock_reply(&mut p, next.as_ref());
+                            p
+                        }),
+                )
             }
             alarm::GET_NEXT_WAKE_FROM_IDLE_TIME => {
                 alarm::GetNextWakeFromIdleTime::read(&mut call.data).map_err(|_| BAD_VALUE)?;

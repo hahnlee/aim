@@ -216,7 +216,7 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
                 if (!pendingScheduled) {
                     pendingScheduled = true;
                     pendingCallingUid = callingUid;
-                    postDelayed(this::flushPending, SystemClock.uptimeMillis() > policy.serviceStartWithDelay() ? 1000 : 10000);
+                    postDelayed(this::flushPending, "reset_component_state_changed".equals(reason) || SystemClock.uptimeMillis() > policy.serviceStartWithDelay() ? 1000 : 10000);
                 }
             }
         } else {

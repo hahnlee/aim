@@ -61,6 +61,8 @@ pub enum Value {
     /// An `ArrayList<String>` (`putStringArrayList`, `writeList`),
     /// length-prefixed as `Parcel.writeValue` writes lists.
     StringList(Vec<String>),
+    /// A list whose elements may be null (`putStringArrayList`).
+    NullableStringList(Vec<Option<String>>),
     /// An `ArrayList<Integer>` (`putIntegerArrayList`, `writeList`),
     /// length-prefixed as `Parcel.writeValue` writes lists.
     IntList(Vec<i32>),
@@ -151,6 +153,18 @@ impl Value {
                 for item in items {
                     p.write_i32(VAL_STRING);
                     p.write_string16(Some(item));
+                }
+            }),
+            Value::NullableStringList(items) => length_prefixed(p, VAL_LIST, |p| {
+                p.write_i32(items.len() as i32);
+                for item in items {
+                    match item {
+                        Some(item) => {
+                            p.write_i32(VAL_STRING);
+                            p.write_string16(Some(item));
+                        }
+                        None => p.write_i32(VAL_NULL),
+                    }
                 }
             }),
             Value::IntList(items) => length_prefixed(p, VAL_LIST, |p| {

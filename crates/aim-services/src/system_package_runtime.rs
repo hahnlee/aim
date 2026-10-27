@@ -156,12 +156,11 @@ impl System {
             changes,
             Arc::new(installer::existing::Restores::default()),
         )?;
-        let policy_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_POLICY_BRIDGE)?;
+        let policy_leaf = self.package_bootstrap_node(bridge, api::GET_INSTALLER_POLICY_BRIDGE)?;
         let policy =
             crate::system_package_installer_init::policy_source(self, bridge, policy_leaf)?;
         let icons = crate::system_package_persistence_init::IconOwner::new(
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_RECOVERY_PRESENTATION)?,
+            self.package_bootstrap_node(bridge, api::GET_INSTALLER_RECOVERY_PRESENTATION)?,
         );
         let publisher = self.package_installer_publisher()?;
         let system = Arc::downgrade(self);
@@ -252,9 +251,9 @@ impl System {
             self.configure_native_install_pipeline(bridge, &persistence.installer, environment)?;
         let removal_store = self.native_removal_store(bridge, persistence.disk.clone())?;
         let removal_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_REMOVAL_BRIDGE)?;
+            self.package_bootstrap_node(bridge, api::GET_INSTALLER_REMOVAL_BRIDGE)?;
         let query_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE)?;
+            self.package_bootstrap_node(bridge, api::GET_INSTALLER_ARCHIVE_QUERY_BRIDGE)?;
         let archive = self.configure_installer_archive(
             bridge,
             removal_store,
@@ -286,40 +285,7 @@ impl System {
                         "application data mutation system stopped",
                     )
                 })?;
-                system.check_package_bootstrap(&attached)?;
-                let install = system.package_install_guard();
-                let dependencies = system
-                    .package_bootstrap
-                    .lock()
-                    .unwrap()
-                    .current
-                    .as_ref()
-                    .filter(|current| Arc::ptr_eq(&current.bridge, &attached))
-                    .and_then(|current| current.mutations.clone())
-                    .ok_or_else(|| {
-                        Exception::new(
-                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                            "application data mutation dependencies unavailable",
-                        )
-                    })?;
-                let prepared = crate::package::mutation_dispatch::Prepared {
-                    code: 0,
-                    plans,
-                    global: None,
-                    finish: crate::package::mutation_dispatch::Finish::None,
-                    reply: Parcel::new(),
-                    distraction_cleanup: Vec::new(),
-                };
-                system
-                    .publish_prepared_package_mutation_guarded(
-                        &attached,
-                        &base,
-                        prepared,
-                        &dependencies,
-                        caller,
-                        install,
-                    )
-                    .map(|_| ())
+                system.publish_package_plans(&attached, &base, plans, caller)
             },
         );
         let application_data = self.install_package_application_data(bridge, commit)?;
@@ -377,7 +343,7 @@ impl System {
         inputs.early_users.attach_after_scan(users)?;
         let user_operations = inputs.early_user_binder;
         let lifecycle_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_BOOT_LIFECYCLE_LEAF)?;
+            self.package_bootstrap_node(bridge, api::GET_PACKAGE_BOOT_LIFECYCLE_LEAF)?;
         let boot_lifecycle = self.initialize_package_boot_lifecycle(
             bridge,
             lifecycle_leaf,
@@ -435,5 +401,87 @@ impl Drop for Runtime {
         if let Err(error) = self.web_policy.close() {
             eprintln!("Native web policy watcher close failed: {}", error.message);
         }
+    }
+}
+
+impl System {
+    pub(crate) fn publish_package_plans(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        plans: Vec<crate::package::write::mutation::Plan>,
+        caller: i32,
+    ) -> Result<()> {
+        self.check_package_bootstrap(bridge)?;
+        let install = self.package_install_guard();
+        let dependencies = self
+            .package_bootstrap
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .and_then(|current| current.mutations.clone())
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "application data mutation dependencies unavailable",
+                )
+            })?;
+        let mut resets = Vec::new();
+        for plan in &plans {
+            if let (Some(user), crate::package::write::mutation::Change::Enabled(enabled)) =
+                (plan.user, &plan.change)
+            {
+                let old = base
+                    .state()
+                    .packages
+                    .get(&plan.package)
+                    .ok_or_else(|| Exception::illegal_argument("reset package unavailable"))?;
+                let old = crate::package::info::user_state(old, user);
+                let classes: std::collections::BTreeSet<_> = old
+                    .enabled_components
+                    .iter()
+                    .chain(&old.disabled_components)
+                    .chain(&enabled.enabled_components)
+                    .chain(&enabled.disabled_components)
+                    .cloned()
+                    .collect();
+                for class in classes {
+                    let new_state = if enabled.enabled_components.contains(&class) {
+                        1
+                    } else if enabled.disabled_components.contains(&class) {
+                        2
+                    } else {
+                        0
+                    };
+                    resets.push(crate::package::write::enabled::Setting {
+                        package: plan.package.clone(),
+                        class: Some(class),
+                        new_state,
+                        flags: 1,
+                        user,
+                        calling_package: caller.to_string(),
+                    });
+                }
+            }
+        }
+        let prepared = crate::package::mutation_dispatch::Prepared {
+            code: 0,
+            plans,
+            global: None,
+            finish: crate::package::mutation_dispatch::Finish::ResetComponents(resets),
+            reply: Parcel::new(),
+            distraction_cleanup: Vec::new(),
+        };
+        self.publish_prepared_package_mutation_guarded(
+            bridge,
+            base,
+            prepared,
+            &dependencies,
+            caller,
+            install,
+        )
+        .map(|_| ())
     }
 }

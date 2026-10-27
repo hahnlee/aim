@@ -22,6 +22,7 @@ use aim_service_aidl::ReadParcelable;
 use aim_service_aidl::android_content_icontentservice as cs;
 
 use super::account_service::Account;
+use super::activity_user::AllowMode;
 use super::kept::{By, KeptBundle, RawBundle};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::intent_filter::Plain;
@@ -359,7 +360,7 @@ impl ContentService {
         if let Some(listen) = root.as_ref().and_then(|r| master_sync_of(r, user)) {
             return Ok(listen);
         }
-        let packages = &self.host.inputs()?.packages;
+        let packages = self.host.framework()?;
         packages
             .framework_bool("config_syncstorageengine_masterSyncAutomatically")
             .ok_or_else(|| state("no config_syncstorageengine_masterSyncAutomatically".into()))
@@ -423,7 +424,18 @@ impl ContentService {
             ));
         };
         let uid = call.sender_euid as i32;
-        let user = self.host.incoming_user(uid, args.user_handle, true)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            args.user_handle,
+            true,
+            if args.user_handle == USER_ALL {
+                AllowMode::FullOnly
+            } else {
+                AllowMode::NonFull
+            },
+            None,
+            None,
+        )?;
         if !self.check_access(&uri, uid, user, args.target_sdk_version)? {
             return Ok(());
         }
@@ -472,7 +484,18 @@ impl ContentService {
         user: i32,
         observer: Arc<dyn LocalObserver>,
     ) -> Result<u64, Exception> {
-        let user = self.host.incoming_user(SYSTEM_UID, user, true)?;
+        let user = self.host.handle_incoming_user(
+            SYSTEM_UID,
+            user,
+            true,
+            if user == USER_ALL {
+                AllowMode::FullOnly
+            } else {
+                AllowMode::NonFull
+            },
+            None,
+            None,
+        )?;
         // `checkContentProviderAccess`, which the system is held to as an
         // app of the current SDK.
         if let Some(msg) =
@@ -526,7 +549,18 @@ impl ContentService {
             Some(Binder::Handle(h)) => Some(Observer::Remote(h)),
             _ => None,
         };
-        let user = self.host.incoming_user(uid, args.user_handle, true)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            args.user_handle,
+            true,
+            if args.user_handle == USER_ALL {
+                AllowMode::FullOnly
+            } else {
+                AllowMode::NonFull
+            },
+            None,
+            None,
+        )?;
         let mut uris = Vec::new();
         for ParcelUri(uri) in args.uris.unwrap_or_default().into_iter().flatten() {
             if self.check_access(&uri, uid, user, args.target_sdk_version)? {

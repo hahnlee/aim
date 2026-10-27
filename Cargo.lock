@@ -45,6 +45,7 @@ name = "aim-app-host-agent"
 version = "0.1.0"
 dependencies = [
  "aim-emulated-storage",
+ "aim-f2fs",
  "aim-input-transport",
  "aim-meminfo",
  "android_os_vold",
@@ -107,6 +108,14 @@ name = "aim-emulated-storage"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "aim-f2fs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
 ]
 
 [[package]]

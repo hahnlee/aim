@@ -472,8 +472,8 @@ impl AppHost {
 
     /// `retrieveSettings`' multi-window support.
     fn multi_window(&self) -> Result<MultiWindow, Exception> {
-        let inputs = self.inputs()?;
-        let packages = &inputs.packages;
+        let inputs = self.platform()?;
+        let packages = self.framework()?;
         let global = |name: &str| {
             inputs
                 .settings
@@ -600,14 +600,13 @@ impl AppHost {
             || RESIZEABLE_MODES.contains(&resize_mode)
             || root_info.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
         let package = root_info.info.application_info.item.package_name.as_deref();
-        let checks_min_size = self.inputs()?.compat.is_enabled(
+        let checks_min_size = self.platform()?.compat.is_enabled(
             CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
             package,
             root_info.info.application_info.target_sdk_version,
         );
         let default_min_size = self
-            .inputs()?
-            .packages
+            .framework()?
             .framework_dimension_dp("default_minimal_size_resizable_task")
             .ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "no default_minimal_size_resizable_task")

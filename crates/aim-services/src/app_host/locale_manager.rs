@@ -18,6 +18,7 @@ use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::android_app_ilocalemanager as lm;
 
+use super::activity_user::AllowMode;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::query::Query;
 
@@ -153,7 +154,14 @@ impl LocaleManager {
         package: &str,
         user: i32,
     ) -> Result<LocaleList, Exception> {
-        let user = self.host.incoming_user(uid, user, true)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("getApplicationLocales"),
+            None,
+        )?;
         let same_app =
             |other: i32| other >= 0 && other % PER_USER_RANGE as i32 == uid % PER_USER_RANGE as i32;
         // `isPackageOwnedByCaller`.
@@ -213,7 +221,14 @@ impl LocaleManager {
         locales: &LocaleList,
         from_delegate: bool,
     ) -> Result<(), Exception> {
-        let user = self.host.incoming_user(uid, user, true)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("setApplicationLocales"),
+            None,
+        )?;
         // `isPackageOwnedByCaller`.
         let target = self.package_uid(package, user)?;
         if target < 0 {
@@ -259,7 +274,14 @@ impl LocaleManager {
         {
             return Ok(None);
         }
-        let user = self.host.incoming_user(uid, user, true)?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            AllowMode::NonFull,
+            Some("getOverrideLocaleConfig"),
+            None,
+        )?;
         let file = self
             .host
             .data()?

@@ -11,7 +11,7 @@ impl Bridge {
         api::GetExistingPackageInstallUserPolicy { user_id: user }.write(&mut data);
         let reply = self
             .owner
-            .transact(api::GET_EXISTING_PACKAGE_INSTALL_USER_POLICY, &data, false)
+            .transact_as_owner(api::GET_EXISTING_PACKAGE_INSTALL_USER_POLICY, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = api::read_get_existing_package_install_user_policy_reply(&mut reader)
@@ -38,7 +38,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(api::ON_EXISTING_PACKAGE_INSTALLED, &data, false)
+            .transact_as_owner(api::ON_EXISTING_PACKAGE_INSTALLED, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let values = api::read_on_existing_package_installed_reply(&mut reader)
@@ -67,7 +67,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(api::RESTORE_EXISTING_PACKAGE_INSTALL, &data, false)
+            .transact_as_owner(api::RESTORE_EXISTING_PACKAGE_INSTALL, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let value = api::read_restore_existing_package_install_reply(&mut reader)
@@ -97,7 +97,7 @@ impl Bridge {
         .write(&mut data);
         let reply = self
             .owner
-            .transact(api::COMPLETE_EXISTING_PACKAGE_INSTALL, &data, false)
+            .transact_as_owner(api::COMPLETE_EXISTING_PACKAGE_INSTALL, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let value = api::read_complete_existing_package_install_reply(&mut reader)

@@ -112,6 +112,68 @@ pub fn transact(system: &Arc<crate::system::System>, call: &mut Call<'_>) -> Opt
     })())
 }
 
+/// IPackageManagerBase's deprecated permission reads use the live access
+/// owner too, with the original caller and the default virtual device.
+pub fn check(system: &Arc<crate::system::System>, call: &mut Call<'_>) -> Reply {
+    let (code, request) = check_request(call)?;
+    let original = match system.package_permission_call(code, &request) {
+        Ok(reply) => reply,
+        Err(error) => {
+            let mut reply = Parcel::new();
+            reply.write_exception(&error);
+            return Ok(reply);
+        }
+    };
+    let mut reader = original.reader();
+    let mut reply = Parcel::new();
+    match reader.read_exception()? {
+        Err(error) => reply.write_exception(&error),
+        Ok(()) => {
+            let value = reader.read_i32()?;
+            if code == permission::CHECK_PERMISSION {
+                pm::write_check_permission_reply(&mut reply, value);
+            } else {
+                pm::write_check_uid_permission_reply(&mut reply, value);
+            }
+        }
+    }
+    if reader.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
+    Ok(reply)
+}
+fn check_request(call: &mut Call<'_>) -> aim_binder_host::parcel::Result<(u32, Parcel)> {
+    let mut request = Parcel::new();
+    let code = match call.code {
+        pm::CHECK_PERMISSION => {
+            let args = pm::CheckPermission::read(&mut call.data)?;
+            permission::CheckPermission {
+                package_name: args.pkg_name,
+                permission_name: args.perm_name,
+                persistent_device_id: Some("default:0".into()),
+                user_id: args.user_id,
+            }
+            .write(&mut request);
+            permission::CHECK_PERMISSION
+        }
+        pm::CHECK_UID_PERMISSION => {
+            let args = pm::CheckUidPermission::read(&mut call.data)?;
+            permission::CheckUidPermission {
+                uid: args.uid,
+                permission_name: args.perm_name,
+                device_id: 0,
+            }
+            .write(&mut request);
+            permission::CHECK_UID_PERMISSION
+        }
+        _ => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
+    };
+    if call.data.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
+    Ok((code, request))
+}
+
 pub fn group_info(system: &Arc<crate::system::System>, call: &mut Call<'_>) -> Reply {
     let args = pm::GetPermissionGroupInfo::read(&mut call.data)?;
     if call.data.remaining() != 0 {
@@ -138,4 +200,60 @@ pub fn group_info(system: &Arc<crate::system::System>, call: &mut Call<'_>) -> R
     let mut reply = Parcel::new();
     reply.write_raw(bytes, &objects);
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn permission_reads_translate_device_arguments_without_changing_the_caller() {
+        for uid in [1000, 2000, 10123] {
+            let mut request = Parcel::new();
+            pm::CheckPermission {
+                perm_name: Some("p.camera".into()),
+                pkg_name: Some("a.b".into()),
+                user_id: 10,
+            }
+            .write(&mut request);
+            let mut call = Call {
+                code: pm::CHECK_PERMISSION,
+                flags: 0,
+                sender_pid: 431,
+                sender_euid: uid,
+                data: request.reader(),
+            };
+            let (code, translated) = check_request(&mut call).unwrap();
+            assert_eq!(code, permission::CHECK_PERMISSION);
+            let args = permission::CheckPermission::read(&mut translated.reader()).unwrap();
+            assert_eq!(
+                (
+                    args.package_name.as_deref(),
+                    args.permission_name.as_deref(),
+                    args.persistent_device_id.as_deref(),
+                    args.user_id
+                ),
+                (Some("a.b"), Some("p.camera"), Some("default:0"), 10)
+            );
+            assert_eq!((call.sender_pid, call.sender_euid), (431, uid));
+            let mut request = Parcel::new();
+            pm::CheckUidPermission {
+                perm_name: None,
+                uid: 99001,
+            }
+            .write(&mut request);
+            call.code = pm::CHECK_UID_PERMISSION;
+            call.data = request.reader();
+            let (code, translated) = check_request(&mut call).unwrap();
+            assert_eq!(code, permission::CHECK_UID_PERMISSION);
+            let args = permission::CheckUidPermission::read(&mut translated.reader()).unwrap();
+            assert_eq!(
+                (args.uid, args.permission_name, args.device_id),
+                (99001, None, 0)
+            );
+            let mut malformed = request.clone();
+            malformed.write_i32(42);
+            call.data = malformed.reader();
+            assert_eq!(check_request(&mut call).unwrap_err(), BAD_VALUE);
+        }
+    }
 }

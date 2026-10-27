@@ -43,7 +43,10 @@ impl Bridge {
         let key = (code, request.data().to_vec());
         match AHEAD.with(|ahead| ahead.borrow().get(&key).cloned()) {
             Some(bytes) => Ok(Reply::Ahead(bytes)),
-            None => self.owner.transact(code, request, false).map(Reply::Live),
+            None => self
+                .owner
+                .transact_as_owner(code, request, false)
+                .map(Reply::Live),
         }
     }
 
@@ -90,7 +93,7 @@ impl Bridge {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(bridge::TRANSACT_BATCH, &request, false)?;
+            .transact_as_owner(bridge::TRANSACT_BATCH, &request, false)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_transact_batch_reply(&mut reader)?
             .map_err(|_| aim_binder_host::parcel::BAD_VALUE)?

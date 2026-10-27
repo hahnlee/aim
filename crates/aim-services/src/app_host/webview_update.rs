@@ -9,9 +9,10 @@
 //!
 //! The provider is prepared (`prepareWebViewInSystemServer`) when the
 //! service is first asked, and the WebView zygote started once its RELRO
-//! files are made (`webview_zygote`). Changing the provider, package
-//! changes, the repair of a default provider not installed for every user
-//! and pinning its files are not implemented (#1491).
+//! files are made (`webview_zygote`). Package notifications reselect the
+//! provider, defer a second preparation until pending RELRO work finishes,
+//! and stop dependents of the previous provider. Explicit provider choice,
+//! default-provider repair and file pinning remain #1491.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Condvar, Mutex};
@@ -134,12 +135,12 @@ fn providers(xml: &[u8]) -> Result<Vec<Provider>, String> {
 /// The provider in use and its RELRO files' progress.
 #[derive(Default)]
 struct State {
+    capture: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
     current: Option<PackageInfo>,
     relros_started: u32,
     relros_finished: u32,
     any_installed: bool,
-    /// `mWebViewPackageDirty`: the provider changed while RELRO files of
-    /// the last were made (never, as nothing changes it here).
+    /// `mWebViewPackageDirty`: the provider changed during RELRO creation.
     dirty: bool,
 }
 
@@ -154,12 +155,18 @@ pub struct WebViewUpdate {
 }
 
 impl WebViewUpdate {
-    pub fn new(host: Arc<AppHost>) -> Self {
-        WebViewUpdate {
+    pub fn new(host: Arc<AppHost>) -> Arc<Self> {
+        let service = Arc::new(WebViewUpdate {
             host,
             providers: std::sync::OnceLock::new(),
             shared: Arc::new((Mutex::new(None), Condvar::new())),
-        }
+        });
+        let monitor = service.clone() as Arc<dyn super::package_writes::PackageMonitor>;
+        service
+            .host
+            .package_monitors
+            .register(super::USER_ALL, Arc::downgrade(&monitor));
+        service
     }
 
     fn providers(&self) -> Result<&[Provider], Exception> {
@@ -168,8 +175,7 @@ impl WebViewUpdate {
         }
         let xml = self
             .host
-            .inputs()?
-            .packages
+            .framework()?
             .framework_file(self.host.root()?, "xml", "config_webview_packages")
             .ok_or_else(|| {
                 Exception::new(
@@ -192,8 +198,14 @@ impl WebViewUpdate {
     }
 
     /// `pm.getPackageInfo(package, flags)` as the system asks it.
-    fn package_info(&self, package: &str, flags: i64) -> Result<Option<PackageInfo>, Exception> {
-        let (state, resolution) = self.host.packages()?;
+    fn package_info(
+        &self,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        package: &str,
+        flags: i64,
+    ) -> Result<Option<PackageInfo>, Exception> {
+        let state = capture.state();
+        let resolution = super::package_resolution(capture, "webviewupdate:")?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,
@@ -210,7 +222,12 @@ impl WebViewUpdate {
     }
 
     /// `validityResult(...) == VALIDITY_OK`.
-    fn valid(&self, provider: &Provider, info: &PackageInfo) -> Result<bool, Exception> {
+    fn valid(
+        &self,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        provider: &Provider,
+        info: &PackageInfo,
+    ) -> Result<bool, Exception> {
         let app = info.application_info.as_ref().ok_or_else(|| {
             Exception::new(
                 EX_ILLEGAL_STATE,
@@ -220,7 +237,13 @@ impl WebViewUpdate {
         // `WebViewFactoryProvider.isCompatibleImplementationPackage`: with
         // the B entry point, a version from `MINIMUM_SUPPORTED_VERSION_CODE`,
         // else one targeting Tiramisu or after.
-        let compatible = if self.host.flag("android.webkit.use_b_entry_point")? {
+        let compatible = if capture
+            .state()
+            .system
+            .flags
+            .iter()
+            .any(|(name, on)| name == "android.webkit.use_b_entry_point" && *on)
+        {
             i64::from(info.version_code) >= MINIMUM_SUPPORTED_VERSION_CODE
         } else {
             app.target_sdk_version >= MINIMUM_SUPPORTED_TARGET_SDK
@@ -232,7 +255,7 @@ impl WebViewUpdate {
         let version = |i: &PackageInfo| {
             (i64::from(i.version_code_major) << 32) | i64::from(i.version_code as u32)
         };
-        if !debuggable && version(info) / 100_000 < self.minimum_version_code()? / 100_000 {
+        if !debuggable && version(info) / 100_000 < self.minimum_version_code(capture)? / 100_000 {
             return Ok(false);
         }
         // `providerHasValidSignature`.
@@ -247,10 +270,13 @@ impl WebViewUpdate {
 
     /// `getMinimumVersionCode`: the lowest factory version of the providers
     /// available by default.
-    fn minimum_version_code(&self) -> Result<i64, Exception> {
+    fn minimum_version_code(
+        &self,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+    ) -> Result<i64, Exception> {
         let mut minimum = -1;
         for p in self.providers()?.iter().filter(|p| p.available_by_default) {
-            if let Some(info) = self.package_info(&p.package, MATCH_FACTORY_ONLY)? {
+            if let Some(info) = self.package_info(capture, &p.package, MATCH_FACTORY_ONLY)? {
                 let v = (i64::from(info.version_code_major) << 32)
                     | i64::from(info.version_code as u32);
                 if minimum < 0 || v < minimum {
@@ -264,20 +290,20 @@ impl WebViewUpdate {
     /// `findPreferredWebViewPackage`: the user's choice if valid and
     /// installed and enabled for every user (here, user 0), else the
     /// default if valid.
-    fn preferred(&self) -> Result<Option<PackageInfo>, Exception> {
+    fn preferred(
+        &self,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+    ) -> Result<Option<PackageInfo>, Exception> {
         let chosen = self
             .host
-            .inputs()?
+            .platform()?
             .settings
             .get(Table::Global, "webview_provider");
-        if let Some(provider) = chosen.and_then(|c| {
-            self.providers()
-                .ok()?
-                .iter()
-                .find(|p| p.package == c)
-                .cloned()
-        }) && let Some(info) = self.package_info(&provider.package, PACKAGE_FLAGS)?
-            && self.valid(&provider, &info)?
+        let configured = self.providers()?;
+        if let Some(provider) =
+            chosen.and_then(|c| configured.iter().find(|p| p.package == c).cloned())
+            && let Some(info) = self.package_info(capture, &provider.package, PACKAGE_FLAGS)?
+            && self.valid(capture, &provider, &info)?
             && info
                 .application_info
                 .as_ref()
@@ -286,8 +312,12 @@ impl WebViewUpdate {
             return Ok(Some(info));
         }
         let default = self.default_provider()?.clone();
-        if let Some(info) = self.package_info(&default.package, PACKAGE_FLAGS)?
-            && self.valid(&default, &info)?
+        if let Some(info) = self.package_info(capture, &default.package, PACKAGE_FLAGS)?
+            && self.valid(capture, &default, &info)?
+            && info
+                .application_info
+                .as_ref()
+                .is_some_and(|a| a.flags & FLAG_INSTALLED != 0 && a.enabled)
         {
             return Ok(Some(info));
         }
@@ -298,31 +328,53 @@ impl WebViewUpdate {
     /// then `onWebViewProviderChanged`: its RELRO files made).
     fn state(&self) -> Result<std::sync::MutexGuard<'_, Option<State>>, Exception> {
         let mut guard = self.shared.0.lock().unwrap();
-        if guard.is_none() {
-            let mut state = State::default();
-            match self.preferred()? {
-                Some(info) => {
-                    state.any_installed = true;
-                    (state.relros_started, state.relros_finished) = self.create_relros(&info);
-                    // `WebViewZygote.onWebViewProviderChanged`, then
-                    // `startZygoteWhenReady`: the zygote started once the
-                    // RELRO files are made, or the wait for them ends.
-                    if let Some(app) = &info.application_info {
-                        self.host.webview_provider_changed(app.clone());
-                    }
-                    let (host, shared) = (self.host.clone(), self.shared.clone());
-                    std::thread::spawn(move || {
-                        drop(wait_ready(&shared));
-                        host.ensure_webview_zygote();
-                    });
-                    state.current = Some(info);
+        let capture = self.host.package_capture()?;
+        let state = guard.get_or_insert_with(State::default);
+        if state
+            .capture
+            .as_ref()
+            .is_some_and(|old| Arc::ptr_eq(old, &capture))
+            && !state.dirty
+        {
+            return Ok(guard);
+        }
+        let preferred = self.preferred(&capture)?;
+        let changed = !same_provider(
+            state.capture.as_deref(),
+            &capture,
+            state.current.as_ref(),
+            preferred.as_ref(),
+        );
+        if changed && state.relros_started != state.relros_finished {
+            state.dirty = true;
+            return Ok(guard);
+        }
+        if changed {
+            let old = state.current.take();
+            state.any_installed = preferred.is_some();
+            state.dirty = false;
+            state.current = preferred;
+            if let Some(info) = &state.current {
+                (state.relros_started, state.relros_finished) = self.create_relros(info);
+                if let Some(app) = &info.application_info {
+                    self.host.webview_provider_changed(Some(app.clone()));
                 }
-                None => {
-                    eprintln!("app host: webviewupdate: Could not find a loadable WebView package")
+                let (host, shared) = (self.host.clone(), self.shared.clone());
+                std::thread::spawn(move || {
+                    drop(wait_ready(&shared));
+                    host.ensure_webview_zygote();
+                });
+            } else {
+                self.host.webview_provider_changed(None);
+            }
+            if let Some(old) = old.and_then(|info| info.application_info) {
+                if let Some(name) = &old.item.package_name {
+                    self.host.kill_package_processes(name, old.uid as u32);
                 }
             }
-            *guard = Some(state);
+            self.shared.1.notify_all();
         }
+        state.capture = Some(capture);
         Ok(guard)
     }
 
@@ -402,16 +454,70 @@ impl WebViewUpdate {
         if caller != SHARED_RELRO_UID as i32 && caller != SYSTEM_UID {
             return;
         }
-        relro_finished(&self.shared);
+        if relro_finished(&self.shared) {
+            if let Err(e) = self.state() {
+                eprintln!("app host: webviewupdate: {}", e.message);
+            }
+        }
+    }
+}
+
+impl super::package_writes::PackageMonitor for WebViewUpdate {
+    fn package_changed(
+        &self,
+        change: &super::package_writes::PackageChanged<'_>,
+    ) -> Result<(), Exception> {
+        // WebViewUpdateService.entirePackageChanged.
+        if change.some_packages_changed()
+            && self
+                .providers()?
+                .iter()
+                .any(|p| p.package == change.package)
+        {
+            drop(self.state()?);
+        }
+        Ok(())
+    }
+}
+
+fn same_provider(
+    before: Option<&crate::package::scan_snapshot::query_state::Capture>,
+    after: &crate::package::scan_snapshot::query_state::Capture,
+    old: Option<&PackageInfo>,
+    new: Option<&PackageInfo>,
+) -> bool {
+    match (old, new) {
+        (None, None) => true,
+        (Some(old), Some(new)) => {
+            let (mut a, mut b) = (Parcel::new(), Parcel::new());
+            old.write_to(&mut a);
+            new.write_to(&mut b);
+            let code = |capture: &crate::package::scan_snapshot::query_state::Capture,
+                        name: Option<&str>| {
+                name.and_then(|name| capture.state().packages.get(name))
+                    .and_then(|p| p.pkg.clone())
+            };
+            let same_code = before
+                .and_then(|before| code(before, old.package_name.as_deref()))
+                .zip(code(after, new.package_name.as_deref()))
+                .is_some_and(|(a, b)| Arc::ptr_eq(&a, &b));
+            a.data() == b.data() && same_code
+        }
+        _ => false,
     }
 }
 
 /// `notifyRelroCreationCompleted`: one more RELRO file creator finished.
-fn relro_finished(shared: &(Mutex<Option<State>>, Condvar)) {
-    if let Some(s) = shared.0.lock().unwrap().as_mut() {
+/// Whether the provider was changed meanwhile and every RELRO is now done,
+/// so that the change is applied (`onWebViewProviderChanged`'s deferral).
+fn relro_finished(shared: &(Mutex<Option<State>>, Condvar)) -> bool {
+    let mut guard = shared.0.lock().unwrap();
+    let dirty = guard.as_mut().is_some_and(|s| {
         s.relros_finished += 1;
-    }
+        s.dirty && s.relros_started == s.relros_finished
+    });
     shared.1.notify_all();
+    dirty
 }
 
 /// `webViewIsReadyLocked`.
@@ -520,10 +626,13 @@ impl Service for WebViewUpdate {
                     if call.code == wv::GET_ALL_WEB_VIEW_PACKAGES {
                         return Ok(all);
                     }
+                    let capture = self.host.package_capture()?;
+                    let capture = capture.as_ref();
                     let mut valid = Vec::new();
                     for provider in all {
-                        if let Some(info) = self.package_info(&provider.package, PACKAGE_FLAGS)?
-                            && self.valid(&provider, &info)?
+                        if let Some(info) =
+                            self.package_info(capture, &provider.package, PACKAGE_FLAGS)?
+                            && self.valid(capture, &provider, &info)?
                         {
                             valid.push(provider);
                         }
@@ -571,6 +680,108 @@ impl Service for WebViewUpdate {
 
 #[cfg(test)]
 mod tests {
+    /// WebViewUpdateService.entirePackageChanged includes application
+    /// enabled settings; component-only changes do not select a provider.
+    #[test]
+    fn webview_provider_follows_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.target_sdk_version = 36;
+                    pkg.meta_data = Some(crate::package::pkg::MetaData(vec![(
+                        WEBVIEW_LIBRARY.into(),
+                        crate::package::pkg::Value::String(Some("libwebview.so".into())),
+                    )]));
+                }
+            });
+            let service = WebViewUpdate::new(host.clone());
+            service
+                .providers
+                .set(vec![Provider {
+                    package: "p".into(),
+                    description: "provider".into(),
+                    available_by_default: true,
+                    is_fallback: false,
+                    signatures: vec![],
+                }])
+                .ok()
+                .unwrap();
+            drop(service.state().unwrap());
+            let cached = || {
+                let held = service.shared.0.lock().unwrap();
+                let state = held.as_ref().unwrap();
+                (
+                    state.capture.clone().unwrap(),
+                    state
+                        .current
+                        .as_ref()
+                        .and_then(|info| info.package_name.clone()),
+                )
+            };
+            let (before, current) = cached();
+            assert_eq!(current.as_deref(), Some("p"));
+            enabled(Some("p.Main"), 2);
+            assert!(Arc::ptr_eq(&before, &cached().0));
+            enabled(Some("p.Main"), 1);
+            assert!(Arc::ptr_eq(&before, &cached().0));
+            enabled(None, 2);
+            // Inspect the cached answer before asking state() to refresh it.
+            assert_eq!(cached().1, None);
+            enabled(None, 1);
+            assert_eq!(cached().1.as_deref(), Some("p"));
+        });
+    }
+
+    #[test]
+    fn provider_removal_during_relro_creation_reselects_after_completion() {
+        crate::system::with_discovery_session(|host, publish, _| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.target_sdk_version = 36;
+                    pkg.meta_data = Some(crate::package::pkg::MetaData(vec![(
+                        WEBVIEW_LIBRARY.into(),
+                        crate::package::pkg::Value::String(Some("libwebview.so".into())),
+                    )]));
+                }
+            });
+            let service = WebViewUpdate::new(host.clone());
+            service
+                .providers
+                .set(vec![Provider {
+                    package: "p".into(),
+                    description: "provider".into(),
+                    available_by_default: true,
+                    is_fallback: false,
+                    signatures: Vec::new(),
+                }])
+                .ok()
+                .unwrap();
+            let before = host.package_capture().unwrap();
+            let current = service
+                .preferred(&before)
+                .unwrap()
+                .expect("installed provider");
+            *service.shared.0.lock().unwrap() = Some(State {
+                capture: Some(before),
+                current: Some(current),
+                relros_started: 1,
+                relros_finished: 0,
+                any_installed: true,
+                dirty: false,
+            });
+            publish(&mut |pkg| pkg.booleans &= !crate::package::pkg::booleans::ENABLED);
+            let held = service.state().unwrap();
+            assert!(held.as_ref().unwrap().dirty);
+            assert!(held.as_ref().unwrap().current.is_some());
+            drop(held);
+            service.notify_relro_creation_completed(SHARED_RELRO_UID as i32);
+            let held = service.state().unwrap();
+            let state = held.as_ref().unwrap();
+            assert!(!state.dirty);
+            assert!(!state.any_installed);
+            assert!(state.current.is_none());
+        });
+    }
     use super::*;
 
     #[test]

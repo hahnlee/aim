@@ -44,7 +44,7 @@
 //! samples them (`appops_sampling.rs`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
@@ -1050,10 +1050,10 @@ struct Effects {
     collected: Vec<Collected>,
 }
 
-/// The ops of each uid's packages by attribution tag (`Op`, made by a note
-/// or a start, with its attributed ops' history), and the watchers of their
-/// starts.
+/// UID/package states (including empty Ops from package-added), the ops
+/// made by notes or starts with their attributed history, and start watchers.
 pub(super) struct Started<L> {
+    packages: HashMap<i32, HashSet<String>>,
     ops: HashMap<OpKey, HashMap<Option<String>, Attributed<L>>>,
     active: HashMap<u32, Watcher<L>>,
     started: HashMap<u32, Watcher<L>>,
@@ -1062,6 +1062,7 @@ pub(super) struct Started<L> {
 impl<L> Default for Started<L> {
     fn default() -> Self {
         Started {
+            packages: HashMap::new(),
             ops: HashMap::new(),
             active: HashMap::new(),
             started: HashMap::new(),
@@ -1070,6 +1071,15 @@ impl<L> Default for Started<L> {
 }
 
 impl<L> Started<L> {
+    /// `onPackageAdded`: retain existing Ops and create the app and sandbox
+    /// UID states. No checking-service modes or access history are written.
+    fn package_added(&mut self, package: &str, uid: i32) {
+        self.packages.entry(uid).or_default().insert(package.into());
+        if app_id(uid) >= FIRST_APPLICATION_UID {
+            self.packages.entry(uid + 10_000).or_default();
+        }
+    }
+
     fn watchers(&mut self, which: Watch) -> &mut HashMap<u32, Watcher<L>> {
         match which {
             Watch::Active => &mut self.active,
@@ -2249,8 +2259,8 @@ impl System for Host<'_> {
     /// `isChangeEnabledByUid`.
     fn invalid_tags_rejected(&self, package: &str, caller: i32) -> Result<bool, Exception> {
         let change = SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE;
-        let inputs = self.0.inputs()?;
-        let by_package = match inputs.packages.application_info(package, 0) {
+        let inputs = self.0.platform()?;
+        let by_package = match self.0.application_info(package, 0, None)? {
             Some(ai) => inputs
                 .compat
                 .is_enabled(change, Some(package), ai.target_sdk_version),
@@ -2268,19 +2278,19 @@ impl System for Host<'_> {
     }
 
     fn uid_mode(&self, app_id: i32, op: &str) -> Result<Option<i32>, Exception> {
-        let access = self.0.inputs()?.packages.access();
-        let ops = access.and_then(|a| a.app_id_app_ops.iter().find(|(id, _)| *id == app_id));
-        Ok(ops
-            .and_then(|(_, ops)| ops.iter().find(|(n, _)| n == op))
-            .map(|(_, mode)| *mode))
+        self.0
+            .permission_manager
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native access owner unavailable"))?
+            .uid_mode(app_id, op)
     }
 
     fn package_mode(&self, package: &str, op: &str) -> Result<Option<i32>, Exception> {
-        let access = self.0.inputs()?.packages.access();
-        let ops = access.and_then(|a| a.package_app_ops.iter().find(|(name, _)| name == package));
-        Ok(ops
-            .and_then(|(_, ops)| ops.iter().find(|(n, _)| n == op))
-            .map(|(_, mode)| *mode))
+        self.0
+            .permission_manager
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native access owner unavailable"))?
+            .package_mode(package, op)
     }
 
     fn running(&self, uid: i32) -> bool {
@@ -2354,6 +2364,18 @@ impl System for Host<'_> {
 /// A link to a binder's death: its reference and the cookie; none for a
 /// binder of the app host's own, which does not die.
 type Link = Option<(Strong, u64)>;
+
+/// `AppOpsManagerInternal.onPackageAdded`, android-16.0.0_r1: every UM
+/// user gets an empty package Ops if absent. Sampling's rarely-used set
+/// depends on the historical registry, which this owner does not keep.
+pub(super) fn package_added(host: &AppHost, package: &str, app_id: i32) -> Result<(), Exception> {
+    let users = super::user_service::user_ids(host, false)?;
+    let mut started = host.app_ops.started.lock().unwrap();
+    for user in users {
+        started.package_added(package, user * PER_USER_RANGE + app_id);
+    }
+    Ok(())
+}
 
 /// AppOpsService's state in the app host: the started ops and their
 /// watchers, the async-noted watchers and the ops none took, the clients'
@@ -3014,6 +3036,15 @@ fn packages_for_ops<L>(
         .keys()
         .filter(|(uid, _, _)| all || *uid == caller)
         .map(|(uid, package, _)| (*uid, package.clone()))
+        .chain(
+            started
+                .packages
+                .iter()
+                .filter(|(uid, _)| all || **uid == caller)
+                .flat_map(|(uid, packages)| {
+                    packages.iter().map(move |package| (*uid, package.clone()))
+                }),
+        )
         .collect();
     packages.sort_by(|(a, p), (b, q)| {
         (a, crate::package::info::java_hash(p), p).cmp(&(b, crate::package::info::java_hash(q), q))
@@ -4010,7 +4041,15 @@ impl Service for AppOps {
                         )));
                     }
                     // `getUidStateLocked(uid, false)`: a uid with ops.
-                    if !has_ops(&sys, args.uid)? {
+                    let added = self
+                        .host
+                        .app_ops
+                        .started
+                        .lock()
+                        .unwrap()
+                        .packages
+                        .contains_key(&args.uid);
+                    if !added && !has_ops(&sys, args.uid)? {
                         return Ok(None);
                     }
                     Ok(
@@ -4724,6 +4763,67 @@ mod tests {
         });
         result.unwrap();
         (effects.notices, ended)
+    }
+
+    /// AppOpsService.onPackageAdded creates empty Ops without touching modes
+    /// or replacing an update's existing attributed history.
+    #[test]
+    fn package_added_keeps_empty_ops_and_update_history() {
+        let f = fake();
+        let mut started = Started::<Binder>::default();
+        started.package_added("app", APP);
+        let empty = packages_for_ops(&started, &f, APP, None, PERSISTENT_DEVICE_ID_DEFAULT)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            empty,
+            [PackageOps {
+                package: Some("app".into()),
+                uid: APP,
+                entries: vec![]
+            }]
+        );
+        assert!(started.packages[&(APP + 10_000)].is_empty());
+        assert_eq!(
+            packages_for_ops(
+                &started,
+                &f,
+                APP,
+                Some(&[OP_CAMERA]),
+                PERSISTENT_DEVICE_ID_DEFAULT
+            )
+            .unwrap(),
+            None
+        );
+        run(&f, APP, &mut started, |ops| {
+            ops.note(&own(OP_CAMERA, APP, "app"), DEVICE_ID_DEFAULT)
+        })
+        .0
+        .unwrap();
+        let before =
+            packages_for_ops(&started, &f, APP, None, PERSISTENT_DEVICE_ID_DEFAULT).unwrap();
+        started.package_added("app", APP);
+        assert_eq!(
+            packages_for_ops(&started, &f, APP, None, PERSISTENT_DEVICE_ID_DEFAULT).unwrap(),
+            before
+        );
+        assert_eq!(
+            packages_for_ops(&started, &f, APP + 1, None, PERSISTENT_DEVICE_ID_DEFAULT).unwrap(),
+            None
+        );
+        started.package_added("system", SYSTEM_UID);
+        assert!(!started.packages.contains_key(&(SYSTEM_UID + 10_000)));
+    }
+
+    #[test]
+    fn package_added_excludes_pre_created_users() {
+        crate::system::with_discovery_session(|host, _, _| {
+            host.user_file().unwrap();
+            std::fs::write(host.data().unwrap().join("system/users/0.xml"),
+                br#"<user id="0" serialNumber="0" flags="19" preCreated="true" type="android.os.usertype.full.SYSTEM"/>"#).unwrap();
+            package_added(host, "p", 10100).unwrap();
+            assert!(host.app_ops.started.lock().unwrap().packages.is_empty());
+        });
     }
 
     /// A note leaves its access, or its rejection, by the uid's state and

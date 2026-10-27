@@ -25,6 +25,7 @@ use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_UNSUPPORTED_OPERATION, Excep
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iapptraceretriever as retriever;
 
+use super::activity_user;
 use super::{AppHost, PER_USER_RANGE, is_isolated, reply};
 use crate::package::app_metadata::Descriptor;
 use crate::package::info::java_hash;
@@ -817,16 +818,12 @@ impl AppHost {
             return Ok(tracker);
         }
         let name = "config_app_exit_info_history_list_size";
-        let capacity = self
-            .inputs()?
-            .packages
-            .framework_integer(name)
-            .ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    format!("no integer {name}"),
-                )
-            })?;
+        let capacity = self.framework()?.framework_integer(name).ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("no integer {name}"),
+            )
+        })?;
         let data = self.data()?.to_path_buf();
         let host = self.me.clone();
         Ok(self.exit_infos.get_or_init(|| {
@@ -906,7 +903,14 @@ impl AppHost {
         if user == USER_ALL || user == USER_CURRENT {
             return Err(Exception::illegal_argument("Unsupported userId"));
         }
-        self.handle_incoming_user(calling_uid, user, true, false, Some(NAME))?;
+        self.handle_incoming_user(
+            calling_uid,
+            user,
+            true,
+            activity_user::AllowMode::NonFull,
+            Some(NAME),
+            None,
+        )?;
         let package = package.filter(|p| !p.is_empty());
         let filter_uid = match package {
             Some(package) => self.dump_permission_for_package(call, package, user, NAME)?,
@@ -962,7 +966,14 @@ impl AppHost {
             .filter(|p| !p.is_empty())
             .ok_or_else(|| Exception::illegal_argument("Invalid package name"))?;
         let user = uid / PER_USER_RANGE as i32;
-        self.handle_incoming_user(calling_uid, user, true, false, Some(NAME))?;
+        self.handle_incoming_user(
+            calling_uid,
+            user,
+            true,
+            activity_user::AllowMode::NonFull,
+            Some(NAME),
+            None,
+        )?;
         let filter_uid = self.dump_permission_for_package(call, package, user, NAME)?;
         if filter_uid == INVALID_UID {
             return Ok(None);

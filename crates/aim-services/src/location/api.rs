@@ -444,7 +444,14 @@ impl LocationManagerService {
             }
             ilm::IS_PROVIDER_ENABLED_FOR_USER => {
                 let a = ilm::IsProviderEnabledForUser::read(r).map_err(bad_parcel)?;
-                let user = self.incoming_user(caller, a.user_id, "isProviderEnabledForUser")?;
+                let user = self.env.system.handle_incoming_user(
+                    caller.pid,
+                    caller.uid,
+                    a.user_id,
+                    false,
+                    "isProviderEnabledForUser",
+                    None,
+                )?;
                 let name = a.provider.unwrap_or_default();
                 let enabled = self.with(|inner, env, effects| {
                     visible(inner, env, &name, caller)
@@ -454,13 +461,27 @@ impl LocationManagerService {
             }
             ilm::IS_LOCATION_ENABLED_FOR_USER => {
                 let a = ilm::IsLocationEnabledForUser::read(r).map_err(bad_parcel)?;
-                let user = self.incoming_user(caller, a.user_id, "isLocationEnabledForUser")?;
+                let user = self.env.system.handle_incoming_user(
+                    caller.pid,
+                    caller.uid,
+                    a.user_id,
+                    false,
+                    "isLocationEnabledForUser",
+                    None,
+                )?;
                 let enabled = self.env.location_enabled(user);
                 ilm::write_is_location_enabled_for_user_reply(&mut reply, enabled);
             }
             ilm::SET_LOCATION_ENABLED_FOR_USER => {
                 let a = ilm::SetLocationEnabledForUser::read(r).map_err(bad_parcel)?;
-                let user = self.incoming_user(caller, a.user_id, "setLocationEnabledForUser")?;
+                let user = self.env.system.handle_incoming_user(
+                    caller.pid,
+                    caller.uid,
+                    a.user_id,
+                    false,
+                    "setLocationEnabledForUser",
+                    None,
+                )?;
                 self.enforce_calling(caller, WRITE_SECURE_SETTINGS, None)?;
                 let mode = if a.enabled {
                     LOCATION_MODE_ON
@@ -474,13 +495,27 @@ impl LocationManagerService {
             }
             ilm::IS_ADAS_GNSS_LOCATION_ENABLED_FOR_USER => {
                 let a = ilm::IsAdasGnssLocationEnabledForUser::read(r).map_err(bad_parcel)?;
-                self.incoming_user(caller, a.user_id, "isAdasGnssLocationEnabledForUser")?;
+                self.env.system.handle_incoming_user(
+                    caller.pid,
+                    caller.uid,
+                    a.user_id,
+                    false,
+                    "isAdasGnssLocationEnabledForUser",
+                    None,
+                )?;
                 // Only an automotive device keeps it on (LocationSettings).
                 ilm::write_is_adas_gnss_location_enabled_for_user_reply(&mut reply, false);
             }
             ilm::SET_ADAS_GNSS_LOCATION_ENABLED_FOR_USER => {
                 let a = ilm::SetAdasGnssLocationEnabledForUser::read(r).map_err(bad_parcel)?;
-                self.incoming_user(caller, a.user_id, "setAdasGnssLocationEnabledForUser")?;
+                self.env.system.handle_incoming_user(
+                    caller.pid,
+                    caller.uid,
+                    a.user_id,
+                    false,
+                    "setAdasGnssLocationEnabledForUser",
+                    None,
+                )?;
                 self.enforce_bypass(caller)?;
                 // Filtered off on a device that is not automotive.
                 ilm::write_set_adas_gnss_location_enabled_for_user_reply(&mut reply);
@@ -634,14 +669,6 @@ impl LocationManagerService {
             "uid{} does not have {LOCATION_BYPASS}.",
             caller.uid
         )))
-    }
-
-    /// `ActivityManager.handleIncomingUser(pid, uid, user, false, false,
-    /// name, null)`.
-    fn incoming_user(&self, caller: Caller, user: i32, name: &str) -> Result<i32> {
-        self.env
-            .system
-            .handle_incoming_user(caller.pid, caller.uid, user, false, name, None)
     }
 
     /// `CallerIdentity.fromBinder`: the package must be the caller's.

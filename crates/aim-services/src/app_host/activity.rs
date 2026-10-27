@@ -21,7 +21,7 @@ use super::activity_stack::{FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS, FLAG_ACTIVITY_NE
 use super::activity_start::{Component, FLAG_EXCLUDE_FROM_RECENTS, Report};
 use super::config::{self, Configuration, SizeBuckets};
 use super::kept::{RawBundle, RawIntent};
-use super::packages::WindowStyle;
+use super::resources::WindowStyle;
 use super::{AppHost, reply};
 use crate::package::info::ActivityInfo;
 
@@ -259,10 +259,10 @@ impl AppHost {
             {
                 return Ok((apk, Ok(*style)));
             }
-            let inputs = self.inputs()?;
+            let inputs = self.platform()?;
             Ok((
                 apk,
-                inputs.packages.window_style(
+                self.framework()?.window_style(
                     self.root()?,
                     &inputs.data,
                     &pkg,

@@ -1147,9 +1147,10 @@ impl LockSettings {
         if self.credential_type(user)? != CREDENTIAL_TYPE_NONE {
             return Ok(false);
         }
-        let inputs = self.host.inputs()?;
-        let by_default = inputs
-            .packages
+        let inputs = self.host.platform()?;
+        let by_default = self
+            .host
+            .framework()?
             .framework_bool("config_disableLockscreenByDefault")
             .unwrap_or(false);
         let demo_mode = inputs

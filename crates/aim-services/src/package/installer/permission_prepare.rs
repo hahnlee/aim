@@ -6,7 +6,7 @@ use crate::package::{
     scan_snapshot::{Store, endpoint::Endpoint},
 };
 use aim_binder_host::{
-    local::{LocalProcess, Strong},
+    local::LocalProcess,
     parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
 };
 use aim_service_aidl::dev_aim_server_iinstallerpermissionbridge as api;
@@ -22,7 +22,9 @@ struct Install {
     name: String,
 }
 pub struct Owner {
-    bridge: Strong,
+    /// The permission bridge: another process's node, or this process's
+    /// own where it serves the bootstrap bridge.
+    bridge: crate::system::ServiceOwner,
     process: Arc<LocalProcess>,
     snapshots: Arc<Store>,
     cross_user_suspensions: bool,
@@ -144,7 +146,7 @@ pub(in crate::package) fn complete_candidate_runtime(
 }
 impl Owner {
     pub fn new(
-        bridge: Strong,
+        bridge: crate::system::ServiceOwner,
         process: Arc<LocalProcess>,
         snapshots: Arc<Store>,
         cross_user_suspensions: bool,
@@ -231,7 +233,7 @@ impl Owner {
                 super::permission_capture::endpoint(current, context, &self.process)
                     .map_err(illegal)?,
             );
-            let binder = self.process.add_service(scope.0.clone());
+            let binder = super::permission_capture::bind(&self.process, &scope.0);
             let mut request = Parcel::new();
             api::Rollback {
                 candidate: Some(prepared.binder),
@@ -242,7 +244,7 @@ impl Owner {
             .write(&mut request);
             let reply = self
                 .bridge
-                .transact(api::ROLLBACK, &request, false)
+                .transact_as_owner(api::ROLLBACK, &request, false)
                 .map_err(|error| {
                     illegal(format!("original permission rollback transport: {error}"))
                 })?;
@@ -438,8 +440,8 @@ impl Owner {
             super::permission_capture::endpoint(base.clone(), previous_context, &self.process)
                 .map_err(illegal)?,
         );
-        let candidate_endpoint = self.process.add_service(candidate_scope.0.clone());
-        let previous_endpoint = self.process.add_service(previous_scope.0.clone());
+        let candidate_endpoint = super::permission_capture::bind(&self.process, &candidate_scope.0);
+        let previous_endpoint = super::permission_capture::bind(&self.process, &previous_scope.0);
         let prepared = Arc::new(Prepared {
             _candidate: candidate_scope,
             _previous: previous_scope,
@@ -470,7 +472,7 @@ impl Owner {
         request.write_bool(self.cross_user_suspensions);
         let reply = self
             .bridge
-            .transact(api::PREPARE, &request, false)
+            .transact_as_owner(api::PREPARE, &request, false)
             .map_err(|error| illegal(format!("permission prepare transport: {error}")))?;
         let mut reader = reply.reader();
         reader
@@ -606,61 +608,6 @@ mod tests {
                 ..Default::default()
             }
         );
-    }
-    #[test]
-    fn retained_permission_handoff_allows_real_usage_publication_but_rejects_code_changes() {
-        use crate::package::scan_snapshot::install_context::same_install_identity;
-        let original = base();
-        let store = Store::new(original.owner().clone(), original.usage().clone()).unwrap();
-        let before = store.capture();
-        let mut usage = before.usage().clone();
-        usage.notify("fixture", 0, 991);
-        let mut owner = before.owner().clone();
-        owner.update_replica_usage(before.usage(), &usage).unwrap();
-        let latest = store.publish(&before, owner, usage).unwrap();
-        assert!(same_install_identity(&before, &latest).unwrap());
-        assert_eq!(
-            latest
-                .replica_runtime("fixture", false)
-                .unwrap()
-                .unwrap()
-                .usage[0],
-            991
-        );
-        assert_eq!(
-            latest
-                .replica_runtime("fixture", true)
-                .unwrap()
-                .unwrap()
-                .usage,
-            [17; 8]
-        );
-        assert_eq!(
-            store
-                .publish(&before, latest.owner().clone(), latest.usage().clone())
-                .unwrap_err(),
-            crate::package::scan_snapshot::Error::Stale
-        );
-        let mut changed = latest.owner().clone();
-        changed.settings.packages[0].code_path = "/data/app/replaced-code".into();
-        let values = [false, true]
-            .into_iter()
-            .map(|factory| {
-                (
-                    ("fixture".into(), factory),
-                    latest
-                        .replica_runtime("fixture", factory)
-                        .unwrap()
-                        .unwrap()
-                        .clone(),
-                )
-            })
-            .collect();
-        changed.capture_replica_runtime(values).unwrap();
-        let replaced = store
-            .publish(&latest, changed, latest.usage().clone())
-            .unwrap();
-        assert!(!same_install_identity(&before, &replaced).unwrap());
     }
     #[test]
     fn candidate_runtime_rebuilds_new_shared_group_before_store_validation() {

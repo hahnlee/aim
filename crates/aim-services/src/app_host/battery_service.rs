@@ -574,18 +574,17 @@ impl BatteryService {
     /// The constructor's and `updateBatteryWarningLevelLocked`'s levels,
     /// then the HAL.
     pub(super) fn start(self: &Arc<Self>) -> Result<(), String> {
-        let inputs = self.host.inputs().map_err(|e| e.message)?;
+        let inputs = self.host.platform().map_err(|e| e.message)?;
         let (model, _) = self.host.packages().map_err(|e| e.message)?;
         let flag = |name: &str| model.system.flags.iter().any(|(n, on)| n == name && *on);
+        let framework = self.host.framework().map_err(|e| e.message)?;
         let integer = |name: &str| {
-            inputs
-                .packages
+            framework
                 .framework_integer(name)
                 .ok_or(format!("no integer {name}"))
         };
         let icon = |name: &str| {
-            inputs
-                .packages
+            framework
                 .framework_id("drawable", name)
                 .map(|id| id as i32)
                 .ok_or(format!("no drawable {name}"))

@@ -21,7 +21,9 @@ use super::{AppHost, PER_USER_RANGE, reply};
 use crate::bundle::Value;
 
 /// The only user.
-const SYSTEM_USER: i32 = 0;
+pub(super) const SYSTEM_USER: i32 = 0;
+/// `UserManager.DISALLOW_DEBUGGING_FEATURES`.
+const DISALLOW_DEBUGGING_FEATURES: &str = "no_debugging_features";
 /// `UserHandle.USER_NULL`, also `UserInfo.NO_PROFILE_GROUP_ID`.
 const USER_NULL: i32 = -10000;
 /// `UserInfo.FLAG_PRIMARY`, `FLAG_ADMIN`, `FLAG_DISABLED`, `FLAG_DEMO`,
@@ -30,7 +32,7 @@ const FLAG_PRIMARY: i32 = 0x1;
 const FLAG_ADMIN: i32 = 0x2;
 const FLAG_DISABLED: i32 = 0x40;
 const FLAG_DEMO: i32 = 0x200;
-const FLAG_FULL: i32 = 0x400;
+pub(super) const FLAG_FULL: i32 = 0x400;
 const FLAG_MAIN: i32 = 0x4000;
 const FLAG_INITIALIZED: i32 = 0x10;
 /// `UserManager.USER_TYPE_FULL_GUEST`, `USER_TYPE_FULL_RESTRICTED`.
@@ -331,6 +333,15 @@ pub(super) fn profile_ids(user: i32) -> Vec<i32> {
     }
 }
 
+/// `InstallerRemovalBridge.getChildrenDeletedWithParent`: the app host's
+/// profile groups contain only the parent itself.
+pub(super) fn children_deleted_with_parent(user: i32) -> Vec<i32> {
+    profile_ids(user)
+        .into_iter()
+        .filter(|id| *id != user)
+        .collect()
+}
+
 /// `readUserListLP`'s first boot: with no user list persisted,
 /// `fallbackToSingleUserLP` records the system user (`writeUserLP`, then
 /// `writeUserListLP`), as the app host does at its start.
@@ -340,14 +351,13 @@ pub(super) fn ensure_system_user(host: &AppHost) -> Result<(), String> {
     if users.join("userlist.xml").exists() {
         return Ok(());
     }
-    let inputs = host.inputs().map_err(|e| e.message)?;
-    let packages = &inputs.packages;
-    let (state, _) = host.packages().map_err(|e| e.message)?;
-    let save_on_system_user = state
-        .system
+    let packages = host.framework().map_err(|e| e.message)?;
+    let save_on_system_user = packages
+        .0
         .flags
-        .iter()
-        .any(|(n, on)| n == SAVE_ON_SYSTEM_USER_XML && *on);
+        .get(SAVE_ON_SYSTEM_USER_XML)
+        .copied()
+        .unwrap_or(false);
     // `isDefaultHeadlessSystemUserMode` of a user build:
     // `ro.fw.mu.headless_system_user`.
     let headless = super::system_boolean(
@@ -483,6 +493,75 @@ pub(super) fn serial_number(host: &AppHost, user: i32) -> Result<Option<i32>, Ex
     Ok(Some(info.serial_number))
 }
 
+/// UserManager.getMaxSupportedUsers, shared by its limits and package shell.
+pub(super) fn max_supported_users(host: &AppHost) -> Result<i32, Exception> {
+    if host
+        .property("ro.build.id")
+        .is_some_and(|id| id.starts_with("JVP"))
+    {
+        return Ok(1);
+    }
+    let config = host
+        .framework()?
+        .framework_integer("config_multiuserMaximumUsers")
+        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "missing config_multiuserMaximumUsers"))?;
+    Ok(host
+        .property("fw.max_users")
+        .and_then(|v| v.trim_start().parse().ok())
+        .unwrap_or(config)
+        .max(1))
+}
+
+/// UserManagerServiceShellCommand.runList, invoked by pm list users with
+/// exactly the original `list` arguments and the shell's identity.
+pub(super) fn list_shell(
+    host: Arc<AppHost>,
+    uid: i32,
+    output: &mut impl std::io::Write,
+) -> Result<i32, Exception> {
+    let owner = UserManager::new(host);
+    if !owner.manage_or(uid, Some(CREATE_USERS))? {
+        return Err(Exception::security(
+            "You either need MANAGE_USERS or CREATE_USERS permission to: query users",
+        ));
+    }
+    let (user, _) = owner.user_data()?;
+    let mut users = Vec::new();
+    if !user.partial && !user.pre_created {
+        users.extend(owner.with_name(Some(user))?);
+    }
+    let write_error =
+        |e: std::io::Error| Exception::new(EX_ILLEGAL_STATE, format!("user shell output: {e}"));
+    writeln!(output, "Users:").map_err(write_error)?;
+    for user in users {
+        writeln!(
+            output,
+            "\tUserInfo{{{}:{}:{:x}}}{}",
+            user.id,
+            user.name.as_deref().unwrap_or("null"),
+            user.flags,
+            if user.id == SYSTEM_USER {
+                " running"
+            } else {
+                ""
+            }
+        )
+        .map_err(write_error)?;
+    }
+    Ok(0)
+}
+
+/// UserManagerService.getProfileParent: a full user has no profile parent.
+pub(super) fn profile_parent(host: &AppHost, user: i32) -> Result<Option<i32>, Exception> {
+    let Some(info) = user_info(host, user)? else {
+        return Ok(None);
+    };
+    if info.profile_group_id == USER_NULL || info.profile_group_id == info.id {
+        return Ok(None);
+    }
+    Ok(user_info(host, info.profile_group_id)?.map(|parent| parent.id))
+}
+
 /// `UserInfo.isDemo` of the user; false for one that does not exist.
 pub(super) fn is_demo(host: &AppHost, user: i32) -> Result<bool, Exception> {
     Ok(user_flags(host, user)?.is_some_and(|f| f & FLAG_DEMO != 0))
@@ -509,6 +588,71 @@ pub(super) fn managed_profiles(host: &AppHost, user: i32) -> Result<Vec<i32>, Ex
     Ok(managed)
 }
 
+/// The users the package boot scan installs for (`Settings.getAllUsers`:
+/// `getUsers(true, false, false)`, no partial user), with each one's
+/// `isAdbInstallDisallowed` (`hasUserRestriction(DISALLOW_DEBUGGING_FEATURES)`).
+/// `UserManagerService.getUsers(excludePartial=true, excludeDying,
+/// excludePreCreated)`'s ids: the system user unless it is partial, or a
+/// pre-created one when those are excluded; it is never dying.
+pub(super) fn user_ids(host: &AppHost, include_pre_created: bool) -> Result<Vec<i32>, Exception> {
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    Ok(
+        if info.partial || (info.pre_created && !include_pre_created) {
+            Vec::new()
+        } else {
+            vec![info.id]
+        },
+    )
+}
+
+/// What the package boot's context records of a user.
+pub(super) struct ContextUser {
+    pub id: i32,
+    pub flags: i32,
+    pub pre_created: bool,
+    pub profile_group_id: i32,
+}
+
+/// `getUsers(true, false, false)`: the system user unless it is partial.
+pub(super) fn boot_context_users(host: &AppHost) -> Result<Vec<ContextUser>, Exception> {
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    Ok((!info.partial)
+        .then_some(ContextUser {
+            id: info.id,
+            flags: info.flags,
+            pre_created: info.pre_created,
+            profile_group_id: info.profile_group_id,
+        })
+        .into_iter()
+        .collect())
+}
+
+pub(super) fn scan_users(host: &AppHost) -> Result<Vec<crate::package::scan::User>, Exception> {
+    if host.device_policies()?.owned() {
+        return Err(host.unimplemented_named(
+            "user",
+            "a device or profile owner's user restrictions (#1521)",
+        ));
+    }
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    if info.partial {
+        return Ok(Vec::new());
+    }
+    Ok(vec![crate::package::scan::User {
+        id: info.id,
+        pre_created: info.pre_created,
+        adb_install_disallowed: host
+            .user_restrictions()?
+            .contains(DISALLOW_DEBUGGING_FEATURES),
+    }])
+}
+
 /// The flags of a user that exists and is not partial.
 fn user_flags(host: &AppHost, user: i32) -> Result<Option<i32>, Exception> {
     Ok(user_info(host, user)?.map(|u| u.flags))
@@ -523,6 +667,23 @@ fn user_info(host: &AppHost, user: i32) -> Result<Option<UserInfo>, Exception> {
     let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
     Ok((!info.partial).then_some(info))
+}
+
+/// `UserManagerService.isSameProfileGroup` (`isSameProfileGroupNoChecks`):
+/// one user, or two existing users of one profile group.
+pub(super) fn same_profile_group(host: &AppHost, user: i32, other: i32) -> Result<bool, Exception> {
+    if user == other {
+        return Ok(true);
+    }
+    let group = |id| -> Result<Option<i32>, Exception> {
+        Ok(user_info(host, id)?
+            .map(|u| u.profile_group_id)
+            .filter(|&g| g != USER_NULL))
+    };
+    Ok(match (group(user)?, group(other)?) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    })
 }
 
 /// What `UserDataPreparer` and `reconcileAppsData` read of a user's
@@ -670,7 +831,7 @@ impl UserManager {
             return Ok(types);
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("user types: {e}"));
-        let packages = &self.host.inputs()?.packages;
+        let packages = self.host.framework()?;
         let communal = super::system_boolean(
             self.host
                 .property("persist.fw.omnipresent_communal_user")
@@ -707,18 +868,7 @@ impl UserManager {
     /// `isCreationOverrideEnabled`, FEATURE_MANAGED_USERS and
     /// `Flags.profilesForAll`.
     fn limits(&self) -> Result<user_types::Limits, Exception> {
-        let build_id = self.host.property("ro.build.id").unwrap_or_default();
-        let max_users = if build_id.starts_with("JVP") {
-            1
-        } else {
-            let config = self
-                .host
-                .inputs()?
-                .packages
-                .framework_integer("config_multiuserMaximumUsers")
-                .unwrap_or(0);
-            self.int_property("fw.max_users", config).max(1)
-        };
+        let max_users = max_supported_users(&self.host)?;
         Ok(user_types::Limits {
             max_users,
             creation_override: self.debuggable()
@@ -871,7 +1021,7 @@ impl UserManager {
                 None
             };
             if let Some(resource) = resource {
-                let name = self.host.inputs()?.packages.framework_string(resource);
+                let name = self.host.framework()?.framework_string(resource);
                 user.name = Some(name.ok_or_else(|| {
                     Exception::new(EX_ILLEGAL_STATE, format!("no framework string {resource}"))
                 })?);
@@ -1558,11 +1708,11 @@ impl Service for UserManager {
             }
             um::HAS_USER_RESTRICTION => {
                 let args = um::HasUserRestriction::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let restricted = match self.host.user_restrictions() {
-                    Ok(r) => {
-                        args.user_id == SYSTEM_USER
-                            && args.restriction_key.is_some_and(|k| r.contains(&k))
-                    }
+                let restricted = match self.host.has_user_restriction(
+                    args.restriction_key.as_deref().unwrap_or(""),
+                    args.user_id,
+                ) {
+                    Ok(restricted) => restricted,
                     Err(e) => return reply(Err(e)),
                 };
                 um::write_has_user_restriction_reply(&mut p, restricted);
@@ -1759,5 +1909,31 @@ mod tests {
             restrictions.into_iter().collect::<Vec<_>>(),
             ["no_config_wifi", "no_sms"]
         );
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    #[test]
+    fn package_user_listing_reads_the_user_owner_and_excludes_partial_or_precreated() {
+        let data = crate::app_host::test_temp_dir("package-users");
+        let users = data.join("system/users");
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(users.join("userlist.xml"), "<users/>").unwrap();
+        let process = crate::test_process(1000);
+        let host = AppHost::new(process);
+        crate::app_host::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        for (extra, expected) in [
+            ("", "Users:\n\tUserInfo{0:Kim:4c13} running\n"),
+            ("partial=\"true\"", "Users:\n"),
+            ("preCreated=\"true\"", "Users:\n"),
+        ] {
+            std::fs::write(users.join("0.xml"), format!("<user id=\"0\" serialNumber=\"0\" flags=\"19475\" type=\"android.os.usertype.full.SYSTEM\" {extra}><name>Kim</name><restrictions/></user>")).unwrap();
+            let mut output = Vec::new();
+            assert_eq!(list_shell(host.clone(), 0, &mut output).unwrap(), 0);
+            assert_eq!(String::from_utf8(output).unwrap(), expected);
+        }
+        std::fs::remove_dir_all(data).unwrap();
     }
 }

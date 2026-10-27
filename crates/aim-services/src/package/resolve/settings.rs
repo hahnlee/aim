@@ -1,19 +1,17 @@
 //! Original PMS settings phase: no provider read while native scanning.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use crate::system::ServiceOwner;
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagebootcontextleaf as api;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 pub struct Owner {
-    owner: Arc<Strong>,
+    owner: Arc<ServiceOwner>,
     filtering: AtomicBool,
 }
 impl Owner {
-    pub fn new(owner: Arc<Strong>, initial_disabled: bool) -> Arc<Self> {
+    pub fn new(owner: Arc<ServiceOwner>, initial_disabled: bool) -> Arc<Self> {
         Arc::new(Self {
             owner,
             filtering: AtomicBool::new(initial_disabled),
@@ -29,7 +27,10 @@ impl Owner {
     ) -> Result<bool, Exception> {
         let mut request = Parcel::new();
         write(&mut request);
-        let reply = self.owner.transact(code, &request, false).map_err(error)?;
+        let reply = self
+            .owner
+            .transact_as_owner(code, &request, false)
+            .map_err(error)?;
         read(&mut reply.reader()).map_err(error)?
     }
     pub fn cached_filtering_disabled(&self) -> bool {
@@ -49,7 +50,7 @@ impl Owner {
         .write(&mut request);
         let reply = self
             .owner
-            .transact(api::REGISTER_FILTERING_UPDATES, &request, false)
+            .transact_as_owner(api::REGISTER_FILTERING_UPDATES, &request, false)
             .map_err(error)?;
         api::read_register_filtering_updates_reply(&mut reply.reader()).map_err(error)?
     }
@@ -81,7 +82,7 @@ impl Owner {
         api::BeginSystemReady {}.write(&mut request);
         let reply = self
             .owner
-            .transact(api::BEGIN_SYSTEM_READY, &request, false)
+            .transact_as_owner(api::BEGIN_SYSTEM_READY, &request, false)
             .map_err(error)?;
         api::read_begin_system_ready_reply(&mut reply.reader()).map_err(error)?
     }

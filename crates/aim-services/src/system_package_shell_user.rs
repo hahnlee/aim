@@ -34,7 +34,7 @@ fn read_list_users_reply(reader: &mut Reader<'_>) -> Result<i32> {
 }
 fn transact_user_command(
     process: &Arc<LocalProcess>,
-    owner: &Strong,
+    owner: &ServiceOwner,
     request: &Parcel,
 ) -> Result<i32> {
     if process.authenticated_inbound_identity().is_none() {
@@ -42,14 +42,22 @@ fn transact_user_command(
             "User creation shell forwarding requires live inbound provenance",
         ));
     }
-    let reply = process
-        .transact_preserving_inbound(owner.handle, user::HANDLE_CREATE_USER_COMMAND, request)
-        .map_err(|status| failure(format!("User creation shell transport: {status}")))?;
+    let reply = match owner {
+        ServiceOwner::Remote(owner) => process.transact_preserving_inbound(
+            owner.handle,
+            user::HANDLE_CREATE_USER_COMMAND,
+            request,
+        ),
+        ServiceOwner::Local(owner) => {
+            owner.transact(user::HANDLE_CREATE_USER_COMMAND, request, false)
+        }
+    }
+    .map_err(|status| failure(format!("User creation shell transport: {status}")))?;
     read_user_reply(&mut reply.reader())
 }
 fn transact_list_users_command(
     process: &Arc<LocalProcess>,
-    owner: &Strong,
+    owner: &ServiceOwner,
     request: &Parcel,
 ) -> Result<i32> {
     if process.authenticated_inbound_identity().is_none() {
@@ -57,9 +65,17 @@ fn transact_list_users_command(
             "User listing shell forwarding requires live inbound provenance",
         ));
     }
-    let reply = process
-        .transact_preserving_inbound(owner.handle, user::HANDLE_LIST_USERS_COMMAND, request)
-        .map_err(|status| failure(format!("User listing shell transport: {status}")))?;
+    let reply = match owner {
+        ServiceOwner::Remote(owner) => process.transact_preserving_inbound(
+            owner.handle,
+            user::HANDLE_LIST_USERS_COMMAND,
+            request,
+        ),
+        ServiceOwner::Local(owner) => {
+            owner.transact(user::HANDLE_LIST_USERS_COMMAND, request, false)
+        }
+    }
+    .map_err(|status| failure(format!("User listing shell transport: {status}")))?;
     read_list_users_reply(&mut reply.reader())
 }
 impl System {
@@ -79,8 +95,8 @@ impl System {
         }
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner = self
-            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let owner =
+            self.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
         let mut request = Parcel::new();
         user::HandleCreateUserCommand {
             input: Some(Descriptor(input.into_file_owner())),
@@ -110,8 +126,8 @@ impl System {
         }
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner = self
-            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let owner =
+            self.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
         let mut request = Parcel::new();
         user::HandleListUsersCommand {
             input: Some(Descriptor(input.into_file_owner())),
@@ -139,8 +155,8 @@ impl System {
         }
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner = self
-            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let owner =
+            self.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
         let mut request = Parcel::new();
         user::HandleRemoveUserCommand {
             input: Some(Descriptor(input.into_file_owner())),
@@ -150,10 +166,17 @@ impl System {
         }
         .write(&mut request);
         // As create-user: the original checks Binder.getCallingUid itself.
-        let reply = self
-            .process
-            .transact_preserving_inbound(owner.handle, user::HANDLE_REMOVE_USER_COMMAND, &request)
-            .map_err(|status| failure(format!("User removal shell transport: {status}")))?;
+        let reply = match &owner {
+            ServiceOwner::Remote(owner) => self.process.transact_preserving_inbound(
+                owner.handle,
+                user::HANDLE_REMOVE_USER_COMMAND,
+                &request,
+            ),
+            ServiceOwner::Local(owner) => {
+                owner.transact(user::HANDLE_REMOVE_USER_COMMAND, &request, false)
+            }
+        }
+        .map_err(|status| failure(format!("User removal shell transport: {status}")))?;
         let mut reader = reply.reader();
         let result = user::read_handle_remove_user_command_reply(&mut reader)
             .map_err(|status| failure(format!("User removal shell reply: {status}")))??;
@@ -406,7 +429,9 @@ mod tests {
         }
         struct Forward {
             process: Weak<LocalProcess>,
-            owner: Strong,
+            owner: ServiceOwner,
+            boot: ServiceOwner,
+            host: Arc<crate::app_host::AppHost>,
         }
         impl Service for Forward {
             fn descriptor(&self) -> &str {
@@ -422,6 +447,50 @@ mod tests {
                     arguments: args.arguments,
                 }
                 .write(&mut request);
+                // Actual nested shell ingress: the bootstrap factory and live
+                // UM leaf are private owner calls, not shell calls.
+                use aim_service_aidl::dev_aim_server_ipackagebootcontextleaf as context;
+                use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as boot;
+                let mut get = Parcel::new();
+                boot::GetPackageBootContextLeaf {}.write(&mut get);
+                let denied =
+                    self.boot
+                        .transact(boot::GET_PACKAGE_BOOT_CONTEXT_LEAF, &get, false)?;
+                assert_eq!(
+                    denied.reader().read_exception()?.unwrap_err().code,
+                    aim_binder_host::parcel::EX_SECURITY
+                );
+                let reply = self.boot.transact_as_owner(
+                    boot::GET_PACKAGE_BOOT_CONTEXT_LEAF,
+                    &get,
+                    false,
+                )?;
+                let binder = boot::read_get_package_boot_context_leaf_reply(&mut reply.reader())?
+                    .unwrap()
+                    .unwrap();
+                let owner = ServiceOwner::retain(&reply, binder)?;
+                let mut query = Parcel::new();
+                context::UserUnlockingOrUnlocked { user_id: 0 }.write(&mut query);
+                let denied = owner.transact(context::USER_UNLOCKING_OR_UNLOCKED, &query, false)?;
+                assert_eq!(
+                    denied.reader().read_exception()?.unwrap_err().code,
+                    aim_binder_host::parcel::EX_SECURITY
+                );
+                let settings =
+                    crate::package::resolve::settings::Owner::new(Arc::new(owner), false);
+                self.host.set_user_unlocked_for_package_test(0, false);
+                assert!(!settings.unlocked(0).unwrap());
+                self.host.set_user_unlocked_for_package_test(0, true);
+                assert!(settings.unlocked(0).unwrap());
+                assert!(!settings.unlocked(10).unwrap());
+                // Owner transport restores the shell before user execution.
+                let denied =
+                    self.boot
+                        .transact(boot::GET_PACKAGE_BOOT_CONTEXT_LEAF, &get, false)?;
+                assert_eq!(
+                    denied.reader().read_exception()?.unwrap_err().code,
+                    aim_binder_host::parcel::EX_SECURITY
+                );
                 let result =
                     transact_user_command(&self.process.upgrade().unwrap(), &self.owner, &request)
                         .unwrap();
@@ -461,12 +530,12 @@ mod tests {
         java.start();
         let shell = open(&driver, 190425, 2000);
         shell.start();
-        let owner = publish(
+        let owner = ServiceOwner::Remote(Arc::new(publish(
             &java,
             &native,
             "profile",
             java.add_service(Arc::new(CallerOwner)),
-        );
+        )));
         let mut request = Parcel::new();
         user::HandleCreateUserCommand::<Descriptor> {
             input: None,
@@ -481,17 +550,32 @@ mod tests {
                 .code,
             aim_binder_host::parcel::EX_SECURITY
         );
-        let ingress = native.add_service(Arc::new(Forward {
-            process: Arc::downgrade(&native),
+        let app_host = crate::app_host::AppHost::new(native.clone());
+        let boot = native.add_service(Arc::new(
+            crate::app_host::package_bootstrap::PackageBootstrap::new(app_host.clone()),
+        ));
+        let Binder::Local(boot) = boot else {
+            unreachable!()
+        };
+        let Binder::Local(local) = native.add_service(Arc::new(CallerOwner)) else {
+            unreachable!()
+        };
+        for owner in [
             owner,
-        }));
-        let ingress = publish(&native, &shell, "ingress", ingress);
-        let reply = ingress
-            .transact(user::HANDLE_CREATE_USER_COMMAND, &request, false)
-            .unwrap();
-        assert_eq!(read_user_reply(&mut reply.reader()).unwrap(), -23);
-        drop(reply);
-        drop(ingress);
+            ServiceOwner::Local(native.local_service(local).unwrap()),
+        ] {
+            let ingress = native.add_service(Arc::new(Forward {
+                process: Arc::downgrade(&native),
+                owner,
+                boot: ServiceOwner::Local(native.local_service(boot).unwrap()),
+                host: app_host.clone(),
+            }));
+            let ingress = publish(&native, &shell, "ingress", ingress);
+            let reply = ingress
+                .transact(user::HANDLE_CREATE_USER_COMMAND, &request, false)
+                .unwrap();
+            assert_eq!(read_user_reply(&mut reply.reader()).unwrap(), -23);
+        }
         for process in [&shell, &native, &java, &manager] {
             driver.release(process.proc_handle());
         }

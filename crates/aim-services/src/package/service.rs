@@ -1,7 +1,7 @@
-//! Binder package endpoints for M4 C. They consume an owned scan snapshot,
-//! never the original PMS's shadow feed. These endpoints are not yet
-//! registered by guest-init: native scanning, mutation side effects and
-//! the SystemServer facade must pass the C gates first (#798).
+//! Native package endpoints over the boot session's immutable captures.
+//! Construction publishes both original names; private scopes retain their
+//! epoch while public fronts acquire the current session for every call.
+//! Registration alone does not establish the ADR 0013 conformance gates.
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -525,7 +525,6 @@ impl Service for PackageQueries {
                 pm::GET_INSTALLED_APPLICATIONS | pm::GET_INSTALLED_PACKAGES
             ) {
             Some((|| -> Result<Parcel, QueryError> {
-                use aim_service_aidl::ReadParcelable;
                 let process = self
                     .system
                     .as_ref()
@@ -1553,6 +1552,20 @@ impl Service for PackageQueries {
                     }
                 }
                 return Ok(reply);
+            }
+            if !self.native
+                && capture.is_some()
+                && matches!(call.code, pm::CHECK_PERMISSION | pm::CHECK_UID_PERMISSION)
+            {
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "permission query system owner unavailable",
+                    )))?;
+                return super::permission_mutation::check(&system, call)
+                    .map_err(QueryError::Transport);
             }
             if !self.native && call.code == pm::GET_PERMISSION_GROUP_INFO {
                 let system = self

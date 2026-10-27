@@ -55,7 +55,9 @@ impl WriteParcelable for UserHandle {
 }
 
 pub struct External {
-    owner: Strong,
+    /// The removal bridge: another process's node, or this process's own
+    /// where it serves the bootstrap bridge.
+    owner: crate::system::ServiceOwner,
     process: Arc<LocalProcess>,
     revoked: std::sync::atomic::AtomicBool,
 }
@@ -84,7 +86,7 @@ impl External {
             )),
         }
     }
-    pub fn new(owner: Strong, process: Arc<LocalProcess>) -> Arc<Self> {
+    pub fn new(owner: crate::system::ServiceOwner, process: Arc<LocalProcess>) -> Arc<Self> {
         Arc::new(Self {
             owner,
             process,
@@ -131,7 +133,7 @@ impl External {
         write(&mut request);
         let reply = self
             .owner
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|code| illegal(format!("Removal {stage} owner transport: {code}")))?;
         let mut reader = reply.reader();
         reader
@@ -323,7 +325,7 @@ impl External {
         name: &str,
         app: i32,
         user: i32,
-    ) -> Result<Strong, Exception> {
+    ) -> Result<crate::system::ServiceOwner, Exception> {
         self.call_with_reply(
             external_api::PREPARE_PERMISSIONS,
             |p| {
@@ -334,13 +336,13 @@ impl External {
             |r, reply| {
                 // Acquire in the actual receiving process before freeing the
                 // reply buffer's original reference.
-                reply.retain_remote_binder(r.read_binder()?.ok_or(BAD_VALUE)?)
+                crate::system::ServiceOwner::retain(reply, r.read_binder()?.ok_or(BAD_VALUE)?)
             },
         )
     }
     pub fn apply_permissions(
         &self,
-        scope: Strong,
+        scope: crate::system::ServiceOwner,
         code_removed: bool,
         clear_grants: bool,
     ) -> Result<(), Exception> {
@@ -350,7 +352,7 @@ impl External {
         data.write_bool(code_removed);
         data.write_bool(clear_grants);
         let reply = scope
-            .transact(permission_api::APPLY, &data, false)
+            .transact_as_owner(permission_api::APPLY, &data, false)
             .map_err(|code| illegal(format!("Permission removal transport: {code}")))?;
         let mut reader = reply.reader();
         reader
@@ -1161,6 +1163,28 @@ impl Controller {
         }
         let data_removed = plan.request.flags & KEEP_DATA == 0;
         let remove_setting = should_remove_setting(&package, plan, data_removed);
+        let remove_code = should_remove_setting(&package, plan, true);
+        // Original full deletion calls onPackageUninstalled once, after
+        // removing the setting. Prepare its captured identity (and all other
+        // fallible permission inputs) before profiles or app data are lost.
+        let permissions = if remove_code {
+            Some(
+                self.external
+                    .prepare_permissions(&package.name, package.app_id, -1)?,
+            )
+        } else {
+            None
+        };
+        let mut user_permissions = BTreeMap::new();
+        if data_removed && !remove_code {
+            for &user in &plan.users {
+                user_permissions.insert(
+                    user,
+                    self.external
+                        .prepare_permissions(&package.name, package.app_id, user)?,
+                );
+            }
+        }
         self.external.destroy_profiles(&package.name)?;
         for &user in &plan.users {
             self.effects
@@ -1203,25 +1227,15 @@ impl Controller {
                         false,
                     )?);
                 }
-                let scope =
-                    self.external
-                        .prepare_permissions(&package.name, package.app_id, user)?;
-                self.external.apply_permissions(scope, false, true)?;
+                if let Some(scope) = user_permissions.remove(&user) {
+                    self.external.apply_permissions(scope, false, true)?;
+                }
                 self.keystore
                     .post(package.app_id, &[user])
                     .map_err(illegal)?;
             }
         }
-        let capture = self.store.snapshots.capture();
-        let installed = capture
-            .owner()
-            .scanned_user_states(&package.name)
-            .is_some_and(|users| users.values().any(|state| state.installed));
-        let remove_code = !package.is.system && !installed && !plan.keep_uninstalled;
-        if remove_code {
-            let permissions =
-                self.external
-                    .prepare_permissions(&package.name, package.app_id, -1)?;
+        if let Some(permissions) = permissions {
             if data_removed {
                 self.store.remove_setting(&package.name)?;
             } else {

@@ -466,6 +466,7 @@ mod tests {
             )]),
         };
         let context = Context {
+            access: None,
             scan_version: 1,
             native_domains: None,
             boot_classes: None,

@@ -55,8 +55,8 @@ fn random_uuid() -> std::io::Result<String> {
 impl AppHost {
     /// `WebViewZygote.onWebViewProviderChanged`: the provider whose
     /// renderers the zygote starts, a running zygote stopped.
-    pub(super) fn webview_provider_changed(&self, info: Arc<ApplicationInfo>) {
-        *self.webview_zygote.package.lock().unwrap() = Some(info);
+    pub(super) fn webview_provider_changed(&self, info: Option<Arc<ApplicationInfo>>) {
+        *self.webview_zygote.package.lock().unwrap() = info;
         if let Some(child) = self.webview_zygote.child.lock().unwrap().take()
             && let Err(e) = self.call_agent(super::KILL_PROCESS, "killProcess", |data| {
                 data.write_i32(child.pid)

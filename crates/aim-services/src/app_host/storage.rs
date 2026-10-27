@@ -32,6 +32,17 @@ const ON_USER_ADDED: u32 = 6;
 const ON_USER_STARTED: u32 = 8;
 const SETUP_APP_DIR: u32 = 23;
 const FIXUP_APP_DIR: u32 = 24;
+const FSTRIM: u32 = 28;
+const NEEDS_CHECKPOINT: u32 = 53;
+const SUPPORTS_CHECKPOINT: u32 = 62;
+const SUPPORTS_BLOCK_CHECKPOINT: u32 = 63;
+/// `IVoldTaskListener`'s descriptor and calls.
+const TASK_LISTENER_DESCRIPTOR: &str = "android.os.IVoldTaskListener";
+const ON_STATUS: u32 = 1;
+const ON_FINISHED: u32 = 2;
+/// `StorageManagerService.LAST_FSTRIM_FILE`, `TAG_STORAGE_TRIM`.
+const LAST_FSTRIM_FILE: &str = "system/last-fstrim";
+const TAG_STORAGE_TRIM: &str = "storage_trim";
 /// `IVoldListener`'s volume calls.
 const LISTENER_DESCRIPTOR: &str = "android.os.IVoldListener";
 const ON_DISK_CREATED: u32 = 1;
@@ -57,6 +68,7 @@ const TYPE_PRIVATE: i32 = 1;
 /// `VolumeInfo.STATE_*` (`IVold.VOLUME_STATE_*`).
 const STATE_UNMOUNTED: i32 = 0;
 const STATE_MOUNTED: i32 = 2;
+const STATE_MOUNTED_READ_ONLY: i32 = 3;
 /// User 0's emulated volume, its paths and its serial number
 /// (`UserInfo.serialNumber` of the system user).
 const VOLUME: &str = "emulated;0";
@@ -88,6 +100,9 @@ const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE
 #[derive(Default)]
 pub struct Volumes {
     volume: Mutex<Option<VolumeInfo>>,
+    /// Storage successfully prepared by vold and installd, before the user
+    /// enters unlocking. This is independent of the user's lifecycle state.
+    prepared_users: Mutex<HashMap<i32, i32>>,
     vold: Mutex<Option<Strong>>,
     listeners: Mutex<HashMap<u32, (Strong, u64)>>,
     /// Each user's cloud media provider's authority, as MediaProvider set
@@ -95,7 +110,20 @@ pub struct Volumes {
     cloud_media_providers: Mutex<HashMap<i32, Option<String>>>,
     /// `mInternalStorageSize`, once read.
     internal_storage_size: Mutex<i64>,
+    /// The listeners of this process (`StorageEventListener`s registered
+    /// with `StorageManager`), by the id they were registered with.
+    native_listeners: Mutex<Vec<(u64, NativeListener)>>,
+    /// `mLastMaintenance`: when idle maintenance last ran, from
+    /// `last-fstrim`'s time; none until it is first read.
+    last_maintenance: Mutex<Option<i64>>,
 }
+
+/// A listener of this process: told each volume's type, new state and
+/// file system UUID (`onVolumeStateChanged`).
+pub(super) type NativeListener = Arc<dyn Fn(i32, i32, Option<&str>) + Send + Sync>;
+
+/// The ids of this process's storage listeners.
+static NATIVE_LISTENER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// `VolumeInfo` of user 0's emulated volume, as StorageManagerService
 /// keeps it from vold's calls, or of internal storage.
@@ -189,10 +217,9 @@ impl AppHost {
     /// later (`unlock_user_storage`), as `finishUserBoot` unlocks it.
     pub(super) fn start_storage(&self) -> Result<StartedUser, String> {
         let installd = self.installd()?;
-        // PackageManagerService's start.
-        if let Err(e) = self.fix_apps_data_on_boot(&installd) {
-            eprintln!("app host: app data: {e}");
-        }
+        self.package_system()
+            .and_then(|system| system.wait_native_package_app_data())
+            .map_err(|e| e.message)?;
         let deadline = Instant::now() + VOLD_PATIENCE;
         let vold = loop {
             if let Ok(vold) = super::display::check_service(&self.process, VOLD) {
@@ -242,7 +269,7 @@ impl AppHost {
             fingerprint,
             updated,
         };
-        self.prepare_user_storage(&started, super::app_data::FLAG_STORAGE_DE);
+        self.prepare_user_storage(&started, super::app_data::FLAG_STORAGE_DE)?;
         call(ON_USER_STARTED, "onUserStarted", &|p| p.write_i32(USER))?;
         // The started user's emulated volume, mounted while the user is
         // locked (`onUserStarted` → `mount`).
@@ -260,20 +287,38 @@ impl AppHost {
 
     /// The user's and its apps' data of the storage of `flags`
     /// (`prepareUserData`, `reconcileAppsData`).
-    fn prepare_user_storage(&self, user: &StartedUser, flags: i32) {
-        if let Err(e) = self.prepare_user_data(&user.vold, &user.installd, USER, flags) {
-            eprintln!("app host: user data: {e}");
-        }
-        if let Err(e) = self.reconcile_apps_data(&user.installd, USER, flags, user.updated) {
-            eprintln!("app host: app data: {e}");
-        }
+    fn prepare_user_storage(&self, user: &StartedUser, flags: i32) -> Result<(), String> {
+        let system = self.package_system().map_err(|e| e.message)?;
+        system
+            .wait_native_package_app_data()
+            .map_err(|e| e.message)?;
+        self.prepare_user_data(&user.vold, &user.installd, USER, flags)?;
+        *self
+            .storage
+            .prepared_users
+            .lock()
+            .unwrap()
+            .entry(USER)
+            .or_default() |= flags;
+        system
+            .internal_reconcile_apps_data(USER, flags, user.updated, 1000, 0)
+            .map_err(|e| e.message)
+    }
+
+    pub(super) fn ce_storage_prepared(&self, user: i32) -> bool {
+        self.storage
+            .prepared_users
+            .lock()
+            .unwrap()
+            .get(&user)
+            .is_some_and(|flags| flags & super::app_data::FLAG_STORAGE_CE != 0)
     }
 
     /// `finishUserUnlocking` of user 0: UserManagerService's
     /// `onBeforeUnlockUser`, its CE storage and apps' data, then the user
     /// unlocking.
     pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<(), String> {
-        self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE);
+        self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE)?;
         self.user_unlocking(USER).map_err(|e| e.message)
     }
 
@@ -295,6 +340,31 @@ impl AppHost {
         crate::package::info::array_order(volumes, |v| v.id)
             .into_iter()
             .map(Some)
+            .collect()
+    }
+
+    /// The file system UUIDs of the private volumes mounted readable
+    /// (`getVolumes`, `TYPE_PRIVATE`, `isMountedReadable`, a `fsUuid`).
+    pub(super) fn mounted_private_volume_uuids(&self) -> Vec<String> {
+        self.volume_infos()
+            .into_iter()
+            .flatten()
+            .filter(|v| {
+                v.kind == TYPE_PRIVATE && matches!(v.state, STATE_MOUNTED | STATE_MOUNTED_READ_ONLY)
+            })
+            .filter_map(|v| v.fs_uuid)
+            .collect()
+    }
+
+    /// The file system UUIDs of the private volumes mounted writable
+    /// (`getWritablePrivateVolumes`: `TYPE_PRIVATE`, `isMountedWritable`),
+    /// none for internal storage.
+    pub(super) fn writable_private_volume_uuids(&self) -> Vec<Option<String>> {
+        self.volume_infos()
+            .into_iter()
+            .flatten()
+            .filter(|v| v.kind == TYPE_PRIVATE && v.state == STATE_MOUNTED)
+            .map(|v| v.fs_uuid)
             .collect()
     }
 
@@ -520,10 +590,18 @@ impl AppHost {
 
     /// `StorageManagerInternal.getExternalStorageMountMode`
     /// (`getMountModeInternal`) of `package`'s process of `uid`.
-    pub(super) fn mount_mode(&self, uid: i32, package: &str) -> Result<MountExternal, Exception> {
+    pub(super) fn mount_mode(
+        &self,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        uid: i32,
+        package: &str,
+    ) -> Result<MountExternal, Exception> {
         /// `AppOpsManager.OP_REQUEST_INSTALL_PACKAGES`.
         const OP_REQUEST_INSTALL_PACKAGES: i32 = 66;
-        let (state, resolution) = self.packages()?;
+        let state = capture.state();
+        let resolution = capture
+            .resolution()
+            .map_err(|e| io_exception(&format!("mount mode resolution: {e:?}")))?;
         let user = uid / 100_000;
         let app_id = uid % 100_000;
         let packages: Vec<&str> = state
@@ -561,9 +639,7 @@ impl AppHost {
         }
         if self.check_permission(Some("android.permission.ACCESS_MTP"), uid)? == 0
             && self
-                .inputs()?
-                .packages
-                .application_info(package, 0)
+                .application_info(package, 0, Some(&state))?
                 .is_some_and(|ai| ai.private_flags & PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY != 0)
         {
             return Ok(MountExternal::AndroidWritable);
@@ -645,9 +721,8 @@ impl AppHost {
             .unwrap()
             .as_ref()
             .map(|v| v.state);
-        let inputs = self.inputs()?;
-        let unknown = inputs
-            .packages
+        let unknown = self
+            .framework()?
             .framework_string("unknownName")
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no unknownName"))?;
         let volume = match state.filter(|_| user == USER) {
@@ -846,8 +921,7 @@ impl AppHost {
     /// in `state`.
     fn storage_volume(&self, user: i32, state: i32) -> Result<StorageVolume, Exception> {
         let description = self
-            .inputs()?
-            .packages
+            .framework()?
             .framework_string("storage_internal")
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no storage_internal"))?;
         Ok(StorageVolume {
@@ -963,10 +1037,169 @@ impl AppHost {
         Ok((!filtered).then_some(authority))
     }
 
+    /// `StorageManager.registerListener` of a listener of this process;
+    /// the id to unregister it with.
+    pub(super) fn register_native_storage_listener(&self, listener: NativeListener) -> u64 {
+        let id = NATIVE_LISTENER_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.storage
+            .native_listeners
+            .lock()
+            .unwrap()
+            .push((id, listener));
+        id
+    }
+
+    /// `StorageManager.unregisterListener`.
+    pub(super) fn unregister_native_storage_listener(&self, id: u64) {
+        self.storage
+            .native_listeners
+            .lock()
+            .unwrap()
+            .retain(|(i, _)| *i != id);
+    }
+
+    /// `lastMaintenance`: `mLastMaintenance`, read at the service's start
+    /// from `last-fstrim`'s time, which is made empty when absent (so the
+    /// first maintenance after it runs at once).
+    pub(super) fn last_maintenance(&self) -> Result<i64, Exception> {
+        let mut last = self.storage.last_maintenance.lock().unwrap();
+        if let Some(last) = *last {
+            return Ok(last);
+        }
+        let file = self.data()?.join(LAST_FSTRIM_FILE);
+        let read = match std::fs::metadata(&file).and_then(|m| m.modified()) {
+            Ok(time) => time
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64),
+            Err(_) => {
+                if let Err(e) = std::fs::File::create(&file) {
+                    eprintln!(
+                        "app host: mount: Unable to create fstrim record {}: {e}",
+                        file.display()
+                    );
+                }
+                0
+            }
+        };
+        *last = Some(read);
+        Ok(read)
+    }
+
+    /// `runMaintenance` → `H_FSTRIM`: the time kept and `last-fstrim`
+    /// touched, then `fstrim(0, null)`, on the service's thread.
+    pub(super) fn run_maintenance(&self) -> Result<(), Exception> {
+        let me = self
+            .me
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host gone"))?;
+        let now = std::time::SystemTime::now();
+        std::thread::spawn(move || {
+            eprintln!("app host: mount: Running fstrim idle maintenance");
+            let millis = now
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            *me.storage.last_maintenance.lock().unwrap() = Some(millis);
+            let touched = me.data().map_err(|e| e.message).and_then(|data| {
+                std::fs::File::options()
+                    .write(true)
+                    .open(data.join(LAST_FSTRIM_FILE))
+                    .and_then(|f| f.set_modified(now))
+                    .map_err(|e| e.to_string())
+            });
+            if touched.is_err() {
+                eprintln!("app host: mount: Unable to record last fstrim!");
+            }
+            if let Err(e) = me.fstrim() {
+                eprintln!("app host: mount: fstrim: {}", e.message);
+            }
+        });
+        Ok(())
+    }
+
+    /// `StorageManagerService.supportsCheckpoint`: vold's answer.
+    pub(super) fn supports_checkpoint(&self) -> Result<bool, Exception> {
+        let vold = self.storage.vold.lock().unwrap();
+        let vold = vold
+            .as_ref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "vold not connected"))?;
+        let fail = |s| Exception::new(EX_ILLEGAL_STATE, format!("vold supportsCheckpoint: {s}"));
+        let mut data = Parcel::new();
+        data.write_interface_token(VOLD_DESCRIPTOR);
+        let reply = vold
+            .transact(SUPPORTS_CHECKPOINT, &data, false)
+            .map_err(fail)?;
+        let mut r = reply.reader();
+        r.read_exception().map_err(fail)??;
+        r.read_bool().map_err(fail)
+    }
+
+    /// `fstrim(0, null)`: vold's trim unless a block checkpoint is in
+    /// progress, each trimmed path recorded in the dropbox.
+    fn fstrim(&self) -> Result<(), Exception> {
+        let vold = self.storage.vold.lock().unwrap();
+        let vold = vold
+            .as_ref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "vold not connected"))?;
+        let call = |code: u32, name: &str, write: &dyn Fn(&mut Parcel)| {
+            let mut data = Parcel::new();
+            data.write_interface_token(VOLD_DESCRIPTOR);
+            write(&mut data);
+            vold.transact(code, &data, false)
+                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold {name}: {s}")))
+        };
+        let boolean = |code: u32, name: &str| -> Result<bool, Exception> {
+            let reply = call(code, name, &|_| {})?;
+            let mut r = reply.reader();
+            r.read_exception()
+                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold {name}: {s}")))??;
+            r.read_bool()
+                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold {name}: {s}")))
+        };
+        if boolean(NEEDS_CHECKPOINT, "needsCheckpoint")?
+            && boolean(SUPPORTS_BLOCK_CHECKPOINT, "supportsBlockCheckpoint")?
+        {
+            eprintln!("app host: mount: Skipping fstrim - block based checkpoint in progress");
+            return Ok(());
+        }
+        let listener = self
+            .process
+            .add_service(Arc::new(TrimListener(self.me.clone())));
+        let reply = call(FSTRIM, "fstrim", &|p| {
+            p.write_i32(0);
+            p.write_binder(Some(listener));
+        })?;
+        reply
+            .reader()
+            .read_exception()
+            .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold fstrim: {s}")))?
+    }
+
+    /// `scrubPath`: internal storage's paths, else an adopted volume's age.
+    fn scrub_path(path: &str) -> &'static str {
+        // `Environment.getDataDirectory`.
+        if path.starts_with("/data") {
+            return "internal";
+        }
+        // `findRecordForPath`: the app host keeps no volume records
+        // (#1839), so no adopted volume is known.
+        "unknown"
+    }
+
     /// `onVolumeStateChangedAsync`'s calls of the listeners: the volume's
     /// new state, then, when its environment changed, the storage state of
     /// each user it is visible to (user 0's, unlocked).
     fn volume_state_changed(&self, info: &VolumeInfo, old: i32) {
+        let natives: Vec<NativeListener> = self
+            .storage
+            .native_listeners
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, l)| l.clone())
+            .collect();
+        for listener in natives {
+            listener(info.kind, info.state, info.fs_uuid.as_deref());
+        }
         let listeners: Vec<u32> = self
             .storage
             .listeners
@@ -1244,14 +1477,11 @@ impl Service for StorageManager {
                         .volume_list(call, args.user_id, args.calling_package.as_deref()),
                 )
             }
-            // `mCeUnlockedUsers`: the users whose CE storage
-            // `start_storage` prepared.
+            // `mCeUnlockedUsers`: storage availability precedes the user's
+            // lifecycle transition to unlocking.
             sm::IS_CE_STORAGE_UNLOCKED => {
                 let args = sm::IsCeStorageUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let unlocked = match self.0.user_unlocking_or_unlocked(args.user_id) {
-                    Ok(unlocked) => unlocked,
-                    Err(e) => return reply(Err(e)),
-                };
+                let unlocked = self.0.ce_storage_prepared(args.user_id);
                 let mut p = Parcel::new();
                 sm::write_is_ce_storage_unlocked_reply(&mut p, unlocked);
                 Ok(p)
@@ -1381,9 +1611,138 @@ impl Service for StorageManager {
     }
 }
 
+/// fstrim's `IVoldTaskListener`: a trimmed path's bytes and time recorded
+/// in the dropbox (`TAG_STORAGE_TRIM`), failures ignored.
+struct TrimListener(std::sync::Weak<AppHost>);
+
+impl Service for TrimListener {
+    fn descriptor(&self) -> &str {
+        TASK_LISTENER_DESCRIPTOR
+    }
+
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        match call.code {
+            ON_STATUS => {
+                let status = call.data.read_i32()?;
+                let extras = crate::bundle::read(&mut call.data)?.unwrap_or_default();
+                if status != 0 {
+                    return Ok(Parcel::new());
+                }
+                let Some(host) = self.0.upgrade() else {
+                    return Ok(Parcel::new());
+                };
+                // `getString("path")`, whose absence the original's
+                // `scrubPath` throws on; `getLong`'s default 0.
+                let Some(crate::bundle::Value::String(Some(path))) = extras.get("path") else {
+                    eprintln!("app host: mount: fstrim status without a path");
+                    return Ok(Parcel::new());
+                };
+                let long = |key: &str| match extras.get(key) {
+                    Some(crate::bundle::Value::Long(v)) => *v,
+                    _ => 0,
+                };
+                let line = format!(
+                    "{} {} {}",
+                    AppHost::scrub_path(path),
+                    long("bytes"),
+                    long("time")
+                );
+                if let Some(dropbox) = host.dropbox.get()
+                    && let Err(e) = dropbox.add_text(TAG_STORAGE_TRIM, &line)
+                {
+                    eprintln!("app host: mount: dropbox: {}", e.message);
+                }
+                Ok(Parcel::new())
+            }
+            ON_FINISHED => Ok(Parcel::new()),
+            _ => Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// StorageManager's CE fact precedes UserController's unlocking state.
+    /// Both the internal bridge and the public storage API must agree.
+    #[test]
+    fn ce_storage_availability_is_independent_of_user_unlocking() {
+        use aim_service_aidl::dev_aim_server_ipackageinternalstoragebridge as internal;
+        let process = crate::test_process(1000);
+        let host = AppHost::new(process.clone());
+        let Binder::Local(ptr) = process.add_service(Arc::new(
+            super::super::package_internal_storage::PackageInternalStorage::new(host.clone()),
+        )) else {
+            unreachable!()
+        };
+        let bridge = process.local_service(ptr).unwrap();
+        let Binder::Local(ptr) = process.add_service(Arc::new(StorageManager(host.clone()))) else {
+            unreachable!()
+        };
+        let mount = process.local_service(ptr).unwrap();
+        let available = || {
+            let mut request = Parcel::new();
+            internal::CeUnlocked { user: 0 }.write(&mut request);
+            let response = bridge
+                .transact(internal::CE_UNLOCKED, &request, false)
+                .unwrap();
+            let native = internal::read_ce_unlocked_reply(&mut response.reader())
+                .unwrap()
+                .unwrap();
+            let mut request = Parcel::new();
+            sm::IsCeStorageUnlocked { user_id: 0 }.write(&mut request);
+            let response = mount
+                .transact(sm::IS_CE_STORAGE_UNLOCKED, &request, false)
+                .unwrap();
+            assert_eq!(
+                sm::read_is_ce_storage_unlocked_reply(&mut response.reader())
+                    .unwrap()
+                    .unwrap(),
+                native
+            );
+            native
+        };
+        assert!(!available());
+        host.unlocked_users.lock().unwrap().insert(0);
+        assert!(
+            !available(),
+            "a lifecycle flag alone cannot permit CE reconciliation"
+        );
+        host.unlocked_users.lock().unwrap().clear();
+        host.storage.prepared_users.lock().unwrap().insert(0, 1);
+        assert!(!available());
+        host.storage.prepared_users.lock().unwrap().insert(0, 3);
+        assert!(available());
+        assert!(!host.user_unlocking_or_unlocked(0).unwrap());
+        assert!(!host.ce_storage_prepared(10));
+    }
+
+    /// A listener of this process is told each volume's change, until it
+    /// is unregistered.
+    #[test]
+    fn native_listeners_are_told_volume_changes() {
+        let process = crate::test_process(1000);
+        let host = AppHost::new(process);
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let seen = told.clone();
+        let id = host.register_native_storage_listener(Arc::new(move |kind, state, uuid| {
+            seen.lock()
+                .unwrap()
+                .push((kind, state, uuid.map(String::from)));
+        }));
+        let mut info = VolumeInfo::created(TYPE_PRIVATE, None, -1);
+        info.state = STATE_MOUNTED;
+        info.fs_uuid = Some("1234-5678".into());
+        info.mount_flags = 0;
+        host.volume_state_changed(&info, STATE_UNMOUNTED);
+        host.unregister_native_storage_listener(id);
+        host.volume_state_changed(&info, STATE_UNMOUNTED);
+        assert_eq!(
+            *told.lock().unwrap(),
+            [(TYPE_PRIVATE, STATE_MOUNTED, Some("1234-5678".into()))]
+        );
+    }
 
     /// A volume of another UUID is not found, as `findPathForUuid`
     /// throws, in the envelope `ParcelableException` writes.

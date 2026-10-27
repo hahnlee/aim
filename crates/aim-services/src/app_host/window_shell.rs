@@ -356,8 +356,8 @@ fn folded(host: &AppHost) -> Result<Rect, String> {
     if !empty(&r#override) {
         return Ok(r#override);
     }
-    let inputs = host.inputs().map_err(|e| java_exception(&e))?;
-    match inputs.packages.framework_string("config_foldedArea") {
+    let framework = host.framework().map_err(|e| java_exception(&e))?;
+    match framework.framework_string("config_foldedArea") {
         Some(s) if !s.is_empty() => unflatten(&s),
         _ => Ok([0; 4]),
     }

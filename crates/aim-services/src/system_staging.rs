@@ -4,7 +4,7 @@ impl System {
     pub fn install_package_staging(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
-        transport: aim_binder_host::local::Strong,
+        transport: crate::system::ServiceOwner,
     ) -> Result<Arc<crate::package::staging::Owner>> {
         self.check_package_bootstrap(bridge)?;
         let owner = crate::package::staging::Owner::new(self.process.clone(), transport);
@@ -86,19 +86,21 @@ impl System {
                 "staging bridge reply trailing bytes",
             ));
         }
-        let strong = reply
-            .retain_remote_binder(binder.ok_or_else(|| {
+        let strong = crate::system::ServiceOwner::retain(
+            &reply,
+            binder.ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "staging bridge unavailable",
                 )
-            })?)
-            .map_err(|status| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    format!("staging bridge capability {status}"),
-                )
-            })?;
+            })?,
+        )
+        .map_err(|status| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("staging bridge capability {status}"),
+            )
+        })?;
         self.install_package_staging(bridge, strong)
     }
 }

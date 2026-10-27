@@ -24,7 +24,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use super::activity::{ActivityRecord, Item, Token};
 use super::activity_stack::{self as stack, Command, Decision, Outcome, Then};
 use super::kept::{KeptIntent, RawIntent};
-use super::packages::WindowStyle;
+use super::resources::WindowStyle;
 use super::uri_grants::{NeededUriGrants, Owner};
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::info::ActivityInfo;

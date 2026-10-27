@@ -1089,7 +1089,10 @@ mod committed_effect_tests {
                 security_context: None,
             },
         );
-        let effects = crate::package::effects::Owner::new(client.strong(0)).unwrap();
+        let effects = crate::package::effects::Owner::new(crate::system::ServiceOwner::Remote(
+            std::sync::Arc::new(client.strong(0)),
+        ))
+        .unwrap();
         let settings = Settings {
             packages: vec![Package {
                 name: "p".into(),
@@ -1291,7 +1294,12 @@ mod committed_effect_tests {
             publish: {
                 let query = query.clone();
                 let events = events.clone();
+                let mode = mode.clone();
                 Arc::new(move |snapshot| {
+                    if mode.load(Ordering::SeqCst) == 4 {
+                        events.lock().unwrap().push("publication-failed");
+                        return Err("permission access publication failed (#2161)".into());
+                    }
                     *query.lock().unwrap() = snapshot.clone();
                     events.lock().unwrap().push("publish");
                     Ok(())
@@ -1314,7 +1322,7 @@ mod committed_effect_tests {
         let (environment, first) =
             environment::committed_fault_reservation(config, snapshots.capture(), vec![]);
         drop(first);
-        for case in 0..4 {
+        for case in 0..5 {
             mode.store(case, Ordering::SeqCst);
             events.lock().unwrap().clear();
             let base = snapshots.capture();
@@ -1370,6 +1378,32 @@ mod committed_effect_tests {
                 verified_sessions: vec![],
             };
             let committed = Box::new(prepared).commit();
+            if case == 4 {
+                let Err(Error::Install(failure)) = committed else {
+                    panic!("publication failure must not produce a success receipt")
+                };
+                assert!(failure.committed);
+                assert_eq!(failure.legacy_status, -110);
+                assert!(failure.message.contains("#2161"));
+                assert_eq!(query.lock().unwrap().version(), base.version());
+                assert!(snapshots.capture().version() > base.version());
+                assert_eq!(
+                    disk.lock()
+                        .unwrap()
+                        .state()
+                        .settings
+                        .key_sets
+                        .last_issued_key_id,
+                    5
+                );
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    vec!["commit", "publication-failed"]
+                );
+                assert!(app_data.join("owned").exists());
+                assert_eq!(rollbacks.load(Ordering::SeqCst), 0);
+                continue;
+            }
             if case == 3 {
                 let Err(Error::Owner {
                     committed: true,
@@ -1457,7 +1491,7 @@ mod committed_effect_tests {
         }
         assert_eq!(
             environment.errors().len(),
-            3,
+            4,
             "normal generation must not replay historical owner errors"
         );
         drop(environment);

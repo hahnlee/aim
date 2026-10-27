@@ -31,7 +31,7 @@ pub struct FullIntent {
 
 /// `Integer.decode`: a sign, then `0x`, `0X` or `#` for hex, `0` for
 /// octal, else decimal.
-fn decode_integer(s: &str) -> Option<i32> {
+pub(crate) fn decode_integer(s: &str) -> Option<i32> {
     let (negative, rest) = match s.as_bytes().first()? {
         b'-' => (true, &s[1..]),
         b'+' => (false, &s[1..]),

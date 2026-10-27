@@ -2,7 +2,6 @@
 use super::*;
 use aim_service_aidl::dev_aim_server_ipermissionpersistencebridge as permission_api;
 use std::{
-    collections::BTreeMap,
     sync::Condvar,
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -10,7 +9,9 @@ use std::{
 
 pub struct Runtime {
     bridge: Arc<crate::package::bootstrap::Bridge>,
-    permission: Strong,
+    /// The permission persistence leaf: another process's node, or this
+    /// process's own where it serves the bootstrap bridge.
+    permission: ServiceOwner,
     kernel: Arc<crate::package::kernel_mappings::Owner>,
     signal: Arc<(Mutex<(bool, Option<Instant>)>, Condvar)>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -38,7 +39,7 @@ impl Runtime {
     pub fn start(
         system: &Arc<System>,
         bridge: Arc<crate::package::bootstrap::Bridge>,
-        permission: Strong,
+        permission: ServiceOwner,
         kernel: Arc<crate::package::kernel_mappings::Owner>,
     ) -> Result<Arc<Self>> {
         system.check_package_bootstrap(&bridge)?;
@@ -452,7 +453,7 @@ impl System {
         // native Settings read restores its actual persisted legacy objects;
         // a computed live permission export is a separate query owner.
         let install = self.package_install_guard();
-        let mut disk = disk.lock().unwrap();
+        let disk = disk.lock().unwrap();
         let mut state = self.package_bootstrap.lock().unwrap();
         let current = state
             .current
@@ -559,6 +560,7 @@ mod latest_settings_tests {
         scan::{CapturedUsers, SigningScan},
         settings::{Package, Settings},
     };
+    use std::collections::BTreeMap;
     #[test]
     fn permission_definition_merge_retains_latest_package_and_app_data_fields() {
         let mut latest = SigningScan::new(

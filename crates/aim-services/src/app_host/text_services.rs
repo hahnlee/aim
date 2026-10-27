@@ -387,7 +387,7 @@ impl TextServices {
     /// checkers found again (`initializeTextServicesData`) and, while
     /// enabled, a system one selected if none was. A changed package is not
     /// disappearing (`isPackageDisappearing`), so a selected one stays.
-    fn packages_changed(&self, user: i32) -> Result<(), Exception> {
+    fn packages_changed(&self, user: i32, removed: Option<&str>) -> Result<(), Exception> {
         let mut users = self.users.lock().unwrap();
         let Some(data) = users.get_mut(&user) else {
             return Ok(());
@@ -397,7 +397,10 @@ impl TextServices {
         if !self.enabled(user)? {
             return Ok(());
         }
-        if selected.is_none() {
+        if selected
+            .as_ref()
+            .is_none_or(|checker| removed == Some(checker.package.as_str()))
+        {
             let sci = self.avail_system_checker(&data.checkers);
             self.set_current(sci.as_deref(), user)?;
         }
@@ -498,7 +501,7 @@ impl TextServices {
                     format!("queryIntentServicesAsUser: {e:?}"),
                 ),
             })?;
-        let inputs = self.host.inputs()?;
+        let inputs = self.host.platform()?;
         let root = self.host.root()?;
         let mut checkers = Vec::new();
         for r in found {
@@ -525,8 +528,9 @@ impl TextServices {
                 .filter(|id| *id != 0);
             let pkg = state.packages.get(&package).and_then(|ps| ps.pkg.clone());
             let parsed = match (id, pkg) {
-                (Some(id), Some(pkg)) => inputs
-                    .packages
+                (Some(id), Some(pkg)) => self
+                    .host
+                    .framework()?
                     .xml_resource(root, &inputs.data, &pkg, id, parse_checker)
                     .and_then(|r| r),
                 (None, _) => Err(format!("No {SERVICE_META_DATA} meta-data")),
@@ -986,14 +990,15 @@ impl TextServices {
 impl PackageMonitor for TextServices {
     /// On its handler (`register(context, null, ...)`), when the whole
     /// package changed (`onPackageChanged`'s default).
-    fn package_changed(&self, change: &PackageChanged<'_>) {
+    fn package_changed(&self, change: &PackageChanged<'_>) -> Result<(), Exception> {
         if !change.some_packages_changed() {
-            return;
+            return Ok(());
         }
         let (me, user) = (self.me.clone(), change.user);
+        let removed = change.removed.then(|| change.package.to_owned());
         self.post(move || {
             if let Some(me) = me.upgrade()
-                && let Err(e) = me.packages_changed(user)
+                && let Err(e) = me.packages_changed(user, removed.as_deref())
             {
                 eprintln!(
                     "app host: textservices: packages of user {user}: {}",
@@ -1001,6 +1006,7 @@ impl PackageMonitor for TextServices {
                 );
             }
         });
+        Ok(())
     }
 }
 
@@ -1154,6 +1160,132 @@ impl Service for TextServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spell_checkers_follow_package_monitor_session_enabled_changes() {
+        crate::system::with_discovery_session(|host, publish, enabled| {
+            publish(&mut |pkg| {
+                if pkg.package_name == "p" {
+                    pkg.base_apk_path = Some("/data/app/p/base.apk".into());
+                    let mut service = crate::package::pkg::Service::default();
+                    service.main.enabled = true;
+                    service.main.exported = true;
+                    service.main.component.name = "p.SpellChecker".into();
+                    service.main.component.package_name = "p".into();
+                    service.permission = Some(BIND_TEXT_SERVICE.into());
+                    service.main.component.meta_data = Some(crate::package::pkg::MetaData(vec![(
+                        SERVICE_META_DATA.into(),
+                        MetaValue::Int(0x7f010001),
+                    )]));
+                    service.main.component.intents =
+                        vec![crate::package::intent_filter::ParsedIntentInfo {
+                            filter: crate::package::intent_filter::IntentFilter {
+                                actions: vec![SERVICE_INTERFACE.into()],
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }];
+                    pkg.services = vec![service];
+                }
+            });
+            host.platform()
+                .unwrap()
+                .settings
+                .insert(
+                    super::super::settings::Table::Secure,
+                    SPELL_CHECKER_ENABLED,
+                    &super::super::settings::Change {
+                        value: Some("0"),
+                        tag: None,
+                        make_default: false,
+                        package: Some("android"),
+                        caller_system: true,
+                        overrideable_by_restore: false,
+                    },
+                    false,
+                )
+                .unwrap();
+            let service =
+                TextServices::new(host.clone(), Arc::new(SettingsProvider::new(host.clone())));
+            let checkers = service.find_checkers(0).unwrap();
+            assert_eq!(checkers.len(), 1);
+            service.users.lock().unwrap().insert(
+                0,
+                UserData {
+                    checkers,
+                    groups: HashMap::new(),
+                },
+            );
+            let flush = || {
+                let (send, receive) = mpsc::channel();
+                service.post(move || send.send(()).unwrap());
+                receive
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+            };
+            let answer = || {
+                let mut request = Parcel::new();
+                tsm::GetEnabledSpellCheckers { user_id: 0 }.write(&mut request);
+                let response = service
+                    .transact(&mut Call {
+                        code: tsm::GET_ENABLED_SPELL_CHECKERS,
+                        flags: 0,
+                        sender_pid: 77,
+                        sender_euid: SYSTEM_UID as u32,
+                        data: request.reader(),
+                    })
+                    .unwrap();
+                let mut response = response.reader();
+                response.read_exception().unwrap().unwrap();
+                let count = response.read_i32().unwrap();
+                if count > 0 {
+                    assert_eq!(count, 1);
+                    assert_eq!(response.read_i32().unwrap(), 1);
+                    assert_eq!(response.read_i32().unwrap(), 0); // label
+                    assert_eq!(
+                        response.read_string16().unwrap().as_deref(),
+                        Some("p/.SpellChecker")
+                    );
+                }
+                count.max(0)
+            };
+            assert_eq!(answer(), 1);
+            // PackageMonitor's default onPackageChanged returns false for
+            // component-only changes. TextServicesMonitor only overrides
+            // onSomePackagesChanged, so its existing map stays until a
+            // whole-package change (even though the resolver is fresh).
+            let available = || {
+                let (_, resolution) = host.packages().unwrap();
+                resolution
+                    .query_intent_services(
+                        &Intent {
+                            action: Some(SERVICE_INTERFACE.into()),
+                            ..Default::default()
+                        },
+                        None,
+                        GET_META_DATA,
+                        0,
+                        SYSTEM_UID,
+                    )
+                    .unwrap()
+                    .len()
+            };
+            enabled(Some("p.SpellChecker"), 2);
+            flush();
+            assert_eq!(available(), 0);
+            assert_eq!(answer(), 1);
+            enabled(Some("p.SpellChecker"), 1);
+            flush();
+            assert_eq!(available(), 1);
+            assert_eq!(answer(), 1);
+            enabled(None, 2);
+            flush();
+            assert_eq!(answer(), 0);
+            enabled(None, 1);
+            flush();
+            assert_eq!(answer(), 1);
+        });
+    }
 
     #[test]
     fn language_tags_are_read_as_java_reads_them() {

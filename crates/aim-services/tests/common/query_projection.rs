@@ -105,6 +105,7 @@ pub fn export(directory: &Path, snapshot: &Arc<Snapshot>) {
     let capture = Capture::new(
         snapshot.clone(),
         Context {
+            access: None,
             scan_version: snapshot.version(),
             native_domains: None,
             boot_classes: None,

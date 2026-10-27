@@ -159,6 +159,7 @@ pub fn build(input: Inputs) -> Result<Context, String> {
     }
     let ids = users.keys().copied().collect::<Vec<_>>();
     let mut context = Context {
+        access: None,
         scan_version: input.snapshot.version(),
         native_domains: None,
         boot_classes: Some(input.classes),
@@ -398,8 +399,8 @@ pub struct Original {
     pub compatibility_mode: bool,
 }
 impl Original {
-    pub fn capture(owner: &aim_binder_host::local::Strong) -> Result<Self, String> {
-        use aim_binder_host::parcel::{Parcel, Reader};
+    pub fn capture(owner: &crate::system::ServiceOwner) -> Result<Self, String> {
+        use aim_binder_host::parcel::Parcel;
         use aim_service_aidl::dev_aim_server_ipackagebootcontextleaf as api;
         let mut request = Parcel::new();
         api::CaptureBootContext {}.write(&mut request);
@@ -410,7 +411,12 @@ impl Original {
             .map_err(|status| format!("boot context leaf reply: {status}"))?
             .map_err(|error| error.message)?
             .ok_or("boot context leaf returned null")?;
-        let mut reader = Reader::new(&bytes, &[]);
+        Self::decode(&bytes)
+    }
+    /// The leaf's record.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
+        use aim_binder_host::parcel::Reader;
+        let mut reader = Reader::new(bytes, &[]);
         let read = |status| format!("boot context record: {status}");
         if reader.read_i32().map_err(read)? != 2 {
             return Err("boot context record version differs".into());
@@ -488,7 +494,7 @@ impl Original {
         input.image_system.compatibility_mode = self.compatibility_mode;
         Ok(input)
     }
-    pub fn bind_settings(mut self, owner: Arc<aim_binder_host::local::Strong>) -> Self {
+    pub fn bind_settings(mut self, owner: Arc<crate::system::ServiceOwner>) -> Self {
         self.resolver.settings_owner = Some(crate::package::resolve::settings::Owner::new(
             owner,
             self.resolver.query_filtering_disabled,

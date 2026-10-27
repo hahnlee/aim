@@ -22,6 +22,7 @@ use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
 use aim_service_aidl::android_content_iintentsender as sender;
 
 use super::activity_start::StartArgs;
+use super::activity_user::AllowMode;
 use super::broadcasts::filter_equals;
 use super::kept::{By, KeptIntent, RawBundle, RawIntent};
 use super::{AppHost, PER_USER_RANGE};
@@ -271,11 +272,18 @@ impl AppHost {
                 "File descriptors passed in options",
             ));
         }
+        let user = self.handle_incoming_user(
+            uid,
+            req.user,
+            req.kind == INTENT_SENDER_BROADCAST,
+            AllowMode::NonFull,
+            Some("getIntentSender"),
+            None,
+        )?;
         let user = if req.user == USER_CURRENT {
-            self.incoming_user(uid, 0, true)?;
             USER_CURRENT
         } else {
-            self.incoming_user(uid, req.user, true)?
+            user
         };
         let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
         if app_id != 0 && app_id != 1000 && !self.owns_package(uid, &package)? {
@@ -371,6 +379,18 @@ impl AppHost {
             .iter()
             .find(|r| r.binder == target)
             .map(|r| r.uid)
+    }
+
+    /// `isIntentSenderImmutable`: a record's FLAG_IMMUTABLE; another
+    /// IIntentSender (the shell's `LocalIntentReceiver`) is not immutable.
+    pub(super) fn intent_sender_immutable(&self, target: Binder) -> bool {
+        self.pending_intents
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.binder == target)
+            .is_some_and(|r| r.flags & FLAG_IMMUTABLE != 0)
     }
 
     /// `getInfoForIntentSender`.
@@ -541,7 +561,19 @@ impl AppHost {
             Some(Binder::Handle(h)) => Some(self.process.strong(h)),
             _ => None,
         };
-        let Binder::Handle(other) = target else {
+        let other = match target {
+            Binder::Handle(handle) => {
+                crate::system::ServiceOwner::Remote(Arc::new(self.process.strong(handle)))
+            }
+            Binder::Local(ptr) => {
+                crate::system::ServiceOwner::Local(self.process.local_service(ptr).ok_or_else(
+                    || Exception::new(EX_ILLEGAL_STATE, "IntentSender node unavailable"),
+                )?)
+            }
+        };
+        // AMS checks for PendingIntentRecord, not whether the binder is local:
+        // the native shell's LocalIntentReceiver is local too.
+        if matches!(&other, crate::system::ServiceOwner::Local(node) if node.is::<IntentSender>()) {
             return self.send_record(
                 caller,
                 target,
@@ -552,7 +584,7 @@ impl AppHost {
                 required_permission,
                 Sent::default(),
             );
-        };
+        }
         // Another implementation of IIntentSender: sent on, its result
         // reported here.
         let intent = intent.unwrap_or_else(|| RawIntent::new("android.intent.action.MAIN", 0, &[]));
@@ -567,7 +599,9 @@ impl AppHost {
             options: options.as_ref().map(By),
         }
         .write(&mut p);
-        let _ = self.process.strong(other).transact(sender::SEND, &p, true);
+        other.transact(sender::SEND, &p, true).map_err(|status| {
+            Exception::new(EX_ILLEGAL_STATE, format!("IntentSender.send: {status}"))
+        })?;
         if let Some(f) = &finished {
             perform_receive(f, &intent, calling_uid / PER_USER_RANGE as i32);
         }

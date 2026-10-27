@@ -88,13 +88,15 @@ struct Observer {
 }
 pub struct Owner {
     process: Arc<LocalProcess>,
-    bridge: Strong,
+    /// The apexd input bridge: another process's node, or this process's
+    /// own where it serves the bootstrap bridge.
+    bridge: crate::system::ServiceOwner,
     closed: AtomicBool,
     ready: Mutex<BTreeMap<i32, ReadySession>>,
     observers: Mutex<Vec<Observer>>,
 }
 impl Owner {
-    pub fn new(process: Arc<LocalProcess>, bridge: Strong) -> Arc<Self> {
+    pub fn new(process: Arc<LocalProcess>, bridge: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             process,
             bridge,
@@ -173,7 +175,7 @@ impl Owner {
             .write(&mut request);
             let reply = self
                 .bridge
-                .transact(aidl::GET_STAGED_APEX_INFOS, &request, false)
+                .transact_as_owner(aidl::GET_STAGED_APEX_INFOS, &request, false)
                 .map_err(|status| {
                     Exception::new(
                         aim_binder_host::parcel::EX_ILLEGAL_STATE,

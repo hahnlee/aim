@@ -194,10 +194,9 @@ fn round_storage_size(size: i64) -> i64 {
 impl AppHost {
     /// `ProcessList.getMemoryInfo`.
     pub(super) fn memory_info(&self) -> Result<MemoryInfo, Exception> {
-        let inputs = self.inputs()?;
+        let framework = self.framework()?;
         let integer = |name: &str| {
-            inputs
-                .packages
+            framework
                 .framework_integer(name)
                 .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no {name}")))
         };

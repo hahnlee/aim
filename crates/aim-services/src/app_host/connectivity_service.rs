@@ -1021,8 +1021,7 @@ impl ConnectivityService {
         Ok(vendor < VENDOR_API_2024_Q2
             && self
                 .host
-                .inputs()?
-                .packages
+                .framework()?
                 .framework_bool("config_mobile_data_capable")
                 .unwrap_or(true))
     }
@@ -1193,9 +1192,11 @@ impl ConnectivityService {
     /// `ApplicationInfo.targetSdkVersion` of `package` at least `version`
     /// (`isTargetSdkAtleast`), true for a package not installed.
     fn target_at_least(&self, version: i32, package: Option<&str>) -> Result<bool, Exception> {
-        let inputs = self.host.inputs()?;
+        let (state, _) = self.host.packages()?;
         Ok(package
-            .and_then(|p| inputs.packages.application_info(p, 0))
+            .map(|p| self.host.application_info(p, 0, Some(&state)))
+            .transpose()?
+            .flatten()
             .is_none_or(|ai| ai.target_sdk_version >= version))
     }
 
@@ -1209,8 +1210,13 @@ impl ConnectivityService {
         package: Option<&str>,
     ) -> Result<(), Exception> {
         if nc.has(PRIORITIZE_LATENCY) || nc.has(PRIORITIZE_BANDWIDTH) {
-            let inputs = self.host.inputs()?;
-            let enabled = match package.and_then(|p| inputs.packages.application_info(p, 0)) {
+            let (state, _) = self.host.packages()?;
+            let inputs = self.host.platform()?;
+            let enabled = match package
+                .map(|p| self.host.application_info(p, 0, Some(&state)))
+                .transpose()?
+                .flatten()
+            {
                 Some(ai) => inputs.compat.is_enabled(
                     ENABLE_SELF_CERTIFIED_CAPABILITIES_DECLARATION,
                     package,

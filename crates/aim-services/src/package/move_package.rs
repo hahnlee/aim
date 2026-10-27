@@ -5,10 +5,7 @@ use super::{
     effects, installer::native::QuerySource, lifecycle, moves, pkg::booleans, query::Query,
     resolve::Resolver,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_ipackagerelocationbridge as api;
 use std::{
     path::PathBuf,
@@ -61,10 +58,10 @@ pub struct Volume {
     pub measure_path: String,
 }
 pub struct StorageOwner {
-    binder: Strong,
+    binder: crate::system::ServiceOwner,
 }
 impl StorageOwner {
-    pub fn new(binder: Strong) -> Arc<Self> {
+    pub fn new(binder: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self { binder })
     }
     fn call<T>(
@@ -78,7 +75,7 @@ impl StorageOwner {
         write(&mut data);
         let reply = self
             .binder
-            .transact(code, &data, false)
+            .transact_as_owner(code, &data, false)
             .map_err(|code| illegal(format!("Move storage transport: {code}")))?;
         let mut reader = reply.reader();
         reader

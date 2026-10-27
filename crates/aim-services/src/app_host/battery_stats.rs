@@ -1184,7 +1184,7 @@ impl BatteryStats {
         if let Some(c) = self.config.get() {
             return Some(*c);
         }
-        let inputs = host.inputs().ok()?;
+        let inputs = host.platform().ok()?;
         let setting = inputs
             .settings
             .get(super::settings::Table::Global, "battery_stats_constants");
@@ -1196,7 +1196,8 @@ impl BatteryStats {
                 .find(|(k, _)| k.trim() == key)
                 .and_then(|(_, v)| v.trim().parse::<i64>().ok())
         };
-        let resource = |name: &str| inputs.packages.framework_bool(name).unwrap_or(false);
+        let framework = host.framework().ok()?;
+        let resource = |name: &str| framework.framework_bool(name).unwrap_or(false);
         // `ActivityManager.isLowRamDeviceStatic`.
         let low_ram = super::system_boolean(host.property("ro.config.low_ram").as_deref(), false)
             || host.property("ro.debuggable").as_deref() == Some("1")
@@ -1209,8 +1210,7 @@ impl BatteryStats {
         let max_history_size = constant("max_history_size")
             .or_else(|| constant("max_history_files").map(|files| files * max_history_buffer))
             .unwrap_or_else(|| {
-                inputs
-                    .packages
+                framework
                     .framework_integer("config_batteryHistoryStorageSize")
                     .map_or(DEFAULT_MAX_HISTORY_SIZE, i64::from)
             });

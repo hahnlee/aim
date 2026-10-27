@@ -3,7 +3,7 @@ mod boot_configuration_epoch {
     use aim_binder_driver::{Credentials,Device,Driver,Errno,File,GuestProcess,errno,uapi::*};
     use aim_binder_host::local::{Call,Reply,Service};
     use aim_service_aidl::{dev_aim_server_ipackagebootstrapbridge as bootstrap,dev_aim_server_iservicehost as host};
-    use std::{path::PathBuf,time::Duration,sync::atomic::{AtomicUsize,Ordering}};
+    use std::{path::PathBuf,time::Duration};
 
     struct NoMemory;
     impl GuestProcess for NoMemory {
@@ -32,9 +32,8 @@ mod boot_configuration_epoch {
     }
     impl Fixture {
         fn new()->Self {
-            static NEXT:AtomicUsize=AtomicUsize::new(0);
-            let root=std::env::temp_dir().join(format!("aim-boot-epoch-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
-            std::fs::create_dir(&root).unwrap();std::fs::create_dir(root.join("image")).unwrap();std::fs::create_dir(root.join("data")).unwrap();
+            let root=crate::app_host::test_temp_dir("boot-epoch");
+            std::fs::create_dir(root.join("image")).unwrap();std::fs::create_dir(root.join("data")).unwrap();
             let driver=Driver::new();let native=LocalProcess::open(&driver,Device::Binder,Credentials{pid:97101,euid:1000,security_context:None});
             let system=System::new(native.clone(),&[]);
             let Binder::Local(pointer)=native.add_service(Arc::new(crate::service_host::ServiceHost::new(native.clone(),&system)))else{panic!("local host expected")};
@@ -106,7 +105,7 @@ mod boot_configuration_epoch {
         owner.capture_legacy_permissions(&[0],Default::default(),shared).unwrap();
         let process_order=owner.identities.shared_users.keys().map(|name|(name.clone(),Vec::new())).collect();
         owner.complete_shared_processes(process_order).unwrap();
-        let context=Context{scan_version:version,native_domains:None,boot_classes:None,nonce:Some(17),
+        let context=Context{access:None,scan_version:version,native_domains:None,boot_classes:None,nonce:Some(17),
             system:model::System{sdk_sandbox_package:Some(None),..Default::default()},platform:model::Platform::default(),
             users:[(0,model::User{id:0,profile_group_id:0,unlocking_or_unlocked:true,..Default::default()})].into(),
             apex_inventory:ApexInventory{packages:Some(vec![]),active:vec![]},

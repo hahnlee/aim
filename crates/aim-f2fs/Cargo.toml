@@ -1,0 +1,11 @@
+[package]
+license.workspace = true
+name = "aim-f2fs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "F2fsUtils.releaseCompressedBlocks: an installed package's compressed blocks released where the kernel and /data support f2fs compression"
+
+[dependencies]
+libc.workspace = true
+log.workspace = true

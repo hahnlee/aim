@@ -17,19 +17,6 @@ use std::{
 };
 
 pub type Current = Arc<dyn Fn() -> Result<Arc<Capture>, String> + Send + Sync>;
-/// Permit a retained read across actual usage publication only. All settings,
-/// code, UID, user, signing, library and permission ownership remain compared.
-pub(crate) fn same_install_identity(before: &Snapshot, after: &Snapshot) -> Result<bool, String> {
-    if before.owner() == after.owner() && before.usage() == after.usage() {
-        return Ok(true);
-    }
-    if before.usage().names().ne(after.usage().names()) {
-        return Ok(false);
-    }
-    let mut normalized = before.owner().clone();
-    normalized.update_replica_usage(before.usage(), after.usage())?;
-    Ok(&normalized == after.owner())
-}
 /// Installation owns the changed code/settings and every package sharing its
 /// old/new appId. Other packages may receive native user-state publications.
 pub(crate) fn install_targets(
@@ -718,14 +705,24 @@ pub enum Phase {
 }
 /// Invoke after the original permission lifecycle completed and installed its
 /// live states in this candidate. The phase is an explicit pipeline boundary.
+pub type AccessSource = Arc<
+    dyn Fn(&Snapshot) -> Result<Arc<crate::package::permissions::AccessView>, String> + Send + Sync,
+>;
 pub struct Builder {
+    access: Option<AccessSource>,
     current: Current,
     bridge: Arc<Bridge>,
     config: Arc<SystemConfig>,
 }
 impl Builder {
-    pub fn new(current: Current, bridge: Arc<Bridge>, config: Arc<SystemConfig>) -> Arc<Self> {
+    pub fn new(
+        current: Current,
+        bridge: Arc<Bridge>,
+        config: Arc<SystemConfig>,
+        access: Option<AccessSource>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            access,
             current,
             bridge,
             config,
@@ -762,6 +759,11 @@ impl Builder {
         scan.package_registry()?;
         let mut context = (**current.context()).clone();
         context.scan_version = snapshot.version();
+        context.access = self
+            .access
+            .as_ref()
+            .map(|source| source(snapshot))
+            .transpose()?;
         context.packages.clear();
         context.retained_packages.clear();
         context.native_domains = None;
@@ -808,6 +810,7 @@ impl Builder {
                     parsed,
                     &users,
                     &mut permissions,
+                    context.access.as_deref(),
                 )?;
                 context
                     .packages
@@ -828,6 +831,7 @@ impl Builder {
                     None,
                     &users,
                     &mut permissions,
+                    context.access.as_deref(),
                 )?;
                 context.retained_packages.insert((id, name.clone()), inputs);
             }
@@ -841,6 +845,7 @@ impl Builder {
                     None,
                     &users,
                     &mut permissions,
+                    context.access.as_deref(),
                 )?;
                 if context
                     .retained_packages
@@ -1044,6 +1049,7 @@ impl Builder {
         code: Option<&crate::package::pkg::AndroidPackage>,
         users: &[i32],
         permissions: &mut BTreeMap<i32, legacy_permissions::State>,
+        access: Option<&crate::package::permissions::AccessView>,
     ) -> Result<PackageInputs, String> {
         if let Some(id) = permission_id {
             if !(0..100_000).contains(&id) {
@@ -1062,9 +1068,17 @@ impl Builder {
             if !permissions.contains_key(&id) {
                 permissions.insert(
                     id,
-                    self.bridge
-                        .legacy_permissions(id, users)
-                        .map_err(|error| format!("install live permission UID: {error:?}"))?,
+                    if let Some(access) = access {
+                        let bytes = access
+                            .legacy_state(id, users, &self.config)
+                            .map_err(|error| error.message)?;
+                        legacy_permissions::State::read(&bytes, id, users)
+                            .map_err(|error| format!("candidate access receipt: {error:?}"))?
+                    } else {
+                        self.bridge
+                            .legacy_permissions(id, users)
+                            .map_err(|error| format!("install live permission UID: {error:?}"))?
+                    },
                 );
             }
         }
@@ -1083,13 +1097,16 @@ impl Builder {
             };
             let live = &permissions[&permission_id];
             let installed = stored.get(user).is_none_or(|state| state.installed);
-            let gids = self
-                .bridge
-                .permission_gids(permission_id, &[*user])
-                .map_err(|error| format!("install live permission GIDs: {error:?}"))?
-                .into_iter()
-                .map(|gid| gid as i32)
-                .collect();
+            let gids = if let Some(access) = access {
+                access.gids(permission_id, *user, &self.config)
+            } else {
+                self.bridge
+                    .permission_gids(permission_id, &[*user])
+                    .map_err(|error| format!("install live permission GIDs: {error:?}"))?
+                    .into_iter()
+                    .map(|gid| gid as i32)
+                    .collect()
+            };
             inputs.insert(*user, live_user_inputs(live, *user, installed, gids)?);
         }
         let syncable_authorities = code
@@ -1107,10 +1124,13 @@ impl Builder {
             app_id: setting.app_id,
             path: setting.code_path.clone(),
             version: setting.version_code,
-            installed_permissions: self
-                .bridge
-                .installed_permissions(&setting.name)
-                .map_err(|error| format!("install permission definitions: {error:?}"))?,
+            installed_permissions: if let Some(access) = access {
+                access.installed_permissions(&setting.name)
+            } else {
+                self.bridge
+                    .installed_permissions(&setting.name)
+                    .map_err(|error| format!("install permission definitions: {error:?}"))?
+            },
             filter_application_query: self
                 .bridge
                 .application_query_filtering(&setting.name, setting.target_sdk_version)

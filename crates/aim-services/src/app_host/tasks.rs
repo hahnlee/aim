@@ -44,6 +44,12 @@ pub struct Task {
     launch: Option<String>,
 }
 
+impl Task {
+    fn is_locked(&self) -> bool {
+        false
+    }
+}
+
 /// The tasks, back to front, and the server's connection.
 #[derive(Default)]
 pub struct Tasks {
@@ -55,6 +61,16 @@ pub struct Tasks {
 }
 
 impl Tasks {
+    /// `ActivityTaskManagerInternal.isBaseOfLockedTask`: this task owner
+    /// has no lock task mode, so none of its tasks is locked.
+    pub(super) fn is_base_of_locked_task(&self, package: Option<&str>) -> bool {
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|task| Some(task.package.as_str()) == package && task.is_locked())
+    }
+
     /// Whether the display server shows a window per task.
     pub fn window_mode(&self) -> bool {
         self.windows.get().copied().unwrap_or(false)
@@ -502,12 +518,9 @@ impl AppHost {
     /// the task got.
     fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
         let min_dp = self
-            .inputs()
+            .framework()
             .ok()
-            .and_then(|i| {
-                i.packages
-                    .framework_dimension_dp("default_minimal_size_resizable_task")
-            })
+            .and_then(|i| i.framework_dimension_dp("default_minimal_size_resizable_task"))
             .ok_or("no default_minimal_size_resizable_task")? as i32;
         let density = self
             .display()

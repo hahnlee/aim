@@ -503,7 +503,7 @@ pub(super) enum Event {
 impl AppHost {
     /// `AppStandbyController.Injector.isAppIdleEnabled`.
     pub(super) fn app_idle_enabled(&self) -> Result<bool, Exception> {
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         let global = |name: &str| {
             inputs
                 .settings
@@ -512,8 +512,8 @@ impl AppHost {
                 .unwrap_or(1)
                 == 1
         };
-        Ok(inputs
-            .packages
+        Ok(self
+            .framework()?
             .framework_bool("config_enableAutoPowerModes")
             .unwrap_or(false)
             && global("app_standby_enabled")
@@ -799,7 +799,7 @@ impl AppHost {
                 "app standby with device admins or policies (#1723)",
             ));
         }
-        let inputs = self.inputs()?;
+        let inputs = self.platform()?;
         if inputs
             .settings
             .get(Table::Global, "network_recommendations_package")
@@ -829,7 +829,8 @@ impl AppHost {
         if self.bound_widget_packages(user)?.contains(package) {
             return Ok(STANDBY_BUCKET_ACTIVE);
         }
-        let config = |name: &str| inputs.packages.framework_string(name).unwrap_or_default();
+        let framework = self.framework()?;
+        let config = |name: &str| framework.framework_string(name).unwrap_or_default();
         if config("config_deviceProvisioningPackage") == package {
             return Ok(STANDBY_BUCKET_EXEMPTED);
         }

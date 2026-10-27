@@ -193,6 +193,12 @@ impl ClassPath {
         Ok(Classes::new(dexes))
     }
 
+    /// Whether the class path defines the class `descriptor` (a class
+    /// loader's `loadClass` finding it).
+    pub fn defines(&self, descriptor: &str) -> Result<bool, String> {
+        Ok(self.classes(None)?.index.contains_key(descriptor))
+    }
+
     pub fn hierarchy(&self) -> Result<Hierarchy, String> {
         let classes = self.classes(None)?;
         let mut parents = HashMap::new();

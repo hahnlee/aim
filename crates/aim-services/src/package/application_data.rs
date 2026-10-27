@@ -26,9 +26,14 @@ pub type Commit = Arc<dyn Fn(Arc<Capture>, Vec<Plan>, i32) -> Result<(), Excepti
 enum Observer {
     Remote(Strong),
     Local(LocalService),
+    Callback(Box<dyn FnOnce(bool) + Send>),
+}
+enum Completion {
+    Binder(Option<Binder>),
+    Callback(Box<dyn FnOnce(bool) + Send>),
 }
 impl Observer {
-    fn send(&self, name: Option<String>, succeeded: bool) -> Result<(), Exception> {
+    fn send(self, name: Option<String>, succeeded: bool) -> Result<(), Exception> {
         let mut data = Parcel::new();
         observer_api::OnRemoveCompleted {
             package_name: name,
@@ -36,6 +41,10 @@ impl Observer {
         }
         .write(&mut data);
         let result = match self {
+            Self::Callback(done) => {
+                done(succeeded);
+                return Ok(());
+            }
             Self::Remote(owner) => owner.transact(observer_api::ON_REMOVE_COMPLETED, &data, true),
             Self::Local(owner) => owner.transact(observer_api::ON_REMOVE_COMPLETED, &data, true),
         };
@@ -57,7 +66,7 @@ struct Task {
     execute: bool,
 }
 pub struct Owner {
-    bridge: Strong,
+    bridge: crate::system::ServiceOwner,
     process: Arc<LocalProcess>,
     current: Current,
     commit: Commit,
@@ -74,7 +83,7 @@ impl Owner {
         let _ = self.queue.send(None);
     }
     pub fn start(
-        bridge: Strong,
+        bridge: crate::system::ServiceOwner,
         process: Arc<LocalProcess>,
         current: Current,
         commit: Commit,
@@ -137,7 +146,7 @@ impl Owner {
         fill(&mut data);
         let reply = self
             .bridge
-            .transact(code, &data, false)
+            .transact_as_owner(code, &data, false)
             .map_err(transport)?;
         let mut reader = reply.reader();
         reader.read_exception().map_err(transport)??;
@@ -154,6 +163,35 @@ impl Owner {
         pid: i32,
         uid: i32,
         callback: Option<Binder>,
+        effects: &super::effects::Owner,
+    ) -> Result<(), Exception> {
+        self.clear_request(
+            package,
+            user,
+            pid,
+            uid,
+            Completion::Binder(callback),
+            effects,
+        )
+    }
+    pub(crate) fn clear_with_callback(
+        &self,
+        package: Option<String>,
+        user: i32,
+        pid: i32,
+        uid: i32,
+        done: Box<dyn FnOnce(bool) + Send>,
+        effects: &super::effects::Owner,
+    ) -> Result<(), Exception> {
+        self.clear_request(package, user, pid, uid, Completion::Callback(done), effects)
+    }
+    fn clear_request(
+        &self,
+        package: Option<String>,
+        user: i32,
+        pid: i32,
+        uid: i32,
+        callback: Completion,
         effects: &super::effects::Owner,
     ) -> Result<(), Exception> {
         self.call(
@@ -200,8 +238,8 @@ impl Owner {
             .as_deref()
             .map(|name| query.resolve_internal_package_name(name, -1))
             .and_then(|name| state.packages.get(&name));
-        let execute = setting
-            .is_some_and(|setting| super::info::user_state(setting, user).installed)
+        let execute = state.users.contains_key(&user)
+            && setting.is_some_and(|setting| super::info::user_state(setting, user).installed)
             && !query
                 .filtered(setting, uid, user)
                 .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error.0))?;
@@ -211,16 +249,19 @@ impl Owner {
                 package.as_deref().unwrap()
             )));
         }
-        let observer = callback
-            .map(|binder| match binder {
-                Binder::Handle(handle) => Ok(Observer::Remote(self.process.strong(handle))),
-                Binder::Local(ptr) => self
-                    .process
-                    .local_service(ptr)
-                    .map(Observer::Local)
-                    .ok_or_else(|| transport(BAD_VALUE)),
-            })
-            .transpose()?;
+        let observer = match callback {
+            Completion::Callback(done) => Some(Observer::Callback(done)),
+            Completion::Binder(callback) => callback
+                .map(|binder| match binder {
+                    Binder::Handle(handle) => Ok(Observer::Remote(self.process.strong(handle))),
+                    Binder::Local(ptr) => self
+                        .process
+                        .local_service(ptr)
+                        .map(Observer::Local)
+                        .ok_or_else(|| transport(BAD_VALUE)),
+                })
+                .transpose()?,
+        };
         self.queue
             .send(Some(Task {
                 package,
@@ -355,7 +396,7 @@ impl Owner {
         self.errors.lock().unwrap().clone()
     }
 }
-fn reset_components(state: &State, name: &str, user: i32) -> Vec<Plan> {
+pub(crate) fn reset_components(state: &State, name: &str, user: i32) -> Vec<Plan> {
     let Some(setting) = state.packages.get(name) else {
         return vec![];
     };

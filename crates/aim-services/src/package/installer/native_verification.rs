@@ -86,7 +86,7 @@ impl NativeOwners {
 impl NativeOwners {
     pub fn restore_native_staged_on_boot(
         &self,
-        leaf: &aim_binder_host::local::Strong,
+        leaf: &crate::system::ServiceOwner,
     ) -> Result<(), Exception> {
         use aim_service_aidl::dev_aim_server_ipackagebootlifecycleleaf as api;
         let staged = self

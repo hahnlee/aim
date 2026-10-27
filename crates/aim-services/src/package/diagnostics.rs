@@ -87,7 +87,7 @@ pub type UsagePublication =
 /// Concrete bootstrap inputs; all mutable package actions use the same native owners.
 pub struct Inputs {
     pub process: Arc<LocalProcess>,
-    pub maintenance: Arc<Strong>,
+    pub maintenance: Arc<crate::system::ServiceOwner>,
     pub effects: Arc<super::effects::Owner>,
     pub install_serial: Arc<Mutex<()>>,
     pub current: super::diagnostics_storage::Current,
@@ -100,7 +100,7 @@ pub struct Runtime {
     process: Arc<LocalProcess>,
     queue: Arc<Mutex<Option<mpsc::Sender<Job>>>>,
     errors: Arc<Mutex<Vec<String>>>,
-    bridge: Arc<Strong>,
+    bridge: Arc<crate::system::ServiceOwner>,
     art: Mutex<Option<(Binder, Target)>>,
     effects: Arc<super::effects::Owner>,
     install_serial: Arc<Mutex<()>>,
@@ -189,7 +189,7 @@ impl Runtime {
     }
     pub fn new(
         process: Arc<LocalProcess>,
-        bridge: Arc<Strong>,
+        bridge: Arc<crate::system::ServiceOwner>,
         effects: Arc<super::effects::Owner>,
         install_serial: Arc<Mutex<()>>,
         storage: Arc<super::diagnostics_storage::Owner>,
@@ -218,7 +218,7 @@ impl Runtime {
                         }
                         if let Some((sender,_capability))=free.sender {
                             let mut request=Parcel::new();bridge::SendFreeStorageResult {sender:Some(sender),success}.write(&mut request);
-                            match storage_bridge.transact(bridge::SEND_FREE_STORAGE_RESULT,&request,false) {
+                            match storage_bridge.transact_as_owner(bridge::SEND_FREE_STORAGE_RESULT,&request,false) {
                                 Err(status)=>callback_errors.lock().unwrap().push(format!("free-storage IntentSender transport: {status}")),
                                 Ok(reply)=>if let Err(error)=bridge::read_send_free_storage_result_reply(&mut reply.reader()).and_then(|result|result.map_err(|_|BAD_VALUE)) {callback_errors.lock().unwrap().push(format!("free-storage IntentSender reply: {error}"));}
                             }
@@ -228,7 +228,7 @@ impl Runtime {
                         let _install=storage_serial.lock().unwrap();
                         let mut request=Parcel::new();
                         bridge::ClearCacheFiles {package_name:cache.package.clone(),user_id:cache.user,can_access_instant_apps:cache.instant,calling_uid:cache.caller}.write(&mut request);
-                        let cleared=storage_bridge.transact(bridge::CLEAR_CACHE_FILES,&request,false)
+                        let cleared=storage_bridge.transact_as_owner(bridge::CLEAR_CACHE_FILES,&request,false)
                             .map_err(|status|format!("cache owner transport: {status}"))
                             .and_then(|reply|bridge::read_clear_cache_files_reply(&mut reply.reader()).map_err(|status|format!("cache owner reply: {status}")).and_then(|result|result.map_err(|error|error.message)));
                         drop(_install);
@@ -279,7 +279,7 @@ impl Runtime {
         code: u32,
     ) -> Result<aim_binder_host::local::Received, Exception> {
         self.bridge
-            .transact(code, request, false)
+            .transact_as_owner(code, request, false)
             .map_err(|status| {
                 Exception::new(
                     EX_ILLEGAL_STATE,

@@ -1,21 +1,19 @@
-//! Actual original PackageList/PackageObserverHelper references stay in their
-//! Java LocalServices owner; native publication sends only names and real UIDs.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{BAD_VALUE, Exception, Parcel},
-};
+//! PackageList observer references stay in their service owner: Java
+//! LocalServices in system_server, or the native registry in the app host.
+//! Publication sends only names and affected UIDs, outside publication locks.
+use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackageobservereventsbridge as api;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 pub struct Owner {
-    target: Strong,
+    target: crate::system::ServiceOwner,
     closed: AtomicBool,
     revoked: AtomicBool,
 }
 impl Owner {
-    pub fn new(target: Strong) -> Arc<Self> {
+    pub fn new(target: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             target,
             closed: AtomicBool::new(false),

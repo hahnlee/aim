@@ -1,22 +1,19 @@
 //! Original image LauncherApps/AppOps/graphics leaves for native archive queries.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
-use aim_service_aidl::{
-    ReadParcelable, WriteParcelable, dev_aim_server_iinstallerarchivequerybridge as api,
-};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
+use aim_service_aidl::{ReadParcelable, dev_aim_server_iinstallerarchivequerybridge as api};
 use std::{path::Path, sync::Arc};
 fn error(message: impl Into<String>) -> Exception {
     Exception::new(EX_ILLEGAL_STATE, message)
 }
 pub struct Leaf {
-    owner: Strong,
+    /// The archive query bridge: another process's node, or this
+    /// process's own where it serves the bootstrap bridge.
+    owner: crate::system::ServiceOwner,
     current: Arc<dyn Fn() -> Result<(), Exception> + Send + Sync>,
 }
 impl Leaf {
     pub fn new(
-        owner: Strong,
+        owner: crate::system::ServiceOwner,
         current: Arc<dyn Fn() -> Result<(), Exception> + Send + Sync>,
     ) -> Arc<Self> {
         Arc::new(Self { owner, current })
@@ -30,7 +27,7 @@ impl Leaf {
         (self.current)()?;
         let reply = self
             .owner
-            .transact(code, parcel, false)
+            .transact_as_owner(code, parcel, false)
             .map_err(|code| error(format!("archive query transport {code}")))?;
         let mut reader = reply.reader();
         reader

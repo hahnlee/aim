@@ -19,6 +19,7 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_media_imediarouter2 as router2;
 use aim_service_aidl::android_media_imediarouterservice as mr;
 
+use super::activity_user;
 use super::media_route_providers::{Providers, Told, visible};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::component_resolver::Info;
@@ -153,9 +154,14 @@ impl MediaRouter {
                 "packageName must match the calling uid",
             ));
         }
-        let user =
-            self.host
-                .handle_incoming_user(uid, user, false, true, Some("registerClientAsUser"))?;
+        let user = self.host.handle_incoming_user(
+            uid,
+            user,
+            false,
+            activity_user::AllowMode::FullOnly,
+            Some("registerClientAsUser"),
+            None,
+        )?;
         let trusted = self
             .host
             .check_permission(Some(CONFIGURE_WIFI_DISPLAY), uid)?
@@ -434,7 +440,7 @@ impl Service for MediaRouter {
             mr::SET_SELECTED_ROUTE => {
                 let a = mr::SetSelectedRoute::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let packages = &self.host.inputs()?.packages;
+                    let packages = self.host.framework()?;
                     let string = |name: &str| {
                         packages.framework_string(name).ok_or_else(|| {
                             Exception::new(

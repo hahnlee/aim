@@ -3,7 +3,7 @@
 use super::*;
 use crate::package::domain_verification::{self as domain, original_bridge};
 use aim_service_aidl::{
-    ReadParcelable, dev_aim_server_ipackagebootstrapbridge as bootstrap,
+    dev_aim_server_ipackagebootstrapbridge as bootstrap,
     dev_aim_server_ipackagedomainsettings as leaf,
     dev_aim_server_ipackagedomainsettingschanged as callback,
 };
@@ -16,7 +16,9 @@ struct State {
 pub struct Runtime {
     system: Weak<System>,
     bridge: Arc<crate::package::bootstrap::Bridge>,
-    leaf: Strong,
+    /// The original domain settings: another process's node, or this
+    /// process's own where it serves the bootstrap bridge.
+    leaf: ServiceOwner,
     state: Mutex<State>,
     lifecycle: Mutex<()>,
     lifecycle_done: std::sync::Condvar,
@@ -65,7 +67,7 @@ impl Runtime {
                 .write(&mut request);
                 let reply = self
                     .leaf
-                    .transact(leaf::RECONCILE_PACKAGES, &request, false)
+                    .transact_as_owner(leaf::RECONCILE_PACKAGES, &request, false)
                     .map_err(|status| failure(format!("domain lifecycle transport: {status}")))?;
                 leaf::read_reconcile_packages_reply(&mut reply.reader())
                     .map_err(|status| failure(format!("domain lifecycle reply: {status}")))?
@@ -97,7 +99,7 @@ impl Runtime {
         leaf::Close {}.write(&mut request);
         let reply = self
             .leaf
-            .transact(leaf::CLOSE, &request, false)
+            .transact_as_owner(leaf::CLOSE, &request, false)
             .map_err(|status| failure(format!("domain close transport: {status}")))?;
         leaf::read_close_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain close reply: {status}")))?
@@ -272,8 +274,7 @@ impl System {
             .owner()
             .xml_projection();
         let record = original_bridge::encode(&before).map_err(failure)?;
-        let owner =
-            self.package_bootstrap_binder_leaf(bridge, bootstrap::GET_PACKAGE_DOMAIN_SETTINGS)?;
+        let owner = self.package_bootstrap_node(bridge, bootstrap::GET_PACKAGE_DOMAIN_SETTINGS)?;
         let runtime = Arc::new(Runtime {
             system: Arc::downgrade(self),
             bridge: bridge.clone(),
@@ -303,7 +304,7 @@ impl System {
         .write(&mut request);
         let reply = runtime
             .leaf
-            .transact(leaf::SEED, &request, false)
+            .transact_as_owner(leaf::SEED, &request, false)
             .map_err(|status| failure(format!("domain seed transport: {status}")))?;
         leaf::read_seed_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain seed reply: {status}")))??;
@@ -311,7 +312,7 @@ impl System {
         leaf::Capture {}.write(&mut request);
         let reply = runtime
             .leaf
-            .transact(leaf::CAPTURE, &request, false)
+            .transact_as_owner(leaf::CAPTURE, &request, false)
             .map_err(|status| failure(format!("domain export transport: {status}")))?;
         let record = leaf::read_capture_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain export reply: {status}")))??

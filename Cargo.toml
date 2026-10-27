@@ -14,6 +14,7 @@ members = [
     "crates/aim-android-xml",
     "crates/aim-input-transport",
     "crates/aim-meminfo",
+    "crates/aim-f2fs",
     "crates/aim-emulated-storage",
     "crates/aim-ashmem",
     "crates/aim-apps",
@@ -81,6 +82,7 @@ default-members = [
     "crates/aim-android-xml",
     "crates/aim-input-transport",
     "crates/aim-meminfo",
+    "crates/aim-f2fs",
     "crates/aim-emulated-storage",
     "crates/aim-ashmem",
     "crates/aim-apps",
@@ -131,6 +133,7 @@ binder = { path = "hal/binder" }
 daemon-log = { path = "daemons/log" }
 aim-input-transport = { path = "crates/aim-input-transport" }
 aim-meminfo = { path = "crates/aim-meminfo" }
+aim-f2fs = { path = "crates/aim-f2fs" }
 aim-emulated-storage = { path = "crates/aim-emulated-storage" }
 libc = "0.2"
 log = "0.4"

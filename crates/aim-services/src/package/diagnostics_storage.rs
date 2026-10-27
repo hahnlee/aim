@@ -5,17 +5,14 @@ use super::{
     query::Query,
     scan_snapshot::query_state::Capture,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagemaintenancebridge as api;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub type Current = Arc<dyn Fn() -> Result<Arc<Capture>, Exception> + Send + Sync>;
 
 pub struct Owner {
-    bridge: Arc<Strong>,
+    bridge: Arc<crate::system::ServiceOwner>,
     current: Current,
     delete: Arc<super::installer::removal::Controller>,
     installer: Arc<super::installer::native::NativeOwners>,
@@ -32,7 +29,7 @@ impl From<Exception> for Error {
 }
 impl Owner {
     pub fn new(
-        bridge: Arc<Strong>,
+        bridge: Arc<crate::system::ServiceOwner>,
         current: Current,
         delete: Arc<super::installer::removal::Controller>,
         installer: Arc<super::installer::native::NativeOwners>,
@@ -56,7 +53,7 @@ impl Owner {
         write(&mut request);
         let reply = self
             .bridge
-            .transact(code, &request, false)
+            .transact_as_owner(code, &request, false)
             .map_err(|status| {
                 Exception::new(
                     EX_ILLEGAL_STATE,

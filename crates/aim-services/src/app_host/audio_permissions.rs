@@ -3,12 +3,12 @@
 //! checks its callers' permissions against the state its
 //! `INativePermissionController` is given, so on audioserver's start the
 //! app host gives it each app id's packages and, for each permission it
-//! monitors (`PermissionEnum`), the uids holding it. Packages are not
-//! added and permissions not changed while the app host runs, so nothing
-//! updates it later.
+//! monitors (`PermissionEnum`), the uids holding it. Package effects and
+//! committed permission changes repopulate the running controller.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::Parcel;
@@ -44,20 +44,120 @@ const MONITORED_PERMS: [&str; 16] = [
 const USERS: [i32; 1] = [0];
 
 impl AppHost {
+    pub(super) fn refresh_audio_permissions(
+        &self,
+    ) -> Result<(), aim_binder_host::parcel::Exception> {
+        let _refresh = self.audio_permission_update.lock().unwrap();
+        let controller = self
+            .audio_permission_controller
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(controller, _)| controller.clone());
+        let Some(controller) = controller else {
+            return Ok(());
+        };
+        self.populate_audio_permissions(&controller).map_err(|e| {
+            aim_binder_host::parcel::Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("audioserver permissions: {e}"),
+            )
+        })
+    }
+
+    pub(super) fn audio_permission_service_started(
+        &self,
+        controller: Strong,
+    ) -> Result<(), String> {
+        let _refresh = self.audio_permission_update.lock().unwrap();
+        let controller = Arc::new(controller);
+        // Install the identity before linking: an already-dead controller can
+        // deliver its death notice immediately.
+        let previous = self
+            .audio_permission_controller
+            .lock()
+            .unwrap()
+            .replace((controller.clone(), 0));
+        if let Some((previous, cookie)) = previous {
+            self.process.clear_death(&previous, cookie);
+        }
+        let weak = self.me.clone();
+        let watched = Arc::downgrade(&controller);
+        let death = self.process.link_to_death(
+            &controller,
+            Box::new(move || {
+                // Reconnect off the Binder death dispatcher, as AudioService's handler does.
+                if let Some(host) = weak.upgrade() {
+                    std::thread::spawn(move || {
+                        let mut held = host.audio_permission_controller.lock().unwrap();
+                        if !held
+                            .as_ref()
+                            .is_some_and(|(current, _)| watched.ptr_eq(&Arc::downgrade(current)))
+                        {
+                            return;
+                        }
+                        *held = None;
+                        drop(held);
+                        let reconnected = host.reconnect_audio_permissions();
+                        if let Err(e) = reconnected {
+                            eprintln!("app host: audioserver permissions: restart: {e}");
+                        }
+                    });
+                }
+            }),
+        );
+        let retained = {
+            let mut held = self.audio_permission_controller.lock().unwrap();
+            if let Some((current, cookie)) = held.as_mut()
+                && Arc::ptr_eq(current, &controller)
+            {
+                *cookie = death;
+                true
+            } else {
+                false
+            }
+        };
+        if !retained {
+            self.process.clear_death(&controller, death);
+        }
+        self.populate_audio_permissions(&controller)
+    }
+
+    fn reconnect_audio_permissions(&self) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + super::audio_policy::PATIENCE;
+        loop {
+            // ServiceManager may still return the retired policy's Binder while
+            // processing its death; wait for a live controller, not just a name.
+            match super::audio_policy::AudioPolicy::connect(&self.process)
+                .and_then(|policy| policy.permission_controller(&self.process))
+            {
+                Ok(controller) => return self.audio_permission_service_started(controller),
+                Err(error) if std::time::Instant::now() >= deadline => return Err(error),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+    }
+
     /// `onServiceStart`: `controller` given every app id's packages
     /// (`resetNativePackageState`), then each monitored permission's
     /// holders (`getUidsHoldingPerm`, as `checkComponentPermission`
     /// answers).
     pub(super) fn populate_audio_permissions(&self, controller: &Strong) -> Result<(), String> {
-        let packages = {
-            let (state, _) = self.packages().map_err(|e| format!("{e:?}"))?;
-            package_mappings(
-                state
-                    .packages
-                    .values()
-                    .map(|ps| (ps.app_id, ps.name.clone())),
-            )
-        };
+        let capture = self.package_capture().map_err(|e| e.message)?;
+        let packages = package_mappings(
+            capture
+                .state()
+                .packages
+                .values()
+                .filter(|ps| ps.app_id >= 0)
+                .map(|ps| (ps.app_id, ps.name.clone())),
+        );
+        let permissions = self
+            .permission_manager
+            .get()
+            .ok_or("no permissionmgr")?
+            .audio_permission_holders(&capture, &MONITORED_PERMS, &USERS, packages.keys().copied())
+            .map_err(|e| e.message)?;
         let mut data = Parcel::new();
         data.write_interface_token(DESCRIPTOR);
         write_package_states(&mut data, &packages);
@@ -67,20 +167,7 @@ impl AppHost {
             "populatePackagesForUids",
             &data,
         )?;
-        for (perm, name) in MONITORED_PERMS.iter().enumerate() {
-            let mut uids = Vec::new();
-            for user in USERS {
-                for &app_id in packages.keys() {
-                    let uid = user * super::PER_USER_RANGE as i32 + app_id;
-                    if self
-                        .check_component_permission(Some(name), uid, -1, true)
-                        .map_err(|e| format!("{e:?}"))?
-                    {
-                        uids.push(uid);
-                    }
-                }
-            }
-            uids.sort_unstable();
+        for (perm, uids) in permissions.into_iter().enumerate() {
             let mut data = Parcel::new();
             data.write_interface_token(DESCRIPTOR);
             // `PermissionEnum`, a byte enum, written as an int.

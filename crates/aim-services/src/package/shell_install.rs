@@ -19,7 +19,6 @@ use aim_service_aidl::{
 };
 use std::{
     collections::VecDeque,
-    os::fd::AsFd,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
@@ -1155,7 +1154,7 @@ mod retained_install_file_tests {
     use std::{
         fs::OpenOptions,
         io::{Read, Seek, SeekFrom, Write},
-        os::fd::AsRawFd,
+        os::fd::{AsFd, AsRawFd},
         sync::Weak,
     };
     struct Incoming(u32);

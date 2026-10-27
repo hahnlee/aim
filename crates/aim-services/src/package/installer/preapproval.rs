@@ -1,9 +1,6 @@
 //! Native preapproval state and original SDK presentation callbacks (AOSP Apache-2.0).
-use aim_binder_host::{
-    local::Strong,
-    parcel::{
-        BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
-    },
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::{
     ReadParcelable, WriteParcelable, dev_aim_server_iinstallerexternalbridge as aidl,
@@ -41,7 +38,7 @@ pub struct Status {
     pub pending_installer: Option<String>,
 }
 pub struct BridgeOwner {
-    owner: Strong,
+    owner: crate::system::ServiceOwner,
     closed: std::sync::atomic::AtomicBool,
 }
 pub struct Icon {
@@ -65,7 +62,7 @@ fn transport(code: i32) -> Exception {
     )
 }
 impl BridgeOwner {
-    pub fn new(owner: Strong) -> Arc<Self> {
+    pub fn new(owner: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             owner,
             closed: std::sync::atomic::AtomicBool::new(false),

@@ -10,12 +10,9 @@ use crate::{
         },
         write::Apks,
     },
-    system::System,
+    system::{ServiceOwner, System},
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::{
     dev_aim_server_iinstallerpolicybridge as api,
     dev_aim_server_ipackagemaintenancebridge as maintenance,
@@ -33,7 +30,9 @@ fn illegal(message: impl Into<String>) -> Exception {
 struct DeviceOwner {
     system: std::sync::Weak<System>,
     bridge: Arc<Bridge>,
-    leaf: Strong,
+    /// The flags' owner: another process's node, or this process's own
+    /// where it serves the bridge.
+    leaf: ServiceOwner,
     permissions: CallingPermissions,
 }
 impl DeviceOwner {
@@ -53,7 +52,7 @@ impl DeviceOwner {
         request.write_interface_token(api::DESCRIPTOR);
         let reply = self
             .leaf
-            .transact(api::GET_POLICY_FLAGS, &request, false)
+            .transact_as_owner(api::GET_POLICY_FLAGS, &request, false)
             .map_err(|status| illegal(format!("installer flag owner transport: {status}")))?;
         let mut reader = reply.reader();
         reader
@@ -145,7 +144,7 @@ impl DeviceOwner {
 pub fn policy_source(
     system: &Arc<System>,
     bridge: &Arc<Bridge>,
-    leaf: Strong,
+    leaf: ServiceOwner,
 ) -> Result<PolicySource, Exception> {
     system.check_package_bootstrap(bridge)?;
     let permissions = permission_source(system, bridge)?;
@@ -170,7 +169,7 @@ pub fn permission_source(
         error => illegal(format!("installer permission bridge owner: {error:?}")),
     })?;
     let reply = leaf
-        .transact(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
+        .transact_as_owner(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
         .map_err(|status| {
             illegal(format!(
                 "installer permission descriptor transport: {status}"
@@ -202,7 +201,7 @@ pub fn permission_source(
         }
         .write(&mut request);
         let reply = leaf
-            .transact(maintenance::CHECK_PERMISSION, &request, false)
+            .transact_as_owner(maintenance::CHECK_PERMISSION, &request, false)
             .map_err(|status| illegal(format!("installer permission owner transport: {status}")))?;
         let mut reader = reply.reader();
         let granted = maintenance::read_check_permission_reply(&mut reader)

@@ -12,7 +12,7 @@ impl System {
         bootstrap::GetPackageLaunchBridge {}.write(&mut request);
         let reply = bridge
             .owner
-            .transact(bootstrap::GET_PACKAGE_LAUNCH_BRIDGE, &request, false)
+            .transact_as_owner(bootstrap::GET_PACKAGE_LAUNCH_BRIDGE, &request, false)
             .map_err(|status| unreachable_service("package launch bridge", status))?;
         let mut reader = reply.reader();
         let binder = bootstrap::read_get_package_launch_bridge_reply(&mut reader)
@@ -23,14 +23,16 @@ impl System {
                 "launch bridge reply tail",
             ));
         }
-        let node = reply
-            .retain_remote_binder(binder.ok_or_else(|| {
+        let node = ServiceOwner::retain(
+            &reply,
+            binder.ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "launch bridge unavailable",
                 )
-            })?)
-            .map_err(|status| unreachable_service("package launch bridge", status))?;
+            })?,
+        )
+        .map_err(|status| unreachable_service("package launch bridge", status))?;
         let node = Arc::new(node);
         let retained = bridge.clone();
         let system = Arc::downgrade(self);
@@ -62,7 +64,7 @@ impl System {
                 }
                 .write(&mut payload);
                 let serialized = node
-                    .transact(intent::BUILD_LAUNCH_INTENT, &payload, false)
+                    .transact_as_owner(intent::BUILD_LAUNCH_INTENT, &payload, false)
                     .map_err(|status| unreachable_service("launch intent serializer", status))?;
                 let mut reader = serialized.reader();
                 let bytes = intent::read_build_launch_intent_reply(&mut reader)

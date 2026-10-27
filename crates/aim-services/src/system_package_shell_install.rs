@@ -4,7 +4,6 @@ use aim_service_aidl::{
     ReadParcelable, dev_aim_server_ipackagebootstrapbridge as bootstrap,
     dev_aim_server_ipackageshellinstallpolicy as api,
 };
-use std::os::fd::AsFd;
 struct InputFile(aim_binder_driver::File);
 impl aim_service_aidl::WriteParcelable for InputFile {
     fn write_to(&self, p: &mut Parcel) {
@@ -31,10 +30,10 @@ impl System {
     ) -> Result<aim_binder_host::local::Received> {
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner = self
-            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_INSTALL_POLICY)?;
+        let owner =
+            self.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_SHELL_INSTALL_POLICY)?;
         let reply = owner
-            .transact(code, request, false)
+            .transact_as_owner(code, request, false)
             .map_err(shell_install_transport)?;
         self.check_package_bootstrap(&bridge)?;
         Ok(reply)

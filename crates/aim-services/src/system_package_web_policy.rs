@@ -7,8 +7,9 @@ use aim_service_aidl::{
 };
 
 pub struct Runtime {
-    owner: Strong,
-    policy: Arc<Owner>,
+    owner: ServiceOwner,
+    /// Keeps the policy's strong owner alive so the Weak callback can upgrade it.
+    _policy: Arc<Owner>,
     callback: Binder,
     started: Mutex<Option<Result<()>>>,
     closed: std::sync::atomic::AtomicBool,
@@ -25,7 +26,7 @@ impl Runtime {
         leaf::Stop {}.write(&mut request);
         let reply = self
             .owner
-            .transact(leaf::STOP, &request, false)
+            .transact_as_owner(leaf::STOP, &request, false)
             .map_err(|status| error(format!("web watcher stop: {status}")))?;
         let mut reader = reply.reader();
         leaf::read_stop_reply(&mut reader)
@@ -86,7 +87,7 @@ impl System {
             // Original systemReady registers both observers, then co.onChange.
             let reply = runtime
                 .owner
-                .transact(leaf::START, &request, false)
+                .transact_as_owner(leaf::START, &request, false)
                 .map_err(|status| error(format!("web watcher start: {status}")))?;
             let mut reader = reply.reader();
             leaf::read_start_reply(&mut reader)
@@ -115,12 +116,11 @@ impl System {
         {
             return Ok(runtime);
         }
-        let node =
-            self.package_bootstrap_binder_leaf(bridge, bootstrap::GET_WEB_INSTANT_APPS_STATE)?;
+        let node = self.package_bootstrap_node(bridge, bootstrap::GET_WEB_INSTANT_APPS_STATE)?;
         let mut request = Parcel::new();
         leaf::Capture {}.write(&mut request);
         let reply = node
-            .transact(leaf::CAPTURE, &request, false)
+            .transact_as_owner(leaf::CAPTURE, &request, false)
             .map_err(|status| error(format!("web policy capture: {status}")))?;
         let mut reader = reply.reader();
         let bytes = leaf::read_capture_reply(&mut reader)
@@ -148,7 +148,7 @@ impl System {
         }));
         let runtime = Arc::new(Runtime {
             owner: node,
-            policy,
+            _policy: policy,
             callback,
             started: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
