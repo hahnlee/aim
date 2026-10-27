@@ -113,6 +113,14 @@ fn main() {
     // inherits every descriptor not closed on exec.
     let inherited_fds = aim_linux_abi::sys::open_fds();
     let internal_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if internal_args == ["--memfd-lifetime"] {
+        aim_storage::inherited::close_above_stdio();
+        if let Err(error) = aim_linux_abi::sys::serve_memfd_lifetime() {
+            eprintln!("linux-run: memfd lifetime: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if internal_args
         .first()
         .is_some_and(|arg| arg == "--fuse-broker")

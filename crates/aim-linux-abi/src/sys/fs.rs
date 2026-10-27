@@ -2305,6 +2305,9 @@ struct LinuxFlock {
 }
 
 fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
+    if let Err(error) = memfd::sync_locks(fd) {
+        return -(error as i64);
+    }
     if matches!(cmd, F_GETLK | F_SETLK | F_SETLKW) && super::posix_locks::configured() {
         let mut bytes = match super::fsverity_ioctl::read::<32>(arg) {
             Ok(bytes) => bytes,

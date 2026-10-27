@@ -16,12 +16,14 @@
 //! Opening `/proc/<pid>/fd/N` of a memfd opens its file again: a new open
 //! file description, with its own access mode and offset, as on Linux.
 //! Darwin cannot open an unlinked file, so the file keeps its name in
-//! [`dir`] while an fd refers to it. Each open file description holds a
-//! shared `flock` on the file; one no description holds is unreferenced,
-//! and a sweep that can take the exclusive lock removes its name. Its
-//! mappings, if any, stay valid. A guest `flock` on a memfd works on the
-//! same lock, so `LOCK_UN` makes a memfd sweepable early (it then cannot be
-//! reopened) and `LOCK_EX` conflicts with a reopened description (#258).
+//! [`dir`] while an fd refers to it. A native keeper pins each new open
+//! description and uses Darwin's PROC_FP_SHARED to recognize its last
+//! external reference, including descriptors queued in sockets. It drops
+//! the pin and reference attribute then, and removes an unreferenced name.
+//! Guest flock and record locks have no part in liveness. A keeper crash
+//! leaves its attributes and names retained conservatively; unversioned
+//! files from the former flock scheme are also left alone. Mappings of an
+//! unlinked file remain valid.
 //!
 //! Darwin refuses executable views of file-backed shared memory (ADR 0012,
 //! "Platform probes"). ART's JIT maps one memfd twice, RW and RX. When a
@@ -62,6 +64,10 @@ use super::fdtab::{self, Kind};
 use super::vmmap;
 use crate::errno::{self, EINVAL, EPERM};
 
+mod lifetime;
+
+pub(crate) use lifetime::serve as serve_lifetime;
+
 const MFD_CLOEXEC: u64 = 1;
 const MFD_ALLOW_SEALING: u64 = 2;
 const MFD_HUGETLB: u64 = 4;
@@ -93,7 +99,7 @@ const VIEW_ATTR: &str = "dev.aim.memfd.view.";
 /// on start (#446). The processes that make many memfds sweep for all.
 const SWEEP_EVERY: u32 = 64;
 /// Periodic sweeps leave recent files alone; lifecycle sweeps additionally
-/// require our mark, which the creator installs only after taking its lock.
+/// require our mark, which the creator installs after registering its pin.
 const SWEEP_MIN_AGE: i64 = 5;
 
 /// (device, inode) of the backing file.
@@ -212,10 +218,15 @@ pub fn adopt(fd: i32) {
 }
 
 /// Take this description's reference on the file.
-fn hold(fd: i32) {
-    // SAFETY: plain flock on our fd; a guest's exclusive lock only
-    // leaves the file sweepable.
-    unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) };
+fn hold(fd: i32) -> Result<(), errno::Errno> {
+    lifetime::hold(fd)
+}
+
+pub fn sync_locks(fd: i32) -> Result<(), errno::Errno> {
+    if memfd_stat(fd).is_some() {
+        lifetime::sync()?;
+    }
+    Ok(())
 }
 
 fn set_seals(fd: i32, seals: u32) -> i64 {
@@ -241,6 +252,10 @@ fn read_seals(fd: i32) -> u32 {
 
 /// The names of the file's attributes.
 fn attr_names(fd: i32) -> Vec<String> {
+    try_attr_names(fd).unwrap_or_default()
+}
+
+fn try_attr_names(fd: i32) -> Result<Vec<String>, errno::Errno> {
     let mut buf = vec![0u8; 1024];
     loop {
         // SAFETY: listing attributes into our buffer of its length.
@@ -252,12 +267,15 @@ fn attr_names(fd: i32) -> Vec<String> {
             buf.resize(size.max(buf.len() as isize * 2) as usize, 0);
             continue;
         }
-        return buf[..n.max(0) as usize]
+        if n < 0 {
+            return Err(errno::last());
+        }
+        return Ok(buf[..n as usize]
             .split(|&c| c == 0)
             .filter_map(|a| std::str::from_utf8(a).ok())
             .filter(|a| !a.is_empty())
             .map(str::to_string)
-            .collect();
+            .collect());
     }
 }
 
@@ -306,24 +324,25 @@ fn set_attr(fd: Option<i32>, path: Option<&std::path::Path>, name: &str, value: 
 
 /// Before a shared view of memfd `fd` that may be written: this process
 /// puts its [`VIEW_ATTR`] on the file once, while holding [`StateLock`].
-fn note_viewer(k: Key, fd: i32) {
+fn note_viewer(k: Key, fd: i32) -> Result<(), i64> {
     if !with(|m| m.get(&k).is_some_and(|f| f.viewer.is_some())) {
         let mut path = [0u8; libc::PATH_MAX as usize];
         // SAFETY: F_GETPATH into a buffer of PATH_MAX bytes.
-        let path =
-            (unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } == 0).then(|| {
-                let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
-                PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end]))
-            });
-        let me = std::process::id();
-        if set_attr(Some(fd), None, &format!("{VIEW_ATTR}{me}"), "") {
-            with(|m| {
-                if let Some(f) = m.get_mut(&k) {
-                    f.viewer = path.or_else(|| Some(PathBuf::new()));
-                }
-            });
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
+            return Err(-(errno::last() as i64));
         }
+        let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end]));
+        let me = std::process::id();
+        let value = with(|m| m.get(&k).and_then(|f| f.anon))
+            .map(|(base, size)| format!("{base:x}:{size:x}"))
+            .unwrap_or_default();
+        if !set_attr(Some(fd), None, &format!("{VIEW_ATTR}{me}"), &value) {
+            return Err(-(errno::last() as i64));
+        }
+        with(|m| m.get_mut(&k).unwrap().viewer = Some(path));
     }
+    Ok(())
 }
 
 /// The inode lock is separate from guest flock and record locks. Keep it
@@ -337,21 +356,24 @@ impl Drop for StateLock {
 }
 
 fn state_lock() -> Result<StateLock, i64> {
+    state_lock_io().map_err(|e| -(errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)) as i64))
+}
+
+fn state_lock_io() -> std::io::Result<StateLock> {
     let _own = super::fork::spawn::own_fds();
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir().join(".state-lock"))
-        .map_err(|e| -(errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)) as i64))?;
+        .open(dir().join(".state-lock"))?;
     let file = StateLock(unsafe { OwnedFd::from_raw_fd(fdtab::hide(file.into_raw_fd())) });
     loop {
         if unsafe { libc::flock(file.0.as_raw_fd(), libc::LOCK_EX) } == 0 {
             return Ok(file);
         }
         if errno::last() != errno::EINTR {
-            return Err(-(errno::last() as i64));
+            return Err(std::io::Error::last_os_error());
         }
     }
 }
@@ -483,6 +505,12 @@ fn viewed_writable_elsewhere(fd: i32, k: Key) -> bool {
 /// Remove the names of memfd files in `dir` no open file description
 /// refers to, unless younger than `min_age` seconds.
 fn sweep(dir: &std::path::Path, min_age: i64) -> u64 {
+    if lifetime::sync().is_err() {
+        return 0;
+    }
+    let Ok(_lock) = state_lock() else {
+        return 0;
+    };
     let mut removed = 0;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -494,22 +522,21 @@ fn sweep(dir: &std::path::Path, min_age: i64) -> u64 {
         let Ok(p) = CString::new(e.path().into_os_string().into_encoded_bytes()) else {
             continue;
         };
-        // SAFETY: probing a file of our directory; the name goes only when
-        // the exclusive lock shows nothing holds it.
+        // SAFETY: probing our directory; only versioned files with no
+        // keeper reference attributes can be reclaimed.
         unsafe {
             let fd = libc::open(
                 p.as_ptr(),
-                libc::O_RDONLY
-                    | libc::O_NONBLOCK
-                    | libc::O_CLOEXEC
-                    | libc::O_EXLOCK
-                    | libc::O_NOFOLLOW,
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             );
             if fd < 0 {
                 continue;
             }
             if let Some(st) = stat_fd(fd)
                 && marked(&st)
+                && attr_text(fd, lifetime::FORMAT).as_deref() == Some("1")
+                && try_attr_names(fd)
+                    .is_ok_and(|names| !names.iter().any(|a| a.starts_with(lifetime::REFERENCE)))
                 && now - st.st_birthtime >= min_age
             {
                 let mut named: libc::stat = std::mem::zeroed();
@@ -589,7 +616,13 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     if fd < 0 {
         return -(errno::last() as i64);
     }
-    hold(fd);
+    if let Err(error) = hold(fd) {
+        unsafe {
+            libc::close(fd);
+            libc::unlink(tmpl.as_ptr().cast());
+        }
+        return -(error as i64);
+    }
     fdtab::set_flags(fd, false, flags & MFD_CLOEXEC != 0);
     let mut seals = 0;
     if flags & (MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL) == 0 {
@@ -668,7 +701,7 @@ fn read_noexec_scope() -> Result<u32, errno::Errno> {
 
 fn parse_noexec(bytes: &[u8]) -> Result<u32, errno::Errno> {
     let text = std::str::from_utf8(bytes).map_err(|_| EINVAL)?;
-    text.trim()
+    text.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\0')
         .parse::<u32>()
         .ok()
         .filter(|&n| n <= 2)
@@ -684,10 +717,10 @@ pub fn open_noexec(write: bool, cloexec: bool) -> i64 {
         Ok(scope) => scope,
         Err(error) => return -(error as i64),
     };
-    if !write {
-        return super::procfs::content_fd(format!("{scope}\n").as_bytes(), cloexec);
-    }
-    super::knob::open(format!("{scope}\n").as_bytes(), cloexec, |bytes| {
+    super::knob::open(format!("{scope}\n").as_bytes(), cloexec, move |bytes| {
+        if !write {
+            return Err(errno::EBADF);
+        }
         let value = parse_noexec(bytes)?;
         let _guard = state_lock().map_err(|error| -error as i32)?;
         let (host, area) = crate::vfs::lookup(NOEXEC_SYSCTL);
@@ -751,7 +784,12 @@ pub fn reopen(fd: i32, host_flags: i32) -> Option<i64> {
         unsafe { libc::close(new) };
         return Some(-(libc::ENOENT as i64));
     }
-    hold(new);
+    if let Err(error) = hold(new) {
+        unsafe {
+            libc::close(new);
+        }
+        return Some(-(error as i64));
+    }
     know(key_of(&st), fd);
     fdtab::insert(new, Kind::Memfd(key_of(&st)));
     if let Err(error) = fdtab::publish_guest(new) {
@@ -786,22 +824,28 @@ fn mapped_writable(k: Key) -> bool {
 /// A new shared view `[base, base + len)` of `fd` with protection `prot`:
 /// read-only while a write seal is set, it may never be written
 /// (`memfd_check_seals_mmap` clears `VM_MAYWRITE`).
-pub fn seal_view(fd: i32, base: u64, len: u64, prot: i32) {
+pub fn seal_view(fd: i32, base: u64, len: u64, prot: i32) -> Result<(), i64> {
     if prot & libc::PROT_WRITE == 0
-        && seals(fd).is_some_and(|s| s & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0)
+        && (unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE == libc::O_RDONLY
+            || seals(fd).is_some_and(|s| s & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0))
     {
         // SAFETY: lowering the maximum protection of our own new view.
-        if let Some(view) = vmmap::info_at(base) {
-            unsafe {
-                crate::patch::vm::mach_vm_protect(
-                    crate::patch::vm::task(),
-                    base,
-                    len,
-                    1,
-                    view.max_prot as i32 & !libc::PROT_WRITE,
-                )
-            };
-        }
+        let view = vmmap::info_at(base).ok_or(-(errno::ENOMEM as i64))?;
+        max_protect(base, len, view.max_prot as i32 & !libc::PROT_WRITE)?;
+    }
+    Ok(())
+}
+
+fn max_protect(base: u64, len: u64, prot: i32) -> Result<(), i64> {
+    let view = vmmap::info_at(base).ok_or(-(errno::ENOMEM as i64))?;
+    if view.max_prot as i32 == prot {
+        return Ok(());
+    }
+    // SAFETY: lowering maximum protection of our own mapping.
+    match unsafe { crate::patch::vm::mach_vm_protect(crate::patch::vm::task(), base, len, 1, prot) } {
+        0 => Ok(()),
+        2 /* KERN_PROTECTION_FAILURE */ => Err(-(errno::EACCES as i64)),
+        _ => Err(-(errno::ENOMEM as i64)),
     }
 }
 
@@ -996,15 +1040,7 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
         // SAFETY: restoring the view's protection.
         unsafe { libc::mprotect(v.start as *mut _, (v.end - v.start) as usize, v.prot as i32) };
         // Conversion must keep VM_MAYWRITE, including a write seal's denial.
-        unsafe {
-            crate::patch::vm::mach_vm_protect(
-                crate::patch::vm::task(),
-                v.start,
-                v.end - v.start,
-                1,
-                v.usage.max_prot as i32,
-            )
-        };
+        max_protect(v.start, v.end - v.start, v.usage.max_prot as i32)?;
     }
     let path = with(|m| m.get(&k).and_then(|f| f.viewer.clone()));
     if !set_attr(
@@ -1012,7 +1048,8 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
         path.as_deref(),
         &format!("{VIEW_ATTR}{}", std::process::id()),
         &format!("{base:x}:{size:x}"),
-    ) {
+    ) && !(fd.is_none() && errno::last() == errno::ENOENT)
+    {
         return Err(-(errno::last() as i64));
     }
     with(|m| {
@@ -1102,8 +1139,13 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
     // A shared view of a description open for writing may be written
     // (`VM_MAYWRITE`), whatever its protection now.
     // SAFETY: plain fcntl.
-    if unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE == libc::O_RDWR {
-        note_viewer(k, fd);
+    if prot & libc::PROT_WRITE != 0
+        && unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE != libc::O_RDWR
+    {
+        return Shared::Done(-(errno::EACCES as i64));
+    }
+    if let Err(error) = note_viewer(k, fd) {
+        return Shared::Done(error);
     }
     let seals = read_seals(fd);
     if prot & libc::PROT_WRITE != 0 && seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
@@ -1135,7 +1177,12 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
     if unsafe { libc::mprotect(target as *mut _, len as usize, prot) } < 0 {
         return Shared::Done(-(errno::last() as i64));
     }
-    seal_view(fd, target, len, prot);
+    if let Err(error) = seal_view(fd, target, len, prot) {
+        unsafe {
+            libc::munmap(target as *mut _, len as usize);
+        }
+        return Shared::Done(error);
+    }
     Shared::Done(target as i64)
 }
 
@@ -1316,7 +1363,7 @@ mod tests {
         ) else {
             panic!("not converted");
         };
-        assert!(view > 0);
+        assert!(view > 0, "executable shared mapping: {view}");
         // SAFETY: the view is readable and `size` long; the writable view
         // now maps the same memory.
         unsafe {
@@ -1431,6 +1478,31 @@ mod tests {
         assert_eq!(due, [63, 127, 191]);
     }
 
+    /// Entry point used only by the native keeper's test executable.
+    #[test]
+    fn lifetime_worker() {
+        let st = stat_fd(0).unwrap();
+        if st.st_mode & libc::S_IFMT == libc::S_IFSOCK {
+            aim_storage::inherited::close_above_stdio();
+            lifetime::serve().unwrap();
+        }
+    }
+
+    #[test]
+    fn lifetime_crash_fixture() {
+        let Some(st) = memfd_stat(0) else {
+            return;
+        };
+        assert!(marked(&st));
+        hold(0).unwrap();
+        println!("ready");
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
     #[test]
     fn lifecycle_sweep_collects_crashed_short_process() {
         use std::io::{BufRead, BufReader};
@@ -1438,6 +1510,10 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("aim-memfd-crash-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
+        let file = std::fs::File::create(directory.join("short-process")).unwrap();
+        unsafe {
+            libc::fchflags(file.as_raw_fd(), MARK);
+        }
         struct ChildGuard(std::process::Child);
         impl Drop for ChildGuard {
             fn drop(&mut self) {
@@ -1445,24 +1521,32 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
-        let mut child = ChildGuard(Command::new("python3")
-            .args(["-c", "import os,sys,fcntl,stat,time; p=sys.argv[1]; f=os.open(p,os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600); fcntl.flock(f,fcntl.LOCK_SH); os.chflags(p,stat.UF_NODUMP|stat.UF_HIDDEN); os.write(f,b'fixture'); print('ready',flush=True); time.sleep(60)"])
-            .arg(directory.join("short-process"))
-            .stdout(Stdio::piped())
-            .spawn().unwrap());
-        let mut ready = String::new();
-        BufReader::new(child.0.stdout.take().unwrap())
-            .read_line(&mut ready)
-            .unwrap();
-        assert_eq!(ready.trim(), "ready");
-        assert_eq!(sweep(&directory, 0), 0);
-        assert_eq!(
-            std::fs::read(directory.join("short-process")).unwrap(),
-            b"fixture"
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sys::memfd::tests::lifetime_crash_fixture",
+                    "--nocapture",
+                ])
+                .stdin(Stdio::from(file))
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
         );
+        let mut reader = BufReader::new(child.0.stdout.take().unwrap());
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line.trim() == "ready" {
+                break;
+            }
+        }
+        assert_eq!(sweep(&directory, 0), 0);
+        assert!(directory.join("short-process").exists());
         child.0.kill().unwrap();
         child.0.wait().unwrap();
-        assert_eq!(sweep(&directory, 0), 1);
+        // The keeper, rather than the crashed process, releases the name.
+        sweep(&directory, 0);
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
         std::fs::remove_dir(directory).unwrap();
     }
@@ -1483,10 +1567,18 @@ mod tests {
         unsafe {
             libc::fchflags(held.as_raw_fd(), MARK);
             libc::fchflags(free.as_raw_fd(), MARK);
+            libc::fsetxattr(
+                free.as_raw_fd(),
+                lifetime::FORMAT.as_ptr(),
+                c"1".as_ptr().cast(),
+                1,
+                0,
+                0,
+            );
         }
         drop(free);
         use std::os::fd::AsRawFd;
-        hold(held.as_raw_fd());
+        hold(held.as_raw_fd()).unwrap();
         // Younger than a day: an age no run of the test can reach, however
         // loaded the host.
         assert_eq!(sweep(&d, 86_400), 0);
@@ -1500,13 +1592,18 @@ mod tests {
         let reopened = reopen(held.as_raw_fd(), libc::O_RDONLY | libc::O_CLOEXEC).unwrap();
         assert!(reopened >= 0);
         unsafe { libc::close(reopened as i32) };
-        // Unlocking the description rather than closing it: a child another
-        // test forks meanwhile may hold a copy of it.
+        // Guest flock operations cannot release the keeper's reference.
         // SAFETY: our fd.
         unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) };
         sweep(&d, 0);
-        assert!(!d.join("held").exists());
+        assert!(d.join("held").exists());
+        assert_eq!(
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
         drop(held);
+        sweep(&d, 0);
+        assert!(!d.join("held").exists());
         std::fs::remove_file(d.join("unrelated")).unwrap();
         std::fs::remove_dir(&d).unwrap();
     }

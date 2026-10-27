@@ -560,7 +560,12 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
             Ok(b) => {
                 if let Some((k, _guard)) = memfd {
                     super::memfd::note_view(k, b, len, off);
-                    super::memfd::seal_view(fd, b, len, host_prot(prot));
+                    if let Err(error) = super::memfd::seal_view(fd, b, len, host_prot(prot)) {
+                        unsafe {
+                            libc::munmap(b as *mut _, len as usize);
+                        }
+                        return error;
+                    }
                 }
                 (b, Finish::Nothing)
             }

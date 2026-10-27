@@ -138,6 +138,11 @@ pub fn sweep_unused_memfds() -> u64 {
     memfd::sweep_unused()
 }
 
+/// Internal native owner of memfd open-description references.
+pub fn serve_memfd_lifetime() -> std::io::Result<()> {
+    memfd::serve_lifetime()
+}
+
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Relaxed);
 }

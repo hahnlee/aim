@@ -5,6 +5,20 @@ mod common {
 use common::runtime::{Boot, Data, run};
 use std::{fs, process::Command, time::Duration};
 
+fn backings() -> Vec<std::path::PathBuf> {
+    let entries = match fs::read_dir(std::env::temp_dir().join("aim-memfd")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("memfd backing directory: {error}"),
+    };
+    entries
+        .map(|entry| entry.unwrap())
+        .filter(|entry| !entry.file_name().as_encoded_bytes().starts_with(b"."))
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| entry.path())
+        .collect()
+}
+
 fn ready(boot: &Boot) {
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300))
@@ -32,6 +46,8 @@ fn stop_and_crash_start_reclaim_memfd_backings() {
         aim_paths::root().join("target/release/aimctl"),
         data.0.join("g"),
     );
+    // Legacy backings are deliberately retained by the new lifetime owner.
+    let existing: std::collections::HashSet<_> = backings().into_iter().collect();
     ready(&boot);
     fs::copy(&program, boot.data.join("data/local/tmp/memfd-probe")).unwrap();
     struct ChildGuard(std::process::Child);
@@ -54,10 +70,7 @@ fn stop_and_crash_start_reclaim_memfd_backings() {
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line.trim(), "ready");
-    let before = fs::read_dir(std::env::temp_dir().join("aim-memfd"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect::<Vec<_>>();
+    let before = backings();
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     run(boot.command().arg("stop"));
@@ -98,9 +111,9 @@ fn stop_and_crash_start_reclaim_memfd_backings() {
             .then(|| pid.parse().unwrap())
         })
         .collect();
-    let crashed_backings: Vec<_> = fs::read_dir(std::env::temp_dir().join("aim-memfd"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
+    let crashed_backings: Vec<_> = backings()
+        .into_iter()
+        .filter(|path| !existing.contains(path))
         .collect();
     assert!(!crashed_backings.is_empty());
     assert_eq!(unsafe { libc::getpgid(keeper) }, keeper);

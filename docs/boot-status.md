@@ -7404,10 +7404,16 @@ directory at its first memfd_create (2.2 ms with 48 memfds alive; 49
 calls in a boot averaged 2.9 ms). Guest-init now sweeps unused backing files
 once at instance startup and after stopping its processes (#1008);
 `linux-run --sweep-memfds` performs the same owner cleanup between batches.
-It requires the memfd mark, an exclusive nonblocking lock and matching inode
-before unlinking; live descriptors and cross-process reopening retain their
-backing names. The creator takes its shared lock before marking the file, so
-cleanup also collects newly released files without a five-second delay.
+As of 2026-10-28 (#258), a native memfd keeper holds one reference per open
+description and uses Darwin's `PROC_FP_SHARED` to see its last external
+reference, including descriptors queued in sockets. Guest flock no longer
+affects liveness. The keeper reclaims released names; a sweep additionally
+requires the memfd mark, the lifetime-format attribute, no remaining keeper
+reference attributes and a matching inode. Files from the former flock scheme
+and files left by a crashed keeper are retained conservatively. The keeper
+runs outside guest process groups and exits after its references are gone.
+Targeted NDK and native unit tests pass without an Android boot; boot lifecycle
+integration has not been rerun with this change.
 The accumulated 93,754 unused files occupied 65.568 GiB; owner cleanup
 reclaimed them and restored approximately 78 GiB of free space.
 
@@ -8007,8 +8013,14 @@ The host's security agent did not flag or block any of the four boots
   (traced_probes' aborts were its memory watchdog reading four times its
   rss from `/proc`, now counted in the guest's 16 KiB pages): on
   2026-10-21 both kept their pids for 14 minutes after boot (#230).
-- #258 remaining memfd seal gaps; #261 app data lost on a second boot of
-  the same data directory.
+- #258: the memfd NDK suites pass on 2026-10-28 for shared-view write denial
+  through executable conversion, cross-process seal/mmap exclusion (including
+  anonymous executable aliases and inherited views), exec-sealed chmod,
+  `vm.memfd_noexec` scopes 0–2 and validated writes, and flock-independent
+  lifetime through dup and queued SCM_RIGHTS. No Android boot was run. A
+  separate pre-existing lock mismatch remains: Darwin guest flock and OFD
+  record locks can conflict where Linux keeps them independent (#258).
+- #261 app data lost on a second boot of the same data directory.
 
 ## Network (2026-09-28)
 

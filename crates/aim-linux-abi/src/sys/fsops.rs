@@ -1594,6 +1594,9 @@ pub fn flock(a: [u64; 6]) -> i64 {
     if matches!(pinned.kind(), Some(super::fdtab::Kind::Path(_))) {
         return -(crate::errno::EBADF as i64);
     }
+    if let Err(error) = memfd::sync_locks(pinned.descriptor().as_raw_fd()) {
+        return -(error as i64);
+    }
     errno::check(unsafe { libc::flock(pinned.descriptor().as_raw_fd(), a[1] as i32) } as i64)
 }
 

@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -295,6 +296,19 @@ static void seals_and_views(void) {
   munmap(ro, PAGE);
   munmap(before, PAGE);
   close(fd);
+  // A read-only description's executable alias cannot write the file.
+  fd = memfd_create("readonly-exec", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+  int readonly = reopen(fd, O_RDONLY);
+  CHECK(readonly >= 0);
+  void* rx = mmap(NULL, PAGE, PROT_READ | PROT_EXEC, MAP_SHARED, readonly, 0);
+  CHECK(rx != MAP_FAILED);
+  errno = 0;
+  CHECK(mprotect(rx, PAGE, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
+  munmap(rx, PAGE);
+  close(readonly);
+  close(fd);
 }
 
 // A view that may be written keeps F_SEAL_WRITE out in whichever process
@@ -435,6 +449,69 @@ static void exec_seal_chmod(void) {
   close(noexec);
 }
 
+static void flock_and_lifetime(void) {
+  int fd = memfd_create("flock", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0);
+  CHECK(flock(fd, LOCK_UN) == 0);
+  // Make the file eligible for the periodic sweep, then force a sweep.
+  sleep(6);
+  for (int i = 0; i < 64; ++i) {
+    int sweep = memfd_create("sweep", MFD_CLOEXEC);
+    CHECK(sweep >= 0);
+    close(sweep);
+  }
+  int other = reopen(fd, O_RDWR);
+  CHECK(other >= 0);
+  // Merely reopening a file takes no guest lock.
+  CHECK(flock(fd, LOCK_EX | LOCK_NB) == 0);
+  errno = 0;
+  CHECK(flock(other, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK);
+  int copy = dup(fd);
+  CHECK(copy >= 0);
+  close(fd);
+  errno = 0;
+  CHECK(flock(other, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK);
+  close(copy);
+  // The keeper must release the last closed description's lock first.
+  CHECK(flock(other, LOCK_EX | LOCK_NB) == 0);
+  CHECK(flock(other, LOCK_UN) == 0);
+  int record = reopen(other, O_RDWR);
+  CHECK(record >= 0);
+  struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+  CHECK(fcntl(record, F_OFD_SETLK, &lock) == 0);
+  lock.l_type = F_WRLCK;
+  errno = 0;
+  CHECK(fcntl(other, F_OFD_SETLK, &lock) == -1 && errno == EAGAIN);
+  close(record);
+  CHECK(fcntl(other, F_OFD_SETLK, &lock) == 0);
+  close(other);
+
+  // A description queued in a socket still references the memfd.
+  int sv[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) == 0);
+  fd = memfd_create("queued", MFD_CLOEXEC);
+  CHECK(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
+  CHECK(send_fd(sv[0], fd) == 0);
+  close(fd);
+  for (int i = 0; i < 64; ++i) {
+    int sweep = memfd_create("sweep", MFD_CLOEXEC);
+    CHECK(sweep >= 0);
+    close(sweep);
+  }
+  fd = recv_fd(sv[1]);
+  CHECK(fd >= 0);
+  other = reopen(fd, O_RDWR);
+  CHECK(other >= 0);
+  errno = 0;
+  CHECK(flock(other, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK);
+  CHECK(flock(fd, LOCK_UN) == 0);
+  CHECK(flock(other, LOCK_EX | LOCK_NB) == 0);
+  close(other);
+  close(fd);
+  close(sv[0]);
+  close(sv[1]);
+}
+
 static int scope;
 
 // The exec bits of a memfd made with `flags`, and its seals; -1 if
@@ -454,6 +531,8 @@ static void noexec_sysctl_read(void) {
   int fd = open("/proc/sys/vm/memfd_noexec", O_RDONLY | O_CLOEXEC);
   CHECK(fd >= 0);
   CHECK(read(fd, value, sizeof value - 1) > 0 && atoi(value) == scope);
+  errno = 0;
+  CHECK(write(fd, "1", 1) == -1 && errno == EBADF);
   close(fd);
 }
 
@@ -499,6 +578,17 @@ static void noexec_sysctl_write(void) {
   }
   scope = 2;
   noexec_sysctl_read();
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    int seals;
+    if (make(MFD_EXEC, &seals) != -1 || errno != EACCES) _exit(2);
+    if (make(0, &seals) != 0 || seals != F_SEAL_EXEC) _exit(3);
+    if (setuid(12345) != 0) _exit(4);
+    if (open("/proc/sys/vm/memfd_noexec", O_WRONLY) != -1 || errno != EACCES) _exit(5);
+    _exit(0);
+  }
+  int status;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
   CHECK(pwrite(fd, "0", 1, 0) == 1);
   close(fd);
   scope = 0;
@@ -514,6 +604,7 @@ int main(int argc, char** argv) {
     DONE();
   }
   RUN(reopen_proc_self_fd);
+  RUN(noexec_sysctl_read);
   RUN(seal_rules);
   RUN(seals_across_dup);
   RUN(seals_across_fork);
@@ -522,5 +613,6 @@ int main(int argc, char** argv) {
   RUN(views_in_other_processes);
   RUN(seal_races_mmap);
   RUN(exec_seal_chmod);
+  RUN(flock_and_lifetime);
   DONE();
 }
