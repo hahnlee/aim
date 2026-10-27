@@ -1322,6 +1322,9 @@ fn ftruncate_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     ftruncate_private(&pinned, a[1] as i64, id)
 }
 fn ftruncate_private(pinned: &super::fdtab::Pinned, len: i64, id: &super::cred::Identity) -> i64 {
+    if matches!(pinned.kind(), Some(super::fdtab::Kind::ProcMem(open)) if open.mode == 0) {
+        return -(EINVAL as i64);
+    }
     let fd = pinned.descriptor().as_raw_fd();
     if super::fs::is_path_fd(fd) {
         return -(crate::errno::EBADF as i64);
@@ -1462,6 +1465,7 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
     }
     if flags & libc::O_ACCMODE == libc::O_RDONLY
         || matches!(pinned.kind(),Some(super::fdtab::Kind::Regular(description))if !matches!(description.flags&3,1|2))
+        || matches!(pinned.kind(),Some(super::fdtab::Kind::ProcMem(open))if !matches!(open.mode,1|2))
     {
         return -(crate::errno::EBADF as i64);
     }
@@ -1478,6 +1482,9 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
     };
     if off.checked_add(len).is_none() {
         return -EFBIG;
+    }
+    if super::proc_mem::is_mem(fd) {
+        return -(crate::errno::EOPNOTSUPP as i64);
     }
     if mode == FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE {
         if memfd::write_sealed(fd) {
@@ -1542,6 +1549,9 @@ pub fn fsync(a: [u64; 6]) -> i64 {
     fsync_private(&pinned)
 }
 fn fsync_private(pinned: &super::fdtab::Pinned) -> i64 {
+    if super::proc_mem::is_mem(pinned.descriptor().as_raw_fd()) {
+        return -(EINVAL as i64);
+    }
     let fd = pinned.descriptor().as_raw_fd();
     if super::fs::is_path_fd(fd) {
         return -(crate::errno::EBADF as i64);

@@ -328,6 +328,68 @@ pub fn remote_vm(write: bool, pid: i32, local: &[(u64, u64)], remote: &[(u64, u6
     done
 }
 
+/// PTRACE_MODE_ATTACH_FSCREDS was checked by procfs; the agent checks
+/// dumpability and supplies the identity of its current address space.
+pub(super) fn open_mem(pid: i32) -> Result<[u8; 16], i64> {
+    let bytes = call_result(
+        pid,
+        &request(agent::MEM_OPEN, |w| w.bool(cred::capable(CAP_SYS_PTRACE))),
+    )?;
+    Reader::new(&bytes)
+        .bytes()
+        .try_into()
+        .map_err(|_| -(EIO as i64))
+}
+
+pub(super) fn mem_io(
+    pid: i32,
+    epoch: [u8; 16],
+    address: u64,
+    count: usize,
+    write: bool,
+    data: &[u8],
+) -> (i64, Vec<u8>) {
+    let req = request(agent::MEM_IO, |w| {
+        w.bytes(&epoch);
+        w.u64(address);
+        w.u32(count as u32);
+        w.bool(write);
+        w.bytes(data);
+    });
+    let mut result = call(pid, &req);
+    if matches!(result, Err(e) if e == -(ESRCH as i64)) {
+        // A relaunch closes the old connection. Reconnect once if the host
+        // process is still live; the mm identity decides whether it is EOF.
+        match aim_storage::process_namespace::ProcessIdentity::running_strict(pid) {
+            Ok(process) if process.is_live() => result = call(pid, &req),
+            Ok(_) => return (0, Vec::new()),
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ESRCH | libc::ENOENT)) => {
+                return (0, Vec::new());
+            }
+            Err(error) => {
+                return (
+                    -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64),
+                    Vec::new(),
+                );
+            }
+        }
+    }
+    match result {
+        Ok((n, rest)) if n >= 0 && n as usize <= count => {
+            let bytes = Reader::new(&rest).bytes();
+            if !write && bytes.len() != n as usize {
+                return (-(EIO as i64), Vec::new());
+            }
+            (n, bytes)
+        }
+        Ok((n, _)) if n < 0 => (n, Vec::new()),
+        Err(e) if e != -(ESRCH as i64) => (e, Vec::new()),
+        // A live process whose agent cannot serve the request is an I/O
+        // error, not an empty read of an exited address space.
+        _ => (-(EIO as i64), Vec::new()),
+    }
+}
+
 /// prlimit64 setting another process's limit `res`, which the process
 /// applies (`cred::own_rlimit`): the limit before. The caller has checked
 /// `check_prlimit_permission`; `may_raise` is its CAP_SYS_RESOURCE.

@@ -1778,7 +1778,7 @@ pub fn resolve_jit(request: JitFault) -> FaultResult {
             };
         }
     }
-    resolve_page(map, request.address, request.access, true)
+    resolve_page(map, request.address, request.access, true, false)
 }
 
 pub struct Registration {
@@ -2056,7 +2056,7 @@ pub fn resolve(intent: &FaultIntent) -> FaultResult {
             FaultResult::Retry
         };
     }
-    resolve_page(map, intent.address, intent.access, false)
+    resolve_page(map, intent.address, intent.access, false, false)
 }
 /// Resolve lazy user pages before a kernel copy, outside descriptor/VM locks.
 pub fn prepare_user_range(
@@ -2102,7 +2102,38 @@ pub fn prepare_user_range(
     }
     Ok(())
 }
-fn resolve_page(map: &Mapping, address: u64, access: Access, jit: bool) -> FaultResult {
+/// Fault in a debugger's page without requiring its current guest protection.
+/// FOLL_FORCE bypasses that protection, never the source's verity proof. Called
+/// before descriptor locks, just like prepare_user_range.
+pub(super) fn prepare_debug_page(address: u64) -> Result<(), crate::errno::Errno> {
+    loop {
+        let Some(intent) = fault_intent(address, Access::Read) else {
+            return Ok(());
+        };
+        let result = if intent.pending {
+            resolve(&intent)
+        } else if let Some(request) = intent.jit_request().map_err(|_| crate::errno::EIO)? {
+            drop(intent);
+            resolve_jit(request)
+        } else {
+            let map = unsafe { &*intent.mapping };
+            resolve_page(map, address, Access::Read, false, true)
+        };
+        match result {
+            FaultResult::Verified | FaultResult::Unowned => return Ok(()),
+            FaultResult::Retry => {}
+            FaultResult::Permission | FaultResult::Bus { .. } => return Err(crate::errno::EIO),
+        }
+    }
+}
+
+fn resolve_page(
+    map: &Mapping,
+    address: u64,
+    access: Access,
+    jit: bool,
+    forced: bool,
+) -> FaultResult {
     if map.failed.load(Ordering::Acquire) {
         return FaultResult::Bus { address };
     }
@@ -2116,7 +2147,7 @@ fn resolve_page(map: &Mapping, address: u64, access: Access, jit: bool) -> Fault
     let page = address & !(PAGE - 1);
     let index = ((page - map.base) / PAGE) as usize;
     let protection = ready[index].protection;
-    if protection & access.protection() == 0 {
+    if !forced && protection & access.protection() == 0 {
         return FaultResult::Permission;
     }
     if ready[index].ready {
@@ -2581,6 +2612,32 @@ mod tests {
             source.clone(),
         )
         .unwrap();
+        // /proc/pid/mem may read PROT_NONE, but must fault in authenticated
+        // bytes through this owner rather than aliasing the empty reservation.
+        let forced = register(
+            base + PAGE * 2,
+            PAGE,
+            0,
+            libc::PROT_NONE,
+            false,
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::proc_mem::transfer(
+                super::super::proc_mem::epoch(),
+                base + PAGE * 2,
+                8,
+                false,
+                &[]
+            ),
+            (8, vec![37; 8])
+        );
+        assert_eq!(
+            super::super::vmmap::info_at(base + PAGE * 2).unwrap().prot & 7,
+            0
+        );
+        drop(forced);
         assert!(fault_intent(base + PAGE * 2, Access::Read).is_none());
         let first = fault_intent(base + 17, Access::Read).unwrap();
         assert_eq!(

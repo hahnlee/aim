@@ -62,6 +62,7 @@ mod park;
 mod pidns;
 mod poll;
 pub(crate) mod posix_locks;
+mod proc_mem;
 mod process;
 mod procfs;
 mod procrec;

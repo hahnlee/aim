@@ -26,6 +26,7 @@ use crate::vfs::{self, Area};
 pub enum Node {
     File(Vec<u8>),
     NetTable(String),
+    Mem(i32),
     MountTable {
         host_pid: i32,
         info: bool,
@@ -101,6 +102,9 @@ fn pid() -> i32 {
 
 /// Guest path of an open host fd.
 pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
+    if let Some(Kind::ProcMem(open)) = fdtab::get(fd) {
+        return Ok(format!("/proc/{}/mem", open.guest_pid));
+    }
     if let Some(p) = crate::xrt::original_guest_path(fd) {
         return Ok(p);
     }
@@ -999,6 +1003,7 @@ const PID_ENTRIES: &[(&str, u8)] = &[
     ("attr", dir::DT_DIR),
     ("cgroup", dir::DT_REG),
     ("cmdline", dir::DT_REG),
+    ("mem", dir::DT_REG),
     ("comm", dir::DT_REG),
     ("cwd", dir::DT_LNK),
     ("environ", dir::DT_REG),
@@ -1178,6 +1183,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
             }
             Node::NetTable(kind.to_owned())
         }
+        "mem" => Node::Mem(p),
         "cmdline" => Node::File(cmdline(p)),
         "cgroup" => Node::File(super::cgroup::proc_cgroup(p, thread.unwrap_or(p)).into_bytes()),
         "comm" => {
@@ -1819,7 +1825,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     if let Some(node) = super::fuse_sysfs::node(guest) {
         return Some(match node {
             Ok(Node::Dir(entries)) => dir_fd(guest, entries, flags & O_CLOEXEC != 0),
-            Ok(Node::File(_) | Node::NetTable(_) | Node::MountTable { .. }) => {
+            Ok(Node::File(_) | Node::NetTable(_) | Node::MountTable { .. } | Node::Mem(_)) => {
                 -(errno::EACCES as i64)
             }
             Ok(Node::Link(_)) => -(errno::EINVAL as i64),
@@ -1947,6 +1953,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         });
     }
     Some(match node(&canon) {
+        Some(Node::Mem(pid)) => super::proc_mem::open(pid, flags),
         Some(Node::MountTable { host_pid, info }) => {
             if write {
                 return Some(-(EACCES as i64));
@@ -2143,6 +2150,10 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     st.st_mtime = now;
     st.st_ctime = now;
     match node(&canon) {
+        Some(Node::Mem(_)) => {
+            st.st_mode = libc::S_IFREG | 0o600;
+            st.st_nlink = 1;
+        }
         Some(Node::File(_)) if canon == super::memfd::NOEXEC_SYSCTL => {
             st.st_mode = libc::S_IFREG | 0o644;
             st.st_nlink = 1;

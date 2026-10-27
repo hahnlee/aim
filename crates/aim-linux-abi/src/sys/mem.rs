@@ -260,6 +260,9 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
     if matches!(held.kind(), Some(super::fdtab::Kind::Path(_))) {
         return -(crate::errno::EBADF as i64);
     }
+    if matches!(held.kind(), Some(super::fdtab::Kind::ProcMem(_))) {
+        return -(crate::errno::ENODEV as i64);
+    }
     let identity = match held.kind() {
         Some(super::fdtab::Kind::Regular(description)) => Some(description.identity),
         _ => None,

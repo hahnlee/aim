@@ -37,6 +37,8 @@ pub(super) const STOPPED: u32 = 14;
 pub(super) const SIGNAL: u32 = 15;
 pub(super) const SMAPS: u32 = 17;
 pub(super) const RLIMIT: u32 = 18;
+pub(super) const MEM_OPEN: u32 = 19;
+pub(super) const MEM_IO: u32 = 20;
 
 const NT_PRSTATUS: u32 = 1;
 const NT_PRFPREG: u32 = 2;
@@ -485,6 +487,23 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
                 Ok(None) => reply(0, |_| {}),
                 Err(e) => err(e),
             }
+        }
+        MEM_OPEN => {
+            if !(misc::dumpable() || r.bool()) {
+                return err(crate::errno::EACCES);
+            }
+            reply(0, |w| w.bytes(&crate::sys::proc_mem::epoch()))
+        }
+        MEM_IO => {
+            let Ok(epoch) = r.bytes().try_into() else {
+                return err(EINVAL);
+            };
+            let (address, count, write, data) = (r.u64(), r.u32() as usize, r.bool(), r.bytes());
+            if count > crate::sys::mem::PAGE as usize || write && data.len() != count {
+                return err(EINVAL);
+            }
+            let (n, bytes) = crate::sys::proc_mem::transfer(epoch, address, count, write, &data);
+            reply(n, |w| w.bytes(&bytes))
         }
         VM => vm(r),
         SIGNAL => {
