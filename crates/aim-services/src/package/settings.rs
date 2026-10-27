@@ -1231,7 +1231,7 @@ fn required<T>(e: &Element, name: &str, v: Option<T>) -> Result<T, String> {
     v.ok_or_else(|| format!("<{}> without {name}", e.name))
 }
 
-fn read_permission(out: &mut Vec<Permission>, item: &Element) {
+pub(crate) fn read_permission(out: &mut Vec<Permission>, item: &Element) {
     if item.name != "item" {
         return;
     }

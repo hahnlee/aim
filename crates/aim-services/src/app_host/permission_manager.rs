@@ -26,6 +26,7 @@
 
 mod boot;
 mod install;
+mod migration;
 mod policy;
 mod removal;
 
@@ -1542,9 +1543,11 @@ impl PermissionManager {
     fn system(&self) -> Result<Arc<AccessSystem>, Exception> {
         let mut owner = self.owner.lock().unwrap();
         if owner.system.is_none() {
-            owner.system = Some(Arc::new(
-                self.read_access(SYSTEM_ACCESS, AccessSystem::parse)?,
-            ));
+            let system = match self.read_access(SYSTEM_ACCESS, AccessSystem::parse)? {
+                Some(system) => system,
+                None => self.migrate_system()?,
+            };
+            owner.system = Some(Arc::new(system));
         }
         Ok(owner.system.as_ref().unwrap().clone())
     }
@@ -1563,15 +1566,9 @@ impl PermissionManager {
         &self,
         path: &str,
         parse: impl Fn(&aim_android_xml::Element) -> Result<T, String>,
-    ) -> Result<T, Exception> {
+    ) -> Result<Option<T>, Exception> {
         crate::package::atomic(&self.host.data()?.join(path), parse)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
-            .ok_or_else(|| {
-                self.host.unimplemented_named(
-                    "permissionmgr",
-                    &format!("{path}: access state migration without access.abx (#2168)"),
-                )
-            })
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 
     /// `PermissionService.writeLegacyPermissionsTEMP` / `toLegacyPermissions`.
@@ -1583,7 +1580,15 @@ impl PermissionManager {
     fn user0(&self) -> Result<Arc<AccessUser>, Exception> {
         let mut owner = self.owner.lock().unwrap();
         if owner.user0.is_none() {
-            owner.user0 = Some(Arc::new(self.read_access(USER0_ACCESS, AccessUser::parse)?));
+            let user = self
+                .read_access(USER0_ACCESS, AccessUser::parse)?
+                .ok_or_else(|| {
+                    self.host.unimplemented_named(
+                        "permissionmgr",
+                        "AppIdPermissionMigration.migrateUserState (#1508)",
+                    )
+                })?;
+            owner.user0 = Some(Arc::new(user));
         }
         Ok(owner.user0.as_ref().unwrap().clone())
     }
@@ -1864,12 +1869,14 @@ impl PermissionManager {
     }
 
     fn write_system(&self, state: &AccessSystem) -> Result<(), Exception> {
-        let path = self.host.data()?.join(SYSTEM_ACCESS);
-        let backup = path.with_extension("abx.bak");
-        let bytes = std::fs::read(if backup.exists() { &backup } else { &path })
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
-        let root = aim_android_xml::read(&bytes)
-            .and_then(|root| permissions::with_system_permissions(root, state))
+        let root = self
+            .read_access(SYSTEM_ACCESS, |root| Ok(root.clone()))?
+            .unwrap_or_else(|| aim_android_xml::Element {
+                name: "access".into(),
+                attrs: Vec::new(),
+                content: Vec::new(),
+            });
+        let root = permissions::with_system_permissions(root, state)
             .and_then(|root| aim_android_xml::abx::write(&root))
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         self.write_access(SYSTEM_ACCESS, &root)
@@ -1878,6 +1885,7 @@ impl PermissionManager {
     fn write_access(&self, relative: &str, bytes: &[u8]) -> Result<(), Exception> {
         let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{relative}: {e}"));
         let path = self.host.data()?.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| fail(e.to_string()))?;
         let backup = path.with_extension("abx.bak");
         // New files of the system's, under system_server's umask (077).
         let owner = aim_storage::guest_inode::GuestInode {
@@ -2484,7 +2492,7 @@ mod tests {
 
     pub(super) struct PersistedAccess {
         pub(super) host: Arc<AppHost>,
-        data: std::path::PathBuf,
+        pub(super) data: std::path::PathBuf,
     }
 
     impl PersistedAccess {
@@ -2703,7 +2711,7 @@ mod tests {
     }
 
     /// AccessPersistence's backup wins; a malformed document tries the reserve
-    /// copy. Missing access is the migration boundary, not an empty grant set.
+    /// copy. Malformed modern state must never fall back to legacy migration.
     #[test]
     fn persisted_access_errors_and_atomic_recovery() {
         let fixture = PersistedAccess::new();
@@ -2716,10 +2724,6 @@ mod tests {
                     manager.gids_for_uid(10123, &Default::default()).map(|_| ())
                 }
             };
-            let missing = read().unwrap_err();
-            assert_eq!(missing.code, EX_UNSUPPORTED_OPERATION);
-            assert!(missing.message.contains("#2168"));
-            assert!(missing.message.contains(path));
             fixture.write(path, xml);
             std::fs::write(fixture.data.join(format!("{path}.bak")), b"broken").unwrap();
             assert_eq!(read().unwrap_err().code, EX_ILLEGAL_STATE);
@@ -2734,7 +2738,13 @@ mod tests {
             fixture.write(&format!("{path}.reservecopy"), xml);
             read().unwrap();
             std::fs::remove_file(fixture.data.join(path)).unwrap();
-            assert_eq!(read().unwrap_err().code, EX_UNSUPPORTED_OPERATION);
+            if path == SYSTEM_ACCESS {
+                read().unwrap();
+            } else {
+                let missing = read().unwrap_err();
+                assert_eq!(missing.code, EX_UNSUPPORTED_OPERATION);
+                assert!(missing.message.contains("migrateUserState"));
+            }
         }
     }
 

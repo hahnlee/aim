@@ -201,9 +201,9 @@ launches, and `pm uninstall` removes its code and data; each survives a
 reboot. Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. `pm install <file>` (#2178), archiving (#1757), internal event delivery
-and shutdown statistics (#2167), permission state without `access.abx`
-(#2168), boot admissions into the permission policy (#2169) and the remaining
+and shutdown statistics (#2167), boot admissions into the permission policy (#2169) and the remaining
 bootstrap owners (#2022) are open.
+Without system `access.abx`, the app-host permission manager migrates legacy definitions and trees from `packages.xml` and persists the registry (#2168); focused tests cover migration and reload without a guest boot, while the separate user-state migration remains unimplemented.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
