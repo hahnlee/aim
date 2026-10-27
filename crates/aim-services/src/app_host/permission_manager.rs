@@ -539,54 +539,6 @@ fn single_permission_granted(
                 .is_some_and(|p| p.protection_level & PROTECTION_FLAG_INSTANT != 0))
 }
 
-/// `PermissionService.getGrantedPermissions` against validated package owners.
-fn granted_permissions(
-    state: &State,
-    defined: &[Permission],
-    user0: &AccessUser,
-    package: &str,
-    app_id: i32,
-    user: i32,
-) -> Result<Vec<String>, Exception> {
-    let ps = state
-        .packages
-        .get(package)
-        .filter(|ps| ps.shared_user_app_id.unwrap_or(ps.app_id) == app_id)
-        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission UID owner differs"))?;
-    if !state.users.contains_key(&user) || !ps.users.contains_key(&user) {
-        return Err(Exception::new(
-            EX_ILLEGAL_STATE,
-            "permission user owner differs",
-        ));
-    }
-    // The access owner has user 0's state alone.
-    if user != 0 {
-        return Ok(Vec::new());
-    }
-    let Some((_, flags)) = user0
-        .app_id_permissions
-        .iter()
-        .find(|(id, _)| *id == app_id)
-    else {
-        return Ok(Vec::new());
-    };
-    let instant = info::user_state(ps, user).instant_app;
-    let single = |name: &str| {
-        let flags = flags
-            .iter()
-            .find(|(n, _)| n == name)
-            .map_or(0, |(_, flags)| *flags);
-        single_permission_granted(defined, flags, instant, name)
-    };
-    Ok(tree_order(
-        flags
-            .iter()
-            .filter(|(name, _)| single(name) || fuller(name).is_some_and(single))
-            .map(|(name, _)| name.clone())
-            .collect(),
-    ))
-}
-
 /// What the permission service reads: the package model with its apps
 /// filter, the permissions defined, the permission groups and the access
 /// state of user 0, the model's one user.
@@ -600,6 +552,47 @@ struct Access<'a> {
 }
 
 impl Access<'_> {
+    /// `PermissionService.getGrantedPermissions` against validated package owners.
+    fn granted_permissions(
+        &self,
+        package: &str,
+        app_id: i32,
+        user: i32,
+    ) -> Result<Vec<String>, Exception> {
+        let ps = self
+            .state
+            .packages
+            .get(package)
+            .filter(|ps| ps.shared_user_app_id.unwrap_or(ps.app_id) == app_id)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission UID owner differs"))?;
+        if !self.user_exists(user) || !ps.users.contains_key(&user) {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "permission user owner differs",
+            ));
+        }
+        // The access owner has user 0's state alone.
+        if user != 0 {
+            return Ok(Vec::new());
+        }
+        let Some((_, flags)) = self
+            .user0
+            .app_id_permissions
+            .iter()
+            .find(|(id, _)| *id == app_id)
+        else {
+            return Ok(Vec::new());
+        };
+        let instant = info::user_state(ps, user).instant_app;
+        Ok(tree_order(
+            flags
+                .iter()
+                .filter(|(name, _)| self.granted_for_app_id(app_id, instant, name))
+                .map(|(name, _)| name.clone())
+                .collect(),
+        ))
+    }
+
     /// `UserManagerInternal.exists`.
     fn user_exists(&self, user: i32) -> bool {
         self.state.users.contains_key(&user)
@@ -624,9 +617,16 @@ impl Access<'_> {
     /// implies it. Instant apps have no shared uid, so the package's own
     /// state says whether it is one.
     fn granted(&self, ps: &PackageState, user: i32, permission: &str) -> bool {
-        let instant = info::user_state(ps, user).instant_app;
-        self.single_granted(ps.app_id, instant, permission)
-            || fuller(permission).is_some_and(|f| self.single_granted(ps.app_id, instant, f))
+        self.granted_for_app_id(
+            ps.app_id,
+            info::user_state(ps, user).instant_app,
+            permission,
+        )
+    }
+
+    fn granted_for_app_id(&self, app_id: i32, instant: bool, permission: &str) -> bool {
+        self.single_granted(app_id, instant, permission)
+            || fuller(permission).is_some_and(|f| self.single_granted(app_id, instant, f))
     }
 
     /// `isSinglePermissionGranted`: an instant app holds only `instant`
@@ -1629,14 +1629,9 @@ impl PermissionManager {
         let bridge = system.package_bootstrap()?;
         let capture = system.capture_package_queries_for(&bridge)?;
         let view = self.retained_access()?;
-        granted_permissions(
-            capture.state(),
-            &view.system.permissions,
-            &view.user0,
-            package,
-            app_id,
-            user,
-        )
+        self.access_with_capture(&view.system, &view.user0, &capture, "package", |access| {
+            access.granted_permissions(package, app_id, user)
+        })
     }
 
     /// `PermissionService.getLegacyPermissionState` of `app_id`, captured
@@ -1701,11 +1696,30 @@ impl PermissionManager {
         user0: &AccessUser,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
+        self.host.platform()?;
+        let capture = self.host.package_capture()?;
+        self.access_with_capture(system, user0, &capture, "package", f)
+    }
+
+    fn access_with_capture<T>(
+        &self,
+        system: &AccessSystem,
+        user0: &AccessUser,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        resolution_context: &str,
+        f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
         let platform = self.host.platform()?;
-        let (state, resolution) = self.host.packages()?;
-        let groups = self.groups(&state);
+        let state = capture.state();
+        let resolution = capture.resolution().map_err(|error| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("{resolution_context} resolution: {error:?}"),
+            )
+        })?;
+        let groups = self.groups(state);
         f(&Access {
-            state: &state,
+            state,
             filter: &resolution.apps_filter,
             defined: &system.permissions,
             groups: &groups,
@@ -1965,44 +1979,31 @@ impl PermissionManager {
         app_ids: impl Iterator<Item = i32>,
     ) -> Result<Vec<Vec<i32>>, Exception> {
         let view = self.retained_access()?;
-        let platform = self.host.platform()?;
-        let state = capture.state();
-        let resolution = capture.resolution().map_err(|e| {
-            Exception::new(
-                EX_ILLEGAL_STATE,
-                format!("audio permission resolution: {e:?}"),
-            )
-        })?;
-        let groups = self.groups(state);
-        let access = Access {
-            state,
-            filter: &resolution.apps_filter,
-            defined: &view.system.permissions,
-            groups: &groups,
-            user0: &view.user0,
-            compat: &platform.compat,
-        };
-        let app_ids: Vec<_> = app_ids.collect();
-        permissions
-            .iter()
-            .map(|permission| {
-                let mut holders = Vec::new();
-                for user in users {
-                    for &app_id in &app_ids {
-                        let uid = user * PER_USER_RANGE + app_id;
-                        if app_id == 0
-                            || app_id == 1000
-                            || (!(90000..=99999).contains(&app_id)
-                                && access.holds(uid, permission)?)
-                        {
-                            holders.push(uid);
+        self.access_with_capture(
+            &view.system,
+            &view.user0,
+            capture,
+            "audio permission",
+            |access| {
+                let app_ids: Vec<_> = app_ids.collect();
+                permissions
+                    .iter()
+                    .map(|permission| {
+                        let mut holders = Vec::new();
+                        for user in users {
+                            for &app_id in &app_ids {
+                                let uid = user * PER_USER_RANGE + app_id;
+                                if access.holds(uid, permission)? {
+                                    holders.push(uid);
+                                }
+                            }
                         }
-                    }
-                }
-                holders.sort_unstable();
-                Ok(holders)
-            })
-            .collect()
+                        holders.sort_unstable();
+                        Ok(holders)
+                    })
+                    .collect()
+            },
+        )
     }
 
     /// `Context.checkPermission(permission, INVALID_PID, uid)` in the
@@ -2348,6 +2349,12 @@ impl Service for PermissionManager {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::*;
+    use crate::package::model::{PackageUserState, SharedUser, User};
+    use crate::package::pkg::{self, AndroidPackage, Component};
+
     #[test]
     fn delayed_restore_caches_only_the_controllers_no_more_backup_for_each_user() {
         let process = aim_binder_host::local::LocalProcess::open(
@@ -2417,11 +2424,6 @@ mod tests {
             assert!(!Arc::ptr_eq(&before, &host.package_capture().unwrap()));
         });
     }
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use super::*;
-    use crate::package::model::{PackageUserState, SharedUser, User};
-    use crate::package::pkg::{self, AndroidPackage, Component};
 
     pub(super) struct PersistedAccess {
         pub(super) host: Arc<AppHost>,
@@ -3132,9 +3134,7 @@ mod tests {
     #[test]
     fn granted_permission_refresh_validates_package_and_user() {
         with_access(|access| {
-            let granted = |name, id, user| {
-                granted_permissions(access.state, access.defined, access.user0, name, id, user)
-            };
+            let granted = |name, id, user| access.granted_permissions(name, id, user);
             assert_eq!(granted("granted", 10001, 0).unwrap(), [CAMERA]);
             assert!(granted("denied", 10002, 0).unwrap().is_empty());
             assert_eq!(granted("instant", 10004, 0).unwrap(), [CAMERA]);
@@ -3154,15 +3154,23 @@ mod tests {
             shared.app_id = -1;
             shared.shared_user_app_id = Some(10003);
             assert_eq!(
-                granted_permissions(&state, access.defined, access.user0, "shared.a", 10003, 0)
-                    .unwrap(),
+                Access {
+                    state: &state,
+                    ..*access
+                }
+                .granted_permissions("shared.a", 10003, 0)
+                .unwrap(),
                 [INTERNET]
             );
             state.packages.get_mut("granted").unwrap().users.clear();
             assert_eq!(
-                granted_permissions(&state, access.defined, access.user0, "granted", 10001, 0)
-                    .unwrap_err()
-                    .message,
+                Access {
+                    state: &state,
+                    ..*access
+                }
+                .granted_permissions("granted", 10001, 0)
+                .unwrap_err()
+                .message,
                 "permission user owner differs"
             );
         });
