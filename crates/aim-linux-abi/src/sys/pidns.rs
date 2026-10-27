@@ -27,6 +27,8 @@ use aim_storage::process_namespace::ProcessIdentity;
 
 use crate::errno::ESRCH;
 
+pub(super) mod tids;
+
 fn me() -> i32 {
     // SAFETY: trivial.
     unsafe { libc::getpid() }
