@@ -28,6 +28,8 @@
 //!   `Debug.MemoryInfo` reports (`aim_meminfo`), as system_server does.
 //! - It restores the SELinux label of what the installer makes
 //!   (`SELinux.restorecon`), as system_server does.
+//! - It writes the host services' binary EventLog entries to logd as the
+//!   system uid, as system_server does.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -42,6 +44,7 @@ use binder::{
 };
 
 mod effects;
+mod event_log;
 mod input;
 mod storage;
 
@@ -109,6 +112,8 @@ const RESTORECON: u32 = 15;
 /// (`aim_f2fs`), with the `RELEASE_COMPRESS_BLOCKS_ON_INSTALL` setting the host
 /// read.
 const RELEASE_COMPRESSED_BLOCKS: u32 = 16;
+/// `IAppHostAgent.writeEvent(int tag, byte[] payload)`.
+const WRITE_EVENT: u32 = 17;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -356,6 +361,25 @@ fn on_transact(
     reply: &mut BorrowedParcel<'_>,
 ) -> Result<(), StatusCode> {
     match code {
+        WRITE_EVENT => {
+            if !matches!(binder::ThreadState::get_calling_uid(), 0 | 1000) {
+                reply.write(&Status::new_exception_str(
+                    binder::ExceptionCode::SECURITY,
+                    Some("writeEvent requires system or root"),
+                ))?;
+                return Ok(());
+            }
+            let tag: i32 = data.read()?;
+            let payload: Vec<u8> = data.read()?;
+            reply.write(&match event_log::write(tag, &payload) {
+                Ok(()) => Status::ok(),
+                Err(error) => Status::new_exception_str(
+                    binder::ExceptionCode::ILLEGAL_STATE,
+                    Some(format!("EventLog: {error}")),
+                ),
+            })?;
+            Ok(())
+        }
         OPEN_INPUT_CHANNEL => {
             let name: String = data.read()?;
             let display: (i32, i32) = (data.read()?, data.read()?);
