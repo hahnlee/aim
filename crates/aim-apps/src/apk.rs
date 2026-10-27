@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use android_image_extract::source::FileSource;
+use android_image_extract::source::{FileSource, ReadAt};
 use android_image_extract::zip::Archive;
 
 use crate::res::{self, Element, Result, Value, bad};
@@ -15,7 +15,7 @@ use crate::table::{Config, Entry, Table};
 const MAX_ENTRY: u64 = 512 << 20;
 
 pub struct Apk {
-    source: Box<FileSource>,
+    source: Box<dyn ReadAt + Send + Sync>,
     table: Option<Table>,
 }
 
@@ -23,6 +23,11 @@ impl Apk {
     pub fn open(path: &Path) -> Result<Apk> {
         let source =
             Box::new(FileSource::open(path).map_err(|e| bad(format!("{}: {e}", path.display())))?);
+        Self::from_source(source)
+    }
+
+    /// An already-open APK, including a descriptor transferred over Binder.
+    pub fn from_source(source: Box<dyn ReadAt + Send + Sync>) -> Result<Apk> {
         let mut apk = Apk {
             source,
             table: None,

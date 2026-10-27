@@ -616,6 +616,15 @@ impl Service for PackageBootstrap {
                 bridge::write_get_package_shell_policy_bridge_reply(&mut p, Some(owner));
                 Ok(())
             }
+            bridge::GET_PACKAGE_SHELL_INSTALL_POLICY => {
+                bridge::GetPackageShellInstallPolicy::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let owner = self.leaf(Arc::new(
+                    super::package_shell_install_policy::ShellInstallPolicy(host.clone()),
+                ));
+                bridge::write_get_package_shell_install_policy_reply(&mut p, Some(owner));
+                Ok(())
+            }
             bridge::GET_PACKAGE_OBSERVER_EVENTS_BRIDGE => {
                 bridge::GetPackageObserverEventsBridge::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -1512,6 +1521,7 @@ mod tests {
             bridge::GET_PACKAGE_MOVE_BRIDGE,
             bridge::GET_PACKAGE_RELOCATION_BRIDGE,
             bridge::GET_PACKAGE_INTERNAL_STORAGE_BRIDGE,
+            bridge::GET_PACKAGE_SHELL_INSTALL_POLICY,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

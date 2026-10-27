@@ -131,6 +131,7 @@ pub mod package_observers;
 mod package_policy;
 pub mod package_resolution_policy;
 pub mod package_service;
+mod package_shell_install_policy;
 mod package_shell_policy;
 mod package_shell_read;
 mod package_writes;

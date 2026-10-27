@@ -103,6 +103,45 @@ impl NativeLibraryInstallPolicy {
 }
 
 impl ZipNativeLibraries {
+    /// `sumNativeBinariesWithOverride` for one APK. Selection failures
+    /// contribute zero, as `sumNativeBinariesForSupportedAbi` does.
+    pub fn sum_with_override(
+        &self,
+        source: &dyn ReadAt,
+        all: &[String],
+        supported: super::SupportedAbis<'_>,
+        multi_arch: bool,
+        abi_override: Option<&str>,
+    ) -> Result<u64, String> {
+        let override_list;
+        let lists = if multi_arch {
+            vec![supported.bit32, supported.bit64]
+        } else if let Some(abi) = abi_override.filter(|abi| *abi != "-") {
+            override_list = vec![abi.to_owned()];
+            vec![override_list.as_slice()]
+        } else if !supported.bit64.is_empty() && self.renderscript_bitcode {
+            vec![supported.bit32]
+        } else {
+            vec![all]
+        };
+        let archive = Archive::open(source).map_err(|e| e.to_string())?;
+        let mut size = 0u64;
+        for list in lists {
+            if let SupportedAbi::Index(at) = self.find_supported_abi(list) {
+                for entry in &archive.entries {
+                    if entry.name.len() < 4096
+                        && library_abi(&entry.name) == Some(list[at].as_bytes())
+                    {
+                        size = size
+                            .checked_add(entry.size)
+                            .ok_or("native library size overflow")?;
+                    }
+                }
+            }
+        }
+        Ok(size)
+    }
+
     /// Reads only ZIP inventory, without extracting or changing an APK.
     pub fn read(source: &dyn ReadAt) -> Result<Self, String> {
         let archive = Archive::open(source).map_err(|e| e.to_string())?;
