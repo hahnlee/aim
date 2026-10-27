@@ -8082,11 +8082,7 @@ Measured on a loaded host (load average 90, other agents' boots running),
   an event while the level read warn for a minute. The module polls the
   level every 250 ms instead.
 
-What is not covered: ActivityManager's process groups
-(`setProcessGroup`) change nothing on the host. The `blkio`, `cpu` and
-`cpuset` hierarchies are mounted, so libprocessgroup's profiles join
-their groups as on a device, but no Darwin policy follows a group yet
-(#297). Kills name their process: another process's
+ActivityManager's process groups now constrain Darwin CPU/QoS and disk policy through the cgroup controllers, with freezer explicitly unavailable (#297; NDK tests, no guest boot). Kills name their process: another process's
 `/proc/<pid>/cmdline` and `comm` come from its record (#238).
 
 **Morning check** (one boot slot, after the throttle is lifted):

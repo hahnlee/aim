@@ -105,7 +105,7 @@ use crate::errno::ENOSYS;
 
 pub use arena::map_anon as map_guest_anon;
 pub use binder::init as init_binder;
-pub use cgroup::exec_reset as reset_exec_cgroups;
+pub use cgroup::{exec_reset as reset_exec_cgroups, refresh_own as refresh_cgroup_policy};
 pub use copies::note as note_copy;
 pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec, interpret as interpret_script};
@@ -209,7 +209,7 @@ pub fn dispatch(ctx: &mut GuestContext) {
     }
     // A syscall a host signal interrupted is restarted when no guest
     // handler is to run for it.
-    let r = loop {
+    let mut r = loop {
         let release = close_effects::release_checkpoint();
         let r = handle(ctx, nr, a);
         let r = close_effects::after_release(release, r);
@@ -217,8 +217,10 @@ pub fn dispatch(ctx: &mut GuestContext) {
             break r;
         }
     };
-    if let Some(th) = thread::current() {
-        process::apply_stale_sched(th);
+    if let Some(th) = thread::current()
+        && let Err(error) = process::apply_stale_sched(th)
+    {
+        r = -(error as i64);
     }
     if let Some((pid, tid, call)) = trace {
         if (-4095..0).contains(&r) {

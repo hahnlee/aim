@@ -125,6 +125,9 @@ pub enum File {
     MemoryPressureEnabled,
     PrioClass,
     ResetStats,
+    Events,
+    Controllers,
+    SubtreeControl,
 }
 
 /// Where a file exists (`CFTYPE_ONLY_ON_ROOT`, `CFTYPE_NOT_ON_ROOT`).
@@ -478,6 +481,7 @@ fn default_value(c: Controller, f: File, parent: Option<&Path>) -> String {
         File::MemorySpreadPage => inherited("memory_spread_page").into(),
         File::MemorySpreadSlab => inherited("memory_spread_slab").into(),
         File::PrioClass => "no-change\n".into(),
+        File::Events | File::Controllers | File::SubtreeControl => unreachable!(),
     }
 }
 
@@ -671,7 +675,9 @@ pub fn write(
         store(&path(name), if v != 0 { "1\n" } else { "0\n" })
     };
     match f {
-        File::Tasks | File::Procs => Err(EINVAL),
+        File::Tasks | File::Procs | File::Events | File::Controllers | File::SubtreeControl => {
+            Err(EINVAL)
+        }
         File::CloneChildren => flag("cgroup.clone_children"),
         File::NotifyOnRelease => flag("notify_on_release"),
         File::ReleaseAgent => {

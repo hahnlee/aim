@@ -1525,13 +1525,14 @@ pub fn thread_nice(tid: i32) -> i32 {
 /// The host scheduling of thread `tid` of this process after its nice value
 /// changed to `nice`: set now for the calling thread, by `tid` itself at its
 /// next syscall otherwise.
-fn nice_changed(tid: i32, nice: i32) {
+fn nice_changed(tid: i32, nice: i32) -> Result<(), crate::errno::Errno> {
     if tid == super::thread::gettid() as i32 {
         let policy = super::thread::current().map_or(0, |t| t.sched.policy.load(Ordering::SeqCst));
-        super::process::apply_host_sched(nice, policy);
+        super::process::apply_host_sched(nice, policy)?;
     } else if let Some(th) = super::thread::find(tid) {
         th.sched.host_stale.store(true, Ordering::SeqCst);
     }
+    Ok(())
 }
 
 /// `set_one_prio`'s checks for another process `p`: the owner rule, then
@@ -1599,8 +1600,7 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
             // best effort.
             // SAFETY: plain setpriority.
             unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
-            nice_changed(a[1] as i32, nice);
-            0
+            nice_changed(a[1] as i32, nice).map_or_else(|error| -(error as i64), |()| 0)
         });
         if r == 0 {
             super::process::task_priority_changed();
@@ -1619,8 +1619,7 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
         table.retain(|t| t.0 != tid && super::thread::find(t.0).is_some());
         table.push((tid, nice));
         drop(table);
-        nice_changed(tid, nice);
-        return 0;
+        return nice_changed(tid, nice).map_or_else(|error| -(error as i64), |()| 0);
     }
     if a[0] == PRIO_PROCESS
         && let Err(e) = super::pidns::check(a[1] as i32)

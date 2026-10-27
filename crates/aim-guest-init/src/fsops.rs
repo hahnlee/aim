@@ -561,6 +561,22 @@ impl FsOps {
                     // init is root: the group's files keep root's owner.
                     self.record_cgroup_files(&resolved.guest, &made, 0, 0)?;
                 }
+                if self.apply
+                    && self.map.entries().iter().any(|entry| {
+                        matches!(entry.kind, crate::paths::MapKind::Cgroup2)
+                            && resolved.host.starts_with(&entry.host)
+                    })
+                {
+                    let made = aim_storage::cgroup_v2::populate(
+                        &resolved.host,
+                        self.map.entries().iter().any(|entry| {
+                            matches!(entry.kind, crate::paths::MapKind::Cgroup2)
+                                && resolved.host == entry.host
+                        }),
+                    )
+                    .map_err(|e| format!("mkdir() failed on {path}: {e}"))?;
+                    self.record_cgroup_files(&resolved.guest, &made, 0, 0)?;
+                }
                 self.record_attrs(
                     &resolved,
                     Some(uid.unwrap_or(0)),

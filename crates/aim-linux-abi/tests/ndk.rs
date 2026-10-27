@@ -516,9 +516,96 @@ fn cgroup_v1_hierarchies() {
             .unwrap();
         writeln!(f, "{}\t{guest}\t{}", controller.map_kind(), host.display()).unwrap();
     }
+    let unified = g.runtime.join("cgroup");
+    std::fs::create_dir_all(&unified).unwrap();
+    aim_storage::cgroup_v2::populate(&unified, true).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&g.map)
+        .unwrap();
+    use std::io::Write;
+    writeln!(f, "cgroup2\t/sys/fs/cgroup\t{}", unified.display()).unwrap();
     let (ok, out) = g.run(&[&prog]);
     println!("{out}");
     assert!(ok && out.contains("PASS"), "t_cgroup failed:\n{out}");
+}
+
+/// The native scheduler sees cgroup transitions, including another process.
+#[test]
+fn cgroup_host_policy() {
+    use std::io::{BufRead, Write};
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_cgroup_policy");
+    let prog = g.build(&clang, "t_cgroup_policy");
+    let root = g.runtime.join("cpu");
+    std::fs::create_dir_all(&root).unwrap();
+    aim_storage::cgroup_v1::populate(aim_storage::cgroup_v1::Controller::Cpu, &root, None).unwrap();
+    let mut map = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&g.map)
+        .unwrap();
+    writeln!(map, "cgroup:cpu\t/dev/cpuctl\t{}", root.display()).unwrap();
+    struct Stop(std::process::Child);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Stop(
+        Command::new(env!("CARGO_BIN_EXE_linux-run"))
+            .arg("--path-map")
+            .arg(&g.map)
+            .arg("--cache")
+            .arg(&g.cache)
+            .arg(prog)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut input = child.0.stdin.take().unwrap();
+    let mut output = std::io::BufReader::new(child.0.stdout.take().unwrap());
+    for (step, one, two, fork) in [
+        ("default", 31, 31, None),
+        ("background", 4, 4, None),
+        ("realtime", 4, 47, None),
+        ("fair", 4, 4, None),
+        ("thread", 31, 4, None),
+        ("utility", 31, 20, None),
+        ("shares", 31, 20, None),
+        ("restored", 31, 31, None),
+        ("raised", 31, 46, None),
+        ("clamped", 31, 20, None),
+        ("unclamped", 31, 31, None),
+        ("forked", 4, 4, Some(4)),
+        ("parent", 31, 31, Some(4)),
+        ("remote", 31, 31, Some(31)),
+    ] {
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let (name, pid) = line.trim().split_once(' ').unwrap_or((line.trim(), "0"));
+        assert_eq!(name, step, "{line}");
+        assert_eq!(thread_priority(child.0.id(), "cg-one"), Some(one), "{step}");
+        assert_eq!(thread_priority(child.0.id(), "cg-two"), Some(two), "{step}");
+        if let Some(priority) = fork {
+            assert_eq!(
+                thread_priority(pid.parse().unwrap(), "cg-child"),
+                Some(priority),
+                "{step}"
+            );
+        }
+        writeln!(input).unwrap();
+    }
+    let mut rest = String::new();
+    output.read_to_string(&mut rest).unwrap();
+    assert!(
+        child.0.wait().unwrap().success() && rest.contains("PASS"),
+        "{rest}"
+    );
 }
 
 /// Extended attributes' permission rules (xattr_permission, #780).

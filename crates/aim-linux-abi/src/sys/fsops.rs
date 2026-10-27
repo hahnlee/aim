@@ -556,7 +556,7 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
     }
     let path =
         |r: &Resolved| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
-    if vfs::cgroup_v1(&old.guest).is_some() || vfs::cgroup_v1(&new.guest).is_some() {
+    if vfs::cgroup(&old.guest).is_some() || vfs::cgroup(&new.guest).is_some() {
         // kernfs_iop_rename takes no flags.
         if flags != 0 {
             return -(EINVAL as i64);
