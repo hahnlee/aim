@@ -408,12 +408,29 @@ static void exec_seal_chmod(void) {
   errno = 0;
   CHECK(fchmod(fd, st.st_mode & 0666) == -1 && errno == EPERM);
   CHECK(fchmod(fd, (st.st_mode & 07777) & ~0060) == 0);
+  // A separate description and a procfs chmod see the inode's seal too.
+  int again = reopen(fd, O_RDONLY);
+  CHECK(again >= 0);
+  errno = 0;
+  CHECK(fchmod(again, 0600) == -1 && errno == EPERM);
+  char path[64];
+  snprintf(path, sizeof path, "/proc/self/fd/%d", again);
+  errno = 0;
+  CHECK(chmod(path, 0600) == -1 && errno == EPERM);
+  CHECK(ftruncate(fd, PAGE) == -1 && errno == EPERM);
+  close(again);
   close(fd);
   int noexec = memfd_create("noexec", MFD_CLOEXEC | MFD_NOEXEC_SEAL);
   CHECK(noexec >= 0);
   errno = 0;
   CHECK(fchmod(noexec, 0755) == -1 && errno == EPERM);
   CHECK(fchmod(noexec, 0600) == 0);
+  CHECK(fstat(noexec, &st) == 0 && (st.st_mode & 0777) == 0600);
+  // F_SEAL_EXEC protects mode bits; it does not deny executable mmap.
+  CHECK(ftruncate(noexec, PAGE) == 0);
+  void* rx = mmap(NULL, PAGE, PROT_READ | PROT_EXEC, MAP_SHARED, noexec, 0);
+  CHECK(rx != MAP_FAILED);
+  munmap(rx, PAGE);
   close(noexec);
 }
 

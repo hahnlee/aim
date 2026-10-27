@@ -1009,12 +1009,15 @@ fn chmod_fd_private(
         .map(|_| 0)
         .unwrap_or_else(|error| -(error as i64));
     }
-    let guest_fd = fd;
     let anchor = match metadata_fd_copy(fd) {
         Ok(fd) => fd,
         Err(error) => return error,
     };
     let fd = anchor.as_raw_fd();
+    let _seals = match memfd::lock_mode(fd) {
+        Ok(lock) => lock,
+        Err(error) => return error,
+    };
     let guest = fd_guest(fd).unwrap_or_default();
     inode_mutation(Host::Fd(fd), &guest, true, |stat| {
         // Following a procfs magic link to an O_PATH symlink must not change
@@ -1029,7 +1032,7 @@ fn chmod_fd_private(
             Ok(mode) => mode,
             Err(error) => return error,
         };
-        if memfd::chmod_sealed(guest_fd, stat.st_mode as u32, mode) {
+        if memfd::chmod_sealed(fd, stat.st_mode as u32, mode) {
             return -(errno::EPERM as i64);
         }
         if unsafe { libc::fchmod(fd, host_mode(mode, stat.st_mode)) } < 0 {

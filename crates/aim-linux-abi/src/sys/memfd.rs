@@ -356,6 +356,15 @@ fn state_lock() -> Result<StateLock, i64> {
     }
 }
 
+/// chmod and F_ADD_SEALS share the inode's seal/mode critical section.
+pub fn lock_mode(fd: i32) -> Result<Option<StateLock>, i64> {
+    if memfd_stat(fd).is_some() {
+        state_lock().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// `proc_regioninfo` (`<sys/proc_info.h>`).
 #[repr(C)]
 struct RegionInfo {
@@ -761,23 +770,27 @@ pub fn add_seals(fd: i32, add: u32) -> i64 {
     if add & !F_ALL_SEALS != 0 {
         return -(EINVAL as i64);
     }
-    let Some(st) = memfd_stat(fd) else {
+    let Some(mut st) = memfd_stat(fd) else {
         return -(EINVAL as i64);
     };
     let _g = match state_lock() {
         Ok(lock) => lock,
         Err(error) => return error,
     };
+    st = stat_fd(fd).unwrap_or(st);
     let cur = read_seals(fd);
     if cur & F_SEAL_SEAL != 0 {
         return -(EPERM as i64);
     }
+    let explicit_write = add & F_SEAL_WRITE != 0;
     let mut add = add;
     // SEAL_EXEC implies the write seals on an executable memfd (W^X).
     if add & F_SEAL_EXEC != 0 && st.st_mode & 0o111 != 0 {
         add |= F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE;
     }
-    if add & F_SEAL_WRITE == 0 || cur & F_SEAL_WRITE != 0 {
+    // Linux checks an explicitly requested WRITE before EXEC adds its
+    // implied seals; existing views survive EXEC alone.
+    if !explicit_write || cur & F_SEAL_WRITE != 0 {
         return set_seals(fd, add & !cur);
     }
     // `mapping_deny_writable`: views that may be written in any process
@@ -1046,9 +1059,6 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
     let anon = with(|m| m.get(&k).and_then(|f| f.anon));
     if anon.is_none() && prot & libc::PROT_EXEC == 0 {
         return Shared::File(Some((k, guard)));
-    }
-    if prot & libc::PROT_EXEC != 0 && seals & F_SEAL_EXEC != 0 {
-        return Shared::Done(-(libc::EACCES as i64));
     }
     let (base, size) = match convert(k, Some(fd), off + len) {
         Ok(a) => a,
