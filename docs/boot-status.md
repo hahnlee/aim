@@ -31,6 +31,8 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+Fresh app-host secure/global settings tables persist `user_setup_complete=1` and `device_provisioned=1` for user 0 as native vendor defaults (#2202), while existing XML tables retain their values.
+
 The app host image ([app-host.md](app-host.md)) boots without
 system_server: with `--only` its 33 services and one-shots, zygote accepts
 commands 4.2-4.3 s after guest-init starts (odsign is done at 2.36 s,
