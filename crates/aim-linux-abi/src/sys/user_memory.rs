@@ -144,6 +144,8 @@ thread_local! {
 }
 
 pub(super) fn initialize_fault_slot() {
+    // Syscall callers may enter without a guest context or runtime setup.
+    super::signal::install_host_handlers();
     // Register the TLS destructor on the ordinary host stack, before a fault.
     USER_FAULT.with(|_| {});
 }
@@ -385,7 +387,6 @@ mod tests {
         if super::super::fdtab::isolated_kernel_test(&format!("sys::user_memory::tests::{name}")) {
             return true;
         }
-        crate::diag::install_signal_handlers();
         false
     }
 
@@ -420,6 +421,15 @@ mod tests {
         if isolated("copies_owned_bytes_and_contains_bad_addresses_and_permissions") {
             return;
         }
+        assert_eq!(read_exact(1, 1), Err(errno::EFAULT));
+        assert_eq!(write_exact(1, b"bad"), Err(errno::EFAULT));
+        let mut host = b"host".to_vec();
+        assert_eq!(
+            read_exact(host.as_ptr() as u64, host.len()).unwrap(),
+            b"host"
+        );
+        write_exact(host.as_mut_ptr() as u64, b"copy").unwrap();
+        assert_eq!(host, b"copy");
         let mapping = Mapping::new();
         let address = mapping.address();
         write_exact(address, b"guest\0").unwrap();
