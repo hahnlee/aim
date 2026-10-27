@@ -25,8 +25,10 @@ use super::model::System;
 use super::parse::Platform;
 
 mod libraries;
+mod permission_allowlist;
 pub use libraries::Library;
 pub(crate) use libraries::Sdk;
+pub use permission_allowlist::PermissionAllowlist;
 
 /// `PackageManager.FEATURE_*` that SystemConfig adds from the environment.
 const FEATURE_FILE_BASED_ENCRYPTION: &str = "android.software.file_based_encryption";
@@ -46,6 +48,9 @@ const ALLOW_FEATURES: u32 = 0x1;
 const ALLOW_LIBS: u32 = 0x2;
 const ALLOW_PERMISSIONS: u32 = 0x4;
 const ALLOW_APP_CONFIGS: u32 = 0x8;
+const ALLOW_PRIVAPP_PERMISSIONS: u32 = 0x10;
+const ALLOW_OEM_PERMISSIONS: u32 = 0x20;
+const ALLOW_SIGNATURE_PERMISSIONS: u32 = 0x800;
 const ALLOW_HIDDENAPI_WHITELISTING: u32 = 0x40;
 const ALLOW_OVERRIDE_APP_RESTRICTIONS: u32 = 0x100;
 const ALLOW_IMPLICIT_BROADCASTS: u32 = 0x200;
@@ -54,6 +59,7 @@ const ALLOW_ALL: u32 = !0;
 /// SystemConfig's features, libraries and hidden-API allowlist.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SystemConfig {
+    pub permission_allowlist: PermissionAllowlist,
     /// `mSharedLibraries`, including public native libraries.
     pub libraries: BTreeMap<String, Library>,
     /// SystemConfig exact Linux UID permission assignments.
@@ -162,10 +168,11 @@ impl SystemConfig {
                 }
             }
         };
-        // Vendor and ODM may add libraries and features; product and system_ext all of it
-        // that matters here (the product's allowlist is a TODO upstream).
+        // Keep partition permission allowlists separate from permission/GID definitions.
         let vendor = ALLOW_FEATURES
             | ALLOW_LIBS
+            | ALLOW_PRIVAPP_PERMISSIONS
+            | ALLOW_SIGNATURE_PERMISSIONS
             | if first_sdk <= 27 {
                 ALLOW_APP_CONFIGS | ALLOW_PERMISSIONS
             } else {
@@ -174,7 +181,7 @@ impl SystemConfig {
         partition("system", ALLOW_ALL, None);
         partition("vendor", vendor, prop("ro.boot.product.vendor.sku"));
         partition("odm", vendor, prop("ro.boot.product.hardware.sku"));
-        partition("oem", ALLOW_FEATURES, None);
+        partition("oem", ALLOW_FEATURES | ALLOW_OEM_PERMISSIONS, None);
         // A device first shipped with R or before may configure all of it.
         partition(
             "product",
@@ -184,6 +191,8 @@ impl SystemConfig {
                 ALLOW_FEATURES
                     | ALLOW_LIBS
                     | ALLOW_PERMISSIONS
+                    | ALLOW_PRIVAPP_PERMISSIONS
+                    | ALLOW_SIGNATURE_PERMISSIONS
                     | ALLOW_HIDDENAPI_WHITELISTING
                     | ALLOW_APP_CONFIGS
                     | ALLOW_OVERRIDE_APP_RESTRICTIONS
@@ -203,7 +212,10 @@ impl SystemConfig {
                 if apex.is_dir() && !name.contains('@') {
                     c.read_dir(
                         &apex.join("etc/permissions"),
-                        ALLOW_FEATURES | ALLOW_LIBS,
+                        ALLOW_FEATURES
+                            | ALLOW_LIBS
+                            | ALLOW_PRIVAPP_PERMISSIONS
+                            | ALLOW_SIGNATURE_PERMISSIONS,
                         low_ram,
                         root,
                         prop,
@@ -292,6 +304,15 @@ impl SystemConfig {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "privapp-permissions" if flags & ALLOW_PRIVAPP_PERMISSIONS != 0 => {
+                    self.permission_allowlist.read(e, image, file);
+                }
+                "signature-permissions" if flags & ALLOW_SIGNATURE_PERMISSIONS != 0 => {
+                    self.permission_allowlist.read(e, image, file);
+                }
+                "oem-permissions" if flags & ALLOW_OEM_PERMISSIONS != 0 => {
+                    self.permission_allowlist.read(e, image, file);
+                }
                 "group" if flags == ALLOW_ALL => match e.string("gid") {
                     Some(gid) => {
                         let gid = gid_for_name(image, prop, &gid);

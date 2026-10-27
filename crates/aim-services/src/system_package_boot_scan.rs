@@ -864,7 +864,7 @@ impl System {
             .map_err(|error| failure(format!("initial native snapshot: {error:?}")))?
             .capture();
         let input = crate::package::scan_snapshot::boot_context::Inputs {
-            snapshot,
+            snapshot: snapshot.clone(),
             config: Arc::new(begin.system_config.clone()),
             platform: platform.clone(),
             bridge: bridge.clone(),
@@ -883,10 +883,19 @@ impl System {
         let input = original.populate(input).map_err(failure)?;
         let mut context =
             crate::package::scan_snapshot::boot_context::build(input).map_err(failure)?;
-        context.access = self
-            .native_permissions()
-            .map(|owner| owner.retained_access())
-            .transpose()?;
+        if let Some(permissions) = self.native_permissions() {
+            // PermissionService batches the scan's onPackageAdded receipts at
+            // onStorageVolumeMounted, before the initial live projections.
+            let initial = Capture::new(snapshot, context.clone()).map_err(failure)?;
+            let admissions = owner.permission_admissions().map_err(failure)?;
+            let access = permissions.reconcile_boot(
+                initial.state(),
+                &admissions,
+                begin.lifecycle.owner.device_upgrading(),
+            )?;
+            access.project_context(&mut context, initial.state(), &begin.system_config);
+            context.access = Some(access);
+        }
         let values = begin.initial.clone();
         let props = |name: &str| values.property_value(name);
         begin.initial.check()?;
