@@ -727,7 +727,11 @@ impl AppHost {
     pub(super) fn package_capture(
         &self,
     ) -> Result<Arc<package::scan_snapshot::query_state::Capture>, Exception> {
-        self.package_system()?.capture_package_queries()
+        let system = self.package_system()?;
+        // PMS construction precedes its consumers in SystemServer. Construction
+        // itself uses System's captures and the bootstrap leaves, never this gate.
+        self.package_boot.wait().clone()?;
+        system.capture_package_queries()
     }
 
     pub fn set_published(&self, services: &[(String, Binder)]) {
@@ -5524,6 +5528,13 @@ impl Service for Control {
 
 #[cfg(test)]
 pub(crate) use battery_history::tests::temp_dir as test_temp_dir;
+
+#[cfg(test)]
+impl AppHost {
+    pub(crate) fn package_booted_for_test(&self) {
+        self.package_boot.set(Ok(())).unwrap();
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn configure_test_host(

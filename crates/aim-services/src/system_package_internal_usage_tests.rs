@@ -333,6 +333,7 @@ fn permission_refresh_uses_the_current_native_capture() {
         }),
     );
     host.set_system(fixture.system.clone());
+    host.package_booted_for_test();
     let _services = host.services();
     let Binder::Local(ptr) = fixture
         .native
@@ -2386,6 +2387,7 @@ fn app_data_read_through_observes_persisted_session_receipts() {
     let host = crate::app_host::AppHost::new(fixture.native.clone());
     assert!(host.package_capture().is_err());
     host.set_system(fixture.system.clone());
+    host.package_booted_for_test();
     let old = host.package_capture().unwrap();
     assert!(Arc::ptr_eq(&old, &before));
     let snapshots = fixture

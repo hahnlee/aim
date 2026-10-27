@@ -500,7 +500,13 @@ mod tests {
                 )))
                 .is_ok()
         );
-        let missing = host.package_capture().err().unwrap();
+        assert!(host.package_boot.get().is_none());
+        let missing = host
+            .package_system()
+            .unwrap()
+            .capture_package_queries()
+            .err()
+            .unwrap();
         assert_eq!(
             missing.message,
             "native package query owners are unavailable"
@@ -532,7 +538,13 @@ mod tests {
                 .unwrap(),
             density
         );
-        assert!(host.package_capture().is_err());
+        assert!(
+            host.package_system()
+                .unwrap()
+                .capture_package_queries()
+                .is_err()
+        );
+        assert!(host.package_boot.get().is_none());
     }
     #[test]
     fn locale_codes_pack_as_res_table_config() {

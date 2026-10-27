@@ -353,6 +353,7 @@ fn session() -> Session {
     let host = AppHost::new(fixture.native.clone());
     let cached = PackageService::new(host.clone());
     host.set_system(fixture.system.clone());
+    host.package_booted_for_test();
     let host_leaf = host.clone();
     let grants = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let bridge_grants = grants.clone();

@@ -5,6 +5,49 @@ fn host() -> Arc<AppHost> {
     AppHost::new(crate::test_process(SYSTEM_UID))
 }
 
+#[test]
+fn package_consumers_wait_for_boot_even_after_queries_are_published() {
+    crate::system::with_discovery_session(|ready, _, _| {
+        let system = ready.package_system().unwrap();
+        let version = system.capture_package_queries().unwrap().scan().version();
+        for outcome in [
+            Ok(()),
+            Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "package construction failed",
+            )),
+        ] {
+            let host = host();
+            host.set_system(system.clone());
+            let expected = outcome.clone().map(|()| version);
+            let (started, arrival) = std::sync::mpsc::channel();
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                for _ in 0..3 {
+                    let started = started.clone();
+                    let done = done.clone();
+                    let host = &host;
+                    scope.spawn(move || {
+                        started.send(()).unwrap();
+                        done.send(host.package_capture().map(|v| v.scan().version()))
+                            .unwrap();
+                    });
+                }
+                for _ in 0..3 {
+                    arrival.recv().unwrap();
+                }
+                let blocked = result.recv_timeout(Duration::from_millis(50));
+                host.package_boot.set(outcome).unwrap();
+                assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+                for _ in 0..3 {
+                    assert_eq!(result.recv().unwrap(), expected);
+                }
+                assert_eq!(host.package_capture().map(|v| v.scan().version()), expected);
+            });
+        }
+    });
+}
+
 /// `SystemServer.startBootstrapServices` calls `setSystemProcess` after PMS.
 #[test]
 fn system_process_attach_waits_for_package_boot_outcome() {
