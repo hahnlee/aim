@@ -1,12 +1,15 @@
 //! `PackageInternalEventsBridge` (`android-16.0.0_r1`): the package
-//! broadcast owner's Intents and callback Bundles. Delivery to the
-//! activity manager's receivers and native service receivers is #2167.
+//! broadcast owner's Intents, callback Bundles and delivery to the
+//! activity manager's receivers and native service receivers.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, Exception, Parcel, UNKNOWN_TRANSACTION};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_NULL_POINTER, Exception, Parcel, Reader, UNKNOWN_TRANSACTION,
+};
+use aim_service_aidl::ReadParcelable;
 use aim_service_aidl::dev_aim_server_ipackageinternaleventsbridge as events;
 
 use super::kept::RawIntent;
@@ -80,11 +83,24 @@ impl Service for InternalEvents {
                     })
             }
             events::BROADCAST => {
-                events::Broadcast::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                Err(self.host.unimplemented_named(
-                    "package internal events",
-                    "broadcast to registered and native service receivers (#2167)",
-                ))
+                let a = events::Broadcast::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                a.intent
+                    .ok_or_else(|| Exception::new(EX_NULL_POINTER, "intent"))
+                    .and_then(|bytes| {
+                        let mut reader = Reader::new(&bytes, &[]);
+                        let intent = RawIntent::read_from(&mut reader).map_err(|_| {
+                            Exception::illegal_argument("invalid package event Intent")
+                        })?;
+                        if reader.remaining() != 0 {
+                            return Err(Exception::illegal_argument("package event Intent tail"));
+                        }
+                        self.host
+                            .package_writes
+                            .get_or_init(|| package_writes::Writes::new(self.host.clone()))
+                            .broadcast(intent, a.user_id, a.instant, a.allow_list.as_deref())?;
+                        events::write_broadcast_reply(&mut p);
+                        Ok(())
+                    })
             }
             _ => return Err(UNKNOWN_TRANSACTION),
         };
@@ -97,7 +113,7 @@ mod tests {
     use super::*;
     use crate::bundle::{self, Value};
     use crate::package::{intent_filter::Plain, uri::Uri};
-    use aim_binder_host::parcel::{Binder, EX_SECURITY, EX_UNSUPPORTED_OPERATION, Reader};
+    use aim_binder_host::parcel::{Binder, EX_ILLEGAL_ARGUMENT, EX_SECURITY};
 
     fn callback_intent(bytes: &[u8]) -> Vec<u8> {
         let values = bundle::read(&mut Reader::new(bytes, &[])).unwrap().unwrap();
@@ -297,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn internal_events_reject_null_packages_unserved_broadcasts_and_foreign_callers() {
+    fn internal_events_reject_null_packages_invalid_intents_and_foreign_callers() {
         let process = crate::test_process(1000);
         let host = AppHost::new(process);
         let node = node(&host);
@@ -335,8 +351,7 @@ mod tests {
         .write(&mut request);
         let reply = node.transact(events::BROADCAST, &request, false).unwrap();
         let error = reply.reader().read_exception().unwrap().unwrap_err();
-        assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
-        assert!(error.message.contains("#2167"));
+        assert_eq!(error.code, EX_ILLEGAL_ARGUMENT);
         let mut call = Call {
             code: events::BROADCAST,
             flags: 0,

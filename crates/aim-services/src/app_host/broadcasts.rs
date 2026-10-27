@@ -2840,6 +2840,10 @@ impl Broadcasts {
 }
 
 #[cfg(test)]
+#[path = "package_internal_events_delivery_tests.rs"]
+mod internal_package_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::package::uri::Uri;

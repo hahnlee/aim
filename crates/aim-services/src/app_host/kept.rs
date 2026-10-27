@@ -23,6 +23,27 @@ pub struct RawIntent {
 }
 
 impl RawIntent {
+    /// `Intent.getIntExtra`: the default also applies to a value of another type.
+    pub fn int_extra(&self, key: &str, default: i32) -> Result<i32> {
+        let Some((_, extras, _)) = entries(&self.raw, Spans::of(&self.raw)?.extras)? else {
+            return Ok(default);
+        };
+        for (name, raw) in &extras {
+            if name != key {
+                continue;
+            }
+            let p = raw.parcel();
+            let mut r = p.reader();
+            r.read_string16()?;
+            return if r.read_i32()? == crate::bundle::VAL_INTEGER {
+                r.read_i32()
+            } else {
+                Ok(default)
+            };
+        }
+        Ok(default)
+    }
+
     #[cfg(test)]
     pub(super) fn test_extras(&self) -> std::collections::HashMap<String, crate::bundle::Value> {
         let p = self.parcel();
