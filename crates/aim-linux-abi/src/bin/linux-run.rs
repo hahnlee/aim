@@ -71,6 +71,8 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
 
   linux-run --fuse-broker PATH (internal) the FUSE kernel connection owner
 
+  linux-run --sync-file-owner DIR (internal) the sync_file merge owner
+
   linux-run --audio-io   (internal) the audio host module's CoreAudio
                          process, started by the module itself
   linux-run [RUNTIME OPTIONS] --fork-child FDS
@@ -113,6 +115,22 @@ fn main() {
     // inherits every descriptor not closed on exec.
     let inherited_fds = aim_linux_abi::sys::open_fds();
     let internal_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if internal_args
+        .first()
+        .is_some_and(|arg| arg == "--sync-file-owner")
+    {
+        if internal_args.len() != 2 {
+            usage();
+        }
+        aim_storage::inherited::close_above_stdio();
+        if let Err(error) =
+            aim_linux_abi::sys::sync_file::serve_owner(&PathBuf::from(&internal_args[1]))
+        {
+            eprintln!("linux-run: sync_file owner: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if internal_args
         .first()
         .is_some_and(|arg| arg == "--fuse-broker")

@@ -200,6 +200,40 @@ fn events() {
 }
 
 #[test]
+fn sync_file_metadata() {
+    use std::{io::Write, os::unix::net::UnixStream};
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let guest = Guest::new(&image, "t_sync_file");
+    let program = guest.build(&clang, "t_sync_file");
+    let (a, wa) = aim_sync_file::pair().unwrap();
+    let (b, wb) = aim_sync_file::pair().unwrap();
+    let (mut host, control) = UnixStream::pair().unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let producer = std::thread::spawn(move || {
+        let mut command = [0];
+        host.read_exact(&mut command).unwrap();
+        assert_eq!(command, [b'a']);
+        wa.signal_at(111, 1);
+        host.write_all(b"x").unwrap();
+        host.read_exact(&mut command).unwrap();
+        assert_eq!(command, [b'b']);
+        wb.signal_at(222, -5);
+        host.write_all(b"x").unwrap();
+    });
+    let (ok, output) = guest.run_with(&[&program], vec![a, b, control.into()]);
+    println!("{output}");
+    producer.join().unwrap();
+    assert!(
+        ok && output.contains("PASS"),
+        "sync_file metadata failed:\n{output}"
+    );
+}
+
+#[test]
 fn files() {
     check("t_fs", &["/data/local/tmp"]);
 }

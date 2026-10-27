@@ -14,6 +14,9 @@ use super::fdtab::{self, Kind};
 use super::fork_state::{Reader, Writer};
 use crate::errno::{EFAULT, EINVAL, ENOENT, ENOTTY};
 
+mod owner;
+pub use owner::serve as serve_owner;
+
 /// `_IOWR('>', 3, struct sync_merge_data)`.
 const SYNC_IOC_MERGE: u64 = 0xc030_3e03;
 /// `_IOWR('>', 4, struct sync_file_info)`.
@@ -23,7 +26,7 @@ const SYNC_IOC_SET_DEADLINE: u64 = 0x4010_3e05;
 /// The ioctl type byte of `SYNC_IOC_*`.
 const SYNC_IOC_MAGIC: u64 = b'>' as u64;
 
-/// The name every fence reports (Linux: the driver and timeline).
+/// The host fence driver's timeline and driver names.
 const NAME: &[u8] = b"aim";
 const DRIVER: &[u8] = b"aim";
 
@@ -64,7 +67,8 @@ const _: () = assert!(size_of::<FenceInfo>() == 80);
 
 fn name32(s: &[u8]) -> [u8; 32] {
     let mut n = [0; 32];
-    n[..s.len()].copy_from_slice(s);
+    let len = s.iter().position(|&b| b == 0).unwrap_or(s.len()).min(31);
+    n[..len].copy_from_slice(&s[..len]);
     n
 }
 
@@ -155,8 +159,9 @@ fn merge(fd: i32, arg: u64) -> i64 {
     if !is_sync_file(second.descriptor().as_raw_fd()) {
         return -(ENOENT as i64);
     }
+    d.name[31] = 0;
     let file =
-        match unsafe { aim_sync_file::merge(BorrowedFd::borrow_raw(fd), second.descriptor()) } {
+        match unsafe { owner::merge(BorrowedFd::borrow_raw(fd), second.descriptor(), d.name) } {
             Ok(file) => file,
             Err(error) => {
                 return -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::ENOMEM))
@@ -165,7 +170,6 @@ fn merge(fd: i32, arg: u64) -> i64 {
         };
     // The new descriptor remains owned and unpublished until copy_to_user
     // succeeds, as sync_file_ioctl_merge's fd_install ordering requires.
-    d.name[31] = 0;
     d.fence = file.as_raw_fd();
     let output = unsafe {
         std::slice::from_raw_parts(
@@ -191,39 +195,57 @@ fn file_info(fd: i32, arg: u64) -> i64 {
     if info.flags != 0 || info.pad != 0 {
         return -(EINVAL as i64);
     }
-    // One fence per file: a merge signals its own fence once all of its
-    // inputs have, with the last time and the first error.
-    let (status, timestamp_ns) = match state(fd) {
-        State::Active => (0, 0),
-        State::Signaled {
-            timestamp_ns,
-            status,
-        } => (status, timestamp_ns as u64),
+    let (name, fences) = match owner::info(unsafe { BorrowedFd::borrow_raw(fd) }) {
+        Ok(info) => info,
+        Err(error) => {
+            return -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
+        }
+    };
+    let status = match state(fd) {
+        State::Active => 0,
+        State::Signaled { status, .. } => status,
     };
     if info.num_fences != 0 {
-        if info.sync_fence_info == 0 {
-            return -(EFAULT as i64);
+        if (info.num_fences as usize) < fences.len() {
+            return -(EINVAL as i64);
         }
-        let fence = FenceInfo {
-            obj_name: name32(NAME),
-            driver_name: name32(DRIVER),
-            status,
-            flags: 0,
-            timestamp_ns,
-        };
+        let fences: Vec<_> = fences
+            .iter()
+            .map(|fd| {
+                use std::os::fd::AsFd;
+                let (status, timestamp_ns) = match aim_sync_file::state(fd.as_fd()) {
+                    State::Active => (0, 0),
+                    State::Signaled {
+                        timestamp_ns,
+                        status,
+                    } => (status, timestamp_ns as u64),
+                };
+                FenceInfo {
+                    obj_name: name32(NAME),
+                    driver_name: name32(DRIVER),
+                    status,
+                    flags: 0,
+                    timestamp_ns,
+                }
+            })
+            .collect();
+        info.status = fences
+            .iter()
+            .fold(1, |s, f| if s <= 0 { s } else { f.status });
         let output = unsafe {
             std::slice::from_raw_parts(
-                (&fence as *const FenceInfo).cast::<u8>(),
-                size_of::<FenceInfo>(),
+                fences.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(fences.as_slice()),
             )
         };
         if let Err(error) = super::user_memory::write_exact(info.sync_fence_info, output) {
             return -(error as i64);
         }
+    } else {
+        info.status = status;
     }
-    info.status = status;
-    info.name = name32(NAME);
-    info.num_fences = 1;
+    info.name = name;
+    info.num_fences = fences.len() as u32;
     let output = unsafe {
         std::slice::from_raw_parts(
             (&info as *const FileInfo).cast::<u8>(),
@@ -273,14 +295,14 @@ mod tests {
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 
-    fn info(fd: i32, with_fence: bool) -> (i64, FileInfo, FenceInfo) {
+    fn info(fd: i32, with_fence: bool) -> (i64, FileInfo, [FenceInfo; 2]) {
         // SAFETY: plain old data.
-        let mut fence: FenceInfo = unsafe { std::mem::zeroed() };
+        let mut fence: [FenceInfo; 2] = unsafe { std::mem::zeroed() };
         // SAFETY: plain old data.
         let mut info: FileInfo = unsafe { std::mem::zeroed() };
         if with_fence {
-            info.num_fences = 1;
-            info.sync_fence_info = &mut fence as *mut FenceInfo as u64;
+            info.num_fences = 2;
+            info.sync_fence_info = fence.as_mut_ptr() as u64;
         }
         let r = ioctl(fd, SYNC_IOC_FILE_INFO, &mut info as *mut FileInfo as u64).unwrap();
         (r, info, fence)
@@ -292,12 +314,12 @@ mod tests {
         let (fd, writer) = guest_fence();
         let (r, i, _) = info(fd, false);
         assert_eq!((r, i.status, i.num_fences), (0, 0, 1));
-        assert_eq!(&i.name[..4], b"aim\0");
+        assert!(i.name.starts_with(b"aim-aim"));
         writer.signal_at(1234, 1);
         let (r, i, f) = info(fd, true);
         assert_eq!((r, i.status, i.num_fences), (0, 1, 1));
-        assert_eq!((f.status, f.timestamp_ns), (1, 1234));
-        assert_eq!(&f.driver_name[..4], b"aim\0");
+        assert_eq!((f[0].status, f[0].timestamp_ns), (1, 1234));
+        assert_eq!(&f[0].driver_name[..4], b"aim\0");
         // Flags must be zero.
         // SAFETY: plain old data.
         let mut bad: FileInfo = unsafe { std::mem::zeroed() };
@@ -329,7 +351,10 @@ mod tests {
             5000
         ));
         let (_, i, f) = info(m, true);
-        assert_eq!((i.status, f.timestamp_ns), (1, 7));
+        assert_eq!((i.status, i.num_fences), (1, 2));
+        let mut times = f.map(|f| f.timestamp_ns);
+        times.sort_unstable();
+        assert_eq!(times, [5, 7]);
 
         // fd2 that is not a sync_file, and nonzero flags.
         let (s, t) = std::os::unix::net::UnixDatagram::pair().unwrap();

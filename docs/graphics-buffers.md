@@ -240,12 +240,25 @@ device. A sync_file is an `AF_UNIX` datagram socket pair made by
   as a failed fence. The composer module holds a frame's acquire fence
   until the frame's present fence signals.
 - **The syscall layer** (`sys/sync_file.rs`) adds the rest of its Linux
-  behaviour: `SYNC_IOC_MERGE` (signaled at the later time, with the first
-  error; a merge of pending fences is signaled by one host thread per
-  process over a kqueue, which also sets the `MTLSharedEvent` of a Vulkan
-  timeline semaphore once a fence imported into it has signaled), `SYNC_IOC_FILE_INFO` (one fence per file, named
-  `aim`), `SYNC_IOC_SET_DEADLINE` (accepted), `EINVAL` for `read` and
-  `write`, and `anon_inode:sync_file` in `/proc/self/fd`.
+  behaviour: `SYNC_IOC_MERGE` keeps the user's name and flattened input
+  fences, deduplicated by context. As Linux 6.12's
+  `dma_fence_unwrap_merge` does, it drops inputs already signaled at merge
+  time, or creates one successful fence at the latest timestamp if none
+  remain. `SYNC_IOC_FILE_INFO` reports the count, name and each fence's
+  timeline (`aim`), driver (`aim`), status, zero flags and signal time;
+  a nonzero capacity below the count is `EINVAL`. `SYNC_IOC_SET_DEADLINE`
+  is accepted; `read` and `write` return `EINVAL`, and `/proc/self/fd`
+  shows `anon_inode:sync_file`.
 
-A merged file reports one fence rather than its inputs; Android reads only
-the overall status and the latest signal time from it.
+Ioctl merges use a native `linux-run --sync-file-owner` process. The socket's
+bound address locates its owner; queries pass the actual descriptor and look
+up its Darwin socket identity. The owner retains the input descriptors and
+name across dup, fork and descriptor transfer, including after the creator
+exits. It signals the merged socket once every input signals, using the latest
+timestamp and first error, and releases the entry when the writer observes
+the reader's last close. It checks for that close every 20 ms (Darwin does not
+wake a datagram peer's kqueue on close) and exits after one idle second.
+Native `aim_sync_file::merge` and `on_signal` callbacks still use the
+process's kqueue waiter, including signaling imported Vulkan timeline
+semaphores. The fork-state encoding is unchanged: the metadata stays with
+the native owner, and the ordinary guest socket is inherited.
