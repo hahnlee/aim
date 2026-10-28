@@ -262,6 +262,40 @@ impl Backend {
     pub(super) fn new(host: Arc<AppHost>) -> Self {
         Self(DomainVerification::new(host))
     }
+
+    fn set_status(
+        &self,
+        pid: i32,
+        args: original::SetDomainVerificationStatus<DomainSet>,
+        mut capture: Arc<Capture>,
+    ) -> Result<i32, Exception> {
+        let system = self.0.host.package_system()?;
+        let disk = loop {
+            match system.package_persistence_owner(&capture) {
+                Ok((_, disk)) => break disk,
+                Err(error) => {
+                    let current = self.0.host.package_capture()?;
+                    if Arc::ptr_eq(&capture, &current) {
+                        return Err(error);
+                    }
+                    capture = current;
+                }
+            }
+        };
+        // The retained Java enforcer checked the explicit caller. Acquire the
+        // disk owner against a current capture; the native mutation also retries
+        // if another package write publishes before its commit.
+        let driver = crate::package::domain_verification::service::DomainQueries::with_persistence(
+            system, disk,
+        );
+        driver.set_verifier_status(
+            pid,
+            SYSTEM_UID,
+            args.id.as_deref(),
+            args.domains,
+            args.state,
+        )
+    }
 }
 impl Service for Backend {
     fn accepts_fds(&self) -> bool {
@@ -296,21 +330,8 @@ impl Service for Backend {
             original::SET_DOMAIN_VERIFICATION_STATUS => {
                 let a = original::SetDomainVerificationStatus::<DomainSet>::read(&mut call.data)?;
                 (|| {
-                    let system = self.0.host.system.get().ok_or_else(|| {
-                        Exception::new(EX_ILLEGAL_STATE, "native package owner unavailable")
-                    })?;
                     let capture = self.0.host.package_capture()?;
-                    let (_, disk) = system.package_persistence_owner(&capture)?;
-                    // The retained Java enforcer checked the explicit caller;
-                    // this private system-UID call only applies the native state.
-                    let driver = crate::package::domain_verification::service::DomainQueries::with_persistence(system, disk);
-                    let status = driver.set_verifier_status(
-                        call.sender_pid as i32,
-                        SYSTEM_UID,
-                        a.id.as_deref(),
-                        a.domains,
-                        a.state,
-                    )?;
+                    let status = self.set_status(call.sender_pid as i32, a, capture)?;
                     dv::write_set_domain_verification_status_reply(&mut reply, status);
                     Ok(())
                 })()

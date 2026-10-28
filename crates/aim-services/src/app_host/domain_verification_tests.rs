@@ -170,8 +170,8 @@ fn original_frontend_receives_authenticated_uid_and_preserves_replies() {
 }
 
 #[test]
-fn verifier_status_publishes_paired_reads_and_persists_without_mutating_retained_capture() {
-    crate::system::with_discovery_session(|host, publish, _| {
+fn verifier_status_retries_package_write_and_persists_without_mutating_retained_capture() {
+    crate::system::with_discovery_session(|host, publish, enabled| {
         publish(&mut |package| {
             let mut filter = crate::package::intent_filter::IntentFilter {
                 auto_verify: true,
@@ -277,7 +277,30 @@ fn verifier_status_publishes_paired_reads_and_persists_without_mutating_retained
             );
             dv::read_set_domain_verification_status_reply(&mut response.reader()).unwrap()
         };
-        assert_eq!(status(&id, &[Some("example.org")], 1).unwrap(), 0);
+        // Commit another package owner's mutation between the domain read and
+        // its write. Both persistence acquisition and publication must rebase.
+        let mut pending = retained.domains().unwrap().owner().clone();
+        pending
+            .set_verifier_status(
+                &id,
+                retained.state().packages["p"].pkg.as_deref(),
+                retained.domains().unwrap().collector_policy("p").unwrap(),
+                &mut ["example.org".into()].into(),
+                1,
+            )
+            .unwrap();
+        let pending = retained.prepare_domain_update(pending).unwrap();
+        enabled(Some("p.Main"), 2);
+        assert!(
+            system
+                .commit_package_domains_if_current(&bridge, pending, &mut disk.lock().unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let request = backend_set_request(&id, &[Some("example.org")], 1);
+        let args = original::SetDomainVerificationStatus::<DomainSet>::read(&mut request.reader())
+            .unwrap();
+        assert_eq!(backend.set_status(77, args, retained.clone()).unwrap(), 0);
         let current = host.package_capture().unwrap();
         let code = current.state().packages["p"].pkg.clone().unwrap();
         assert_eq!(
@@ -328,6 +351,30 @@ fn verifier_status_publishes_paired_reads_and_persists_without_mutating_retained
             saved.domain_verification,
             current.domains().unwrap().owner().persisted()
         );
+        let reopened = crate::package::owner::Store::open(host.data().unwrap(), &[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened.state().settings.domain_verification,
+            saved.domain_verification
+        );
+        assert_eq!(
+            reopened.state().users[0]
+                .1
+                .restrictions
+                .packages
+                .iter()
+                .find(|(name, _)| name == "p")
+                .unwrap()
+                .1
+                .disabled_components
+                .as_deref(),
+            Some(["p.Main".to_string()].as_slice())
+        );
+        assert_eq!(
+            current.state().packages["p"].users[&0].disabled_components,
+            ["p.Main"]
+        );
         for (hosts, expected) in [(vec![Some("other.org")], 2), (vec![None], 2)] {
             assert_eq!(status(&id, &hosts, 1).unwrap(), expected);
         }
@@ -358,6 +405,72 @@ fn verifier_status_publishes_paired_reads_and_persists_without_mutating_retained
                 collector::Kind::ValidAutoVerify
             )
             .contains(&"example.org".into())
+        );
+        // A replacement package's new domain-set id invalidates the old request.
+        let replacement_id = "00000000-0000-0000-0000-000000000003";
+        let mut scan = current.scan().owner().clone();
+        scan.settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "p")
+            .unwrap()
+            .domain_set_id = Some(replacement_id.into());
+        let mut domains = current.domains().unwrap().owner().clone();
+        domains.remove("p").unwrap();
+        domains
+            .add(
+                owner::Input {
+                    id: replacement_id,
+                    name: "p",
+                    code: Some(&code),
+                    signatures: &[],
+                    system: false,
+                    restrict_domains: true,
+                    pre_verified: None,
+                },
+                &config,
+            )
+            .unwrap();
+        scan.settings.domain_verification = domains.xml_projection();
+        let mut context = (**current.context())
+            .clone()
+            .attach_boot_domains(
+                &scan,
+                owner::Boot {
+                    owner: domains,
+                    changes: vec![],
+                },
+                &config,
+                &policies,
+            )
+            .unwrap();
+        context.scan_version += 1;
+        disk.lock()
+            .unwrap()
+            .commit_scan_settings_owner(&scan)
+            .unwrap();
+        let changed = system
+            .publish_package_scan_with_queries(
+                &bridge,
+                Some(current.scan()),
+                scan,
+                current.scan().usage().clone(),
+                context,
+            )
+            .unwrap();
+        let request = backend_set_request(&id, &[Some("example.org")], 1);
+        let args = original::SetDomainVerificationStatus::<DomainSet>::read(&mut request.reader())
+            .unwrap();
+        assert_eq!(backend.set_status(77, args, current).unwrap(), 1);
+        assert!(Arc::ptr_eq(&changed, &host.package_capture().unwrap()));
+        assert_eq!(
+            crate::package::owner::Store::open(host.data().unwrap(), &[0])
+                .unwrap()
+                .unwrap()
+                .state()
+                .settings
+                .domain_verification,
+            changed.domains().unwrap().owner().persisted()
         );
     });
 }
