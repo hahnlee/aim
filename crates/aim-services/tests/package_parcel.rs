@@ -97,6 +97,10 @@ fn compile_original_parcel_oracle(
         )
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/RetainedSigningOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageCacheValidationOracle.java"),
         )
         .arg(
