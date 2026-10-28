@@ -44,6 +44,11 @@ impl Service for OriginalBridge {
             bootstrap::IS_TEST_BASE_ON_BOOTCLASSPATH => {
                 bootstrap::write_is_test_base_on_bootclasspath_reply(&mut reply, true)
             }
+            bootstrap::IS_DOMAIN_SET_UUID_STRICT_VALIDATION_ENABLED => {
+                bootstrap::write_is_domain_set_uuid_strict_validation_enabled_reply(
+                    &mut reply, true,
+                )
+            }
             bootstrap::IS_SIGNING_DEBUGGABLE => {
                 bootstrap::write_is_signing_debuggable_reply(&mut reply, false)
             }

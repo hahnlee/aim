@@ -17,6 +17,7 @@ import android.os.UserManager;
 import android.system.Os;
 import android.util.Slog;
 
+import com.android.internal.os.ApplicationSharedMemory;
 import com.android.internal.os.ClassLoaderFactory;
 import com.android.internal.os.RuntimeInit;
 import com.android.server.SystemService;
@@ -104,6 +105,10 @@ public final class SystemProcessHost extends RuntimeInit {
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
             ActivityThread.initializeMainlineModules();
+            // SystemServer initializes mutable nonce storage after the modules and
+            // before services: PlatformCompat invalidates IpcDataCache at construction.
+            // Keep its mutable mapping and fd for the lifetime of this system process.
+            ApplicationSharedMemory.setInstance(ApplicationSharedMemory.create());
             // ActivityManagerService.setSystemProcess: framework manifest
             // receivers use the system server's class loader, not the boot loader.
             thread.installSystemApplicationInfo(context.getPackageManager().getApplicationInfo(
@@ -114,6 +119,7 @@ public final class SystemProcessHost extends RuntimeInit {
                     ServiceManager.waitForService("aim.system_process"));
             host.attachNetworkActivityBridge(new NetworkActivityBridge(
                     new Handler(Looper.getMainLooper())));
+            host.attachDomainVerification(new AppHostDomainVerification(context, host));
             host.attachSystemProcess(applicationThread.asBinder(),
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));

@@ -35,4 +35,8 @@ interface ISystemProcess {
      * Replays the current statsd after a system-process restart; system UID only.
      */
     void attachStatsCompanionUidMap(IStatsCompanionUidMap uidMap);
+    /** System-UID-only backend and original front end for domain verification (#1763). */
+    IBinder getDomainVerificationBackend();
+    void attachDomainVerification(IBinder frontend);
+    boolean isDomainVerifier(int uid);
 }

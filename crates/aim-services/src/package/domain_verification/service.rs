@@ -132,7 +132,7 @@ impl DomainQueries {
         system.authorize_package_domain(&bridge, &capture, pid, uid, Operation::Verifier)?;
         Ok(domains.owner().valid_verification_package_names())
     }
-    fn set_verifier_status(
+    pub(crate) fn set_verifier_status(
         &self,
         pid: i32,
         uid: i32,
