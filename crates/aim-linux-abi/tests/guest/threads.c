@@ -534,10 +534,9 @@ static void test_async_latency(void) {
 // Signals landing anywhere in the syscall path (guest code, stub, lean and
 // full paths) must leave every register as it was: the handler clobbers
 // caller-saved and vector registers, the frame restores them.
-static _Atomic uint64_t storm_hits;
+static _Atomic uint64_t storm_hits[3];
 static void clobber_handler(int sig) {
-  (void)sig;
-  atomic_fetch_add(&storm_hits, 1);
+  atomic_fetch_add(&storm_hits[sig == SIGUSR1 ? 0 : sig == SIGUSR2 ? 1 : 2], 1);
   __asm__ volatile(
       "movi v0.16b, #0x55\n movi v8.16b, #0x55\n movi v16.16b, #0x55\n movi v31.16b, #0x55\n"
       "mov x9, #0x5555\n mov x15, #0x5555\n cmp x9, x9\n" ::
@@ -574,30 +573,101 @@ static uint64_t storm_iter(uint64_t nr) {
 static _Atomic int storm_done;
 static void *stormer(void *arg) {
   uint64_t *bad = arg;
-  // getpid (lean path), sched_getscheduler(0) (full path).
-  for (int i = 0; i < 200000; i++) *bad |= storm_iter(i & 1 ? SYS_getpid : SYS_sched_getscheduler);
-  atomic_store(&storm_done, 1);
+  // getpid (lean path), sched_getscheduler(0) (full path). Stay alive
+  // until the sender has finished and the real-time queue has drained.
+  for (uint64_t i = 0; i < 200000 || !atomic_load(&storm_done); i++)
+    *bad |= storm_iter(i & 1 ? SYS_getpid : SYS_sched_getscheduler);
   return NULL;
 }
 
-static void test_signal_storm(void) {
-  const char *t = "signal_storm";
-  signal(SIGUSR2, clobber_handler);
-  signal(SIGRTMIN + 4, clobber_handler);
+static void run_signal_storm(const char *t, int delayed_sender) {
+  CHECK(t, signal(SIGUSR2, clobber_handler) != SIG_ERR, "SIGUSR2 handler");
+  CHECK(t, signal(SIGRTMIN + 4, clobber_handler) != SIG_ERR, "real-time handler");
+  atomic_store(&storm_hits[1], 0);
+  atomic_store(&storm_hits[2], 0);
+  atomic_store(&storm_done, 0);
   uint64_t bad = 0;
   pthread_t p;
-  pthread_create(&p, NULL, stormer, &bad);
-  long sent = 0;
-  while (!atomic_load(&storm_done)) {
-    pthread_kill(p, sent++ & 1 ? SIGUSR2 : SIGRTMIN + 4);
+  CHECK(t, pthread_create(&p, NULL, stormer, &bad) == 0, "create");
+  // Reproduce sender starvation under host load: the old fixed-lifetime
+  // receiver finished before the sender ran, failing even with zero sends.
+  if (delayed_sender) usleep(50000);
+  enum { N = 256 };
+  int sent[2] = {0}, error = 0;
+  for (int i = 0; i < 2 * N; i++) {
+    int kind = i & 1;
+    error = pthread_kill(p, kind ? SIGRTMIN + 4 : SIGUSR2);
+    if (error) break;
+    sent[kind]++;
     for (volatile int k = 0; k < 500; k++) {
     }
   }
-  pthread_join(p, NULL);
-  printf("storm: %ld signals sent, %llu handled\n", sent, (unsigned long long)atomic_load(&storm_hits));
+  uint64_t deadline = now_ns() + 30000000000ull;
+  while ((atomic_load(&storm_hits[2]) < (uint64_t)sent[1] || !atomic_load(&storm_hits[1])) && now_ns() < deadline)
+    sched_yield();
+  atomic_store(&storm_done, 1);
+  int joined = pthread_join(p, NULL);
+  uint64_t standard = atomic_load(&storm_hits[1]), realtime = atomic_load(&storm_hits[2]);
+  printf("storm: standard %d sent, %llu handled; real-time %d sent, %llu handled\n",
+         sent[0], (unsigned long long)standard, sent[1], (unsigned long long)realtime);
+  CHECK(t, !error && !joined, "send error %d, join error %d", error, joined);
   CHECK(t, bad == 0, "registers changed across syscalls (bitmask %#llx)", (unsigned long long)bad);
-  CHECK(t, atomic_load(&storm_hits) > 100, "only %llu handler runs", (unsigned long long)atomic_load(&storm_hits));
+  // signal(7), Queueing and delivery semantics: standard signals coalesce
+  // while pending; every successfully sent real-time signal must arrive.
+  CHECK(t, standard >= 1 && standard <= (uint64_t)sent[0], "standard handler runs %llu", (unsigned long long)standard);
+  CHECK(t, realtime == (uint64_t)sent[1], "real-time handler runs %llu, expected %d", (unsigned long long)realtime, sent[1]);
   printf("ok %s\n", t);
+}
+
+static void test_signal_storm(void) {
+  run_signal_storm("signal_storm", 0);
+}
+
+static void test_signal_storm_delayed(void) {
+  run_signal_storm("signal_storm_delayed", 1);
+}
+
+// Force coalescing independently of scheduling, and check that distinct
+// standard signals and repeated real-time signals retain their pending state.
+// https://man7.org/linux/man-pages/man7/signal.7.html
+static void test_signal_pending_storm(void) {
+  const char *t = "signal_pending_storm";
+  int signals[] = {SIGUSR1, SIGUSR2, SIGRTMIN + 4};
+  sigset_t set, old;
+  sigemptyset(&set);
+  for (int i = 0; i < 3; i++) {
+    CHECK(t, signal(signals[i], clobber_handler) != SIG_ERR, "handler %d", signals[i]);
+    sigaddset(&set, signals[i]);
+  }
+  enum { ROUNDS = 32, N = 16 };
+  for (int round = 0; round < ROUNDS; round++) {
+    for (int i = 0; i < 3; i++) atomic_store(&storm_hits[i], 0);
+    CHECK(t, pthread_sigmask(SIG_BLOCK, &set, &old) == 0, "block");
+    int error = 0;
+    for (int n = 0; n < N; n++)
+      for (int i = 0; i < 3; i++) {
+        int rc = pthread_kill(pthread_self(), signals[i]);
+        if (rc) error = rc;
+      }
+    sigset_t pending;
+    sigemptyset(&pending);
+    int rc = sigpending(&pending);
+    int present = rc == 0;
+    for (int i = 0; i < 3; i++)
+      present &= sigismember(&pending, signals[i]) == 1 && atomic_load(&storm_hits[i]) == 0;
+    int unblocked = pthread_sigmask(SIG_SETMASK, &old, NULL);
+    CHECK(t, !error && present && !unblocked, "round %d: send %d, pending %d, unblock %d", round, error, present, unblocked);
+    uint64_t deadline = now_ns() + 30000000000ull;
+    while (atomic_load(&storm_hits[2]) < N && now_ns() < deadline) sched_yield();
+    CHECK(t, atomic_load(&storm_hits[0]) == 1 && atomic_load(&storm_hits[1]) == 1 && atomic_load(&storm_hits[2]) == N,
+          "round %d: handlers %llu/%llu/%llu, expected 1/1/%d", round,
+          (unsigned long long)atomic_load(&storm_hits[0]), (unsigned long long)atomic_load(&storm_hits[1]),
+          (unsigned long long)atomic_load(&storm_hits[2]), N);
+    CHECK(t, sigpending(&pending) == 0, "pending after delivery");
+    for (int i = 0; i < 3; i++)
+      CHECK(t, sigismember(&pending, signals[i]) == 0, "signal %d still pending", signals[i]);
+  }
+  printf("ok %s (%d rounds)\n", t, ROUNDS);
 }
 
 // Cost of a redirected syscall: lean path (getpid) and full path
@@ -1004,6 +1074,8 @@ static const struct test tests[] = {
     {"raise", test_raise_latency},
     {"async_signal", test_async_latency},
     {"signal_storm", test_signal_storm},
+    {"signal_storm_delayed", test_signal_storm_delayed},
+    {"signal_pending_storm", test_signal_pending_storm},
     {"sigwait_sigqueue", test_sigwait},
     {"directed_sigquit_join", test_directed_sigquit_join},
     {"sigsuspend", test_sigsuspend},
