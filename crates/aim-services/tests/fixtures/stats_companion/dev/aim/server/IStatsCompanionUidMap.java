@@ -2,5 +2,6 @@
 package dev.aim.server;
 public interface IStatsCompanionUidMap {
     void start(android.os.IBinder binder) throws android.os.RemoteException;
+    String dumpStatsCompanion();
     abstract class Stub implements IStatsCompanionUidMap {}
 }

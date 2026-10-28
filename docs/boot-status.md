@@ -52,7 +52,7 @@ Legacy network activity listeners register through the original RemoteCallbackLi
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
 The app host routes `lock_settings.generateKey` and `removeKey` through retained Android 16 Java and its original keystore owners with `RECOVER_KEYSTORE` checks (#1888; host tests, fresh-data app-host boot).
-statsd receives the UID map from the original StatsCompanionService code and its package, user and shutdown updates.
+statsd receives the retained Java UID map, receivers and live statsd_java updates, with a permission-checked deletion-history dump. aim-system now starts the image's original StatsPullAtomService and delivers its boot phases; the fork is removed. Host lifecycle, original DEX registration-route, native statsmanager forwarding and image linkage checks pass, but original pull execution remains unverified and ActivityManagerInternal/PinnerService local owners are missing (#1765; no guest boot rerun).
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.
