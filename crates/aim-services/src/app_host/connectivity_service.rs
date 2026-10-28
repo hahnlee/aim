@@ -698,6 +698,43 @@ fn network_under(text: &str) -> Option<(Uplink, Vec<Ipv4Addr>)> {
 }
 
 impl ConnectivityService {
+    /// ConnectivityService.dump/hasDumpPermission, until its state formatting is served.
+    fn dump(&self, call: &mut Call<'_>) -> Reply {
+        use std::io::Write;
+        let fd = call.data.read_fd()?;
+        let mut out = self
+            .host
+            .process
+            .file(fd)
+            .and_then(|file| aim_binder_host::server::file_fd(&file))
+            .ok_or(BAD_VALUE)?;
+        aim_service_aidl::read_string_list(&mut call.data)?;
+        if call.data.remaining() != 0 {
+            return Err(BAD_VALUE);
+        }
+        let uid = call.sender_euid as i32;
+        let granted = match self
+            .host
+            .check_permission(Some("android.permission.DUMP"), uid)
+        {
+            Ok(granted) => granted == 0,
+            Err(error) => return reply(Err(error)),
+        };
+        let text = if granted {
+            "connectivity dump (#2140) is not implemented by the app host: networks, providers, UID status, requests, offers and legacy types\n".to_owned()
+        } else {
+            format!(
+                "Permission Denial: can't dump ConnectivityService from from pid={}, uid={uid} due to missing android.permission.DUMP permission\n",
+                call.sender_pid
+            )
+        };
+        out.write_all(text.as_bytes())
+            .map_err(|_| aim_binder_host::parcel::FAILED_TRANSACTION)?;
+        let mut p = Parcel::new();
+        p.write_no_exception();
+        Ok(p)
+    }
+
     /// Netstats' transport inventory follows the same network publication as
     /// clients, rather than inferring the guest transport from the Mac's link.
     pub(super) fn ifaces_since_boot(&self, transport: u32) -> Vec<String> {
@@ -1863,6 +1900,9 @@ impl Service for ConnectivityService {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result: Result<(), Exception> = match call.code {
+            aim_binder_host::local::DUMP_TRANSACTION => {
+                return self.dump(call);
+            }
             cm::GET_ACTIVE_NETWORK => {
                 cm::GetActiveNetwork::read(&mut call.data).map_err(bad)?;
                 self.enforce_access(uid)
@@ -2233,6 +2273,67 @@ mod tests {
     use super::*;
     use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
     use std::sync::mpsc;
+
+    /// Dumps carry an output FD, without an interface token (Binder.onTransact).
+    #[test]
+    fn dump_with_output_fd_names_the_unimplemented_surface() {
+        use std::os::fd::AsFd;
+        struct Output(std::fs::File);
+        impl Service for Output {
+            fn descriptor(&self) -> &str {
+                "test.IOutput"
+            }
+            fn transact(&self, _: &mut Call<'_>) -> Reply {
+                let mut p = Parcel::new();
+                p.write_file(aim_binder_host::server::file_from_fd(self.0.as_fd()).unwrap());
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let permissions = super::super::permission_manager::PermissionManager::with_system(
+                host.clone(),
+                Default::default(),
+            );
+            assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+            let service = Arc::new(ConnectivityService::for_test(host.clone(), None));
+            let Binder::Local(ptr) = host.process.add_service(service.clone()) else {
+                unreachable!()
+            };
+            let node = host.process.local_service(ptr).unwrap();
+            let dir = super::super::test_temp_dir("connectivity-dump");
+            for uid in [1000, 99001] {
+                let path = dir.join(uid.to_string());
+                let output = export(Arc::new(Output(std::fs::File::create(&path).unwrap())));
+                let received = output.transact(1, &Parcel::new(), false).unwrap();
+                let mut p = received.into_parcel();
+                p.write_i32(1);
+                p.write_string16(Some("--short"));
+                let code = aim_binder_host::local::DUMP_TRANSACTION;
+                let response = if uid == 1000 {
+                    node.transact(code, &p, false).unwrap().into_parcel()
+                } else {
+                    call(service.as_ref(), uid, code, &p)
+                };
+                response.reader().read_exception().unwrap().unwrap();
+                let text = std::fs::read_to_string(&path).unwrap();
+                if uid == 1000 {
+                    assert!(
+                        text.starts_with("connectivity dump (#2140) is not implemented"),
+                        "{text}"
+                    );
+                    assert!(text.contains(
+                        "networks, providers, UID status, requests, offers and legacy types"
+                    ));
+                } else {
+                    assert_eq!(
+                        text,
+                        "Permission Denial: can't dump ConnectivityService from from pid=42, uid=99001 due to missing android.permission.DUMP permission\n"
+                    );
+                }
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
 
     struct ActivityBridge(mpsc::Sender<(u32, Option<Binder>, bool)>);
 
