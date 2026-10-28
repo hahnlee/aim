@@ -527,6 +527,7 @@ trait Device {
     fn property(&self, name: &str) -> Option<String>;
     /// The managed profiles of `user` (`UserManager.getProfiles`).
     fn managed_profiles(&self, user: i32) -> Result<Vec<i32>, Exception>;
+    fn profiles(&self, user: i32) -> Vec<i32>;
     /// The exception of `what`, not implemented.
     fn unimplemented(&self, what: &str) -> Exception;
 }
@@ -653,6 +654,24 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
         }
     };
     let result: Result<(), Exception> = match code {
+        dp::RESET_DEFAULT_CROSS_PROFILE_INTENT_FILTERS => {
+            let a = dp::ResetDefaultCrossProfileIntentFilters::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                authorize(
+                    caller.system_or_root()
+                        || caller.permitted(MANAGE_PROFILE_AND_DEVICE_OWNERS)?,
+                )?;
+                // DevicePolicyManagerService.resetDefaultCrossProfileIntentFilters,
+                // android-16.0.0_r1: no filters to reset in a group of at most one.
+                if device.profiles(a.user_id).len() > 1 {
+                    return Err(device.unimplemented(
+                        "resetting cross-profile intent filters for profiles (#1521)",
+                    ));
+                }
+                dp::write_reset_default_cross_profile_intent_filters_reply(&mut p);
+                Ok(())
+            })()
+        }
         dp::GET_PASSWORD_QUALITY => {
             let a = dp::GetPasswordQuality::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
@@ -1285,6 +1304,10 @@ impl Device for DevicePolicy {
         super::user_service::managed_profiles(&self.host, user)
     }
 
+    fn profiles(&self, user: i32) -> Vec<i32> {
+        super::user_service::profile_ids(user)
+    }
+
     fn unimplemented(&self, what: &str) -> Exception {
         self.host.unimplemented_named("device_policy", what)
     }
@@ -1606,6 +1629,16 @@ mod tests {
             Ok(self.managed.iter().copied().filter(|_| user == 0).collect())
         }
 
+        fn profiles(&self, user: i32) -> Vec<i32> {
+            if user == 0 {
+                std::iter::once(0)
+                    .chain(self.managed.iter().copied())
+                    .collect()
+            } else {
+                vec![]
+            }
+        }
+
         fn unimplemented(&self, what: &str) -> Exception {
             Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, what)
         }
@@ -1624,6 +1657,53 @@ mod tests {
 
     fn not_authorized() -> Exception {
         Exception::security("Calling identity is not authorized")
+    }
+
+    /// DevicePolicyManagerService.resetDefaultCrossProfileIntentFilters,
+    /// android-16.0.0_r1: authorize before returning for a group of <= 1.
+    #[test]
+    fn reset_cross_profile_filters_checks_permission_before_the_single_user_return() {
+        let reset = |device: &Fake, uid, user_id| {
+            call(
+                device,
+                uid,
+                dp::RESET_DEFAULT_CROSS_PROFILE_INTENT_FILTERS,
+                |p| dp::ResetDefaultCrossProfileIntentFilters { user_id }.write(p),
+            )
+        };
+        let mut device = Fake::default();
+        for user in [0, 10] {
+            assert_eq!(exception(&reset(&device, APP, user)), not_authorized());
+            assert!(
+                reset(&device, SYSTEM_UID, user)
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .is_ok()
+            );
+        }
+        device.permissions.push((APP, MANAGE_USERS));
+        assert_eq!(exception(&reset(&device, APP, 0)), not_authorized());
+        device
+            .permissions
+            .push((APP, MANAGE_PROFILE_AND_DEVICE_OWNERS));
+        // Neither a missing feature nor persisted policy changes this decision.
+        for feature in [true, false] {
+            device.feature = feature;
+            device.policies.owned = true;
+            assert!(
+                reset(&device, APP, 0)
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .is_ok()
+            );
+        }
+        device.managed.push(10);
+        assert_eq!(
+            exception(&reset(&device, APP, 0)).code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
     }
 
     /// `getSystemUpdatePolicy`: none without a persisted one, which is not
