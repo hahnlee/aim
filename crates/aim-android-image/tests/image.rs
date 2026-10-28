@@ -417,6 +417,42 @@ reason = "IPv6 loopback"
 }
 
 #[test]
+fn only_a_matching_derived_receipt_supplies_a_build_identity() {
+    let fixture = Fixture::new();
+    // An extraction may have an identity too; it is not a derived build.
+    assert_eq!(
+        identity::read_derived_identity(&fixture.original).unwrap(),
+        None
+    );
+    let derived = fixture.temp.0.join("metadata");
+    let first = compute(&fixture, OVERLAY);
+    write(&derived.join(".identity"), &first.hex);
+    write(&derived.join(".overlay-receipt"), &first.receipt);
+    assert_eq!(
+        identity::read_derived_identity(&derived).unwrap(),
+        Some(first.hex)
+    );
+
+    fs::write(
+        fixture.sources.join("_build/vendor/manifest.xml"),
+        "changed",
+    )
+    .unwrap();
+    let next = compute(&fixture, OVERLAY);
+    write(&derived.join(".overlay-receipt"), &next.receipt);
+    assert!(identity::read_derived_identity(&derived).is_err());
+    write(&derived.join(".identity"), &next.hex);
+    assert_eq!(
+        identity::read_derived_identity(&derived).unwrap(),
+        Some(next.hex)
+    );
+    write(&derived.join(".identity"), "not a hash");
+    assert!(identity::read_derived_identity(&derived).is_err());
+    fs::remove_file(derived.join(".identity")).unwrap();
+    assert!(identity::read_derived_identity(&derived).is_err());
+}
+
+#[test]
 fn original_identity_comes_from_file_or_flag() {
     let fixture = Fixture::new();
     let found = identity::original_identity(&fixture.original, None).unwrap();
