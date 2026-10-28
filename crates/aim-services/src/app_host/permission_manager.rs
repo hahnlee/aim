@@ -26,10 +26,12 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 mod boot;
+mod existing;
 mod install;
 mod migration;
 mod policy;
 mod removal;
+mod reset;
 
 pub(super) use policy::PermissionPolicy;
 
@@ -1501,6 +1503,8 @@ pub struct PermissionManager {
     owner: Mutex<AccessOwner>,
     #[cfg(test)]
     access_writes: Mutex<Vec<String>>,
+    #[cfg(test)]
+    permission_kills: Mutex<Vec<(i32, String)>>,
     installs: Mutex<BTreeMap<u64, install::Candidate>>,
     groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
     gid_permissions: OnceLock<BTreeSet<String>>,
@@ -1516,6 +1520,8 @@ impl PermissionManager {
             owner: Mutex::new(AccessOwner::default()),
             #[cfg(test)]
             access_writes: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            permission_kills: Mutex::new(Vec::new()),
             installs: Mutex::new(BTreeMap::new()),
             groups: Mutex::new(None),
             gid_permissions: OnceLock::new(),
@@ -2077,6 +2083,11 @@ impl PermissionManager {
     }
 
     fn post_permission_kill(&self, uid: i32, reason: &str) {
+        #[cfg(test)]
+        self.permission_kills
+            .lock()
+            .unwrap()
+            .push((uid, reason.to_owned()));
         let host = self.host.clone();
         let reason = reason.to_owned();
         // `handler.post`: after persistence and query publication.

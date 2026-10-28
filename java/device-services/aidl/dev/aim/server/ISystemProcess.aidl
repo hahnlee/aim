@@ -60,4 +60,11 @@ interface ISystemProcess {
     void attachProviderQueries(IBinder queries);
     /** Original Installer crate queries and CrateInfo conversion; system UID only. */
     void attachStorageCrates(IStorageCrates crates);
+    /** Retained package helpers; system UID only, before setSystemProcess. */
+    void attachPackageBootstrapJava(IBinder bridge);
+    /** Local permission/storage adapters in aim-system; system UID only. */
+    void existingPackagePermissionsInstalled(String packageName, in String[] allowlisted, int userId);
+    boolean isPackageCeStoragePrepared(int userId);
+    /** PermissionManagerServiceInternal's per-user reset; system UID only. */
+    void resetPackageRuntimePermissionsForUser(int userId);
 }

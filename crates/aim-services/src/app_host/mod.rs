@@ -572,6 +572,8 @@ pub struct AppHost {
     safe_labels: Mutex<Option<Arc<Strong>>>,
     provider_queries: Mutex<Option<Arc<Strong>>>,
     storage_crates: Mutex<Option<Arc<Strong>>>,
+    /// Cold package helpers in the current system process.
+    package_bootstrap_java: Mutex<Option<Arc<Strong>>>,
     device_policy_defaults: Mutex<Option<Arc<Strong>>>,
     tasks: tasks::Tasks,
     /// The server's launches, by package, until the package's task is made.
@@ -692,6 +694,7 @@ impl AppHost {
             safe_labels: Mutex::new(None),
             provider_queries: Mutex::new(None),
             storage_crates: Mutex::new(None),
+            package_bootstrap_java: Mutex::new(None),
             device_policy_defaults: Mutex::new(None),
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),

@@ -111,29 +111,38 @@ public final class ExistingInstallEffects {
             args.appId = setting.appId; args.previousAppId = 0;
             args.seInfo = seInfo + com.android.server.pm.pkg.SELinuxUtil.getSeinfoUser(packageSetting.readUserState(user));
             args.targetSdkVersion = setting.targetSdkVersion;
-            android.os.CreateAppDataResult result;
-            synchronized (installer) {
-                try {
-                    var batch = new Installer.Batch();
-                    var future = batch.createAppData(args); batch.execute(installer); result = future.join();
-                }
-                catch (Installer.InstallerException | java.util.concurrent.CompletionException failure) {
-                    installer.destroyAppData(args.uuid, args.packageName, user, storageFlags, state.ceDataInode);
-                    result = installer.createAppData(args);
-                }
-                if (result.exceptionCode != 0) throw new Installer.InstallerException(result.exceptionMessage);
-                if ((storageFlags & 2) != 0 && setting.primaryCpuAbiRaw != null
-                        && !dalvik.system.VMRuntime.is64BitAbi(setting.primaryCpuAbiRaw)
-                        && new java.io.File(pkg.getNativeLibraryDir()).exists())
-                    installer.linkNativeLibraryDirectory(setting.volumeUuid, setting.getPackageName(), pkg.getNativeLibraryDir(), user);
-                if (users.isUserUnlockingOrUnlocked(user))
-                    storage.prepareAppDataAfterInstall(setting.getPackageName(), user * 100000 + setting.appId);
-            }
+            long[] result = prepareAppData(installer, args, storageFlags, state.ceDataInode,
+                    setting.primaryCpuAbiRaw, pkg.getNativeLibraryDir(), () -> {
+                        if (users.isUserUnlockingOrUnlocked(user))
+                            storage.prepareAppDataAfterInstall(setting.getPackageName(), user * 100000 + setting.appId);
+                    });
             if (users != LocalServices.getService(UserManagerInternal.class)
                     || storage != LocalServices.getService(android.os.storage.StorageManagerInternal.class))
                 throw new IllegalStateException("existing install storage owner changed");
-            return new long[] {storageFlags, result.ceDataInode, result.deDataInode};
+            return result;
         } finally { parcel.recycle(); }
+    }
+    // AppDataHelper.prepareAppData and prepareAppDataContentsLeafLIF, android-16.0.0_r1.
+    static long[] prepareAppData(Installer installer, android.os.CreateAppDataArgs args,
+            int storageFlags, long ceInode, String primaryAbi, String nativeDir,
+            Runnable afterInstall) throws Installer.InstallerException {
+        synchronized (installer) {
+            android.os.CreateAppDataResult result;
+            try {
+                var batch = new Installer.Batch();
+                var future = batch.createAppData(args); batch.execute(installer); result = future.join();
+            } catch (Installer.InstallerException | java.util.concurrent.CompletionException failure) {
+                installer.destroyAppData(args.uuid, args.packageName, args.userId, storageFlags, ceInode);
+                result = installer.createAppData(args);
+            }
+            if (result.exceptionCode != 0) throw new Installer.InstallerException(result.exceptionMessage);
+            if ((storageFlags & 2) != 0 && primaryAbi != null
+                    && !dalvik.system.VMRuntime.is64BitAbi(primaryAbi)
+                    && new java.io.File(nativeDir).exists())
+                installer.linkNativeLibraryDirectory(args.uuid, args.packageName, nativeDir, args.userId);
+            afterInstall.run();
+            return new long[] {storageFlags, result.ceDataInode, result.deDataInode};
+        }
     }
     private static final java.util.Map<String, int[]> kernelUsers = new java.util.HashMap<>();
     private static synchronized void writeKernelMapping(com.android.server.pm.PackageSetting setting) throws java.io.IOException {

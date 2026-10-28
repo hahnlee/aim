@@ -99,6 +99,26 @@ payloads fail explicitly. Host parcel and Binder apply-path checks cover this
 change, using the captured original layer state plus constructed full parcels;
 a complete original Transaction oracle and guest validation remain unrun
 (2026-10-28; no guest boot).
+The package bootstrap bridge delegates preferred-activity change broadcasts,
+timestamp formatting and the background-handler barrier to the existing Java
+PackageBootstrapBridge in aim-system (#2330). The system process attaches it
+before setSystemProcess; both bridge boundaries require system UID, and a
+missing/dead Java owner fails explicitly. Host transport, Java helper and
+system-process lifecycle tests cover this slice; no guest boot was run
+(2026-10-29). The install-existing leaf now also uses this bridge: aim-system
+starts the original non-isolated Installer over installd and installs local
+permission/user/storage adapters over the native owners. The retained Java
+keeps batch recovery, CE/DE inode receipts and 32-bit library linking; the
+permission owner persists and publishes restricted exemptions with its usual
+revocation effects. Host Java, transport, permission-publication and lifecycle
+checks pass; no guest boot was run. Preferred per-user runtime permission reset
+also uses the Java bridge's local adapter and the native permission owner: one
+mutation over non-APEX packages persists and publishes grants before callbacks
+and revocation kills. Cross-profile preferred access retains UserManagerService's
+Java maximum-access rule over the user owner's UserProperties (user 0 on this
+device; absent users contribute ACCESS_LEVEL_ALL). Both boundaries admit only
+system UID. Host tests cover transport, Java adapters, persisted properties and
+permission publication/effects; no guest boot was run (#2330, 2026-10-29).
 
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHORTCUTS or its package is user 0's HOME role holder; package-scoped queries retain their events (#1870; host tests only, no guest boot rerun).

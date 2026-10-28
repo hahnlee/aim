@@ -1845,6 +1845,51 @@ pub(super) fn application_restrictions(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cross_profile_access_properties_preserve_values_and_system_visibility() {
+        let data = crate::app_host::test_temp_dir("preferred-user-properties");
+        let users = data.join("system/users");
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(users.join("userlist.xml"), "<users/>").unwrap();
+        let process = crate::test_process(1000);
+        let host = AppHost::new(process);
+        crate::app_host::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        let service = UserManager::new(host.clone());
+        for value in [None, Some(10), Some(20)] {
+            let attribute = value.map_or(String::new(), |v| {
+                format!("crossProfileIntentFilterAccessControl=\"{v}\"")
+            });
+            std::fs::write(users.join("0.xml"), format!("<user id=\"0\" serialNumber=\"0\" flags=\"19475\" type=\"android.os.usertype.full.SYSTEM\"><userProperties {attribute}/></user>")).unwrap();
+            for uid in [1000, 0, 10100] {
+                let mut p = Parcel::new();
+                um::GetUserPropertiesCopy { user_id: 0 }.write(&mut p);
+                let out = service
+                    .transact(&mut Call {
+                        code: um::GET_USER_PROPERTIES_COPY,
+                        flags: 0,
+                        sender_pid: 77,
+                        sender_euid: uid,
+                        data: p.reader(),
+                    })
+                    .unwrap();
+                let mut r = out.reader();
+                r.read_exception().unwrap().unwrap();
+                assert_eq!(r.read_i32().unwrap(), 1);
+                let present = r.read_i64().unwrap();
+                assert_eq!(present & (1 << 6) != 0, uid == 1000);
+                for index in 0..19 {
+                    let field = r.read_i32().unwrap();
+                    if index == 8 {
+                        assert_eq!(field, if uid == 1000 { value.unwrap_or(0) } else { 0 });
+                    }
+                }
+                assert_eq!(r.remaining(), 0);
+            }
+        }
+        host.process.shutdown().unwrap();
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
     /// UserManagerService.LifeCycle.onUserUnlocking / getUserUnlockRealtime,
     /// android-16.0.0_r1: boot elapsed time, scoped to the calling user.
     #[test]

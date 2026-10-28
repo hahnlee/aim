@@ -1,4 +1,4 @@
 package dev.aim.server;
 final class NetworkActivityBridge extends android.os.Binder {
-    NetworkActivityBridge(android.os.Handler handler) {}
+    NetworkActivityBridge(android.content.Context context, android.os.Handler handler, ISystemProcess host) {}
 }

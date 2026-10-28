@@ -131,8 +131,11 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
             ServiceManager.addService("aim.role_queries", new RoleQueries(context));
             host.attachSettingsValues(new SettingsValues());
-
             host.attachProviderQueries(new ProviderQueries(context));
+            var installer = new com.android.server.pm.Installer(context);
+            installer.onStart();
+            PackageLocalOwners.publish(host);
+            host.attachPackageBootstrapJava(new PackageBootstrapBridge(null, installer));
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
             PreBootNotifications.publish(context);
             host.attachSystemProcess(applicationThread.asBinder(),
