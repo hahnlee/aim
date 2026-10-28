@@ -15,6 +15,7 @@ pub mod accounts_db;
 pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
+mod activity_stats;
 mod activity_user;
 pub mod alarm_service;
 pub mod apex_manager;
@@ -447,6 +448,9 @@ struct App {
     /// milliseconds (`ProcessProfileRecord.mLastMemInfo`,
     /// `mLastMemInfoTime`).
     last_mem_info: Option<(i64, memory_info::ProcessMemoryInfo)>,
+    /// State assigned by this process owner (also used by stats pulls).
+    proc_state: i32,
+    oom_adj: i32,
 }
 
 impl App {
@@ -545,6 +549,7 @@ pub struct AppHost {
     zygote: Mutex<Option<zygote::Session>>,
     next_seq: AtomicI64,
     apps: Mutex<HashMap<i64, App>>,
+    process_stats: activity_stats::ProcessStats,
     /// The services of this host, by name, once registered.
     published: Mutex<Vec<(String, Binder)>>,
     /// The global configuration's sequence number.
@@ -670,6 +675,7 @@ impl AppHost {
             zygote: Mutex::new(None),
             next_seq: AtomicI64::new(1),
             apps: Mutex::new(HashMap::new()),
+            process_stats: activity_stats::ProcessStats::default(),
             published: Mutex::new(Vec::new()),
             config_seq: AtomicI64::new(1),
             grammatical_genders: Mutex::new(HashMap::new()),
@@ -1468,6 +1474,8 @@ impl AppHost {
                 persistent: false,
                 package_deps: Vec::new(),
                 last_mem_info: None,
+                proc_state: PROCESS_STATE_NONEXISTENT,
+                oom_adj: 0,
             },
         );
         self.watch_start(start_seq);
@@ -1583,6 +1591,8 @@ impl AppHost {
                 persistent: false,
                 package_deps: Vec::new(),
                 last_mem_info: None,
+                proc_state: PROCESS_STATE_NONEXISTENT,
+                oom_adj: 0,
             },
         );
         self.watch_start(start_seq);
@@ -1849,6 +1859,8 @@ impl AppHost {
                     && app_info.process_name.as_deref() == Some(process),
                 package_deps: Vec::new(),
                 last_mem_info: None,
+                proc_state: PROCESS_STATE_NONEXISTENT,
+                oom_adj: 0,
             },
         );
         self.watch_start(start_seq);
@@ -2049,6 +2061,7 @@ impl AppHost {
             app.package,
             app.started.elapsed()
         );
+        app.proc_state = PROCESS_STATE_TOP;
         app.thread = Some(strong);
         // Its uid's first process.
         let first = !apps
@@ -2058,6 +2071,7 @@ impl AppHost {
         if first {
             self.uid_changed(uid as i32, uid_observers::Change::Active);
         }
+        self.observe_cached_apps()?;
         // `onApplicationAttachedLocked`: the broadcasts waiting for it.
         self.broadcasts.process_attached(self, seq);
         Ok(())
@@ -2130,6 +2144,8 @@ impl AppHost {
                 persistent: true,
                 package_deps: Vec::new(),
                 last_mem_info: None,
+                proc_state: PROCESS_STATE_TOP,
+                oom_adj: 0,
             },
         );
         for provider in &providers {
@@ -2249,6 +2265,10 @@ impl AppHost {
                 isolated,
             )
         };
+        self.forget_stats_process(start_seq);
+        if let Err(e) = self.observe_cached_apps() {
+            eprintln!("app host: cached-app accounting: {}", e.message);
+        }
         if let Some(exit) = exit {
             if isolated && let Err(e) = self.free_isolated_uid(exit.real_uid as u32) {
                 eprintln!("app host: isolated uid {}: {}", exit.real_uid, e.message);
@@ -2587,11 +2607,7 @@ impl AppHost {
         }
         let apps = self.apps.lock().unwrap();
         let processes = apps.values().map(|a| {
-            let set = if a.thread.is_some() && a.entry_point.is_none() {
-                PROCESS_STATE_TOP
-            } else {
-                PROCESS_STATE_NONEXISTENT
-            };
+            let set = a.proc_state;
             (a.package.as_str(), a.package_deps.as_slice(), set)
         });
         Ok(package_process_state(processes, package))
@@ -2869,7 +2885,19 @@ impl AppHost {
             .ok_or_else(|| format!("no process of start {start_seq}"))?;
         thread
             .transact(code, data, true)
-            .map(|_| ())
+            .map(|_| {
+                let component = match code {
+                    thread::SCHEDULE_RECEIVER | thread::SCHEDULE_REGISTERED_RECEIVER => {
+                        activity_stats::HOSTING_RECEIVER
+                    }
+                    thread::SCHEDULE_SERVICE_ARGS => activity_stats::HOSTING_STARTED_SERVICE,
+                    thread::SCHEDULE_BIND_SERVICE => activity_stats::HOSTING_BOUND_SERVICE,
+                    _ => 0,
+                };
+                if component != 0 {
+                    self.note_stats_component(start_seq, component);
+                }
+            })
             .map_err(|s| format!("{code}: {s}"))
     }
 
@@ -5757,7 +5785,10 @@ mod tests {
 
     /// An app host of no image, and an isolated start of it, `seq`, with
     /// `crash_handler`.
-    fn host_with_start(seq: i64, crash_handler: Arc<dyn Fn() + Send + Sync>) -> Arc<AppHost> {
+    pub(super) fn host_with_start(
+        seq: i64,
+        crash_handler: Arc<dyn Fn() + Send + Sync>,
+    ) -> Arc<AppHost> {
         let driver = aim_binder_driver::Driver::new();
         let credentials = aim_binder_driver::Credentials {
             pid: 97_301,
@@ -5795,6 +5826,8 @@ mod tests {
                 persistent: false,
                 package_deps: Vec::new(),
                 last_mem_info: None,
+                proc_state: PROCESS_STATE_NONEXISTENT,
+                oom_adj: 0,
             },
         );
         host

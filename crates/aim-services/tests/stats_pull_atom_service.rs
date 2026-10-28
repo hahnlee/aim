@@ -45,6 +45,24 @@ fn original_pullers_use_the_framework_statsmanager_registration_contract() {
         let (_, name, signature) = dex.method(id).unwrap();
         name == "<init>" && signature == "(Landroid/content/Context;)V"
     }));
+    // Read-only power-attribution flag is folded into the pinned DEX:
+    // no registration, and the callback is const/4 v0, #1 (PULL_SKIP); return v0.
+    let cpu = calls(
+        &dex,
+        bytes,
+        SERVICE,
+        "registerCpuCyclesPerThreadGroupCluster",
+    );
+    assert!(!cpu.iter().any(|(_, name, _)| name == "setPullAtomCallback"));
+    let code = dex
+        .methods_named(class, "pullCpuCyclesPerThreadGroupCluster")
+        .unwrap();
+    assert_eq!(units(bytes, &code[0]).unwrap(), [0x1012, 0x000f]);
+    assert!(
+        calls(&dex, bytes, SERVICE, "registerPinnerServiceStats")
+            .iter()
+            .any(|(_, name, _)| name == "setPullAtomCallback")
+    );
     let initialize = calls(&dex, bytes, SERVICE, "initializePullersState");
     assert!(initialize.iter().any(|(class, name, _)| {
         class == "Landroid/content/Context;" && name == "getSystemService"
@@ -93,4 +111,74 @@ fn original_pullers_use_the_framework_statsmanager_registration_contract() {
             && method == "registerPullAtomCallback"
             && signature == "(IJJ[ILandroid/os/IPullAtomCallback;)V"
     }));
+}
+
+#[test]
+#[ignore = "requires pinned original image; static call-site audit, no guest boot"]
+fn activity_internal_calls_in_system_process_modules() {
+    let image = aim_paths::original_image();
+    let mut jars = vec![
+        (
+            "system/framework/services.jar",
+            Some("Lcom/android/server/stats/pull/"),
+        ),
+        (
+            "apex/com.android.appsearch/javalib/service-appsearch.jar",
+            None,
+        ),
+        (
+            "apex/com.android.adservices/javalib/service-adservices.jar",
+            None,
+        ),
+        (
+            "apex/com.android.tethering/javalib/service-connectivity.jar",
+            None,
+        ),
+        (
+            "apex/com.android.devicelock/javalib/service-devicelock.jar",
+            None,
+        ),
+    ];
+    jars.sort();
+    for (jar, prefix) in jars {
+        let bytes = fs::read(image.join(jar)).expect("NOT RUN: required original module missing");
+        for bytes in dex_files(&bytes).unwrap() {
+            let dex = Dex::parse(&bytes).unwrap();
+            for class in &dex.classes {
+                if prefix.is_some_and(|p| !class.descriptor.starts_with(p)) {
+                    continue;
+                }
+                let mut methods = std::collections::BTreeSet::new();
+                for id in dex.members(class).unwrap().1 {
+                    methods.insert(dex.method(id).unwrap().1);
+                }
+                for method in methods {
+                    for code in dex.methods_named(class, &method).unwrap() {
+                        let insns = units(&bytes, &code).unwrap();
+                        let mut at = 0;
+                        while at < insns.len() {
+                            if matches!(insns[at] & 0xff, 0x6e..=0x72 | 0x74..=0x78) {
+                                let (owner, name, _) =
+                                    dex.method(u32::from(insns[at + 1])).unwrap();
+                                if owner == "Landroid/app/ActivityManagerInternal;" {
+                                    assert!(
+                                        matches!(
+                                            name.as_str(),
+                                            "getMemoryStateForProcesses"
+                                                | "getPendingIntentStats"
+                                                | "getCachedAppsHighWatermarkStats"
+                                        ),
+                                        "unserved ActivityManagerInternal: {}->{method}: {name}",
+                                        class.descriptor
+                                    );
+                                    println!("{jar}: {}->{method}: {name}", class.descriptor);
+                                }
+                            }
+                            at += instruction_units(&insns, at).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

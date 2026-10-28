@@ -4,6 +4,8 @@ import dev.aim.server.IBatteryHealthStats;
 import dev.aim.server.ISafeLabels;
 import dev.aim.server.IStatsCompanionUidMap;
 import dev.aim.server.IRecoverableKeyStoreKeys;
+import dev.aim.server.IActivityStatsSnapshot;
+import dev.aim.server.IActivityStatsHost;
 
 /**
  * The app host's part of system_server for its system process
@@ -48,4 +50,5 @@ interface ISystemProcess {
     void attachRecoverableKeyStoreKeys(IRecoverableKeyStoreKeys keys);
     /** Retained MediaRouter2 system route/session queries; system UID only. */
     void attachSystemRouteQueries(IBinder queries);
+    IActivityStatsHost getActivityStatsHost(IActivityStatsSnapshot snapshot);
 }
