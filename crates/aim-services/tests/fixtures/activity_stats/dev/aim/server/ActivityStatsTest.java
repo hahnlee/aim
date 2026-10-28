@@ -26,7 +26,23 @@ public final class ActivityStatsTest {
                     default -> throw new AssertionError(method);
                 });
         ActivityStats.publish(snapshot -> { collector = snapshot; return host; });
+        TaskManagerLocal.publish();
+        var tasks = LocalServices.getService(com.android.server.wm.ActivityTaskManagerInternal.class);
+        var home = tasks.getHomeIntent();
+        check(home.action.equals("android.intent.action.MAIN")
+                && home.category.equals("android.intent.category.HOME") && home.flags == 256);
+        check(home != tasks.getHomeIntent());
         ActivityManagerInternal service = LocalServices.getService(ActivityManagerInternal.class);
+        android.app.ActivityManager.service = (android.app.IActivityManager) Proxy.newProxyInstance(
+                ActivityStatsTest.class.getClassLoader(), new Class<?>[]{android.app.IActivityManager.class},
+                (proxy, method, values) -> {
+                    check(method.getName().equals("isUidActive") && values[1].equals("android"));
+                    if ((int)values[0] == -1) throw new android.os.RemoteException();
+                    return (int)values[0] == 10123;
+                });
+        check(service.isUidActive(10123) && !service.isUidActive(10124));
+        try { service.isUidActive(-1); throw new AssertionError(); }
+        catch (IllegalStateException expected) { check(expected.getCause() instanceof android.os.RemoteException); }
         check(service.getClass().getSuperclass() == ActivityManagerInternal.class);
         var p = service.getMemoryStateForProcesses().get(0);
         check(p.uid == 10123 && p.pid == 42 && p.oomScore == 900 && p.hasForegroundServices

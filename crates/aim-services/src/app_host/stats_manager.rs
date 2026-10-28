@@ -22,7 +22,7 @@
 //! original holds while it calls statsd are not taken. The cold UID-map writer
 //! and its receivers, live properties, deletion history/dump and system atom
 //! registrations run in the system process: the pullers use the original
-//! StatsPullAtomService from services.jar. The remaining Pinner local owner is #2274.
+//! StatsPullAtomService and its PinnerService local owner from services.jar (#2274).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::io::{Read, Write};

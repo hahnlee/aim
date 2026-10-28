@@ -17,6 +17,10 @@ public abstract class SystemService {
     public void onStart() { event("start"); }
     public void onBootPhase(int phase) { event("phase="+phase); }
     public void onUserStarting(TargetUser user) { event("starting"); }
+    public void onUserSwitching(TargetUser from, TargetUser to) {
+        if (from != null || to == null) throw new AssertionError("initial user switch");
+        event("switching");
+    }
     public void onUserUnlocking(TargetUser user) { event("unlocking"); }
     public void onUserUnlocked(TargetUser user) { event("unlocked"); }
 }

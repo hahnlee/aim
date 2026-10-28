@@ -22,11 +22,12 @@ public final class SystemProcessHostTest {
         } catch (Attached expected) {
             List<String> wanted = new ArrayList<>(List.of("jni", "context", "modules", "memory",
                     "systemApplication", "network", "domain", "attachDomain", "foreground",
-                    "attachSystem", "companion", "NetworkStatsInitializer:construct",
+                    "attachSystem", "companion", "activityStats", "taskManagerLocal",
+                    "PinnerService:construct", "PinnerService:start", "NetworkStatsInitializer:construct",
                     "NetworkStatsInitializer:start", "NearbyServiceInitializer:construct",
-                    "NearbyServiceInitializer:start", "activityStats", "StatsPullAtomService:construct",
+                    "NearbyServiceInitializer:start", "StatsPullAtomService:construct",
                     "StatsPullAtomService:start", "AdServices:construct", "AdServices:start"));
-            List<String> early = List.of("NearbyServiceInitializer", "StatsPullAtomService", "AdServices");
+            List<String> early = List.of("PinnerService", "NearbyServiceInitializer", "StatsPullAtomService", "AdServices");
             for (int phase : new int[] {480, 500, 520}) {
                 for (String service : early) wanted.add(service+":phase="+phase);
             }
@@ -40,7 +41,9 @@ public final class SystemProcessHostTest {
             for (int phase : new int[] {550, 600}) {
                 for (String service : services) wanted.add(service+":phase="+phase);
             }
-            for (String state : List.of("starting", "unlocking", "unlocked", "phase=1000")) {
+            for (String service : services) wanted.add(service+":starting");
+            wanted.add("PinnerService:switching");
+            for (String state : List.of("unlocking", "unlocked", "phase=1000")) {
                 for (String service : services) wanted.add(service+":"+state);
             }
             wanted.add("telecom");

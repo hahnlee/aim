@@ -11,3 +11,5 @@ service aim-system /system_ext/bin/aim-system
     class main
     user system
     group system
+    # ZygoteInit gives system_server IPC_LOCK for the original PinnerService.
+    capabilities IPC_LOCK

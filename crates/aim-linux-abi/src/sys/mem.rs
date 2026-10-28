@@ -969,6 +969,7 @@ fn mprotect_owned(a: [u64; 6]) -> i64 {
 }
 
 const MADV_DONTNEED: u64 = 4;
+const MADV_WILLNEED: u64 = 3;
 const MADV_FREE: u64 = 8;
 const MADV_REMOVE: u64 = 9;
 
@@ -1402,16 +1403,29 @@ fn refill_copy(lo: u64, n: u64, prot: i32) -> Result<(), i64> {
 }
 
 pub fn madvise(a: [u64; 6]) -> i64 {
+    let Some(len) = a[1].checked_add(PAGE - 1).map(|n| n & !(PAGE - 1)) else {
+        return -(EINVAL as i64);
+    };
+    if a[0].checked_add(len).is_none() {
+        return -(EINVAL as i64);
+    }
     let _epoch = super::verity_pager::mutation();
-    if super::verity_pager::failed_range(a[0], page_up(a[1])) {
+    if super::verity_pager::failed_range(a[0], len) {
         return -(errno::EIO as i64);
     }
-    let (addr, len, advice) = (a[0], page_up(a[1]), a[2]);
+    let (addr, advice) = (a[0], a[2]);
     super::verity_pager::wait_pending(addr, len);
     if addr & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
     }
     match advice {
+        MADV_WILLNEED => {
+            // Linux madvise(2): request read-ahead and report unmapped ranges.
+            // SAFETY: advisory access to the validated guest range.
+            errno::check(
+                unsafe { libc::madvise(addr as *mut _, len as usize, libc::MADV_WILLNEED) } as i64,
+            )
+        }
         MADV_DONTNEED | MADV_REMOVE => {
             let ranges = super::verity_pager::covered(addr, len);
             if ranges.is_empty() {
@@ -1860,15 +1874,74 @@ pub fn msync(a: [u64; 6]) -> i64 {
 }
 
 pub fn mlock(nr: u64, a: [u64; 6]) -> i64 {
-    // SAFETY: guest range.
-    let r = unsafe {
-        if nr == 229 {
-            libc::munlock(a[0] as *const _, a[1] as usize)
-        } else {
-            libc::mlock(a[0] as *const _, a[1] as usize)
-        }
+    let privileged = super::cred::capable(super::cred::CAP_IPC_LOCK);
+    let limit = match super::cred::own_rlimit(8, None, false) {
+        Ok(l) => l[0],
+        Err(e) => return e,
     };
-    errno::check(r as i64)
+    if nr != 229 && limit == 0 && !privileged {
+        return -(errno::EPERM as i64);
+    }
+    // Linux accepts unaligned addresses and charges every touched page.
+    let addr = a[0] & !(PAGE - 1);
+    let Some(end) = a[0]
+        .checked_add(a[1])
+        .and_then(|n| n.checked_add(PAGE - 1))
+        .map(|n| n & !(PAGE - 1))
+    else {
+        return -(EINVAL as i64);
+    };
+    if addr == end {
+        return 0;
+    }
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _lock = LOCK.lock().unwrap();
+    let mut cursor = addr;
+    let mut already_locked = 0;
+    let mut unwired = Vec::new();
+    for r in vmmap::regions(addr, end) {
+        if r.start != cursor {
+            return -(ENOMEM as i64);
+        }
+        if r.usage.wired {
+            already_locked += r.end - r.start;
+        } else {
+            unwired.push((r.start, r.end - r.start));
+        }
+        cursor = r.end;
+    }
+    if cursor != end {
+        return -(ENOMEM as i64);
+    }
+    if nr != 229 && !privileged && limit != u64::MAX {
+        let locked: u64 = vmmap::regions(0, u64::MAX)
+            .filter(|r| r.usage.wired)
+            .map(|r| r.end - r.start)
+            .sum();
+        if locked + (end - addr - already_locked) > limit / PAGE * PAGE {
+            return -(ENOMEM as i64);
+        }
+    }
+    // SAFETY: mapped page-aligned range. Darwin performs real wiring; a host
+    // resource failure is returned, never replaced by a successful pin.
+    if nr == 229 {
+        return errno::check(
+            unsafe { libc::munlock(addr as *const _, (end - addr) as usize) } as i64,
+        );
+    }
+    // Darwin's user wiring nests; Linux mlock does not. Wire only new pages.
+    for (i, &(start, len)) in unwired.iter().enumerate() {
+        if unsafe { libc::mlock(start as *const _, len as usize) } < 0 {
+            let error = errno::last();
+            for &(start, len) in &unwired[..i] {
+                unsafe {
+                    libc::munlock(start as *const _, len as usize);
+                }
+            }
+            return -(error as i64);
+        }
+    }
+    0
 }
 
 const MEMBARRIER_CMD_QUERY: u64 = 0;
@@ -2112,4 +2185,145 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let heap = brk_heap();
     vm_account::with(|s| s.set_heap(heap));
     super::vma_names::fork_restore(r);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_locking_charges_pages_once_and_honors_linux_limits() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::mem::tests::memory_locking_charges_pages_once_and_honors_linux_limits",
+        ) {
+            return;
+        }
+        let mut identity = super::super::cred::Identity::default();
+        identity.cap_eff = 0;
+        identity.rlimits[8] = Some((PAGE, u64::MAX));
+        super::super::cred::init(identity.clone(), None);
+        // SAFETY: fresh writable pages, released below.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                (3 * PAGE) as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+        let at = ptr as u64;
+        let lock = |addr, len| mlock(228, [addr, len, 0, 0, 0, 0]);
+        let unlock = |addr, len| mlock(229, [addr, len, 0, 0, 0, 0]);
+        assert_eq!(lock(at + 1, PAGE), -(ENOMEM as i64));
+        assert_eq!(lock(at + 1, 1), 0);
+        assert!(vmmap::region_at(at).unwrap().usage.wired);
+        assert_eq!(lock(at + 2, 1), 0, "overlap is charged only once");
+        assert_eq!(lock(at + PAGE, 1), -(ENOMEM as i64));
+        assert_eq!(unlock(at + 1, 1), 0);
+        assert!(!vmmap::region_at(at).unwrap().usage.wired);
+        assert_eq!(lock(at + PAGE, 1), 0);
+        assert_eq!(unlock(at + PAGE, 1), 0);
+        super::super::cred::own_rlimit(8, Some([3 * PAGE, u64::MAX]), false).unwrap();
+        assert_eq!(lock(at, 1), 0);
+        assert_eq!(
+            lock(at, 2 * PAGE),
+            0,
+            "partial overlap wires only new pages"
+        );
+        assert_eq!(unlock(at, 2 * PAGE), 0);
+        assert!(!vmmap::region_at(at).unwrap().usage.wired);
+        assert_eq!(lock(u64::MAX - 1, 4), -(EINVAL as i64));
+        // SAFETY: make a hole in our own mapping.
+        assert_eq!(
+            unsafe { libc::munmap((at + PAGE) as *mut _, PAGE as usize) },
+            0
+        );
+        assert_eq!(lock(at, 3 * PAGE), -(ENOMEM as i64));
+        assert_eq!(unlock(at, 3 * PAGE), -(ENOMEM as i64));
+        assert!(!vmmap::region_at(at).unwrap().usage.wired);
+        super::super::cred::own_rlimit(8, Some([0, u64::MAX]), false).unwrap();
+        assert_eq!(lock(at, 1), -(errno::EPERM as i64));
+        identity.cap_eff = 1 << super::super::cred::CAP_IPC_LOCK;
+        identity.rlimits[8] = Some((0, u64::MAX));
+        super::super::cred::init(identity, None);
+        assert_eq!(lock(at, 1), 0, "CAP_IPC_LOCK bypasses the guest limit");
+        assert_eq!(unlock(at, 1), 0);
+        // SAFETY: release the two surviving pages.
+        unsafe {
+            libc::munmap(ptr, PAGE as usize);
+            libc::munmap((at + 2 * PAGE) as *mut _, PAGE as usize);
+        }
+        // Pinner's HOME budget must be real wired memory, above Linux's common
+        // unprivileged limit. The host must still accept the actual wiring.
+        use std::os::fd::AsRawFd;
+        let bytes = 60 * 1024 * 1024;
+        let path = std::env::temp_dir().join(format!("aim-pinner-lock-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        file.set_len(bytes as u64).unwrap();
+        // Pinner maps regular files read-only and shared before locking ranges.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+        assert_eq!(
+            madvise([ptr as u64, bytes as u64, MADV_WILLNEED, 0, 0, 0]),
+            0
+        );
+        assert_eq!(lock(ptr as u64, bytes as u64), 0);
+        assert!(vmmap::region_at(ptr as u64).unwrap().usage.wired);
+        assert_eq!(unlock(ptr as u64, bytes as u64), 0);
+        unsafe {
+            libc::munmap(ptr, bytes);
+        }
+    }
+
+    #[test]
+    fn willneed_requests_readahead_and_reports_invalid_ranges() {
+        // madvise(2): alignment, rounding, overflow and unmapped-range errors.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                PAGE as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+        let at = ptr as u64;
+        assert_eq!(madvise([at, 1, MADV_WILLNEED, 0, 0, 0]), 0);
+        assert_eq!(
+            madvise([at + 1, 1, MADV_WILLNEED, 0, 0, 0]),
+            -(EINVAL as i64)
+        );
+        assert_eq!(
+            madvise([at, u64::MAX, MADV_WILLNEED, 0, 0, 0]),
+            -(EINVAL as i64)
+        );
+        assert_eq!(
+            madvise([u64::MAX & !(PAGE - 1), PAGE, MADV_WILLNEED, 0, 0, 0]),
+            -(EINVAL as i64)
+        );
+        unsafe {
+            libc::munmap(ptr, PAGE as usize);
+        }
+        assert_eq!(madvise([0, PAGE, MADV_WILLNEED, 0, 0, 0]), -(ENOMEM as i64));
+    }
 }
