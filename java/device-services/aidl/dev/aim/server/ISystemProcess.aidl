@@ -1,5 +1,6 @@
 package dev.aim.server;
 import dev.aim.server.IForegroundServicePolicy;
+import dev.aim.server.IPermissionBootPolicy;
 import dev.aim.server.IBatteryHealthStats;
 import dev.aim.server.ISafeLabels;
 import dev.aim.server.IStatsCompanionUidMap;
@@ -48,4 +49,6 @@ interface ISystemProcess {
     void attachRecoverableKeyStoreKeys(IRecoverableKeyStoreKeys keys);
     /** Retained MediaRouter2 system route/session queries; system UID only. */
     void attachSystemRouteQueries(IBinder queries);
+    /** Attach before package-dependent startup; system UID only (#2282). */
+    void attachPermissionBootPolicy(IPermissionBootPolicy policy);
 }

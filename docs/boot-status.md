@@ -258,6 +258,10 @@ from Settings, persists migrated state, and leaves a user with no legacy runtime
 file empty and unwritten. Archiving (#1757), shutdown statistics (#2167) and the
 remaining bootstrap owners (#2022) are open.
 
+On a fingerprint change, native permission boot evaluates restricted-permission
+exemptions and preserves existing role grants through the system-UID Java policy
+bridge (#2282; host update and Java policy tests, no guest boot rerun).
+
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
 active setting inventory, matching the original PackageUsage owner, and a
