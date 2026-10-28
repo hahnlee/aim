@@ -23,14 +23,7 @@ fn image_apk(file: &str) -> Option<Vec<u8>> {
 
 /// A test APK of the CTS release (`tools/cts-module.py` fetches them).
 fn cts(file: &str) -> Option<PathBuf> {
-    let path = aim_paths::fetched().join("cts").join(file);
-    if !path.exists() {
-        aim_paths::skip(&format!(
-            "no _build/cts/{file} (python3 tools/cts-module.py)"
-        ));
-        return None;
-    }
-    Some(path)
+    aim_paths::cts(file)
 }
 
 fn verify_bytes(

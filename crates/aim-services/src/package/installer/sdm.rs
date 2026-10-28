@@ -97,7 +97,7 @@ mod tests {
             always_load_past_certs_v4: false,
         }
     }
-    fn inputs() -> std::path::PathBuf {
+    fn inputs() -> Option<std::path::PathBuf> {
         let root =
             aim_paths::fetched().join("cts-tradefed/android-cts/testcases/CtsCompilationTestCases");
         for name in [
@@ -108,12 +108,9 @@ mod tests {
             "testkey2.pk8",
             "testkey2.x509.pem",
         ] {
-            assert!(
-                root.join(name).is_file(),
-                "Pinned signing inputs required: {name}"
-            );
+            aim_paths::input(root.join(name), "cts-tradefed")?;
         }
-        root
+        Some(root)
     }
     fn unsigned(root: &Path) -> Vec<u8> {
         let source = FileSource::open(&root.join("CtsCompilationTestCases.jar")).unwrap();
@@ -182,7 +179,7 @@ mod tests {
     }
     #[test]
     fn genuine_v3_crypto_rejects_unsigned_tampered_and_other_signer_sdm() {
-        let root = inputs();
+        let Some(root) = inputs() else { return };
         let data = Data::new();
         let stage = data.0.join("stage");
         fs::create_dir(&stage).unwrap();
@@ -243,7 +240,7 @@ mod tests {
         let error = verify(&data.0, &unknown, &build(), None).unwrap_err();
         assert_eq!(error.legacy_status, -110);
         assert!(!error.committed);
-        let root = inputs();
+        let Some(root) = inputs() else { return };
         let expected = expected(&root);
         let signed_metadata = data.0.join("signed.zip");
         signed(&root, &data, "testkey", &signed_metadata);
@@ -268,7 +265,7 @@ mod tests {
             write::Apks,
         };
         use aim_storage::guest_inode::GuestInode;
-        let root = inputs();
+        let Some(root) = inputs() else { return };
         let data = Data::new();
         let stage = data.0.join("app/vmdl7.tmp");
         fs::create_dir_all(&stage).unwrap();

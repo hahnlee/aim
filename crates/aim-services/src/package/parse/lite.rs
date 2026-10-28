@@ -578,6 +578,9 @@ mod tests {
     #[test]
     fn malformed_split_types_keep_manifest_parse_status() {
         let apk = aim_paths::fetched().join("cts-tradefed/android-cts/testcases/CtsPackageManagerHostTestCases/CtsInvalidRequiredSplitTypeSplitApp.apk");
+        let Some(apk) = aim_paths::input(apk, "cts-tradefed") else {
+            return;
+        };
         assert_eq!(
             install_lite(&apk, &environment())
                 .unwrap_err()

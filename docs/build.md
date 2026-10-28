@@ -47,7 +47,7 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 | `_build/android16-image.dmg` | The system image (`image` node): the original and its translation cache as an uncompressed read-only case-sensitive disk image, mounted at `_build/android16-image` (docs/storage.md) |
 | `_build/aosp/` | AOSP trees fetched at the image's tag, each checked against its lock's hash |
 | `_build/downloads/` | Their archives (and the MoltenVK release), so a refetch needs no network |
-| `_build/cts/` | The pinned entries of the CTS release (`upstream/cts.lock`, `tools/cts-module.py`; docs/system-services.md) |
+| `_build/cts/`, `_build/cts-tradefed/` | The `cts` and `cts-tradefed` nodes fetch and hash-check the official release entries in `upstream/cts.lock` and `upstream/cts-tradefed.lock`; `cargo aim test --integration` builds both |
 | `_build/java/` | The Java toolchain of `upstream/java-toolchain.lock`, unpacked ("Java") |
 | `_build/xsdc`, `_build/angle-source`, `_build/depot_tools` | Pinned checkouts |
 | `target/aim/<node>/` | Every build output (`hal/bin`, `art/stripped`, `boot-image`, ...) |

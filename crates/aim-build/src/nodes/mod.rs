@@ -6,6 +6,7 @@ mod aidl;
 mod angle;
 mod art;
 mod boot_image;
+mod cts;
 mod cts_host_tools;
 mod derived_image;
 mod device_services;
@@ -39,6 +40,7 @@ pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
         device_services::node(),
         oat::node(),
     ]);
+    built.extend(cts::nodes()?);
     let derived = derived_image::node(&built)?;
     built.push(derived);
     built.push(translation_cache::node());
@@ -55,6 +57,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::AidlGen => aidl::run(log)?,
         Action::Xsdc => xsdc::run(log)?,
         Action::CtsHostTools => cts_host_tools::run(log)?,
+        Action::Cts { tradefed } => cts::run(log, tradefed)?,
         Action::Art => {
             art::run(log)?;
             return crate::n2db::repository_deps(&aim_paths::art());
@@ -107,6 +110,7 @@ pub fn clean(node: &Node) -> Result<(), String> {
         Action::AidlGen => node.outputs.clone(),
         Action::Xsdc => vec![xsdc::out()],
         Action::CtsHostTools => vec![cts_host_tools::out()],
+        Action::Cts { .. } => Vec::new(),
         Action::Art => vec![aim_paths::art()],
         Action::BootImage => vec![aim_paths::boot_image()],
         // The build tree of a checkout other checkouts may share.
