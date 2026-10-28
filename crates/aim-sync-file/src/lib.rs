@@ -612,6 +612,69 @@ mod tests {
     }
 
     #[test]
+    fn exported_acquire_and_release_fences_outlive_their_original_handles() {
+        // SurfaceControl's handoff: exporting a sync duplicates its fd;
+        // destroying the sync must neither signal nor invalidate that fd.
+        // Keep the writers under test control so pending is deterministic.
+        for frame in 0..240 {
+            let (acquire, render) = pair().unwrap();
+            let exported = acquire.try_clone().unwrap();
+            drop(acquire);
+            assert_eq!(state(exported.as_fd()), State::Active);
+            assert_eq!(poll_bits(exported.as_fd()), 0);
+            assert!(!wait(exported.as_fd(), 0));
+            render.signal_at(frame * 2 + 1, 1);
+            let imported = exported.try_clone().unwrap();
+            drop(exported);
+            assert_eq!(
+                state(imported.as_fd()),
+                State::Signaled {
+                    timestamp_ns: frame * 2 + 1,
+                    status: 1,
+                }
+            );
+
+            let (release, present) = pair().unwrap();
+            let exported = release.try_clone().unwrap();
+            drop(release);
+            // Rendering done does not mean the consumer has released it.
+            assert!(!wait(exported.as_fd(), 0));
+            present.signal_at(frame * 2 + 2, 1);
+            assert_eq!(poll_bits(exported.as_fd()), libc::POLLIN);
+            assert_eq!(
+                state(exported.as_fd()),
+                State::Signaled {
+                    timestamp_ns: frame * 2 + 2,
+                    status: 1,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn merged_release_keeps_pending_inputs_alive_and_reports_failure() {
+        let (a, first_consumer) = pair().unwrap();
+        let (b, second_consumer) = pair().unwrap();
+        let release = merge(a.as_fd(), b.as_fd()).unwrap();
+        drop((a, b));
+        first_consumer.signal_at(10, 1);
+        assert_eq!(state(release.as_fd()), State::Active);
+        assert_eq!(poll_bits(release.as_fd()), 0);
+        // A failed consumer still completes the fence, with its error;
+        // readability alone must not turn failure into successful reuse.
+        second_consumer.signal_at(20, -5); // Linux EIO.
+        assert!(wait(release.as_fd(), 5000));
+        assert_eq!(
+            state(release.as_fd()),
+            State::Signaled {
+                timestamp_ns: 20,
+                status: -5,
+            }
+        );
+        assert_eq!(poll_bits(release.as_fd()), libc::POLLIN);
+    }
+
+    #[test]
     fn a_merge_waits_for_both_and_keeps_an_error() {
         let (a, wa) = pair().unwrap();
         let (b, wb) = pair().unwrap();
