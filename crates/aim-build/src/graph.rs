@@ -283,9 +283,26 @@ fn staleness(graph: &Graph, node: &Node, eval: &Eval, stamp: Option<&Stamp>) -> 
         return Some("never built".into());
     };
     if stamp.key == eval.key {
-        return graph
-            .missing_output(node)
-            .map(|p| format!("output missing: {}", stamp::display(p).display()));
+        if let Some(path) = graph.missing_output(node) {
+            return Some(format!(
+                "output missing: {}",
+                stamp::display(path).display()
+            ));
+        }
+        for path in &node.outputs {
+            let known = stamp.outputs.get(path);
+            if known.is_none() && !path.is_file() {
+                continue;
+            }
+            let state = hash::file_state(path, known);
+            if state.hash == hash::MISSING || known.is_none_or(|known| known.hash != state.hash) {
+                return Some(format!(
+                    "output changed: {}",
+                    stamp::display(path).display()
+                ));
+            }
+        }
+        return None;
     }
     if stamp.recipe != node.recipe {
         return Some("recipe changed".into());
@@ -480,6 +497,7 @@ pub fn build(
                             tools: eval.tools,
                             deps: eval.deps,
                             inputs: eval.inputs,
+                            outputs: output_states(node)?,
                             found,
                         }
                         .write(name)?;
@@ -516,6 +534,22 @@ pub fn build(
     } else {
         Err(failures.join("\n"))
     }
+}
+
+/// Directory outputs keep their node's own freshness contract. File outputs
+/// may also be replaced by tools run outside the graph (for example Cargo).
+fn output_states(node: &Node) -> Result<BTreeMap<PathBuf, FileState>, String> {
+    node.outputs
+        .iter()
+        .filter(|path| path.is_file())
+        .map(|path| {
+            let state = hash::file_state(path, None);
+            if state.hash == hash::MISSING {
+                return Err(format!("cannot hash output {}", path.display()));
+            }
+            Ok((path.clone(), state))
+        })
+        .collect()
 }
 
 /// The key downstream nodes see for `node`: its output's, else its own.
@@ -684,6 +718,61 @@ mod tests {
         );
         let reason = staleness(&graph, graph.node("b"), &key("k2"), Some(&stamp)).unwrap();
         assert!(reason.contains("upstream a"), "{reason}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reverted_sources_do_not_hide_an_externally_replaced_output() {
+        let dir = std::env::temp_dir().join(format!("aim-output-state-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let source = dir.join("source");
+        let output = dir.join("binary");
+        std::fs::write(&source, b"original").unwrap();
+        std::fs::write(&output, b"original executable").unwrap();
+        let mut n = node("fixture", &[], vec![source.clone()]);
+        n.outputs.push(output.clone());
+        let graph = Graph::new(vec![n]).unwrap();
+        let n = graph.node("fixture");
+        let evaluate = || {
+            graph
+                .evaluate(
+                    n,
+                    &Tools::default(),
+                    &HashMap::new(),
+                    &[],
+                    &BTreeMap::new(),
+                    false,
+                )
+                .unwrap()
+        };
+        let original = evaluate();
+        let mut stamp = Stamp {
+            key: original.key.clone(),
+            recipe: n.recipe,
+            inputs: original.inputs.clone(),
+            outputs: output_states(n).unwrap(),
+            ..Stamp::default()
+        };
+        assert_eq!(staleness(&graph, n, &original, Some(&stamp)), None);
+
+        std::fs::write(&source, b"instrumented").unwrap();
+        std::fs::write(&output, b"instrumented executable").unwrap();
+        std::fs::write(&source, b"original").unwrap();
+        let reverted = evaluate();
+        assert_eq!(reverted.key, original.key);
+        assert!(
+            staleness(&graph, n, &reverted, Some(&stamp))
+                .unwrap()
+                .starts_with("output changed:")
+        );
+
+        std::fs::write(&output, b"original executable").unwrap();
+        stamp.outputs = output_states(n).unwrap();
+        assert_eq!(staleness(&graph, n, &reverted, Some(&stamp)), None);
+        // Pre-fingerprint stamps rebuild once, rather than trusting an
+        // executable whose provenance the graph never recorded.
+        stamp.outputs.clear();
+        assert!(staleness(&graph, n, &reverted, Some(&stamp)).is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

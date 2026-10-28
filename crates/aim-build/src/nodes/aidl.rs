@@ -36,6 +36,8 @@ pub fn node() -> Node {
         repo("tools/lib/daemon_aidl.py"),
         repo("tools/lib/raw_file_descriptor.rs"),
         repo(service_aidl::LOCK),
+        repo("crates/aim-build/src/nodes/aidl.rs"),
+        repo("crates/aim-build/src/nodes/service_aidl.rs"),
         // The generated codes are checked against the image's stubs.
         repo("image/original.lock"),
     ];
@@ -228,6 +230,17 @@ pub fn run(log: &mut Log) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_generators_are_keyed_inputs() {
+        let n = node();
+        for source in ["aidl.rs", "service_aidl.rs"] {
+            assert!(
+                n.inputs
+                    .contains(&repo(&format!("crates/aim-build/src/nodes/{source}")))
+            );
+        }
+    }
 
     /// Out-of-line modules are skipped by rustfmt; inline modules and the
     /// rest stay as they are.
