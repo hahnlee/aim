@@ -84,6 +84,12 @@ public final class NetworkActivityBridge extends INetworkActivityBridge.Stub {
         if (available) mHandler.post(this::reportNetworkActive);
     }
 
+    @Override
+    public String formatConnectivityDump(ConnectivityDumpSnapshot snapshot, String[] args) {
+        Bridge.enforceSystemUid();
+        return ConnectivityDump.format(snapshot, args);
+    }
+
     /** LegacyNetworkActivityTracker.reportNetworkActive, on the owning handler. */
     private void reportNetworkActive() {
         final int length = mNetworkActivityListeners.beginBroadcast();

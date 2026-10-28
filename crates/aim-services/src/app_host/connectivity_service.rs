@@ -29,6 +29,7 @@ use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_TYPE, BAD_VALUE, Binder, EX_NULL_POINTER, EX_SERVICE_SPECIFIC, Exception, Parcel,
 };
+use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_net_iconnectivitymanager as cm;
 use aim_service_aidl::android_os_imessenger as imessenger;
 use aim_service_aidl::dev_aim_server_inetworkactivitybridge as activity;
@@ -421,6 +422,7 @@ struct Nri {
     /// The caller's binder, linked to its death.
     binder: Option<(Strong, u64)>,
     uid: i32,
+    pid: i32,
     as_uid: i32,
     /// Counted against the system's limit.
     system: bool,
@@ -663,6 +665,85 @@ fn callback_data(
     Some(p)
 }
 
+/// Wire pair of the private Java ConnectivityDumpSnapshot. Network objects keep
+/// their pinned original parcel formats and toString implementations.
+struct DumpSnapshot {
+    network: Option<(i32, LinkProperties, NetworkCapabilities)>,
+    requests: Vec<DumpRequest>,
+    blocked: Vec<(i32, i32)>,
+    legacy_types: Result<Vec<i32>, Exception>,
+}
+struct DumpRequest {
+    request: NetworkRequest,
+    uid: i32,
+    pid: i32,
+    as_uid: i32,
+    flags: i32,
+    declared: i32,
+    satisfier: Option<i32>,
+    tracked: bool,
+}
+impl WriteParcelable for DumpSnapshot {
+    fn write_to(&self, p: &mut Parcel) {
+        let start = p.position();
+        p.write_i32(0); // Structured AIDL parcelable size, including this word.
+        p.write_i32(self.network.as_ref().map_or(-1, |n| n.0));
+        if let Some((_, lp, nc)) = &self.network {
+            for value in [&network_info() as &dyn WriteParcelable, lp, nc] {
+                p.write_i32(1);
+                value.write_to(p);
+            }
+        } else {
+            for _ in 0..3 {
+                p.write_i32(0);
+            }
+        }
+        p.write_i32(self.requests.len() as i32);
+        for n in &self.requests {
+            p.write_i32(1);
+            let at = p.position();
+            p.write_i32(0);
+            p.write_i32(1);
+            n.request.write_to(p);
+            for value in [
+                n.uid,
+                n.pid,
+                n.as_uid,
+                n.flags,
+                n.declared,
+                n.satisfier.unwrap_or(-1),
+            ] {
+                p.write_i32(value);
+            }
+            p.write_bool(n.tracked);
+            p.set_i32_at(at, (p.position() - at) as i32);
+        }
+        for values in [
+            self.blocked.iter().map(|v| v.0).collect::<Vec<_>>(),
+            self.blocked.iter().map(|v| v.1).collect(),
+        ] {
+            p.write_i32(values.len() as i32);
+            for value in values {
+                p.write_i32(value);
+            }
+        }
+        match &self.legacy_types {
+            Ok(types) => {
+                p.write_i32(types.len() as i32);
+                for t in types {
+                    p.write_i32(*t);
+                }
+                p.write_string16(None);
+            }
+            Err(e) => {
+                p.write_i32(-1);
+                p.write_string16(Some(&e.message));
+            }
+        }
+        p.set_i32_at(start, (p.position() - start) as i32);
+    }
+}
+
 pub struct ConnectivityService {
     host: Arc<AppHost>,
     shared: Arc<Shared>,
@@ -698,6 +779,106 @@ fn network_under(text: &str) -> Option<(Uplink, Vec<Ipv4Addr>)> {
 }
 
 impl ConnectivityService {
+    /// ConnectivityService.dump/hasDumpPermission at android-16.0.0_r1.
+    fn dump(&self, call: &mut Call<'_>) -> Reply {
+        use std::io::Write;
+        let fd = call.data.read_fd()?;
+        let mut out = self
+            .host
+            .process
+            .file(fd)
+            .and_then(|file| aim_binder_host::server::file_fd(&file))
+            .ok_or(BAD_VALUE)?;
+        let args = aim_service_aidl::read_string_list(&mut call.data)?;
+        if call.data.remaining() != 0 {
+            return Err(BAD_VALUE);
+        }
+        let uid = call.sender_euid as i32;
+        let granted = match self
+            .host
+            .check_permission(Some("android.permission.DUMP"), uid)
+        {
+            Ok(granted) => granted == 0,
+            Err(error) => return reply(Err(error)),
+        };
+        let text = if granted {
+            let result = self.dump_snapshot().and_then(|snapshot| {
+                let mut data = Parcel::new();
+                activity::FormatConnectivityDump {
+                    snapshot: Some(snapshot),
+                    args,
+                }
+                .write(&mut data);
+                self.activity_call(
+                    activity::FORMAT_CONNECTIVITY_DUMP,
+                    &data,
+                    activity::read_format_connectivity_dump_reply,
+                )
+            });
+            match result {
+                Ok(Some(text)) => text,
+                Ok(None) => "Error: NetworkActivityBridge returned no dump (#2333)\n".into(),
+                Err(e) => format!("Error: ConnectivityService dump owner: {}\n", e.message),
+            }
+        } else {
+            format!(
+                "Permission Denial: can't dump ConnectivityService from from pid={}, uid={uid} due to missing android.permission.DUMP permission\n",
+                call.sender_pid
+            )
+        };
+        out.write_all(text.as_bytes())
+            .map_err(|_| aim_binder_host::parcel::FAILED_TRANSACTION)?;
+        let mut p = Parcel::new();
+        p.write_no_exception();
+        Ok(p)
+    }
+
+    /// Copy the native owner under its lock; never call Java while holding it.
+    fn dump_snapshot(&self) -> Result<DumpSnapshot, Exception> {
+        let state = self.shared.state.lock().unwrap();
+        let network = state
+            .network
+            .as_ref()
+            .map(|net| Ok((net.id, self.link_properties(net)?, network_capabilities())))
+            .transpose()?;
+        let mut requests: Vec<_> = state
+            .requests
+            .iter()
+            .map(|n| DumpRequest {
+                request: n.request.clone(),
+                uid: n.uid,
+                pid: n.pid,
+                as_uid: n.as_uid,
+                flags: n.callback_flags,
+                declared: n.declared_methods,
+                satisfier: n.satisfier,
+                tracked: n.messenger.is_some(),
+            })
+            .collect();
+        requests.sort_by_key(|n| n.request.request_id);
+        drop(state);
+        // These are the UIDs known to this owner, evaluated by the same blocking
+        // decision used by callbacks and active-network queries, not netpolicy data.
+        let uids: BTreeSet<_> = requests.iter().map(|n| n.as_uid).collect();
+        let blocked = uids
+            .into_iter()
+            .map(|uid| Ok((uid, self.blocked_reasons(uid)?)))
+            .collect::<Result<Vec<_>, Exception>>()?;
+        let legacy_types = (0..=MAX_NETWORK_TYPE)
+            .filter_map(|t| match self.type_supported(t) {
+                Ok(true) => Some(Ok(t)),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect();
+        Ok(DumpSnapshot {
+            network,
+            requests,
+            blocked,
+            legacy_types,
+        })
+    }
+
     /// Netstats' transport inventory follows the same network publication as
     /// clients, rather than inferring the guest transport from the Mac's link.
     pub(super) fn ifaces_since_boot(&self, transport: u32) -> Vec<String> {
@@ -1506,6 +1687,7 @@ impl ConnectivityService {
         state: &mut State,
         request: NetworkRequest,
         uid: i32,
+        pid: i32,
         as_uid: i32,
         messenger: Option<Messenger>,
         binder: Option<Binder>,
@@ -1524,6 +1706,7 @@ impl ConnectivityService {
             request,
             messenger,
             uid,
+            pid,
             as_uid,
             system,
             callback_flags,
@@ -1649,6 +1832,7 @@ impl ConnectivityService {
             &mut state,
             request.clone(),
             uid,
+            call.sender_pid as i32,
             as_uid,
             a.messenger,
             a.binder,
@@ -1704,6 +1888,7 @@ impl ConnectivityService {
             &mut state,
             request.clone(),
             uid,
+            call.sender_pid as i32,
             uid,
             a.messenger,
             a.binder,
@@ -1863,6 +2048,9 @@ impl Service for ConnectivityService {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result: Result<(), Exception> = match call.code {
+            aim_binder_host::local::DUMP_TRANSACTION => {
+                return self.dump(call);
+            }
             cm::GET_ACTIVE_NETWORK => {
                 cm::GetActiveNetwork::read(&mut call.data).map_err(bad)?;
                 self.enforce_access(uid)
@@ -2234,6 +2422,139 @@ mod tests {
     use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
     use std::sync::mpsc;
 
+    /// Structured AIDL wire, with original network parcelables and native
+    /// request matching. This guards the snapshot consumed by the Java fixture.
+    #[test]
+    fn dump_snapshot_carries_validated_ethernet_request_and_blocked_uid() {
+        use aim_service_aidl::ReadParcelable;
+        let up = up([192, 0, 2, 2], 24, [192, 0, 2, 1], 1500);
+        let mut state = State::new(Some((up.clone(), vec![up.gateway])));
+        let mut caps = NetworkCapabilities::default();
+        caps.add(INTERNET);
+        register(&mut state, nri(caps, RequestType::Request, 7)).unwrap();
+        let n = &state.requests[0];
+        let snapshot = DumpSnapshot {
+            network: Some((
+                state.network.as_ref().unwrap().id,
+                link_properties(&up, &[up.gateway], None),
+                network_capabilities(),
+            )),
+            requests: vec![DumpRequest {
+                request: n.request.clone(),
+                uid: n.uid,
+                pid: n.pid,
+                as_uid: n.as_uid,
+                flags: n.callback_flags,
+                declared: n.declared_methods,
+                satisfier: n.satisfier,
+                tracked: false,
+            }],
+            blocked: vec![(10100, BLOCKED_REASON_NETWORK_RESTRICTED)],
+            legacy_types: Ok(vec![9, 17]),
+        };
+        let mut p = Parcel::new();
+        snapshot.write_to(&mut p);
+        let mut r = p.reader();
+        assert_eq!(r.read_i32().unwrap() as usize, p.data().len());
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (100, 1));
+        let mut info = Parcel::new();
+        network_info().write_to(&mut info);
+        assert_eq!(
+            &p.data()[r.position()..r.position() + info.data().len()],
+            info.data()
+        );
+        r.skip(info.data().len()).unwrap();
+        assert_eq!(r.read_i32().unwrap(), 1);
+        let lp = &snapshot.network.as_ref().unwrap().1;
+        assert_eq!((lp.interface.as_str(), lp.mtu), ("eth0", 1500));
+        assert_eq!(lp.addresses[0].addr, up.addr);
+        let mut links = Parcel::new();
+        lp.write_to(&mut links);
+        assert_eq!(
+            &p.data()[r.position()..r.position() + links.data().len()],
+            links.data()
+        );
+        r.skip(links.data().len()).unwrap();
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert!(
+            NetworkCapabilities::read_from(&mut r)
+                .unwrap()
+                .has(VALIDATED)
+        );
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (1, 1));
+        let at = r.position();
+        let end = at + r.read_i32().unwrap() as usize;
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(NetworkRequest::read_from(&mut r).unwrap(), n.request);
+        for value in [10100, 42, 10100, 0, -1, 100, 0] {
+            assert_eq!(r.read_i32().unwrap(), value);
+        }
+        assert_eq!(r.position(), end);
+        for value in [1, 10100, 1, 256, 2, 9, 17] {
+            assert_eq!(r.read_i32().unwrap(), value);
+        }
+        assert_eq!(r.read_string16().unwrap(), None);
+        assert_eq!(r.remaining(), 0);
+    }
+
+    /// Dumps carry an output FD, without an interface token (Binder.onTransact).
+    #[test]
+    fn dump_with_output_fd_reports_missing_bridge_and_denies_without_dump() {
+        use std::os::fd::AsFd;
+        struct Output(std::fs::File);
+        impl Service for Output {
+            fn descriptor(&self) -> &str {
+                "test.IOutput"
+            }
+            fn transact(&self, _: &mut Call<'_>) -> Reply {
+                let mut p = Parcel::new();
+                p.write_file(aim_binder_host::server::file_from_fd(self.0.as_fd()).unwrap());
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let permissions = super::super::permission_manager::PermissionManager::with_system(
+                host.clone(),
+                Default::default(),
+            );
+            assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+            let service = Arc::new(ConnectivityService::for_test(host.clone(), None));
+            let Binder::Local(ptr) = host.process.add_service(service.clone()) else {
+                unreachable!()
+            };
+            let node = host.process.local_service(ptr).unwrap();
+            let dir = super::super::test_temp_dir("connectivity-dump");
+            for uid in [1000, 99001] {
+                let path = dir.join(uid.to_string());
+                let output = export(Arc::new(Output(std::fs::File::create(&path).unwrap())));
+                let received = output.transact(1, &Parcel::new(), false).unwrap();
+                let mut p = received.into_parcel();
+                p.write_i32(1);
+                p.write_string16(Some("--short"));
+                let code = aim_binder_host::local::DUMP_TRANSACTION;
+                let response = if uid == 1000 {
+                    node.transact(code, &p, false).unwrap().into_parcel()
+                } else {
+                    call(service.as_ref(), uid, code, &p)
+                };
+                response.reader().read_exception().unwrap().unwrap();
+                let text = std::fs::read_to_string(&path).unwrap();
+                if uid == 1000 {
+                    assert_eq!(
+                        text,
+                        "Error: ConnectivityService dump owner: connectivity network activity before its system-process bridge attaches (#1509) is not implemented by the app host\n"
+                    );
+                } else {
+                    assert_eq!(
+                        text,
+                        "Permission Denial: can't dump ConnectivityService from from pid=42, uid=99001 due to missing android.permission.DUMP permission\n"
+                    );
+                }
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
+
     struct ActivityBridge(mpsc::Sender<(u32, Option<Binder>, bool)>);
 
     impl Service for ActivityBridge {
@@ -2445,6 +2766,7 @@ mod tests {
             messenger: None,
             binder: None,
             uid: 10_100,
+            pid: 42,
             as_uid: 10_100,
             system: false,
             callback_flags: 0,

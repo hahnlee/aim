@@ -2,6 +2,7 @@ package dev.aim.server;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.LinkProperties;
+import dev.aim.server.ConnectivityDumpSnapshot;
 
 /** LegacyNetworkActivityTracker's Ethernet listener ownership in aim-system (#1509). */
 interface INetworkActivityBridge {
@@ -16,4 +17,5 @@ interface INetworkActivityBridge {
             in NetworkCapabilities capabilities, long timestamp);
     oneway void onNetworkConnectivityReported(in Network network, int uid, boolean connected,
             boolean revalidating);
+    String formatConnectivityDump(in ConnectivityDumpSnapshot snapshot, in String[] args);
 }

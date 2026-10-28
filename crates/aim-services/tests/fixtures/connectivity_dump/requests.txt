@@ -1,0 +1,1 @@
+uid/pid:10100/42 activeRequest: 7 callbackRequest: 7 [NetworkRequest [ REQUEST id=7, [ Capabilities: INTERNET ] ]] callback flags: 0 order: 2147483647 isUidTracked: true declaredMethods: ALL

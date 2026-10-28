@@ -136,6 +136,15 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::ATTACH_NATIVE_STAGING_BRIDGE => {
+                let a =
+                    sp::AttachNativeStagingBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.attach_native_staging_bridge(a.bridge)?;
+                    sp::write_attach_native_staging_bridge_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_WIFI_BRIDGE => {
                 let a = sp::AttachWifiBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
