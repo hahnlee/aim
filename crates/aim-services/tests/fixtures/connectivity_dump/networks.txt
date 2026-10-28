@@ -1,0 +1,8 @@
+NetworkAgentInfo{network{100}  handle{432902426637}  ni{Ethernet CONNECTED extra: 02:61:69:6d:00:02}  lp{{InterfaceName: eth0 LinkAddresses: [ 192.0.2.2/24 ] DnsAddresses: [ /192.0.2.1 ] MTU: 1500}}  nc{[ Transports: ETHERNET Capabilities: INTERNET&VALIDATED&FOREGROUND ]}}
+  Error: NetworkAgentInfo score/lifecycle/factory serial owner unavailable in app host (#2333)
+  Nat464Xlat:
+    Error: Nat464Xlat owner unavailable in app host (#2333)
+  Requests: REQUEST:1 LISTEN:0 BACKGROUND_REQUEST:0 total:1
+    NetworkRequest [ REQUEST id=7, [ Capabilities: INTERNET ] ]
+  Inactivity Timers:
+    Error: NetworkAgentInfo inactivity timers owner unavailable in app host (#2333)

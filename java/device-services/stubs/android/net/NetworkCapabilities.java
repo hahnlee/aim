@@ -1,6 +1,7 @@
 // Compile-only pinned image API; checked against the original image.
 package android.net;
 public final class NetworkCapabilities implements android.os.Parcelable {
+ public NetworkCapabilities() { throw new RuntimeException("stub"); }
  public NetworkCapabilities(NetworkCapabilities nc, long redactions) { throw new RuntimeException("stub"); }
  public boolean satisfiedByNetworkCapabilities(NetworkCapabilities nc) { throw new RuntimeException("stub"); }
  public NetworkCapabilities setUids(java.util.Set<?> uids) { throw new RuntimeException("stub"); }
