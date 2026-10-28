@@ -139,8 +139,7 @@ impl System {
         let bridge = self.package_bootstrap()?;
         let removal = self.public_package_removal()?;
         let capture = self.capture_package_queries_for(&bridge)?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver.resolution(capture.state()).map_err(|error| {
+        let resolution = capture.resolution().map_err(|error| {
             Exception::new(
                 EX_ILLEGAL_STATE,
                 format!("Historical session visibility: {error:?}"),
@@ -205,8 +204,7 @@ impl System {
             return report(-5, "Can't uninstall an apex for a single user");
         }
         let capture = self.capture_package_queries()?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver.resolution(capture.state()).map_err(|error| {
+        let resolution = capture.resolution().map_err(|error| {
             Exception::new(EX_ILLEGAL_STATE, format!("APEX selection: {error:?}"))
         })?;
         let query = crate::package::query::Query {

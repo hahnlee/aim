@@ -296,8 +296,7 @@ impl System {
         let install = self.package_install_guard();
         let (bridge, capture, dependencies) =
             self.internal_suspension_context(calling_uid, calling_pid)?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver.resolution(capture.state()).map_err(|error| {
+        let resolution = capture.resolution().map_err(|error| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("internal suspension resolution: {error:?}"),
@@ -358,8 +357,7 @@ impl System {
         let install = self.package_install_guard();
         let (bridge, capture, dependencies) =
             self.internal_suspension_context(calling_uid, calling_pid)?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver.resolution(capture.state()).map_err(|error| {
+        let resolution = capture.resolution().map_err(|error| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("internal stopped resolution: {error:?}"),

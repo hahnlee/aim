@@ -60,9 +60,8 @@ impl System {
         _pid: i32,
     ) -> Result<Option<SessionInfo>> {
         let capture = self.capture_package_queries()?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|error| archive_error(format!("Unarchive sessions visibility: {error:?}")))?;
         let query = crate::package::query::Query {
             state: capture.state(),

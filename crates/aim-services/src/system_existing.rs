@@ -6,7 +6,6 @@ use crate::package::{
         existing::{Owner, Request},
         policy,
     },
-    resolve::Resolver,
 };
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
@@ -76,9 +75,8 @@ impl System {
     ) -> Result<i32, Exception> {
         self.check_package_bootstrap(&owner.bridge)?;
         let before = self.capture_package_queries_for(&owner.bridge)?;
-        let resolver = Resolver::default();
-        let resolution = resolver
-            .resolution(before.state())
+        let resolution = before
+            .resolution()
             .map_err(|e| error(format!("existing install resolution: {e:?}")))?;
         let query = crate::package::query::Query {
             state: before.state(),
@@ -153,8 +151,8 @@ impl System {
             .ok_or_else(|| error("existing install generation changed"))?;
         disk.validate_committed_scan(capture.scan().owner())
             .map_err(|e| error(e.to_string()))?;
-        let current_resolution = resolver
-            .resolution(capture.state())
+        let current_resolution = capture
+            .resolution()
             .map_err(|e| error(format!("existing install locked resolution: {e:?}")))?;
         let Some(package) = capture
             .state()
@@ -370,8 +368,8 @@ impl System {
             ))
         })?;
         self.commit_existing_data_inodes(&owner.bridge, &name, request.user, inodes)?;
-        let resolution = resolver
-            .resolution(installed.state())
+        let resolution = installed
+            .resolution()
             .map_err(|e| error(format!("existing install publication resolution: {e:?}")))?;
         let query = crate::package::query::Query {
             state: installed.state(),

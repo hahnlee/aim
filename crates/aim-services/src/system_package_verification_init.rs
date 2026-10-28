@@ -128,9 +128,8 @@ impl System {
             ));
         }
         let capture = self.capture_package_queries_for(bridge)?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|error| failure(format!("Verifier visibility: {error:?}")))?;
         let query = crate::package::query::Query {
             state: capture.state(),

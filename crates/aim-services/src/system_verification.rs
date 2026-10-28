@@ -4,7 +4,6 @@ use crate::package::{
     domain_verification::{self as domain, agent::Runtime},
     intent::ComponentName,
     query::Query,
-    resolve::Resolver,
 };
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception};
 use std::sync::Arc;
@@ -60,9 +59,8 @@ impl System {
         let agent=runtime.component.as_ref().ok_or_else(||Exception::new(EX_NULL_POINTER,
             "Attempt to invoke virtual method 'java.lang.String android.content.ComponentName.getPackageName()' on a null object reference"))?;
         let capture = self.capture_package_queries()?;
-        let resolver = Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|cause| error(format!("native verifier visibility: {cause:?}")))?;
         let query = Query {
             state: capture.state(),
@@ -92,9 +90,8 @@ impl System {
             return Ok(false);
         };
         let capture = self.capture_package_queries()?;
-        let resolver = Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|cause| error(format!("native verifier UID owner: {cause:?}")))?;
         let query = Query {
             state: capture.state(),

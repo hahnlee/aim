@@ -1693,6 +1693,9 @@ checks and publication share the coordinator lock, and callbacks run after relea
 Two exact interleaving regressions pass. Caller-preserving native CLI read/install/
 mutation cohorts compile with original helper APIs (#1052). C45 full Java/linkage/
 Rust/oat/image build passes; native full gate 726/0, eight ignored not run.
+Native component-use, event, verification and installer visibility now reuse the
+resolver of their immutable query capture (#1056). Host cache-isolation and
+publication/concurrency tests pass (2026-10-28); no guest boot or timing rerun.
 C46 reaches `sys.boot_completed=1` with zygote running and native PM active.
 Native read CLI lists the actual packages and resolves paths/features; HOME resolves
 to `dev.aim.home/.Home`. Original Settings cold start completes with `Status: ok`

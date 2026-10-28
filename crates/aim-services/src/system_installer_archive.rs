@@ -223,21 +223,27 @@ impl System {
             )),
         });
         let draft_installer = Arc::downgrade(&installer);
-        let draft_source = source.clone();
+        let draft_system = Arc::downgrade(self);
         let draft_query = query_owner.clone();
         let draft_leaf = leaf.clone();
         let draft_bridge = bridge.clone();
         let create = Arc::new(move |name: &str, store: &str, user: i32, caller: &str| {
-            let state = draft_source()?;
-            let resolver = crate::package::resolve::Resolver::default();
-            let resolution = resolver.resolution(&state).map_err(|error| {
+            let system = draft_system.upgrade().ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "archive system stopped",
+                )
+            })?;
+            let capture = system.capture_package_queries_for(&draft_bridge)?;
+            let state = capture.state();
+            let resolution = capture.resolution().map_err(|error| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     format!("draft resolver {error:?}"),
                 )
             })?;
             let query = crate::package::query::Query {
-                state: &state,
+                state,
                 filter: &resolution.apps_filter,
                 calling_uid: 1000,
             };
