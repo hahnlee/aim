@@ -100,6 +100,258 @@ fn classify(leaf: &dyn Service, requested: Option<Vec<Option<String>>>) -> Parce
     .unwrap()
 }
 
+const ENUMERATE_RUNTIME_PERMISSIONS: u32 = 0xffff_fffd;
+
+struct RuntimePermissionShell {
+    host: crate::service_host::ServiceHost,
+    system: Weak<System>,
+}
+impl Service for RuntimePermissionShell {
+    fn descriptor(&self) -> &str {
+        self.host.descriptor()
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code != ENUMERATE_RUNTIME_PERMISSIONS {
+            return self.host.transact(call);
+        }
+        assert_eq!(call.sender_euid, 2000);
+        let package = call.data.read_string16()?;
+        let result = self
+            .system
+            .upgrade()
+            .unwrap()
+            .shell_requested_runtime_permissions(
+                call.sender_euid,
+                call.sender_pid,
+                package.as_deref(),
+                0,
+            );
+        let mut reply = Parcel::new();
+        match result {
+            Ok(targets) => {
+                reply.write_no_exception();
+                reply.write_i32(targets.len() as i32);
+                for (name, permissions) in targets {
+                    reply.write_string16(Some(&name));
+                    reply.write_i32(permissions.len() as i32);
+                    for permission in permissions {
+                        reply.write_string16(Some(&permission));
+                    }
+                }
+            }
+            Err(error) => reply.write_exception(&error),
+        }
+        Ok(reply)
+    }
+}
+
+struct RuntimePermissionBridge(Binder);
+impl Service for RuntimePermissionBridge {
+    fn descriptor(&self) -> &str {
+        bootstrap::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code != bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE {
+            return OriginalBridge.transact(call);
+        }
+        bootstrap::GetPackageShellPolicyBridge::read(&mut call.data)?;
+        let mut reply = Parcel::new();
+        bootstrap::write_get_package_shell_policy_bridge_reply(&mut reply, Some(self.0));
+        Ok(reply)
+    }
+}
+
+// PackageShellPolicyBridge.runtimePermissions classifies the captured request;
+// pause its last reply so publication/bridge replacement cannot miss the read.
+struct RuntimePermissionPolicy {
+    entered: mpsc::Sender<Vec<Option<String>>>,
+    resume: Mutex<Option<mpsc::Receiver<()>>>,
+    pause_on: Vec<Option<String>>,
+}
+impl Service for RuntimePermissionPolicy {
+    fn descriptor(&self) -> &str {
+        policy::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        assert_eq!(call.code, policy::RUNTIME_PERMISSIONS);
+        assert_eq!(call.sender_euid, 1000);
+        let requested = policy::RuntimePermissions::read(&mut call.data)?
+            .requested
+            .unwrap();
+        assert_eq!(call.data.remaining(), 0);
+        if requested == self.pause_on
+            && let Some(resume) = self.resume.lock().unwrap().take()
+        {
+            self.entered.send(requested.clone()).unwrap();
+            resume.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let permissions = requested
+            .into_iter()
+            .filter(|name| name.as_deref() == Some(CAMERA))
+            .collect();
+        let mut reply = Parcel::new();
+        policy::write_runtime_permissions_reply(&mut reply, &Some(permissions));
+        Ok(reply)
+    }
+}
+
+fn publish_permission_requests(
+    fixture: &Fixture,
+    bridge: &Arc<crate::package::bootstrap::Bridge>,
+    name: &str,
+    requested: &[&str],
+) -> Arc<Capture> {
+    let base = fixture.system.capture_package_queries().unwrap();
+    let mut owner = base.scan().owner().clone();
+    let mut pkg = (**base.state().packages[name].pkg.as_ref().unwrap()).clone();
+    pkg.requested_permissions = requested.iter().map(|name| (*name).into()).collect();
+    pkg.uses_permissions = requested
+        .iter()
+        .map(|name| crate::package::pkg::UsesPermission {
+            name: Some((*name).into()),
+            flags: 0,
+        })
+        .collect();
+    owner.load_test_code(pkg);
+    complete_owner(&mut owner);
+    let mut context = (**base.context()).clone();
+    context.scan_version = base.scan().version() + 1;
+    fixture
+        .system
+        .publish_package_scan_with_queries(
+            bridge,
+            Some(base.scan()),
+            owner,
+            base.scan().usage().clone(),
+            context,
+        )
+        .unwrap()
+}
+
+fn runtime_permission_read_during(
+    package: Option<&str>,
+    change: impl FnOnce(&mut Fixture, &Arc<crate::package::bootstrap::Bridge>, &Arc<Capture>),
+) -> Result<Vec<(String, Vec<String>)>> {
+    let mut fixture = Fixture::with_context(|process, system| {
+        Arc::new(RuntimePermissionShell {
+            host: crate::service_host::ServiceHost::new(process.clone(), system),
+            system: Arc::downgrade(system),
+        })
+    });
+    let (entered, waiting) = mpsc::channel();
+    let (finish, resume) = mpsc::channel();
+    let pause_on = if package.is_some() {
+        vec![
+            Some(NORMAL.into()),
+            Some(CAMERA.into()),
+            Some(CAMERA.into()),
+        ]
+    } else {
+        vec![]
+    };
+    let bridge = fixture.attach_service(|process| {
+        Arc::new(RuntimePermissionBridge(process.add_service(Arc::new(
+            RuntimePermissionPolicy {
+                entered,
+                resume: Mutex::new(Some(resume)),
+                pause_on: pause_on.clone(),
+            },
+        ))))
+    });
+    publish_code(&fixture, &bridge);
+    let captured = publish_permission_requests(&fixture, &bridge, "p", &[NORMAL, CAMERA, CAMERA]);
+    let shell = LocalProcess::open(
+        &fixture.driver,
+        aim_binder_driver::Device::Binder,
+        aim_binder_driver::Credentials {
+            pid: 97300,
+            euid: 2000,
+            security_context: None,
+        },
+    );
+    let mut request = Parcel::new();
+    request.write_string16(package);
+    let client = shell.clone();
+    let reading = std::thread::spawn(move || {
+        client
+            .transact(0, ENUMERATE_RUNTIME_PERMISSIONS, &request, false)
+            .unwrap()
+            .into_parcel()
+    });
+    assert_eq!(
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap(),
+        pause_on
+    );
+    change(&mut fixture, &bridge, &captured);
+    finish.send(()).unwrap();
+    let reply = reading.join().unwrap();
+    fixture.driver.release(shell.proc_handle());
+    let mut reader = reply.reader();
+    reader.read_exception().unwrap()?;
+    let targets = (0..reader.read_i32().unwrap())
+        .map(|_| {
+            let name = reader.read_string16().unwrap().unwrap();
+            let permissions = (0..reader.read_i32().unwrap())
+                .map(|_| reader.read_string16().unwrap().unwrap())
+                .collect();
+            (name, permissions)
+        })
+        .collect();
+    assert_eq!(reader.remaining(), 0);
+    Ok(targets)
+}
+
+#[test]
+fn shell_runtime_permission_read_retains_capture_across_unrelated_package_publication() {
+    for package in [Some("p"), None] {
+        let targets = runtime_permission_read_during(package, |fixture, bridge, captured| {
+            let current = publish_permission_requests(fixture, bridge, "q", &[CAMERA]);
+            assert!(!Arc::ptr_eq(captured, &current));
+            assert!(current.scan().version() > captured.scan().version());
+            assert_eq!(
+                current.state().packages["q"]
+                    .pkg
+                    .as_ref()
+                    .unwrap()
+                    .requested_permissions,
+                [CAMERA]
+            );
+            assert!(
+                captured.state().packages["q"]
+                    .pkg
+                    .as_ref()
+                    .unwrap()
+                    .requested_permissions
+                    .is_empty()
+            );
+            fixture.system.check_package_bootstrap(bridge).unwrap();
+        })
+        .unwrap();
+        let mut expected = vec![("p".into(), vec![CAMERA.into(), CAMERA.into()])];
+        if package.is_none() {
+            expected.push(("q".into(), vec![]));
+        }
+        assert_eq!(targets, expected);
+    }
+}
+
+#[test]
+fn shell_runtime_permission_read_rejects_bootstrap_replacement_after_policy_leaf() {
+    for package in [Some("p"), None] {
+        let error = runtime_permission_read_during(package, |fixture, bridge, _| {
+            let replacement = fixture.attach();
+            assert!(!Arc::ptr_eq(bridge, &replacement));
+            fixture
+                .system
+                .check_package_bootstrap(&replacement)
+                .unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(error.code, aim_binder_host::parcel::EX_ILLEGAL_STATE);
+        assert_eq!(error.message, "package scan bootstrap owner changed");
+    }
+}
+
 #[test]
 fn runtime_classification_uses_live_definitions_order_duplicates_and_java_null_checks() {
     let data = crate::app_host::test_temp_dir("shell-classification");
