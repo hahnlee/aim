@@ -53,6 +53,37 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
             "setAllowlistedRestrictedPermissions(java.util.List<String> permissions){names=permissions;}")
         .replace("public PackageInstalledParams build(){throw new RuntimeException(\"stub\");}",
             "public PackageInstalledParams build(){return new PackageInstalledParams(null,names,0);}")).unwrap();
+    let mut discovery = Vec::new();
+    for (name, package) in [
+        ("IUserManager", "android/os"),
+        ("IPackageManager", "android/content/pm"),
+    ] {
+        let file = data.0.join(format!("{name}.java"));
+        let source =
+            fs::read_to_string(production.join(format!("stubs/{package}/{name}.java"))).unwrap();
+        let declaration = if name == "IUserManager" {
+            "abstract class Stub extends Binder"
+        } else {
+            "abstract class Stub extends android.os.Binder"
+        };
+        let source = source.replace(
+            &format!("{declaration} implements {name} {{"),
+            &format!("{declaration} implements {name} {{ public static {name} service;"),
+        );
+        let source = source
+            .lines()
+            .map(|line| {
+                if line.contains(" asInterface(") {
+                    line.replace("throw new RuntimeException(\"stub\");", "return service;")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file, source).unwrap();
+        discovery.push(file);
+    }
     // The decoded package boundary retains only the getters this helper uses.
     let package = data.0.join("AndroidPackage.java");
     let api =
@@ -85,6 +116,7 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
         .arg(&users)
         .arg(&permissions)
         .arg(&package)
+        .args(&discovery)
         .args(common::java::sources(&aim_paths::root().join(
             "crates/aim-services/tests/fixtures/package_bootstrap_java",
         ))));

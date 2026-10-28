@@ -10,7 +10,7 @@ use std::{
     collections::BTreeMap,
     fmt::Write,
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -71,6 +71,8 @@ pub enum CompilerRead {
 pub struct CompilerStats {
     packages: Mutex<BTreeMap<String, Vec<(String, i64)>>>,
     read: CompilerRead,
+    path: PathBuf,
+    file_lock: Mutex<()>,
 }
 impl PartialEq for CompilerStats {
     fn eq(&self, other: &Self) -> bool {
@@ -107,7 +109,64 @@ impl CompilerStats {
         Ok(Arc::new(Self {
             packages: Mutex::new(packages),
             read,
+            path: main,
+            file_lock: Mutex::new(()),
         }))
+    }
+    /// CompilerStats.writeInternal logs I/O failures and lets shutdown continue.
+    pub fn write_now(&self) {
+        if let Err(error) = self.write() {
+            eprintln!("Failed to write compiler stats: {error}");
+        }
+    }
+    fn write(&self) -> io::Result<()> {
+        use std::{io::Write as _, os::unix::fs::OpenOptionsExt};
+        let _file = self.file_lock.lock().unwrap();
+        let mut text = String::from("PACKAGE_MANAGER__COMPILER_STATS__1\n");
+        {
+            let packages = self.packages.lock().unwrap();
+            for (package, times) in packages.iter().filter(|(_, times)| !times.is_empty()) {
+                writeln!(text, "{package}").unwrap();
+                for (path, time) in times {
+                    writeln!(text, "-{path}:{time}").unwrap();
+                }
+            }
+        }
+        let backup = super::sibling(&self.path, ".bak");
+        match fs::rename(&backup, &self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let new = super::sibling(&self.path, ".new");
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&new)?;
+            file.write_all(text.as_bytes())?;
+            crate::fsync(&file)?;
+            aim_storage::guest_inode::record(
+                &new,
+                aim_storage::guest_inode::GuestInode {
+                    uid: Some(1000),
+                    gid: Some(1000),
+                    mode: Some(0o600),
+                },
+            )?;
+            fs::rename(&new, &self.path)
+        })();
+        if result.is_err() {
+            // AtomicFile.failWrite leaves the committed main file intact.
+            if let Err(error) = fs::remove_file(&new)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("Failed to remove compiler stats new file: {error}");
+            }
+        }
+        result
     }
     pub fn read_result(&self) -> &CompilerRead {
         &self.read
@@ -228,5 +287,59 @@ impl Maintenance {
             2097152 => Ok(self.compiler.text(state, package)),
             _ => Err(NotModelled("unknown maintenance diagnostic input")),
         }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    #[test]
+    fn compiler_shutdown_persists_live_times_recovers_backup_and_preserves_failed_commit() {
+        let data = std::env::temp_dir().join(format!("compiler-shutdown-{}", std::process::id()));
+        fs::create_dir_all(data.join("system")).unwrap();
+        let main = data.join("system/package-cstats.list");
+        let backup = super::super::sibling(&main, ".bak");
+        fs::write(&main, "stale").unwrap();
+        fs::write(
+            &backup,
+            "PACKAGE_MANAGER__COMPILER_STATS__1\np\n-base.apk:4\n",
+        )
+        .unwrap();
+        let owner = CompilerStats::read(&data).unwrap();
+        assert_eq!(owner.read_result(), &CompilerRead::Backup);
+        owner.record("p", "/data/app/p/base.apk", 17);
+        owner.record("p", "/data/app/p/split.apk", 9);
+        owner.record("empty", "base.apk", 0);
+        owner.write().unwrap();
+        assert!(!backup.exists());
+        let inode = aim_storage::guest_inode::read(&main).unwrap().unwrap();
+        assert_eq!(
+            (inode.uid, inode.gid, inode.mode),
+            (Some(1000), Some(1000), Some(0o600))
+        );
+        let committed = fs::read_to_string(&main).unwrap();
+        assert_eq!(
+            committed,
+            "PACKAGE_MANAGER__COMPILER_STATS__1\np\n-base.apk:17\n-split.apk:9\n"
+        );
+        let reloaded = CompilerStats::read(&data).unwrap();
+        assert_eq!(
+            reloaded.packages.lock().unwrap().get("p"),
+            owner.packages.lock().unwrap().get("p")
+        );
+        assert!(!reloaded.packages.lock().unwrap().contains_key("empty"));
+        owner.record("p", "base.apk", 0);
+        let new = super::super::sibling(&main, ".new");
+        fs::create_dir(&new).unwrap();
+        assert!(owner.write().is_err());
+        owner.write_now(); // I/O failure does not abort shutdown.
+        assert_eq!(fs::read_to_string(&main).unwrap(), committed);
+        fs::remove_dir(&new).unwrap();
+        owner.write().unwrap();
+        assert_eq!(
+            fs::read_to_string(&main).unwrap(),
+            "PACKAGE_MANAGER__COMPILER_STATS__1\np\n-split.apk:9\n"
+        );
+        fs::remove_dir_all(data).unwrap();
     }
 }

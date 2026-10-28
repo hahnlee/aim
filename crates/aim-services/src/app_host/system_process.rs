@@ -54,6 +54,26 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::WRITE_PACKAGE_COMPILER_STATS => {
+                sp::WritePackageCompilerStats::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let capture = self.host.package_capture()?;
+                    let owner = capture
+                        .state()
+                        .system
+                        .maintenance_diagnostics
+                        .as_ref()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "native compiler statistics owner unavailable",
+                            )
+                        })?;
+                    owner.compiler.write_now();
+                    sp::write_write_package_compiler_stats_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::RESET_PACKAGE_RUNTIME_PERMISSIONS_FOR_USER => {
                 let a = sp::ResetPackageRuntimePermissionsForUser::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

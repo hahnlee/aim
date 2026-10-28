@@ -637,6 +637,15 @@ UserManagerInternal's UserProperties; aim-system's adapter reads the native
 user owner's full system-UID property copy and returns null for absent users.
 No additional original class or image replacement is introduced.
 
+The package shutdown bridge (#2330, #2167) retains the original DexManager,
+DynamicCodeLogger and conditional PackageWatchdog in aim-system. Their loading
+uses native user/package local adapters, and the local dynamic-code accessor
+shares the retained logger. CompilerStats stays with the native package capture;
+a system-UID-only callback writes that live owner in the original shutdown order,
+before package usage/settings. This adds vendor classes/interfaces only, with no
+new original-class or image replacement. Host checks cover this slice; no guest
+boot was run.
+
 The cold statscompanion UID-map writer and its app, user and shutdown receivers
 are extracted from the original [StatsCompanionService.java](https://android.googlesource.com/platform/packages/modules/StatsD/+/refs/tags/android-16.0.0_r1/service/java/com/android/server/stats/StatsCompanionService.java)
 into `StatsCompanionUidMap` in the existing vendor jar (#1765): the system-UID-only

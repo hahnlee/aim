@@ -134,8 +134,10 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachProviderQueries(new ProviderQueries(context));
             var installer = new com.android.server.pm.Installer(context);
             installer.onStart();
-            PackageLocalOwners.publish(host);
-            host.attachPackageBootstrapJava(new PackageBootstrapBridge(null, installer));
+            var shutdown = PackageLocalOwners.publish(host, context, installer);
+            var packageBridge = new PackageBootstrapBridge(null, installer);
+            packageBridge.installPackageShutdownOwner(shutdown);
+            host.attachPackageBootstrapJava(packageBridge);
             host.attachNativeStagingBridge(new com.android.server.pm.NativeStagingBridge());
             host.attachAudioPolicyQueries(new AudioPolicyQueries());
             host.attachSyncAdapterQueries(new SyncAdapterQueries(context, host));
