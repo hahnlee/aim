@@ -19,11 +19,14 @@ host checks cover tagged traffic, stats-map switching, CLAT exclusion and real
 UDP send/receive through pinned maps; no guest boot was run (2026-10-28).
 
 The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2287).
+<<<<<<< HEAD
 The original-PMS shadow feed captures per-package, per-user state/data protection
 through the original PackageManagerInternal (#754). The enabled-setting write
 model uses the captured pre-call state, including provisioning and DevicePolicy
 protection, and retains NotModelled when that input is absent. Focused host tests
 and pinned-image Java linkage pass; no guest boot was run (2026-10-28).
+=======
+>>>>>>> c49ee63a6 (fix(package): authorize live static libraries against prior versions)
 
 ## How to reproduce
 
@@ -255,7 +258,12 @@ A shell install session
 (Success), a same-signer update keeps its uid and data (Success), another
 signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app
 launches, and `pm uninstall` removes its code and data; each survives a
-reboot. Installs are not dexopted: without ART Service (#2063) the
+reboot. Live static-library versions check the nearest strictly older
+registered setting's signer and upgrade keys while retaining their own internal
+identity and UID; invalid static declarations reject before allocation (#806).
+Focused host admission and pinned-image policy checks cover these gates;
+guest boot and CTS were not rerun for this change (2026-10-28).
+Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions
 and trees from `packages.xml` and runtime user grants, flags and package versions
