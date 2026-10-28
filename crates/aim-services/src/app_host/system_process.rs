@@ -54,12 +54,20 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
-
             sp::ATTACH_PROVIDER_QUERIES => {
                 let a = sp::AttachProviderQueries::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
                     self.host.attach_provider_queries(a.queries)?;
                     sp::write_attach_provider_queries_reply(&mut p);
+                    Ok(())
+                })
+            }
+            sp::ATTACH_PACKAGE_BOOTSTRAP_JAVA => {
+                let a =
+                    sp::AttachPackageBootstrapJava::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.attach_package_bootstrap_java(a.bridge)?;
+                    sp::write_attach_package_bootstrap_java_reply(&mut p);
                     Ok(())
                 })
             }

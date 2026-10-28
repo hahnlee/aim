@@ -60,4 +60,6 @@ interface ISystemProcess {
     void attachProviderQueries(IBinder queries);
     /** Original Installer crate queries and CrateInfo conversion; system UID only. */
     void attachStorageCrates(IStorageCrates crates);
+    /** Retained package helpers; system UID only, before setSystemProcess. */
+    void attachPackageBootstrapJava(IBinder bridge);
 }

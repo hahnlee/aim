@@ -16,6 +16,8 @@
 //! owners, the internal persistence, install and storage leaves, and the
 //! move's storage leaves, monitor users and payloads, and internal event
 //! preparation and the native services' PackageList observer registry.
+//! Cold preferred-change broadcasts, timestamp formatting and the retained
+//! background-handler barrier run in aim-system's original Java bridge.
 //! Existing-install completion restores delayed permissions through the
 //! permission owner and delivers its status; backup restore has no owner
 //! (#1925). The install-existing app-data leaf remains unsupported (#2330).
@@ -159,7 +161,46 @@ fn cached_package(cache: Option<Vec<u8>>) -> Result<AndroidPackage, Exception> {
         .map_err(|e| Exception::illegal_argument(format!("parsed package: {e:?}")))
 }
 
+impl AppHost {
+    pub(super) fn attach_package_bootstrap_java(
+        &self,
+        owner: Option<aim_binder_host::parcel::Binder>,
+    ) -> Result<(), Exception> {
+        let Some(aim_binder_host::parcel::Binder::Handle(handle)) = owner else {
+            return Err(Exception::illegal_argument("no package Java bridge"));
+        };
+        let owner = Arc::new(self.process.strong(handle));
+        *self.package_bootstrap_java.lock().unwrap() = Some(owner.clone());
+        let weak = self.me.clone();
+        self.process.link_to_death(
+            &owner,
+            Box::new(move || {
+                if let Some(host) = weak.upgrade() {
+                    let mut current = host.package_bootstrap_java.lock().unwrap();
+                    if current.as_ref().is_some_and(|p| p.handle == handle) {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        Ok(())
+    }
+}
+
 impl PackageBootstrap {
+    fn java(&self, code: u32, request: &Parcel) -> Reply {
+        let owner = self.host.package_bootstrap_java.lock().unwrap().clone();
+        match owner {
+            Some(owner) => owner
+                .transact(code, request, false)
+                .map(|p| p.into_parcel()),
+            None => reply(Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "package Java bridge is not attached (#2330)",
+            ))),
+        }
+    }
+
     pub fn new(host: Arc<AppHost>) -> Self {
         let observers = Arc::new(super::package_observers::Registry::default());
         observers
@@ -478,6 +519,24 @@ impl Service for PackageBootstrap {
                     .map(|redirected| {
                         bridge::write_is_provider_clone_redirected_reply(&mut p, redirected)
                     })
+            }
+            bridge::SEND_PREFERRED_ACTIVITY_CHANGED => {
+                let a = bridge::SendPreferredActivityChanged::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
+            bridge::WAIT_PACKAGE_BACKGROUND_HANDLER => {
+                let a = bridge::WaitPackageBackgroundHandler::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
+            bridge::FORMAT_PACKAGE_TIMESTAMP => {
+                let a =
+                    bridge::FormatPackageTimestamp::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
             }
             bridge::COMPLETE_EXISTING_PACKAGE_INSTALL => {
                 let a =
@@ -1420,6 +1479,10 @@ mod existing_tests;
 #[cfg(test)]
 #[path = "package_bootstrap_query_tests.rs"]
 mod query_tests;
+
+#[cfg(test)]
+#[path = "package_bootstrap_java_tests.rs"]
+mod java_tests;
 
 #[cfg(test)]
 mod tests {

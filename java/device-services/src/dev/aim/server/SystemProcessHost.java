@@ -131,8 +131,8 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
             ServiceManager.addService("aim.role_queries", new RoleQueries(context));
             host.attachSettingsValues(new SettingsValues());
-
             host.attachProviderQueries(new ProviderQueries(context));
+            host.attachPackageBootstrapJava(new PackageBootstrapBridge());
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
             PreBootNotifications.publish(context);
             host.attachSystemProcess(applicationThread.asBinder(),
