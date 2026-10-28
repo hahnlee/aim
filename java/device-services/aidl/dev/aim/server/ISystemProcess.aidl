@@ -74,4 +74,6 @@ interface ISystemProcess {
     void attachSyncAdapterQueries(IBinder queries);
     /** PackageManagerInternal.filterAppAccess at the native package owner. */
     boolean filterSyncAdapterPackageAccess(String packageName, int uid, int userId);
+    /** Synchronous write of the live native CompilerStats; system UID only. */
+    void writePackageCompilerStats();
 }

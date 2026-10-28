@@ -416,6 +416,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         packageShutdown = new com.android.server.pm.NativePackageShutdownBridge(context, compiler, dex, dynamicCode);
     }
 
+    public synchronized void installPackageShutdownOwner(IPackageShutdownBridge owner) {
+        enforceSystemUid();
+        if (packageShutdown != null) throw new IllegalStateException("package shutdown owner already attached");
+        packageShutdown = Objects.requireNonNull(owner);
+    }
+
     @Override
     public synchronized IPackageShutdownBridge getPackageShutdownBridge() {
         enforceSystemUid();

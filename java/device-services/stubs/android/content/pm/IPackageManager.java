@@ -67,6 +67,7 @@ public interface IPackageManager extends android.os.IInterface {
     CharSequence getHarmfulAppWarning(String packageName, int userId) throws RemoteException;
     boolean[] canPackageQuery(String sourcePackageName, String[] targetPackageNames, int userId) throws RemoteException;
     ParceledListSlice<android.content.IntentFilter> getAllIntentFilters(String packageName) throws RemoteException;
+    void requestPackageChecksums(String name, boolean splits, int optional, int required, java.util.List trusted, IOnChecksumsReadyListener listener, int user) throws RemoteException;
     abstract class Stub extends android.os.Binder implements IPackageManager {
         public static IPackageManager asInterface(android.os.IBinder binder) { throw new RuntimeException("stub"); }
     }

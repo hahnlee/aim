@@ -29,7 +29,7 @@ import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import android.content.pm.PackageManagerInternal;
 /** Original Internal type; mandatory owners supply operations outside the retained read slice. */
-public final class NativePackageManagerInternal extends android.content.pm.PackageManagerInternal {
+public class NativePackageManagerInternal extends android.content.pm.PackageManagerInternal {
     public interface Owner extends ReadOwner, MutationOwner, LifecycleOwner, PolicyOwner, PolicyReadOwner, ObserverOwner {}
     public interface ObserverOwner {
         void addPackageListObserver(PackageListObserver observer);

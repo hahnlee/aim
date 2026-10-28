@@ -24,6 +24,11 @@
 //! local adapters over the native permission, user and storage owners.
 //! Preferred per-user resets use that permission owner; the retained Java
 //! cross-profile policy reads the user owner's original UserProperties.
+//! Process-start security logging retains ProcessLoggingHandler over the live
+//! checksum owner; role diagnostics read the native package/user local adapters.
+//! Dexopt diagnostics use the retained ART/PackageManagerLocal when published.
+//! Shutdown writes the live native CompilerStats through aim-system, then its
+//! original dex/dynamic-code owners and conditional PackageWatchdog.
 //! The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2330).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -556,6 +561,24 @@ impl Service for PackageBootstrap {
             bridge::FORMAT_PACKAGE_TIMESTAMP => {
                 let a =
                     bridge::FormatPackageTimestamp::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
+            bridge::LOG_PACKAGE_PROCESS_START => {
+                let a =
+                    bridge::LogPackageProcessStart::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
+            bridge::GET_PACKAGE_SHUTDOWN_BRIDGE => {
+                let a = bridge::GetPackageShutdownBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
+            bridge::GET_PACKAGE_DIAGNOSTIC_INPUTS => {
+                let a = bridge::GetPackageDiagnosticInputs::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 a.write(&mut p);
                 return self.java(call.code, &p);
             }
@@ -1834,7 +1857,8 @@ mod tests {
         );
         let reply = call(bridge::GET_PACKAGE_SHUTDOWN_BRIDGE);
         let e = reply.reader().read_exception().unwrap().unwrap_err();
-        assert!(e.message.contains("#2330"), "{}", e.message);
+        assert_eq!(e.code, EX_ILLEGAL_STATE);
+        assert!(e.message.contains("Java"), "{}", e.message);
         std::fs::remove_dir_all(&data).unwrap();
     }
 

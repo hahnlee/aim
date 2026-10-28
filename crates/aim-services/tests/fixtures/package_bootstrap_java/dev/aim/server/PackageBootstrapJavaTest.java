@@ -16,6 +16,7 @@ public final class PackageBootstrapJavaTest {
         for (int uid : new int[] {0, 2000, 10100}) {
             Binder.uid = uid;
             for (Runnable action : new Runnable[] {
+                    () -> bridge.getPackageShutdownBridge(),
                     () -> bridge.onExistingPackageInstalled(null, 0, 0),
                     () -> bridge.resetPreferredRuntimePermissions(0),
                     () -> bridge.getPreferredCrossProfileAccessControl(0, 10),
@@ -27,8 +28,10 @@ public final class PackageBootstrapJavaTest {
             }
         }
         Binder.uid = 1000;
+        PackageShutdownJavaTest.run();
         ExistingInstallJavaTest.run(args[0]);
         PackageLocalOwnersTest.run();
+        PackageDiagnosticsJavaTest.run(args[0]);
         Locale.setDefault(Locale.US);
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
         check(bridge.formatPackageTimestamp(0).equals("1970-01-01 00:00:00"));

@@ -2329,7 +2329,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn package_provider_queries_use_live_authority_grants_and_user_scope() {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
