@@ -1308,12 +1308,13 @@ mod tests {
         else {
             return;
         };
-        let mut channel = Channel::new(
-            UnixStream::connect(path).unwrap(),
-            None,
-            Duration::from_secs(2),
-        )
-        .unwrap();
+        let stream = UnixStream::connect(path).unwrap();
+        let mut gate = [0];
+        // Do not start the channel timeout until the parent has authenticated
+        // us and queued the request. EOF also releases us if the parent fails.
+        std::io::stdin().read_exact(&mut gate).unwrap();
+        assert_eq!(gate, [1]);
+        let mut channel = Channel::new(stream, None, Duration::from_secs(2)).unwrap();
         let (frame, proof) = channel.receive().unwrap();
         assert!(proof.is_some());
         channel
@@ -1325,6 +1326,9 @@ mod tests {
                 None,
             )
             .unwrap();
+        // receive() verifies that its peer is live after decoding the reply.
+        std::io::stdin().read_exact(&mut gate).unwrap();
+        assert_eq!(gate, [2]);
     }
     #[test]
     #[ignore = "owned subprocess for authenticated_fork_handoff"]
@@ -1858,7 +1862,18 @@ mod tests {
     }
     #[test]
     fn authenticated_cross_process_frames() {
-        let path = std::env::temp_dir().join(format!("aim-verity-control-{}", std::process::id()));
+        cross_process_frames(Duration::ZERO);
+    }
+    #[test]
+    fn authenticated_cross_process_frames_with_delayed_parent() {
+        cross_process_frames(Duration::from_millis(2100));
+    }
+    fn cross_process_frames(parent_delay: Duration) {
+        let path = std::env::temp_dir().join(format!(
+            "aim-verity-control-{}-{}",
+            std::process::id(),
+            parent_delay.as_millis()
+        ));
         let listener = UnixListener::bind(&path).unwrap();
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -1869,11 +1884,31 @@ mod tests {
                 "--skip",
                 &format!("--control-endpoint={}", path.display()),
             ])
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .spawn()
             .unwrap();
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                match self.0.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => {}
+                    Err(error) => eprintln!("control child status failed: {error}"),
+                }
+                if let Err(error) = self.0.kill() {
+                    eprintln!("control child termination failed: {error}");
+                }
+                if let Err(error) = self.0.wait() {
+                    eprintln!("control child reap failed: {error}");
+                }
+            }
+        }
+        let mut child = ChildGuard(child);
         let (stream, _) = listener.accept().unwrap();
-        let process = ProcessIdentity::running(child.id() as i32).unwrap();
+        std::thread::sleep(parent_delay);
+        assert!(child.0.try_wait().unwrap().is_none());
+        let process = ProcessIdentity::running(child.0.id() as i32).unwrap();
         let mut channel = Channel::new(stream, Some(process), Duration::from_secs(2)).unwrap();
         let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
         let proof = PrivateFd::adopt(file.into()).unwrap();
@@ -1885,11 +1920,15 @@ mod tests {
             error: 0,
         };
         channel.send(&frame, Some(&proof)).unwrap();
+        child.0.stdin.as_mut().unwrap().write_all(&[1]).unwrap();
+        std::thread::sleep(parent_delay);
+        assert!(process.is_live());
         let (reply, fd) = channel.receive().unwrap();
         assert_eq!(reply.operation, Operation::Prepared);
         assert!(fd.is_none());
-        let mut child = child;
-        assert!(child.wait().unwrap().success());
+        assert!(process.is_live());
+        child.0.stdin.take().unwrap().write_all(&[2]).unwrap();
+        assert!(child.0.wait().unwrap().success());
         assert!(!process.is_live());
         std::fs::remove_file(path).unwrap();
     }
