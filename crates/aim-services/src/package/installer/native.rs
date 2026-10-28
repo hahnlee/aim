@@ -3303,6 +3303,9 @@ mod tests {
         let retained_system = crate::system::System::new(process.clone(), &[]);
         drop(native_store);
         drop(controller);
+        // Callback visibility briefly upgrades the installer's Weak reference.
+        // Join this fixture's dispatcher before inspecting the archive graph.
+        drop(owner.take_callback_worker().unwrap());
         drop(owner);
         assert!(
             weak_owner.upgrade().is_none(),
