@@ -512,7 +512,9 @@ this adds vendor bridge classes only, with no replacement of original classes.
   (`makeActive`), installs its providers in it (`installSystemProviders`:
   the system apps' of that process, less `settings`, which the app host
   serves itself) and runs there, on its main thread, the components that
-  other system-uid packages declare in `android:process="system"`. Until
+  system-uid packages declare in `android:process="system"`; its original
+  `installSystemApplicationInfo` installs the system-server class loader so
+  the `android` package's manifest receivers run there too (#1518). Until
   2026-10-21 zygote started the system process as an app's; Telecom could
   not load there, as TelecomLoaderService creates the telecom service with
   an in-process call on system_server's main thread, which Telecom's
@@ -560,8 +562,8 @@ this adds vendor bridge classes only, with no replacement of original classes.
   `StorageStatsManagerLocal` (#1520), on which AppSearch's `onStart` stops
   after publishing its binder and registering its receivers, and its
   maintenance `JobService`, a component of the `android` package, whose
-  own components are system_server's services' code and stay
-  unimplemented (#1518).
+  unserved services and providers still require their owners' internals
+  and remain explicit UnsupportedOperation (#1518).
 
 ### CTS-derived conformance (2026-10-16)
 

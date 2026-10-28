@@ -22,6 +22,8 @@ public abstract class PackageManager {
     public static final int GET_PERMISSIONS = 4096;
     public static final int GET_PROVIDERS = 8;
     public static final int MATCH_DISABLED_COMPONENTS = 512;
+    public static final int MATCH_SYSTEM_ONLY = 1048576;
+    public static final int GET_SHARED_LIBRARY_FILES = 1024;
     public static final int MATCH_DIRECT_BOOT_UNAWARE = 262144;
     public static final int MATCH_DIRECT_BOOT_AWARE = 524288;
     public static final int FLAG_PERMISSION_POLICY_FIXED = 4;

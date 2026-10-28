@@ -97,11 +97,17 @@ public final class SystemProcessHost extends RuntimeInit {
         private Server() {}
 
         public static void main(String[] args)
-                throws ReflectiveOperationException, RemoteException {
+                throws ReflectiveOperationException, RemoteException,
+                PackageManager.NameNotFoundException {
             Looper.prepareMainLooper();
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
             ActivityThread.initializeMainlineModules();
+            // ActivityManagerService.setSystemProcess: framework manifest
+            // receivers use the system server's class loader, not the boot loader.
+            thread.installSystemApplicationInfo(context.getPackageManager().getApplicationInfo(
+                    "android", PackageManager.GET_SHARED_LIBRARY_FILES
+                            | PackageManager.MATCH_SYSTEM_ONLY), Server.class.getClassLoader());
             IApplicationThread applicationThread = thread.getApplicationThread();
             ISystemProcess host = ISystemProcess.Stub.asInterface(
                     ServiceManager.waitForService("aim.system_process"));
