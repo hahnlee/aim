@@ -1477,10 +1477,6 @@ pub struct PermissionManager {
     host: Arc<AppHost>,
     /// The sole mutable access owner; readers retain immutable states.
     owner: Mutex<AccessOwner>,
-    boot_policy: (
-        Mutex<Option<Arc<aim_binder_host::local::Strong>>>,
-        std::sync::Condvar,
-    ),
     #[cfg(test)]
     access_writes: Mutex<Vec<String>>,
     installs: Mutex<BTreeMap<u64, install::Candidate>>,
@@ -1495,7 +1491,6 @@ impl PermissionManager {
         PermissionManager {
             host,
             owner: Mutex::new(AccessOwner::default()),
-            boot_policy: (Mutex::new(None), std::sync::Condvar::new()),
             #[cfg(test)]
             access_writes: Mutex::new(Vec::new()),
             installs: Mutex::new(BTreeMap::new()),

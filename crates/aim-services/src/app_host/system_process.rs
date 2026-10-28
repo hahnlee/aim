@@ -54,24 +54,6 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
-            sp::ATTACH_PERMISSION_BOOT_POLICY => {
-                let a =
-                    sp::AttachPermissionBootPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                system().and_then(|()| {
-                    self.host
-                        .permission_manager
-                        .get()
-                        .ok_or_else(|| {
-                            Exception::new(
-                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                                "permission manager is not published",
-                            )
-                        })?
-                        .attach_boot_policy(a.policy)?;
-                    sp::write_attach_permission_boot_policy_reply(&mut p);
-                    Ok(())
-                })
-            }
             sp::ATTACH_WIFI_BRIDGE => {
                 let a = sp::AttachWifiBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

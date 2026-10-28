@@ -257,8 +257,12 @@ file empty and unwritten. Archiving (#1757), shutdown statistics (#2167) and the
 remaining bootstrap owners (#2022) are open.
 
 On a fingerprint change, native permission boot evaluates restricted-permission
-exemptions and preserves existing role grants through the system-UID Java policy
-bridge (#2282; host update and Java policy tests, no guest boot rerun).
+exemptions and preserves existing role grants in Rust before publishing package
+queries (#2282). No Java boot policy bridge is used on fresh, unchanged or update
+boots. Host coverage exercises an absent system process, persistence/reload and
+the retained offline Java rule cases; no guest boot was rerun. The reported
+450-second upgrade stall at checkpoint 01 was a circular dependency on the
+late `aim-system` bridge; upgrade boot completion remains unverified here.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
