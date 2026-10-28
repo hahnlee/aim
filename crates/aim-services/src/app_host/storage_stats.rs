@@ -6,7 +6,8 @@
 //! counting allocated blocks (`getAppSize`, `getUserSize`,
 //! `getExternalSize`). No `StorageStatsAugmenter` is registered in the app
 //! host (AppSearch's runs in its own process, #1520). Cache quotas are
-//! `super::cache_quota`'s; ART-managed file stats are #1825, crates #1826.
+//! `super::cache_quota`'s; ART-managed file stats are #1825. Crates use
+//! the original Installer and CrateInfo in the system process.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::fs;
@@ -15,9 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_usage_istoragestatsmanager as ss;
+use aim_service_aidl::dev_aim_server_istoragecrates as crates;
 
 use super::appops_service::{self, MODE_ALLOWED, MODE_DEFAULT, MODE_ERRORED};
 use super::cache_quota::CacheQuotas;
@@ -32,6 +34,7 @@ const PER_USER_RANGE: i32 = 100_000;
 const USERS: [i32; 1] = [0];
 const PACKAGE_USAGE_STATS: &str = "android.permission.PACKAGE_USAGE_STATS";
 const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
+const MANAGE_CRATES: &str = "android.permission.MANAGE_CRATES";
 /// `AppOpsManager.OP_GET_USAGE_STATS`.
 const OP_GET_USAGE_STATS: i32 = 43;
 /// `PackageManager.MATCH_UNINSTALLED_PACKAGES`.
@@ -669,6 +672,29 @@ pub struct StorageStatsService {
     cache_quotas: Arc<CacheQuotas>,
 }
 
+impl AppHost {
+    pub(super) fn attach_storage_crates(&self, owner: Option<Binder>) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = owner else {
+            return Err(Exception::illegal_argument("no storage crates bridge"));
+        };
+        let owner = Arc::new(self.process.strong(handle));
+        let weak = self.me.clone();
+        self.process.link_to_death(
+            &owner,
+            Box::new(move || {
+                if let Some(host) = weak.upgrade() {
+                    let mut current = host.storage_crates.lock().unwrap();
+                    if current.as_ref().is_some_and(|p| p.handle == handle) {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        *self.storage_crates.lock().unwrap() = Some(owner);
+        Ok(())
+    }
+}
+
 impl StorageStatsService {
     pub fn new(host: Arc<AppHost>) -> Self {
         let cache_quotas = CacheQuotas::new(&host);
@@ -964,12 +990,92 @@ impl StorageStatsService {
     }
 
     /// `checkCratesEnable`.
-    fn crates(&self) -> Exception {
-        if system_boolean(self.host.property("fw.storage_crates").as_deref(), false) {
-            self.unimplemented("storage crates (#1826)")
-        } else {
-            Exception::new(EX_ILLEGAL_STATE, "Storage Crate feature is disabled.")
+    fn check_crates_enabled(&self) -> Result<(), Exception> {
+        if !system_boolean(self.host.property("fw.storage_crates").as_deref(), false) {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "Storage Crate feature is disabled.",
+            ));
         }
+        Ok(())
+    }
+
+    fn enforce_crates_permission(
+        &self,
+        caller: i32,
+        calling: Option<&str>,
+    ) -> Result<(), Exception> {
+        if self.host.check_permission(Some(MANAGE_CRATES), caller)? != 0 {
+            let prefix = calling.map(|name| format!("{name}: ")).unwrap_or_default();
+            return Err(Exception::security(format!(
+                "{prefix}Neither user {caller} nor current process has {MANAGE_CRATES}."
+            )));
+        }
+        Ok(())
+    }
+
+    /// StorageStatsService.queryCratesFor*: package visibility and permissions
+    /// stay with their native owners; the cold conversion stays in Java.
+    fn crates_for(
+        &self,
+        caller: i32,
+        uuid: Option<String>,
+        package: Option<&str>,
+        uid: Option<i32>,
+        user: i32,
+        calling: Option<&str>,
+    ) -> Result<Parcel, Exception> {
+        self.check_crates_enabled()?;
+        self.enforce_user(caller, user)?;
+        let packages = if let Some(package) = package {
+            let info = self.application_info(caller, package, user)?;
+            if caller != info.uid {
+                self.enforce_crates_permission(caller, calling)?;
+            }
+            Some(vec![Some(package.to_string())])
+        } else if let Some(uid) = uid {
+            if caller != uid {
+                self.enforce_crates_permission(caller, calling)?;
+            }
+            let mut names = Vec::new();
+            for name in self.packages_for_uid(caller, uid)? {
+                if !name.is_empty() {
+                    self.application_info(caller, &name, user)?;
+                    names.push(Some(name));
+                }
+            }
+            Some(names)
+        } else {
+            self.enforce_crates_permission(caller, calling)?;
+            None
+        };
+        let owner = self
+            .host
+            .storage_crates
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "storage crates bridge is not attached")
+            })?;
+        let mut data = Parcel::new();
+        crates::QueryCrates {
+            volume_uuid: uuid,
+            package_names: packages,
+            user_id: user,
+        }
+        .write(&mut data);
+        // Same ParceledListSlice reply ABI, including its retriever binder and
+        // original ParcelableException; forward it without decoding the list.
+        owner
+            .transact(crates::QUERY_CRATES, &data, false)
+            .map(|reply| reply.into_parcel())
+            .map_err(|status| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("storage crates: binder status {status}"),
+                )
+            })
     }
 }
 
@@ -1062,8 +1168,38 @@ impl Service for StorageStatsService {
                 .map(|s| ss::write_query_external_stats_for_user_reply(&mut p, Some(&s)))
             }
             ss::QUERY_ART_MANAGED_STATS => Err(self.unimplemented("queryArtManagedStats (#1825)")),
-            ss::QUERY_CRATES_FOR_PACKAGE | ss::QUERY_CRATES_FOR_UID | ss::QUERY_CRATES_FOR_USER => {
-                Err(self.crates())
+            ss::QUERY_CRATES_FOR_PACKAGE => {
+                let a = ss::QueryCratesForPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply(self.crates_for(
+                    uid,
+                    a.volume_uuid,
+                    Some(a.package_name.as_deref().unwrap_or_default()),
+                    None,
+                    a.user_id,
+                    a.calling_package.as_deref(),
+                ));
+            }
+            ss::QUERY_CRATES_FOR_UID => {
+                let a = ss::QueryCratesForUid::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply(self.crates_for(
+                    uid,
+                    a.volume_uuid,
+                    None,
+                    Some(a.uid),
+                    a.uid.div_euclid(PER_USER_RANGE),
+                    a.calling_package.as_deref(),
+                ));
+            }
+            ss::QUERY_CRATES_FOR_USER => {
+                let a = ss::QueryCratesForUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply(self.crates_for(
+                    uid,
+                    a.volume_uuid,
+                    None,
+                    None,
+                    a.user_id,
+                    a.calling_package.as_deref(),
+                ));
             }
             code => {
                 let name = ss::METHODS
@@ -1080,6 +1216,129 @@ impl Service for StorageStatsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// StorageStatsService.queryCratesFor* (android-16.0.0_r1): disabled
+    /// before permission checks, own UID without MANAGE_CRATES, user with it.
+    #[test]
+    fn crate_queries_keep_permissions_and_original_replies() {
+        struct Original;
+        impl Service for Original {
+            fn descriptor(&self) -> &str {
+                crates::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                assert_eq!(call.code, crates::QUERY_CRATES);
+                let a = crates::QueryCrates::read(&mut call.data)?;
+                assert_eq!(a.user_id, 0);
+                if a.volume_uuid.as_deref() == Some("transport") {
+                    return Err(BAD_VALUE);
+                }
+                let mut p = Parcel::new();
+                if a.volume_uuid.is_some() {
+                    p.write_exception(&io_exception("original installer failure"));
+                } else {
+                    p.write_no_exception();
+                    p.write_i32(1); // typed ParceledListSlice
+                    p.write_i32(if a.package_names.is_some() { 7 } else { 8 });
+                }
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders(|fixture, _, _, export| {
+            let host = AppHost::new(fixture.process.clone());
+            host.set_system(fixture.package_system().unwrap().clone());
+            host.package_booted_for_test();
+            let inputs = fixture.configured.get().unwrap();
+            let enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let property = enabled.clone();
+            let original_properties = fixture.clone();
+            super::super::configure_test_host(
+                &host,
+                &inputs.root,
+                &inputs.data,
+                &inputs.bpf,
+                Box::new(move |name| {
+                    if name == "fw.storage_crates" {
+                        Some(
+                            property
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                                .to_string(),
+                        )
+                    } else {
+                        original_properties.property(name)
+                    }
+                }),
+            );
+            assert!(
+                host.permission_manager
+                    .set(Arc::new(
+                        super::super::permission_manager::PermissionManager::with_system(
+                            host.clone(),
+                            Default::default()
+                        )
+                    ))
+                    .is_ok()
+            );
+            let service = StorageStatsService::new(host.clone());
+            let own = service.application_info(1000, "p", 0).unwrap().uid;
+            let query = |caller, uuid, package: Option<&str>, uid, user| {
+                service.crates_for(caller, uuid, package, uid, user, Some("p"))
+            };
+            let disabled = query(10000, None, None, None, 10).unwrap_err();
+            assert_eq!(disabled.code, EX_ILLEGAL_STATE);
+            assert_eq!(disabled.message, "Storage Crate feature is disabled.");
+            enabled.store(true, std::sync::atomic::Ordering::SeqCst);
+            for owner in [None, Some(Binder::Local(1))] {
+                assert!(host.attach_storage_crates(owner).is_err());
+            }
+            let original = export(Arc::new(Original));
+            host.attach_storage_crates(Some(Binder::Handle(original.handle)))
+                .unwrap();
+            for (package, uid, expected) in
+                [(Some("p"), None, 7), (None, Some(own), 7), (None, None, 8)]
+            {
+                let p = query(
+                    if uid.is_some() || package.is_some() {
+                        own
+                    } else {
+                        1000
+                    },
+                    None,
+                    package,
+                    uid,
+                    0,
+                )
+                .unwrap();
+                let mut r = p.reader();
+                r.read_exception().unwrap().unwrap();
+                assert_eq!(r.read_i32().unwrap(), 1);
+                assert_eq!(r.read_i32().unwrap(), expected);
+            }
+            for args in [
+                (None, None, 0),
+                (Some("q"), None, 0),
+                (None, Some(own + 1), 0),
+                (None, None, 10),
+            ] {
+                assert_eq!(
+                    query(own, None, args.0, args.1, args.2).unwrap_err().code,
+                    aim_binder_host::parcel::EX_SECURITY
+                );
+            }
+            let p = query(own, Some("bad".into()), None, Some(own), 0).unwrap();
+            assert_eq!(
+                p.reader().read_exception().unwrap().unwrap_err(),
+                io_exception("original installer failure")
+            );
+            assert_eq!(
+                query(own, Some("transport".into()), None, Some(own), 0)
+                    .unwrap_err()
+                    .code,
+                EX_ILLEGAL_STATE
+            );
+        });
+    }
 
     struct Tree(PathBuf);
 

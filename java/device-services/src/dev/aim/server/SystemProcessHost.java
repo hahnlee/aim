@@ -135,6 +135,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSystemRouteQueries(new com.android.server.media.SystemRouteQueries(context));
             host.attachStatsCompanionUidMap(new StatsCompanionUidMap(context));
             host.attachRecoverableKeyStoreKeys(new RecoverableKeyStoreKeys(context));
+            host.attachStorageCrates(new StorageCrates(context));
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's

@@ -643,6 +643,12 @@ and application-key classes run in `aim-system` against the existing keystore2.
 Only this pair is exposed; the remaining missing recovery operations retain their
 explicit UnsupportedOperation naming #1888.
 
+The app host's cold storage crate queries (#1826) retain the original Installer,
+installd, CrateInfo and ParceledListSlice through a system-UID-only vendor bridge.
+StorageStatsService's metadata conversion is extracted into that bridge; native
+package and permission owners check the caller before forwarding. This adds
+vendor classes only, with no original class or image replacement.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the
