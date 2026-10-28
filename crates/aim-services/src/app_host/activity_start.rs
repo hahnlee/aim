@@ -361,6 +361,7 @@ impl AppHost {
     /// Sends what the stack decided, each as a transaction to its
     /// activity's process, in order.
     pub(super) fn run(self: &Arc<Self>, commands: Vec<Command>) {
+        self.update_window_focus();
         for command in commands {
             if let Err(e) = self.run_one(command) {
                 eprintln!("app host: activity: {e}");

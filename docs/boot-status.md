@@ -148,6 +148,11 @@ remain logged by their owners, while transport and unexpected owner failures
 propagate before package usage/settings flushes. Host transport, persistence,
 Java ordering/admission and lifecycle tests cover this slice; no guest boot was
 run (#2330, #2167, 2026-10-29).
+Window focus observers follow the focused task's top resumed activity and its
+latest window (#2320). Notifications use the window's IWindowId token, with
+oneway gain before loss as in Android 16 r1; unregister and Binder death remove
+observers. Host checks cover lifecycle, task focus, removal, ordered delivery
+and callback reentry. No guest boot was run (2026-10-28).
 
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHORTCUTS or its package is user 0's HOME role holder; package-scoped queries retain their events (#1870; host tests only, no guest boot rerun).
