@@ -41,4 +41,6 @@ interface ISystemProcess {
     boolean isDomainVerifier(int uid);
     /** ActiveModeWarden's cold listener registry and empty Passpoint query (#2261). */
     void attachWifiBridge(IBinder bridge);
+    /** Original Java policy default; system UID only. */
+    void attachDevicePolicyDefaults(IBinder defaults);
 }
