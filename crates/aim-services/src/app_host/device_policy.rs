@@ -148,6 +148,8 @@ pub struct Policies {
     admins: bool,
     /// A policy the policy engine keeps.
     policies: bool,
+    /// DevicePolicyEngine's persisted policy state, decoded by the original Java.
+    engine_xml: Vec<u8>,
     users: HashMap<i32, UserData>,
     /// The ids of the strings a device policy resource update replaced
     /// (`DeviceManagementResourcesProvider.mUpdatedStrings`).
@@ -311,8 +313,10 @@ impl Policies {
         if engine.exists()
             && let Some(bytes) = read_atomic_bytes(&engine)?
         {
-            policies.policies = aim_android_xml::read_sequence(&bytes)
-                .map_err(|e| format!("{}: {e}", engine.display()))?
+            let entries = aim_android_xml::read_sequence(&bytes)
+                .map_err(|e| format!("{}: {e}", engine.display()))?;
+            policies.engine_xml = bytes;
+            policies.policies = entries
                 .iter()
                 .any(|e| e.name == "local-policy-entry" || e.name == "global-policy-entry");
         }
@@ -537,6 +541,7 @@ fn encryption_status(crypto_type: Option<&str>, target_sdk: i32) -> i32 {
 
 /// What the service reads beside its own state.
 trait Device {
+    fn usb_data_signaling_enabled(&self) -> Result<bool, Exception>;
     fn content_protection_default(&self, user: i32) -> Result<i32, Exception>;
     fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception>;
     /// `mHasFeature`.
@@ -707,6 +712,17 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
         }
     };
     let result: Result<(), Exception> = match code {
+        dp::IS_USB_DATA_SIGNALING_ENABLED => {
+            let a = dp::IsUsbDataSignalingEnabled::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                caller.identity(None, a.caller_package.as_deref())?;
+                dp::write_is_usb_data_signaling_enabled_reply(
+                    &mut p,
+                    device.usb_data_signaling_enabled()?,
+                );
+                Ok(())
+            })()
+        }
         dp::GET_CONTENT_PROTECTION_POLICY => {
             let a =
                 dp::GetContentProtectionPolicy::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
@@ -1411,6 +1427,18 @@ impl DevicePolicy {
 }
 
 impl Device for DevicePolicy {
+    fn usb_data_signaling_enabled(&self) -> Result<bool, Exception> {
+        let mut data = Parcel::new();
+        defaults::IsUsbDataSignalingEnabled {
+            policies: Some(self.host.device_policies()?.engine_xml.clone()),
+        }
+        .write(&mut data);
+        let result = self
+            .host
+            .device_policy_default(defaults::IS_USB_DATA_SIGNALING_ENABLED, &data)?;
+        defaults::read_is_usb_data_signaling_enabled_reply(&mut result.reader())
+            .map_err(default_transport)?
+    }
     fn content_protection_default(&self, user_id: i32) -> Result<i32, Exception> {
         let mut data = Parcel::new();
         defaults::GetContentProtectionPolicyDefault { user_id }.write(&mut data);
@@ -1797,6 +1825,7 @@ mod tests {
     /// A device with `com.example` (app id 10100) in every user, the
     /// permissions by uid, user 0's settings and the flags on or off.
     struct Fake {
+        usb_enabled: bool,
         content_protection: bool,
         keyguard_coexistence: bool,
         feature: bool,
@@ -1811,6 +1840,7 @@ mod tests {
     impl Default for Fake {
         fn default() -> Self {
             Fake {
+                usb_enabled: true,
                 content_protection: false,
                 keyguard_coexistence: true,
                 feature: true,
@@ -1824,6 +1854,9 @@ mod tests {
     }
 
     impl Device for Fake {
+        fn usb_data_signaling_enabled(&self) -> Result<bool, Exception> {
+            Ok(self.usb_enabled)
+        }
         fn content_protection_default(&self, _user: i32) -> Result<i32, Exception> {
             Ok(0)
         }
@@ -1910,6 +1943,35 @@ mod tests {
         Exception::security("Calling identity is not authorized")
     }
 
+    #[test]
+    fn usb_signaling_checks_package_identity_without_a_privileged_permission() {
+        let mut device = Fake::default();
+        let ask = |device: &Fake, uid, package| {
+            call(device, uid, dp::IS_USB_DATA_SIGNALING_ENABLED, |p| {
+                dp::IsUsbDataSignalingEnabled {
+                    caller_package: package,
+                }
+                .write(p)
+            })
+        };
+        for enabled in [true, false] {
+            device.usb_enabled = enabled;
+            // Owners and other policies do not block this engine read.
+            device.policies.owned = true;
+            for package in [None, Some("com.example".into())] {
+                let p = ask(&device, APP, package);
+                assert_eq!(
+                    dp::read_is_usb_data_signaling_enabled_reply(&mut p.reader()).unwrap(),
+                    Ok(enabled)
+                );
+            }
+        }
+        assert_eq!(
+            exception(&ask(&device, OTHER_APP, Some("com.example".into()))),
+            Exception::security("Caller with uid 10101 is not com.example")
+        );
+    }
+
     fn permission_required(permission: &str) -> Exception {
         Exception::security(format!(
             "Caller does not have the required permissions for this user. Permission required: {permission}."
@@ -1927,6 +1989,11 @@ mod tests {
                 assert_eq!(call.sender_euid, 1000);
                 let mut p = Parcel::new();
                 match call.code {
+                    defaults::IS_USB_DATA_SIGNALING_ENABLED => {
+                        let a = defaults::IsUsbDataSignalingEnabled::read(&mut call.data)?;
+                        assert_eq!(a.policies, Some(b"<global-policy-entry/>".to_vec()));
+                        defaults::write_is_usb_data_signaling_enabled_reply(&mut p, false);
+                    }
                     defaults::GET_CONTENT_PROTECTION_POLICY_DEFAULT => {
                         let a = defaults::GetContentProtectionPolicyDefault::read(&mut call.data)?;
                         if a.user_id == 10 {
@@ -1945,6 +2012,11 @@ mod tests {
         crate::system::with_discovery_binders(|host, _, _, export| {
             use aim_service_aidl::dev_aim_server_isystemprocess as sp;
             let service = DevicePolicy::new(host.clone());
+            std::fs::write(
+                host.data().unwrap().join("system/device_policy_state.xml"),
+                b"<global-policy-entry/>",
+            )
+            .unwrap();
             let error = service.content_protection_default(0).unwrap_err();
             assert_eq!(
                 error.code,
@@ -1982,6 +2054,7 @@ mod tests {
                 }
             }
             assert_eq!(service.content_protection_default(0).unwrap(), 37);
+            assert!(!service.usb_data_signaling_enabled().unwrap());
             assert_eq!(
                 service.content_protection_default(10).unwrap_err(),
                 Exception::security("original exception")

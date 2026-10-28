@@ -57,7 +57,9 @@ public final class SystemProcessHost extends RuntimeInit {
         Os.umask(S_IRWXG | S_IRWXO);
         String libraryPath = System.getProperty("java.library.path");
         ClassLoader classLoader = ClassLoaderFactory.createClassLoader(
-                System.getenv("SYSTEMSERVERCLASSPATH"), libraryPath, libraryPath,
+                System.getenv("SYSTEMSERVERCLASSPATH")
+                        + ":/apex/com.android.permission/javalib/service-permission.jar",
+                libraryPath, libraryPath,
                 ClassLoader.getSystemClassLoader().getParent(),
                 VMRuntime.SDK_VERSION_CUR_DEVELOPMENT, true /* isNamespaceShared */,
                 null /* classLoaderName */);
@@ -127,6 +129,7 @@ public final class SystemProcessHost extends RuntimeInit {
                     context, new Handler(Looper.getMainLooper()), host));
             host.attachWifiBridge(new WifiBridge(new Handler(Looper.getMainLooper())));
             host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
+            ServiceManager.addService("aim.role_queries", new RoleQueries(context));
             host.attachSettingsValues(new SettingsValues());
 
             host.attachProviderQueries(new ProviderQueries(context));
