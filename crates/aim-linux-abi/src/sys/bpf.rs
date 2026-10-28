@@ -840,12 +840,19 @@ mod tests {
         create[..5].copy_from_slice(&[HASH, 8, 4, 4, 0]);
         let fd = call(MAP_CREATE, &mut create);
         assert!(fd >= 0, "{fd}");
+        // The host reader uses the same owner API on real BPF-created
+        // files, including their page-aligned data area.
+        let map = mapped(fd as i32).unwrap();
+        assert!(map.keys().unwrap().is_empty());
         let key = |k: &u64| (k as *const u64).cast::<u8>();
         let mut v = 7u32;
         let vp = (&raw mut v).cast::<u8>();
         for k in [10u64, 20, 30] {
             assert_eq!(elem(fd, MAP_UPDATE_ELEM, key(&k), vp, 0), 0);
         }
+        let mut keys = map.keys().unwrap();
+        keys.sort();
+        assert_eq!(keys, [10u64, 20, 30].map(|k| k.to_ne_bytes().to_vec()));
         assert_eq!(
             elem(fd, MAP_UPDATE_ELEM, key(&10), vp, BPF_NOEXIST),
             -(EEXIST as i64)
@@ -869,6 +876,25 @@ mod tests {
         }
         seen.sort();
         assert_eq!(seen, [10, 30, 40]);
+        let mut keys: Vec<_> = map
+            .keys()
+            .unwrap()
+            .iter()
+            .map(|k| u64::from_ne_bytes(k.as_slice().try_into().unwrap()))
+            .collect();
+        keys.sort();
+        assert_eq!(keys, seen);
+        for k in seen {
+            assert_eq!(
+                map.lookup(&k.to_ne_bytes()),
+                Some(7u32.to_ne_bytes().to_vec())
+            );
+            assert_eq!(
+                elem(fd, MAP_DELETE_ELEM, key(&k), std::ptr::null_mut(), 0),
+                0
+            );
+        }
+        assert!(map.keys().unwrap().is_empty());
         let mut info = [0u8; 80];
         let mut a = [0u32; 6];
         a[0] = fd as u32;
@@ -883,11 +909,32 @@ mod tests {
     }
 
     #[test]
+    fn ring_buffers_reject_key_snapshots() {
+        let mut create = [0u32; 24];
+        create[..5].copy_from_slice(&[RINGBUF, 0, 0, 16384, 0]);
+        let fd = call(MAP_CREATE, &mut create);
+        assert!(fd >= 0);
+        assert_eq!(
+            mapped(fd as i32)
+                .unwrap()
+                .keys()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    #[test]
     fn arrays_have_every_index_and_no_deletes() {
         let mut create = [0u32; 24];
         create[..5].copy_from_slice(&[PERCPU_ARRAY, 4, 8, 2, 0]);
         let fd = call(MAP_CREATE, &mut create);
         assert!(fd >= 0);
+        assert_eq!(
+            mapped(fd as i32).unwrap().keys().unwrap(),
+            [0u32, 1].map(|k| k.to_ne_bytes().to_vec())
+        );
         let mut value = vec![0u64; ncpu()];
         let vp = value.as_mut_ptr().cast::<u8>();
         let (one, two) = (1u32, 2u32);

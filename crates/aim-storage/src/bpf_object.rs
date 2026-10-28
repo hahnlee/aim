@@ -232,6 +232,33 @@ impl Map {
         // SAFETY: the value in the mapping, under the map's lock.
         Some(unsafe { std::slice::from_raw_parts(v, self.value_len()) }.to_vec())
     }
+
+    /// A snapshot of the keys visited by BPF_MAP_GET_NEXT_KEY. Values can
+    /// change or disappear before a subsequent lookup.
+    pub fn keys(&self) -> io::Result<Vec<Vec<u8>>> {
+        let _g = self.lock();
+        let h = self.h();
+        if arrayed(h.ty) {
+            return Ok((0..h.max_entries)
+                .map(|i| i.to_ne_bytes().to_vec())
+                .collect());
+        }
+        if !hashed(h.ty) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        Ok((0..h.max_entries as usize)
+            .filter_map(|i| {
+                let slot = self.slot(i);
+                // SAFETY: slot i and its key belong to the mapping; the
+                // lock excludes updates and deletion while copying keys.
+                unsafe {
+                    (slot.cast::<u32>().read() == SLOT_USED).then(|| {
+                        std::slice::from_raw_parts(slot.add(8), h.key_size as usize).to_vec()
+                    })
+                }
+            })
+            .collect())
+    }
 }
 
 pub struct Guard<'a>(&'a AtomicU32);

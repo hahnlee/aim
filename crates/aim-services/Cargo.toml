@@ -43,4 +43,5 @@ sha1 = { version = "0.10", features = ["oid"] }
 sha2 = { workspace = true, features = ["oid"] }
 
 [dev-dependencies]
+aim-linux-abi = { path = "../aim-linux-abi" }
 aim-paths.workspace = true

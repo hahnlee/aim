@@ -19,7 +19,7 @@ use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_net_inetworkstatsservice as ns;
 use aim_service_aidl::dev_aim_server_inetworkstatsbridge as bridge;
-use aim_storage::bpf_object::{HASH, LRU_HASH, Mapped, SLOT_USED};
+use aim_storage::bpf_object::{HASH, LRU_HASH, Mapped};
 
 use super::settings::Table;
 use super::{AppHost, reply};
@@ -69,8 +69,14 @@ struct Entry {
 }
 
 impl Entry {
+    // android-16.0.0_r1 Connectivity/bpf/progs/netd.h: StatsValue.
+    const VALUE_SIZE: usize = std::mem::size_of::<[u64; 4]>();
+
     /// The map's value: rxPackets, rxBytes, txPackets, txBytes.
     fn of(v: &[u8]) -> Option<Entry> {
+        if v.len() != Self::VALUE_SIZE {
+            return None;
+        }
         let at =
             |i: usize| Some(u64::from_ne_bytes(v.get(i * 8..i * 8 + 8)?.try_into().ok()?) as i64);
         Some(Entry {
@@ -252,27 +258,25 @@ impl NetworkStats {
         let map = self.uid_map()?.map();
         let h = map.h();
         if !matches!(h.ty, HASH | LRU_HASH)
-            || h.key_size != 4
-            || h.value_size != 32
-            || h.data_len != u64::from(h.max_entries) * 48
+            || h.key_size as usize != std::mem::size_of::<u32>()
+            || h.value_size as usize != Entry::VALUE_SIZE
         {
             return Err(Exception::new(
                 EX_ILLEGAL_STATE,
-                format!("netstats: {APP_UID_STATS_MAP}: invalid UID stats layout"),
+                format!("netstats: {APP_UID_STATS_MAP}: invalid UID stats type or sizes"),
             ));
         }
-        let _guard = map.lock();
         let mut stats = BTreeMap::new();
-        for i in 0..h.max_entries as usize {
-            // SAFETY: the checked hash layout bounds each slot and its
-            // four-byte key and 32-byte value; the map lock excludes writers.
-            unsafe {
-                let slot = map.slot(i);
-                if slot.cast::<u32>().read() == SLOT_USED {
-                    let uid = slot.add(8).cast::<i32>().read();
-                    let value = std::slice::from_raw_parts(map.value_of(i), 32);
-                    stats.insert(uid, Entry::of(value).unwrap());
-                }
+        let keys = map.keys().map_err(|e| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("netstats: {APP_UID_STATS_MAP}: {e}"),
+            )
+        })?;
+        for key in keys {
+            if let Some(value) = map.lookup(&key) {
+                let uid = i32::from_ne_bytes(key.try_into().unwrap());
+                stats.insert(uid, Entry::of(&value).unwrap());
             }
         }
         Ok(stats)
@@ -292,7 +296,18 @@ impl NetworkStats {
         // Keep the same cache -> map lock order as getUidStats. A concurrent
         // query cannot republish an older cached value after this poll.
         let mut cache = self.uid_cache()?.map(|c| c.lock().unwrap());
-        let stats = self.poll_uid_stats()?;
+        // NetworkStatsService.performPollLocked logs a snapshot's
+        // IllegalStateException and returns without publishing an update.
+        let stats = match self.poll_uid_stats() {
+            Ok(stats) => stats,
+            Err(e) => {
+                eprintln!(
+                    "app host: netstats: problem reading network stats: {}",
+                    e.message
+                );
+                return Ok(());
+            }
+        };
         if let Some(cache) = cache.as_mut() {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
