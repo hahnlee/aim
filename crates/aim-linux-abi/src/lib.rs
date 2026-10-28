@@ -227,6 +227,9 @@ pub fn run(mut opts: RunOptions) -> String {
     sys::start_ptrace_agent();
     sys::init_exec(opts.runtime_args);
     context::init_thread();
+    if let Err(error) = sys::refresh_cgroup_policy() {
+        return format!("cgroup scheduling: errno {error}");
+    }
     diag::install_signal_handlers();
     if let Err(error) = opts.state.apply() {
         return error;

@@ -7,8 +7,11 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
+#include <linux/futex.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -166,6 +169,48 @@ static void values(void) {
   CHECK(rmdir("/dev/cpuctl/h") == 0);
 }
 
+// The unified core has one process membership, and no pretend freezer.
+static void unified(void) {
+  CHECK(mkdir("/sys/fs/cgroup/a", 0755) == 0);
+  CHECK(mkdir("/sys/fs/cgroup/b", 0755) == 0);
+  char value[256], pid[16];
+  snprintf(pid, sizeof pid, "%d", getpid());
+  CHECK(get("/sys/fs/cgroup/a/cgroup.controllers", value, sizeof value) == 0 && !*value);
+  CHECK(put("/sys/fs/cgroup/a/cgroup.subtree_control", "+cpu") < 0 && errno == ENOENT);
+  CHECK(put("/sys/fs/cgroup/a/cgroup.subtree_control", "cpu") < 0 && errno == EINVAL);
+  CHECK(open("/sys/fs/cgroup/a/cgroup.freeze", O_WRONLY) < 0 && errno == ENOENT);
+  CHECK(open("/sys/fs/cgroup/a/cgroup.freeze", O_WRONLY | O_CREAT, 0644) < 0 && errno == EACCES);
+  CHECK(chmod("/sys/fs/cgroup/a/cgroup.procs", 0666) == 0);
+  int inherited = open("/sys/fs/cgroup/a/cgroup.procs", O_WRONLY);
+  CHECK(inherited >= 0);
+  FORK_OR_SKIP(delegate);
+  if (delegate == 0) {
+    if (setuid(2000) != 0) _exit(1);
+    // Target is writable, but the common ancestor is not delegated.
+    if (put("/sys/fs/cgroup/a/cgroup.procs", "0") >= 0 || errno != EACCES) _exit(2);
+    // An inherited file checks its root opener's saved credentials.
+    if (write(inherited, "0", 1) != 1) _exit(3);
+    _exit(0);
+  }
+  int delegated_status;
+  CHECK(waitpid(delegate, &delegated_status, 0) == delegate &&
+        WIFEXITED(delegated_status) && WEXITSTATUS(delegated_status) == 0);
+  close(inherited);
+  CHECK(rename("/sys/fs/cgroup/a", "/sys/fs/cgroup/c") < 0 && errno == EIO);
+  CHECK(put("/sys/fs/cgroup/a/cgroup.procs", pid) == 0);
+  CHECK(group_of("self", "", value, sizeof value) == 0 && strcmp(value, "/a") == 0);
+  CHECK(lists("/sys/fs/cgroup/a/cgroup.procs", getpid()));
+  CHECK(get("/sys/fs/cgroup/a/cgroup.events", value, sizeof value) == 0 &&
+        strcmp(value, "populated 1\n") == 0);
+  CHECK(put("/sys/fs/cgroup/b/cgroup.procs", "0") == 0);
+  CHECK(!lists("/sys/fs/cgroup/a/cgroup.procs", getpid()));
+  CHECK(get("/sys/fs/cgroup/a/cgroup.events", value, sizeof value) == 0 &&
+        strcmp(value, "populated 0\n") == 0);
+  CHECK(rmdir("/sys/fs/cgroup/b") < 0 && errno == EBUSY);
+  CHECK(put("/sys/fs/cgroup/cgroup.procs", "0") == 0);
+  CHECK(rmdir("/sys/fs/cgroup/a") == 0 && rmdir("/sys/fs/cgroup/b") == 0);
+}
+
 static void* idle(void* arg) {
   *(long*)arg = syscall(SYS_gettid);
   for (;;) pause();
@@ -205,6 +250,43 @@ static void exec_drops_threads(void) {
   int status;
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
   CHECK(rmdir("/dev/cpuset/ex") == 0);
+}
+
+static volatile pid_t split_tid = -1;
+static int split_go[2], split_report[2];
+
+static int split_worker(void* arg) {
+  (void)arg;
+  char command, value[64];
+  while (read(split_go[0], &command, 1) == 1 && command != 'q') {
+    int ok = group_of("thread-self", "cpu", value, sizeof value) == 0 &&
+             strcmp(value, command == 'b' ? "/split" : "/") == 0;
+    if (write(split_report[1], &ok, sizeof ok) != sizeof ok) _exit(2);
+  }
+  return 0;
+}
+
+// cgroup.procs moves the entire Linux thread group, including a debuggerd
+// pseudothread whose file table lives in a separate Darwin process.
+static void split_thread_group(void) {
+  CHECK(mkdir("/dev/cpuctl/split", 0755) == 0);
+  CHECK(pipe(split_go) == 0 && pipe(split_report) == 0);
+  static char stack[64 * 1024];
+  pid_t tid = clone(split_worker, stack + sizeof stack,
+                  CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_CHILD_SETTID |
+                      CLONE_CHILD_CLEARTID,
+                  NULL, NULL, NULL, (pid_t*)&split_tid);
+  CHECK(tid > 0);
+  while (split_tid == -1) syscall(SYS_futex, &split_tid, FUTEX_WAIT, -1, NULL, NULL, 0);
+  CHECK(put("/dev/cpuctl/split/cgroup.procs", "0") == 0);
+  int ok;
+  CHECK(write(split_go[1], "b", 1) == 1 && read(split_report[0], &ok, sizeof ok) == sizeof ok && ok);
+  CHECK(put("/dev/cpuctl/cgroup.procs", "0") == 0);
+  CHECK(write(split_go[1], "r", 1) == 1 && read(split_report[0], &ok, sizeof ok) == sizeof ok && ok);
+  CHECK(write(split_go[1], "q", 1) == 1);
+  while (split_tid != 0) syscall(SYS_futex, &split_tid, FUTEX_WAIT, split_tid, NULL, NULL, 0);
+  for (int i = 0; i < 2; i++) { close(split_go[i]); close(split_report[i]); }
+  CHECK(rmdir("/dev/cpuctl/split") == 0);
 }
 
 static volatile int churning;
@@ -249,7 +331,9 @@ int main(int argc, char** argv) {
   RUN(mounts);
   RUN(moves);
   RUN(values);
+  RUN(unified);
   RUN(exec_drops_threads);
+  RUN(split_thread_group);
   RUN(membership_files_unlisted);
   DONE();
 }

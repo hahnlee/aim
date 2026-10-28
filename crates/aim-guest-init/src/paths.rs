@@ -15,7 +15,7 @@
 //! | `/data`, `/metadata`, `/cache` | `<data>/<name>` | writable | persistent |
 //! | `/data/user/0` | `<data>/data/data` | writable | persistent (vold's bind of `/data/data`) |
 //! | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | kernfs | per boot: values init wrote |
-//! | `/sys/fs/cgroup` | `<runtime>/cgroup` | cgroup2 | per boot: a plain directory tree |
+//! | `/sys/fs/cgroup` | `<runtime>/cgroup` | cgroup2 | per boot: unified cgroup core |
 //! | `/dev/blkio`, `/dev/cpuctl`, `/dev/cpuset` | `<runtime>/cgroup-v1/<controller>` | `cgroup:<controller>` | per boot, from `SetupCgroups`: cgroup v1 hierarchies |
 //! | `/sys/fs/bpf` | `<runtime>/bpf` | bpf | per boot: pinned eBPF objects |
 //! | everything else | `<image>/...` | read-only image | |
@@ -52,8 +52,7 @@ pub enum MapKind {
     /// `/proc` and `/sys`: the syscall layer synthesizes them; this tree
     /// only holds the values init wrote, for the layer to report.
     Kernfs,
-    /// The cgroup v2 hierarchy: a writable directory whose groups no
-    /// controller acts on. zygote cannot start a process without making
+    /// The unified cgroup hierarchy, served by linux-abi's cgroup core. zygote cannot start a process without making
     /// its group (`createProcessGroup`).
     Cgroup2,
     /// bpffs: where the syscall layer's eBPF maps and programs are pinned

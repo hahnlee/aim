@@ -421,6 +421,43 @@ pub fn remote_rlimit(pid: i32, res: u32, new: [u64; 2], may_raise: bool) -> Resu
     Ok([r.u64(), r.u64()])
 }
 
+/// The cgroup owner has checked attachment permissions. Only guest-thread
+/// policy is sent; the peer never applies policy to an arbitrary host pid.
+pub(crate) fn remote_cgroup_policy(
+    pid: i32,
+    policies: &[(i32, super::cgroup::Policy)],
+) -> Result<Vec<(i32, super::cgroup::Policy)>, crate::errno::Errno> {
+    let reply = call_result(
+        pid,
+        &request(agent::CGROUP_POLICY, |w| {
+            w.seq(policies.iter(), |w, (tid, p)| {
+                w.i32(*tid);
+                w.i32(p.min);
+                w.i32(p.max);
+                w.i32(p.fair_max);
+                w.i32(p.io);
+            });
+        }),
+    )
+    .map_err(|e| -e as i32)?;
+    let mut r = Reader::new(&reply);
+    let before = r.seq(|r| {
+        (
+            r.i32(),
+            super::cgroup::Policy {
+                min: r.i32(),
+                max: r.i32(),
+                fair_max: r.i32(),
+                io: r.i32(),
+            },
+        )
+    });
+    if !r.ok() {
+        return Err(EIO);
+    }
+    Ok(before)
+}
+
 fn gather(local: &[(u64, u64)]) -> Result<Vec<u8>, i32> {
     let mut v = Vec::new();
     for &(a, n) in local {

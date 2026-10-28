@@ -1115,7 +1115,7 @@ impl GuestExecutor {
                     if let Some((root, mode, uid, gid)) = self.fs.cgroup2.clone() {
                         setup_cgroup_hierarchy(&mut self.fs, &root, mode, uid, gid)?;
                         done.push(format!(
-                            "{root}/apps and {root}/system (cgroup v2; no controller acts)"
+                            "{root}/apps and {root}/system (cgroup v2; no resource controller or freezer)"
                         ));
                     }
                     if done.is_empty() {
@@ -1293,6 +1293,7 @@ mod cgroup_tests {
         assert_eq!(
             records
                 .iter()
+                .filter(|record| record.mode == Some(0o775))
                 .map(|record| record.guest.as_str())
                 .collect::<Vec<_>>(),
             [
@@ -1301,6 +1302,10 @@ mod cgroup_tests {
                 "/sys/fs/cgroup/system"
             ]
         );
+        for suffix in ["", "apps", "system"] {
+            assert!(root.join(suffix).join("cgroup.procs").is_file());
+            assert!(!root.join(suffix).join("cgroup.freeze").exists());
+        }
         setup_cgroup_hierarchy(&mut fs, "/sys/fs/cgroup", 0o750, 2100, 2200).unwrap();
         for suffix in ["", "apps", "system"] {
             let inode = crate::guest_inode::read(&root.join(suffix))

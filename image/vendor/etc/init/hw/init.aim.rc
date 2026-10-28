@@ -90,3 +90,10 @@ on early-init
 
 on post-fs-data && property:ro.boot.aim.adb.port=*
     setprop persist.sys.usb.config adb
+
+# Vendor CPU policy. libprocessgroup's unmodified profiles join these
+# groups; linux-abi maps their controller values to Darwin (docs/cgroups.md).
+on init
+    write /dev/cpuctl/background/cpu.idle 1
+    write /dev/cpuctl/system-background/cpu.idle 1
+    write /dev/cpuctl/dex2oat/cpu.shares 512

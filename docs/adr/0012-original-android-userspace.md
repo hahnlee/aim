@@ -657,16 +657,17 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   (`prlimit`) matching ids or CAP_SYS_RESOURCE. Another process's limits
   and memory cannot be changed or read (EPERM): Darwin reaches them only
   from inside the process.
-- **cgroup v2 and bpffs** are writable areas of the path map: the
-  hierarchy holds the directories libprocessgroup creates, and no
-  controller acts.
+- **cgroup v2 and bpffs** are areas of the path map: the unified cgroup
+  core owns process membership and population; no v2 resource controller
+  or freezer is advertised (see [cgroups.md](../cgroups.md)).
 - **cgroup v1 hierarchies** (`blkio`, `cpu`, `cpuset` of `cgroups.json`)
   are the layer's, as the android16-6.12 kernel's: groups with their
   control files, values checked and stored as the kernel's, tasks moved
   with `tasks` and `cgroup.procs` (with the opener's credentials), new
   threads and fork children in their creator's groups, and
   `/proc/<pid>/cgroup`. CFS bandwidth control, which Darwin cannot
-  enforce, is not offered. No Darwin policy follows a group yet (#297).
+  enforce, is not offered. Controller values constrain Darwin task/thread
+  scheduling and disk policy ([cgroups.md](../cgroups.md), #297).
 - **Extended attributes** are host attributes under their own prefix;
   `security.selinux` is the original inode's label, a `genfscon` label, or
   `unlabeled`.

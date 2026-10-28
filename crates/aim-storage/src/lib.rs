@@ -47,6 +47,7 @@ pub mod pipe_identity;
 pub mod bpf_object;
 
 pub mod cgroup_v1;
+pub mod cgroup_v2;
 
 /// A new test directory of this process's own, `<prefix>-<pid>-<n>` in the
 /// system's temporary directory: created exclusively, skipping names that

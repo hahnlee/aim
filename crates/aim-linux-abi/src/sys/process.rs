@@ -175,6 +175,19 @@ thread_local! {
     static HOST_POLICY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+unsafe extern "C" {
+    fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
+}
+
+fn apply_host_io(io: i32) -> Result<(), crate::errno::Errno> {
+    // Disk policy is per thread, so a task move cannot throttle siblings.
+    if unsafe { setiopolicy_np(0, 1, io) } < 0 {
+        Err(crate::errno::last())
+    } else {
+        Ok(())
+    }
+}
+
 /// Give the calling thread the host scheduling of its Linux scheduling.
 /// Linux runs a SCHED_FIFO or SCHED_RR thread before every normal one and
 /// weighs normal threads by nice value; Android raises display and audio
@@ -192,16 +205,51 @@ thread_local! {
 /// default priority on top of the task's base priority, which the host
 /// process's nice value moves (a job a shell starts in the background runs
 /// at nice 5); a Linux thread's priority is its own, so the importance is
-/// taken from the task's base priority as it is.
-pub fn apply_host_sched(nice: i32, policy: i32) {
-    let raised = matches!(policy, SCHED_FIFO | SCHED_RR)
-        || nice < 0 && !matches!(policy, SCHED_BATCH | SCHED_IDLE);
-    if !raised && !HOST_POLICY.get() {
+/// taken from the task's base priority as it is, and threads apply theirs
+/// again when it changes ([`task_priority_changed`]).
+pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errno> {
+    let th = thread::current();
+    let (floor, ceiling, io) = th.map_or((0, 33, 0), |th| {
+        (
+            th.sched.cgroup_min.load(SeqCst),
+            if matches!(policy, SCHED_FIFO | SCHED_RR) {
+                th.sched.cgroup_max.load(SeqCst)
+            } else {
+                th.sched
+                    .cgroup_max
+                    .load(SeqCst)
+                    .min(th.sched.cgroup_fair_max.load(SeqCst))
+            },
+            th.sched.cgroup_io.load(SeqCst),
+        )
+    });
+    let ceiling = if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        ceiling
+    } else {
+        super::cgroup::clamp_qos(host_qos(nice, policy) as i32, floor, ceiling) as i32
+    };
+    // XNU strips QoS when setting non-default disk policy. Leave QoS via
+    // pthread_setschedparam first, retaining the Linux CPU priority, rather
+    // than trying to re-enter QoS after setiopolicy_np has opted us out.
+    let needs_policy = matches!(policy, SCHED_FIFO | SCHED_RR)
+        || nice < 0 && !matches!(policy, SCHED_BATCH | SCHED_IDLE)
+        || floor >= 25
+        || io != 0;
+    if !needs_policy && !HOST_POLICY.get() {
         // SAFETY: plain call on the calling thread.
-        unsafe { libc::pthread_set_qos_class_self_np(host_qos(nice, policy), 0) };
-        return;
+        let result = unsafe {
+            libc::pthread_set_qos_class_self_np(
+                super::cgroup::clamp_qos(host_qos(nice, policy) as i32, floor, ceiling),
+                0,
+            )
+        };
+        return if result == 0 {
+            apply_host_io(io)
+        } else {
+            Err(crate::errno::from_darwin(result))
+        };
     }
-    HOST_POLICY.set(true);
+    let old_host_policy = HOST_POLICY.replace(true);
     let (policy, priority) = match policy {
         SCHED_FIFO => (libc::SCHED_FIFO, 47),
         SCHED_RR => (libc::SCHED_RR, 47),
@@ -209,24 +257,72 @@ pub fn apply_host_sched(nice: i32, policy: i32) {
         SCHED_BATCH => (libc::SCHED_OTHER, timeshare_priority(nice.max(10))),
         _ => (libc::SCHED_OTHER, timeshare_priority(nice)),
     };
+    let floor_priority = match floor {
+        25 => 37,
+        33 => 46,
+        _ => 0,
+    };
+    let ceiling_priority = match ceiling {
+        9 => 4,
+        17 => 20,
+        _ => MAXPRI_USER,
+    };
+    // Darwin's non-QoS user range starts at 15; the separate background
+    // thread policy applies MAXPRI_THROTTLE (4) below that range.
+    let priority = priority.max(floor_priority).min(ceiling_priority).max(15);
     let priority = (priority + BASEPRI_DEFAULT - task_priority()).min(MAXPRI_USER);
     // SAFETY: sched_param is plain data; plain call on the calling thread.
-    unsafe {
+    let result = unsafe {
         let mut param: libc::sched_param = std::mem::zeroed();
         param.sched_priority = priority;
-        libc::pthread_setschedparam(libc::pthread_self(), policy, &param);
+        libc::pthread_setschedparam(libc::pthread_self(), policy, &param)
+    };
+    if result != 0 {
+        HOST_POLICY.set(old_host_policy);
+        return Err(crate::errno::from_darwin(result));
     }
+    // DARWIN_THREAD is used only after leaving QoS: XNU removes a thread's
+    // QoS policy and returns EIDRM if both APIs are mixed.
+    let result = unsafe {
+        libc::setpriority(
+            libc::PRIO_DARWIN_THREAD,
+            0,
+            if ceiling == 9 {
+                libc::PRIO_DARWIN_BG
+            } else {
+                0
+            },
+        )
+    };
+    if result < 0 {
+        return Err(crate::errno::last());
+    }
+    apply_host_io(io)
+}
+
+/// Task suppression changed the base priority: every guest thread applies
+/// its own scheduling again at its next syscall.
+pub fn task_priority_changed() {
+    thread::with_table(|t| {
+        for th in t.values() {
+            th.sched.host_stale.store(true, SeqCst);
+        }
+    });
 }
 
 /// Apply the calling thread's scheduling, changed by another thread, to
 /// the host.
-pub fn apply_stale_sched(th: &Thread) {
+pub fn apply_stale_sched(th: &Thread) -> Result<(), crate::errno::Errno> {
     if th.sched.host_stale.load(SeqCst) && th.sched.host_stale.swap(false, SeqCst) {
-        apply_host_sched(
+        if let Err(error) = apply_host_sched(
             super::cred::thread_nice(th.tid),
             th.sched.policy.load(SeqCst),
-        );
+        ) {
+            th.sched.host_stale.store(true, SeqCst);
+            return Err(error);
+        }
     }
+    Ok(())
 }
 
 /// A change to another process's scheduling (a thread of it, `pid`) needs
@@ -284,8 +380,15 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
                     if let Some(th) = &th {
                         th.sched.policy.store(policy, SeqCst);
                         th.sched.priority.store(prio, SeqCst);
+                        if let Err(error) = super::cgroup::refresh_own() {
+                            return -(error as i64);
+                        }
                         if th.tid == thread::gettid() as i32 {
-                            apply_host_sched(super::cred::thread_nice(th.tid), policy);
+                            if let Err(error) =
+                                apply_host_sched(super::cred::thread_nice(th.tid), policy)
+                            {
+                                return -(error as i64);
+                            }
                         } else {
                             th.sched.host_stale.store(true, SeqCst);
                         }
