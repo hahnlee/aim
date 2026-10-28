@@ -527,6 +527,7 @@ impl AppHost {
                 Ok(())
             }
             Command::Front(task) => self.task_to_front(task),
+            Command::Back(task) => self.task_to_back(task),
             Command::TaskEmpty(task) => {
                 self.remove_task(task);
                 Ok(())
@@ -1121,11 +1122,14 @@ impl AppHost {
             return false;
         };
         let stack = self.activities.stack.lock().unwrap();
-        let root = stack
-            .get(token)
-            .and_then(|a| stack.root(a.task))
-            .map(|a| a.token);
-        root == Some(token)
+        let Some(activity) = stack.get(token) else {
+            return false;
+        };
+        stack.root(activity.task).is_some_and(|a| a.token == token)
+            && stack.top(activity.task).is_some_and(|a| a.token == token)
+            && stack
+                .task(activity.task)
+                .is_some_and(|t| t.real_activity == activity.component)
             && self
                 .activities
                 .records
@@ -1133,6 +1137,24 @@ impl AppHost {
                 .unwrap()
                 .get(&token)
                 .is_some_and(|r| matches!(r.intent, LaunchIntent::Component))
+    }
+
+    pub(super) fn move_activity_task_to_back(
+        self: &Arc<Self>,
+        token: Option<Binder>,
+        non_root: bool,
+    ) -> bool {
+        let Some(Binder::Local(token)) = token else {
+            return false;
+        };
+        let (moved, commands) = self
+            .activities
+            .stack
+            .lock()
+            .unwrap()
+            .move_to_back(token, non_root);
+        self.run(commands);
+        moved
     }
 
     /// `getCallingActivity`, `getCallingPackage`: the activity that asked

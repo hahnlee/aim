@@ -355,6 +355,25 @@ impl AppHost {
         Ok(())
     }
 
+    pub(super) fn task_to_back(&self, id: i32) -> Result<(), String> {
+        {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let at = tasks
+                .iter()
+                .position(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            let task = tasks.remove(at);
+            tasks.insert(0, task);
+        }
+        self.place_tasks()?;
+        self.tasks.send(&Record {
+            op: window::MOVED_TO_BACK,
+            task: id,
+            ..Default::default()
+        });
+        Ok(())
+    }
+
     /// The layer of task `id`, the parent of its windows: made at its
     /// bounds, in front.
     pub(super) fn task_layer<T>(

@@ -26,6 +26,7 @@
 use super::activity_start::LaunchIntent;
 use crate::package::intent::Intent;
 use crate::package::uri::Uri;
+use std::collections::BTreeSet;
 
 /// `Intent.FLAG_ACTIVITY_*`.
 pub const FLAG_ACTIVITY_NO_HISTORY: i32 = 0x4000_0000;
@@ -219,6 +220,8 @@ pub enum Command {
     },
     /// The task is in front and focused.
     Front(i32),
+    /// The task returned to the desktop, retaining its activities.
+    Back(i32),
     /// A task without activities, gone.
     TaskEmpty(i32),
 }
@@ -293,6 +296,8 @@ pub struct Stack {
     pub tasks: Vec<Task>,
     /// Whether the display is freeform: tasks do not hide each other.
     pub freeform: bool,
+    /// Tasks behind the desktop, also hidden on a freeform display.
+    background: BTreeSet<i32>,
     /// The task last reported focused.
     front: Option<i32>,
     /// `mTopResumedActivity`, `mLastReportedTopResumedActivity`,
@@ -349,7 +354,7 @@ impl Stack {
             .iter()
             .rev()
             .map(|t| t.id)
-            .find(|&t| self.top(t).is_some())
+            .find(|&t| !self.background.contains(&t) && self.top(t).is_some())
     }
 
     /// The focused task's top activity (`topRunningActivity`).
@@ -363,7 +368,7 @@ impl Stack {
     /// tasks neither fill the display nor match its bounds, so do not
     /// hide one another.
     pub fn visibility(&self, task: i32) -> Visibility {
-        if self.top(task).is_none() {
+        if self.background.contains(&task) || self.top(task).is_none() {
             return Visibility::Invisible;
         }
         if self.freeform {
@@ -371,7 +376,7 @@ impl Stack {
         }
         let mut translucent = false;
         for other in self.tasks.iter().rev().take_while(|t| t.id != task) {
-            if self.top(other.id).is_none() {
+            if self.background.contains(&other.id) || self.top(other.id).is_none() {
                 continue;
             }
             if !self.translucent(other.id) {
@@ -766,6 +771,7 @@ impl Stack {
     }
 
     fn move_to_front(&mut self, task: i32) {
+        self.background.remove(&task);
         if let Some(at) = self.tasks.iter().position(|t| t.id == task) {
             let t = self.tasks.remove(at);
             self.tasks.push(t);
@@ -779,6 +785,28 @@ impl Stack {
         self.resume_focused(true, &mut out);
         self.settle(&mut out);
         out
+    }
+
+    /// `Task.moveTaskToBack`: return to the desktop and focus the next
+    /// task. In window mode this also hides the otherwise visible task.
+    pub fn move_to_back(&mut self, token: u64, non_root: bool) -> (bool, Vec<Command>) {
+        let Some(task) = self.get(token).map(|a| a.task) else {
+            return (false, Vec::new());
+        };
+        if !non_root && self.root(task).is_some_and(|a| a.token != token) {
+            return (false, Vec::new());
+        }
+        let Some(at) = self.tasks.iter().position(|t| t.id == task) else {
+            return (false, Vec::new());
+        };
+        let moved = self.tasks.remove(at);
+        self.tasks.insert(0, moved);
+        self.background.insert(task);
+        let mut out = vec![Command::Back(task)];
+        self.resume_focused(false, &mut out);
+        self.stop_hidden(None, &mut out);
+        self.settle(&mut out);
+        (true, out)
     }
 
     /// `startPausing` of the resumed `token`; the top resumed activity is
@@ -1009,6 +1037,13 @@ impl Stack {
             self.complete_finishing(token, &mut out);
         }
         self.resume_focused(false, &mut out);
+        if self.focused().is_none()
+            || self
+                .get(token)
+                .is_some_and(|a| self.background.contains(&a.task))
+        {
+            self.stop_hidden(None, &mut out);
+        }
         self.settle(&mut out);
         out
     }
@@ -1099,6 +1134,7 @@ impl Stack {
     fn remove_if_empty(&mut self, task: i32, out: &mut Vec<Command>) {
         if !self.activities.iter().any(|a| a.task == task) && self.task(task).is_some() {
             self.tasks.retain(|t| t.id != task);
+            self.background.remove(&task);
             out.push(Command::TaskEmpty(task));
         }
     }
@@ -1299,6 +1335,79 @@ mod tests {
 
     fn activity(token: u64, task: i32, class: &str, mode: i32) -> Activity {
         Activity::new(token, task, 1, &format!("{APP}/{class}"), mode, 0, None)
+    }
+
+    /// ActivityClientController.moveActivityTaskToBack / Task.moveTaskToBack
+    /// (android-16.0.0_r1): pause and stop, retain the activity, then resume
+    /// the next task; reopening resumes the same instance.
+    #[test]
+    fn moving_back_retains_the_task_and_reopening_resumes_it() {
+        for freeform in [false, true] {
+            let mut s = Stack {
+                freeform,
+                ..Default::default()
+            };
+            s.tasks
+                .extend([*task(1, "A", Some(APP)), *task(2, "B", Some(APP))]);
+            let mut a = activity(1, 1, "A", 0);
+            a.state = if freeform {
+                State::Resumed
+            } else {
+                State::Stopped
+            };
+            let mut b = activity(2, 2, "B", 0);
+            b.state = State::Resumed;
+            s.activities.extend([a, b]);
+            s.bring_to_front(2);
+
+            let (moved, commands) = s.move_to_back(2, false);
+            assert!(moved);
+            assert!(commands.contains(&Back(2)));
+            assert!(commands.iter().any(|c| matches!(
+                c,
+                Pause {
+                    token: 2,
+                    finishing: false,
+                    ..
+                }
+            )));
+            assert_eq!(s.focused(), Some(1));
+            assert_eq!(s.visibility(2), Visibility::Invisible);
+            assert_eq!(s.tasks.iter().map(|t| t.id).collect::<Vec<_>>(), [2, 1]);
+            let mut commands = s.paused(2);
+            commands.extend(s.idle(1));
+            assert!(commands.contains(&Stop(2)));
+            s.stopped(2);
+            assert_eq!(s.get(2).unwrap().state, State::Stopped);
+            assert!(!s.get(2).unwrap().finishing);
+
+            let mut commands = s.bring_to_front(2);
+            if !freeform {
+                commands.extend(s.paused(1));
+            }
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| matches!(c, Resume { token: 2, .. }))
+            );
+            assert_eq!(s.focused(), Some(2));
+            assert_eq!(s.visibility(2), Visibility::Visible);
+            assert_eq!(s.activities.len(), 2);
+        }
+    }
+
+    #[test]
+    fn moving_the_last_task_back_stops_it_without_another_idle_report() {
+        let mut s = Stack::default();
+        launch_new(&mut s, 1, 7, "A", 0);
+        s.activities.push(activity(2, 7, "B", 0));
+        assert!(!s.move_to_back(2, false).0);
+        assert!(!s.move_to_back(99, true).0);
+        assert!(s.move_to_back(2, true).0);
+        assert_eq!(s.focused(), None);
+        assert!(s.paused(1).contains(&Stop(1)));
+        assert!(!s.get(1).unwrap().finishing);
+        assert!(s.bring_to_front(7).contains(&Launch(2)));
     }
 
     /// `finishActivityAffinity` finishes the activity and those below it

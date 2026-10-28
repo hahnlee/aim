@@ -1236,11 +1236,11 @@ impl Service for ActivityClientController {
             // (`IRequestFinishCallback.requestFinish`).
             acc::ON_BACK_PRESSED => {
                 let a = acc::OnBackPressed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if self.0.task_of_activity(a.activity_token, false) < 0 {
+                    return Ok(Parcel::new());
+                }
                 if self.0.launcher_root(a.activity_token) {
-                    let _ = self.0.unimplemented_named(
-                        "activity client controller",
-                        "a task to the back (#1486)",
-                    );
+                    self.0.move_activity_task_to_back(a.activity_token, true);
                 } else if let Some(Binder::Handle(callback)) = a.callback {
                     let mut p = Parcel::new();
                     p.write_interface_token(REQUEST_FINISH_DESCRIPTOR);
@@ -1250,9 +1250,22 @@ impl Service for ActivityClientController {
                 }
                 Ok(Parcel::new())
             }
-            acc::MOVE_ACTIVITY_TASK_TO_BACK => reply(Err(self
-                .0
-                .unimplemented_named("activity client controller", "a task to the back (#1486)"))),
+            acc::MOVE_ACTIVITY_TASK_TO_BACK => {
+                let a = acc::MoveActivityTaskToBack::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply((|| {
+                    if super::is_isolated(call.sender_euid as i32) {
+                        return Err(Exception::security(
+                            "Isolated process not allowed to call moveActivityTaskToBack",
+                        ));
+                    }
+                    let mut p = Parcel::new();
+                    acc::write_move_activity_task_to_back_reply(
+                        &mut p,
+                        self.0.move_activity_task_to_back(a.token, a.non_root),
+                    );
+                    Ok(p)
+                })())
+            }
             // The size buckets decide which size changes relaunch it.
             acc::REPORT_SIZE_CONFIGURATIONS => {
                 let args = acc::ReportSizeConfigurations::<SizeBuckets>::read(&mut call.data)

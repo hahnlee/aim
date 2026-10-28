@@ -333,6 +333,8 @@ fn on_bridge_record(r: &Record) {
             && let Some(h) = crate::hosts::for_task(package, r.text())
         {
             h.send_window(r);
+        } else {
+            restore(r.task);
         }
         return;
     }
@@ -384,6 +386,7 @@ fn publish_tasks() {
 /// A record the server passed on (in a window host).
 pub fn on_host_record(r: &Record, relative: isize) {
     if r.op == window::DRAWN {
+        restore(r.task);
         return drawn();
     }
     with(|s| note(s, r));
@@ -933,6 +936,15 @@ fn orient(task: i32, o: u32) {
 
 fn set_bounds(task: i32, b: [i32; 4]) {
     request(window::SET_BOUNDS, task, b);
+}
+
+/// Completion of an explicit launch also restores its minimized task.
+/// Ordinary focus/stacking records keep the user's minimized windows so.
+fn restore(task: i32) {
+    if let Some(Some(w)) = with(|s| s.tasks.get(&task).map(|t| t.window)) {
+        send!(w, c"deminiaturize:" => (), Id = std::ptr::null_mut());
+        front(task, 0);
+    }
 }
 
 /// Android brought `task` to the front.

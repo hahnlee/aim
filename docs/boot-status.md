@@ -168,6 +168,11 @@ The native task owner persists per-user launch parameters in Android's ABX
 format, restores saved bounds before freeform placement on the recorded
 display, loads them when the user unlocks, and removes package records
 through the PackageList callback.
+Moving a task to the back, including Back at its launcher root, now retains
+its activities, pauses and stops them, and focuses the next task (#1486).
+The existing display record minimizes its window; an explicit launch restores
+the window and resumes the retained activity. Fullscreen and freeform lifecycle
+tests cover this change; no guest boot or live window check was run.
 
 The app host forwards cold netstats usage sessions (queries and `close`) and operation counts to retained Android 16 Java owners with the app's Binder identity, returning empty histories while no interface-associated snapshots are recorded. Native `forceUpdate` checks NETWORK_STACK or MAINLINE_NETWORK_STACK as the original does, polls the live UID map through its owner's key snapshot and lookup APIs, and refreshes resident query-cache entries. Missing maps or invalid key/value sizes are logged without replacing cached values or failing the Binder call, matching the pinned service's poll-error handling. Host regressions use real BPF map creation, updates and deletion, including empty maps; no guest boot was rerun (2026-10-28, #1671, #1765).
 
