@@ -3,7 +3,13 @@ import android.os.IBinder;
 interface ISystemProcess {
     IBinder getInternalServiceRepository();
     void attachDomainVerification(IBinder frontend);
-    void attachSystemProcess(IBinder thread, IForegroundServicePolicy foreground);
+    void attachSystemProcess(IBinder thread, IForegroundServicePolicy foreground, SafeLabels labels, BatteryHealthStats battery);
+    void attachNetworkActivityBridge(IBinder bridge);
+    void attachWifiBridge(WifiBridge bridge);
+    void attachDevicePolicyDefaults(DevicePolicyDefaults defaults);
+    void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys);
+    void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries);
+    void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     abstract class Stub {
         public static ISystemProcess asInterface(IBinder binder) {
             return new ISystemProcess() {
@@ -12,7 +18,17 @@ interface ISystemProcess {
                     if (frontend == null) throw new AssertionError("missing domain front end");
                     SystemProcessHostTest.events.add("attachDomain");
                 }
-                public void attachSystemProcess(IBinder thread, IForegroundServicePolicy policy) {
+                public void attachWifiBridge(WifiBridge bridge) {}
+                public void attachDevicePolicyDefaults(DevicePolicyDefaults defaults) {}
+                public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
+                public void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries) {}
+                public void attachNetworkActivityBridge(IBinder bridge) {
+                    SystemProcessHostTest.events.add("network");
+                }
+                public void attachStatsCompanionUidMap(StatsCompanionUidMap companion) {
+                    SystemProcessHostTest.events.add("companion");
+                }
+                public void attachSystemProcess(IBinder thread, IForegroundServicePolicy policy, SafeLabels labels, BatteryHealthStats battery) {
                     if (thread != SystemProcessHostTest.applicationThread
                             || policy != SystemProcessHostTest.foregroundPolicy) {
                         throw new AssertionError("lost application thread or foreground policy");

@@ -5,6 +5,9 @@ package android.provider;
 public final class DeviceConfig {
     public static String getString(String namespace,String name,String defaultValue){throw new RuntimeException("stub");}
     public static final String NAMESPACE_PACKAGE_MANAGER_SERVICE = "package_manager_service";
+    public static final String NAMESPACE_STATSD_JAVA = "statsd_java";
+    public static Properties getProperties(String namespace, String... names) { throw new RuntimeException("stub"); }
+    public static void removeOnPropertiesChangedListener(OnPropertiesChangedListener listener) { throw new RuntimeException("stub"); }
 
     public static boolean getBoolean(String namespace, String name, boolean defaultValue) { throw new RuntimeException("stub"); }
     public static long getLong(String namespace, String name, long defaultValue) { throw new RuntimeException("stub"); }
@@ -17,6 +20,7 @@ public final class DeviceConfig {
 
     public static class Properties {
         public java.util.Set<String> getKeyset() { throw new RuntimeException("stub"); }
+        public String getString(String name, String defaultValue) { throw new RuntimeException("stub"); }
         public boolean getBoolean(String name, boolean defaultValue) { throw new RuntimeException("stub"); }
         public Properties(String namespace, java.util.Map<String, String> keyValueMap) { throw new RuntimeException("stub"); }
     }

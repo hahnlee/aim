@@ -350,6 +350,7 @@ dependencies = [
  "aim-host-wifi",
  "aim-hostcall",
  "aim-input-transport",
+ "aim-linux-abi",
  "aim-meminfo",
  "aim-paths",
  "aim-service-aidl",

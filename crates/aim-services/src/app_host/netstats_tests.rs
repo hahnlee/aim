@@ -7,6 +7,448 @@ use aim_service_aidl::android_os_iservicemanager as sm;
 use std::collections::HashMap;
 use std::sync::Weak;
 
+fn poll_permissions(host: &Arc<AppHost>, granted: &str) {
+    use crate::package::permissions::{AccessSystem, Permission};
+    let path = host
+        .data()
+        .unwrap()
+        .join("misc_de/0/apexdata/com.android.permission/access.abx");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let xml = format!(
+        "<access><app-id-permissions>
+        <app-id id='10100'><permission name='{granted}' flags='4'/></app-id>
+        <app-id id='10101'><permission name='android.permission.NETWORK_STATS_PROVIDER' flags='4'/></app-id>
+        </app-id-permissions></access>"
+    );
+    let xml = aim_android_xml::read(xml.as_bytes()).unwrap();
+    std::fs::write(path, aim_android_xml::abx::write(&xml).unwrap()).unwrap();
+    let manager = super::super::permission_manager::PermissionManager::with_system(
+        host.clone(),
+        AccessSystem {
+            permissions: [
+                NETWORK_STACK,
+                MAINLINE_NETWORK_STACK,
+                "android.permission.NETWORK_STATS_PROVIDER",
+            ]
+            .into_iter()
+            .map(|name| Permission {
+                name: name.into(),
+                package: "android".into(),
+                protection_level: 2,
+                dynamic: None,
+            })
+            .collect(),
+            ..Default::default()
+        },
+    );
+    assert!(host.permission_manager.set(Arc::new(manager)).is_ok());
+}
+
+// Exercise bpf(BPF_MAP_CREATE/UPDATE/DELETE), exactly as NetBpfLoad and
+// netd do, rather than constructing the shared file's private layout.
+fn syscall(nr: u64, args: [u64; 6]) -> i64 {
+    // SAFETY: zero is a valid register context; dispatch only uses its
+    // registers for these bpf/close calls, with live host argument buffers.
+    let mut ctx = unsafe { std::mem::zeroed::<aim_linux_abi::context::GuestContext>() };
+    ctx.x[..6].copy_from_slice(&args);
+    ctx.x[8] = nr;
+    aim_linux_abi::sys::dispatch(&mut ctx);
+    ctx.x[0] as i64
+}
+
+fn bpf(cmd: u64, attr: &[u64]) -> i64 {
+    syscall(
+        280,
+        [
+            cmd,
+            attr.as_ptr() as u64,
+            std::mem::size_of_val(attr) as u64,
+            0,
+            0,
+            0,
+        ],
+    )
+}
+
+struct UidMap(i32);
+
+impl Drop for UidMap {
+    fn drop(&mut self) {
+        assert_eq!(syscall(57, [self.0 as u64, 0, 0, 0, 0, 0]), 0);
+    }
+}
+
+fn create_uid_map(host: &AppHost, key_size: u32, value_size: u32) -> UidMap {
+    let path = host.bpf().unwrap().join(APP_UID_STATS_MAP);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut attr = [0u32; 24];
+    attr[..5].copy_from_slice(&[HASH, key_size, value_size, 4, 0]);
+    let fd = syscall(
+        280,
+        [
+            0,
+            attr.as_ptr() as u64,
+            std::mem::size_of_val(&attr) as u64,
+            0,
+            0,
+            0,
+        ],
+    );
+    assert!(fd >= 0, "BPF_MAP_CREATE: {fd}");
+    let mut name = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most PATH_MAX bytes for this live map fd.
+    assert_eq!(
+        unsafe { libc::fcntl(fd as i32, libc::F_GETPATH, name.as_mut_ptr()) },
+        0
+    );
+    let end = name.iter().position(|&b| b == 0).unwrap();
+    use std::os::unix::ffi::OsStrExt;
+    std::fs::hard_link(std::ffi::OsStr::from_bytes(&name[..end]), &path).unwrap();
+    UidMap(fd as i32)
+}
+
+fn uid_map(host: &AppHost) -> UidMap {
+    create_uid_map(
+        host,
+        std::mem::size_of::<u32>() as u32,
+        std::mem::size_of::<[u64; 4]>() as u32,
+    )
+}
+
+fn record(map: &UidMap, uid: i32, values: [u64; 4]) {
+    assert_eq!(
+        bpf(
+            2,
+            &[
+                map.0 as u64,
+                (&uid as *const i32) as u64,
+                values.as_ptr() as u64,
+                0
+            ]
+        ),
+        0
+    );
+}
+
+fn delete(map: &UidMap, uid: i32) {
+    assert_eq!(
+        bpf(3, &[map.0 as u64, (&uid as *const i32) as u64, 0, 0]),
+        0
+    );
+}
+
+fn force_update(service: &NetworkStats, caller: u32) -> Result<(), Exception> {
+    let mut p = Parcel::new();
+    p.write_interface_token(ns::DESCRIPTOR);
+    let result = service
+        .transact(&mut Call {
+            code: ns::FORCE_UPDATE,
+            flags: 0,
+            sender_pid: 71,
+            sender_euid: caller,
+            data: p.reader(),
+        })
+        .unwrap();
+    result.reader().read_exception().unwrap()
+}
+
+fn transport_stats(service: &NetworkStats, caller: u32, transport: i32) -> Parcel {
+    let mut p = Parcel::new();
+    p.write_interface_token(ns::DESCRIPTOR);
+    p.write_i32(transport);
+    service
+        .transact(&mut Call {
+            code: ns::GET_UID_STATS_FOR_TRANSPORT,
+            flags: 0,
+            sender_pid: 71,
+            sender_euid: caller,
+            data: p.reader(),
+        })
+        .unwrap()
+}
+
+// NetworkStats(Parcel), including withoutInterfaces/mapKeysNotNull's empty
+// result (elapsedRealtime=0, size=0, capacity=1), android-16.0.0_r1.
+fn assert_empty_transport_stats(p: Parcel) {
+    let mut r = p.reader();
+    r.read_exception().unwrap().unwrap();
+    assert_eq!(r.read_i32().unwrap(), 1); // typed object present
+    assert_eq!(r.read_i64().unwrap(), 0);
+    assert_eq!(r.read_i32().unwrap(), 0);
+    assert_eq!(r.read_i32().unwrap(), 1);
+    assert_eq!(r.read_i32().unwrap(), 1);
+    assert_eq!(r.read_string16().unwrap(), None);
+    for _ in 0..6 {
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(r.read_i32().unwrap(), 0);
+    }
+    for _ in 0..5 {
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(r.read_i64().unwrap(), 0);
+    }
+    assert_eq!(r.remaining(), 0);
+}
+
+fn connectivity_inventory(
+    host: &Arc<AppHost>,
+    ethernet: bool,
+) -> Arc<super::super::connectivity_service::ConnectivityService> {
+    use super::super::connectivity_service::ConnectivityService;
+    use std::net::Ipv4Addr;
+    let network = ethernet.then(|| {
+        (
+            aim_uplink::Uplink {
+                index: 2,
+                addr: Ipv4Addr::new(192, 168, 1, 20),
+                prefix: 24,
+                gateway: Ipv4Addr::new(192, 168, 1, 1),
+                mtu: 1500,
+            },
+            vec![Ipv4Addr::new(192, 168, 1, 1)],
+        )
+    });
+    let connectivity = Arc::new(ConnectivityService::for_test(host.clone(), network));
+    assert!(host.connectivity_service.set(connectivity.clone()).is_ok());
+    connectivity
+}
+
+#[test]
+fn cellular_uid_stats_without_cellular_networks_are_empty() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        connectivity_inventory(host, false);
+        let service = NetworkStats::new(host.clone());
+        // No detail maps need be present for an empty interface selection.
+        assert_empty_transport_stats(transport_stats(&service, 1000, TRANSPORT_CELLULAR as i32));
+        assert_empty_transport_stats(transport_stats(&service, 10100, TRANSPORT_WIFI as i32));
+    });
+}
+
+#[test]
+fn another_recorded_transport_does_not_leak_uid_totals_into_cellular_or_wifi() {
+    use super::super::network::TRANSPORT_ETHERNET;
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let connectivity = connectivity_inventory(host, true);
+        assert_eq!(connectivity.ifaces_since_boot(TRANSPORT_ETHERNET), ["eth0"]);
+        assert!(
+            connectivity
+                .ifaces_since_boot(TRANSPORT_CELLULAR)
+                .is_empty()
+        );
+        let map = uid_map(host);
+        record(&map, 10123, [1, 100, 2, 200]);
+        let service = NetworkStats::new(host.clone());
+        for transport in [TRANSPORT_CELLULAR, TRANSPORT_WIFI] {
+            assert_empty_transport_stats(transport_stats(&service, 10100, transport as i32));
+        }
+        assert_eq!(
+            service.uid_stats(10123, 10123).unwrap().unwrap().rx_bytes,
+            100
+        );
+        let p = transport_stats(&service, 1000, TRANSPORT_ETHERNET as i32);
+        let e = p.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(e, Exception::illegal_argument("Invalid transport 3"));
+    });
+}
+
+#[test]
+fn transport_stats_require_either_stack_permission_before_transport_validation() {
+    use aim_binder_host::parcel::EX_SECURITY;
+    for permission in [NETWORK_STACK, MAINLINE_NETWORK_STACK] {
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            poll_permissions(host, permission);
+            connectivity_inventory(host, false);
+            let service = NetworkStats::new(host.clone());
+            for caller in [10101, 99001] {
+                for transport in [TRANSPORT_CELLULAR as i32, -1, 3] {
+                    let p = transport_stats(&service, caller, transport);
+                    let e = p.reader().read_exception().unwrap().unwrap_err();
+                    assert_eq!(e.code, EX_SECURITY, "{e:?}");
+                    assert!(e.message.contains(NETWORK_STACK));
+                    assert!(e.message.contains(MAINLINE_NETWORK_STACK));
+                }
+            }
+            for caller in [0, 1000, 10100] {
+                assert_empty_transport_stats(transport_stats(
+                    &service,
+                    caller,
+                    TRANSPORT_CELLULAR as i32,
+                ));
+                for transport in [-1, 2, 3, 10, 11] {
+                    let p = transport_stats(&service, caller, transport);
+                    assert_eq!(
+                        p.reader().read_exception().unwrap().unwrap_err(),
+                        Exception::illegal_argument(format!("Invalid transport {transport}"))
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn transport_stats_never_claim_empty_without_inventory_or_with_selected_interfaces() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let service = NetworkStats::new(host.clone());
+        let p = transport_stats(&service, 1000, TRANSPORT_CELLULAR as i32);
+        let e = p.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(e.code, EX_ILLEGAL_STATE);
+        assert!(e.message.contains("transport inventory"));
+        let e = service.uid_detail(&["wlan0".into()]).err().unwrap();
+        assert_eq!(e.code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);
+        assert!(e.message.contains("#1671"));
+    });
+}
+
+#[test]
+fn force_update_checks_both_permissions_before_polling() {
+    use aim_binder_host::parcel::EX_SECURITY;
+    for permission in [NETWORK_STACK, MAINLINE_NETWORK_STACK] {
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            poll_permissions(host, permission);
+            let service = NetworkStats::new(host.clone());
+            // NETWORK_STATS_PROVIDER alone does not pass the network-stack check.
+            let e = force_update(&service, 10101).unwrap_err();
+            assert_eq!(e.code, EX_SECURITY, "{e:?}");
+            assert!(e.message.contains(NETWORK_STACK));
+            assert!(e.message.contains(MAINLINE_NETWORK_STACK));
+            // Authorized callers reach the real poll even when its map is missing.
+            for uid in [10100, 1000] {
+                force_update(&service, uid).unwrap();
+                assert_eq!(service.poll_uid_stats().unwrap_err().code, EX_ILLEGAL_STATE);
+            }
+            let _map = uid_map(host);
+            for uid in [10100, 1000] {
+                force_update(&service, uid).unwrap();
+            }
+        });
+    }
+}
+
+#[test]
+fn force_update_refreshes_cached_counters_and_keeps_uid_query_access() {
+    use aim_binder_host::parcel::EX_SECURITY;
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let map = uid_map(host);
+        record(&map, 10123, [1, 100, 2, 200]);
+        let service = NetworkStats::new(host.clone());
+        assert!(
+            service
+                .uid_cache
+                .set(Some(Mutex::new(RateLimitCache {
+                    expiry_ms: 60_000,
+                    max: 400,
+                    entries: VecDeque::new(),
+                })))
+                .is_ok()
+        );
+        let old = service.uid_stats(10123, 10123).unwrap().unwrap();
+        assert_eq!((old.rx_bytes, old.tx_bytes), (100, 200));
+        record(&map, 10123, [3, 300, 4, 400]);
+        assert_eq!(service.uid_stats(10123, 10123).unwrap(), Some(old));
+        assert_eq!(force_update(&service, 10101).unwrap_err().code, EX_SECURITY);
+        assert_eq!(service.uid_stats(10123, 10123).unwrap(), Some(old));
+        force_update(&service, 10100).unwrap();
+        let current = service.uid_stats(10123, 10123).unwrap().unwrap();
+        assert_eq!(
+            (
+                current.rx_packets,
+                current.rx_bytes,
+                current.tx_packets,
+                current.tx_bytes
+            ),
+            (3, 300, 4, 400)
+        );
+        assert_eq!(service.uid_stats(10124, 10123).unwrap(), None);
+        record(&map, 10123, [0; 4]);
+        force_update(&service, 10100).unwrap();
+        assert_eq!(
+            service.uid_stats(1000, 10123).unwrap(),
+            Some(Entry::default())
+        );
+        assert!(
+            service
+                .uid_cache()
+                .unwrap()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    });
+}
+
+#[test]
+fn force_update_polls_entries_deleted_entries_and_an_empty_hash_without_a_cache() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let map = uid_map(host);
+        let service = NetworkStats::new(host.clone());
+        assert!(service.uid_cache.set(None).is_ok());
+        assert!(service.poll_uid_stats().unwrap().is_empty());
+        force_update(&service, 10100).unwrap();
+        record(&map, 10123, [1, 100, 2, 200]);
+        record(&map, 10124, [3, 300, 4, 400]);
+        record(&map, 10125, [5, 500, 6, 600]);
+        let stats = service.poll_uid_stats().unwrap();
+        assert_eq!(stats.len(), 3);
+        assert_eq!(stats[&10123].rx_bytes, 100);
+        assert_eq!(stats[&10124].tx_packets, 4);
+        assert_eq!(stats[&10125].tx_bytes, 600);
+        delete(&map, 10124);
+        let stats = service.poll_uid_stats().unwrap();
+        assert_eq!(stats.len(), 2);
+        assert!(!stats.contains_key(&10124));
+        force_update(&service, 10100).unwrap();
+        assert_eq!(
+            service.uid_stats(10123, 10123).unwrap().unwrap().rx_bytes,
+            100
+        );
+        delete(&map, 10123);
+        delete(&map, 10125);
+        assert!(service.poll_uid_stats().unwrap().is_empty());
+        force_update(&service, 10100).unwrap();
+    });
+}
+
+#[test]
+fn force_update_logs_invalid_map_sizes_without_publishing_a_cache_update() {
+    for (key_size, value_size) in [(4, 24), (4, 40), (8, 32)] {
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            poll_permissions(host, NETWORK_STACK);
+            let _map = create_uid_map(host, key_size, value_size);
+            let service = NetworkStats::new(host.clone());
+            let cached = Entry {
+                rx_packets: 1,
+                rx_bytes: 100,
+                tx_packets: 2,
+                tx_bytes: 200,
+            };
+            assert!(
+                service
+                    .uid_cache
+                    .set(Some(Mutex::new(RateLimitCache {
+                        expiry_ms: 60_000,
+                        max: 400,
+                        entries: VecDeque::from([(10123, 123, cached)]),
+                    })))
+                    .is_ok()
+            );
+            let e = service.poll_uid_stats().unwrap_err();
+            assert_eq!(e.code, EX_ILLEGAL_STATE);
+            assert!(e.message.contains("invalid UID stats type or sizes"));
+            // The pinned performPollLocked logs IllegalStateException and returns.
+            force_update(&service, 10100).unwrap();
+            let cache = service.uid_cache().unwrap().unwrap().lock().unwrap();
+            assert_eq!(cache.entries, VecDeque::from([(10123, 123, cached)]));
+        });
+    }
+}
+
 struct Registry {
     process: Weak<LocalProcess>,
     names: Mutex<HashMap<String, Strong>>,

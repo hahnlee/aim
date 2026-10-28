@@ -20,7 +20,7 @@
 //! rest are not implemented (#1509).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -436,6 +436,8 @@ type Callback = (usize, i32, i32);
 
 struct State {
     network: Option<Net>,
+    /// Interfaces of each published transport, retained after network loss.
+    ifaces_since_boot: BTreeMap<u32, BTreeSet<String>>,
     next_net_id: i32,
     next_request_id: i32,
     requests: Vec<Nri>,
@@ -447,6 +449,7 @@ impl State {
     fn new(now: Option<(Uplink, Vec<Ipv4Addr>)>) -> State {
         let mut state = State {
             network: None,
+            ifaces_since_boot: BTreeMap::new(),
             next_net_id: MIN_NET_ID,
             next_request_id: FIRST_REQUEST_ID,
             requests: Vec::new(),
@@ -498,6 +501,15 @@ impl State {
             }
         }
         if let Some((uplink, dns)) = now {
+            let caps = network_capabilities();
+            for transport in 0..u64::BITS {
+                if caps.has_transport(transport) {
+                    self.ifaces_since_boot
+                        .entry(transport)
+                        .or_default()
+                        .insert(INTERFACE.into());
+                }
+            }
             self.network = Some(Net {
                 id: self.next_net_id,
                 uplink,
@@ -679,6 +691,32 @@ fn network_under(text: &str) -> Option<(Uplink, Vec<Ipv4Addr>)> {
 }
 
 impl ConnectivityService {
+    /// Netstats' transport inventory follows the same network publication as
+    /// clients, rather than inferring the guest transport from the Mac's link.
+    pub(super) fn ifaces_since_boot(&self, transport: u32) -> Vec<String> {
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .ifaces_since_boot
+            .get(&transport)
+            .map(|ifaces| ifaces.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(host: Arc<AppHost>, now: Option<(Uplink, Vec<Ipv4Addr>)>) -> Self {
+        Self {
+            host,
+            shared: Arc::new(Shared {
+                state: Mutex::new(State::new(now)),
+                changed: Condvar::new(),
+            }),
+            activity: Mutex::new(None),
+            native: Mutex::new((None, None)),
+        }
+    }
+
     /// The default network and its capabilities as the system's own
     /// callers see them (JobScheduler's `ConnectivityController`); none
     /// while the Mac has no network.
@@ -2062,15 +2100,7 @@ mod tests {
     }
 
     fn service(host: &Arc<AppHost>) -> ConnectivityService {
-        ConnectivityService {
-            host: host.clone(),
-            shared: Arc::new(Shared {
-                state: Mutex::new(State::new(None)),
-                changed: Condvar::new(),
-            }),
-            activity: Mutex::new(None),
-            native: Mutex::new((None, None)),
-        }
+        ConnectivityService::for_test(host.clone(), None)
     }
 
     fn call(service: &dyn Service, uid: u32, code: u32, p: &Parcel) -> Parcel {
@@ -2334,6 +2364,23 @@ mod tests {
         let mut state = State::new(network_under(""));
         state.follow(network_under("down\n"));
         assert!(state.network.is_none());
+    }
+
+    #[test]
+    fn transport_interfaces_survive_network_loss_and_reconnection() {
+        use super::super::network::TRANSPORT_CELLULAR;
+        let host = AppHost::new(crate::test_process(SYSTEM_UID as u32));
+        let cs = service(&host);
+        assert!(cs.ifaces_since_boot(TRANSPORT_ETHERNET).is_empty());
+        let lease = (up([192, 168, 1, 20], 24, [192, 168, 1, 1], 1500), vec![]);
+        cs.shared.state.lock().unwrap().follow(Some(lease.clone()));
+        assert_eq!(cs.ifaces_since_boot(TRANSPORT_ETHERNET), [INTERFACE]);
+        cs.shared.state.lock().unwrap().follow(None);
+        assert_eq!(cs.ifaces_since_boot(TRANSPORT_ETHERNET), [INTERFACE]);
+        cs.shared.state.lock().unwrap().follow(Some(lease));
+        assert_eq!(cs.ifaces_since_boot(TRANSPORT_ETHERNET), [INTERFACE]);
+        assert!(cs.ifaces_since_boot(TRANSPORT_CELLULAR).is_empty());
+        assert!(cs.ifaces_since_boot(TRANSPORT_WIFI).is_empty());
     }
 
     #[test]

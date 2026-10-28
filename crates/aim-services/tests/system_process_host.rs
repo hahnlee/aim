@@ -8,7 +8,7 @@ mod common {
 
 #[test]
 #[ignore = "requires pinned JDK; run explicitly without a guest boot"]
-fn system_process_initializes_nonces_before_attaching_both_java_frontends() {
+fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
     use common::runtime::{Data, run};
     let data =
         Data(std::env::temp_dir().join(format!("aim-system-process-{}", std::process::id())));
@@ -39,21 +39,21 @@ fn system_process_initializes_nonces_before_attaching_both_java_frontends() {
     // Only compile dependencies here; the class under test is always production source.
     let mut sources = common::java::sources(&fixtures);
     sources.push(binder);
-    // These are referenced by later (unexecuted) startup stages.
-    sources.extend([
-        production.join("src/dev/aim/server/TelecomLoader.java"),
-        production.join("src/com/android/server/adservices/SystemProcessLifecycle.java"),
-    ]);
     let generated = common::java::private_aidl_sources(&data.0);
     sources.extend(generated.into_iter().filter(|p| {
         p.ends_with("IForegroundServicePolicy.java")
             || p.ends_with("IForegroundServiceTypeHost.java")
     }));
-    for missing_memory in [false, true] {
+    for (missing_memory, device_lock) in [(false, true), (false, false), (true, true)] {
         let server = data.0.join("SystemProcessHost.java");
         let mut source =
             fs::read_to_string(production.join("src/dev/aim/server/SystemProcessHost.java"))
                 .unwrap();
+        // JNI loading is an Android boundary; the image linkage gate checks the real call.
+        source = source.replace(
+            "System.loadLibrary(\"android_servers\");",
+            "SystemProcessHostTest.loadLibrary(\"android_servers\");",
+        );
         if missing_memory {
             source = source.replace(
                 "ApplicationSharedMemory.setInstance(ApplicationSharedMemory.create());",
@@ -72,6 +72,7 @@ fn system_process_initializes_nonces_before_attaching_both_java_frontends() {
             .arg("-cp")
             .arg(format!("{}:{}", classes.display(), stubs.display()))
             .arg("dev.aim.server.SystemProcessHostTest")
+            .arg(device_lock.to_string())
             .output()
             .unwrap();
         if missing_memory {
