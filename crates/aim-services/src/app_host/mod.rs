@@ -580,6 +580,8 @@ pub struct AppHost {
     system: OnceLock<Arc<crate::system::System>>,
     /// `startBootstrapServices` constructs PMS before `setSystemProcess`.
     package_boot: OnceLock<Result<(), Exception>>,
+    /// Retained verifier API in the current system process; replaced on attach.
+    domain_frontend: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -684,6 +686,7 @@ impl AppHost {
             permission_manager: OnceLock::new(),
             system: OnceLock::new(),
             package_boot: OnceLock::new(),
+            domain_frontend: Mutex::new(None),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),

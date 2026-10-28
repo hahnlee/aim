@@ -484,6 +484,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IUiModeHost|java/device-services/aidl/dev/aim/server/IUiModeHost.aidl|*"
   "dev.aim.server.IForegroundServicePolicy|java/device-services/aidl/dev/aim/server/IForegroundServicePolicy.aidl|*"
   "dev.aim.server.IForegroundServiceTypeHost|java/device-services/aidl/dev/aim/server/IForegroundServiceTypeHost.aidl|*"
+  "dev.aim.server.IAppHostDomainVerification|java/device-services/aidl/dev/aim/server/IAppHostDomainVerification.aidl|*"
   "dev.aim.server.ISystemProcess|java/device-services/aidl/dev/aim/server/ISystemProcess.aidl|*"
   "dev.aim.server.INetworkActivityBridge|java/device-services/aidl/dev/aim/server/INetworkActivityBridge.aidl|*"
   "dev.aim.server.IPackageFeed|java/device-services/aidl/dev/aim/server/IPackageFeed.aidl|*"

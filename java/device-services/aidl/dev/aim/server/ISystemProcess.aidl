@@ -26,4 +26,8 @@ interface ISystemProcess {
 
     /** Original Java callback registry for the native connectivity owner (#1509). */
     void attachNetworkActivityBridge(IBinder bridge);
+    /** System-UID-only backend and original front end for domain verification (#1763). */
+    IBinder getDomainVerificationBackend();
+    void attachDomainVerification(IBinder frontend);
+    boolean isDomainVerifier(int uid);
 }

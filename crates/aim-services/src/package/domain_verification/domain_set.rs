@@ -3,7 +3,7 @@ use aim_binder_host::{
     local::LocalProcess,
     parcel::{BAD_VALUE, Reader, Result},
 };
-use aim_service_aidl::ReadParcelable;
+use aim_service_aidl::{ReadParcelable, WriteParcelable};
 use std::os::unix::fs::FileExt;
 
 pub enum DomainSet {
@@ -36,7 +36,44 @@ impl ReadParcelable for DomainSet {
     }
 }
 
+pub enum Forward {
+    Hosts(Vec<Option<String>>),
+    Blob {
+        file: aim_binder_driver::File,
+        len: usize,
+    },
+}
+
+impl WriteParcelable for Forward {
+    fn write_to(&self, parcel: &mut aim_binder_host::parcel::Parcel) {
+        match self {
+            Self::Hosts(hosts) => {
+                parcel.write_bool(false);
+                parcel.write_i32(hosts.len() as i32);
+                for host in hosts {
+                    parcel.write_string16(host.as_deref());
+                }
+            }
+            Self::Blob { file, len } => {
+                parcel.write_bool(true);
+                parcel.write_i32(*len as i32);
+                parcel.write_i32(1);
+                parcel.write_file(file.clone());
+            }
+        }
+    }
+}
+
 impl DomainSet {
+    pub fn forward(self, process: &LocalProcess) -> Result<Forward> {
+        match self {
+            Self::Hosts(hosts) => Ok(Forward::Hosts(hosts)),
+            Self::Blob { fd, len } => Ok(Forward::Blob {
+                file: process.file(fd).ok_or(BAD_VALUE)?,
+                len,
+            }),
+        }
+    }
     pub fn resolve(self, process: &LocalProcess) -> Result<Vec<Option<String>>> {
         match self {
             Self::Hosts(hosts) => Ok(hosts),

@@ -166,6 +166,21 @@ runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).
 The app host's system process starts the original DeviceLock APEX service when `android.software.device_lock` is declared, as in the pinned image; linkage is checked, with no guest boot run (#2234).
+
+The domain verifier's non-hot agent APIs run through the original Java Stub,
+status validation and Enforcer in that system process; the native package owner
+persists accepted status in its domain settings (#1763). After mainline module
+initialization, the process now creates and installs mutable
+`ApplicationSharedMemory`, as SystemServer does before constructing services:
+`PlatformCompat` construction invalidates `is_compat_change_enabled` through
+`IpcDataCache`, which otherwise throws for the missing nonce store. The domain
+front end attaches before the single application-thread/foreground-service-policy
+attach, followed by Nearby, AdServices, AppSearch and DeviceLock. Host tests cover
+startup ordering (Android boundaries doubled), verifier persistence and fd-bearing
+domain requests/replies; device-services linkage is checked. No guest boot was run;
+recovery from the reported attach/death loop and `Bad file descriptor` remains for
+the boot check.
+
 Telecom is loaded in the system process: TelecomLoaderService's part
 there binds its TelecomService and creates and publishes `telecom` on that
 process's main thread, also with Bluetooth on and after the process is

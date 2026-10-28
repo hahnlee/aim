@@ -64,6 +64,49 @@ impl Service for SystemProcess {
                         .map(|()| sp::write_attach_system_process_reply(&mut p))
                 })
             }
+            sp::GET_DOMAIN_VERIFICATION_BACKEND => {
+                sp::GetDomainVerificationBackend::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().map(|()| {
+                    let backend = self.host.process.add_service(Arc::new(
+                        super::domain_verification::Backend::new(self.host.clone()),
+                    ));
+                    sp::write_get_domain_verification_backend_reply(&mut p, Some(backend));
+                })
+            }
+            sp::ATTACH_DOMAIN_VERIFICATION => {
+                let a =
+                    sp::AttachDomainVerification::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let frontend = a
+                        .frontend
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "frontend"))?;
+                    let owner = match frontend {
+                        Binder::Handle(handle) => crate::system::ServiceOwner::Remote(Arc::new(
+                            self.host.process.strong(handle),
+                        )),
+                        Binder::Local(ptr) => crate::system::ServiceOwner::Local(
+                            self.host
+                                .process
+                                .local_service(ptr)
+                                .ok_or_else(|| Exception::new(EX_NULL_POINTER, "frontend gone"))?,
+                        ),
+                    };
+                    *self.host.domain_frontend.lock().unwrap() = Some(Arc::new(owner));
+                    sp::write_attach_domain_verification_reply(&mut p);
+                    Ok(())
+                })
+            }
+            sp::IS_DOMAIN_VERIFIER => {
+                let a = sp::IsDomainVerifier::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let capture = self.host.package_capture()?;
+                    let allowed =
+                        super::domain_verification::DomainVerification::new(self.host.clone())
+                            .is_caller_verifier(&capture, a.uid)?;
+                    sp::write_is_domain_verifier_reply(&mut p, allowed);
+                    Ok(())
+                })
+            }
             sp::GET_INTERNAL_SERVICE_REPOSITORY => {
                 sp::GetInternalServiceRepository::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().map(|()| {
