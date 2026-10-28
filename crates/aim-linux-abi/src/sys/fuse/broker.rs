@@ -18,6 +18,7 @@ struct Device {
 }
 struct Description {
     node: u64,
+    generation: u64,
     fh: u64,
     flags: Mutex<u32>,
     directory: bool,
@@ -44,7 +45,7 @@ struct State {
     files: BTreeMap<u64, Arc<Description>>,
     notifications: VecDeque<(i32, Vec<u8>)>,
     inode_locks: BTreeMap<u64, Arc<Mutex<()>>>,
-    retiring: BTreeMap<u64, usize>,
+    retiring: BTreeMap<(u64, u64), usize>,
     seen: bool,
 }
 struct Owner {
@@ -579,6 +580,7 @@ fn clone_device(owner: &Arc<Owner>, number: u64, body: &[u8]) -> Result<Vec<u8>,
 }
 struct Retiring {
     node: u64,
+    generation: u64,
     fh: u64,
     flags: u32,
     directory: bool,
@@ -592,6 +594,7 @@ impl Drop for Description {
         if let Some(owner) = self.owner.upgrade() {
             let retiring = Retiring {
                 node: self.node,
+                generation: self.generation,
                 fh: self.fh,
                 flags: *self.flags.lock().unwrap(),
                 directory: self.directory,
@@ -605,7 +608,7 @@ impl Drop for Description {
                 .lock()
                 .unwrap()
                 .retiring
-                .entry(self.node)
+                .entry((self.node, self.generation))
                 .or_default() += 1;
             std::thread::spawn(move || retire(owner, retiring));
         }
@@ -613,6 +616,7 @@ impl Drop for Description {
 }
 fn retire(owner: Arc<Owner>, description: Retiring) {
     let node = description.node;
+    let generation = description.generation;
     let inode = owner
         .state
         .lock()
@@ -634,7 +638,10 @@ fn retire(owner: Arc<Owner>, description: Retiring) {
                     .files
                     .values()
                     .find(|file| {
-                        file.node == node && !file.directory && *file.flags.lock().unwrap() & 3 == 2
+                        file.node == node
+                            && file.generation == generation
+                            && !file.directory
+                            && *file.flags.lock().unwrap() & 3 == 2
                     })
                     .cloned()
             };
@@ -656,8 +663,11 @@ fn retire(owner: Arc<Owner>, description: Retiring) {
                     description.gid,
                     description.pid,
                 ));
-            let result =
-                super::super::fuse_cache::flush_retiring(&owner.key, node, |offset, bytes| {
+            let result = super::super::fuse_cache::flush_retiring(
+                &owner.key,
+                node,
+                generation,
+                |offset, bytes| {
                     if description.read_only {
                         return Err(errno::EROFS);
                     }
@@ -688,7 +698,8 @@ fn retire(owner: Arc<Owner>, description: Retiring) {
                         return Err(EIO);
                     }
                     Ok(count)
-                });
+                },
+            );
             match result {
                 Ok(()) => break,
                 Err(error) => {
@@ -726,13 +737,29 @@ fn retire(owner: Arc<Owner>, description: Retiring) {
     }
     let last = {
         let state = owner.state.lock().unwrap();
-        !state.files.values().any(|file| file.node == node)
-            && state.retiring.get(&node).copied() == Some(1)
+        !state
+            .files
+            .values()
+            .any(|file| file.node == node && file.generation == generation)
+            && state.retiring.get(&(node, generation)).copied() == Some(1)
     };
     if last {
-        if let Err(error) = super::super::fuse_cache::evict_inode(&owner.key, node) {
-            if error != errno::EBUSY {
-                eprintln!("FUSE inode cache eviction failed: {error}");
+        // Mapping leases retain the description's lookup reference. Even a
+        // transient cache user must finish before eviction and final FORGET.
+        // libfuse lowlevel forget/release semantics:
+        // https://libfuse.github.io/doxygen/structfuse__lowlevel__ops.html
+        loop {
+            match super::super::fuse_cache::evict_inode(&owner.key, node, generation) {
+                Ok(()) => break,
+                Err(error) => {
+                    if owner.state.lock().unwrap().aborted {
+                        break;
+                    }
+                    if error != errno::EBUSY {
+                        eprintln!("FUSE inode cache eviction failed: {error}");
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
             }
         }
     }
@@ -750,10 +777,10 @@ fn retire(owner: Arc<Owner>, description: Retiring) {
         }
     }
     let mut state = owner.state.lock().unwrap();
-    if let Some(count) = state.retiring.get_mut(&node) {
+    if let Some(count) = state.retiring.get_mut(&(node, generation)) {
         *count -= 1;
         if *count == 0 {
-            state.retiring.remove(&node);
+            state.retiring.remove(&(node, generation));
         }
     }
 }
@@ -959,16 +986,22 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
                     },
                 );
             } else if op == BORROW_FILE {
-                if body.len() != 8 {
+                if body.len() != 8 && body.len() != 16 {
                     return Err(EINVAL);
                 }
                 let node = u64_at(&body, 0)?;
+                let generation = if body.len() == 16 {
+                    Some(u64_at(&body, 8)?)
+                } else {
+                    None
+                };
                 let mut state = owner.state.lock().unwrap();
                 let file = state
                     .files
                     .values()
                     .filter(|file| {
                         file.node == node
+                            && generation.is_none_or(|generation| file.generation == generation)
                             && !file.directory
                             && *file.flags.lock().unwrap() & 0x200000 == 0
                     })
@@ -984,10 +1017,10 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
                 }
                 state.files.insert(number, file);
             } else {
-                if body.len() < 48 {
+                if body.len() < 56 {
                     return Err(EINVAL);
                 }
-                let mut at = 48;
+                let mut at = 56;
                 let relative = read_text(&body, &mut at)?;
                 let guest = read_text(&body, &mut at)?;
                 if at != body.len() {
@@ -1002,6 +1035,7 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
                 };
                 let description = Arc::new(Description {
                     node: u64_at(&body, 0)?,
+                    generation: u64_at(&body, 48)?,
                     fh: u64_at(&body, 8)?,
                     flags: Mutex::new(u32_at(&body, 16)? & !0x80000),
                     directory: body[20] != 0,
@@ -1183,6 +1217,7 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
                 out.push(file.policy.allow_other as u8);
                 out.push(file.policy.default_permissions as u8);
                 out.push(file.policy.read_only as u8);
+                out.extend(file.generation.to_le_bytes());
                 text(&mut out, &file.relative);
                 text(&mut out, &file.guest);
                 out

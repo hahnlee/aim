@@ -62,7 +62,11 @@ pub fn forget(route: &FuseRoute, node: u64, count: u64) -> Result<(), Errno> {
     )
 }
 pub fn lookup(route: &FuseRoute) -> Result<u64, Errno> {
+    lookup_entry(route).map(|(node, _)| node)
+}
+fn lookup_entry(route: &FuseRoute) -> Result<(u64, u64), Errno> {
     let mut node = 1;
+    let mut generation = 0;
     for component in route.relative.split('/').filter(|name| !name.is_empty()) {
         if component == "." || component == ".." || component.as_bytes().contains(&0) {
             return Err(EINVAL);
@@ -117,8 +121,9 @@ pub fn lookup(route: &FuseRoute) -> Result<u64, Errno> {
             forget(route, node, 1)?;
         }
         node = next;
+        generation = u64_at(&reply, 8)?;
     }
-    Ok(node)
+    Ok((node, generation))
 }
 pub fn getattr(route: &FuseRoute, node: u64, fh: Option<u64>) -> Result<Vec<u8>, Errno> {
     let mut data = Vec::new();
@@ -158,6 +163,7 @@ pub struct Open {
     pub guest: String,
     pub route: FuseRoute,
     pub node: u64,
+    pub generation: u64,
     pub fh: u64,
     pub flags: u32,
     pub open_flags: u32,
@@ -167,7 +173,7 @@ pub struct Open {
 }
 impl Open {
     pub fn open(route: FuseRoute, flags: u32) -> Result<Self, Errno> {
-        let node = lookup(&route)?;
+        let (node, generation) = lookup_entry(&route)?;
         let mut lookup = LookupGuard {
             route: route.clone(),
             node,
@@ -205,6 +211,7 @@ impl Open {
                 guest: String::new(),
                 route,
                 node,
+                generation,
                 fh: 0,
                 flags,
                 open_flags: 0,
@@ -224,6 +231,7 @@ impl Open {
             guest: String::new(),
             route,
             node,
+            generation,
             fh,
             flags,
             open_flags,
@@ -333,6 +341,7 @@ pub fn adopt(fd: i32) -> Result<bool, Errno> {
         guest: description.guest,
         route,
         node: description.node,
+        generation: description.generation,
         fh: description.fh,
         flags: description.flags,
         open_flags: description.open_flags,
@@ -438,6 +447,7 @@ pub fn open_fd(route: FuseRoute, guest: String, flags: u32, mode: u32) -> Result
                 guest: String::new(),
                 route,
                 node: u64_at(&reply, 0)?,
+                generation: u64_at(&reply, 8)?,
                 fh: u64_at(&reply, 128)?,
                 flags,
                 open_flags: u32_at(&reply, 136)?,
@@ -459,6 +469,7 @@ pub fn open_fd(route: FuseRoute, guest: String, flags: u32, mode: u32) -> Result
     let fd = super::fuse::open_description(
         &SessionKey::from_transport(opened.route.session.clone()),
         opened.node,
+        opened.generation,
         opened.fh,
         opened.flags,
         opened.directory,
@@ -1115,6 +1126,7 @@ pub fn tmpfile(route: FuseRoute, guest: String, flags: u32, mode: u32) -> Result
         guest,
         route,
         node,
+        generation: u64_at(&reply, 8)?,
         fh,
         flags,
         open_flags,
@@ -1126,6 +1138,7 @@ pub fn tmpfile(route: FuseRoute, guest: String, flags: u32, mode: u32) -> Result
     let fd = super::fuse::open_description(
         &SessionKey::from_transport(opened.route.session.clone()),
         node,
+        opened.generation,
         fh,
         flags,
         false,
@@ -1196,6 +1209,7 @@ mod private_alias_tests {
                 read_only: false,
             },
             node: 1,
+            generation: 0,
             fh: 2,
             flags: 0,
             open_flags: 0,
