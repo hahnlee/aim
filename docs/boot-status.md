@@ -8320,6 +8320,15 @@ and `system_locales` `ko-KR`; Settings draws in Korean.
 
 ## Storage images (2026-09-29)
 
+Fresh blank-image formatting now retries the raw-device EPERM/EBUSY diagnostic
+within one 20-second deadline, preserving persistent permission errors and eject
+failures (#2278; retry/deadline unit checks, 2026-10-28). The new stress test
+creates 64 small images with eight concurrent workers and checks case-sensitive
+mounts and cleanup. Live reproduction and repeated stress validation remain
+unverified: this session's sandbox blocks diskutil's DiskManagement framework
+before image creation. The process or claim responsible for the original race
+has not been identified; no guest boot was run.
+
 On a host with no attached images, IOKit can return success with a null
 matching iterator. The storage reader now treats that as an empty collection
 rather than resetting the invalid handle forever (#809). A real no-match IOKit

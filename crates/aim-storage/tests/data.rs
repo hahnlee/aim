@@ -90,6 +90,43 @@ fn dir(name: &str) -> Fixture {
 }
 
 #[test]
+fn concurrent_small_image_creation_formats_every_volume() {
+    const WORKERS: usize = 8;
+    const PER_WORKER: usize = 8;
+    let start = std::sync::Barrier::new(WORKERS);
+    std::thread::scope(|scope| {
+        for _ in 0..WORKERS {
+            let start = &start;
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..PER_WORKER {
+                    let dir = dir("parallel-format");
+                    let image = data::image_of(&dir);
+                    disk::create_case_sensitive(&image, "256m", "aim-data").unwrap();
+                    assert!(disk::attachments_of(&image).unwrap().is_empty());
+                    fs::create_dir(&dir).unwrap();
+                    let device = disk::attach(
+                        &image,
+                        disk::Attach {
+                            mount: Some(&dir),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert!(disk::is_mount_point(&dir));
+                    fs::write(dir.join("Foo"), "upper").unwrap();
+                    fs::write(dir.join("foo"), "lower").unwrap();
+                    assert_eq!(fs::read_to_string(dir.join("Foo")).unwrap(), "upper");
+                    assert_eq!(fs::read_to_string(dir.join("foo")).unwrap(), "lower");
+                    disk::detach(&device, std::time::Duration::from_secs(20)).unwrap();
+                    assert!(disk::attachments_of(&image).unwrap().is_empty());
+                }
+            });
+        }
+    });
+}
+
+#[test]
 fn a_failed_test_detaches_and_removes_only_its_fixture() {
     let mut owned = None;
     let mut injected = false;
