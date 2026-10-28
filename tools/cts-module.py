@@ -89,8 +89,8 @@ def main():
         args.remove("--tradefed")
     values, pinned = lock()
     url, size = values["URL"], int(values["SIZE"])
-    entries = central_directory(url, size)
     if len(args) == 2 and args[0] == "--list":
+        entries = central_directory(url, size)
         for name, (_, csize, usize, _) in sorted(entries.items()):
             if args[1] in name:
                 print(f"{usize:>12} {name}")
@@ -98,10 +98,15 @@ def main():
     if tradefed:
         pinned = lock("cts-tradefed.lock")[1]
     dest_root = os.path.join(ROOT, "_build", "cts-tradefed" if tradefed else "cts")
+    entries = None
     for name, want in pinned:
         dest = os.path.join(dest_root, name if tradefed else os.path.basename(name))
-        if os.path.exists(dest) and hashlib.sha256(open(dest, "rb").read()).hexdigest() == want:
-            continue
+        if os.path.exists(dest):
+            with open(dest, "rb") as cached:
+                if hashlib.sha256(cached.read()).hexdigest() == want:
+                    continue
+        if entries is None:
+            entries = central_directory(url, size)
         offset, csize, usize, method = entries[name]
         header = fetch(url, offset, 30)
         nl, el = struct.unpack("<HH", header[26:30])

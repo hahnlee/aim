@@ -53,6 +53,7 @@ pub enum Action {
     AidlGen,
     Xsdc,
     CtsHostTools,
+    Cts { tradefed: bool },
     Art,
     BootImage,
     Angle,
