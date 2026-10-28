@@ -51,3 +51,13 @@ emulator's hardware: `ro.kernel.qemu`, the ranchu power, gralloc and UWB
 device names and `ro.soc.*`, which aim-guest-init sets from the Mac
 (`crates/aim-guest-init/src/soc.rs`); the board is `aim`. The product
 identity of every partition is still the emulator build's (#2024).
+
+A derived build's incremental is `aim.<derived sha256>` (#575), from the
+image's `.identity` checked against `.overlay-receipt`. Native init supplies
+it before publishing the read-only build properties and composes the build
+and legacy fingerprints from it, even if the original supplied explicit
+fingerprints. Partition fingerprints retain their upstream values; the global
+build fingerprint makes `PackagePartitions.FINGERPRINT` change with the overlay,
+including its boot image and compiled code. Rebuilding identical content keeps
+the same build number. An extraction without a receipt retains its original
+build number, and inconsistent derived metadata fails boot preparation.
