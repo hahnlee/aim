@@ -629,9 +629,20 @@ It loads the original `android_servers` JNI library before creating the system
 context. No StatsPullAtomService source is copied or replaced. Host lifecycle,
 original DEX registration-route and native statsmanager forwarding tests are
 separate checks, not a running-original integration result. Original callbacks
-still require ActivityManagerInternal and PinnerService local owners (and
-BatteryStatsInternal when its BPF/feature guards enable that pull); these are
-not installed in aim-system, so runtime pull coverage remains open under #1765.
+use a small Java ActivityManagerInternal local service over the native process
+and PendingIntent owners (#2274). Typed vendor AIDL carries process state and
+parcelled extras sizes; Java aggregates per-UID PendingIntent counts and formats
+the original event shape. The process owner retains the cached-app watermark,
+including all-field reset, with cold Java BinderProxy/MemInfoReader snapshots.
+RSS/swap still come from the original pullers' procfs reads. Only the three stats
+methods are served; a pinned DEX audit of the system-process modules finds no
+other ActivityManagerInternal calls. PinnerService remains unserved: its puller
+is unconditional and config_pinnerHomePinBytes is 60 MiB. Starting the original
+pinner would additionally require ActivityManagerInternal.isUidActive and
+ActivityTaskManagerInternal.getHomeIntent; they are not exposed by this adapter.
+The pinned DEX disables CPU-thread-group registration and returns PULL_SKIP from
+that callback, so this image needs no BatteryStatsInternal bridge. Targeted
+host/JVM/DEX and image-linkage checks pass; runtime Pinner coverage remains #2274.
 No guest boot was run.
 
 The cold `lock_settings.generateKey` and paired `removeKey` bodies are extracted
