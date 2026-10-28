@@ -237,6 +237,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         let lo = result as u64;
         vm_account::with(|s| s.map(lo, lo + len, kind));
         super::vma_names::forget(lo, lo + len);
+        super::memfd::reclaim();
     }
     result
 }
@@ -769,6 +770,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
         vm_account::with(|s| s.unmap(addr, addr + len));
         super::vma_names::forget(addr, addr + len);
         super::fuse_cache::forget(addr, len);
+        super::memfd::reclaim();
         if let Err(error) = super::verity_pager::reconcile_memberships() {
             return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
         }
@@ -797,6 +799,7 @@ pub fn run_deferred_unmaps() -> usize {
         if let Err(error) = super::verity_pager::reconcile_memberships() {
             crate::diag!("verity deferred membership retirement failed: {error}");
         }
+        super::memfd::reclaim();
         v.len()
     })
 }
@@ -1567,6 +1570,7 @@ pub fn mremap(a: [u64; 6]) -> i64 {
             new_len,
             flags & MREMAP_DONTUNMAP != 0,
         );
+        super::memfd::reclaim();
     }
     if result >= 0
         && let Some(kind) = kind
