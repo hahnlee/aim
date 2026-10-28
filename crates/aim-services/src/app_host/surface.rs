@@ -12,6 +12,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use aim_binder_host::local::{LocalProcess, Strong};
 use aim_binder_host::parcel::{Binder, Parcel, Reader, Result as ParcelResult};
 
+#[path = "surface_transaction.rs"]
+mod draw_transaction;
+pub(super) use draw_transaction::DrawTransaction;
+
 /// `ISurfaceComposer.createConnection`, `ISurfaceComposerClient
 /// .createSurface`: their order in the interfaces.
 const CREATE_CONNECTION: u32 = 3;
@@ -78,6 +82,17 @@ pub struct Change {
 }
 
 impl Composer {
+    #[cfg(test)]
+    pub(super) fn for_test(process: &LocalProcess, handle: u32) -> Self {
+        Self {
+            client: process.strong(handle),
+            handle,
+            transactions: process.strong(handle),
+            apply_token: process.add_service(Arc::new(super::activity::Token)),
+            next_id: AtomicU32::new(0),
+        }
+    }
+
     pub fn connect(process: &LocalProcess) -> Result<Composer, String> {
         let sf = super::display::check_service(process, super::display::SERVICE)?;
         let mut data = Parcel::new();
@@ -163,20 +178,45 @@ impl Composer {
 
     /// Applies `changes` in one transaction, synchronously.
     pub fn apply(&self, changes: &[(&Layer, Change)]) -> Result<(), String> {
-        let id = u64::from(std::process::id()) << 32
-            | u64::from(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let id = self.next_transaction_id();
         let changes: Vec<_> = changes
             .iter()
             .map(|(layer, change)| (layer.handle, layer.id, *change))
             .collect();
         let data = transaction(id, self.apply_token, &changes);
+        self.submit(&data, false)
+    }
+
+    /// Merge a completed draw into an otherwise empty window transaction.
+    /// `TransactionState::merge` keeps the receiver's id, timestamp and
+    /// apply token, and records the sender's id in the merge history.
+    pub(super) fn apply_draw(&self, draw: &DrawTransaction) -> Result<(), String> {
+        self.submit(
+            &draw.transaction(self.next_transaction_id(), self.apply_token),
+            draw.one_way(),
+        )
+    }
+
+    fn next_transaction_id(&self) -> u64 {
+        u64::from(std::process::id()) << 32
+            | u64::from(self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn submit(&self, data: &Parcel, one_way: bool) -> Result<(), String> {
         let reply = self
             .transactions
-            .transact(SET_TRANSACTION_STATE, &data, false)
+            .transact(SET_TRANSACTION_STATE, data, one_way)
             .map_err(|s| format!("setTransactionState: {s}"))?;
-        match reply.reader().read_i32() {
-            Ok(0) | Err(_) => Ok(()),
+        // The pinned BnSurfaceComposer returns status_t as Binder's status,
+        // with no reply body. Also accept an explicit successful status.
+        let mut r = reply.reader();
+        if r.remaining() == 0 {
+            return Ok(());
+        }
+        match r.read_i32() {
+            Ok(0) => Ok(()),
             Ok(status) => Err(format!("setTransactionState: {status}")),
+            Err(status) => Err(format!("setTransactionState reply: {status}")),
         }
     }
 }
@@ -329,6 +369,32 @@ fn status(r: &mut Reader<'_>, what: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+pub(super) fn draw_for_test() -> Parcel {
+    let state = transaction(
+        123,
+        Binder::Local(1),
+        &[(
+            Binder::Local(2),
+            7,
+            Change {
+                position: Some((12.0, 34.0)),
+                ..Default::default()
+            },
+        )],
+    );
+    let mut r = state.reader();
+    r.enforce_interface(TRANSACTIONS_DESCRIPTOR).unwrap();
+    let start = r.position();
+    r.skip(r.remaining()).unwrap();
+    let (bytes, objects) = r.since(start);
+    let mut p = Parcel::new();
+    p.write_bool(true); // Java's live native Transaction marker
+    p.write_raw(bytes, &objects);
+    p.write_i32(0); // Transaction's client callback map
+    p
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -336,7 +402,7 @@ mod tests {
     /// (`setTransactionState`, captured on the pinned image), from the
     /// stability after its surface's binder to its end; the transaction's
     /// fields from its flags to its apply token.
-    const ORIGINAL_LAYER_STATE: &str = concat!(
+    pub(super) const ORIGINAL_LAYER_STATE: &str = concat!(
         "0c0000003400000040000000000000000000000000000000000000000000000000000000010000000000803f00000000",
         "0000803f000000000000000000000000000080bf000080bf000000000000000000000000000000000000000000000000",
         "000000001400000001000000000000000000000000000000000000000000000000000000000000000400000000000000",

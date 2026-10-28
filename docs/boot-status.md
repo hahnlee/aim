@@ -86,6 +86,15 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The app host applies supported finishDrawing transactions to SurfaceFlinger,
+preserving buffers/fences, barriers, display/input state, cache operations and
+callbacks with the host's ordered apply token (#1431). It requests no BLAST
+sync; older and repeated draw seqIds still apply. WindowInfo and DisplayLuts
+payloads fail explicitly. Host parcel and Binder apply-path checks cover this
+change, using the captured original layer state plus constructed full parcels;
+a complete original Transaction oracle and guest validation remain unrun
+(2026-10-28; no guest boot).
+
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHORTCUTS or its package is user 0's HOME role holder; package-scoped queries retain their events (#1870; host tests only, no guest boot rerun).
 `aimctl open` checks user readiness before opening a window shim, so an open during app-host startup returns the booting error before showing its splash (#1875; host regression, no guest boot rerun).
