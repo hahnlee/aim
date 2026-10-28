@@ -323,11 +323,7 @@ pub fn restore(r: &mut Reader) -> bool {
     if !r.intact() {
         return false;
     }
-    wait::after_fork_child();
-    r.stage("descriptor-rebuild");
-    if let Err(error) = fdtab::after_fork_child() {
-        eprintln!("fork descriptor rebuild: errno {error}");
-        r.invalidate();
+    if !restore_descriptors(r) {
         return false;
     }
     super::super::posix_locks::reset_fork();
@@ -340,9 +336,109 @@ pub fn restore(r: &mut Reader) -> bool {
     true
 }
 
+fn restore_descriptors(r: &mut Reader) -> bool {
+    for (stage, rebuild) in [
+        ("pidfd-rebuild", wait::after_fork_child as fn() -> _),
+        ("descriptor-rebuild", fdtab::after_fork_child as fn() -> _),
+    ] {
+        r.stage(stage);
+        if let Err(error) = rebuild() {
+            eprintln!("fork {stage}: errno {error}");
+            r.owner_error = Some(error);
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptor_restore_rejects_exhaustion_before_guest_acceptance() {
+        if fdtab::isolated_kernel_test(
+            "sys::fork::state::tests::descriptor_restore_rejects_exhaustion_before_guest_acceptance",
+        ) {
+            return;
+        }
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        fdtab::init();
+        for kind in ["epoll", "inotify", "pidfd"] {
+            let fd = match kind {
+                "epoll" => crate::sys::epoll::epoll_create1([0; 6]),
+                "inotify" => crate::sys::inotify::inotify_init1([0; 6]),
+                _ => wait::open_pidfd(unsafe { libc::getpid() }, false),
+            } as i32;
+            assert!(fd >= 0, "{kind}: {fd}");
+            let placeholder = std::fs::File::open("/dev/null").unwrap();
+            assert_eq!(unsafe { libc::dup2(placeholder.as_raw_fd(), fd) }, fd);
+            let mut original: libc::rlimit = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut original) },
+                0
+            );
+            struct Limit(libc::rlimit);
+            impl Drop for Limit {
+                fn drop(&mut self) {
+                    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &self.0) }, 0);
+                }
+            }
+            let limit = Limit(original);
+            let bounded = libc::rlimit {
+                rlim_cur: 256.min(original.rlim_cur),
+                ..original
+            };
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &bounded) }, 0);
+            let mut fillers = Vec::new();
+            loop {
+                let raw = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+                if raw < 0 {
+                    assert_eq!(
+                        crate::errno::last(),
+                        crate::errno::from_darwin(libc::EMFILE)
+                    );
+                    break;
+                }
+                fillers.push(unsafe { OwnedFd::from_raw_fd(raw) });
+            }
+            let mut reader = Reader::new(&[]);
+            let accepted = restore_descriptors(&mut reader);
+            drop(fillers);
+            drop(limit);
+            assert!(
+                !accepted,
+                "{kind} placeholder must never reach guest resume"
+            );
+            assert_eq!(
+                reader.owner_error(),
+                Some(crate::errno::from_darwin(libc::EMFILE)),
+                "{kind}"
+            );
+            assert!(reader.diagnostic().contains(if kind == "pidfd" {
+                "pidfd-rebuild"
+            } else {
+                "descriptor-rebuild"
+            }));
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0);
+            assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFCHR);
+            fdtab::close_owned_guest(fd, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn kqueue_install_reports_duplication_failure_and_preserves_source() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let raw = unsafe { libc::kqueue() };
+        assert!(raw >= 0);
+        let source = unsafe { OwnedFd::from_raw_fd(raw) };
+        assert_eq!(
+            fdtab::restore_kqueue(-1, source.as_raw_fd(), true),
+            Err(crate::errno::EBADF)
+        );
+        assert!(unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0);
+    }
 
     #[test]
     fn damage_diagnostics_retain_first_owner_and_exact_byte_boundary() {

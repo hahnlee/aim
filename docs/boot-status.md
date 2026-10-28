@@ -5,6 +5,12 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+Fork child descriptor reconstruction propagates epoll, inotify and pidfd
+kqueue creation and installation failures to the restore owner before guest
+resume (#1209). Inotify watch and queued-event restoration also rejects failed
+registrations. Focused host checks cover descriptor exhaustion at reserved
+placeholder slots and failed duplication; no guest boot was run (2026-10-28).
+
 `linux-run` embeds the **AIM Runtime** macOS privacy identity and establishes its own process responsibility before initialization ([host privacy](host-privacy.md), #2190).
 
 ART and xsdc use the same pinned Temurin JDK as device services; both build

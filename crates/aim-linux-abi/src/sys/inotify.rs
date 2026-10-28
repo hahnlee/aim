@@ -204,7 +204,7 @@ fn sync_entries(kq: i32, wd: i32, w: &mut Watch) {
 }
 
 /// Keep the kqueue readable while decoded events wait in the queue.
-fn signal_pending(kq: i32, on: bool) {
+fn signal_pending(kq: i32, on: bool) -> bool {
     let k = libc::kevent {
         ident: 0,
         filter: libc::EVFILT_USER,
@@ -218,7 +218,7 @@ fn signal_pending(kq: i32, on: bool) {
         udata: std::ptr::null_mut(),
     };
     // SAFETY: one change, no events.
-    unsafe { libc::kevent(kq, &k, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+    unsafe { libc::kevent(kq, &k, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 }
 }
 
 pub fn inotify_init1(a: [u64; 6]) -> i64 {
@@ -637,30 +637,93 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
 }
 
 /// Fork child: rebuild each inotify kqueue on its fd number.
-pub fn after_fork_child() {
+pub fn after_fork_child() -> Result<(), errno::Errno> {
+    let mut made: Vec<(i32, Arc<Inotify>)> = Vec::new();
     for (fd, k) in fdtab::fds_where(|k| matches!(k, Kind::Inotify(_))) {
         let Kind::Inotify(ino) = k else { continue };
+        if let Some((source, _)) = made.iter().find(|(_, other)| Arc::ptr_eq(other, &ino)) {
+            fdtab::restore_kqueue(fd, *source, ino.cloexec)?;
+            continue;
+        }
         // SAFETY: the parent's fd number, freed by Darwin in the child.
         unsafe {
             let kq = libc::kqueue();
             if kq < 0 {
-                continue;
+                return Err(errno::last());
             }
+            let result = fdtab::restore_kqueue(fd, kq, ino.cloexec);
             if kq != fd {
-                libc::dup2(kq, fd);
                 libc::close(kq);
             }
+            result?;
         }
-        fdtab::set_flags(fd, false, ino.cloexec);
         let s = ino.state.lock().unwrap_or_else(|e| e.into_inner());
         for (wd, w) in &s.watches {
-            register(fd, *wd, w.fd);
+            if !register(fd, *wd, w.fd) {
+                return Err(errno::last());
+            }
             for efd in w.entries.values() {
-                register_note(fd, *efd, entry_udata(*wd, *efd));
+                if !register_note(fd, *efd, entry_udata(*wd, *efd)) {
+                    return Err(errno::last());
+                }
             }
         }
-        if !s.queue.is_empty() {
-            signal_pending(fd, true);
+        if !s.queue.is_empty() && !signal_pending(fd, true) {
+            return Err(errno::last());
+        }
+        drop(s);
+        made.push((fd, ino));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn restored_aliases_share_pending_readiness() {
+        if fdtab::isolated_kernel_test(
+            "sys::inotify::tests::restored_aliases_share_pending_readiness",
+        ) {
+            return;
+        }
+        fdtab::init();
+        let fd = inotify_init1([O_NONBLOCK, 0, 0, 0, 0, 0]) as i32;
+        assert!(fd >= 0);
+        let alias = super::super::fs::dup([fd as u64, 0, 0, 0, 0, 0]) as i32;
+        assert!(alias >= 0);
+        let Some(Kind::Inotify(ino)) = fdtab::get(fd) else {
+            panic!("inotify")
+        };
+        ino.state
+            .lock()
+            .unwrap()
+            .queue
+            .push_back(event(1, IN_MODIFY, &[]));
+        let null = std::fs::File::open("/dev/null").unwrap();
+        for target in [fd, alias] {
+            assert_eq!(unsafe { libc::dup2(null.as_raw_fd(), target) }, target);
+        }
+        after_fork_child().unwrap();
+        let readable = |fd| {
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            (unsafe { libc::poll(&mut poll, 1, 0) }) == 1
+        };
+        assert!(readable(fd) && readable(alias));
+        let mut bytes = [0u8; 16];
+        assert_eq!(
+            read(alias, bytes.as_mut_ptr() as u64, bytes.len()),
+            Some(16)
+        );
+        assert!(!readable(fd) && !readable(alias));
+        for target in [fd, alias] {
+            fdtab::close_owned_guest(target, false).unwrap();
         }
     }
 }

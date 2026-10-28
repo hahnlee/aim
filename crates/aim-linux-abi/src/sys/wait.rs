@@ -544,25 +544,20 @@ pub(super) fn pidfd_fds() -> Vec<i32> {
 /// In a forked child: kqueues are not inherited, so each pidfd is
 /// recreated at its number (held by a placeholder until now), as Linux
 /// children inherit their parent's pidfds.
-pub(super) fn after_fork_child() {
-    let mut t = PIDFDS.lock().unwrap();
-    t.retain(|p| {
+pub(super) fn after_fork_child() -> Result<(), errno::Errno> {
+    let t = PIDFDS.lock().unwrap();
+    for p in t.iter() {
         // SAFETY: filling the fd number the kqueue had.
         unsafe {
-            let Ok(kq) = new_pidfd_kqueue(p.pid) else {
-                return false;
-            };
-            if kq == p.fd {
-                return true;
+            let kq = new_pidfd_kqueue(p.pid).map_err(|error| -error as errno::Errno)?;
+            let result = super::fdtab::restore_kqueue(p.fd, kq, true);
+            if kq != p.fd {
+                libc::close(kq);
             }
-            let ok = libc::dup2(kq, p.fd) == p.fd;
-            libc::close(kq);
-            if ok {
-                libc::fcntl(p.fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-            ok
+            result?;
         }
-    });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
