@@ -215,6 +215,8 @@ impl SigningScan {
         super::process_policy::validate(&request.code).map_err(|error| {
             reject(error.status, format!("Scanning Failed.: {}", error.message))
         })?;
+        super::validate::static_library(&request.code, request.install_flags & 0x800 != 0)
+            .map_err(|error| reject(-110, error))?;
         if !request.metadata.code_path.starts_with("/data/app/")
             || request
                 .metadata
@@ -300,14 +302,25 @@ impl SigningScan {
                     check_downgrade(factory, &request.code)?;
                 }
             }
-            authorize_update(&self.settings, old, &request.signing, request.rollback)?;
-            if let Some(expected) = &old.restrict_update_hash {
-                if package_digest(files, &request.code)? != *expected {
-                    return Err(reject(
-                        -2,
-                        format!("New package fails restrict-update check: {name}"),
-                    ));
-                }
+        }
+        // ReconcilePackageUtils uses the previous static version's signer and
+        // upgrade keys, while this request keeps its own setting and UID.
+        if let Some(check) = self
+            .libraries
+            .latest_static_setting(&request.code, &self.settings)
+            .or(old.as_ref())
+        {
+            authorize_update(&self.settings, check, &request.signing, request.rollback)?;
+        }
+        if let Some(expected) = old
+            .as_ref()
+            .and_then(|old| old.restrict_update_hash.as_ref())
+        {
+            if package_digest(files, &request.code)? != *expected {
+                return Err(reject(
+                    -2,
+                    format!("New package fails restrict-update check: {name}"),
+                ));
             }
         }
         let declared = super::signing::selected_shared_user(
@@ -771,6 +784,159 @@ mod tests {
             source: Default::default(),
             install_user: 0,
             now: 20,
+        }
+    }
+    fn static_request(version: i64, certificate: u8) -> Request {
+        let mut request = request("org.example.provider", version);
+        request.code.manifest_package_name = Some(request.code.package_name.clone());
+        request.code.static_shared_library_name = Some("org.example.library".into());
+        request.code.static_shared_lib_version = version;
+        request.metadata.code_path = format!("/data/app/provider_{version}");
+        request.code.path = Some(request.metadata.code_path.clone());
+        request.code.base_apk_path = Some(format!("{}/base.apk", request.metadata.code_path));
+        request.signing.signatures = vec![if certificate == 1 {
+            include_bytes!("../../../tests/fixtures/settings-certificate-1.der").to_vec()
+        } else {
+            include_bytes!("../../../tests/fixtures/settings-certificate-2.der").to_vec()
+        }];
+        request.signing = SigningDetails::from_saved(&settings::Signatures {
+            signatures: request.signing.signatures,
+            scheme_version: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        request
+    }
+
+    #[test]
+    fn live_static_versions_check_prior_signers_and_rotation_before_allocating() {
+        let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
+        let before = owner.clone();
+        let files: crate::package::write::Files = Box::new(|_| panic!("No restricted update"));
+        for (certificate, capability, accepted) in [
+            (1, None, true),
+            (2, None, false),
+            (2, Some(1), true),
+            (2, Some(0), false),
+        ] {
+            let first = static_request(1, 1);
+            let mut second = static_request(2, certificate);
+            if let Some(flags) = capability {
+                second.signing.scheme_version = 3;
+                second.signing.past_signing_certificates = Some(vec![
+                    (first.signing.signatures[0].clone(), flags),
+                    (second.signing.signatures[0].clone(), 0),
+                ]);
+            }
+            let result = owner.prepare_live_installs(vec![first, second], &[], false, &files);
+            if accepted {
+                let admission = result.unwrap();
+                let old = &admission.owner.settings.packages[0];
+                let new = &admission.owner.settings.packages[1];
+                assert_eq!(old.name, "org.example.provider_1");
+                assert_eq!(new.name, "org.example.provider_2");
+                assert_ne!(old.app_id, new.app_id);
+                assert_eq!(old.code_path, "/data/app/provider_1");
+                assert_eq!(new.code_path, "/data/app/provider_2");
+                assert_eq!(
+                    admission
+                        .owner
+                        .libraries
+                        .get("org.example.library", 1)
+                        .unwrap()
+                        .package_name,
+                    Some(old.name.clone())
+                );
+                assert_eq!(
+                    old.signatures.as_ref().unwrap().signatures,
+                    static_request(1, 1).signing.signatures
+                );
+            } else {
+                let error = match result {
+                    Ok(_) => panic!("unrelated or revoked static library signer admitted"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.status, -7);
+            }
+            assert_eq!(owner, before);
+        }
+        let admission = owner
+            .prepare_live_installs(
+                vec![
+                    static_request(9, 2),
+                    static_request(1, 1),
+                    static_request(2, 1),
+                ],
+                &[],
+                false,
+                &files,
+            )
+            .unwrap();
+        assert_eq!(admission.owner.settings.packages.len(), 3);
+    }
+
+    #[test]
+    fn live_static_versions_use_the_prior_settings_upgrade_keysets() {
+        let mut owner =
+            SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
+        let files: crate::package::write::Files = Box::new(|_| panic!("No restricted update"));
+        let first = static_request(1, 1);
+        let identity = Identity::select(&first.code, &owner.settings, false);
+        owner
+            .admit_live(first, identity, &[], false, &files)
+            .unwrap();
+        owner.settings.packages[0].key_set_data.upgrade_key_sets = vec![9];
+        owner.settings.key_sets.key_sets = vec![(9, vec![11])];
+        owner.settings.key_sets.public_keys = vec![(
+            11,
+            static_request(2, 2).signing.public_keys.unwrap()[0]
+                .clone()
+                .unwrap(),
+        )];
+        let before = owner.clone();
+        for (certificate, accepted) in [(2, true), (1, false)] {
+            let mut candidate = before.clone();
+            let next = static_request(2, certificate);
+            let identity = Identity::select(&next.code, &candidate.settings, false);
+            let result = candidate.admit_live(next, identity, &[], false, &files);
+            if accepted {
+                let new = result.unwrap();
+                assert_eq!(new.record.settings.name, "org.example.provider_2");
+                assert_ne!(
+                    new.record.settings.app_id,
+                    before.settings.packages[0].app_id
+                );
+                assert_eq!(candidate.settings.packages[0], before.settings.packages[0]);
+                assert!(new.record.settings.key_set_data.upgrade_key_sets.is_empty());
+            } else {
+                let error = match result {
+                    Ok(_) => panic!("static library upgrade-keyset mismatch admitted"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.status, -7);
+                assert_eq!(candidate, before);
+            }
+        }
+    }
+
+    #[test]
+    fn live_static_declarations_reject_shared_uids_and_instant_installs() {
+        let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
+        let before = owner.clone();
+        let files: crate::package::write::Files = Box::new(|_| panic!("No restricted update"));
+        for instant in [false, true] {
+            let mut request = static_request(1, 1);
+            if instant {
+                request.install_flags |= 0x800;
+            } else {
+                request.code.shared_user_id = Some("org.example.group".into());
+            }
+            let error = match owner.prepare_live_installs(vec![request], &[], false, &files) {
+                Ok(_) => panic!("invalid static library declaration admitted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.status, -110);
+            assert_eq!(owner, before);
         }
     }
     #[test]

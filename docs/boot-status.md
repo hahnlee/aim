@@ -255,7 +255,12 @@ A shell install session
 (Success), a same-signer update keeps its uid and data (Success), another
 signer's update is rejected (INSTALL_FAILED_UPDATE_INCOMPATIBLE), the app
 launches, and `pm uninstall` removes its code and data; each survives a
-reboot. Installs are not dexopted: without ART Service (#2063) the
+reboot. Live static-library versions check the nearest strictly older
+registered setting's signer and upgrade keys while retaining their own internal
+identity and UID; invalid static declarations reject before allocation (#806).
+Focused host admission and pinned-image policy checks cover these gates;
+guest boot and CTS were not rerun for this change (2026-10-28).
+Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions
 and trees from `packages.xml` and runtime user grants, flags and package versions
