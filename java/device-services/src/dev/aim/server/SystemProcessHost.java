@@ -108,7 +108,8 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachNetworkActivityBridge(new NetworkActivityBridge(
                     new Handler(Looper.getMainLooper())));
             host.attachSystemProcess(applicationThread.asBinder(),
-                    DeviceServices.foregroundServicePolicy(context), new SafeLabels());
+                    DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
+                    new BatteryHealthStats(context));
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's

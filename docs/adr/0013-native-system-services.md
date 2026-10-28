@@ -449,6 +449,15 @@ The migration's state and conformance results are in
 
 ### The app host, L1 (2026-10-16)
 
+The app host's cold UID health reads (#1928) retain the image's
+`BatteryStatsImpl`, `HealthStatsBatteryStatsWriter`, `HealthStatsWriter` and
+`HealthStatsParceler` in the system process through a system-UID-only vendor
+bridge; a read-only subclass projects the native battery/UID timer summaries
+and leaves unproduced fields at the original Uid's initial values, while the
+existing native battery-history owner records camera and flashlight notes.
+The retained owner loads the original `android_servers` JNI library lazily;
+this adds vendor bridge classes only, with no replacement of original classes.
+
 - **No system_server.** The app host image (`tools/app-host-image.sh`, a
   clone of the derived image) starts zygote without
   `--start-system-server`; native `activity` and `package` start an app's

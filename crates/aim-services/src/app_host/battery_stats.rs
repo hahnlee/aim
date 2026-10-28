@@ -21,9 +21,10 @@
 //! time on the uid's background time base) and result counters. A uid's
 //! process state (`noteUidProcessStateLocked`, from the uid's first
 //! process to its last) runs its process state timers and background time
-//! base, and is recorded in the history. `takeUidSnapshotsAsync` answers
-//! its result receiver as the original does (its BATTERY_STATS check), the
-//! snapshots themselves failing as not implemented. The other notes, the
+//! base, and is recorded in the history. Camera and flashlight on/off/reset
+//! notes keep their history and timers. Health snapshots project these
+//! recorded counters through the retained original Java health writer and
+//! parceler, with the original BATTERY_STATS check. The other notes, the
 //! readers, the counters a process state change switches and
 //! `batterystats.bin`: #1928.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -32,12 +33,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, Binder, Exception, Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::ReadParcelable;
 use aim_service_aidl::com_android_internal_app_ibatterystats as bs;
+use aim_service_aidl::dev_aim_server_ibatteryhealthstats as health;
 
 use super::battery_history::{
     Directory, History, MonotonicClock, STATE_AUDIO_ON_FLAG, STATE2_BLUETOOTH_SCAN_FLAG,
@@ -53,6 +55,9 @@ const UPDATE_DEVICE_STATS: &str = "android.permission.UPDATE_DEVICE_STATS";
 const BATTERY_STATS: &str = "android.permission.BATTERY_STATS";
 /// `IBatteryStats.RESULT_RUNTIME_EXCEPTION`, `RESULT_SECURITY_EXCEPTION`,
 /// `KEY_EXCEPTION_MESSAGE`; `IResultReceiver.send`.
+const HEALTH_SINGLE: i32 = 0;
+const HEALTH_ARRAY: i32 = 1;
+const HEALTH_RESULT: i32 = 2;
 const RESULT_RUNTIME_EXCEPTION: i32 = 1;
 const RESULT_SECURITY_EXCEPTION: i32 = 2;
 const KEY_EXCEPTION_MESSAGE: &str = "exception";
@@ -98,6 +103,8 @@ fn failure(code: i32, message: &str) -> Parcel {
 const STATUS_UNKNOWN: i32 = 1;
 const STATUS_FULL: i32 = 5;
 const PLUGGED_NONE: i32 = 0;
+const STATE2_CAMERA_FLAG: i32 = 0x0020_0000;
+const STATE2_FLASHLIGHT_FLAG: i32 = 0x0800_0000;
 /// `BatteryStatsImpl.MAX_LEVEL_STEPS`; `BatteryStats.STEP_LEVEL_*`.
 const MAX_LEVEL_STEPS: usize = 200;
 const STEP_LEVEL_TIME_MASK: i64 = 0x0000_00ff_ffff_ffff;
@@ -476,6 +483,7 @@ struct Uid {
     /// uids' (`mBluetoothScanOnTimers`).
     bluetooth_scan: Option<DualTimer>,
     bluetooth_unoptimized_scan: Option<DualTimer>,
+    camera: Option<StopwatchTimer>,
     bluetooth_scan_results: Option<Counter>,
     bluetooth_scan_results_background: Option<Counter>,
 }
@@ -490,6 +498,7 @@ impl Uid {
                 realtime_start_us: now * 1000,
                 ..TimeBase::default()
             },
+            camera: None,
             bluetooth_scan: None,
             bluetooth_unoptimized_scan: None,
             bluetooth_scan_results: None,
@@ -633,6 +642,12 @@ struct Stats {
     /// When the history was last written (`mLastWriteTimeMs`).
     last_write: i64,
     on_battery_time_base: TimeBase,
+    on_battery_uptime: TimeBase,
+    camera_nesting: i32,
+    camera_timer: StopwatchTimer,
+    camera_pool: Vec<i32>,
+    flashlight_nesting: i32,
+    flashlight_timer: StopwatchTimer,
     audio_on_nesting: i32,
     audio_on_timer: StopwatchTimer,
     video_on_nesting: i32,
@@ -882,7 +897,13 @@ impl Stats {
             self.audio_on_timer.time_stopped(base_us);
             self.video_on_timer.time_stopped(base_us);
             self.bluetooth_scan_timer.time_stopped(base_us);
+            self.camera_timer.time_stopped(base_us);
+            self.flashlight_timer.time_stopped(base_us);
+            let camera_pool = self.camera_pool.len();
             for u in self.uids.values_mut() {
+                if let Some(t) = &mut u.camera {
+                    t.time_stopped_in(base_us, camera_pool);
+                }
                 if let Some(t) = &mut u.bluetooth_scan {
                     t.timer.time_stopped_in(base_us, pool);
                 }
@@ -1083,6 +1104,119 @@ impl Stats {
         true
     }
 
+    /// Camera's pooled per-uid timer, device timer and history; flashlight's
+    /// history/device timer with the pinned streamlined_misc collector enabled.
+    fn note_camera(&mut self, on: bool, uid: i32, now: i64) {
+        if !on && self.camera_nesting == 0 {
+            return;
+        }
+        if count_note(&mut self.camera_nesting, on) {
+            if let Some(h) = &mut self.history {
+                h.record_state2(now, STATE2_CAMERA_FLAG, on, Some((uid, "camera")));
+            }
+            self.camera_timer
+                .start_or_stop(on, &self.on_battery_time_base, now);
+        }
+        let rt = self.on_battery_time_base.realtime(now * 1000);
+        let t = &mut self.uid(uid, now).camera;
+        // Uid.noteCameraTurnedOffLocked does not create a timer.
+        let change = if on {
+            t.get_or_insert_with(StopwatchTimer::default)
+                .begin_start(rt)
+        } else {
+            t.as_mut().is_some_and(StopwatchTimer::begin_stop)
+        };
+        if change {
+            self.refresh_camera_pool(rt);
+            let t = self.uids.get_mut(&uid).unwrap().camera.as_mut().unwrap();
+            if on {
+                self.camera_pool.push(uid);
+                t.finish_start(&self.on_battery_time_base);
+            } else {
+                self.camera_pool.retain(|&u| u != uid);
+                t.finish_stop();
+            }
+        }
+    }
+
+    fn refresh_camera_pool(&mut self, rt: i64) {
+        let n = self.camera_pool.len();
+        for uid in &self.camera_pool {
+            let t = self.uids.get_mut(uid).unwrap().camera.as_mut().unwrap();
+            // Include a timer whose final stop has just reduced nesting to zero.
+            let held = rt - t.update_time_us;
+            if held > 0 {
+                t.total_time_us += held / n as i64;
+            }
+            t.update_time_us = rt;
+        }
+    }
+
+    fn reset_camera(&mut self, now: i64) {
+        if self.camera_nesting == 0 {
+            return;
+        }
+        self.camera_nesting = 0;
+        if let Some(h) = &mut self.history {
+            h.record_state2(now, STATE2_CAMERA_FLAG, false, None);
+        }
+        self.camera_timer.stop_all(&self.on_battery_time_base, now);
+        self.refresh_camera_pool(self.on_battery_time_base.realtime(now * 1000));
+        for u in self.uids.values_mut() {
+            if let Some(t) = &mut u.camera {
+                t.stop_all(&self.on_battery_time_base, now);
+            }
+        }
+        self.camera_pool.clear();
+    }
+
+    fn note_flashlight(&mut self, on: bool, uid: i32, now: i64) {
+        if count_note(&mut self.flashlight_nesting, on) {
+            if let Some(h) = &mut self.history {
+                h.record_state2(now, STATE2_FLASHLIGHT_FLAG, on, Some((uid, "flashlight")));
+            }
+            self.flashlight_timer
+                .start_or_stop(on, &self.on_battery_time_base, now);
+        }
+    }
+
+    fn reset_flashlight(&mut self, now: i64) {
+        if self.flashlight_nesting > 0 {
+            self.flashlight_nesting = 0;
+            if let Some(h) = &mut self.history {
+                h.record_state2(now, STATE2_FLASHLIGHT_FLAG, false, None);
+            }
+            self.flashlight_timer
+                .stop_all(&self.on_battery_time_base, now);
+        }
+    }
+
+    /// Frozen original Timer summaries, consumed by NativeHealthStats in Java.
+    /// Missing UIDs remain empty HealthStats; do not create them on reads.
+    fn health_counters(&self, uids: &[i32], now: i64, uptime: i64) -> Vec<i64> {
+        let rt = self.on_battery_time_base.realtime(now * 1000);
+        let mut out = vec![rt, self.on_battery_uptime.realtime(uptime * 1000)];
+        for uid in uids {
+            out.push(i64::from(*uid));
+            let u = self.uids.get(uid);
+            out.push(i64::from(u.is_some()));
+            let mut timer = |t: Option<&StopwatchTimer>, pool| {
+                out.extend(t.map_or([-1, 0], |t| [i64::from(t.count), t.run_time_in(rt, pool)]));
+            };
+            timer(u.and_then(|u| u.camera.as_ref()), self.camera_pool.len());
+            timer(None, 0); // Flashlight collector on: no per-uid timer.
+            timer(
+                u.and_then(|u| u.bluetooth_scan.as_ref())
+                    .map(|t| &t.timer.timer),
+                self.bluetooth_scan_pool.len(),
+            );
+            for state in 0..NUM_PROCESS_STATE {
+                timer(u.and_then(|u| u.process_state_timers[state].as_ref()), 0);
+            }
+        }
+        out
+    }
+
     /// `noteAudioOnLocked`/`noteAudioOffLocked` of the mapped `uid`, with
     /// the audio power stats collector on: the history and the device
     /// timer, no per-uid timer.
@@ -1161,6 +1295,7 @@ pub struct BatteryStats {
     host: Weak<AppHost>,
     stats: Mutex<Stats>,
     config: OnceLock<Config>,
+    health: Mutex<Option<Arc<Strong>>>,
 }
 
 impl BatteryStats {
@@ -1174,7 +1309,82 @@ impl BatteryStats {
             host: Arc::downgrade(host),
             stats: Mutex::new(stats),
             config: OnceLock::new(),
+            health: Mutex::new(None),
         }
+    }
+
+    pub(super) fn attach_health(&self, owner: Option<Binder>) -> Result<(), Exception> {
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| Exception::illegal_argument("no app host"))?;
+        let Some(Binder::Handle(handle)) = owner else {
+            return Err(Exception::illegal_argument("no battery health writer"));
+        };
+        let owner = Arc::new(host.process.strong(handle));
+        let weak = self.host.clone();
+        host.process.link_to_death(
+            &owner,
+            Box::new(move || {
+                if let Some(host) = weak.upgrade() {
+                    if let Some(stats) = host.battery_stats.get() {
+                        let mut current = stats.health.lock().unwrap();
+                        if current.as_ref().is_some_and(|o| o.handle == handle) {
+                            current.take();
+                        }
+                    }
+                }
+            }),
+        );
+        *self.health.lock().unwrap() = Some(owner);
+        Ok(())
+    }
+
+    fn write_health(&self, uids: &[i32], format: i32) -> Result<Vec<u8>, Exception> {
+        let counters =
+            self.stats
+                .lock()
+                .unwrap()
+                .health_counters(uids, elapsed_realtime(), uptime());
+        let owner = self.health.lock().unwrap().clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "battery health writer is not attached (#1928)",
+            )
+        })?;
+        let mut data = Parcel::new();
+        health::WriteSnapshot {
+            counters: Some(counters),
+            format,
+        }
+        .write(&mut data);
+        let result = owner
+            .transact(health::WRITE_SNAPSHOT, &data, false)
+            .map_err(|e| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("battery health writer: {e:?}"),
+                )
+            })?;
+        health::read_write_snapshot_reply(&mut result.reader())
+            .map_err(|e| Exception::illegal_argument(format!("battery health snapshot: {e:?}")))??
+            .ok_or_else(|| Exception::illegal_argument("null health snapshot"))
+    }
+
+    fn enforce_health_permission(&self, caller: i32, uids: &[i32]) -> Result<(), Exception> {
+        if uids.iter().all(|&u| u == caller) {
+            return Ok(());
+        }
+        let host = self
+            .host
+            .upgrade()
+            .ok_or_else(|| Exception::illegal_argument("no app host"))?;
+        if host.check_permission(Some(BATTERY_STATS), caller)? != 0 {
+            return Err(Exception::security(format!(
+                "Neither user {caller} nor current process has {BATTERY_STATS}."
+            )));
+        }
+        Ok(())
     }
 
     /// The constants (`Constants.updateConstants`: the
@@ -1282,6 +1492,10 @@ impl BatteryStats {
         let (changed, due) = {
             let mut s = self.stats.lock().unwrap();
             self.start_history(&host, &config, &mut s);
+            s.on_battery_uptime.set_running(
+                battery.plug_type == PLUGGED_NONE && battery.status != STATUS_UNKNOWN,
+                uptime() * 1000,
+            );
             (s.set_battery_state(&config, battery, now), s.charging_due)
         };
         if changed {
@@ -1406,6 +1620,10 @@ fn work_source(ws: Option<WorkSource>) -> Result<WorkSource, Exception> {
     })
 }
 
+fn uptime() -> i64 {
+    super::clock_ms(libc::CLOCK_UPTIME_RAW)
+}
+
 /// `SystemClock.elapsedRealtime`, as the app host keeps it.
 fn elapsed_realtime() -> i64 {
     super::clock_ms(libc::CLOCK_MONOTONIC_RAW)
@@ -1435,6 +1653,48 @@ impl Service for BatteryStats {
         let bad = |_| BAD_VALUE;
         // The notes; the audio ones are one-way.
         let noted = match call.code {
+            bs::NOTE_START_CAMERA => {
+                let a = bs::NoteStartCamera::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, map, now| {
+                    s.note_camera(true, map(a.uid), now);
+                });
+                Some(r.map(|()| bs::write_note_start_camera_reply(&mut p)))
+            }
+            bs::NOTE_STOP_CAMERA => {
+                let a = bs::NoteStopCamera::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, map, now| {
+                    s.note_camera(false, map(a.uid), now);
+                });
+                Some(r.map(|()| bs::write_note_stop_camera_reply(&mut p)))
+            }
+            bs::NOTE_RESET_CAMERA => {
+                let _a = bs::NoteResetCamera::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, _, now| {
+                    s.reset_camera(now);
+                });
+                Some(r.map(|()| bs::write_note_reset_camera_reply(&mut p)))
+            }
+            bs::NOTE_FLASHLIGHT_ON => {
+                let a = bs::NoteFlashlightOn::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, map, now| {
+                    s.note_flashlight(true, map(a.uid), now);
+                });
+                Some(r.map(|()| bs::write_note_flashlight_on_reply(&mut p)))
+            }
+            bs::NOTE_FLASHLIGHT_OFF => {
+                let a = bs::NoteFlashlightOff::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, map, now| {
+                    s.note_flashlight(false, map(a.uid), now);
+                });
+                Some(r.map(|()| bs::write_note_flashlight_off_reply(&mut p)))
+            }
+            bs::NOTE_RESET_FLASHLIGHT => {
+                let _a = bs::NoteResetFlashlight::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, _, now| {
+                    s.reset_flashlight(now);
+                });
+                Some(r.map(|()| bs::write_note_reset_flashlight_reply(&mut p)))
+            }
             bs::NOTE_START_AUDIO => {
                 let uid = bs::NoteStartAudio::read(&mut call.data).map_err(bad)?.uid;
                 Some(self.note(caller, |s, map, now| s.note_audio(true, map(uid), now)))
@@ -1527,36 +1787,88 @@ impl Service for BatteryStats {
                     ms(s.charge_time_remaining()),
                 );
             }
-            // One-way: what fails reaches the caller's receiver. Asking
-            // for other uids than its own needs BATTERY_STATS
-            // (`onlyCaller`); the snapshots (`getHealthStatsForUidLocked`)
-            // are #1928, sent as the original sends a failure to make them.
-            bs::TAKE_UID_SNAPSHOTS_ASYNC => {
-                let a = bs::TakeUidSnapshotsAsync::<ResultReceiver>::read(&mut call.data)
-                    .map_err(|_| BAD_VALUE)?;
+            bs::TAKE_UID_SNAPSHOT | bs::TAKE_UID_SNAPSHOTS | bs::TAKE_UID_SNAPSHOTS_ASYNC => {
                 drop(s);
-                let Some(host) = self.host.upgrade() else {
-                    return Err(BAD_VALUE);
+                let (uids, receiver, format) = match call.code {
+                    bs::TAKE_UID_SNAPSHOT => {
+                        let a = bs::TakeUidSnapshot::read(&mut call.data).map_err(bad)?;
+                        (Some(vec![a.uid]), None, HEALTH_SINGLE)
+                    }
+                    bs::TAKE_UID_SNAPSHOTS => {
+                        let a = bs::TakeUidSnapshots::read(&mut call.data).map_err(bad)?;
+                        (a.uid, None, HEALTH_ARRAY)
+                    }
+                    _ => {
+                        let a = bs::TakeUidSnapshotsAsync::<ResultReceiver>::read(&mut call.data)
+                            .map_err(bad)?;
+                        (a.uid, a.result.and_then(|r| r.0), HEALTH_RESULT)
+                    }
                 };
-                let uid = call.sender_euid as i32;
-                let receiver = a.result.and_then(|r| r.0);
-                let only_caller = a.uid.unwrap_or_default().iter().all(|&u| u == uid);
-                match host.check_permission(Some(BATTERY_STATS), uid) {
-                    Ok(0) => {}
-                    Ok(_) if only_caller => {}
-                    Ok(_) => {
+                // onlyCaller dereferences a null array before scheduling async work too.
+                let Some(uids) = uids else {
+                    return reply(Err(Exception::new(
+                        aim_binder_host::parcel::EX_NULL_POINTER,
+                        "requestUids is null",
+                    )));
+                };
+                let permission = self.enforce_health_permission(caller, &uids);
+                if format == HEALTH_RESULT {
+                    let Some(host) = self.host.upgrade() else {
+                        return Err(BAD_VALUE);
+                    };
+                    if let Err(e) = permission {
                         send_failure(
                             &host,
                             receiver,
-                            RESULT_SECURITY_EXCEPTION,
-                            &format!("Neither user {uid} nor current process has {BATTERY_STATS}."),
+                            if e.code == aim_binder_host::parcel::EX_SECURITY {
+                                RESULT_SECURITY_EXCEPTION
+                            } else {
+                                RESULT_RUNTIME_EXCEPTION
+                            },
+                            &e.message,
                         );
-                        return Ok(p);
+                    } else {
+                        // BatteryStatsService posts snapshots after preceding notes.
+                        let receiver_owner = receiver.and_then(|r| match r {
+                            Binder::Handle(handle) => Some(host.process.strong(handle)),
+                            _ => None,
+                        });
+                        host.post_job(move |host| {
+                            let receiver =
+                                receiver_owner.as_ref().map(|r| Binder::Handle(r.handle));
+                            let Some(stats) = host.battery_stats.get() else {
+                                return;
+                            };
+                            match stats.write_health(&uids, HEALTH_RESULT) {
+                                Ok(bytes) => {
+                                    if let Some(Binder::Handle(handle)) = receiver {
+                                        let mut data = Parcel::new();
+                                        data.write_interface_token(RESULT_RECEIVER_DESCRIPTOR);
+                                        data.write_raw(&bytes, &[]);
+                                        let _ = host.process.strong(handle).transact(
+                                            RESULT_RECEIVER_SEND,
+                                            &data,
+                                            true,
+                                        );
+                                    }
+                                }
+                                Err(e) => send_failure(
+                                    host,
+                                    receiver,
+                                    RESULT_RUNTIME_EXCEPTION,
+                                    &e.message,
+                                ),
+                            }
+                        });
                     }
-                    Err(e) => return reply(Err(e)),
+                    return Ok(p);
                 }
-                let e = host.unimplemented_named("batterystats", "a uid's health stats (#1928)");
-                send_failure(&host, receiver, RESULT_RUNTIME_EXCEPTION, &e.message);
+                let result = permission.and_then(|()| self.write_health(&uids, format));
+                return reply(result.map(|bytes| {
+                    p.write_no_exception();
+                    p.write_raw(&bytes, &[]);
+                    p
+                }));
             }
             code => {
                 drop(s);
@@ -1925,3 +2237,7 @@ mod tests {
         assert!(work_source(None).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "battery_stats_tests.rs"]
+mod contract_tests;

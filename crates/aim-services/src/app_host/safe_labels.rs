@@ -145,6 +145,7 @@ mod tests {
             application_thread: Some(Binder::Handle(1)),
             foreground_service_policy: Some(Binder::Handle(2)),
             safe_labels: Some(Binder::Handle(3)),
+            battery_health_stats: None,
         }
         .write(&mut p);
         for uid in [0, 2000, 10100] {
