@@ -111,6 +111,7 @@ pub enum Indicator {
     Microphone,
     Camera,
     Location,
+    Alarm,
 }
 
 /// A posted or updated notification, as the Mac shows it.
@@ -508,6 +509,7 @@ impl Message {
                     0 => Indicator::Microphone,
                     1 => Indicator::Camera,
                     2 => Indicator::Location,
+                    3 => Indicator::Alarm,
                     _ => return Err(bad()),
                 },
                 on: i.u8()? != 0,
@@ -660,6 +662,11 @@ mod tests {
             Message::Indicator {
                 package: "p".into(),
                 indicator: Indicator::Location,
+                on: true,
+            },
+            Message::Indicator {
+                package: "clock".into(),
+                indicator: Indicator::Alarm,
                 on: true,
             },
         ];

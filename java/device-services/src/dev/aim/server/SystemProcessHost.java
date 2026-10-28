@@ -104,7 +104,6 @@ public final class SystemProcessHost extends RuntimeInit {
             Looper.prepareMainLooper();
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
-            MediaArtwork.publish(context);
             ActivityThread.initializeMainlineModules();
             // SystemServer initializes mutable nonce storage after the modules and
             // before services: PlatformCompat invalidates IpcDataCache at construction.
@@ -126,6 +125,8 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSystemProcess(applicationThread.asBinder(),
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));
+            MediaArtwork.publish(context);
+            AlarmIndicator.publish(context);
             host.attachSystemRouteQueries(new com.android.server.media.SystemRouteQueries(context));
             host.attachStatsCompanionUidMap(new StatsCompanionUidMap(context));
             host.attachRecoverableKeyStoreKeys(new RecoverableKeyStoreKeys(context));

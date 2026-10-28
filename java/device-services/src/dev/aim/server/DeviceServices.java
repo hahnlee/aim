@@ -57,6 +57,7 @@ public final class DeviceServices extends SystemService {
     public void onStart() {
         mLocation.publish();
         MediaArtwork.publish(getContext());
+        AlarmIndicator.publish(getContext());
     }
 
     @Override

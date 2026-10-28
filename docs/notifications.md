@@ -30,7 +30,7 @@ request until PermissionController is native ("The permission").
 | Routing in the display server, shim launches | `bin/aim-display/notifications.rs` |
 | `UNUserNotificationCenter` in a shim | `bin/aim-display/un.rs` |
 | An app's menu bar items: live notifications, indicators, system status icons | `bin/aim-display/status.rs` |
-| The indicators' sources: app ops, the next alarm clock | `crates/aim-services/src/notifications/indicators.rs` |
+| The indicators' sources: app ops, the next alarm clock | `crates/aim-services/src/notifications/indicators.rs`, `alarm.rs`; `java/device-services/AlarmIndicator` |
 | The platform's shim, signed shims | `crates/aim-apps` (`app::system`, `shim::write`) |
 | POST_NOTIFICATIONS: the permission set as the Mac decides | `crates/aim-services/src/notifications/permission.rs`, `crates/aim-services/src/service_host.rs` |
 | The request's interceptor and activity | `java/device-services` (`NotificationPermissionInterceptor`), `java/notification-permission` |
@@ -253,13 +253,20 @@ notification itself is in Notification Center as before.
 | microphone in use (privacy indicator) | `IAppOpsService.startWatchingActive`: `RECORD_AUDIO`, `PHONE_CALL_MICROPHONE` | `mic.fill` |
 | camera in use (privacy indicator) | `CAMERA`, `PHONE_CALL_CAMERA` | `video.fill` |
 | high-power location (the location icon) | `MONITOR_HIGH_POWER_LOCATION` | `location.fill` |
+| next alarm clock | Java `AlarmManager.getNextAlarmClock(USER_SYSTEM)` and `ACTION_NEXT_ALARM_CLOCK_CHANGED` | `alarm` |
 
 An op indicator is on while the app has any of its ops active, with any
 attribution tag; uids below `FIRST_APPLICATION_UID` are the platform's
 and not shown. The display server keeps the indicators on, launches the
 app's shim in the background for one as for a notification, and turns
 them off when the bridge goes. Clicked, an indicator brings the app to
-the front. Not shown yet: the next alarm clock (#591) and VPN (#583).
+the front. The alarm item belongs to its show intent's creator, or Android
+System when there is no creator. A system-uid Java receiver supplies its
+initial state and changes through `aim.alarm_indicator`; native services
+need no content observer or app-process identity. The listener reconnects
+after the Java process dies and clears the previous owner's item (#591).
+Host tests cover ownership transitions and callback identity; Java linkage
+passes, without a guest boot or live menu bar check. VPN remains absent (#583).
 
 **System status icons** (`IStatusBar.setIcon`, once the native status
 bar replaces SystemUI's, `docs/m1-shell.md`) are items of the package

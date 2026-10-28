@@ -100,7 +100,7 @@ impl ReadParcelable for PendingIntentRef {
 
 /// `AlarmManager.AlarmClockInfo`: its trigger time (wall) and the
 /// PendingIntent that shows it.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ClockInfo {
     trigger: i64,
     show: Option<Binder>,
@@ -162,7 +162,7 @@ impl Alarm {
 struct State {
     alarms: Vec<Alarm>,
     /// The next alarm clock last broadcast, by user.
-    next_clocks: Vec<(i32, Option<i64>)>,
+    next_clocks: Vec<(i32, Option<ClockInfo>)>,
     /// Elapsed times of the next minute and the next local midnight.
     next_tick: i64,
     next_date: i64,
@@ -579,7 +579,7 @@ impl AlarmManager {
         users.sort_unstable();
         users.dedup();
         for user in users {
-            let next = Self::next_alarm_clock(state, user).map(|c| c.trigger);
+            let next = Self::next_alarm_clock(state, user);
             let last = state
                 .next_clocks
                 .iter()
