@@ -1,6 +1,79 @@
 use super::*;
 use aim_service_aidl::{write_byte_array, write_int_array};
 
+#[test]
+fn protection_feed_retains_original_per_user_decisions_and_rejects_bad_records() {
+    let mut p = Parcel::new();
+    p.write_i32(2);
+    for (user, state, data) in [(0, true, true), (10, false, true)] {
+        p.write_i32(user);
+        p.write_bool(state);
+        p.write_bool(data);
+    }
+    let mut inner = Inner::default();
+    inner.begin(true);
+    let package = package_record("example", None);
+    inner
+        .put(key(PACKAGE, "example"), package.len(), &package)
+        .unwrap();
+    inner
+        .put(key(PACKAGE_PROTECTION, "example"), p.data().len(), p.data())
+        .unwrap();
+    let digest = records_digest(&inner.records);
+    let first = inner.end(&digest, 0).unwrap();
+    assert_eq!(
+        first.packages["example"].protection,
+        BTreeMap::from([(0, (true, true)), (10, (false, true))])
+    );
+    // A new original decision is published without changing the older capture.
+    let mut next = Parcel::new();
+    next.write_i32(1);
+    next.write_i32(0);
+    next.write_bool(false);
+    next.write_bool(false);
+    inner
+        .put(
+            key(PACKAGE_PROTECTION, "example"),
+            next.data().len(),
+            next.data(),
+        )
+        .unwrap();
+    let digest = records_digest(&inner.records);
+    assert_eq!(
+        inner.end(&digest, 0).unwrap().packages["example"].protection[&0],
+        (false, false)
+    );
+    assert_eq!(first.packages["example"].protection[&0], (true, true));
+    inner.records.remove(&key(PACKAGE_PROTECTION, "example"));
+    let digest = records_digest(&inner.records);
+    assert!(
+        inner.end(&digest, 0).unwrap().packages["example"]
+            .protection
+            .is_empty()
+    );
+
+    for length in 0..p.data().len() {
+        assert!(record::protection(&p.data()[..length]).is_err());
+    }
+    for (at, value) in [(0, -1_i32), (0, i32::MAX), (4, -1), (16, 0)] {
+        let mut bytes = p.data().to_vec();
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        assert!(record::protection(&bytes).is_err());
+    }
+    p.write_i32(0);
+    assert!(record::protection(p.data()).is_err());
+    inner.records.remove(&key(PACKAGE, "example"));
+    inner
+        .put(
+            key(PACKAGE_PROTECTION, "missing"),
+            next.data().len(),
+            next.data(),
+        )
+        .unwrap();
+    let digest = records_digest(&inner.records);
+    assert!(inner.end(&digest, 0).is_err());
+}
+
 /// Strings as `PackageFeed.strings` writes them.
 fn strings(p: &mut Parcel, items: &[&str]) {
     p.write_i32(items.len() as i32);

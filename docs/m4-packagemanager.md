@@ -1068,7 +1068,7 @@ owner without side effects, and compared with the original's outcome.
   original; the shadow log carries the comparison as a `check` line, and
   `tools/binder-shadow-report.py` counts the checks per operation.
   Modelled: setComponentEnabledSetting and setApplicationEnabledSetting
-  (not yet a caller changing another package, #754), installs and
+  (including another package's original ProtectedPackages decisions, #754), installs and
   updates (app id, shared user, users' state; not yet signing and
   libraries), removals for every user and for some users. The APK signature
   adapter now verifies the parsed base/split paths directly, supporting
@@ -1081,6 +1081,10 @@ owner without side effects, and compared with the original's outcome.
   change is not modelled, including multi-user installs (#760).
   Not yet: restoring a system package,
   suspension, preferred activities.
+  The feed captures state/data protection per package and user through the
+  original PackageManagerInternal, retaining provisioning and DevicePolicy
+  ownership in Java. Enabled writes consume their captured pre-state; missing
+  protection remains not modelled.
 - The parser's oracle runs here too: every APK the original parses
   (boot, install) is parsed natively and the parcels compared.
 - **Bar.** No unexplained difference over the device-side install

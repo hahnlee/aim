@@ -52,6 +52,7 @@ const DISABLED_SYSTEM_USER_SCOPE: i32 = 11;
 const SCAN_USERS: i32 = 12;
 const APEX_INVENTORY: i32 = 13;
 const SDK_SANDBOX_PACKAGE: i32 = 14;
+const PACKAGE_PROTECTION: i32 = 15;
 
 /// The nullable SDK package selected by original PMS, without inventory inference.
 pub fn read_sdk_sandbox_package(bytes: &[u8]) -> aim_binder_host::parcel::Result<Option<String>> {
@@ -424,6 +425,13 @@ fn build(
                 }
                 state.system.sdk_sandbox_package =
                     Some(read_sdk_sandbox_package(bytes).map_err(failed)?);
+            }
+            PACKAGE_PROTECTION => {
+                let package = state
+                    .packages
+                    .get_mut(&key.name)
+                    .ok_or_else(|| format!("{key:?}: missing protected package"))?;
+                package.protection = record::protection(bytes).map_err(failed)?;
             }
             APEX_INVENTORY => {
                 if !key.name.is_empty() {
