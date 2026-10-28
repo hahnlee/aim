@@ -11,7 +11,7 @@
 //! every other method are not implemented (#1521).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -513,6 +513,7 @@ fn encryption_status(crypto_type: Option<&str>, target_sdk: i32) -> i32 {
 
 /// What the service reads beside its own state.
 trait Device {
+    fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception>;
     /// `mHasFeature`.
     fn feature(&self) -> Result<bool, Exception>;
     fn policies(&self) -> Result<&Policies, Exception>;
@@ -654,6 +655,20 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
         }
     };
     let result: Result<(), Exception> = match code {
+        dp::GET_DEFAULT_CROSS_PROFILE_PACKAGES => {
+            dp::GetDefaultCrossProfilePackages::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                // The original has no feature, owner or permission gate here.
+                let mut packages: HashSet<_> = device
+                    .string_array("cross_profile_apps")?
+                    .into_iter()
+                    .collect();
+                packages.extend(device.string_array("vendor_cross_profile_apps")?);
+                let packages: Vec<_> = packages.into_iter().collect();
+                dp::write_get_default_cross_profile_packages_reply(&mut p, &Some(packages));
+                Ok(())
+            })()
+        }
         dp::RESET_DEFAULT_CROSS_PROFILE_INTENT_FILTERS => {
             let a = dp::ResetDefaultCrossProfileIntentFilters::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
@@ -1253,6 +1268,15 @@ impl DevicePolicy {
 }
 
 impl Device for DevicePolicy {
+    fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception> {
+        self.host
+            .framework()?
+            .framework_string_array(name)
+            .ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, format!("framework array/{name} absent"))
+            })
+    }
+
     fn feature(&self) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
         Ok(state
@@ -1589,6 +1613,14 @@ mod tests {
     }
 
     impl Device for Fake {
+        fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception> {
+            Ok(match name {
+                "cross_profile_apps" => vec![Some("platform".into()), Some("both".into())],
+                "vendor_cross_profile_apps" => vec![Some("vendor".into()), Some("both".into())],
+                _ => panic!("unexpected resource {name}"),
+            })
+        }
+
         fn feature(&self) -> Result<bool, Exception> {
             Ok(self.feature)
         }
@@ -1657,6 +1689,34 @@ mod tests {
 
     fn not_authorized() -> Exception {
         Exception::security("Calling identity is not authorized")
+    }
+
+    #[test]
+    fn default_cross_profile_packages_are_the_union_without_permission_or_feature_checks() {
+        for feature in [false, true] {
+            let device = Fake {
+                feature,
+                policies: Policies {
+                    owned: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let r = call(&device, APP, dp::GET_DEFAULT_CROSS_PROFILE_PACKAGES, |p| {
+                dp::GetDefaultCrossProfilePackages {}.write(p)
+            });
+            let packages = dp::read_get_default_cross_profile_packages_reply(&mut r.reader())
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(packages.len(), 3);
+            assert_eq!(
+                packages.into_iter().collect::<HashSet<_>>(),
+                ["platform", "vendor", "both"]
+                    .map(|p| Some(p.into()))
+                    .into()
+            );
+        }
     }
 
     /// DevicePolicyManagerService.resetDefaultCrossProfileIntentFilters,

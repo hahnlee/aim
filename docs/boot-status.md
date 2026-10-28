@@ -36,6 +36,7 @@ guest-init --image <derived> --data <data> --run \
 ## The app host boot (2026-10-16)
 
 The app host returns caller-scoped user unlock elapsed realtime, handles authorized cross-profile filter resets for groups of at most one user, and checks broadcast caller packages against all packages hosted in the process (#2243; host tests only, no guest boot rerun).
+ManagedProvisioning's single-user OTA call path now reads the default cross-profile package arrays from the configured framework resources, answers configuration eligibility, resets removed packages' app ops and persists the package/UID mode migration through the access owner ([call audit](managedprovisioning-boot.md), #1521; host tests only, no guest boot rerun).
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.

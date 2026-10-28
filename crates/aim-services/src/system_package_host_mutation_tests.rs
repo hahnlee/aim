@@ -1195,6 +1195,34 @@ pub(crate) fn with_discovery_binders(
         &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
     ),
 ) {
+    with_discovery_binders_flags(&[], test);
+}
+
+pub(crate) fn with_discovery_session_flags(
+    flags: &[(&str, bool)],
+    test: impl FnOnce(&Arc<AppHost>),
+) {
+    with_discovery_binders_flags(flags, |host, _, _, export| {
+        let activity = export(crate::app_host::test_activity_service(host));
+        host.package_system()
+            .unwrap()
+            .services
+            .lock()
+            .unwrap()
+            .insert("activity", Arc::new(activity));
+        test(host);
+    });
+}
+
+fn with_discovery_binders_flags(
+    flags: &[(&str, bool)],
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
+        &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+    ),
+) {
     let Session {
         fixture,
         host,
@@ -1255,6 +1283,14 @@ pub(crate) fn with_discovery_binders(
         }
         complete_owner(&mut owner);
         let mut context = (**base.context()).clone();
+        context
+            .system
+            .flags
+            .retain(|(name, _)| !flags.iter().any(|(flag, _)| name == flag));
+        context
+            .system
+            .flags
+            .extend(flags.iter().map(|(name, on)| ((*name).into(), *on)));
         context.scan_version = base.scan().version() + 1;
         fixture
             .system
@@ -1276,6 +1312,9 @@ pub(crate) fn with_discovery_binders(
             )
             .unwrap();
     };
+    if !flags.is_empty() {
+        publish(&mut |_| {});
+    }
     let enabled = |class: Option<&str>, new_state| {
         let before = fixture.system.capture_package_queries().unwrap();
         let (code, request) = enabled_request(class, new_state, 0);

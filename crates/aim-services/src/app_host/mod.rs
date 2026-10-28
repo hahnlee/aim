@@ -95,6 +95,8 @@ pub mod legacy_permission;
 pub mod locale_manager;
 pub mod lock_settings;
 mod loudness;
+#[cfg(test)]
+mod managed_provisioning_tests;
 mod media_route_providers;
 pub mod media_router;
 mod media_router2;
@@ -5576,6 +5578,11 @@ impl Service for Control {
 
 #[cfg(test)]
 pub(crate) use battery_history::tests::temp_dir as test_temp_dir;
+
+#[cfg(test)]
+pub(crate) fn test_activity_service(host: &Arc<AppHost>) -> Arc<dyn Service> {
+    Arc::new(Activity(host.clone()))
+}
 
 #[cfg(test)]
 impl AppHost {
