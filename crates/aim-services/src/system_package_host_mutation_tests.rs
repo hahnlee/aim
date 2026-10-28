@@ -121,6 +121,12 @@ impl Service for Bridge {
                 bootstrap::GetPackageInstalledPermissions::read(&mut call.data)?;
                 bootstrap::write_get_package_installed_permissions_reply(&mut reply, &Some(vec![]));
             }
+            bootstrap::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED => {
+                let a = bootstrap::IsDomainVerificationSettingsV2Enabled::read(&mut call.data)?;
+                assert!(matches!(a.package_name.as_deref(), Some("p" | "q")));
+                assert!(a.target_sdk >= 0);
+                bootstrap::write_is_domain_verification_settings_v2enabled_reply(&mut reply, true);
+            }
             bootstrap::IS_APPLICATION_QUERY_FILTERING_ENABLED => {
                 bootstrap::IsApplicationQueryFilteringEnabled::read(&mut call.data)?;
                 bootstrap::write_is_application_query_filtering_enabled_reply(&mut reply, false);

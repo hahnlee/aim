@@ -62,6 +62,7 @@ pub mod device_idle;
 pub mod device_policy;
 pub mod display;
 pub mod display_service;
+mod domain_shell;
 pub mod domain_verification;
 pub mod dropbox;
 pub mod enhanced_confirmation;

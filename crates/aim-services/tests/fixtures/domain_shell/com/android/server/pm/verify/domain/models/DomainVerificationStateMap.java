@@ -1,0 +1,1 @@
+package com.android.server.pm.verify.domain.models;public class DomainVerificationStateMap<T> {public int size(){throw new AssertionError();}public T valueAt(int i){throw new AssertionError();}public T get(String n){throw new AssertionError();}}

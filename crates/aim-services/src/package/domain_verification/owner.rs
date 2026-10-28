@@ -693,6 +693,20 @@ impl Owner {
         user_id: i32,
         hosts: &std::collections::BTreeSet<String>,
         enabled: bool,
+        lookup: impl FnMut(&str) -> Result<Option<ApprovalInput<'a>>, String>,
+    ) -> Result<i32, String> {
+        self.select_hosts(name, user_id, hosts, enabled, false, lookup)
+    }
+
+    /// Shell selection ignores approval failure, and attempts revocation even
+    /// when disabling; DVS still applies the requested selection afterwards.
+    pub(crate) fn select_hosts<'a>(
+        &mut self,
+        name: &str,
+        user_id: i32,
+        hosts: &std::collections::BTreeSet<String>,
+        enabled: bool,
+        internal: bool,
         mut lookup: impl FnMut(&str) -> Result<Option<ApprovalInput<'a>>, String>,
     ) -> Result<i32, String> {
         let at = self
@@ -716,7 +730,7 @@ impl Owner {
             .enabled_hosts
             .clone();
         let mut revoke = Vec::new();
-        if enabled {
+        if enabled || internal {
             for host in hosts {
                 if selected.contains(host) {
                     continue;
@@ -751,6 +765,10 @@ impl Owner {
                     }
                 }
                 if highest > 3 {
+                    if internal {
+                        revoke.clear();
+                        break;
+                    }
                     return Ok(3);
                 }
                 if let Some(latest) = approved.iter().map(|(_, time)| *time).max() {
@@ -1554,6 +1572,85 @@ mod tests {
         assert!(p.domains.is_empty());
         assert!(p.users.is_empty());
     }
+    #[test]
+    fn shell_selection_applies_after_approval_failure_and_revokes_on_disable() {
+        let code = code(&["a.test"]);
+        let mut owner = Owner::new(State::default(), BTreeMap::new());
+        owner.add(input(&code), &SystemConfig::default()).unwrap();
+        let mut other = owner.package("fixture").unwrap().clone();
+        other.name = "other".into();
+        other.id = OLD.into();
+        other.domains = vec![(Some("a.test".into()), 1)];
+        owner.put(other);
+        let mut other_code = code.clone();
+        other_code.package_name = "other".into();
+        let user = crate::package::restrictions::UserState {
+            installed: true,
+            enabled: 1,
+            ..Default::default()
+        };
+        let hosts = ["a.test".into()].into();
+        let lookup = |name: &str| {
+            Ok(Some(ApprovalInput {
+                code: if name == "other" { &other_code } else { &code },
+                user: Some(&user),
+                settings_v2: true,
+                policy: collector::Policy {
+                    restrict_domains: true,
+                    linked_app: false,
+                },
+            }))
+        };
+        assert_eq!(
+            owner
+                .set_user_selection("fixture", 0, &hosts, true, lookup)
+                .unwrap(),
+            3
+        );
+        assert!(
+            owner.package("fixture").unwrap().users[0]
+                .enabled_hosts
+                .is_empty()
+        );
+        owner
+            .select_hosts("fixture", 0, &hosts, true, true, lookup)
+            .unwrap();
+        assert_eq!(
+            owner.package("fixture").unwrap().users[0].enabled_hosts,
+            ["a.test"]
+        );
+        // Remove the higher approval and transfer selection to the other app.
+        let mut other = owner.remove("other").unwrap();
+        other.domains.clear();
+        other.users = vec![User {
+            id: 0,
+            allow_link_handling: true,
+            enabled_hosts: vec!["a.test".into()],
+        }];
+        owner.put(other);
+        owner
+            .select_hosts("fixture", 0, &hosts, false, true, lookup)
+            .unwrap();
+        assert!(
+            owner.package("fixture").unwrap().users[0]
+                .enabled_hosts
+                .is_empty()
+        );
+        // The selected target was already enabled, so DVS skips revoking this host.
+        assert_eq!(
+            owner.package("other").unwrap().users[0].enabled_hosts,
+            ["a.test"]
+        );
+        owner
+            .select_hosts("fixture", 0, &hosts, false, true, lookup)
+            .unwrap();
+        assert!(
+            owner.package("other").unwrap().users[0]
+                .enabled_hosts
+                .is_empty()
+        );
+    }
+
     #[test]
     fn queries_project_public_states_selection_priority_and_absent_user_defaults() {
         let hosts: Vec<_> = (0..=9).map(|i| format!("h{i}.example")).collect();

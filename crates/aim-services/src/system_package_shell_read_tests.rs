@@ -759,3 +759,113 @@ fn has_feature() {
         (1, String::new(), "Error: expected FEATURE name\n".into())
     );
 }
+
+// The Java boundary is doubled here; golden error lines are emitted by the
+// android-16.0.0_r1 DomainVerificationShell (runGetAppLinks/runGetAppLinkOwners).
+struct DomainCold(Arc<LocalProcess>, Arc<std::sync::atomic::AtomicBool>);
+impl Service for DomainCold {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_iapphostdomainverification::DESCRIPTOR
+    }
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_iapphostdomainverification as domains;
+        assert_eq!(call.code, domains::RUN_SHELL_COMMAND);
+        assert_eq!((call.sender_pid, call.sender_euid), (97330, 2000));
+        let a = domains::RunShellCommand::<Descriptor>::read(&mut call.data)?;
+        assert_eq!(call.data.remaining(), 0);
+        let file =
+            |d: Descriptor| aim_binder_host::server::file_fd(&self.0.file(d.0).unwrap()).unwrap();
+        let mut text = String::new();
+        file(a.input.unwrap()).read_to_string(&mut text).unwrap();
+        assert!(text.is_empty());
+        let _output = file(a.output.unwrap());
+        let mut error = file(a.error.unwrap());
+        let args = a.arguments.unwrap();
+        let (status, line) = match args[0].as_deref().unwrap() {
+            "get-app-links" => (1, "Error: unknown option: --invalid"),
+            "get-app-link-owners" => (1, "Error: no package name or domain specified"),
+            "set-app-links-user-selection" | "set-app-links-allowed" => (0, ""),
+            _ => panic!("unserved domain verb"),
+        };
+        assert_eq!(
+            a.package_shell,
+            self.1.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        if !line.is_empty() {
+            writeln!(error, "{line}").unwrap();
+        }
+        let mut reply = Parcel::new();
+        domains::write_run_shell_command_reply(&mut reply, status);
+        Ok(reply)
+    }
+}
+#[test]
+fn domain_shell_entrypoints_transfer_fds_identity_status_and_errors() {
+    let mut shell = Shell::new();
+    let original = &shell.session.fixture.original[0];
+    let expected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let frontend = original.add_service(Arc::new(DomainCold(original.clone(), expected.clone())));
+    let mut p = Parcel::new();
+    sp::AttachDomainVerification {
+        frontend: Some(frontend),
+    }
+    .write(&mut p);
+    lookup(original, "aim.system_process")
+        .transact(sp::ATTACH_DOMAIN_VERIFICATION, &p, false)
+        .unwrap()
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    for package in [true, false] {
+        expected.store(package, std::sync::atomic::Ordering::Relaxed);
+        shell.package = lookup(
+            &shell.process,
+            if package {
+                "package"
+            } else {
+                "domain_verification"
+            },
+        );
+        for (verb, tail, expected) in [
+            (
+                "get-app-links",
+                vec!["--invalid"],
+                "Error: unknown option: --invalid\n",
+            ),
+            (
+                "get-app-link-owners",
+                vec![],
+                "Error: no package name or domain specified\n",
+            ),
+        ] {
+            let mut args = vec![verb];
+            args.extend(tail);
+            assert_eq!(shell.command(&args), (1, String::new(), expected.into()));
+        }
+        for args in [
+            vec![
+                "set-app-links-user-selection",
+                "--user",
+                "0",
+                "--package",
+                "p",
+                "true",
+                "all",
+            ],
+            vec![
+                "set-app-links-allowed",
+                "--user",
+                "0",
+                "--package",
+                "p",
+                "false",
+            ],
+        ] {
+            assert_eq!(shell.command(&args), (0, String::new(), String::new()));
+        }
+    }
+}

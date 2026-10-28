@@ -154,7 +154,8 @@ struct ScopedQueries {
 }
 impl Service for ScopedQueries {
     fn accepts_fds(&self) -> bool {
-        self.allowed.contains(&crate::package::dump::DUMP_TRANSACTION)
+        self.allowed
+            .contains(&crate::package::dump::DUMP_TRANSACTION)
     }
     fn descriptor(&self) -> &str {
         self.descriptor
@@ -206,6 +207,33 @@ impl ShellRead {
                 .map(OutputFile)
                 .ok_or_else(|| Exception::illegal_argument("missing read shell descriptor"))
         };
+        if args
+            .arguments
+            .as_ref()
+            .and_then(|a| a.first())
+            .and_then(|a| a.as_deref())
+            .is_some_and(|a| {
+                matches!(
+                    a,
+                    "get-app-links"
+                        | "get-app-link-owners"
+                        | "set-app-links-user-selection"
+                        | "set-app-links-allowed"
+                )
+            })
+        {
+            return super::domain_shell::run(
+                &self.0,
+                call,
+                true,
+                args.arguments,
+                [
+                    file(args.input)?.0,
+                    file(args.output)?.0,
+                    file(args.error)?.0,
+                ],
+            );
+        }
         let (packages, _) =
             crate::package::service::PackageQueries::from_system(self.0.package_system()?);
         let scoped = Arc::new(ScopedQueries {

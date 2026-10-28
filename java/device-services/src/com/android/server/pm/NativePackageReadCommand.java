@@ -17,6 +17,13 @@ public final class NativePackageReadCommand {
             return execute(context, packages, dumpServices, args, input, output, error);
         } catch (java.io.IOException failure) { throw new IllegalStateException(failure); }
     }
+    public static int runDomains(Context context,
+            com.android.server.pm.verify.domain.DomainVerificationShell domains, String[] args,
+            ParcelFileDescriptor input, ParcelFileDescriptor output, ParcelFileDescriptor error) {
+        return new PackageManagerShellCommand(null, context, domains).exec(new Binder(),
+                input.getFileDescriptor(), output.getFileDescriptor(), error.getFileDescriptor(),
+                args, null, null);
+    }
     private static int execute(Context context, IPackageManager packages, IBinder[] dumpServices, String[] args,
             ParcelFileDescriptor input, ParcelFileDescriptor output, ParcelFileDescriptor error) {
         if (args == null || args.length == 0) throw new IllegalArgumentException("No read command");

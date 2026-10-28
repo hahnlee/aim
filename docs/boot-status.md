@@ -2447,6 +2447,17 @@ commands. Dump aggregation uses caller-bound capabilities for each real service;
 the package dump still has its reduced native format, so full ComputerEngine/
 Settings dump parity remains #2327. `list staged-sessions` enters the same native
 installer as `get-stagedsessions`. No new guest execution is claimed.
+Domain shell wiring (#2187) carries both `cmd domain_verification` and `pm`
+through the original Java DomainVerificationShell/DomainVerificationDebug over
+native captured state. The pinned JVM oracle asserts exact successful output
+for verified, unverified and selected domains and both Java entry paths; its
+outer PM route and Android runtime boundaries are doubled. Native Binder tests
+cover FD, caller, error and result transport. `set-app-links-user-selection`
+and `set-app-links-allowed` retain original internal authorization and persist
+through the native domain write owner; host checks cover filtering, all-user/
+all-package handling, retained captures, disk reopen and failure replies.
+`set-app-links`, `reset-app-links` and `verify-app-links` remain unserved (#2187).
+No guest execution or CTS rerun was performed for this shell change.
 The same frozen PMHost cohort exposes activity filter priority and public
 restrict-update error mismatches (#1169/#1170). Native activity registration now
 applies the pinned privilege/protected-action/setup-wizard and factory-filter

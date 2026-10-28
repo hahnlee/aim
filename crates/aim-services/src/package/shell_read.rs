@@ -75,7 +75,11 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         return Ok(None);
     };
     let result = match command {
-        "dump"
+        "get-app-links"
+        | "get-app-link-owners"
+        | "set-app-links-user-selection"
+        | "set-app-links-allowed"
+        | "dump"
         | "dump-package"
         | "get-privapp-permissions"
         | "get-privapp-deny-permissions"

@@ -1,0 +1,1 @@
+package android.content.pm.verify.domain;public class DomainVerificationInfo {public @interface State {} public static final int STATE_NO_RESPONSE=0,STATE_SUCCESS=1,STATE_UNMODIFIABLE=2,STATE_MODIFIABLE_VERIFIED=3,STATE_MODIFIABLE_UNVERIFIED=4;}
