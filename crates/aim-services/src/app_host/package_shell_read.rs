@@ -4,8 +4,9 @@
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_ipackageshellreadleaf as leaf;
+use aim_service_aidl::{ReadParcelable, WriteParcelable};
 use aim_service_aidl::{
     android_content_pm_ipackagemanager as pm, android_permission_ipermissionmanager as permission,
     dev_aim_server_iapphostpackageshellread as cold,
@@ -16,6 +17,29 @@ use aim_service_aidl::dev_aim_server_ipackageintentparser as parser;
 
 pub struct ShellRead(pub Arc<AppHost>);
 
+struct Descriptor(u32);
+impl ReadParcelable for Descriptor {
+    fn read_from(reader: &mut Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        if reader.read_i32()? != 0 {
+            return Err(BAD_VALUE);
+        }
+        reader.read_fd().map(Self)
+    }
+}
+struct OutputFile(aim_binder_driver::File);
+impl WriteParcelable for OutputFile {
+    fn write_to(&self, parcel: &mut Parcel) {
+        parcel.write_i32(0);
+        parcel.write_file(self.0.clone());
+    }
+}
+
+fn codec(status: i32) -> Exception {
+    Exception::new(
+        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+        format!("shell syntax codec: {status}"),
+    )
+}
 impl ShellRead {
     fn parse(&self, arguments: Option<Vec<Option<String>>>) -> Result<Option<Vec<u8>>, Exception> {
         let owner = self
@@ -129,6 +153,9 @@ struct ScopedQueries {
     descriptor: &'static str,
 }
 impl Service for ScopedQueries {
+    fn accepts_fds(&self) -> bool {
+        self.allowed.contains(&crate::package::dump::DUMP_TRANSACTION)
+    }
     fn descriptor(&self) -> &str {
         self.descriptor
     }
@@ -160,6 +187,116 @@ impl Drop for Scoped {
     }
 }
 impl ShellRead {
+    fn run_command(&self, call: &mut Call<'_>) -> Result<i32, Exception> {
+        if !matches!(call.sender_euid, 0 | 2000)
+            || self.0.process.authenticated_inbound_identity()
+                != Some((call.sender_pid, call.sender_euid))
+        {
+            return Err(Exception::security(
+                "read shell caller lacks authenticated provenance",
+            ));
+        }
+        let args = leaf::RunReadCommand::<Descriptor>::read(&mut call.data).map_err(codec)?;
+        if call.data.remaining() != 0 {
+            return Err(Exception::illegal_argument("read shell argument tail"));
+        }
+        let file = |value: Option<Descriptor>| -> Result<OutputFile, Exception> {
+            value
+                .and_then(|value| self.0.process.file(value.0))
+                .map(OutputFile)
+                .ok_or_else(|| Exception::illegal_argument("missing read shell descriptor"))
+        };
+        let (packages, _) =
+            crate::package::service::PackageQueries::from_system(self.0.package_system()?);
+        let scoped = Arc::new(ScopedQueries {
+            owner: Mutex::new(Some(packages)),
+            uid: call.sender_euid as i32,
+            pid: call.sender_pid,
+            allowed: &[
+                pm::GET_PACKAGE_INFO,
+                pm::GET_APPLICATION_INFO,
+                crate::package::dump::DUMP_TRANSACTION,
+            ],
+            descriptor: pm::DESCRIPTOR,
+        });
+        struct Retire(Vec<Arc<ScopedQueries>>);
+        impl Drop for Retire {
+            fn drop(&mut self) {
+                for scope in &self.0 {
+                    scope.owner.lock().unwrap().take();
+                }
+            }
+        }
+        let mut retire = Retire(vec![scoped.clone()]);
+        let [activity, meminfo, procstats, usagestats, batterystats] = if args
+            .arguments
+            .as_ref()
+            .and_then(|args| args.first())
+            .and_then(|arg| arg.as_deref())
+            == Some("dump")
+        {
+            let services = self.0.services();
+            [
+                "activity",
+                "meminfo",
+                "procstats",
+                "usagestats",
+                "batterystats",
+            ]
+            .map(|name| {
+                services
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, service)| {
+                        let scope = Arc::new(ScopedQueries {
+                            owner: Mutex::new(Some(service.clone())),
+                            uid: call.sender_euid as i32,
+                            pid: call.sender_pid,
+                            allowed: &[crate::package::dump::DUMP_TRANSACTION],
+                            descriptor: "android.os.IBinder",
+                        });
+                        retire.0.push(scope.clone());
+                        self.0.process.add_callback(scope)
+                    })
+            })
+        } else {
+            [None; 5]
+        };
+        let mut request = Parcel::new();
+        cold::RunReadCommand {
+            arguments: args.arguments,
+            packages: Some(self.0.process.add_callback(scoped)),
+            activity,
+            meminfo,
+            procstats,
+            usagestats,
+            batterystats,
+            input: Some(file(args.input)?),
+            output: Some(file(args.output)?),
+            error: Some(file(args.error)?),
+        }
+        .write(&mut request);
+        let owner = self
+            .0
+            .package_shell_read
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "package shell read owner is not attached")
+            })?;
+        let result = self
+            .0
+            .process
+            .transact_preserving_inbound(owner.handle, cold::RUN_READ_COMMAND, &request)
+            .map_err(codec)?;
+        let mut reader = result.reader();
+        let status = cold::read_run_read_command_reply(&mut reader).map_err(codec)??;
+        if reader.remaining() != 0 {
+            return Err(Exception::illegal_argument("read shell reply tail"));
+        }
+        Ok(status)
+    }
     fn cold(&self, code: u32, request: Parcel) -> Result<Parcel, Exception> {
         let owner = self
             .0
@@ -234,10 +371,20 @@ impl ShellRead {
 }
 
 impl Service for ShellRead {
+    fn accepts_fds(&self) -> bool {
+        true
+    }
     fn descriptor(&self) -> &str {
         leaf::DESCRIPTOR
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == leaf::RUN_READ_COMMAND {
+            let mut p = Parcel::new();
+            return reply(self.run_command(call).map(|status| {
+                leaf::write_run_read_command_reply(&mut p, status);
+                p
+            }));
+        }
         if call.sender_euid != 1000 {
             return reply(Err(Exception::security("Native shell owner required")));
         }

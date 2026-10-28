@@ -7,6 +7,18 @@ import java.util.List;
 
 /** Original Parcelable/resource formatting; native owners retain caller checks. */
 final class AppHostPackageShellRead extends IAppHostPackageShellRead.Stub {
+    private final android.content.Context context;
+    AppHostPackageShellRead(android.content.Context context) { this.context = context; }
+    @Override public int runReadCommand(String[] args, IBinder packages, IBinder activity,
+            IBinder meminfo, IBinder procstats, IBinder usagestats, IBinder batterystats, ParcelFileDescriptor input,
+            ParcelFileDescriptor output, ParcelFileDescriptor error) {
+        if (Binder.getCallingUid() != 0 && Binder.getCallingUid() != 2000)
+            throw new SecurityException("Shell commands are only callable by ADB");
+        return com.android.server.pm.NativePackageReadCommand.run(context,
+                IPackageManager.Stub.asInterface(packages),
+                new IBinder[]{packages, activity, meminfo, procstats, usagestats, batterystats},
+                args, input, output, error);
+    }
     private static void enforce() {
         if (Binder.getCallingUid() != 1000) throw new SecurityException("Native shell owner required");
     }

@@ -55,9 +55,14 @@ struct Bridge(
     Binder,
     Binder,
     Binder,
+    (
+        Arc<LocalProcess>,
+        Mutex<Option<aim_binder_host::local::Strong>>,
+    ),
 );
 // Fixture-only export of a service in the original process to the native host.
 const EXPORT_TEST_BINDER: u32 = 0xffff_fffe;
+const SET_TEST_SHELL_READ: u32 = 0xffff_fffd;
 impl Service for Bridge {
     fn descriptor(&self) -> &str {
         bootstrap::DESCRIPTOR
@@ -65,6 +70,13 @@ impl Service for Bridge {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut reply = Parcel::new();
         match call.code {
+            SET_TEST_SHELL_READ => {
+                let Some(Binder::Handle(handle)) = call.data.read_binder()? else {
+                    panic!("read leaf")
+                };
+                *self.6.1.lock().unwrap() = Some(self.6.0.strong(handle));
+                reply.write_no_exception();
+            }
             EXPORT_TEST_BINDER => {
                 reply.write_binder(Some(Binder::Local(call.data.read_i64()? as u64)));
             }
@@ -78,7 +90,11 @@ impl Service for Bridge {
             }
             bootstrap::GET_PACKAGE_SHELL_READ_LEAF => {
                 bootstrap::GetPackageShellReadLeaf::read(&mut call.data)?;
-                bootstrap::write_get_package_shell_read_leaf_reply(&mut reply, Some(self.5));
+                let retained = self.6.1.lock().unwrap();
+                let binder = retained
+                    .as_ref()
+                    .map_or(self.5, |owner| Binder::Handle(owner.handle));
+                bootstrap::write_get_package_shell_read_leaf_reply(&mut reply, Some(binder));
             }
             bootstrap::GET_PACKAGE_MUTATION_BRIDGE => {
                 bootstrap::GetPackageMutationBridge::read(&mut call.data)?;
@@ -130,6 +146,33 @@ impl Service for Bridge {
                     vec![]
                 };
                 bootstrap::write_get_package_granted_permissions_reply(&mut reply, &Some(grants));
+            }
+            bootstrap::FORMAT_PACKAGE_TIMESTAMP => {
+                let a = bootstrap::FormatPackageTimestamp::read(&mut call.data)?;
+                bootstrap::write_format_package_timestamp_reply(
+                    &mut reply,
+                    &Some(format!("fixture-date-{}", a.millis)),
+                );
+            }
+            bootstrap::GET_LEGACY_PERMISSION_STATE => {
+                let a = bootstrap::GetLegacyPermissionState::read(&mut call.data)?;
+                let mut p = Parcel::new();
+                p.write_i32(a.app_id);
+                let users = a.user_ids.unwrap();
+                p.write_i32(users.len() as i32);
+                for user in users {
+                    p.write_i32(user);
+                    p.write_bool(false);
+                    p.write_i32(1);
+                    p.write_string16(Some("fixture.permission"));
+                    p.write_bool(true);
+                    p.write_bool(true);
+                    p.write_i32(1);
+                }
+                bootstrap::write_get_legacy_permission_state_reply(
+                    &mut reply,
+                    &Some(p.data().to_vec()),
+                );
             }
             bootstrap::GET_PERMISSION_GIDS_FOR_UID => {
                 let a = bootstrap::GetPermissionGidsForUid::read(&mut call.data)?;
@@ -416,6 +459,7 @@ fn session_with_fixture(mut fixture: Fixture) -> Session {
             original.add_service(Arc::new(crate::app_host::package_shell_read::ShellRead(
                 host_leaf,
             ))),
+            (original.clone(), Mutex::new(None)),
         ))
     });
     let old = publish_code(&fixture, &bridge);

@@ -2441,7 +2441,12 @@ queries and path. App-host cold permission resources and ResolveInfo dumps now
 use the original Java leaf in aim-system with scoped caller-bound read queries.
 Host FD/exit-status tests and Java compilation/DEX linkage cover this boundary;
 original execution, matched-image deployment and guest boot remain unverified.
-Dump/dump-package and the other package shell operations remain #2327.
+The read bridge also transfers stdin/stdout/stderr and authenticated shell identity
+for dump/dump-package and the original privapp/OEM/signature/shared-UID allowlist
+commands. Dump aggregation uses caller-bound capabilities for each real service;
+the package dump still has its reduced native format, so full ComputerEngine/
+Settings dump parity remains #2327. `list staged-sessions` enters the same native
+installer as `get-stagedsessions`. No new guest execution is claimed.
 The same frozen PMHost cohort exposes activity filter priority and public
 restrict-update error mismatches (#1169/#1170). Native activity registration now
 applies the pinned privilege/protected-action/setup-wizard and factory-filter

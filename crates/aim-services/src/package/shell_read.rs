@@ -75,6 +75,13 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         return Ok(None);
     };
     let result = match command {
+        "dump"
+        | "dump-package"
+        | "get-privapp-permissions"
+        | "get-privapp-deny-permissions"
+        | "get-oem-permissions"
+        | "get-signature-permission-allowlist"
+        | "get-shared-uid-allowlist" => cold_command(ctx)?,
         "get-max-users" => {
             let mut request = Parcel::new();
             leaf::GetMaxSupportedUsers {}.write(&mut request);
@@ -91,6 +98,7 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
             Some("libraries") => libraries(ctx, &args[2..])?,
             Some("permissions") => permissions(ctx, &args[2..])?,
             Some("permission-groups") => permission_groups(ctx)?,
+            Some("staged-sessions") => super::shell_install::list_staged(ctx, &args[2..])?,
             _ => return Ok(None),
         },
         "-l" => packages(ctx, &args[1..], false)?,
@@ -146,6 +154,21 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         _ => return Ok(None),
     };
     Ok(Some(result))
+}
+fn cold_command(ctx: &mut Context<'_>) -> Result<i32, Exception> {
+    let missing = || bad("missing read shell descriptor");
+    let clone = |fd: Option<&mut aim_binder_host::server::RetainedFd>| {
+        fd.ok_or_else(missing)?.try_clone().map_err(|error| {
+            Exception::new(EX_ILLEGAL_STATE, format!("read shell descriptor: {error}"))
+        })
+    };
+    let descriptors = [
+        clone(ctx.command.input())?,
+        clone(ctx.command.output())?,
+        clone(ctx.command.error())?,
+    ];
+    ctx.system()?
+        .shell_read_command(ctx.uid, ctx.pid, ctx.command.args.clone(), descriptors)
 }
 fn max_users(
     command: &mut crate::shell::ShellCommand,

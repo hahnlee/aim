@@ -9,7 +9,7 @@ use aim_service_aidl::{
     dev_aim_server_isystemprocess as sp,
 };
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     os::fd::AsFd,
 };
 
@@ -28,12 +28,27 @@ fn lookup(process: &Arc<LocalProcess>, name: &str) -> Strong {
     };
     process.strong(handle)
 }
-struct Cold(Arc<LocalProcess>);
+struct Descriptor(u32);
+impl aim_service_aidl::ReadParcelable for Descriptor {
+    fn read_from(r: &mut Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        assert_eq!(r.read_i32()?, 0);
+        r.read_fd().map(Self)
+    }
+}
+struct Cold(Arc<LocalProcess>, Arc<Mutex<Option<Arc<Strong>>>>);
 impl Service for Cold {
+    fn accepts_fds(&self) -> bool {
+        true
+    }
     fn descriptor(&self) -> &str {
         cold::DESCRIPTOR
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == cold::RUN_READ_COMMAND {
+            assert_eq!(call.sender_euid, 2000);
+            assert_eq!(call.sender_pid, 97330);
+            return self.command(call);
+        }
         assert_eq!(call.sender_euid, 1000);
         let mut p = Parcel::new();
         match call.code {
@@ -89,6 +104,126 @@ impl Service for Cold {
     }
 }
 impl Cold {
+    fn file(&self, descriptor: Descriptor) -> aim_binder_host::server::RetainedFd {
+        aim_binder_host::server::file_fd(&self.0.file(descriptor.0).unwrap()).unwrap()
+    }
+    fn command(&self, call: &mut Call<'_>) -> Reply {
+        let a = cold::RunReadCommand::<Descriptor>::read(&mut call.data)?;
+        assert_eq!(call.data.remaining(), 0);
+        let mut input = self.file(a.input.unwrap());
+        let mut out = self.file(a.output.unwrap());
+        let mut err = self.file(a.error.unwrap());
+        let mut text = String::new();
+        input.read_to_string(&mut text).unwrap();
+        assert!(text.is_empty());
+        let Binder::Handle(handle) = a.packages.unwrap() else {
+            panic!("package capability")
+        };
+        let package = Arc::new(self.0.strong(handle));
+        *self.1.lock().unwrap() = Some(package.clone());
+        let denied = package
+            .transact(pm::SET_APPLICATION_ENABLED_SETTING, &Parcel::new(), false)
+            .unwrap();
+        assert_eq!(
+            denied.reader().read_exception().unwrap().unwrap_err().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        let args = a
+            .arguments
+            .unwrap()
+            .into_iter()
+            .map(Option::unwrap)
+            .collect::<Vec<_>>();
+        let cmd = args[0].as_str();
+        let status = if cmd != "get-shared-uid-allowlist" && args.len() == 1 {
+            writeln!(
+                err,
+                "Error: no {} specified{}",
+                if cmd == "get-signature-permission-allowlist" {
+                    "partition"
+                } else {
+                    "package"
+                },
+                if cmd.starts_with("dump") { "" } else { "." }
+            )
+            .unwrap();
+            1
+        } else {
+            match cmd {
+                "dump-package" => self.dump(&package, &mut out, &[&args[1]]),
+                "dump" => {
+                    for (name, binder, args) in [
+                        (
+                            "package",
+                            Some(Binder::Handle(handle)),
+                            vec![args[1].as_str()],
+                        ),
+                        (
+                            "activity",
+                            a.activity,
+                            vec!["-a", "package", args[1].as_str()],
+                        ),
+                        (
+                            "meminfo",
+                            a.meminfo,
+                            vec!["--local", "--package", args[1].as_str()],
+                        ),
+                        ("procstats", a.procstats, vec![args[1].as_str()]),
+                        ("usagestats", a.usagestats, vec![args[1].as_str()]),
+                        ("batterystats", a.batterystats, vec![args[1].as_str()]),
+                    ] {
+                        if name != "package" {
+                            writeln!(out).unwrap();
+                        }
+                        writeln!(out, "DUMP OF SERVICE {name}:").unwrap();
+                        if let Some(Binder::Handle(h)) = binder {
+                            self.dump(&self.0.strong(h), &mut out, &args);
+                        } else {
+                            writeln!(out, "  (Service not found)").unwrap();
+                        }
+                    }
+                }
+                "get-privapp-permissions"
+                | "get-privapp-deny-permissions"
+                | "get-oem-permissions" => {
+                    let mut p = Parcel::new();
+                    pm::GetApplicationInfo {
+                        package_name: Some(args[1].clone()),
+                        flags: 0,
+                        user_id: 0,
+                    }
+                    .write(&mut p);
+                    let r = package
+                        .transact(pm::GET_APPLICATION_INFO, &p, false)
+                        .unwrap();
+                    let mut reader = r.reader();
+                    reader.read_exception().unwrap().unwrap();
+                    assert_eq!(reader.read_i32().unwrap(), 1);
+                    assert!(reader.remaining() > 100);
+                    writeln!(out, "{{}}").unwrap();
+                }
+                "get-signature-permission-allowlist" | "get-shared-uid-allowlist" => {}
+                _ => panic!("unexpected cold shell verb {cmd}"),
+            }
+            0
+        };
+        let mut p = Parcel::new();
+        cold::write_run_read_command_reply(&mut p, status);
+        Ok(p)
+    }
+    fn dump(&self, owner: &Strong, out: &mut aim_binder_host::server::RetainedFd, args: &[&str]) {
+        let mut p = Parcel::new();
+        p.write_file(out.try_clone().unwrap().into_file_owner());
+        aim_service_aidl::write_string_list(
+            &mut p,
+            Some(&args.iter().map(|s| Some((*s).into())).collect::<Vec<_>>()),
+        );
+        let result = owner.transact(crate::package::dump::DUMP_TRANSACTION, &p, false);
+        match result {
+            Ok(r) if r.reader().read_exception().unwrap().is_ok() => {}
+            _ => writeln!(out, "Failure dumping service:").unwrap(),
+        }
+    }
     fn groups(&self, binder: Binder) {
         use aim_service_aidl::android_permission_ipermissionmanager as permission;
         let Binder::Handle(h) = binder else {
@@ -112,6 +247,7 @@ struct Shell {
     package: Strong,
     result: Binder,
     statuses: mpsc::Receiver<i32>,
+    retained: Arc<Mutex<Option<Arc<Strong>>>>,
 }
 impl Shell {
     fn new() -> Self {
@@ -125,6 +261,15 @@ impl Shell {
         });
         let session = session_with_fixture(fixture);
         let f = &session.fixture;
+        let mut request = Parcel::new();
+        request.write_binder(Some(f.native.add_service(Arc::new(
+            crate::app_host::package_shell_read::ShellRead(session.host.clone()),
+        ))));
+        session
+            .bridge
+            .owner
+            .transact(SET_TEST_SHELL_READ, &request, false)
+            .unwrap();
         let image = f.root.join("image");
         let data = f.root.join("data");
         std::fs::create_dir_all(image.join("system/framework")).unwrap();
@@ -185,12 +330,17 @@ impl Shell {
         let mut context = (**before.context()).clone();
         context.scan_version = before.scan().version() + 1;
         context.system.features = vec![("fixture.feature".into(), 2)];
+        context.system.diagnostic_dates = Some(Arc::new(crate::package::dump::Dates::new(
+            session.bridge.clone(),
+            Arc::downgrade(&f.system),
+        )));
         context.system.system_permissions = Some(
             [(
                 2000,
                 [
                     "android.permission.MANAGE_USERS".into(),
                     "android.permission.INTERACT_ACROSS_USERS_FULL".into(),
+                    "android.permission.DUMP".into(),
                 ]
                 .into(),
             )]
@@ -231,7 +381,8 @@ impl Shell {
                 .insert(name.into(), f.native.add_service(service));
         }
         let original = &f.original[0];
-        let node = original.add_service(Arc::new(Cold(original.clone())));
+        let retained = Arc::new(Mutex::new(None));
+        let node = original.add_service(Arc::new(Cold(original.clone(), retained.clone())));
         let mut p = Parcel::new();
         sp::AttachPackageShellRead { owner: Some(node) }.write(&mut p);
         lookup(original, "aim.system_process")
@@ -260,6 +411,7 @@ impl Shell {
             package,
             result,
             statuses,
+            retained,
         }
     }
     fn command(&self, args: &[&str]) -> (i32, String, String) {
@@ -426,4 +578,184 @@ fn path() {
     let s = Shell::new();
     s.check(&["path", "p"], 0, "package:/data/app/p/base.apk\n");
     s.check(&["path", "absent"], 1, "");
+}
+
+#[test]
+fn dump_package() {
+    let s = Shell::new();
+    assert_eq!(
+        s.command(&["dump-package"]),
+        (1, String::new(), "Error: no package specified\n".into())
+    );
+    s.check(
+        &["dump-package", "missing.package"],
+        0,
+        "Unable to find package: missing.package\n",
+    );
+    let (status, out, err) = s.command(&["dump-package", "p"]);
+    assert_eq!((status, err), (0, String::new()));
+    assert!(out.contains("Package [p]"));
+    assert!(out.contains("userId=10100"));
+    assert!(out.contains("firstInstallTime=fixture-date-"));
+    assert!(out.contains("fixture.permission: granted=true, flags=[ USER_SET]"));
+    let retained = s.retained.lock().unwrap().take().unwrap();
+    let reply = retained
+        .transact(
+            crate::package::dump::DUMP_TRANSACTION,
+            &Parcel::new(),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        reply
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap_err()
+            .message,
+        "shell read capability retired"
+    );
+}
+
+#[test]
+fn dump() {
+    let s = Shell::new();
+    assert_eq!(
+        s.command(&["dump"]),
+        (1, String::new(), "Error: no package specified\n".into())
+    );
+    let (status, out, err) = s.command(&["dump", "missing.package"]);
+    assert_eq!((status, err), (0, String::new()));
+    assert!(out.starts_with("DUMP OF SERVICE package:\nUnable to find package: missing.package\n"));
+    for service in [
+        "activity",
+        "meminfo",
+        "procstats",
+        "usagestats",
+        "batterystats",
+    ] {
+        assert!(out.contains(&format!("\nDUMP OF SERVICE {service}:\n")));
+    }
+}
+
+#[test]
+fn dump_package_checks_the_shell_permission_before_reading_state() {
+    let s = Shell::new();
+    let f = &s.session.fixture;
+    let before = f.system.capture_package_queries().unwrap();
+    let mut context = (**before.context()).clone();
+    context.scan_version = before.scan().version() + 1;
+    context
+        .system
+        .system_permissions
+        .as_mut()
+        .unwrap()
+        .get_mut(&2000)
+        .unwrap()
+        .remove("android.permission.DUMP");
+    f.system
+        .publish_package_scan_with_queries(
+            &s.session.bridge,
+            Some(before.scan()),
+            before.scan().owner().clone(),
+            before.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    s.check(&["dump-package", "missing.package"], 0,
+        "Permission Denial: can't dump PackageManager from from pid=97330, uid=2000 due to missing android.permission.DUMP permission\n");
+}
+
+#[test]
+fn get_privapp_permissions() {
+    let s = Shell::new();
+    s.check(&["get-privapp-permissions", "p"], 0, "{}\n");
+    assert_eq!(
+        s.command(&["get-privapp-permissions"]),
+        (1, String::new(), "Error: no package specified.\n".into())
+    );
+}
+#[test]
+fn get_privapp_deny_permissions() {
+    Shell::new().check(&["get-privapp-deny-permissions", "p"], 0, "{}\n");
+}
+#[test]
+fn get_oem_permissions() {
+    Shell::new().check(&["get-oem-permissions", "p"], 0, "{}\n");
+}
+#[test]
+fn get_signature_permission_allowlist() {
+    Shell::new().check(&["get-signature-permission-allowlist", "system"], 0, "");
+}
+#[test]
+fn get_shared_uid_allowlist() {
+    Shell::new().check(&["get-shared-uid-allowlist"], 0, "");
+}
+#[test]
+fn list_staged_sessions() {
+    use crate::package::installer::{Sessions, endpoint::Endpoint, native::NativeOwners, storage};
+    let s = Shell::new();
+    let f = &s.session.fixture;
+    let inode = aim_storage::guest_inode::GuestInode {
+        uid: Some(1000),
+        gid: Some(1000),
+        mode: Some(0o600),
+    };
+    let disk = storage::Store::open(
+        f.root.join("data"),
+        inode,
+        inode,
+        Arc::new(|_, _| panic!("read-only staged listing attempted a write")),
+    )
+    .unwrap();
+    let system = Arc::downgrade(&f.system);
+    let process = f.native.clone();
+    let owner = NativeOwners::open(
+        Arc::new(Sessions::default()),
+        Arc::new(move || {
+            system
+                .upgrade()
+                .unwrap()
+                .capture_package_queries()
+                .map(|c| c.state().clone())
+        }),
+        Arc::new(|_, _, _| panic!("read-only listing attempted install policy")),
+        Default::default(),
+        disk,
+        Arc::new(move |service| Ok(process.add_service(service))),
+        Arc::new(|_| panic!("read-only listing emitted a session event")),
+        f.native.clone(),
+    )
+    .unwrap();
+    let binder = f.native.add_service(Arc::new(Endpoint {
+        sessions: owner.sessions.clone(),
+        owners: owner.clone(),
+    }));
+    f.system
+        .package_bootstrap
+        .lock()
+        .unwrap()
+        .current
+        .as_mut()
+        .unwrap()
+        .installer = Some((owner, binder));
+    s.check(&["list", "staged-sessions"], 1, "");
+    s.check(&["get-stagedsessions", "--only-ready"], 1, "");
+    s.check(&["list", "staged-sessions", "--", "--bad"], 1, "");
+    s.check(&["list", "staged-sessions", "ignored", "--bad"], 1, "");
+    s.check(
+        &["list", "staged-sessions", "--bad"],
+        -1,
+        "Error: Unknown option: --bad\n",
+    );
+}
+#[test]
+fn has_feature() {
+    let s = Shell::new();
+    s.check(&["has-feature", "fixture.feature", "2"], 0, "true\n");
+    s.check(&["has-feature", "fixture.feature", "3"], 1, "false\n");
+    assert_eq!(
+        s.command(&["has-feature"]),
+        (1, String::new(), "Error: expected FEATURE name\n".into())
+    );
 }

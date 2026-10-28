@@ -620,7 +620,13 @@ fn remove(
 }
 fn staged_list(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Result<i32, Exception> {
     let (mut only_parent, mut only_ready, mut only_id) = (false, false, false);
-    for opt in args {
+    for opt in args
+        .iter()
+        .take_while(|arg| arg.starts_with('-') && arg.len() > 1)
+    {
+        if opt == "--" {
+            break;
+        }
         match opt.as_str() {
             "--only-parent" => only_parent = true,
             "--only-ready" => only_ready = true,
@@ -706,6 +712,10 @@ fn staged_list(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Result<
         }
     }
     Ok(1)
+}
+pub(super) fn list_staged(ctx: &mut Context<'_>, args: &[String]) -> Result<i32, Exception> {
+    let owner = installer(ctx)?;
+    staged_list(ctx, owner, args)
 }
 fn print_session(ctx: &mut Context<'_>, s: &SessionInfo, id: bool, indent: &str) {
     if id {

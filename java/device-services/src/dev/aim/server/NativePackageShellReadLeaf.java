@@ -18,6 +18,15 @@ public final class NativePackageShellReadLeaf extends IPackageShellReadLeaf.Stub
         this.context=Objects.requireNonNull(context);this.packages=Objects.requireNonNull(packages);
     }
     private static void enforce(){if(Binder.getCallingUid()!=1000)throw new SecurityException("Native shell owner required");}
+    @Override public int runReadCommand(String[] args, ParcelFileDescriptor input,
+            ParcelFileDescriptor output, ParcelFileDescriptor error) {
+        if (Binder.getCallingUid() != 0 && Binder.getCallingUid() != 2000)
+            throw new SecurityException("Shell commands are only callable by ADB");
+        try (var capture = packages.computer()) {
+            return com.android.server.pm.NativePackageReadCommand.run(context,
+                    capture.readQueries(), null, args, input, output, error);
+        }
+    }
     private static String[] lines(String text){return text.split("\\n",-1).length==1&&text.isEmpty()?new String[0]:text.substring(0,text.endsWith("\n")?text.length()-1:text.length()).split("\\n",-1);}
     @Override public String[] listPermissionGroups(int uid,int pid)throws RemoteException{
         enforce();
