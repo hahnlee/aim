@@ -1561,7 +1561,6 @@ mod tests {
                 layer: std::ptr::null_mut(),
                 view: std::ptr::null_mut(),
                 bounds: [0, 0, 100, 100],
-                caption: 0,
                 visible: true,
                 closed: false,
                 moved: None,
