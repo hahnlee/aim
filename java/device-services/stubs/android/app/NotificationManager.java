@@ -5,6 +5,8 @@ package android.app;
 import android.os.UserHandle;
 
 public class NotificationManager {
+    public static final int IMPORTANCE_LOW = 2;
+    public void createNotificationChannel(NotificationChannel channel) { throw new RuntimeException("stub"); }
     public NotificationManager(android.content.Context context) { throw new RuntimeException("stub"); }
     public void notifyAsUser(String tag, int id, Notification notification, UserHandle user) { throw new RuntimeException("stub"); }
     public void cancelAsUser(String tag, int id, UserHandle user) { throw new RuntimeException("stub"); }

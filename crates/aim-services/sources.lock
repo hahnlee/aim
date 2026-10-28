@@ -422,6 +422,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IAlarmIndicator|java/device-services/aidl/dev/aim/server/IAlarmIndicator.aidl|*"
   "dev.aim.server.IAlarmIndicatorListener|java/device-services/aidl/dev/aim/server/IAlarmIndicatorListener.aidl|*"
   "dev.aim.server.IMediaArtwork|java/device-services/aidl/dev/aim/server/IMediaArtwork.aidl|*"
+  "dev.aim.server.IPreBootNotifications|java/device-services/aidl/dev/aim/server/IPreBootNotifications.aidl|*"
   "dev.aim.server.INetworkStatsBridge|java/device-services/aidl/dev/aim/server/INetworkStatsBridge.aidl|*"
   "dev.aim.server.IPackageShellReadLeaf|java/device-services/aidl/dev/aim/server/IPackageShellReadLeaf.aidl|*"
   "dev.aim.server.IPackageShellPolicyBridge|java/device-services/aidl/dev/aim/server/IPackageShellPolicyBridge.aidl|*"

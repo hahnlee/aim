@@ -8,6 +8,8 @@ import android.os.Bundle;
 import android.os.UserHandle;
 
 public final class PendingIntent implements android.os.Parcelable {
+    public static final int FLAG_IMMUTABLE = 0x04000000;
+    public static PendingIntent getActivity(Context context, int requestCode, Intent intent, int flags) { throw new RuntimeException("stub"); }
     public String getCreatorPackage() { throw new RuntimeException("stub"); }
     public int describeContents(){throw new RuntimeException("stub");}
     public void writeToParcel(android.os.Parcel p,int flags){throw new RuntimeException("stub");}

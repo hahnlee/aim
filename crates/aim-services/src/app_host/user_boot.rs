@@ -9,6 +9,8 @@
 //! `finishUserUnlockedCompleted` (`onUserLoggedIn`, `BOOT_COMPLETED`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use aim_binder_host::parcel::Parcel;
+use aim_service_aidl::dev_aim_server_iprebootnotifications as notification;
 use std::sync::Arc;
 
 use super::AppHost;
@@ -241,6 +243,9 @@ impl AppHost {
         at: usize,
         done: Done,
     ) {
+        if let Err(e) = self.pre_boot_notification(targets.len(), at) {
+            eprintln!("app host: pre-boot notification: {e}");
+        }
         let Some((package, class)) = targets.get(at) else {
             return done();
         };
@@ -257,6 +262,27 @@ impl AppHost {
                 host.send_pre_boot_from(rest, at + 1, done)
             })),
         );
+    }
+
+    fn pre_boot_notification(&self, total: usize, index: usize) -> Result<(), String> {
+        let service = super::display::check_service(&self.process, "aim.pre_boot_notifications")?;
+        let mut p = Parcel::new();
+        notification::Update {
+            user_id: USER,
+            total: total
+                .try_into()
+                .map_err(|_| "too many pre-boot receivers")?,
+            index: index
+                .try_into()
+                .map_err(|_| "too many pre-boot receivers")?,
+        }
+        .write(&mut p);
+        let reply = service
+            .transact(notification::UPDATE, &p, false)
+            .map_err(|e| format!("update: {e}"))?;
+        notification::read_update_reply(&mut reply.reader())
+            .map_err(|e| format!("update reply: {e}"))?
+            .map_err(|e| e.message)
     }
 
     /// `persist.pm.mock-upgrade`, which sends the pre-boot broadcast as

@@ -11,6 +11,7 @@ public class Notification implements android.os.Parcelable {
     public android.graphics.drawable.Icon getSmallIcon() { throw new RuntimeException("stub"); }
     public String getChannelId() { throw new RuntimeException("stub"); }
     public static final int DEFAULT_LIGHTS = 4;
+    public static final int VISIBILITY_PUBLIC = 1;
 
     public Notification() { throw new RuntimeException("stub"); }
 
@@ -25,6 +26,9 @@ public class Notification implements android.os.Parcelable {
         public Builder setOngoing(boolean ongoing) { throw new RuntimeException("stub"); }
         public Builder setDefaults(int defaults) { throw new RuntimeException("stub"); }
         public Builder setColor(int argb) { throw new RuntimeException("stub"); }
+        public Builder setTicker(CharSequence ticker) { throw new RuntimeException("stub"); }
+        public Builder setVisibility(int visibility) { throw new RuntimeException("stub"); }
+        public Builder setProgress(int max, int progress, boolean indeterminate) { throw new RuntimeException("stub"); }
         public Notification build() { throw new RuntimeException("stub"); }
     }
 }

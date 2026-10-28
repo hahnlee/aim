@@ -99,6 +99,7 @@ const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE
 /// it), and the listeners apps registered (`mCallbacks`).
 #[derive(Default)]
 pub struct Volumes {
+    pub(super) boot_completed: std::sync::atomic::AtomicBool,
     volume: Mutex<Option<VolumeInfo>>,
     /// Storage successfully prepared by vold and installd, before the user
     /// enters unlocking. This is independent of the user's lifecycle state.
@@ -1248,6 +1249,21 @@ impl AppHost {
             data.write_i32(info.state);
             send(listener, ON_VOLUME_STATE_CHANGED_EVENT, &data);
         }
+        if let Some(intent) = volume_state_intent(
+            info,
+            self.storage
+                .boot_completed
+                .load(std::sync::atomic::Ordering::Acquire),
+        ) {
+            self.broadcasts.send_from_system_with(
+                self,
+                intent,
+                -1,
+                &[WRITE_MEDIA_STORAGE.to_string()],
+                None,
+                None,
+            );
+        }
         let (old_env, new_env) = (environment(old), environment(info.state));
         let visible =
             info.mount_user == USER && info.mount_flags & MOUNT_FLAG_VISIBLE_FOR_WRITE != 0;
@@ -1272,6 +1288,35 @@ impl AppHost {
             send(listener, ON_STORAGE_STATE_CHANGED, &data);
         }
     }
+}
+
+/// `StorageManagerService.isBroadcastWorthy` and its internal broadcast.
+fn volume_state_intent(info: &VolumeInfo, boot_completed: bool) -> Option<super::kept::RawIntent> {
+    use crate::bundle::Value;
+    if !boot_completed
+        || !matches!(info.kind, 0 | 1 | 2 | 5)
+        || !matches!(info.state, 0 | 2 | 3 | 5 | 6 | 8)
+    {
+        return None;
+    }
+    Some(super::kept::RawIntent::new(
+        "android.os.storage.action.VOLUME_STATE_CHANGED",
+        FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT | FLAG_RECEIVER_INCLUDE_BACKGROUND,
+        &[
+            (
+                "android.os.storage.extra.VOLUME_ID",
+                Value::String(Some(info.id.into())),
+            ),
+            (
+                "android.os.storage.extra.VOLUME_STATE",
+                Value::Int(info.state),
+            ),
+            (
+                "android.os.storage.extra.FS_UUID",
+                Value::String(info.fs_uuid.clone()),
+            ),
+        ],
+    ))
 }
 
 /// `VolumeInfo.getBroadcastForEnvironment`.
@@ -1894,6 +1939,52 @@ mod tests {
         assert!(available());
         assert!(!host.user_unlocking_or_unlocked(0).unwrap());
         assert!(!host.ce_storage_prepared(10));
+    }
+
+    /// StorageManagerService.isBroadcastWorthy's complete type/state matrix,
+    /// including the boot gate and the nullable filesystem UUID on the wire.
+    #[test]
+    fn internal_volume_broadcast_follows_the_boot_gate_and_volume_state() {
+        use crate::bundle::Value;
+        let mut info = VolumeInfo::created(TYPE_PRIVATE, None, -1);
+        for kind in -1..=6 {
+            info.kind = kind;
+            for state in -1..=9 {
+                info.state = state;
+                assert!(volume_state_intent(&info, false).is_none());
+                let intent = volume_state_intent(&info, true);
+                let expected = [0, 1, 2, 5].contains(&kind) && [0, 2, 3, 5, 6, 8].contains(&state);
+                assert_eq!(intent.is_some(), expected, "type {kind}, state {state}");
+                if let Some(intent) = intent {
+                    assert_eq!(
+                        intent.intent.action.as_deref(),
+                        Some("android.os.storage.action.VOLUME_STATE_CHANGED")
+                    );
+                    assert_eq!(intent.intent.flags, 0x0500_0000);
+                    let extras = intent.test_extras();
+                    assert_eq!(extras.len(), 3);
+                    assert_eq!(
+                        extras["android.os.storage.extra.VOLUME_STATE"],
+                        Value::Int(state)
+                    );
+                    assert_eq!(
+                        extras["android.os.storage.extra.VOLUME_ID"],
+                        Value::String(Some(VOLUME.into()))
+                    );
+                    assert_eq!(
+                        extras["android.os.storage.extra.FS_UUID"],
+                        Value::String(None)
+                    );
+                }
+            }
+        }
+        info.kind = TYPE_PRIVATE;
+        info.state = STATE_MOUNTED;
+        info.fs_uuid = Some("1234-5678".into());
+        assert_eq!(
+            volume_state_intent(&info, true).unwrap().test_extras()["android.os.storage.extra.FS_UUID"],
+            Value::String(info.fs_uuid)
+        );
     }
 
     /// A listener of this process is told each volume's change, until it
