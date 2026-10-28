@@ -760,6 +760,10 @@ isolated compilation, contextual search and system captions (no
 
 Off since 2026-09-30, by the device's configuration: network time and
 OTA dexopt (`init.aim.rc` sets the two properties at `early-init`).
+GestureLauncherService is off through the framework-res static overlay
+(`java/framework-overlay`: both gestures false, the lift trigger already
+-1, #526); `wallpaper_effects_generation` through the lightweight
+shell's overlay (its service name empty).
 Wi-Fi stays declared: presenting the Mac's network as Wi-Fi (#265)
 needs the features. USB stays: without the `usb` service GMS persistent
 crash-loops (#336), so `android.hardware.usb.host` is declared.
