@@ -3,7 +3,6 @@
 use super::*;
 use crate::package::scan::permission_admissions::Admission;
 mod signature;
-use aim_service_aidl::dev_aim_server_ipermissionbootpolicy as original;
 use signature::Policy;
 
 type Evaluate<'a> = dyn Fn(&Permission, i32, i32, i32, i32) -> Result<i32, Exception> + 'a;
@@ -16,68 +15,6 @@ fn unsupported(branch: &str) -> Exception {
 }
 
 impl PermissionManager {
-    pub(in crate::app_host) fn attach_boot_policy(
-        &self,
-        policy: Option<Binder>,
-    ) -> Result<(), Exception> {
-        let Some(Binder::Handle(handle)) = policy else {
-            return Err(Exception::illegal_argument(
-                "no permission boot policy bridge",
-            ));
-        };
-        *self.boot_policy.0.lock().unwrap() = Some(Arc::new(self.host.process.strong(handle)));
-        self.boot_policy.1.notify_all();
-        Ok(())
-    }
-
-    fn evaluate_boot_permission(
-        &self,
-        permission: &Permission,
-        info_flags: i32,
-        target: i32,
-        old: i32,
-        new: i32,
-    ) -> Result<i32, Exception> {
-        let transport = |s| {
-            Exception::new(
-                EX_ILLEGAL_STATE,
-                format!("permission boot policy: binder status {s}"),
-            )
-        };
-        let owner = {
-            let (owner, _) = self
-                .boot_policy
-                .1
-                .wait_timeout_while(
-                    self.boot_policy.0.lock().unwrap(),
-                    std::time::Duration::from_secs(30),
-                    |owner| owner.is_none(),
-                )
-                .unwrap();
-            owner.clone()
-        }
-        .ok_or_else(|| {
-            Exception::new(
-                EX_ILLEGAL_STATE,
-                "permission boot policy is not attached (#2282)",
-            )
-        })?;
-        let mut data = Parcel::new();
-        original::EvaluatePermission {
-            name: Some(permission.name.clone()),
-            protection_level: permission.protection_level,
-            info_flags,
-            target_sdk_version: target,
-            old_flags: old,
-            new_flags: new,
-        }
-        .write(&mut data);
-        let result = owner
-            .transact(original::EVALUATE_PERMISSION, &data, false)
-            .map_err(transport)?;
-        original::read_evaluate_permission_reply(&mut result.reader()).map_err(transport)?
-    }
-
     /// PermissionService queues onPackageAdded until onStorageVolumeMounted.
     /// Commit the batch through the sole access owner before query publication.
     pub(crate) fn reconcile_boot(
@@ -110,7 +47,7 @@ impl PermissionManager {
             admissions,
             is_system_updated,
             &policy,
-            &|p, info, target, old, new| self.evaluate_boot_permission(p, info, target, old, new),
+            &|p, info, target, old, new| Ok(evaluate_permission(p, info, target, old, new)),
         )?;
         if *after.system != *base.system {
             self.write_system(&after.system)?;
@@ -512,7 +449,61 @@ fn reconcile(
     })
 }
 
-/// Existing runtime transitions; Java evaluates restrictions before publication.
+/// AppIdPermissionPolicy.kt at android-16.0.0_r1, services/permission/java/
+/// com/android/server/permission/access/permission/ (Apache-2.0).
+/// Keep this mount-time evaluation before publication, not at systemReady:
+/// PackageManagerService.java:2368-2376; PermissionService.kt:2394-2404;
+/// AppIdPermissionPolicy.kt:101-127. No Java state or late policy owner is needed.
+fn evaluate_permission(
+    permission: &Permission,
+    info_flags: i32,
+    target: i32,
+    old: i32,
+    mut new: i32,
+) -> i32 {
+    match permission.protection_level & PROTECTION_MASK_BASE {
+        PROTECTION_SIGNATURE | 4 => {
+            // AppIdPermissionPolicy.kt:1066-1070: retain dynamic role grants.
+            if is_role(permission) {
+                new |= old & (ROLE | RUNTIME_GRANTED);
+            }
+        }
+        PROTECTION_DANGEROUS => {
+            let hard = info_flags & FLAG_HARD_RESTRICTED != 0;
+            let soft = info_flags & FLAG_SOFT_RESTRICTED != 0;
+            // AppIdPermissionPolicy.kt:1183-1205: all three persisted exemptions;
+            // previously unevaluated restricted permissions start upgrade-exempt.
+            let mut exempt = new & (INSTALLER_EXEMPT | SYSTEM_EXEMPT | UPGRADE_EXEMPT) != 0;
+            if (hard || soft) && !exempt && new & (RESTRICTION_REVOKED | SOFT_RESTRICTED) == 0 {
+                new |= UPGRADE_EXEMPT;
+                exempt = true;
+            }
+            // AppIdPermissionPolicy.kt:1206-1211: hard restriction.
+            if hard && !exempt {
+                new |= RESTRICTION_REVOKED;
+            } else {
+                new &= !RESTRICTION_REVOKED;
+            }
+            // AppIdPermissionPolicy.kt:1212-1227,1538-1548: soft restriction;
+            // storage uses the minimum target SDK of the UID's requesters.
+            let storage_exempt = target >= 29
+                && matches!(
+                    permission.name.as_str(),
+                    "android.permission.READ_EXTERNAL_STORAGE"
+                        | "android.permission.WRITE_EXTERNAL_STORAGE"
+                );
+            if soft && !exempt && !storage_exempt {
+                new |= SOFT_RESTRICTED;
+            } else {
+                new &= !SOFT_RESTRICTED;
+            }
+        }
+        _ => {}
+    }
+    new
+}
+
+/// Existing runtime transitions; restrictions are evaluated before publication.
 fn runtime_flags(
     base: &permissions::AccessView,
     user: &AccessUser,
@@ -1243,9 +1234,167 @@ mod tests {
     }
 
     #[test]
+    fn restricted_and_role_rules_match_the_retained_java_cases() {
+        let check = |name: &str, level, info, target, old, new, expected| {
+            let permission = Permission {
+                name: name.into(),
+                package: "owner".into(),
+                protection_level: level,
+                dynamic: None,
+            };
+            assert_eq!(
+                evaluate_permission(&permission, info, target, old, new),
+                expected,
+                "{name}: level={level}, info={info}, target={target}, old={old}, new={new}"
+            );
+        };
+        let granted = RUNTIME_GRANTED | USER_SET;
+        for info in [FLAG_HARD_RESTRICTED, FLAG_SOFT_RESTRICTED] {
+            let restriction = if info == FLAG_HARD_RESTRICTED {
+                RESTRICTION_REVOKED
+            } else {
+                SOFT_RESTRICTED
+            };
+            for grant in [0, granted] {
+                let denied = grant | restriction;
+                check("restricted", 1, info, 36, denied, denied, denied);
+                for source in [
+                    INSTALLER_EXEMPT,
+                    SYSTEM_EXEMPT,
+                    UPGRADE_EXEMPT,
+                    INSTALLER_EXEMPT | SYSTEM_EXEMPT | UPGRADE_EXEMPT,
+                ] {
+                    let exempt = denied | source;
+                    check("restricted", 1, info, 36, exempt, exempt, grant | source);
+                }
+                check("new", 1, info, 36, grant, grant, grant | UPGRADE_EXEMPT);
+            }
+        }
+        for name in [
+            "android.permission.READ_EXTERNAL_STORAGE",
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+        ] {
+            let old = granted | SOFT_RESTRICTED;
+            check(name, 1, FLAG_SOFT_RESTRICTED, 28, old, old, old);
+            check(name, 1, FLAG_SOFT_RESTRICTED, 29, old, old, granted);
+        }
+        let old = granted | RESTRICTION_REVOKED | SOFT_RESTRICTED;
+        check("no longer restricted", 1, 0, 36, old, old, granted);
+        for base in [2, 4] {
+            for old in [0, ROLE, RUNTIME_GRANTED, ROLE | RUNTIME_GRANTED] {
+                check("role", base | PROTECTION_FLAG_ROLE, 0, 36, old, 0, old);
+                check(
+                    "role with static grant",
+                    base | PROTECTION_FLAG_ROLE,
+                    0,
+                    36,
+                    old,
+                    PROTECTION_GRANTED,
+                    old | PROTECTION_GRANTED,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn package_boot_reconciles_without_a_system_process_or_policy_bridge() {
+        // A local host with no remote binder/process attached. Exercise the real
+        // access owner, persistence and reload, not an injected evaluator.
+        for updated in [false, true] {
+            for fresh in [false, true] {
+                for (level, info, old, expected) in [
+                    (
+                        1,
+                        FLAG_HARD_RESTRICTED,
+                        RUNTIME_GRANTED,
+                        RUNTIME_GRANTED | UPGRADE_EXEMPT,
+                    ),
+                    (
+                        1,
+                        FLAG_HARD_RESTRICTED,
+                        RUNTIME_GRANTED | RESTRICTION_REVOKED,
+                        RUNTIME_GRANTED | RESTRICTION_REVOKED,
+                    ),
+                    (
+                        1,
+                        FLAG_SOFT_RESTRICTED,
+                        RUNTIME_GRANTED | SYSTEM_EXEMPT | SOFT_RESTRICTED,
+                        RUNTIME_GRANTED | SYSTEM_EXEMPT,
+                    ),
+                    (
+                        2 | PROTECTION_FLAG_ROLE,
+                        0,
+                        ROLE | RUNTIME_GRANTED,
+                        ROLE | RUNTIME_GRANTED,
+                    ),
+                    (
+                        4 | PROTECTION_FLAG_ROLE,
+                        0,
+                        ROLE | RUNTIME_GRANTED,
+                        ROLE | RUNTIME_GRANTED,
+                    ),
+                ] {
+                    let fixture = PersistedAccess::new();
+                    if !fresh {
+                        fixture.write(SYSTEM_ACCESS, format!("<access><permissions><permission name=\"owner.TEST\" packageName=\"owner\" protectionLevel=\"{level:x}\" type=\"0\"/></permissions><permission-trees/></access>").as_bytes());
+                        // Definitions use hex, user flags use decimal in text XML.
+                        // An unchanged mount starts with already evaluated flags.
+                        let initial = if updated { old } else { expected };
+                        fixture.write(USER0_ACCESS, format!("<access><package-versions><package name=\"owner\" version=\"17\"/><package name=\"client\" version=\"17\"/></package-versions><app-id-permissions><app-id id=\"10002\"><permission name=\"owner.TEST\" flags=\"{initial}\"/></app-id></app-id-permissions></access>").as_bytes());
+                    }
+                    let manager = PermissionManager::new(fixture.host.clone());
+                    let mut state = state();
+                    let declaration = &mut Arc::make_mut(
+                        state
+                            .packages
+                            .get_mut("owner")
+                            .unwrap()
+                            .pkg
+                            .as_mut()
+                            .unwrap(),
+                    )
+                    .permissions[0];
+                    declaration.protection_level = level;
+                    declaration.component.flags = info;
+                    let receipts = admissions(&state);
+                    let after = manager
+                        .reconcile_boot(&state, &receipts.iter().collect::<Vec<_>>(), updated)
+                        .unwrap();
+                    let expected = if fresh {
+                        if level == 1 { UPGRADE_EXEMPT } else { 0 }
+                    } else {
+                        expected
+                    };
+                    assert_eq!(
+                        after.user0.permission_flags(10002, "owner.TEST"),
+                        expected,
+                        "updated={updated}, fresh={fresh}, level={level}, info={info}"
+                    );
+                    let reload = PermissionManager::new(fixture.host.clone())
+                        .retained_access()
+                        .unwrap();
+                    assert_eq!(*after.user0, *reload.user0);
+                    if !updated && !fresh {
+                        assert!(
+                            manager.access_writes.lock().unwrap().is_empty(),
+                            "unchanged mount wrote access: level={level}, info={info}"
+                        );
+                    }
+                    let writes = manager.access_writes.lock().unwrap().len();
+                    let repeat = manager
+                        .reconcile_boot(&state, &receipts.iter().collect::<Vec<_>>(), false)
+                        .unwrap();
+                    assert!(after.same_base(&repeat));
+                    assert_eq!(manager.access_writes.lock().unwrap().len(), writes);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn update_projects_restricted_and_role_state_through_cold_policy() {
-        // The JVM test executes the policy. Here verify that reconciliation
-        // passes the native snapshot intact and publishes only the returned flags.
+        // Verify the evaluator receives the native snapshot intact and a
+        // failed evaluation cannot publish partial flags.
         for (info, level, old, result) in [
             (
                 FLAG_HARD_RESTRICTED,
@@ -1346,45 +1495,6 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.message, "policy failed");
             assert_eq!(base.user0.permission_flags(10002, "owner.TEST"), old);
-        }
-    }
-
-    #[test]
-    fn policy_attachment_requires_system_uid_and_a_bridge() {
-        use aim_service_aidl::dev_aim_server_isystemprocess as sp;
-        let fixture = PersistedAccess::new();
-        assert!(
-            fixture
-                .host
-                .permission_manager
-                .set(Arc::new(PermissionManager::new(fixture.host.clone())))
-                .is_ok()
-        );
-        let endpoint = crate::app_host::system_process::SystemProcess::new(fixture.host.clone());
-        let mut data = Parcel::new();
-        sp::AttachPermissionBootPolicy { policy: None }.write(&mut data);
-        for (uid, expected) in [
-            (10100, aim_binder_host::parcel::EX_SECURITY),
-            (1000, aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT),
-        ] {
-            let response = endpoint
-                .transact(&mut Call {
-                    code: sp::ATTACH_PERMISSION_BOOT_POLICY,
-                    flags: 0,
-                    sender_pid: 42,
-                    sender_euid: uid,
-                    data: data.reader(),
-                })
-                .unwrap();
-            assert_eq!(
-                response
-                    .reader()
-                    .read_exception()
-                    .unwrap()
-                    .unwrap_err()
-                    .code,
-                expected
-            );
         }
     }
 }

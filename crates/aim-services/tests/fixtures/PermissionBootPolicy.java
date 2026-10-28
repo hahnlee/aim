@@ -13,7 +13,7 @@ package dev.aim.server;
  * updatePermissions:3932-3951,4027-4050. Modern access flags also retain grants
  * independently of restrictions (PermissionFlags.kt:330-346).
  */
-final class PermissionBootPolicy extends IPermissionBootPolicy.Stub {
+final class PermissionBootPolicy {
     // PermissionFlags.kt:84,90,211-249,325-328 (access.abx representation).
     static final int ROLE = 1 << 3, RUNTIME_GRANTED = 1 << 4;
     static final int INSTALLER_EXEMPT = 1 << 15, SYSTEM_EXEMPT = 1 << 16;
@@ -21,9 +21,8 @@ final class PermissionBootPolicy extends IPermissionBootPolicy.Stub {
     static final int SOFT_RESTRICTED = 1 << 19;
     static final int MASK_EXEMPT = INSTALLER_EXEMPT | SYSTEM_EXEMPT | UPGRADE_EXEMPT;
     static final int MASK_RESTRICTED = RESTRICTION_REVOKED | SOFT_RESTRICTED;
-    @Override public int evaluatePermission(String name, int protectionLevel, int infoFlags,
+    public int evaluatePermission(String name, int protectionLevel, int infoFlags,
             int targetSdkVersion, int oldFlags, int newFlags) {
-        Bridge.enforceSystemUid();
         int base = protectionLevel & 0xf;
         if (base == 2 || base == 4) {
             // PMS preserves role grants here; RoleManager/PermissionController

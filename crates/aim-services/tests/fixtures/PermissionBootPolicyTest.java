@@ -43,10 +43,5 @@ public final class PermissionBootPolicyTest {
                 check("role with static grant", base | 0x4000000, 0, 36, old, 4, old | 4);
             }
         }
-        Bridge.uid = 10100;
-        try {
-            POLICY.evaluatePermission("denied", 1, 4, 36, 0, 0);
-            throw new AssertionError("non-system caller accepted");
-        } catch (SecurityException expected) {}
     }
 }
