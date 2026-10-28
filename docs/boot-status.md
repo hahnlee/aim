@@ -573,8 +573,8 @@ SHAf029075f (settings106.4s/boot224.1s/permissions230.0s). Matched Original with
 its explicit600s budget publishes in357.11s, template SHA401d6de3
 (settings206.0s/boot297.2s/permissions300.7s). Both keep input pins unchanged;
 independent namespace checks find all570/706 births gone. Those factory receipts
-are separate from live Role/inodes/ART/BootStats, GMS300, full donor capture,
-rollback and full66, which remain unqualified.
+are separate from live Role/inodes/ART/BootStats, full donor capture,
+rollback and full66, which remain unqualified; GMS300 passes later (below).
 
 Runtime6918 reproduces #1329 during the signed v2 update. The Binder trace binds
 native PackageManager transaction87 to an original `isStateProtected` leaf
@@ -676,8 +676,8 @@ not start. Final publication now preserves the strict rejection while returning
 the already computed owner-conflict field instead of collapsing it to `Stale`;
 the focused publication diagnostic regression passes without skips. A rebuilt
 runtime replay is required to identify and fix that owner. The failed body stops
-with cleanup errors empty and no DATA mount or attachment; GMS300, donor capture,
-rollback and full66 remain not run.
+with cleanup errors empty and no DATA mount or attachment; donor capture,
+rollback and full66 remain not run (GMS300 passes in the later replay below).
 
 Runtime21c93296 repeats the complete signed v1/v2/uninstall and native session
 route, including exact installed hashes and the destroyed-session write denial.
@@ -700,7 +700,7 @@ boundary and kill the original process (#1350). Retained enabled-state rebasing
 now validates and applies only the scalar or component names changed by the
 plan, preserves concurrent changes to other components and still rejects two
 writers of the same component. Four focused rebase regressions pass in release
-mode. Runtime1aa1fd39 exposed continuous unrelated metadata publication during the
+mode. Runtime 1aa1fd39 exposed continuous unrelated metadata publication during the
 bounded original visibility capture (#1110). Each original reply is bound to one
 immutable Computer metadata generation. The callback may capture a newer
 generation than the Rust pre-call snapshot; the installer accepts it only when
