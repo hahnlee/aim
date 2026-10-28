@@ -126,6 +126,7 @@ public final class SystemProcessHost extends RuntimeInit {
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));
             host.attachStatsCompanionUidMap(new StatsCompanionUidMap(context));
+            host.attachRecoverableKeyStoreKeys(new RecoverableKeyStoreKeys(context));
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's
