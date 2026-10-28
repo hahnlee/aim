@@ -7705,6 +7705,7 @@ impl System {
                 &system_config,
                 self.package_signing_overrides()?,
                 facts.density,
+                resources,
                 &|name| Ok(properties.get(name).cloned()),
             )
             .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
@@ -7981,14 +7982,6 @@ impl System {
                     "actual early display configuration absent",
                 )
             })?;
-        let apks = image
-            .apks(
-                &begun.system_config,
-                self.package_signing_overrides()?,
-                early_configuration.density_dpi(),
-                &|name| begun.initial.property(name).map_err(|error| error.message),
-            )
-            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         let (policy, resources) = self
             .boot_configuration_for(bridge)?
             .values
@@ -8002,6 +7995,15 @@ impl System {
                     "actual native package boot policy unavailable",
                 )
             })?;
+        let apks = image
+            .apks(
+                &begun.system_config,
+                self.package_signing_overrides()?,
+                early_configuration.density_dpi(),
+                resources,
+                &|name| begun.initial.property(name).map_err(|error| error.message),
+            )
+            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         self.finish_raw_from_image(bridge, begun, &apks, policy, resources)
     }
     pub(crate) fn finish_native_boot_session_initial_scan(

@@ -918,7 +918,12 @@ reads both.
   `aim-package-parse`) matches a first boot's cache byte for byte for all
   288 packages (285 system packages and the 3 decompressed stubs under
   `/data/app`). The cache depends on the device's locale and display
-  density (#722). Signature verification (`.../package/sign`,
+  density (#722). Both native boot APK owners take their feature inventory
+  from native SystemConfig and their locale/density from the captured original
+  Resources/DisplayMetrics owners (#721); the oracle tool's flags describe its
+  separate saved observation. A host-only pinned framework resource test checks
+  Korean/English selection and rejects absent runtime locale or density.
+  Signature verification (`.../package/sign`,
   `aim-package-sign`) makes the `SigningDetails` `packages.xml` records
   (signers, scheme, lineage with capabilities, signing key set) for 242
   of its 244 packages, whether it only collects certificates, as the

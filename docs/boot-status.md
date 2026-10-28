@@ -1672,7 +1672,11 @@ First-boot Settings/restriction publication precedes protected preferred/browser
 reads. These controlled C startup fixes are not yet CTS/app acceptance. Adding an adb bootconfig
 key now preserves the default `hardware=aim`; without it the wrong init/fstab
 prevented zygote startup. These fixes are under controlled boot verification;
-C now parses original system APKs with actual display density. The current
+C now parses original system APKs with actual display density and the captured
+resource locale in both initial-scan and runtime APK owners (#721), alongside
+the native SystemConfig features. The host-only pinned framework APK regression
+passes Korean/English resource selection, changed density and rejection of
+missing locale/density; no guest boot was rerun (2026-10-28). The current
 C44 passes RoleController/window startup, but GMS provider startup still hits
 another prepared-mutation race. All common prepare callers now serialize native
 capture/prepare under the same gate where owner side effects permit it; installation
