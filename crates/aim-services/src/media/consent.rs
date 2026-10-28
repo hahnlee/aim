@@ -161,7 +161,17 @@ impl Consents {
             self.grant(&manager, &request, cookie);
             return Ok(());
         }
-        let label = args.label.unwrap_or_else(|| request.package.clone());
+        let texts = args.texts.and_then(|texts| {
+            texts
+                .into_iter()
+                .collect::<Option<Vec<_>>>()?
+                .try_into()
+                .ok()
+        });
+        let Some(texts) = texts else {
+            reply(&request, None);
+            return Err("consent requires four localized texts".into());
+        };
         let message = {
             let mut pending = self.pending.lock().unwrap();
             pending.0 = pending.0.wrapping_add(1);
@@ -169,7 +179,7 @@ impl Consents {
             let m = Message::Consent {
                 id,
                 package: request.package.clone(),
-                label,
+                texts,
             };
             eprintln!("guest-init: media: {}: consent {id} asked", request.package);
             pending.1.insert(id, request);

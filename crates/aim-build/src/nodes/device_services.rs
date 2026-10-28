@@ -106,6 +106,7 @@ pub fn node() -> Node {
         out().join("systemserverclasspath.pb"),
         out().join("framework-overlay.apk"),
         out().join("lightweight-shell-overlay.apk"),
+        out().join("shell-res.apk"),
     ];
     outputs.extend(APPS.iter().map(|app| out().join(app.apk)));
     Node {
@@ -114,7 +115,7 @@ pub fn node() -> Node {
         inputs,
         outputs,
         tools: Vec::new(),
-        recipe: 3,
+        recipe: 4,
         action: Action::DeviceServices,
         boot: true,
     }
@@ -128,6 +129,14 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let _ = force_remove(&work);
     let staged = work.join("out");
     fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
+
+    // Retain the original localized shell resources without installing or
+    // starting SystemUI. The APK is copied byte for byte, never rewritten.
+    fs::copy(
+        image.join("system_ext/priv-app/SystemUIGoogle/SystemUIGoogle.apk"),
+        staged.join("shell-res.apk"),
+    )
+    .map_err(|e| format!("SystemUI resources: {e}"))?;
 
     let sources = repo(SOURCES);
     let stubs = work.join("stubs");

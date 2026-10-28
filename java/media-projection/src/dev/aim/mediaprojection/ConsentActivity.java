@@ -77,7 +77,7 @@ public final class ConsentActivity extends Activity {
         }
         try {
             IScreenCaptureConsent.Stub.asInterface(service).ask(packageName, info.uid,
-                    label(info, packageName), review, launchCookie(launching),
+                    ConsentText.forApp(this, label(info, packageName)), review, launchCookie(launching),
                     new IScreenCaptureConsentCallback.Stub() {
                         @Override
                         public void onResult(IBinder projection) {

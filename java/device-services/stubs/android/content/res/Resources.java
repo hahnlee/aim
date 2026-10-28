@@ -10,6 +10,7 @@ public class Resources {
     public CharSequence getText(int id) { throw new RuntimeException("stub"); }
     public XmlResourceParser getXml(int id) { throw new RuntimeException("stub"); }
     public String getString(int id) { throw new RuntimeException("stub"); }
+    public String getString(int id, Object... args) { throw new RuntimeException("stub"); }
     public int getIdentifier(String name, String defType, String defPackage) { throw new RuntimeException("stub"); }
     public boolean getBoolean(int id) { throw new RuntimeException("stub"); }
     public String[] getStringArray(int id) { throw new RuntimeException("stub"); }
