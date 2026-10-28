@@ -254,7 +254,7 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     // The kernel log is a character device on Linux: O_TRUNC leaves it.
     // A cgroup hierarchy's files are the kernel's (kernfs): none can be
     // made, and O_TRUNC leaves a control file.
-    let cgroup = vfs::cgroup_v1(&r.guest);
+    let cgroup = vfs::cgroup(&r.guest);
     if cgroup.is_some() && flags & O_CREAT != 0 && attrs::absent(&r.host) {
         return -(EACCES as i64);
     }

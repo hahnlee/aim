@@ -13,8 +13,12 @@
 //! time too, so that a reused pid is not taken for one that exited; exited
 //! tasks leave when the state is next changed.
 //!
-//! Membership has no effect on the host yet (#297): no Darwin policy
-//! follows a group's controller values.
+//! Controller values constrain Darwin scheduling through `host`; see
+//! docs/cgroups.md for the vendor mapping and host limitations.
+
+mod host;
+pub(super) use host::qos as clamp_qos;
+pub(crate) use host::{Policy, apply as apply_policy};
 
 use std::io::{Read as _, Seek as _, Write as _};
 use std::os::fd::AsRawFd as _;
@@ -37,30 +41,57 @@ const EIO: Errno = 5;
 /// An open control file: what it is, and the opener's effective uid, which
 /// a task move checks (`of->file->f_cred`).
 pub struct Open {
-    controller: Controller,
+    controller: Option<Controller>,
     root: PathBuf,
     dir: PathBuf,
     file: File,
     name: String,
-    euid: u32,
+    opener: super::cred::Identity,
     pos: Mutex<u64>,
 }
 
 impl Open {
-    fn new(controller: Controller, root: PathBuf, host: &Path, euid: u32) -> Option<Self> {
+    fn new(
+        controller: Option<Controller>,
+        root: PathBuf,
+        host: &Path,
+        opener: super::cred::Identity,
+    ) -> Option<Self> {
         let dir = host.parent()?.to_path_buf();
         let name = host.file_name()?.to_string_lossy().into_owned();
-        let file = cgroup_v1::file(controller, dir == root, &name)?;
+        let file = match controller {
+            Some(c) => cgroup_v1::file(c, dir == root, &name),
+            None => aim_storage::cgroup_v2::file(dir == root, &name),
+        }?;
         Some(Open {
             controller,
             root,
             dir,
             file,
             name,
-            euid,
+            opener,
             pos: Mutex::new(0),
         })
     }
+}
+
+fn io_error(e: std::io::Error) -> Errno {
+    crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO))
+}
+
+fn hierarchies() -> Vec<(Option<Controller>, PathBuf)> {
+    let mut all: Vec<_> = vfs::cgroup_v1_hierarchies()
+        .into_iter()
+        .map(|(c, root)| (Some(c), root))
+        .collect();
+    if let Some(root) = vfs::kernel_fs_root("cgroup2") {
+        all.push((None, root));
+    }
+    all
+}
+
+fn controller_name(c: Option<Controller>) -> &'static str {
+    c.map_or("cgroup2", Controller::name)
 }
 
 fn me() -> i32 {
@@ -139,6 +170,20 @@ fn read_state(root: &Path) -> Membership {
     Membership::parse(&text)
 }
 
+fn checked_state(root: &Path) -> Result<Membership, Errno> {
+    let mut file = match std::fs::File::open(cgroup_v1::state_path(root)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Membership::default()),
+        Err(e) => return Err(io_error(e)),
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } < 0 {
+        return Err(crate::errno::last());
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(io_error)?;
+    Ok(Membership::parse(&text))
+}
+
 /// Runs `f` on the membership of the hierarchy at `root` under its lock,
 /// with exited tasks dropped, and writes back what changed.
 fn transact<R>(
@@ -146,6 +191,20 @@ fn transact<R>(
     f: impl FnOnce(&mut Membership) -> Result<R, Errno>,
 ) -> Result<R, Errno> {
     let _own = super::fork::spawn::own_fds();
+    let lock_root = vfs::cgroup_v1_hierarchies()
+        .first()
+        .map(|(_, p)| p.clone())
+        .unwrap_or_else(|| root.to_path_buf());
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_root.with_extension("policy-lock"))
+        .map_err(io_error)?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } < 0 {
+        return Err(crate::errno::last());
+    }
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -154,17 +213,29 @@ fn transact<R>(
         .open(cgroup_v1::state_path(root))
         .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
     // SAFETY: locking our open file; released when it closes.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } < 0 {
+        return Err(crate::errno::last());
+    }
     let mut text = String::new();
-    let _ = file.read_to_string(&mut text);
+    file.read_to_string(&mut text).map_err(io_error)?;
     let mut m = Membership::parse(&text);
     prune(&mut m);
+    let old = m.clone();
     let r = f(&mut m)?;
     let new = m.text();
     if new != text {
-        let _ = file.set_len(0);
-        let _ = file.rewind();
-        let _ = file.write_all(new.as_bytes());
+        host::update(root, &old, &m, None)?;
+        if let Err(error) = (|| {
+            file.set_len(0)?;
+            file.rewind()?;
+            file.write_all(new.as_bytes())
+        })() {
+            file.rewind().map_err(io_error)?;
+            file.write_all(text.as_bytes()).map_err(io_error)?;
+            file.set_len(text.len() as u64).map_err(io_error)?;
+            host::update(root, &m, &old, None)?;
+            return Err(io_error(error));
+        }
     }
     Ok(r)
 }
@@ -222,9 +293,29 @@ fn content(open: &Open) -> Result<Vec<u8>, Errno> {
                 .into_bytes())
         }
         File::ResetStats => Err(EINVAL),
+        File::Events => {
+            let state = snapshot(&open.root);
+            let populated = all_tasks().iter().any(|(_, tid)| {
+                let g = group_of(&state, *tid);
+                g == group || group == "/" || g.starts_with(&format!("{group}/"))
+            });
+            Ok(format!("populated {}\n", u8::from(populated)).into_bytes())
+        }
+        File::Controllers | File::SubtreeControl => Ok(Vec::new()),
         _ => std::fs::read(open.dir.join(&open.name))
             .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO))),
     }
+}
+
+fn may_write(id: &super::cred::Identity, stat: &libc::stat) -> bool {
+    let shift = if id.uid[3] == stat.st_uid {
+        6
+    } else if id.gid[3] == stat.st_gid || id.groups.contains(&stat.st_gid) {
+        3
+    } else {
+        0
+    };
+    (stat.st_mode as u32 >> shift) & 2 != 0 || id.cap_eff & (1 << 1) != 0
 }
 
 /// `cgroup_procs_write_start` and `__cgroup1_procs_write`: the task `text`
@@ -245,11 +336,14 @@ fn move_task(open: &Open, text: &str) -> Result<(), Errno> {
     if !tids(owner).contains(&tid) {
         return Err(ESRCH);
     }
-    if !super::cred::may_attach_task(owner, open.euid) && !super::cred::capable(CAP_SYS_NICE) {
+    if open.controller.is_some()
+        && !super::cred::may_attach_task(owner, open.opener.uid[1])
+        && !super::cred::capable(CAP_SYS_NICE)
+    {
         return Err(EACCES);
     }
     // cpuset_can_attach_check: a cpuset with no cpus or mems takes no task.
-    if open.controller == Controller::Cpuset
+    if open.controller == Some(Controller::Cpuset)
         && ["cpus", "mems"]
             .iter()
             .any(|f| std::fs::read_to_string(open.dir.join(f)).is_ok_and(|v| v.trim().is_empty()))
@@ -257,13 +351,50 @@ fn move_task(open: &Open, text: &str) -> Result<(), Errno> {
         return Err(ENOSPC);
     }
     let group = cgroup_v1::group_path(&open.dir, &open.root);
+    // A Linux thread group can span multiple Darwin processes (a clone
+    // with its own file table). cgroup.procs migrates every such task.
+    let process = if procs {
+        super::procrec::tgid(owner)
+    } else {
+        owner
+    };
+    let hosts: std::collections::BTreeSet<_> = if procs {
+        tids(process)
+            .into_iter()
+            .map(super::thread::owner)
+            .collect()
+    } else {
+        [owner].into_iter().collect()
+    };
+    let starts = hosts
+        .iter()
+        .map(|pid| Ok((*pid, start_of(*pid).ok_or(ESRCH)?)))
+        .collect::<Result<Vec<_>, Errno>>()?;
     transact(&open.root, |m| {
+        if open.controller.is_none() {
+            // cgroup_procs_write_permission uses the opener's credentials
+            // at the common ancestor, not the migrating process's uid.
+            let mut ancestor = open.root.join(group_of(m, owner).trim_start_matches('/'));
+            while !open.dir.starts_with(&ancestor) {
+                if !ancestor.pop() {
+                    return Err(EINVAL);
+                }
+            }
+            let path = ancestor.join("cgroup.procs");
+            let guest = vfs::guest_path_of_host(&path).ok_or(EACCES)?;
+            let stat = super::attrs::path_stat(&guest)?;
+            if !may_write(&open.opener, &stat) {
+                return Err(EACCES);
+            }
+        }
         if procs {
             m.threads
-                .retain(|(t, ..)| super::thread::owner(*t) != owner);
-            m.processes.retain(|(p, ..)| *p != owner);
+                .retain(|(t, ..)| !hosts.contains(&super::thread::owner(*t)));
+            m.processes.retain(|(p, ..)| !hosts.contains(p));
             if group != "/" {
-                m.processes.push((owner, start, group));
+                for (pid, start) in &starts {
+                    m.processes.push((*pid, *start, group.clone()));
+                }
             }
         } else {
             m.threads.retain(|(t, ..)| *t != tid);
@@ -285,19 +416,67 @@ fn write_at(open: &Open, input: &[u8], offset: u64) -> i64 {
         File::Tasks | File::Procs => std::str::from_utf8(input)
             .map_err(|_| EINVAL)
             .and_then(|t| move_task(open, t)),
+        File::SubtreeControl => {
+            let text = std::str::from_utf8(input).map_err(|_| EINVAL);
+            text.and_then(|t| {
+                for word in t.split_whitespace() {
+                    if !word.starts_with(['+', '-']) || word.len() == 1 {
+                        return Err(EINVAL);
+                    }
+                    // cgroup_subtree_control_write: no v2 controller is
+                    // available (the resource controllers are bound to v1).
+                    return Err(crate::errno::ENOENT);
+                }
+                Ok(())
+            })
+        }
+        File::Events | File::Controllers => Err(EACCES),
         // cgroup_release_agent_write: the agent runs with every capability.
         File::ReleaseAgent if !super::cred::capable(CAP_SYS_ADMIN) => Err(EPERM),
-        file => cgroup_v1::write(
-            file,
-            &open.dir,
-            &open.root,
-            input,
-            offset,
-            matches!(
+        file => transact(&open.root, |m| {
+            let path = open.dir.join(&open.name);
+            let before = std::fs::read(&path).map_err(io_error)?;
+            let effective = match file {
+                File::Cpus => Some(open.dir.join("effective_cpus")),
+                File::Mems => Some(open.dir.join("effective_mems")),
+                _ => None,
+            };
+            let effective_before = effective
+                .as_ref()
+                .map(std::fs::read)
+                .transpose()
+                .map_err(io_error)?;
+            cgroup_v1::write(
                 file,
-                File::Cpus | File::Mems | File::CpuExclusive | File::MemExclusive
-            ) && populated(&open.root, &open.dir),
-        ),
+                &open.dir,
+                &open.root,
+                input,
+                offset,
+                matches!(
+                    file,
+                    File::Cpus | File::Mems | File::CpuExclusive | File::MemExclusive
+                ) && !members(m, &cgroup_v1::group_path(&open.dir, &open.root)).is_empty(),
+            )?;
+            let affects_policy = matches!(
+                file,
+                File::Cpus
+                    | File::Shares
+                    | File::Idle
+                    | File::UclampMin
+                    | File::UclampMax
+                    | File::UclampLatencySensitive
+                    | File::PrioClass
+            );
+            if affects_policy && let Err(error) = host::update(&open.root, m, m, Some(&open.dir)) {
+                std::fs::write(path, before).map_err(io_error)?;
+                if let Some((path, before)) = effective.zip(effective_before) {
+                    std::fs::write(path, before).map_err(io_error)?;
+                }
+                host::update(&open.root, m, m, Some(&open.dir))?;
+                return Err(error);
+            }
+            Ok(())
+        }),
     };
     match result {
         Ok(()) => input.len() as i64,
@@ -358,9 +537,9 @@ pub fn lseek(open: &Open, offset: i64, whence: i32) -> i64 {
 
 /// Makes `fd`, a file `open` just opened at `host` in the hierarchy of
 /// `controller` rooted at `root`, a control file.
-pub(super) fn opened(fd: i32, host: &Path, controller: Controller, root: PathBuf) {
-    let euid = super::cred::current().uid[1];
-    if let Some(open) = Open::new(controller, root, host, euid) {
+pub(super) fn opened(fd: i32, host: &Path, controller: Option<Controller>, root: PathBuf) {
+    let opener = super::cred::current();
+    if let Some(open) = Open::new(controller, root, host, opener) {
         fdtab::insert(fd, Kind::Cgroup(Arc::new(open)));
     }
 }
@@ -368,7 +547,7 @@ pub(super) fn opened(fd: i32, host: &Path, controller: Controller, root: PathBuf
 /// `fd`, an inherited or received descriptor, is a control file if its
 /// host file is one; the caller's credentials stand for the opener's.
 pub(super) fn adopt(fd: i32) -> bool {
-    let hierarchies = vfs::cgroup_v1_hierarchies();
+    let hierarchies = hierarchies();
     if hierarchies.is_empty() {
         return false;
     }
@@ -397,12 +576,15 @@ pub(super) fn adopt(fd: i32) -> bool {
 /// group's control files, owned by the creator unless it is root
 /// (`cgroup_kn_set_ugid`).
 pub(super) fn made_group(host: &Path, guest: &str) -> Result<(), Errno> {
-    let Some((controller, root)) = vfs::cgroup_v1(guest) else {
+    let Some((controller, root)) = vfs::cgroup(guest) else {
         return Ok(());
     };
     let parent = host.parent().filter(|_| host != root);
-    let made = cgroup_v1::populate(controller, host, parent)
-        .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+    let made = match controller {
+        Some(c) => cgroup_v1::populate(c, host, parent),
+        None => aim_storage::cgroup_v2::populate(host, host == root),
+    }
+    .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
     let id = super::cred::current();
     let (uid, gid) = (id.uid[3], id.gid[3]);
     for (file, mode) in made {
@@ -425,7 +607,7 @@ pub(super) fn made_group(host: &Path, guest: &str) -> Result<(), Errno> {
 /// cannot go; a group goes with its files unless it is the root or has
 /// children or tasks. None outside a hierarchy.
 pub(super) fn remove(guest: &str, host: &Path, directory: bool) -> Option<i64> {
-    let (_, root) = vfs::cgroup_v1(guest)?;
+    let (_, root) = vfs::cgroup(guest)?;
     if !host.is_dir() {
         return Some(-(if directory { ENOTDIR } else { EPERM } as i64));
     }
@@ -445,15 +627,19 @@ pub(super) fn remove(guest: &str, host: &Path, directory: bool) -> Option<i64> {
 /// its parent; the tasks in it and below it stay with it. None outside a
 /// hierarchy.
 pub(super) fn rename(old_guest: &str, old: &Path, new_guest: &str, new: &Path) -> Option<i64> {
-    let from = vfs::cgroup_v1(old_guest);
-    let to = vfs::cgroup_v1(new_guest);
-    let (_, root) = match (from, to) {
+    let from = vfs::cgroup(old_guest);
+    let to = vfs::cgroup(new_guest);
+    let (controller, root) = match (from, to) {
         (None, None) => return None,
         (Some(f), Some(t)) if f == t => f,
         _ => return Some(-(libc::EXDEV as i64)),
     };
     if !old.is_dir() {
         return Some(-(ENOTDIR as i64));
+    }
+    // cgroup_rename: unified hierarchies cannot be renamed.
+    if controller.is_none() {
+        return Some(-(EIO as i64));
     }
     if old.parent() != new.parent() {
         return Some(-(EIO as i64));
@@ -482,7 +668,7 @@ pub(super) fn rename(old_guest: &str, old: &Path, new_guest: &str, new: &Path) -
 
 /// `/proc/<pid>/cgroup` of thread `tid` of process `pid` (host): each v1
 /// hierarchy, newest first, then the v2 one (`proc_cgroup_show`).
-pub fn proc_cgroup(pid: i32, tid: i32) -> String {
+pub fn proc_cgroup(_pid: i32, tid: i32) -> String {
     let mut out = String::new();
     for (controller, root) in vfs::cgroup_v1_hierarchies().into_iter().rev() {
         out.push_str(&format!(
@@ -493,32 +679,15 @@ pub fn proc_cgroup(pid: i32, tid: i32) -> String {
         ));
     }
     let v2 = vfs::kernel_fs_root("cgroup2")
-        .and_then(|root| {
-            let pid = super::pidns::guest_pid(pid).unwrap_or(pid).to_string();
-            v2_group(&root, &root, &pid)
-        })
+        .map(|root| group_of(&snapshot(&root), tid))
         .unwrap_or_else(|| "/".into());
     out.push_str(&format!("0::{v2}\n"));
     out
 }
 
-/// The deepest group of the cgroup v2 tree at `dir` whose `cgroup.procs`
-/// lists `pid`: the tree is a plain directory zygote writes them into.
-fn v2_group(root: &Path, dir: &Path, pid: &str) -> Option<String> {
-    let deeper = cgroup_v1::children(dir)
-        .iter()
-        .find_map(|child| v2_group(root, child, pid));
-    deeper.or_else(|| {
-        std::fs::read_to_string(dir.join("cgroup.procs"))
-            .ok()
-            .filter(|procs| procs.lines().any(|l| l.trim() == pid))
-            .map(|_| cgroup_v1::group_path(dir, root))
-    })
-}
-
 /// A new thread `tid` is in its creator's group (`cgroup_post_fork`).
 pub fn thread_created(creator: i32, tid: i32) {
-    for (_, root) in vfs::cgroup_v1_hierarchies() {
+    for (_, root) in hierarchies() {
         let m = snapshot(&root);
         let Some((.., group)) = m.threads.iter().find(|(t, ..)| *t == creator).cloned() else {
             continue;
@@ -537,7 +706,7 @@ pub fn thread_created(creator: i32, tid: i32) {
 /// Thread `tid` exited: its tid may be given to a new thread of this
 /// process, which must not inherit its group.
 pub fn thread_gone(tid: i32) {
-    for (_, root) in vfs::cgroup_v1_hierarchies() {
+    for (_, root) in hierarchies() {
         if snapshot(&root).threads.iter().any(|(t, ..)| *t == tid) {
             let _ = transact(&root, |m| {
                 m.threads.retain(|(t, ..)| *t != tid);
@@ -552,7 +721,7 @@ pub fn thread_gone(tid: i32) {
 pub fn exec_reset() {
     let pid = me();
     let other = |t: i32| t != pid && super::thread::owner(t) == pid;
-    for (_, root) in vfs::cgroup_v1_hierarchies() {
+    for (_, root) in hierarchies() {
         if snapshot(&root).threads.iter().any(|(t, ..)| other(*t)) {
             let _ = transact(&root, |m| {
                 m.threads.retain(|(t, ..)| !other(*t));
@@ -566,13 +735,13 @@ pub fn exec_reset() {
 /// other forks out.
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     let tid = super::thread::gettid() as i32;
-    let groups: Vec<(Controller, String)> = vfs::cgroup_v1_hierarchies()
+    let groups: Vec<(Option<Controller>, String)> = hierarchies()
         .into_iter()
         .map(|(c, root)| (c, group_of(&read_state(&root), tid)))
         .filter(|(_, g)| g != "/")
         .collect();
     w.seq(groups.into_iter(), |w, (c, g)| {
-        w.str(c.name());
+        w.str(controller_name(c));
         w.str(&g);
     });
 }
@@ -586,36 +755,55 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         return;
     };
     let pid = me();
-    for (c, root) in vfs::cgroup_v1_hierarchies() {
-        let Some((_, group)) = groups.iter().find(|(name, _)| name == c.name()) else {
+    for (c, root) in hierarchies() {
+        let Some((_, group)) = groups.iter().find(|(name, _)| name == controller_name(c)) else {
             continue;
         };
-        let _ = transact(&root, |m| {
+        if let Err(error) = transact(&root, |m| {
             m.processes.retain(|(p, ..)| *p != pid);
             m.threads.retain(|(t, ..)| super::thread::owner(*t) != pid);
             m.processes.push((pid, start, group.clone()));
             Ok(())
-        });
+        }) {
+            r.invalidate();
+            eprintln!("cgroup fork restore: errno {error}");
+        }
     }
+}
+
+/// Rebuild derived host policy after a new host thread/process starts.
+/// The membership remains the owner; these cache fields are not fork state.
+pub fn refresh_own() -> Result<(), Errno> {
+    let Some((_, root)) = vfs::cgroup_v1_hierarchies().into_iter().next() else {
+        return Ok(());
+    };
+    let _own = super::fork::spawn::own_fds();
+    let state = checked_state(&root)?;
+    host::apply(&host::policies(&root, &state, me())?).map(|_| ())
 }
 
 /// Fork of an open control file: what it is, its opener's uid and
 /// position.
 pub(super) fn save_open(w: &mut super::fork_state::Writer, open: &Open) {
-    w.str(open.controller.name());
+    w.str(controller_name(open.controller));
     w.path(&open.root);
     w.path(&open.dir.join(&open.name));
-    w.u32(open.euid);
+    w.str(&open.opener.to_text());
     w.u64(*open.pos.lock().unwrap());
 }
 
 pub(super) fn restore_open(r: &mut super::fork_state::Reader) -> Option<Arc<Open>> {
-    let controller = Controller::from_name(&r.str());
+    let name = r.str();
+    let controller = if name == "cgroup2" {
+        None
+    } else {
+        Some(Controller::from_name(&name)?)
+    };
     let root = r.path();
     let host = r.path();
-    let euid = r.u32();
+    let opener = super::cred::Identity::parse(&r.str()).ok()?;
     let pos = r.u64();
-    let open = Open::new(controller?, root, &host, euid)?;
+    let open = Open::new(controller, root, &host, opener)?;
     *open.pos.lock().unwrap() = pos;
     Some(Arc::new(open))
 }

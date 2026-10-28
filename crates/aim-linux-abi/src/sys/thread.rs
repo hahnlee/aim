@@ -65,6 +65,10 @@ pub struct Sched {
     /// Another thread changed this one's scheduling: Darwin lets only a
     /// thread set its own QoS, so it applies the change at its next syscall.
     pub host_stale: AtomicBool,
+    pub cgroup_min: AtomicI32,
+    pub cgroup_max: AtomicI32,
+    pub cgroup_fair_max: AtomicI32,
+    pub cgroup_io: AtomicI32,
 }
 
 pub struct Thread {
@@ -111,6 +115,12 @@ impl Thread {
                 policy: AtomicI32::new(0),
                 priority: AtomicI32::new(0),
                 host_stale: AtomicBool::new(false),
+                cgroup_min: AtomicI32::new(0),
+                cgroup_max: AtomicI32::new(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE as i32),
+                cgroup_fair_max: AtomicI32::new(
+                    libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE as i32,
+                ),
+                cgroup_io: AtomicI32::new(0),
             },
             stacks: Mutex::new(None),
         }
@@ -618,6 +628,10 @@ extern "C" fn thread_start(arg: *mut libc::c_void) -> *mut libc::c_void {
         th.pthread.store(libc::pthread_self() as usize, SeqCst);
     }
     super::procrec::running(th.tid, host_id(th.pthread.load(SeqCst)));
+    if let Err(error) = super::cgroup::refresh_own() {
+        eprintln!("cgroup thread start: errno {error}");
+        std::process::abort();
+    }
     drop(boot);
     // SAFETY: the context holds the child's registers.
     unsafe { context::resume(ctx) }

@@ -62,7 +62,7 @@ pub enum Kind {
     Binder(aim_binder_host::client::BinderFile),
     /// `/dev/kmsg` or `/proc/kmsg` (`kmsg`).
     Kmsg(Arc<super::kmsg::Open>),
-    /// A control file of a cgroup v1 hierarchy (`cgroup`).
+    /// A control file of a cgroup filesystem (`cgroup`).
     Cgroup(Arc<super::cgroup::Open>),
 }
 

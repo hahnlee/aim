@@ -1505,15 +1505,16 @@ pub fn thread_nice(tid: i32) -> i32 {
 /// The host scheduling of thread `tid` of this process after its nice value
 /// changed to `nice`: set now for the calling thread, by `tid` itself at its
 /// next syscall otherwise.
-fn nice_changed(tid: i32, nice: i32) {
+fn nice_changed(tid: i32, nice: i32) -> Result<(), crate::errno::Errno> {
     if let Some(th) = super::thread::current()
         && th.tid == tid
     {
         let policy = th.sched.policy.load(Ordering::SeqCst);
-        super::process::apply_host_sched(nice, policy);
+        super::process::apply_host_sched(nice, policy)?;
     } else if let Some(th) = super::thread::find(tid) {
         th.sched.host_stale.store(true, Ordering::SeqCst);
     }
+    Ok(())
 }
 
 /// Linux `set_one_prio_perm` followed by `can_nice`: ownership is
@@ -1567,7 +1568,7 @@ pub(super) fn own_priority(tid: i32, new: Option<i32>, caller: &Identity) -> i64
     if result == 0
         && let Some(nice) = new
     {
-        nice_changed(tid, nice);
+        return nice_changed(tid, nice).map_or_else(|error| -(error as i64), |()| 0);
     }
     result
 }
