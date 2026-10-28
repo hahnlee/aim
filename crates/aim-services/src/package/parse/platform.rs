@@ -329,7 +329,7 @@ fn aconfig_flags(root: &Path) -> Result<(HashSet<String>, HashMap<String, bool>)
 
 /// `SystemConfig`'s split permissions, in the order it reads them:
 /// partition by partition, a directory's `platform.xml` last.
-fn split_permissions(root: &Path) -> Result<Vec<SplitPermission>, String> {
+pub(crate) fn split_permissions(root: &Path) -> Result<Vec<SplitPermission>, String> {
     let mut out = Vec::new();
     for p in PARTITIONS {
         let dir = root.join(p).join("etc/permissions");

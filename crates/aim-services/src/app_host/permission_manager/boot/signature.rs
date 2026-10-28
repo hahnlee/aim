@@ -11,6 +11,8 @@ pub(super) struct Policy {
     pub allowlist: PermissionAllowlist,
     pub debuggable: bool,
     pub control_privapp_permissions: String,
+    pub splits: Vec<SplitPermission>,
+    pub leanback: bool,
 }
 impl Policy {
     fn namespace(ps: &PackageState) -> &str {
@@ -217,12 +219,15 @@ impl Policy {
                     .ok_or_else(|| {
                         unsupported("known-package protection grants before role selection")
                     })?;
-                if selected && ps.is.system {
+                // AppIdPermissionPolicy.kt:1641-1725: KnownPackages already
+                // owns selection; there is no additional isSystem condition.
+                if selected {
                     return Ok(true);
                 }
             }
         }
-        if flags & 0x40000000 != 0 && ps.apex_module_name.is_some() {
+        // PermissionInfo.java:259; AppIdPermissionPolicy.kt:1727-1730.
+        if flags & 0x400000 != 0 && ps.apex_module_name.is_some() {
             return Ok(true);
         }
         Ok(false)
@@ -240,7 +245,11 @@ impl Policy {
             if permission.protection_level & 0x10 != 0 {
                 may_grant_privileged |= self.privileged_allowed(ps, permission)?;
             }
-            let by_signature = self.signature(state, ps, permission);
+            // AppIdPermissionPolicy.kt:1036-1040 (android-16.0.0_r1):
+            // internal|role is not eligible for a signature grant.
+            let by_signature = permission.protection_level & PROTECTION_MASK_BASE
+                == PROTECTION_SIGNATURE
+                && self.signature(state, ps, permission);
             let by_flags = self.protection(state, ps, permission, declaration)?;
             granted |= by_signature || by_flags;
         }

@@ -449,6 +449,40 @@ The migration's state and conformance results are in
 
 ### The app host, L1 (2026-10-16)
 
+Permission boot's update scan (#2282) evaluates restricted exemptions and
+retains role grants in the native access owner before package publication.
+Deferral to the system process was rejected: pinned Android 16 r1
+[PackageManagerService.java:2368-2376](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageManagerService.java#2368)
+calls `onStorageVolumeMounted` synchronously in its constructor with
+`mIsUpgrade`, before `systemReady` (line 4223). The legacy
+[PermissionManagerServiceImpl.java:5192-5193,3941-3951](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/permission/PermissionManagerServiceImpl.java#5192)
+updates all permissions there; `onSystemReady` (4378-4392) runs another pass with
+`fingerprintChanged=false` before setting `mSystemReady`. Legacy runtime
+restriction enforcement waits for PermissionPolicyInternal initialization
+(2818-2861), but that does not defer role restoration or the update replace pass.
+The modern
+[PermissionService.kt:2394-2404](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/permission/java/com/android/server/permission/access/permission/PermissionService.kt#2394)
+also batches the scan at mount, and
+[AppIdPermissionPolicy.kt:101-127](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/permission/java/com/android/server/permission/access/permission/AppIdPermissionPolicy.kt#101)
+evaluates grants and restrictions synchronously; its `onSystemReady`
+(1768-1775) only checks privileged allowlist violations. Publishing an interim
+access state until `aim-system` attaches would change this ordering. The cold
+role/restriction rules are ported
+minimally to Rust, with source ranges beside each rule; the Java extraction is
+retained only as an offline test oracle. There is no boot policy bridge, wait,
+or deferred permission state on fresh, unchanged or update boots. Role holder
+selection and subsequent grants remain with RoleManager/PermissionController.
+No original class or image replacement is added.
+
+The same cold pass now implements split-permission grants and revocation
+([AppIdPermissionPolicy.kt:1112-1180,1238-1287](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/permission/java/com/android/server/permission/access/permission/AppIdPermissionPolicy.kt#1112)),
+and internal protection flags (1023-1071,1610-1730). Native KnownPackages selection
+precedes permission reconciliation, matching PMS constructor lines 2295-2335.
+Stored package versions upgrade after this pass
+([AccessPolicy.kt:159-170,286-314](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/permission/java/com/android/server/permission/access/AccessPolicy.kt#159)),
+using AppIdPermissionUpgrade's version 3/10/12/14/16 steps. This stays native for
+the same publication-order reason; it introduces no new image exception.
+
 The app host's cold MediaRouter2 system route/session queries (#1663) retain
 MediaRouter2ServiceImpl's scoped Java permission and selection policy in the
 system-UID-only `SystemRouteQueries` bridge, using the image's original

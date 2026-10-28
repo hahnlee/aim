@@ -937,7 +937,26 @@ impl System {
         if let Some(permissions) = self.native_permissions() {
             // PermissionService batches the scan's onPackageAdded receipts at
             // onStorageVolumeMounted, before the initial live projections.
-            let initial = Capture::new(snapshot, context.clone()).map_err(failure)?;
+            // AppIdPermissionPolicy.kt:1610-1730 consumes PMS constructor
+            // KnownPackages during the mount pass, before query publication.
+            // PackageManagerService.java:2295-2335 selects them before the
+            // onStorageVolumeMounted call at 2375-2376.
+            let initial = Capture::new(snapshot, context.clone())
+                .map_err(failure)?
+                .select_configured_roles(&platform, resource_config)
+                .map_err(failure)?
+                .select_permission_controller()
+                .map_err(failure)?
+                .prepare_known_packages(
+                    &platform,
+                    resource_config,
+                    begin
+                        .system_config
+                        .overlay_config_signature_package()
+                        .map_err(failure)?,
+                )
+                .map_err(failure)?;
+            context = (**initial.context()).clone();
             let admissions = owner.permission_admissions().map_err(failure)?;
             let access = permissions.reconcile_boot(
                 initial.state(),
