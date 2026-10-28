@@ -53,6 +53,28 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
             "setAllowlistedRestrictedPermissions(java.util.List<String> permissions){names=permissions;}")
         .replace("public PackageInstalledParams build(){throw new RuntimeException(\"stub\");}",
             "public PackageInstalledParams build(){return new PackageInstalledParams(null,names,0);}")).unwrap();
+    // The decoded package boundary retains only the getters this helper uses.
+    let package = data.0.join("AndroidPackage.java");
+    let api =
+        fs::read_to_string(production.join("stubs/com/android/server/pm/pkg/AndroidPackage.java"))
+            .unwrap();
+    fs::write(
+        &package,
+        api.lines()
+            .map(|line| {
+                if line.trim_end().ends_with(";") && line.contains('(') {
+                    format!(
+                        "default {} {{ throw new AssertionError(); }}",
+                        line.trim().trim_end_matches(';')
+                    )
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
     let classpath = format!("{}:{}", classes.display(), stubs.display());
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
@@ -62,6 +84,7 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
         .arg(&binder)
         .arg(&users)
         .arg(&permissions)
+        .arg(&package)
         .args(common::java::sources(&aim_paths::root().join(
             "crates/aim-services/tests/fixtures/package_bootstrap_java",
         ))));

@@ -15,6 +15,7 @@ fn call(service: &impl Service, uid: u32, code: u32, data: &Parcel) -> Reply {
 }
 
 struct Java {
+    diagnostic: Arc<Mutex<Option<Binder>>>,
     mode: Arc<AtomicI32>,
     calls: Arc<Mutex<Vec<u32>>>,
 }
@@ -25,6 +26,10 @@ impl Service for Java {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         assert_eq!(call.sender_euid, 1000);
         assert_eq!(call.flags & 1, 0);
+        if call.code == u32::MAX {
+            *self.diagnostic.lock().unwrap() = call.data.read_binder()?;
+            return Ok(Parcel::new());
+        }
         self.calls.lock().unwrap().push(call.code);
         match self.mode.load(Ordering::SeqCst) {
             1 => return reply(Err(Exception::security("Java owner denied"))),
@@ -33,6 +38,22 @@ impl Service for Java {
         }
         let mut p = Parcel::new();
         match call.code {
+            bridge::LOG_PACKAGE_PROCESS_START => {
+                let a = bridge::LogPackageProcessStart::read(&mut call.data)?;
+                assert_eq!(a.package_name.as_deref(), Some("a.b"));
+                assert_eq!(a.process_name.as_deref(), Some("a.b:worker"));
+                assert_eq!((a.uid, a.pid), (10123, 42));
+                assert_eq!(a.seinfo.as_deref(), Some("default"));
+                assert_eq!(a.apk_file.as_deref(), Some("/data/app/a.b/base.apk"));
+                bridge::write_log_package_process_start_reply(&mut p);
+            }
+            bridge::GET_PACKAGE_DIAGNOSTIC_INPUTS => {
+                bridge::GetPackageDiagnosticInputs::read(&mut call.data)?;
+                bridge::write_get_package_diagnostic_inputs_reply(
+                    &mut p,
+                    *self.diagnostic.lock().unwrap(),
+                );
+            }
             bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL => {
                 let a = bridge::GetPreferredCrossProfileAccessControl::read(&mut call.data)?;
                 assert_eq!((a.source_user_id, a.target_user_id), (0, 10));
@@ -73,16 +94,39 @@ impl Service for Java {
     }
 }
 
+struct Diagnostics;
+impl Service for Diagnostics {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_ipackagediagnosticinputs::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_ipackagediagnosticinputs as d;
+        assert_eq!(call.sender_euid, 1000);
+        assert_eq!(call.code, d::COMPUTE_ROLE_PACKAGE_STATE_HASH);
+        let a = d::ComputeRolePackageStateHash::read(&mut call.data)?;
+        assert_eq!(a.user_id, 10);
+        let mut p = Parcel::new();
+        d::write_compute_role_package_state_hash_reply(&mut p, &Some("live hash".into()));
+        Ok(p)
+    }
+}
+
 #[test]
 fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
     crate::system::with_discovery_binders(|host, _, _, export| {
         let leaf = PackageBootstrap::new(host.clone());
         let mode = Arc::new(AtomicI32::new(0));
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let diagnostic = export(Arc::new(Diagnostics));
+        let capability = Arc::new(Mutex::new(None));
         let owner = export(Arc::new(Java {
+            diagnostic: capability.clone(),
             mode: mode.clone(),
             calls: calls.clone(),
         }));
+        let mut setup = Parcel::new();
+        setup.write_binder(Some(diagnostic.binder()));
+        owner.transact(u32::MAX, &setup, false).unwrap();
         let mut broadcast = Parcel::new();
         bridge::SendPreferredActivityChanged { user_id: -1 }.write(&mut broadcast);
         let mut wait = Parcel::new();
@@ -104,7 +148,21 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             target_user_id: 10,
         }
         .write(&mut cross_profile);
+        let mut logging = Parcel::new();
+        bridge::LogPackageProcessStart {
+            package_name: Some("a.b".into()),
+            process_name: Some("a.b:worker".into()),
+            uid: 10123,
+            seinfo: Some("default".into()),
+            apk_file: Some("/data/app/a.b/base.apk".into()),
+            pid: 42,
+        }
+        .write(&mut logging);
+        let mut diagnostics = Parcel::new();
+        bridge::GetPackageDiagnosticInputs {}.write(&mut diagnostics);
         let requests = [
+            (bridge::LOG_PACKAGE_PROCESS_START, logging),
+            (bridge::GET_PACKAGE_DIAGNOSTIC_INPUTS, diagnostics),
             (
                 bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL,
                 cross_profile,
@@ -164,6 +222,34 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             let p = call(&leaf, 1000, *code, data).unwrap();
             let mut r = p.reader();
             match *code {
+                bridge::LOG_PACKAGE_PROCESS_START => {
+                    bridge::read_log_package_process_start_reply(&mut r)
+                        .unwrap()
+                        .unwrap();
+                }
+                bridge::GET_PACKAGE_DIAGNOSTIC_INPUTS => {
+                    let capability = bridge::read_get_package_diagnostic_inputs_reply(&mut r)
+                        .unwrap()
+                        .unwrap();
+                    let Some(Binder::Handle(handle)) = capability else {
+                        panic!("missing diagnostics");
+                    };
+                    use aim_service_aidl::dev_aim_server_ipackagediagnosticinputs as d;
+                    let mut request = Parcel::new();
+                    d::ComputeRolePackageStateHash { user_id: 10 }.write(&mut request);
+                    let answer = host
+                        .process
+                        .strong(handle)
+                        .transact(d::COMPUTE_ROLE_PACKAGE_STATE_HASH, &request, false)
+                        .unwrap();
+                    assert_eq!(
+                        d::read_compute_role_package_state_hash_reply(&mut answer.reader())
+                            .unwrap()
+                            .unwrap()
+                            .as_deref(),
+                        Some("live hash")
+                    );
+                }
                 bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL => {
                     assert_eq!(
                         bridge::read_get_preferred_cross_profile_access_control_reply(&mut r)
@@ -215,7 +301,7 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             );
             mode.store(0, Ordering::SeqCst);
         }
-        assert_eq!(calls.lock().unwrap().len(), 18);
+        assert_eq!(calls.lock().unwrap().len(), 24);
         let mut wait = Parcel::new();
         bridge::WaitPackageBackgroundHandler {
             timeout_millis: i64::MAX,
@@ -231,6 +317,7 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
         // failures must no longer be observed.
         mode.store(2, Ordering::SeqCst);
         let replacement = export(Arc::new(Java {
+            diagnostic: capability.clone(),
             mode: Arc::new(AtomicI32::new(0)),
             calls: Arc::new(Mutex::new(Vec::new())),
         }));

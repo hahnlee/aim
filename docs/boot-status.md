@@ -119,6 +119,14 @@ Java maximum-access rule over the user owner's UserProperties (user 0 on this
 device; absent users contribute ACCESS_LEVEL_ALL). Both boundaries admit only
 system UID. Host tests cover transport, Java adapters, persisted properties and
 permission publication/effects; no guest boot was run (#2330, 2026-10-29).
+Process-start security logging also uses the retained ProcessLoggingHandler,
+including enabled logging through the real native APK checksum owner. Role
+hash diagnostics use live package/user adapters, with package iteration and its
+component/enabled-state reads sharing one scan lease. Dexopt diagnostics retain
+ART/PackageManagerLocal when those owners exist; aim-system does not start them
+and reports their absence explicitly. Host transport, JVM helper, checksum and
+original-image linkage checks cover this slice; no guest boot was run
+(#2330, 2026-10-29).
 
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHORTCUTS or its package is user 0's HOME role holder; package-scoped queries retain their events (#1870; host tests only, no guest boot rerun).

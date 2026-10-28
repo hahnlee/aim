@@ -15,6 +15,13 @@ final class PackageLocalOwners {
         LocalServices.addService(UserManagerInternal.class, new Users(java.util.Objects.requireNonNull(users)));
         LocalServices.addService(PermissionManagerServiceInternal.class, new Permissions(host));
         LocalServices.addService(StorageManagerInternal.class, new Storage(host));
+        var packages = android.content.pm.IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
+        LocalServices.addService(android.content.pm.PackageManagerInternal.class,
+                new Packages(java.util.Objects.requireNonNull(packages), () -> {
+                    var service = IServiceHost.Stub.asInterface(java.util.Objects.requireNonNull(
+                            ServiceManager.getService("aim.service_host"), "package snapshot owner absent"));
+                    return service.capturePackageScan();
+                }));
     }
 
     private static UnsupportedOperationException unsupported() {
@@ -55,6 +62,79 @@ final class PackageLocalOwners {
         @Override public android.content.pm.UserInfo[] getUserInfos() { throw unsupported(); }
         @Override public int getProfileParentId(int user) { throw unsupported(); }
         @Override public int[] getProfileIds(int user, boolean enabled) { throw unsupported(); }
+    }
+
+    /** Read slice needed by the original role helper and ProcessLoggingHandler. */
+    static final class Packages extends NativePackageManagerInternal {
+        private final android.content.pm.IPackageManager owner;
+        private final PackageSnapshots.Source scans;
+        private final ThreadLocal<PackageScanLease> iteration = new ThreadLocal<>();
+        Packages(android.content.pm.IPackageManager owner, PackageSnapshots.Source scans) {
+            this.owner = java.util.Objects.requireNonNull(owner);
+            this.scans = java.util.Objects.requireNonNull(scans);
+        }
+        @Override @SuppressWarnings("rawtypes")
+        public void requestChecksums(String name, boolean splits, int optional, int required,
+                java.util.List trusted, android.content.pm.IOnChecksumsReadyListener listener,
+                int user, java.util.concurrent.Executor executor, android.os.Handler handler) {
+            java.util.Objects.requireNonNull(listener);
+            java.util.Objects.requireNonNull(executor);
+            java.util.Objects.requireNonNull(handler);
+            try {
+                owner.requestPackageChecksums(name, splits, optional, required, trusted,
+                        new android.content.pm.IOnChecksumsReadyListener.Stub() {
+                            @Override public void onChecksumsReady(java.util.List<android.content.pm.ApkChecksum> sums) {
+                                executor.execute(() -> {
+                                    try { listener.onChecksumsReady(sums); }
+                                    catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+                                });
+                            }
+                        }, user);
+            } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+        }
+        @Override public void forEachInstalledPackage(
+                java.util.function.Consumer<com.android.server.pm.pkg.AndroidPackage> action, int user) {
+            java.util.Objects.requireNonNull(action);
+            PackageScanLease previous = iteration.get();
+            try {
+                var endpoint = java.util.Objects.requireNonNull(scans.capture(), "package snapshot absent");
+                try (var lease = new PackageScanLease(endpoint)) {
+                    iteration.set(lease);
+                    for (String name : endpoint.getPackageNames(false)) {
+                        var state = lease.getUserState(name, false, user);
+                        var code = lease.getCode(name, false);
+                        if (code != null && state != null && state.installed)
+                            action.accept(PackageObjects.fromSnapshot(code, lease.getVersion(), name));
+                    }
+                }
+            } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+            catch (java.io.IOException e) { throw new IllegalStateException("package diagnostic capture failed", e); }
+            finally { if (previous == null) iteration.remove(); else iteration.set(previous); }
+        }
+        private <T> T userState(String name, int user, java.util.function.Function<PackageUserStateData, T> read) {
+            try {
+                var current = iteration.get();
+                if (current != null) return read.apply(current.getUserState(name, false, user));
+                try (var lease = new PackageScanLease(java.util.Objects.requireNonNull(scans.capture()))) {
+                    return read.apply(lease.getUserState(name, false, user));
+                }
+            } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+            catch (java.io.IOException e) { throw new IllegalStateException("package user capture failed", e); }
+        }
+        private static android.util.ArraySet<String> components(String[] names) {
+            var result = new android.util.ArraySet<String>();
+            if (names != null) java.util.Collections.addAll(result, names);
+            return result;
+        }
+        @Override public int getApplicationEnabledState(String name, int user) {
+            return userState(name, user, state -> state == null ? 0 : state.enabled);
+        }
+        @Override public android.util.ArraySet<String> getEnabledComponents(String name, int user) {
+            return userState(name, user, state -> components(state == null ? null : state.getEnabledComponents()));
+        }
+        @Override public android.util.ArraySet<String> getDisabledComponents(String name, int user) {
+            return userState(name, user, state -> components(state == null ? null : state.getDisabledComponents()));
+        }
     }
 
     static final class Storage extends StorageManagerInternal {
