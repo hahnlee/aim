@@ -16,6 +16,8 @@ use crate::disk::{self, Attach, Attached};
 
 /// Process-owned image use, shared by guests and exclusive for builders.
 /// The lock is beside the base image so all shadows share its ownership.
+/// Readers wait for builders; builders fail fast while the image is in use.
+/// Release a write lease before requesting any other lease on the same image.
 pub struct ImageLease(File);
 impl ImageLease {
     pub fn read(image: &Path) -> Result<Self, String> {
@@ -53,14 +55,26 @@ impl ImageLease {
             .truncate(false)
             .open(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        let operation = if write { libc::LOCK_EX } else { libc::LOCK_SH };
-        // SAFETY: flock on our open descriptor; no waiting or forced takeover.
-        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
-            return Err(format!(
-                "{}: image is in use; stop its owner before rebuilding: {}",
-                image.display(),
-                std::io::Error::last_os_error()
-            ));
+        let operation = if write {
+            libc::LOCK_EX | libc::LOCK_NB
+        } else {
+            libc::LOCK_SH
+        };
+        loop {
+            // SAFETY: flock on our open descriptor; readers wait for a writer.
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if !write && error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            let message = if write {
+                "image is in use; stop its owner before rebuilding"
+            } else {
+                "could not acquire image read lease"
+            };
+            return Err(format!("{}: {message}: {error}", image.display()));
         }
         Ok(Self(file))
     }
@@ -262,8 +276,8 @@ mod lease_tests {
         assert!(ImageLease::write(&image).is_err());
         drop(second);
         let writer = ImageLease::write(&image).unwrap();
-        assert!(ImageLease::read(&image).is_err());
         drop(writer);
+        drop(ImageLease::read(&image).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
 }
