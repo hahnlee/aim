@@ -298,9 +298,8 @@ impl System {
         }
         let dependencies = dependencies
             .ok_or_else(|| event_error("component usage mutation owner unavailable"))?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|error| event_error(format!("component usage resolution: {error:?}")))?;
         let query = crate::package::query::Query {
             state: capture.state(),
@@ -437,9 +436,8 @@ impl System {
         user: i32,
     ) -> Result<Option<Vec<i32>>> {
         let capture = self.capture_package_queries_for(bridge)?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|error| event_error(format!("event visibility owner {error:?}")))?;
         let Some(target) = capture.state().packages.get(name) else {
             return Ok(None);

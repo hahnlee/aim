@@ -248,8 +248,7 @@ impl System {
             receipt,
         )
         .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver.resolution(capture.state()).map_err(|error| {
+        let resolution = capture.resolution().map_err(|error| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("install monitor visibility: {error:?}"),

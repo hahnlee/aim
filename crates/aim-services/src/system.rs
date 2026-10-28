@@ -2738,11 +2738,10 @@ impl System {
     ) -> Result<()> {
         let bridge = self.package_bootstrap()?;
         let effects = self.package_effects_owner(&bridge)?;
-        let resolver = crate::package::resolve::Resolver::default();
         let mut retained: Option<crate::package::installer_attribution::Plan> = None;
         loop {
             let capture = self.capture_package_queries_for(&bridge)?;
-            let resolution = resolver.resolution(capture.state()).map_err(|error| {
+            let resolution = capture.resolution().map_err(|error| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     format!("installer attribution visibility: {error:?}"),
@@ -5064,7 +5063,7 @@ impl System {
         self.check_package_bootstrap(bridge)?;
         let capture = self.capture_package_queries_for(bridge)?;
         let resolver = Arc::new(crate::package::resolve::Resolver::default());
-        let resolution = resolver.resolution(capture.state()).map_err(|error| {
+        let resolution = capture.resolution().map_err(|error| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 format!("confirmation installer selection: {error:?}"),

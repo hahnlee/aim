@@ -95,9 +95,8 @@ impl DeviceOwner {
         {
             adopted_shell_uids.insert(uid);
         }
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|error| illegal(format!("installer verifier resolution: {error:?}")))?;
         let query = crate::package::query::Query {
             state: capture.state(),

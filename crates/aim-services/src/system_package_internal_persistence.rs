@@ -312,9 +312,8 @@ impl System {
         self.commit_package_list_from_scan(&owner.bridge, &mut disk, &capture, &users)
             .map_err(|error| illegal(error.to_string()))?;
         drop(disk);
-        let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver
-            .resolution(capture.state())
+        let resolution = capture
+            .resolution()
             .map_err(|error| illegal(format!("settings restriction resolution: {error:?}")))?;
         let query = crate::package::query::Query {
             state: capture.state(),
