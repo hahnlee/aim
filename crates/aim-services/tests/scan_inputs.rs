@@ -1096,6 +1096,105 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         }
     }
 
+    // Live installs must defer both the first member and a new member joining
+    // an existing group. ReconcilePackageUtils precedes final scan flags;
+    // InstallPackageHelper.commitReconciledScanResultLocked adds the setting.
+    let live_path = "/data/app/live.apk";
+    let source = root.join(google.location.path.trim_start_matches('/'));
+    let live_apks = Apks {
+        signing_overrides: None,
+        files: Box::new(move |path| (path == live_path).then(|| source.clone())),
+        platform: Platform::load(&root, Default::default()).unwrap(),
+    };
+    let files: aim_services::package::write::Files = Box::new(|_| None);
+    for populated in [false, true] {
+        let mut base = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+        if populated {
+            let mut input = completion();
+            input.factory_test = false;
+            base.scan_new_system(&google, metadata(&google), policy, &apks, input)
+                .unwrap();
+        }
+        let before = base.clone();
+        let prepare = |owner: &SigningScan| {
+            let mut code = google.parsed.clone();
+            code.package_name = "live.member".into();
+            code.manifest_package_name = Some(code.package_name.clone());
+            code.path = Some(live_path.into());
+            code.base_apk_path = Some(live_path.into());
+            code.requested_permissions
+                .push("android.permission.FACTORY_TEST".into());
+            let mut setting = metadata(&google);
+            setting.code_path = live_path.into();
+            setting.flags = 0;
+            setting.private_flags = 0;
+            owner
+                .prepare_live_installs(
+                    vec![aim_services::package::scan::live_install::Request {
+                        code,
+                        signing: google.signing.clone(),
+                        metadata: setting,
+                        install_flags: 2,
+                        force_queryable_override: false,
+                        required_installed_version: -1,
+                        rollback: false,
+                        source: Default::default(),
+                        install_user: 0,
+                        now: 20,
+                    }],
+                    &[],
+                    false,
+                    &files,
+                )
+                .unwrap()
+        };
+        let mut admission = prepare(&base);
+        let prepared_group = &admission.owner.identities.shared_users[group];
+        assert!(!prepared_group.clone().remove_package("live.member"));
+        assert_eq!(prepared_group.member_count(), usize::from(populated));
+        let mut input = completion();
+        input.context.system = false;
+        // Key-set registration follows final flags. An incomplete owner must
+        // reject without committing either new membership or the staged UID.
+        admission.candidates[0].record.parsed.key_set_mapping = Some(vec![(None, None)]);
+        let failure = match admission.complete_metadata(&live_apks, vec![input]) {
+            Ok(_) => panic!("late key-set failure accepted"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(failure.error, SigningError::Fatal(ref e) if e.phase == "keysets"));
+        assert!(
+            !failure.admission.owner.identities.shared_users[group]
+                .clone()
+                .remove_package("live.member")
+        );
+        assert_eq!(base, before);
+        let mut input = completion();
+        input.context.system = false;
+        let completed = prepare(&base)
+            .complete_metadata(&live_apks, vec![input])
+            .unwrap_or_else(|failure| panic!("{:?}", failure.error));
+        let member = &completed.completed[0].candidate.record;
+        assert_ne!(member.settings.flags & 16, 0);
+        let shared = &completed.owner.identities.shared_users[group];
+        assert_eq!(shared.member_count(), usize::from(populated) + 1);
+        assert_ne!(shared.flags & 16, 0);
+        let mut removed = shared.clone();
+        assert!(removed.remove_package("live.member"));
+        assert_eq!(removed.flags & 16, 0);
+        // A retained setting's final flag changes update removal inputs while
+        // preserving SharedUserSetting's cached aggregate, without re-ORing.
+        let mut retained = completed.owner;
+        retained
+            .finish_application_metadata(
+                completed.completed.into_iter().next().unwrap().candidate,
+                false,
+                false,
+            )
+            .unwrap();
+        assert_ne!(retained.identities.shared_users[group].flags & 16, 0);
+        assert_eq!(base, before);
+    }
+
     let snapshot = scan.clone();
     assert!(matches!(
         scan.apply_new_system(&google, metadata(&google), policy),

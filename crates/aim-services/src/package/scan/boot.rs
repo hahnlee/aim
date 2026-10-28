@@ -538,6 +538,7 @@ fn scan_system_image<S>(
 pub(super) fn initial_stopped(pkg: &AndroidPackage, config: &SystemConfig, enabled: bool) -> bool {
     enabled
         && pkg.package_name != "android"
+        && !pkg.is2(crate::package::pkg::booleans2::APEX)
         && !pkg.is(crate::package::pkg::booleans::OVERLAY_IS_STATIC)
         && !config
             .initial_non_stopped_system_packages
@@ -639,6 +640,10 @@ mod tests {
         pkg.booleans |= booleans::OVERLAY_IS_STATIC;
         assert!(!initial_stopped(&pkg, &config, true));
         pkg.booleans &= !booleans::OVERLAY_IS_STATIC;
+        pkg.booleans2 |= crate::package::pkg::booleans2::APEX;
+        assert!(!initial_stopped(&pkg, &config, true));
+        pkg.booleans2 &= !crate::package::pkg::booleans2::APEX;
+        assert!(initial_stopped(&pkg, &config, true));
         pkg.package_name = "android".into();
         assert!(!initial_stopped(&pkg, &config, true));
         pkg.package_name = "fixture".into();

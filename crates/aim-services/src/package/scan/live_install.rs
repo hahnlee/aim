@@ -1111,7 +1111,7 @@ mod tests {
         assert_eq!(second.owner.settings.packages[1].app_id, id);
         assert_eq!(
             second.owner.identities.shared_users["new.group"].member_count(),
-            2
+            0
         );
         let before = owner.clone();
         let error = match owner.prepare_live_installs(

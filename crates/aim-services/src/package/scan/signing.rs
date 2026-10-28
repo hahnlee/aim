@@ -1242,7 +1242,7 @@ impl SigningScan {
         };
         let mut next = self.clone();
         next.settings.packages[at] = record.settings.clone();
-        let signing = next.apply_with_disabled(&record, disabled)?;
+        let signing = next.apply_candidate(&record, disabled, false)?;
         record.settings = next.settings.packages[at].clone();
         next.update_disabled_user_aliases(&record.settings.name, &setting.users);
         *self = next;
@@ -1446,7 +1446,7 @@ impl SigningScan {
             .position(|p| p.name == record.settings.name)
             .unwrap();
         next.settings.packages[at] = record.settings.clone();
-        let signing = next.apply(&record)?;
+        let signing = next.apply_candidate(&record, None, false)?;
         record.settings = next.settings.packages[at].clone();
         // addRenamedPackageLPw replaces the old ArrayMap value on acceptance.
         next.settings
@@ -1719,7 +1719,7 @@ impl SigningScan {
         record: &Record,
         disabled: Option<&Record>,
     ) -> Result<SigningOutcome, SigningError> {
-        self.reconcile_inner(record, None, disabled, true, Some(0), true)
+        self.reconcile_inner(record, None, disabled, false, Some(0), true)
     }
 
     fn reconcile_inner(
