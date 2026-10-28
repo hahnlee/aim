@@ -765,6 +765,8 @@ impl Boot {
             _ => None,
         };
         let init_options = PropertyInitOptions {
+            build_incremental: aim_android_image::identity::read_derived_identity(image.root())?
+                .map(|identity| format!("aim.{identity}")),
             kernel: KernelBootProperties {
                 bootconfig: options
                     .androidboot

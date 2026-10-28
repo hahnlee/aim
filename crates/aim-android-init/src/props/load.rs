@@ -80,6 +80,9 @@ pub struct KernelBootProperties {
 #[derive(Clone, Debug)]
 pub struct PropertyInitOptions {
     pub kernel: KernelBootProperties,
+    /// The device vendor's derived build number, when booting an overlay.
+    /// Replaces the original incremental before fingerprints are composed.
+    pub build_incremental: Option<String>,
     /// `IsRecoveryMode()`: also loads `/prop.default` first.
     pub recovery: bool,
     /// `getpagesize()` for `ro.boot.hardware.cpu.pagesize`.
@@ -92,6 +95,7 @@ impl Default for PropertyInitOptions {
     fn default() -> Self {
         Self {
             kernel: KernelBootProperties::default(),
+            build_incremental: None,
             recovery: false,
             page_size: 16384,
             vendor_api_level: ANDROID_API_FUTURE,
@@ -323,7 +327,7 @@ impl<M: AreaMemory> Loader<'_, M> {
     }
 
     /// `PropertyLoadBootDefaults`.
-    fn load_boot_defaults(&mut self, recovery: bool) {
+    fn load_boot_defaults(&mut self, recovery: bool, build_incremental: Option<&str>) {
         let mut properties = BTreeMap::new();
         if recovery && let Err(error) = self.load_file("/prop.default", None, &mut properties) {
             self.diagnostics
@@ -354,6 +358,13 @@ impl<M: AreaMemory> Loader<'_, M> {
                 .push(Diagnostic::warning(DEBUG_RAMDISK_PROP, 0, error));
         }
 
+        if let Some(incremental) = build_incremental {
+            properties.insert("ro.build.version.incremental".into(), incremental.into());
+            // An explicit original fingerprint also names the old build.
+            // Let ConstructBuildFingerprint compose both from this build.
+            properties.remove("ro.build.fingerprint");
+            properties.remove("ro.build.legacy.fingerprint");
+        }
         for (name, value) in &properties {
             self.set_no_socket(name, value, "while loading .prop files");
         }
@@ -601,7 +612,7 @@ pub fn property_init<M: AreaMemory>(
         }
     }
     loader.export_kernel_boot_props();
-    loader.load_boot_defaults(options.recovery);
+    loader.load_boot_defaults(options.recovery, options.build_incremental.as_deref());
     // PropertyLoadDerivedDefaults.
     if loader.get("ro.boot.hardware.cpu.pagesize", "").is_empty() {
         let page_size = options.page_size.to_string();
