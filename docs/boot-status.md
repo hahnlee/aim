@@ -2520,14 +2520,18 @@ Standalone linux-run now uses its detached PID-namespace watcher as the native
 POSIX controller, admitting the launch incarnation and its descendants and
 retaining holders across exec (#1189). The Darwin process-lock fallback is
 removed. Fork admission authenticates process birth and the admitted XNU
-parent without requiring matching parent/child mount namespaces. Its native
-admission test reproduces the cross-mount EPERM before the fix and passes
-afterward, including foreign actor, forged birth and stale receipt rejection;
-the private locator and Mach audit-generation checks also pass (2026-10-28).
-The NDK regression reproduces lost locks on origin/main. The release process
-suite (41 tests) and POSIX NDK regression both fail before guest execution here:
-watcher/Mach registration reports EADDRINUSE, or standalone locator visibility
-reports EPERM. No guest integration pass or guest boot is claimed.
+parent without requiring matching parent/child mount namespaces. Both native
+receipts remain birth-bound; their reader also rejects empty or malformed
+namespace names. Native admission checks pass for inherited and new mount
+namespaces, foreign actors, forged births, stale and malformed receipts
+(2026-10-29). The two process tests using `--identity` now supply a real native
+controller and private receipt table, including launcher admission before an
+orphaned guest is released; guest-visible admission evidence remains rejected.
+The NDK regression reproduces lost locks on origin/main. The current release
+process suite (41 tests) and NDK suite (57 tests) stop before guest execution:
+Mach registration reports EADDRINUSE, with a native probe confirming bootstrap
+status 1100 (BOOTSTRAP_NOT_PRIVILEGED). No guest integration pass or guest boot
+is claimed.
 The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional

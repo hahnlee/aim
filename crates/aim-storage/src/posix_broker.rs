@@ -752,8 +752,9 @@ impl State {
                     },
                 )
             })?;
-        // Mount namespaces may diverge at clone/unshare. Admission follows the
-        // authenticated process lineage, not a shared filesystem view.
+        // CLONE_NEWNS/unshare may change the child's filesystem view. Both
+        // native receipts must still attest their exact live process births;
+        // neither a namespace name from a request nor ppid alone admits it.
         if init.process != namespace.init.process
             || init.mount_namespace != namespace.init.mount_namespace
         {
@@ -1531,6 +1532,11 @@ mod standalone_tests {
     }
     #[test]
     fn standalone_admits_only_root_and_authenticated_descendants_across_mount_namespaces() {
+        for child_namespace in ["parent", "other"] {
+            standalone_fork_admission(child_namespace);
+        }
+    }
+    fn standalone_fork_admission(child_namespace: &str) {
         let root = ProcessIdentity::running(std::process::id() as i32).unwrap();
         let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
         let actor = ProcessIdentity::running(child.id() as i32).unwrap();
@@ -1625,7 +1631,27 @@ mod standalone_tests {
             Some(libc::ESRCH)
         );
         assert_eq!(controller.state.owners.lock().unwrap().len(), 1);
-        register_mount_namespace(&table, actor, "other").unwrap();
+        for invalid in ["", "../foreign", "bad\0namespace", "bad\nnamespace"] {
+            std::fs::write(
+                table.join(format!("{}.mount-namespace", actor.host_pid)),
+                format!(
+                    "AIMPROCNS1\t{}\t{}\t{}\t{invalid}\n",
+                    actor.host_pid, actor.start_seconds, actor.start_microseconds
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                controller
+                    .state
+                    .admit_fork(actor)
+                    .err()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(libc::EPROTO)
+            );
+        }
+        assert_eq!(controller.state.owners.lock().unwrap().len(), 1);
+        register_mount_namespace(&table, actor, child_namespace).unwrap();
         let admitted = controller.state.admit_fork(actor).unwrap();
         assert_eq!(
             admitted.owner,

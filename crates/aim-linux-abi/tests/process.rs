@@ -143,6 +143,73 @@ fn check(name: &str) {
     );
 }
 
+/// `--identity` joins a native-managed table. Keep its admission evidence
+/// outside the guest root, with a real controller admitting our children.
+struct NativeNamespace {
+    directory: PathBuf,
+    controller: Option<aim_storage::posix_broker::Controller>,
+}
+impl NativeNamespace {
+    fn new(name: &str) -> Self {
+        use aim_storage::{posix_broker, posix_control::Owner, process_namespace};
+        use std::os::unix::fs::DirBuilderExt;
+        let directory =
+            std::env::temp_dir().join(format!("aim-process-{name}-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let mut namespace = Self {
+            directory,
+            controller: None,
+        };
+        let process =
+            process_namespace::ProcessIdentity::running(std::process::id() as i32).unwrap();
+        let table = namespace.directory.join("by-pid");
+        let init = process_namespace::InitRegistration::register(&table, process, name).unwrap();
+        process_namespace::register_mount_namespace(&table, process, name).unwrap();
+        let controller = posix_broker::Controller::start(posix_broker::Config {
+            endpoint: format!("dev.aim.process.{name}.{}", process.host_pid),
+            holder: aim_paths::host_bin("aim-lock-holder"),
+            startup_timeout: Duration::from_secs(5),
+        })
+        .unwrap();
+        controller.bind_namespace(&table, &init).unwrap();
+        controller
+            .register_guest(Owner {
+                process,
+                guest_pid: 1,
+            })
+            .unwrap();
+        controller
+            .owner_config()
+            .unwrap()
+            .write(&namespace.directory.join("posix-control-owner"))
+            .unwrap();
+        namespace.controller = Some(controller);
+        namespace
+    }
+    fn admit(&self, pid: i32) {
+        let process = aim_storage::process_namespace::ProcessIdentity::running(pid).unwrap();
+        self.controller
+            .as_ref()
+            .unwrap()
+            .register_guest(aim_storage::posix_control::Owner {
+                process,
+                guest_pid: pid,
+            })
+            .unwrap();
+    }
+}
+impl Drop for NativeNamespace {
+    fn drop(&mut self) {
+        if let Some(controller) = &self.controller {
+            controller.shutdown().unwrap();
+        }
+        std::fs::remove_dir_all(&self.directory).unwrap();
+    }
+}
+
 #[test]
 fn new_mount_namespace_clone_preserves_parent_view() {
     check("clone_new_mount_namespace");
@@ -346,7 +413,9 @@ fn credential_changes_are_seen_whole() {
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
     let Some(root) = root() else { return };
-    let id = root.join("data/local/tmp/id/svc");
+    let namespace = NativeNamespace::new("identity");
+    let id = namespace.directory.join("svc");
+    let locator = namespace.directory.join("posix-control-owner");
     std::fs::write(
         &id,
         "# aim-guest-init identity v1\nservice\tsvc\nuid\t1000\ngid\t1001\ngroups\t3003 1065\n\
@@ -364,6 +433,8 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
         &[
             "--identity",
             &id_arg,
+            "--posix-control",
+            locator.to_str().unwrap(),
             "--inherit-env",
             PROGRAM,
             "identity_file",
@@ -405,17 +476,22 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
 #[test]
 fn a_guest_cannot_reach_host_processes() {
     let Some(root) = root() else { return };
-    // Its own table, so no other test's processes are in it.
-    let dir = root.join("data/local/tmp/pidns");
-    std::fs::create_dir_all(dir.join("by-pid")).unwrap();
-    let id = dir.join("guest");
+    let namespace = NativeNamespace::new("pidns");
+    let id = namespace.directory.join("guest");
+    let locator = namespace.directory.join("posix-control-owner");
     std::fs::write(
         &id,
         "# aim-guest-init identity v1\nservice\tguest\nuid\t10050\ngid\t10050\n",
     )
     .unwrap();
-    host_process_unreachable(root, &["--identity", id.to_str().unwrap()], false);
-    host_process_unreachable(root, &["--identity", id.to_str().unwrap()], true);
+    let args = [
+        "--identity",
+        id.to_str().unwrap(),
+        "--posix-control",
+        locator.to_str().unwrap(),
+    ];
+    host_process_unreachable(root, &args, false, Some(&namespace));
+    host_process_unreachable(root, &args, true, Some(&namespace));
 }
 
 /// A guest started without a table (a test, a debugging shell) is alone in
@@ -424,8 +500,8 @@ fn a_guest_cannot_reach_host_processes() {
 #[test]
 fn a_standalone_guest_has_a_private_namespace() {
     let Some(root) = root() else { return };
-    host_process_unreachable(root, &[], false);
-    host_process_unreachable(root, &[], true);
+    host_process_unreachable(root, &[], false, None);
+    host_process_unreachable(root, &[], true, None);
 
     // Its init, as a namespace's: signals from inside it that it has no
     // handler for are dropped.
@@ -563,7 +639,12 @@ fn sigkilled_standalone_init_leaves_no_table_or_descendants() {
 /// `pid_namespace` of `tests/guest/process.c` with a host process's pid.
 /// With `leader_gone`, the guest starts in a session and process group
 /// whose leader has exited, as under a shell that went away.
-fn host_process_unreachable(root: &Path, args: &[&str], leader_gone: bool) {
+fn host_process_unreachable(
+    root: &Path,
+    args: &[&str],
+    leader_gone: bool,
+    namespace: Option<&NativeNamespace>,
+) {
     let mut host = Command::new("/bin/sleep")
         .arg("60")
         .process_group(0)
@@ -574,7 +655,13 @@ fn host_process_unreachable(root: &Path, args: &[&str], leader_gone: bool) {
     argv.extend([PROGRAM, "pid_namespace", &host_pid]);
     // An orphaned guest's status is not ours to see; its output says.
     let (status, so, se) = if leader_gone {
-        let (so, se) = orphaned_linux_run(root, &argv);
+        let (so, se) = orphaned_linux_run(root, &argv, |pid| {
+            // The launcher attests the exact child before releasing it. Its
+            // native parent is gone, so fork admission must not guess lineage.
+            if let Some(namespace) = namespace {
+                namespace.admit(pid);
+            }
+        });
         (None, so, se)
     } else {
         let out = linux_run(root, &argv, |_| {});
@@ -594,7 +681,7 @@ fn host_process_unreachable(root: &Path, args: &[&str], leader_gone: bool) {
 /// `linux_run` in a new session and process group whose leader, a host
 /// shell, has exited and been reaped before the guest starts: its stdout
 /// and stderr.
-fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
+fn orphaned_linux_run(root: &Path, args: &[&str], admit: impl FnOnce(i32)) -> (Vec<u8>, Vec<u8>) {
     let mut sh = Command::new("/bin/sh");
     // The background job waits for a line on the shell's stdin, so it
     // runs only once the leader is gone; `$!` names it.
@@ -634,6 +721,7 @@ fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
     let mut line = [0u8; 16];
     let n = so.read(&mut line).unwrap();
     let pid: i32 = String::from_utf8_lossy(&line[..n]).trim().parse().unwrap();
+    admit(pid);
     let (out, err) = (read(Box::new(so)), read(Box::new(se)));
     std::io::Write::write_all(&mut go, b"go\n").unwrap();
     drop(go);
