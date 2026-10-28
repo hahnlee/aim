@@ -275,6 +275,8 @@ static void* short_thread(void* arg) {
   return NULL;
 }
 
+static unsigned clone_wait_delay;
+
 // PTRACE_O_TRACECLONE: a traced thread's clone(CLONE_FILES) child and its
 // new thread start traced, stopped, and the tracer sees the event, the new
 // tid and their ends.
@@ -302,6 +304,7 @@ static void trace_clone_events(void) {
   CHECK(ptrace(PTRACE_GETEVENTMSG, c, 0, &g) == 0 && g > 0);
   CHECK(stop_status(g) >> 8 == TRAP_STOP);
   CHECK(ptrace(PTRACE_CONT, g, 0, 0) == 0);
+  if (clone_wait_delay) usleep(clone_wait_delay);
   int st = stop_status(g);
   CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 3);
   CHECK(ptrace(PTRACE_CONT, c, 0, 0) == 0);
@@ -311,6 +314,7 @@ static void trace_clone_events(void) {
   CHECK(stop_status(tid) >> 8 == TRAP_STOP);
   CHECK(ptrace(PTRACE_CONT, tid, 0, 0) == 0);
   CHECK(ptrace(PTRACE_CONT, c, 0, 0) == 0);
+  if (clone_wait_delay) usleep(clone_wait_delay);
   st = stop_status(tid);
   CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
   CHECK(waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
@@ -414,7 +418,17 @@ static void signals_to_another_process(void) {
   close(ready[1]);
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+  if (argc >= 3 && strcmp(argv[1], "--trace-clone-events") == 0) {
+    int iterations = atoi(argv[2]);
+    if (iterations <= 0) return 1;
+    clone_wait_delay = argc > 3 ? strtoul(argv[3], NULL, 10) : 0;
+    for (int i = 0; i < iterations; i++) {
+      RUN(trace_clone_events);
+      if (failures) break;
+    }
+    DONE();
+  }
   RUN(interrupt_a_blocked_syscall);
   RUN(interrupt_guest_code);
   RUN(errors);

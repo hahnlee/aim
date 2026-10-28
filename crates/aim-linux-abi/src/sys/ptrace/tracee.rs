@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Condvar, LazyLock, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::context;
 use crate::sys::sigframe::Cpu;
@@ -24,8 +24,8 @@ pub(super) const EVENT_CLONE: u32 = 3;
 pub(super) const EVENT_STOP: u32 = 128;
 const CLONE_VFORK: u64 = 0x4000;
 const LINUX_SIGCHLD: u64 = 17;
-/// How long an ending process waits for its tracers to take the news.
-const END_GRACE: Duration = Duration::from_millis(200);
+/// Recheck tracers that have not opened an agent connection yet.
+const END_POLL: Duration = Duration::from_secs(1);
 
 /// Registers of a stopped thread, as the regsets `PTRACE_GETREGSET` reads.
 pub(super) struct Regs {
@@ -76,7 +76,14 @@ pub(super) struct State {
     pub traced: HashMap<i32, Traced>,
     /// Traced threads that ended: their tracer and wait status, until the
     /// tracer's wait takes it.
-    pub ended: HashMap<i32, (i32, i32)>,
+    pub ended: HashMap<i32, Ended>,
+}
+
+pub(super) struct Ended {
+    pub tracer: i32,
+    pub status: i32,
+    /// An unreaped traced thread still owns its TID and its wait route.
+    _reservation: Option<crate::sys::pidns::tids::Reservation>,
 }
 
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(Default::default);
@@ -214,37 +221,64 @@ pub fn forget(tid: i32) {
 }
 
 /// Thread `tid` ends with wait status `status`.
-pub fn thread_ended(tid: i32, status: i32) {
-    if TRACED.load(SeqCst) == 0 {
-        return;
-    }
+pub(in crate::sys) fn thread_ended(
+    tid: i32,
+    status: i32,
+    reservation: Option<crate::sys::pidns::tids::Reservation>,
+) {
     let mut g = lock();
     if let Some(t) = g.detach(tid) {
-        g.ended.insert(tid, (t.tracer, status));
+        g.ended.insert(
+            tid,
+            Ended {
+                tracer: t.tracer,
+                status,
+                _reservation: reservation,
+            },
+        );
+    } else if let Some(ended) = g.ended.get_mut(&tid) {
+        // exit_group may have queued this thread's end first.
+        ended._reservation = reservation;
     }
 }
 
 /// The process ends with wait status `status`: each traced thread ends
-/// with it, and the process waits briefly for its tracers' waits, which
-/// cannot reach it later.
+/// with it. Keep the agent and any already-ended threads reachable until
+/// their tracers reap them or exit, as Linux retains ptraced zombies.
 pub fn process_ending(status: i32) {
-    if TRACED.load(SeqCst) == 0 {
+    let mut g = lock();
+    if g.traced.is_empty() && g.ended.is_empty() {
         return;
     }
-    let mut g = lock();
     let tids: Vec<i32> = g.traced.keys().copied().collect();
     for tid in tids {
         if let Some(t) = g.detach(tid) {
-            g.ended.insert(tid, (t.tracer, status));
+            g.ended.insert(
+                tid,
+                Ended {
+                    tracer: t.tracer,
+                    status,
+                    _reservation: None,
+                },
+            );
         }
     }
-    let deadline = Instant::now() + END_GRACE;
+    let tracers: HashMap<_, _> = g
+        .ended
+        .values()
+        .map(|e| {
+            (
+                e.tracer,
+                aim_storage::process_namespace::ProcessIdentity::running(e.tracer).ok(),
+            )
+        })
+        .collect();
     while !g.ended.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
+        g.ended
+            .retain(|_, e| tracers[&e.tracer].is_some_and(|p| p.is_live()));
+        if !g.ended.is_empty() {
+            g = wait(g, END_POLL);
         }
-        g = wait(g, left);
     }
 }
 
@@ -264,7 +298,8 @@ pub(super) fn tracer_gone(pid: i32) {
             .detach(tid)
             .is_some_and(|t| t.options & super::O_EXITKILL != 0);
     }
-    g.ended.retain(|_, e| e.0 != pid);
+    g.ended.retain(|_, e| e.tracer != pid);
+    CHANGED.notify_all();
     drop(g);
     if kill {
         // SAFETY: killing this process, as the tracer's exit asks.
