@@ -19,10 +19,9 @@
 //!   device's locale, so the device's first boot makes its own (#722).
 //!
 //! A template is the original's own output: a first boot of the derived
-//! image on a data directory made from the empty image, in window mode
-//! (which shows only app tasks; a first-run task may still show a window
-//! for a moment, #607). PackageManagerService's settings are taken as its
-//! constructor writes them (`write settings`, before `pms_ready`), when no
+//! image on a data directory made from the empty image, with a fixed-size
+//! headless display: no task, panel or native UI can open a window (#607).
+//! PackageManagerService's settings are taken as its constructor writes them (`write settings`, before `pms_ready`), when no
 //! app has run yet: a later write would hold what apps did in their first
 //! seconds (components they enable, packages they start), which differs
 //! from boot to boot. The permission module's state is taken once the role
@@ -499,8 +498,12 @@ fn first_boot(
     let output = fs::File::create(work.join("guest-init.log")).map_err(|e| e.to_string())?;
     let display_dir = DisplaySocketDir::new()?;
     let display = match isolated {
-        Some(config) => boot::start_display_binary(&config.display, &display_dir.0, true)?,
-        None => boot::start_display(ctx, &display_dir.0, true)?,
+        Some(config) => boot::start_display_binary(&config.display, &display_dir.0, "headless")?,
+        None => boot::start_display_binary(
+            &ctx.workspace.host_bin("aim-display"),
+            &display_dir.0,
+            "headless",
+        )?,
     };
     let mut command = match isolated {
         Some(config) => {

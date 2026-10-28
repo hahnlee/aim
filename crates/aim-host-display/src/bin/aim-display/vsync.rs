@@ -12,7 +12,9 @@
 //! controller raises its vsync interrupt only while the driver asks for it.
 
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use aim_hostcall::clock::ticks_to_ns;
 
@@ -193,12 +195,71 @@ pub fn create(sink: Sink) -> Result<i64, String> {
     }
 }
 
+/// A virtual display has no physical refresh source. Its clock advances on a
+/// fixed timeline, skipping missed refreshes instead of accumulating drift.
+const HEADLESS_PERIOD: i64 = 1_000_000_000 / 60;
+static HEADLESS: AtomicBool = AtomicBool::new(false);
+static WAKE: Condvar = Condvar::new();
+
+pub fn create_headless(sink: Sink) -> Result<i64, String> {
+    *SINK.lock().unwrap() = Some(sink);
+    HEADLESS.store(true, Ordering::Relaxed);
+    std::thread::Builder::new()
+        .name("headless-vsync".into())
+        .spawn(|| {
+            let period = Duration::from_nanos(HEADLESS_PERIOD as u64);
+            loop {
+                let mut link = LINK.lock().unwrap();
+                while link.started_ns.is_none() {
+                    link = WAKE.wait(link).unwrap();
+                }
+                let mut next = Instant::now() + period;
+                while link.started_ns.is_some() {
+                    let now = Instant::now();
+                    if now < next {
+                        link = WAKE.wait_timeout(link, next - now).unwrap().0;
+                        continue;
+                    }
+                    let now_ns = monotonic_ns();
+                    let timestamp_ns = now_ns - now.duration_since(next).as_nanos() as i64;
+                    let started_ns = (!std::mem::replace(&mut link.ticked, true))
+                        .then_some(link.started_ns)
+                        .flatten();
+                    link.last = Some((timestamp_ns, HEADLESS_PERIOD));
+                    drop(link);
+                    if let Some(sink) = SINK.lock().unwrap().as_ref() {
+                        sink(Tick {
+                            timestamp_ns,
+                            period_ns: HEADLESS_PERIOD,
+                            now_ns,
+                            started_ns,
+                        });
+                    }
+                    next += period
+                        * ((now.duration_since(next).as_nanos() / period.as_nanos()) as u32 + 1);
+                    link = LINK.lock().unwrap();
+                }
+            }
+        })
+        .map_err(|e| format!("headless vsync: {e}"))?;
+    Ok(HEADLESS_PERIOD)
+}
+
 /// Run the link while `wanted()`. Updates are serialized, so concurrent
 /// ones leave the link as the last of them found.
 pub fn update(wanted: impl FnOnce() -> bool) {
     static UPDATE: Mutex<()> = Mutex::new(());
     let _serial = UPDATE.lock().unwrap();
     let want = wanted();
+    if HEADLESS.load(Ordering::Relaxed) {
+        let mut link = LINK.lock().unwrap();
+        if want != link.started_ns.is_some() {
+            link.started_ns = want.then(monotonic_ns);
+            link.ticked = false;
+            WAKE.notify_one();
+        }
+        return;
+    }
     let link = {
         let mut l = LINK.lock().unwrap();
         if l.link.is_null() || want == l.started_ns.is_some() {
@@ -227,5 +288,38 @@ pub fn update(wanted: impl FnOnce() -> bool) {
     };
     if !running {
         LINK.lock().unwrap().started_ns = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headless_clock_starts_stops_and_restarts_without_a_display_link() {
+        let (send, receive) = std::sync::mpsc::channel();
+        assert_eq!(
+            create_headless(Box::new(move |tick| {
+                send.send(tick).unwrap();
+            }))
+            .unwrap(),
+            HEADLESS_PERIOD
+        );
+        assert!(receive.recv_timeout(Duration::from_millis(40)).is_err());
+        for _ in 0..2 {
+            update(|| true);
+            let first = receive.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(first.started_ns.is_some());
+            let next = receive.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(next.started_ns.is_none());
+            assert_eq!(next.period_ns, HEADLESS_PERIOD);
+            assert!(next.timestamp_ns > first.timestamp_ns);
+            assert!(next.timestamp_ns <= next.now_ns);
+            update(|| false);
+            // A callback already outside LINK may finish; none starts after it.
+            std::thread::sleep(Duration::from_millis(40));
+            while receive.try_recv().is_ok() {}
+            assert!(receive.recv_timeout(Duration::from_millis(40)).is_err());
+        }
     }
 }

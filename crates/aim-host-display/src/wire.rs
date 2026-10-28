@@ -21,6 +21,10 @@
 //! The status bar of the lightweight shell (`docs/m1-shell.md`) opens one
 //! with [`OP_SHELL`] and exchanges [`crate::shell`] frames on it.
 //!
+//! Headless mode replies to task and native UI bridge hellos with
+//! `mode::HEADLESS` and closes them: there is no host UI surface.
+//! Composer connections keep the normal buffer, fence and vsync protocol.
+//!
 //! A window host (an app's shim, `docs/windows.md`) opens a connection with
 //! [`OP_HOST`]; from then on both ends write [`Host`] records: the server
 //! sends it the buffers, presents and task records of its package, and it

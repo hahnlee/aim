@@ -63,15 +63,19 @@ pub fn run(
 /// Starts aim-display with its socket and capture file in `dir` (in window
 /// mode when `windows`) and waits for its socket.
 pub fn start_display(ctx: &Ctx, dir: &Path, windows: bool) -> Result<Child, String> {
-    start_display_binary(&ctx.workspace.host_bin("aim-display"), dir, windows)
+    start_display_binary(
+        &ctx.workspace.host_bin("aim-display"),
+        dir,
+        if windows { "windows" } else { "device" },
+    )
 }
 
-pub fn start_display_binary(binary: &Path, dir: &Path, windows: bool) -> Result<Child, String> {
+pub fn start_display_binary(binary: &Path, dir: &Path, mode: &str) -> Result<Child, String> {
     let socket = dir.join("display");
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let _ = fs::remove_file(&socket);
     let mut display = Command::new(binary)
-        .args(display_args(dir, windows))
+        .args(display_args(dir, mode))
         .spawn()
         .map_err(|e| format!("aim-display: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -128,10 +132,10 @@ fn shims_args(ctx: &Ctx, dir: &Path, data: &Path) -> Vec<OsString> {
 
 /// aim-display's arguments: its socket and capture file in `dir`, and a
 /// phone-sized device window or window mode with the shims in `dir/apps`.
-fn display_args(dir: &Path, windows: bool) -> Vec<OsString> {
+fn display_args(dir: &Path, mode: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["--socket".into(), dir.join("display").into()];
-    if windows {
-        args.extend(["--mode", "windows"].map(OsString::from));
+    args.extend(["--mode", mode].map(OsString::from));
+    if mode == "windows" {
         // The shims show the guest's notifications.
         args.push("--apps".into());
         args.push(dir.join("apps").into());
@@ -148,21 +152,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_captures_next_to_its_socket() {
-        let args = display_args(Path::new("/b"), false);
+    fn headless_display_has_fixed_size_and_no_shims() {
+        let args = display_args(Path::new("/b"), "headless");
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
             [
                 "--socket",
                 "/b/display",
+                "--mode",
+                "headless",
                 "--size",
                 "1080x1920",
                 "--capture",
                 "/b/capture.bmp"
             ]
         );
-        let args = display_args(Path::new("/b"), true);
+    }
+
+    #[test]
+    fn display_captures_next_to_its_socket() {
+        let args = display_args(Path::new("/b"), "device");
+        let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "--socket",
+                "/b/display",
+                "--mode",
+                "device",
+                "--size",
+                "1080x1920",
+                "--capture",
+                "/b/capture.bmp"
+            ]
+        );
+        let args = display_args(Path::new("/b"), "windows");
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,

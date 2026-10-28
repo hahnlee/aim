@@ -7358,6 +7358,12 @@ GMS in all four (gone since; see "First boot").
 
 ## First boot (2026-09-30, #241, #375)
 
+The template builder now starts `aim-display --mode headless`, with a fixed
+1080x1920 display and a 60 Hz software clock (#607). No task, panel or native
+UI surface opens a host window. Host clock and build-argument checks pass;
+the GPU protocol/window check has no Metal device here and is not run. No
+build-time guest boot was rerun (2026-10-28).
+
 Two fresh first boots of main (49eed57f, host load 9.5) and of the device
 without telephony (load 3.9), measured from guest-init's start to
 `sys.boot_completed` and the 5 minutes after, CPU per guest process from

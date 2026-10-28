@@ -1,4 +1,4 @@
-//! `aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE] [--apps DIR]`
+//! `aim-display --socket PATH [--mode device|windows|headless] [--size WxH] [--title TEXT] [--capture FILE] [--apps DIR]`
 //!
 //! The display server (`docs/composer.md`): macOS windows showing the
 //! guest's display. It owns what must live on the host's main thread
@@ -14,6 +14,9 @@
 //!   (`docs/layers.md`), and system panels the layers of no task. The app
 //!   shims in `--apps DIR` show the guest's notifications
 //!   (`docs/notifications.md`) and name the server's own windows.
+//!
+//! - **Headless mode** (`--mode headless`): a fixed-size display (1080x1920
+//!   by default), with a 60 Hz software clock and no windows or native UI.
 //!
 //! The windows' input is the guest's evdev devices, listening sockets in
 //! `PATH.input` (`docs/input.md`), removed when the server quits (device
@@ -69,7 +72,7 @@ use stats::Stats;
 /// How long a present waits for its buffer's acquire fence.
 const ACQUIRE_TIMEOUT_MS: i32 = 3000;
 
-const USAGE: &str = "usage: aim-display --socket PATH [--mode device|windows] [--size WxH] [--title TEXT] [--capture FILE] [--apps DIR]";
+const USAGE: &str = "usage: aim-display --socket PATH [--mode device|windows|headless] [--size WxH] [--title TEXT] [--capture FILE] [--apps DIR]";
 
 struct Client {
     /// Events go out on the connection the guest reads.
@@ -282,7 +285,9 @@ impl Display {
         if let Some(fence) = fence {
             fence.done();
         }
-        panels::update(&f);
+        if self.mode != mode::HEADLESS {
+            panels::update(&f);
+        }
         self.attribute_again(again);
     }
 
@@ -349,7 +354,9 @@ impl Display {
             self.show_layers(&f, None);
             *last = Some(Shown::Layers(f.clone()));
             drop(last);
-            panels::update(&f);
+            if self.mode != mode::HEADLESS {
+                panels::update(&f);
+            }
         }
         self.attribute_again(again);
     }
@@ -462,7 +469,9 @@ impl Display {
                         .then(|| fds.pop())
                         .flatten();
                     let changed = r.flag & wire::CURSOR_CHANGED != 0;
-                    cursor::serve(r.id, textures.get(&r.id), changed, acquire, r.x, r.y);
+                    if self.mode != mode::HEADLESS {
+                        cursor::serve(r.id, textures.get(&r.id), changed, acquire, r.x, r.y);
+                    }
                 }
                 wire::OP_SET_VSYNC => {
                     self.set_vsync(&client, r.flag != 0);
@@ -496,13 +505,17 @@ impl Display {
                 wire::OP_MEDIA if r.id == wire::VERSION => {
                     // Window mode's shims show media; in device mode, this
                     // process.
-                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok() {
+                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok()
+                        && self.mode != mode::HEADLESS
+                    {
                         media::serve_bridge(sock.into(), self.mode == mode::WINDOWS);
                     }
                     return;
                 }
                 wire::OP_TEXT_INPUT if r.id == wire::VERSION => {
-                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok() {
+                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok()
+                        && self.mode != mode::HEADLESS
+                    {
                         text_input::serve_bridge(sock.into(), self.mode == mode::WINDOWS);
                     }
                     return;
@@ -510,7 +523,9 @@ impl Display {
                 wire::OP_SHELL if r.id == wire::VERSION => {
                     // Window mode's shims show it; in device mode, this
                     // process.
-                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok() {
+                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok()
+                        && self.mode != mode::HEADLESS
+                    {
                         shell::serve_bar(sock.into(), self.mode == mode::WINDOWS);
                     }
                     return;
@@ -558,7 +573,8 @@ fn write_bmp(path: &std::path::Path, t: &Texture) -> std::io::Result<()> {
 
 fn parse_size(s: &str) -> Option<(u32, u32)> {
     let (w, h) = s.split_once('x')?;
-    Some((w.parse().ok()?, h.parse().ok()?))
+    let (w, h) = (w.parse().ok()?, h.parse().ok()?);
+    (w > 0 && h > 0).then_some((w, h))
 }
 
 fn main() {
@@ -592,6 +608,7 @@ fn main() {
                 display_mode = match value().as_str() {
                     "device" => mode::DEVICE,
                     "windows" => mode::WINDOWS,
+                    "headless" => mode::HEADLESS,
                     _ => {
                         eprintln!("{USAGE}");
                         std::process::exit(2)
@@ -612,7 +629,7 @@ fn main() {
     };
     if display_mode == mode::WINDOWS && size.is_some() {
         eprintln!(
-            "aim-display: window mode's display is the main screen; --size is for device mode"
+            "aim-display: window mode's display is the main screen; --size is for device and headless modes"
         );
         std::process::exit(2)
     }
@@ -627,7 +644,18 @@ fn main() {
         std::process::exit(1);
     }
     window::app(display_mode, true);
-    let win = if display_mode == mode::WINDOWS {
+    let win = if display_mode == mode::HEADLESS {
+        let (width, height) = size.unwrap_or((1080, 1920));
+        window::Window {
+            layer: None,
+            width,
+            height,
+            dpi_x: 160.0,
+            dpi_y: 160.0,
+            density: 160,
+            number: None,
+        }
+    } else if display_mode == mode::WINDOWS {
         windows::start(device)
     } else {
         window::create(size, &title, device)
@@ -644,7 +672,12 @@ fn main() {
     // The display is black until the first frame.
     renderer.present(None, &targets, None);
 
-    let period = vsync::create(Box::new(|tick| {
+    let create_vsync = if display_mode == mode::HEADLESS {
+        vsync::create_headless
+    } else {
+        vsync::create
+    };
+    let period = create_vsync(Box::new(|tick| {
         if let Some(d) = DISPLAY.get() {
             d.on_vsync(tick)
         }
@@ -664,7 +697,9 @@ fn main() {
     };
     let display = DISPLAY.get_or_init(|| Display::new(renderer, info, display_mode, capture));
     display.set_targets(targets);
-    metal::watch_screen();
+    if display_mode != mode::HEADLESS {
+        metal::watch_screen();
+    }
 
     if let Err(e) = input::start(&socket, &win) {
         eprintln!(
@@ -680,8 +715,15 @@ fn main() {
     });
     println!(
         "aim-display: {} {}x{} pixels, {:.0}x{:.0} dpi, vsync {} ns, socket {}",
-        win.number
-            .map_or("window mode".to_string(), |n| format!("window {n}")),
+        win.number.map_or(
+            if display_mode == mode::HEADLESS {
+                "headless"
+            } else {
+                "window mode"
+            }
+            .to_string(),
+            |n| format!("window {n}")
+        ),
         win.width,
         win.height,
         win.dpi_x,
