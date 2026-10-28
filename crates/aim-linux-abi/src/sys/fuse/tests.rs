@@ -175,6 +175,61 @@ fn fuse_device_protocol_dup_clone_and_negative_reply() {
 }
 
 #[test]
+fn path_description_xattrs_reject_before_daemon_or_user_memory_access() {
+    if super::super::fdtab::isolated_kernel_test(
+        "sys::fuse::tests::path_description_xattrs_reject_before_daemon_or_user_memory_access",
+    ) {
+        return;
+    }
+    let connection = Connection::new();
+    initialize(&connection);
+    let policy = MountPolicy {
+        uid: 0,
+        gid: 0,
+        allow_other: true,
+        default_permissions: false,
+        read_only: true,
+    };
+    let fd = open_description(
+        &connection.key,
+        1,
+        0,
+        0,
+        super::super::fs::O_PATH as u32,
+        false,
+        "",
+        "/fuse-path",
+        0,
+        &policy,
+        0,
+        0,
+        1,
+    )
+    .unwrap();
+    assert_eq!(super::super::fuse_client::adopt(fd), Ok(true));
+    super::super::fdtab::publish_guest(fd).unwrap();
+    let mut results = Vec::new();
+    for nr in [7, 10, 13, 16] {
+        let mut args = [fd as u64, 0, 0, 1, u64::MAX, 0];
+        let result = match nr {
+            7 => super::super::xattr::setxattr(nr, args),
+            10 => super::super::xattr::getxattr(nr, args),
+            13 => {
+                args[2] = 65537;
+                super::super::xattr::listxattr(nr, args)
+            }
+            16 => super::super::xattr::removexattr(nr, args),
+            _ => unreachable!(),
+        };
+        results.push((nr, result));
+    }
+    assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    for (nr, result) in results {
+        assert_eq!(result, -(crate::errno::EBADF as i64), "syscall {nr}");
+    }
+}
+
+#[test]
 fn fuse_description_shared_offset_flags_directory_and_last_close() {
     let connection = Connection::new();
     initialize(&connection);

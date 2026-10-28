@@ -477,7 +477,11 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         Err(e) => return e,
     };
     // devpts is its own mount: a link into or out of it crosses mounts.
-    let old_devpts = old.as_ref().is_some_and(|old| devpts_entry(old).is_some());
+    let old_devpts = if empty {
+        super::fdtab::character_reference(a[0] as i32).is_some()
+    } else {
+        old.as_ref().is_some_and(|old| devpts_entry(old).is_some())
+    };
     // An existing new name is EEXIST before the mounts are compared
     // (`filename_create`).
     match (old_devpts, devpts_make(&new)) {
@@ -671,6 +675,27 @@ fn inode_mutation(
         }
     })
     .unwrap_or_else(|error| -(error as i64))
+}
+// The descriptor carries a directory reference, not an open terminal. Check
+// the allocation identity again under the inode lock before using its name.
+fn character_mutation(
+    fd: i32,
+    reference: &aim_binder_host::path_file::CharacterReference,
+    change: impl FnOnce(Host, &libc::stat) -> i64,
+) -> i64 {
+    let failure = |error: std::io::Error| {
+        -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
+    };
+    let host = match reference.host(fd) {
+        Ok(host) => host,
+        Err(error) => return failure(error),
+    };
+    inode_mutation(Host::Path(&host), &reference.guest, false, |stat| {
+        if let Err(error) = reference.stat(fd) {
+            return failure(error);
+        }
+        change(Host::Path(&host), stat)
+    })
 }
 /// Whether `resolved` names a socket file. Darwin opens none, not even
 /// with O_EVTONLY (EOPNOTSUPP), so a socket's metadata changes by its
@@ -979,11 +1004,39 @@ fn chmod_fd_private(
     magic_link: bool,
     pinned: bool,
 ) -> i64 {
-    if !pinned && super::fdtab::is_hidden(fd) {
-        return -(crate::errno::EBADF as i64);
+    if !pinned {
+        let pin = match super::fdtab::pin_guest(fd) {
+            Ok(pin) => pin,
+            Err(error) => return -(error as i64),
+        };
+        return chmod_fd_private(pin.descriptor().as_raw_fd(), mode, id, magic_link, true);
     }
     if !magic_link && super::fs::is_path_fd(fd) {
         return -(crate::errno::EBADF as i64);
+    }
+    if let Some(reference) = super::fdtab::character_reference(fd) {
+        return character_mutation(fd, &reference, |host, stat| {
+            let mode = match chmod_mode(stat, mode & 0o7777, id) {
+                Ok(mode) => mode,
+                Err(error) => return error,
+            };
+            let Host::Path(path) = host else {
+                unreachable!()
+            };
+            if unsafe { libc::chmod(path.as_ptr(), host_mode(mode, stat.st_mode)) } < 0 {
+                return -(errno::last() as i64);
+            }
+            attrs::record_checked(
+                host,
+                || reference.guest.clone(),
+                Attr {
+                    mode: Some(mode),
+                    ..Default::default()
+                },
+            )
+            .map(|_| 0)
+            .unwrap_or_else(|error| -(error as i64))
+        });
     }
     if let Some(file) = super::fuse_client::get(fd) {
         let mut mode = mode & 0o7777;
@@ -1160,11 +1213,36 @@ fn fchown_fd_private(
     pinned: bool,
 ) -> i64 {
     let fd = a[0] as i32;
-    if !pinned && super::fdtab::is_hidden(fd) {
-        return -(crate::errno::EBADF as i64);
+    if !pinned {
+        let pin = match super::fdtab::pin_guest(fd) {
+            Ok(pin) => pin,
+            Err(error) => return -(error as i64),
+        };
+        let mut args = a;
+        args[0] = pin.descriptor().as_raw_fd() as u64;
+        return fchown_fd_private(args, id, allow_path, true);
     }
     if !allow_path && super::fs::is_path_fd(fd) {
         return -(crate::errno::EBADF as i64);
+    }
+    if let Some(reference) = super::fdtab::character_reference(fd) {
+        return character_mutation(fd, &reference, |host, stat| {
+            let change = match chown_change(stat, a[1], a[2], id) {
+                Ok(change) => change,
+                Err(error) => return error,
+            };
+            if !attrs::recording() {
+                let Host::Path(path) = host else {
+                    unreachable!()
+                };
+                return errno::check(
+                    unsafe { libc::lchown(path.as_ptr(), a[1] as u32, a[2] as u32) } as i64,
+                );
+            }
+            attrs::record_checked(host, || reference.guest.clone(), change)
+                .map(|_| 0)
+                .unwrap_or_else(|error| -(error as i64))
+        });
     }
     if let Some(file) = super::fuse_client::get(fd) {
         let mut change = owner(a[1], a[2]);
@@ -1653,6 +1731,39 @@ pub fn utimensat(a: [u64; 6]) -> i64 {
         if path == 0 && super::fs::is_path_fd(dirfd) {
             return -(crate::errno::EBADF as i64);
         }
+        let pin = match super::fdtab::pin_guest(dirfd) {
+            Ok(pin) => pin,
+            Err(error) => return -(error as i64),
+        };
+        let dirfd = pin.descriptor().as_raw_fd();
+        if let Some(reference) = super::fdtab::character_reference(dirfd) {
+            return character_mutation(dirfd, &reference, |host, stat| {
+                if ts.iter().all(|time| time.tv_nsec == libc::UTIME_OMIT) {
+                    return 0;
+                }
+                let id = super::cred::current();
+                let owner = id.uid[3] == stat.st_uid || id.cap_eff & (1 << 3) != 0;
+                if !owner {
+                    if !ts.iter().all(|time| time.tv_nsec == libc::UTIME_NOW) {
+                        return -EPERM;
+                    }
+                    if !attrs::permits(stat, 2, &id, attrs::FS) {
+                        return -(crate::errno::EACCES as i64);
+                    }
+                }
+                let Host::Path(path) = host else {
+                    unreachable!()
+                };
+                errno::check(unsafe {
+                    libc::utimensat(
+                        libc::AT_FDCWD,
+                        path.as_ptr(),
+                        ts.as_ptr(),
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } as i64)
+            });
+        }
         if let Some(file) = super::fuse_client::get(dirfd) {
             return super::fuse_client::times(&file.route, Some(file.node), Some(file.fh), &ts)
                 .map(|_| 0)
@@ -1729,6 +1840,156 @@ mod tests {
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 
+    #[test]
+    fn character_path_metadata_never_opens_the_device_and_preserves_dac_and_exec() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::fsops::tests::character_path_metadata_never_opens_the_device_and_preserves_dac_and_exec",
+        ) {
+            return;
+        }
+        let (_guard, _) = crate::vfs::test_view();
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        assert!(master >= 0);
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        assert_eq!(unsafe { libc::grantpt(master.as_raw_fd()) }, 0);
+        let mut name = [0u8; 128];
+        assert_eq!(
+            unsafe { libc::ioctl(master.as_raw_fd(), 0x4080_7453u64, name.as_mut_ptr()) },
+            0
+        );
+        let host = std::ffi::CStr::from_bytes_until_nul(&name)
+            .unwrap()
+            .to_owned();
+        let mut owner = super::super::cred::current();
+        owner.uid = [2000; 4];
+        owner.gid = [2000; 4];
+        owner.cap_eff = 0;
+        attrs::allocated_character(
+            Host::Path(&host),
+            Attr {
+                uid: Some(2000),
+                gid: Some(2000),
+                mode: Some(0o600),
+            },
+        )
+        .unwrap();
+        let resolved = Resolved {
+            host,
+            guest: "/dev/pts/0".into(),
+            area: vfs::Area::Writable,
+        };
+        let fd = super::super::fdtab::PathDescription::open_character(
+            &resolved,
+            super::super::fs::O_PATH,
+        )
+        .unwrap();
+        super::super::fdtab::publish_guest(fd).unwrap();
+        let mut backing: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd, &mut backing) }, 0);
+        assert_eq!(backing.st_mode & libc::S_IFMT, libc::S_IFDIR);
+        assert_eq!(
+            super::super::fs::stat_fd_kernel(fd).unwrap().st_mode & libc::S_IFMT,
+            libc::S_IFCHR
+        );
+        assert_eq!(chmod_fd(fd, 0o620, &owner, true), 0);
+        assert_eq!(
+            super::super::fs::stat_fd_kernel(fd).unwrap().st_mode & 0o7777,
+            0o620
+        );
+        assert_eq!(
+            fchown_fd_as([fd as u64, 2000, 2000, 0, 0, 0], &owner, true),
+            0
+        );
+        let mut foreign = owner.clone();
+        foreign.uid = [2001; 4];
+        foreign.gid = [2001; 4];
+        foreign.groups.clear();
+        assert_eq!(chmod_fd(fd, 0o666, &foreign, true), -EPERM);
+        assert_eq!(
+            fchown_fd_as([fd as u64, 2001, 2001, 0, 0, 0], &foreign, true),
+            -EPERM
+        );
+        assert_eq!(
+            super::super::fs::fchdir([fd as u64, 0, 0, 0, 0, 0]),
+            -(crate::errno::ENOTDIR as i64)
+        );
+        assert_eq!(
+            super::super::fs::fcntl([fd as u64, 3, 0, 0, 0, 0]),
+            super::super::fs::O_PATH as i64
+        );
+        // Exercise syscall dispatch without bionic's fchmod wrapper, which
+        // retries EBADF by changing the inode through /proc/self/fd.
+        let buffer = name.as_mut_ptr() as u64;
+        let epfd = super::super::epoll::epoll_create1([0; 6]);
+        assert!(epfd >= 0);
+        let event = [1u64, 0];
+        let reject_fd_ops = |fd: i32| {
+            for (nr, args) in [
+                (52, [fd as u64, 0o666, 0, 0, 0, 0]),
+                (55, [fd as u64, 2001, 2001, 0, 0, 0]),
+                (63, [fd as u64, buffer, 1, 0, 0, 0]),
+                (64, [fd as u64, buffer, 1, 0, 0, 0]),
+                (29, [fd as u64, 0x541b, buffer, 0, 0, 0]),
+                (
+                    7,
+                    [fd as u64, c"user.test".as_ptr() as u64, buffer, 1, 0, 0],
+                ),
+                (
+                    10,
+                    [fd as u64, c"user.test".as_ptr() as u64, buffer, 1, 0, 0],
+                ),
+                (13, [fd as u64, buffer, 1, 0, 0, 0]),
+                (16, [fd as u64, c"user.test".as_ptr() as u64, 0, 0, 0, 0]),
+                (46, [fd as u64, 0, 0, 0, 0, 0]),
+                (47, [fd as u64, 0, 0, 1, 0, 0]),
+                (61, [fd as u64, buffer, 1, 0, 0, 0]),
+                (62, [fd as u64, 0, 0, 0, 0, 0]),
+                (82, [fd as u64, 0, 0, 0, 0, 0]),
+                (83, [fd as u64, 0, 0, 0, 0, 0]),
+                (84, [fd as u64, 0, 1, 0, 0, 0]),
+                (267, [fd as u64, 0, 0, 0, 0, 0]),
+                (32, [fd as u64, 2, 0, 0, 0, 0]),
+                (88, [fd as u64, 0, 0, 0, 0, 0]),
+                (21, [epfd as u64, 1, fd as u64, event.as_ptr() as u64, 0, 0]),
+                (21, [fd as u64, 1, epfd as u64, event.as_ptr() as u64, 0, 0]),
+            ] {
+                let mut context: crate::context::GuestContext = unsafe { std::mem::zeroed() };
+                context.x[..6].copy_from_slice(&args);
+                context.x[8] = nr;
+                super::super::dispatch(&mut context);
+                assert_eq!(
+                    context.x[0] as i64,
+                    -(crate::errno::EBADF as i64),
+                    "syscall {nr}"
+                );
+            }
+        };
+        reject_fd_ops(fd);
+        let copy = super::super::fs::dup([fd as u64, 0, 0, 0, 0, 0]);
+        assert!(copy >= 0);
+        reject_fd_ops(copy as i32);
+        assert_eq!(super::super::fs::close([copy as u64, 0, 0, 0, 0, 0]), 0);
+        let text = super::super::fdtab::regular_exec_text().unwrap();
+        let record = text
+            .lines()
+            .find(|line| line.starts_with(&format!("path\t{fd}\t")))
+            .unwrap();
+        super::super::fdtab::insert(
+            fd,
+            super::super::fdtab::Kind::Path(super::super::fdtab::PathDescription::new(
+                super::super::fs::O_PATH,
+            )),
+        );
+        super::super::fdtab::restore_regular_exec(record).unwrap();
+        reject_fd_ops(fd);
+        assert_eq!(
+            super::super::fs::stat_fd_kernel(fd).unwrap().st_mode & 0o7777,
+            0o620
+        );
+        assert_eq!(chmod_fd(fd, 0o600, &owner, true), 0);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(super::super::fs::close([epfd as u64, 0, 0, 0, 0, 0]), 0);
+    }
     #[test]
     fn fd_metadata_pin_rejects_private_and_preserves_closed_inode() {
         // The test closes its descriptor and gives the number to another

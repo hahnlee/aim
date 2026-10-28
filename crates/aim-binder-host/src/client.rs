@@ -376,13 +376,22 @@ impl Client {
     }
 
     /// Register an owned Linux path carrier with the native daemon. Errors are Linux wire errno.
-    pub fn create_path(&self, fd: i32, flags: u32) -> Result<std::os::fd::OwnedFd, Errno> {
+    pub fn create_path(
+        &self,
+        fd: i32,
+        flags: u32,
+        reference: Option<&crate::path_file::CharacterReference>,
+    ) -> Result<std::os::fd::OwnedFd, Errno> {
         use std::os::fd::FromRawFd;
         let port = mach::fd_to_port(fd).ok_or(errno::EBADF)?;
+        let mut data = flags.to_le_bytes().to_vec();
+        if let Some(reference) = reference {
+            data.extend_from_slice(&reference.encode());
+        }
         let request = Msg {
             id: wire::CREATE_PATH,
             ports: vec![(port, mach::COPY_SEND)],
-            data: flags.to_le_bytes().to_vec(),
+            data,
         };
         let result = with_thread(|t| call(t, self.service, &request));
         mach::release_send(port);

@@ -365,7 +365,9 @@ fn pin_target(
         return Ok(None);
     }
     let pin = super::fdtab::pin_guest(args[0] as i32).map_err(|error| -(error as i64))?;
-    if matches!(pin.kind(), Some(super::fdtab::Kind::Path(_))) {
+    // Linux fdget excludes FMODE_PATH before user-memory or filesystem work,
+    // including O_PATH descriptions owned by FUSE rather than fdtab.
+    if super::fs::is_path_fd(pin.descriptor().as_raw_fd()) {
         return Err(-(errno::EBADF as i64));
     }
     args[0] = pin.descriptor().as_raw_fd() as u64;
@@ -451,6 +453,42 @@ pub fn removexattr(nr: u64, mut a: [u64; 6]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_descriptor_xattrs_reject_before_name_or_namespace_checks() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::xattr::tests::path_descriptor_xattrs_reject_before_name_or_namespace_checks",
+        ) {
+            return;
+        }
+        let (_view, root) = vfs::test_view();
+        std::fs::write(root.join("data/xattr-file"), b"original").unwrap();
+        std::fs::create_dir(root.join("data/xattr-dir")).unwrap();
+        std::os::unix::fs::symlink("xattr-file", root.join("data/xattr-link")).unwrap();
+        for path in [c"/data/xattr-file", c"/data/xattr-dir", c"/data/xattr-link"] {
+            let fd = super::super::fs::openat([
+                AT_FDCWD as u64,
+                path.as_ptr() as u64,
+                super::super::fs::O_PATH | 0o400000, // O_NOFOLLOW
+                0,
+                0,
+                0,
+            ]);
+            assert!(fd >= 0);
+            for name in [
+                0,
+                c"user.test".as_ptr() as u64,
+                c"security.selinux".as_ptr() as u64,
+            ] {
+                let args = [fd as u64, name, 0, 1, u64::MAX, 0];
+                assert_eq!(setxattr(7, args), -(errno::EBADF as i64));
+                assert_eq!(getxattr(10, args), -(errno::EBADF as i64));
+                assert_eq!(listxattr(13, args), -(errno::EBADF as i64));
+                assert_eq!(removexattr(16, args), -(errno::EBADF as i64));
+            }
+            assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
 
     #[test]
     fn descriptor_xattrs_keep_the_pinned_inode_after_original_slot_reuse() {

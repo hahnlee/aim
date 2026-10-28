@@ -102,6 +102,12 @@ fn pid() -> i32 {
 
 /// Guest path of an open host fd.
 pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
+    if let Some(reference) = fdtab::character_reference(fd) {
+        reference
+            .stat(fd)
+            .map_err(|error| errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        return Ok(reference.guest);
+    }
     if let Some(Kind::ProcMem(open)) = fdtab::get(fd) {
         return Ok(format!("/proc/{}/mem", open.guest_pid));
     }
@@ -122,6 +128,9 @@ pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
 pub(super) fn fd_link(fd: i32) -> Option<String> {
     if !fdtab::visible(fd) {
         return None;
+    }
+    if fdtab::character_reference(fd).is_some() {
+        return fd_guest_path(fd).ok();
     }
     if let Some((inode, _)) = super::net::proc_socket_identity(fd) {
         return Some(format!("socket:[{inode}]"));
@@ -1915,6 +1924,25 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         if !fdtab::visible(n) {
             return Some(-(ENOENT as i64));
         }
+        if let Some(reference) = fdtab::character_reference(n) {
+            if let Err(error) = reference.stat(n) {
+                return Some(
+                    -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64),
+                );
+            }
+            let path = std::ffi::CString::new(reference.guest).ok()?;
+            return Some(super::fs::openat_as(
+                [
+                    vfs::LINUX_AT_FDCWD as u64,
+                    path.as_ptr() as u64,
+                    flags,
+                    0,
+                    0,
+                    0,
+                ],
+                &super::cred::current(),
+            ));
+        }
         if let Some(r) = super::memfd::reopen(n, host_flags) {
             return Some(r);
         }
@@ -2191,11 +2219,7 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
                 .strip_prefix(&format!("/proc/{me}/fd/"))
                 .and_then(|n| n.parse::<i32>().ok());
             if let Some(n) = fd_n {
-                // SAFETY: fstat of the fd the link names.
-                if unsafe { libc::fstat(n, &mut st) } < 0 {
-                    return Some(Err(errno::last()));
-                }
-                return Some(Ok(st));
+                return Some(super::fs::stat_fd_kernel(n).map_err(|error| (-error) as Errno));
             }
             let target = if t.starts_with('/') {
                 t

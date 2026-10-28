@@ -2330,7 +2330,31 @@ UID/GID and Linux default0600 mode against the real devfs inode/generation/birth
 identity. Guest chmod/chown and repeated unlock/grantpt preserve that binding;
 a reused slave allocation receives its new owner's state. The genuine shellUID2000
 open/foreign-denial/reuse/durable-error regression passes. This does not count as
-full CTS acceptance. C111 now completes actual adbd exec-out getprop on its first
+full CTS acceptance. Locked-slave O_PATH now holds a directory-relative character
+reference with the allocation inode/generation/birth identity, without a host
+slave descriptor (#1161). Descriptor stat, procfs metadata, empty-path chown,
+exec restoration and typed transfer use that reference; I/O and foreign metadata
+changes remain denied. Host syscall dispatch checks confirm EBADF for fchmod,
+fchown, read, write, ioctl, all four f*xattr calls, truncate/allocation, directory
+reads, seek, sync, flock, fd-only utimensat and epoll_ctl on the original,
+duplicated and exec-restored reference. Epoll rejects O_PATH before classifying
+the reference's backing directory. Xattr's common descriptor guard also rejects
+FUSE O_PATH before user-memory, namespace or filesystem work. Original bionic's
+fchmod, fgetxattr, fsetxattr and flistxattr wrappers retry EBADF through
+/proc/self/fd, so t_pty checks their raw syscalls separately and preserves
+the permitted chmod fallback.
+A standalone original-bionic regular-file probe confirms syscall EBADF and
+successful wrapper chmod through procfs.
+The standalone NDK xattr test passes its owner, O_PATH and foreign-permission
+groups (2026-10-29). A test-only manifest excluding the unrelated services
+dependency executes the syscall crate's host suite: 363 pass, 22 fail, 24 ignored;
+the expanded character-reference and FUSE xattr checks pass. Failures include
+native service registration and socket EPERM. Standard test builds stop at an
+unrelated missing media-consent Ask.label field. The expanded original-bionic
+t_pty checks retain foreign-UID DAC and lock preservation, but its rerun still
+stops at native PTY service registration (Address already in use); they provide
+no executed PTY guest acceptance.
+No guest boot was run for this change. C111 now completes actual adbd exec-out getprop on its first
 probe: exit0,27949 bytes,660 parsed property rows,SDK36 and boot_completed1,
 with no PTY error. Its fresh full66 campaign allocates the device and starts the
 first official Parsing module completes with actual XML:11 passed,0 failed,
