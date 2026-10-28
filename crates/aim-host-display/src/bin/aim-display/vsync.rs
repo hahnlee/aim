@@ -163,15 +163,17 @@ extern "C" fn on_refresh(
 }
 
 /// The first vsync at or after `ns`, on the timeline of the last one the
-/// link reported (`ns` itself before it reported any). Times Core
-/// Animation reports for a refresh lie within a microsecond of the model's,
-/// on either side, so a time up to an eighth of a period past a vsync
-/// counts as that vsync.
+/// link reported (`ns` itself before it reported any). Always round forward:
+/// rounding a nearby time back can put a present before its acquire fence.
 pub fn vsync_at_or_after(ns: i64) -> i64 {
     let Some((last, period)) = LINK.lock().unwrap().last else {
         return ns;
     };
-    last + period * (ns - period / 8 - last + period - 1).div_euclid(period)
+    on_timeline(ns, last, period)
+}
+
+fn on_timeline(ns: i64, last: i64, period: i64) -> i64 {
+    last + period * (ns - last + period - 1).div_euclid(period)
 }
 
 /// Create the main display's link, stopped; `sink` gets every refresh
@@ -294,6 +296,22 @@ pub fn update(wanted: impl FnOnce() -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_present_time_never_precedes_its_source_time() {
+        for period in [1_000_000_000 / 60, 1_000_000_000 / 120] {
+            let last = 10 * period;
+            for refresh in [-3, -1, 0, 1, 3] {
+                for offset in [0, 1, 100_000, period / 8, period / 8 + 1, period - 1] {
+                    let ns = last + refresh * period + offset;
+                    let at = on_timeline(ns, last, period);
+                    assert!(at >= ns, "source {ns}, reported {at}, period {period}");
+                    assert!(at - ns < period);
+                    assert_eq!((at - last).rem_euclid(period), 0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn headless_clock_starts_stops_and_restarts_without_a_display_link() {

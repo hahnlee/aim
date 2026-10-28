@@ -7605,7 +7605,13 @@ present fences (docs/composer.md, "Vsync"): at 120 Hz, the composer and
 SurfaceFlinger handled every vsync while nothing changed. Present fences
 now signal at the vsync that shows the frame, SurfaceFlinger predicts
 vsync from them, and aim-display runs its display link only while vsync
-is enabled. On a settled boot of a reused data image (host load 5-7), one
+is enabled. Present times round strictly forward onto the modeled timeline:
+the former one-eighth-period tolerance could backdate a fence before content
+readiness, although both timestamps use the same host uptime clock (#2279).
+The 60/120 Hz boundary regression fails with that tolerance and passes without
+it; standalone presentation validation is pending because the main display is
+asleep (2026-10-28). No guest boot was run.
+On a settled boot of a reused data image (host load 5-7), one
 idle minute, before (c0a2b9b7) and after:
 
 | Check | Before | After |
