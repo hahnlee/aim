@@ -535,7 +535,12 @@ The migration's state and conformance results are in
   in system_server's class loader); then AppSearch's Lifecycle where
   SystemServer starts it (after PHASE_DEVICE_SPECIFIC_SERVICES_READY, so
   it is given the later phases)
-  with user 0 started and unlocked, and TelecomLoaderService's part
+  with user 0 started and unlocked; the DeviceLock APEX's original
+  `DeviceLockService` from its standalone `service-devicelock.jar`, after
+  AppSearch and before PHASE_ACTIVITY_MANAGER_READY when SystemConfig
+  declares `android.software.device_lock`, as the pinned SystemServer's
+  feature branch does (#2234), with the later phases and user callbacks;
+  and TelecomLoaderService's part
   (`TelecomLoader`): its bind, the creation on the connection's main
   thread with the `InternalServiceRepository` the app host serves (its
   DeviceIdleInternal is the app host's) and the publishing of `telecom`;
