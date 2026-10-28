@@ -5,6 +5,11 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+Build freshness checks regular-file output fingerprints and includes the Rust
+AIDL generators as inputs, so restoring sources cannot leave an externally
+replaced runtime binary marked fresh (#1429). Host build-graph regressions pass;
+no guest boot was run (2026-10-28).
+
 Fork child descriptor reconstruction propagates epoll, inotify and pidfd
 kqueue creation and installation failures to the restore owner before guest
 resume (#1209). Inotify watch and queued-event restoration also rejects failed

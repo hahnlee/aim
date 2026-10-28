@@ -141,15 +141,20 @@ A node's key is the sha256 of its recipe version (bumped in code when a
 node's recipe changes its output), the versions of the tools it runs
 (`rustc -vV`, the NDK's `source.properties`, the pinned `aidl`'s hash,
 Python, n2), the keys of its upstream nodes and the content of its inputs.
-Java nodes include `upstream/java-toolchain.lock` in their inputs.
+Java nodes include `upstream/java-toolchain.lock` in their inputs. `aidl-gen`
+also keys on its Rust generator modules.
 An order-only upstream is built first but is not part of the key: the boot
 image does not change with the syscall layer that runs dex2oat.
 
 The stamp `target/aim-cache/<node>.stamp` records the key and each input's
-hash, size and mtime. A check rehashes only the files whose size or mtime
-changed, so a no-op build of the whole graph takes about a second. A node
-whose key matches its stamp and whose outputs exist is skipped; otherwise it
-runs, and cargo or n2 inside it do their own incremental work. The stamp
+hash, size and mtime, plus the same fingerprints for regular-file outputs.
+A check rehashes only files whose size or mtime changed. A node whose key
+matches its stamp, whose outputs exist and whose file outputs still match is
+skipped; otherwise it runs, and cargo or n2 inside it do their own incremental
+work. Thus a binary replaced by a direct Cargo build is republished even after
+its sources revert (#1429). Older stamps without file-output fingerprints
+rebuild those nodes once. Directory outputs retain their node's own freshness
+contract. The stamp
 also lets `cargo aim status` say what changed:
 
 ```

@@ -9,6 +9,7 @@
 //! tool <name> <sha256 of its version>
 //! dep <node> <key>
 //! input <sha256> <size> <mtime ns> <path>
+//! output <sha256> <size> <mtime ns> <path>
 //! found <path>
 //! ```
 //!
@@ -30,6 +31,7 @@ pub struct Stamp {
     pub tools: BTreeMap<String, String>,
     pub deps: BTreeMap<String, String>,
     pub inputs: BTreeMap<PathBuf, FileState>,
+    pub outputs: BTreeMap<PathBuf, FileState>,
     pub found: Vec<PathBuf>,
 }
 
@@ -69,13 +71,18 @@ impl Stamp {
                     let (name, key) = rest.split_once(' ')?;
                     stamp.deps.insert(name.into(), key.into());
                 }
-                "input" => {
+                "input" | "output" => {
                     let mut fields = rest.splitn(4, ' ');
                     let hash = fields.next()?.to_string();
                     let size = fields.next()?.parse().ok()?;
                     let mtime_ns = fields.next()?.parse().ok()?;
                     let path = resolve(fields.next()?);
-                    stamp.inputs.insert(
+                    let states = if tag == "input" {
+                        &mut stamp.inputs
+                    } else {
+                        &mut stamp.outputs
+                    };
+                    states.insert(
                         path,
                         FileState {
                             size,
@@ -99,14 +106,16 @@ impl Stamp {
         for (name, key) in &self.deps {
             text.push_str(&format!("dep {name} {key}\n"));
         }
-        for (path, state) in &self.inputs {
-            text.push_str(&format!(
-                "input {} {} {} {}\n",
-                state.hash,
-                state.size,
-                state.mtime_ns,
-                display(path).display()
-            ));
+        for (tag, states) in [("input", &self.inputs), ("output", &self.outputs)] {
+            for (path, state) in states {
+                text.push_str(&format!(
+                    "{tag} {} {} {} {}\n",
+                    state.hash,
+                    state.size,
+                    state.mtime_ns,
+                    display(path).display()
+                ));
+            }
         }
         for path in &self.found {
             text.push_str(&format!("found {}\n", display(path).display()));
@@ -120,5 +129,28 @@ impl Stamp {
 
     pub fn remove(node: &str) {
         let _ = fs::remove_file(file(node));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_fingerprints_survive_a_stamp_round_trip() {
+        let name = format!("test-output-stamp-{}", std::process::id());
+        let state = FileState {
+            hash: "digest".into(),
+            size: 9,
+            mtime_ns: 123,
+        };
+        let stamp = Stamp {
+            inputs: BTreeMap::from([(aim_paths::root().join("input with spaces"), state.clone())]),
+            outputs: BTreeMap::from([(aim_paths::root().join("output with spaces"), state)]),
+            ..Stamp::default()
+        };
+        stamp.write(&name).unwrap();
+        assert_eq!(Stamp::read(&name), Some(stamp));
+        fs::remove_file(file(&name)).unwrap();
     }
 }
