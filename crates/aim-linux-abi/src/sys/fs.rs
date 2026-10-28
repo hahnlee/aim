@@ -260,7 +260,6 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     }
     // devpts makes no node (it has no `create`): a name no guest pair
     // holds cannot be created, whatever the name.
-    let pts = super::tty::pts_index(&r.guest);
     let in_devpts = r
         .guest
         .strip_prefix("/dev/pts/")
@@ -281,6 +280,38 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if let Some(fd) = procfs::open(&r.guest, flags, hflags) {
         return fd;
     }
+    // Linux publishes a new inode with its owner and mode already set. Keep
+    // regular-file lookup/open behind the creator's directory lock until our
+    // host inode has its guest metadata. Separate opens (including O_RDONLY)
+    // and bind aliases must share this lock across processes.
+    if attrs::recording() && !r.read_only() {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let found = unsafe { libc::lstat(r.host.as_ptr(), &mut stat) } == 0;
+        // Do not hold a directory lock across a blocking FIFO/device open.
+        if found && stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return openat_host(&r, flags, mode, id);
+        }
+        let parent = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()))
+            .parent()
+            .and_then(|path| CString::new(path.as_os_str().as_bytes()).ok());
+        let Some(parent) = parent else {
+            return -(EINVAL as i64);
+        };
+        if unsafe { libc::stat(parent.as_ptr(), &mut stat) } < 0 {
+            return -(errno::last() as i64);
+        }
+        return attrs::with_inode_lock(attrs::Host::Path(&parent), &stat, || {
+            Ok(openat_host(&r, flags, mode, id))
+        })
+        .unwrap_or_else(|error| -(error as i64));
+    }
+    openat_host(&r, flags, mode, id)
+}
+
+fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Identity) -> i64 {
+    let hflags = open_flags_to_host(flags);
+    let cgroup = vfs::cgroup(&r.guest);
+    let pts = super::tty::pts_index(&r.guest);
     let creating = flags & O_CREAT != 0 && attrs::absent(&r.host);
     if flags & (O_CREAT | O_TRUNC) != 0 || flags & O_ACCMODE != 0 {
         // Opening an existing file in the image for reading only is fine;
@@ -2816,6 +2847,79 @@ mod dac_tests {
     fn closed(fd: i64) {
         assert!(fd >= 0, "open failed {fd}");
         assert_eq!(close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+    #[test]
+    fn concurrent_open_waits_for_created_inode_ownership() {
+        if fdtab::isolated_kernel_test(
+            "sys::fs::dac_tests::concurrent_open_waits_for_created_inode_ownership",
+        ) {
+            return;
+        }
+        use std::{os::fd::AsRawFd, sync::mpsc, time::Duration};
+        let (_guard, root) = vfs::test_view();
+        let directory = root.join("data/create-publication");
+        fs::create_dir(&directory).unwrap();
+        record("/data/create-publication", 1017, 1017, 0o700);
+        let app = identity(1017, 1017);
+        super::super::cred::init(app.clone(), None);
+        let parent = CString::new(directory.as_os_str().as_bytes()).unwrap();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::stat(parent.as_ptr(), &mut stat) }, 0);
+        let (started, ready) = mpsc::channel();
+        let (sent, received) = mpsc::channel();
+        let mut threads = Vec::new();
+        let early = attrs::with_inode_lock(attrs::Host::Path(&parent), &stat, || {
+            // Pause the creator after the host inode exists but before its
+            // guest metadata is published. Neither kind of open may see root:root.
+            let file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(directory.join("database"))
+                .unwrap();
+            let unpublished = attrs::path_stat("/data/create-publication/database").unwrap();
+            assert_eq!(
+                (unpublished.st_uid, unpublished.st_mode & 0o777),
+                (0, 0o600)
+            );
+            for flags in [0, O_CREAT | 2] {
+                let (started, sent, app) = (started.clone(), sent.clone(), app.clone());
+                threads.push(std::thread::spawn(move || {
+                    started.send(()).unwrap();
+                    sent.send(open(
+                        "/data/create-publication/database",
+                        flags,
+                        0o666,
+                        &app,
+                    ))
+                    .unwrap();
+                }));
+            }
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            let early = received.recv_timeout(Duration::from_millis(100)).ok();
+            attrs::created(attrs::Host::Fd(file.as_raw_fd()), || {
+                "/data/create-publication/database".into()
+            })?;
+            Ok(early)
+        })
+        .unwrap();
+        for _ in 0..2 - usize::from(early.is_some()) {
+            closed(received.recv_timeout(Duration::from_secs(5)).unwrap());
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        if let Some(fd) = early {
+            closed(fd);
+            panic!("open observed an inode before ownership publication");
+        }
+        let stat = attrs::path_stat("/data/create-publication/database").unwrap();
+        assert_eq!(
+            (stat.st_uid, stat.st_gid, stat.st_mode & 0o777),
+            (1017, 1017, 0o600)
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn typed_path_fileport_import_preserves_roles_flags_and_duplicate_lifetime() {
