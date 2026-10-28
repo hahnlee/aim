@@ -240,9 +240,13 @@ each AF_INET/AF_INET6 send and receive into netd's per-uid maps
 would, with the socket's uid, tag, counter set and interface (`lo` for
 loopback addresses, `eth0` for the rest). One call counts as one packet
 behind its headers, split at the MTU as the programs split a GSO skb;
-TCP's control packets are not counted. The guest-only interface counters
-are #1720. `/proc/net/dev` lists `netif`'s devices in Linux's format, with
-Darwin's 64-bit interface totals (`NET_RT_IFLIST2`): `lo0` for `lo`, the
+TCP's control packets are not counted. The same hooks fill `iface_stats_map`
+independently of UID tags and counter sets, excluding system-owned CLAT egress
+as the original xt_bpf program does. `iface_index_name_map` registers the guest
+devices when the maps are discovered. Host checks cover the map selection,
+CLAT exclusion and real loopback UDP send/receive through pinned maps, without
+a guest boot (#224, #1720). `/proc/net/dev` lists `netif`'s devices in Linux's
+format, with Darwin's 64-bit interface totals (`NET_RT_IFLIST2`): `lo0` for `lo`, the
 current uplink for `eth0`. These include host traffic and Darwin's rounding
 of byte totals. Unsupported fields and a device without a backing host
 interface have zero counters. NDK tests cover the proc aliases, headers,

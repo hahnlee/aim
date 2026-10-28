@@ -11,8 +11,9 @@
 //! The effect applies while NetBpfLoad's netd maps are pinned (ADR 0012
 //! appendix, "Kernel features to emulate"). netd's firewall
 //! (`bpf_owner_match`) and its local network protection do not run, so no
-//! packet is dropped uncounted; the interface counters that netd's xt_bpf
-//! programs keep (`iface_stats_map`) are #1720.
+//! packet is dropped uncounted. The same socket hooks fill `iface_stats_map`
+//! in place of netd's xt_bpf programs, with interface names registered as
+//! `bpfRegisterIface` does. These counters include only guest traffic.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Mutex;
@@ -28,12 +29,15 @@ const APP_UID_STATS: &[u8] = b"/sys/fs/bpf/netd_shared/map_netd_app_uid_stats_ma
 const STATS_A: &[u8] = b"/sys/fs/bpf/netd_shared/map_netd_stats_map_A";
 const STATS_B: &[u8] = b"/sys/fs/bpf/netd_shared/map_netd_stats_map_B";
 const CONFIGURATION: &[u8] = b"/sys/fs/bpf/netd_shared/map_netd_configuration_map";
+const IFACE_STATS: &[u8] = b"/sys/fs/bpf/netd_shared/map_netd_iface_stats_map";
+const IFACE_NAMES: &[u8] = b"/sys/fs/bpf/netd_shared/map_netd_iface_index_name_map";
 
 /// bpf_shared.h: `CURRENT_STATS_MAP_CONFIGURATION_KEY`, `SELECT_MAP_A`.
 const CURRENT_STATS_MAP_CONFIGURATION_KEY: u32 = 1;
 const SELECT_MAP_A: u32 = 0;
 const AID_DNS: u32 = 1051;
 const AID_CLAT: u32 = 1029;
+const AID_SYSTEM: u32 = 1000;
 /// The kernel's overflow uid, which the programs count as root's.
 const OVERFLOW_UID: u32 = 65534;
 const TAG_SYSTEM_DNS: u32 = 0xFFFF_FF82;
@@ -50,17 +54,38 @@ struct Maps {
     stats_a: Kernel,
     stats_b: Kernel,
     configuration: Kernel,
+    iface_stats: Kernel,
+    iface_names: Kernel,
 }
 
 impl Maps {
     fn pinned() -> Option<Maps> {
-        Some(Maps {
+        let maps = Maps {
             cookie_tag: Kernel::pinned(COOKIE_TAG)?,
             uid_counterset: Kernel::pinned(UID_COUNTERSET)?,
             app_uid_stats: Kernel::pinned(APP_UID_STATS)?,
             stats_a: Kernel::pinned(STATS_A)?,
             stats_b: Kernel::pinned(STATS_B)?,
             configuration: Kernel::pinned(CONFIGURATION)?,
+            iface_stats: Kernel::pinned(IFACE_STATS)?,
+            iface_names: Kernel::pinned(IFACE_NAMES)?,
+        };
+        for link in netif::links() {
+            if !maps.register_iface(link.index, &link.name) {
+                return None;
+            }
+        }
+        Some(maps)
+    }
+
+    fn register_iface(&self, index: u32, name: &str) -> bool {
+        // netd.h's IfaceValue: a NUL-terminated IFNAMSIZ name.
+        if name.len() >= 16 || name.as_bytes().contains(&0) {
+            return false;
+        }
+        self.iface_names.update(&index.to_ne_bytes(), |value| {
+            value.fill(0);
+            value[..name.len()].copy_from_slice(name.as_bytes());
         })
     }
 }
@@ -135,6 +160,12 @@ fn account_packet(maps: &Maps, p: &Packet) {
         ),
         None => (sock_uid, 0),
     };
+    // xt_bpf_egress_prog excludes system-owned CLAT translation sockets;
+    // ingress's AF_PACKET CLAT traffic does not reach these INET hooks.
+    if !(p.egress && sock_uid == AID_SYSTEM && uid == AID_CLAT) {
+        maps.iface_stats
+            .update(&p.ifindex.to_ne_bytes(), |v| add(v, p.egress, p.counts()));
+    }
     if p.egress && uid == AID_CLAT {
         return;
     }
@@ -231,7 +262,7 @@ pub(super) fn account(s: &Sock, fd: i32, egress: bool, n: i64, addr: Option<&[u8
     let Family::Inet(o) = &s.family else {
         return;
     };
-    if n <= 0 {
+    if n < 0 || (n == 0 && s.ty != SockType::Dgram) {
         return;
     }
     let Some(owner) = *s.inet_owner.lock().unwrap() else {
@@ -282,6 +313,8 @@ mod tests {
             stats_a: map(1, 16, 32, 16),
             stats_b: map(1, 16, 32, 16),
             configuration: map(2, 4, 4, 2),
+            iface_stats: map(1, 4, 32, 16),
+            iface_names: map(1, 4, 16, 16),
         }
     }
 
@@ -429,6 +462,202 @@ mod tests {
         );
         account_packet(&m, &Packet { cookie: 9, ..TCP });
         assert_eq!(m.app_uid_stats.lookup(&AID_CLAT.to_ne_bytes()), None);
+    }
+
+    #[test]
+    fn interface_totals_ignore_uid_tags_counter_sets_and_map_switches() {
+        let m = maps();
+        assert!(m.register_iface(netif::ETH0, "eth0"));
+        assert!(m.register_iface(netif::LO, "lo"));
+        assert_eq!(
+            m.iface_names.lookup(&netif::ETH0.to_ne_bytes()).unwrap(),
+            b"eth0\0\0\0\0\0\0\0\0\0\0\0\0"
+        );
+        account_packet(&m, &TCP);
+        assert!(m.configuration.update(&1u32.to_ne_bytes(), |v| {
+            v.copy_from_slice(&1u32.to_ne_bytes())
+        }));
+        let tag = [10200u32.to_ne_bytes(), 42u32.to_ne_bytes()].concat();
+        assert!(
+            m.cookie_tag
+                .update(&7u64.to_ne_bytes(), |v| v.copy_from_slice(&tag))
+        );
+        assert!(
+            m.uid_counterset
+                .update(&10200u32.to_ne_bytes(), |v| v[0] = 1)
+        );
+        account_packet(
+            &m,
+            &Packet {
+                egress: false,
+                payload: 1449,
+                ..TCP
+            },
+        );
+        account_packet(
+            &m,
+            &Packet {
+                ifindex: netif::LO,
+                ..TCP
+            },
+        );
+        assert_eq!(
+            stats(m.iface_stats.lookup(&2u32.to_ne_bytes())),
+            [2, 1553, 1, 152]
+        );
+        assert_eq!(
+            stats(m.iface_stats.lookup(&1u32.to_ne_bytes())),
+            [0, 0, 1, 152]
+        );
+        assert_eq!(
+            stats(m.stats_b.lookup(&key(10200, 42, 1, 2))),
+            [2, 1553, 0, 0]
+        );
+    }
+
+    #[test]
+    fn interface_clat_exclusion_matches_xt_bpf_egress() {
+        let m = maps();
+        let tag = [AID_CLAT.to_ne_bytes(), 0u32.to_ne_bytes()].concat();
+        assert!(
+            m.cookie_tag
+                .update(&7u64.to_ne_bytes(), |v| v.copy_from_slice(&tag))
+        );
+        account_packet(
+            &m,
+            &Packet {
+                sock_uid: AID_SYSTEM,
+                ..TCP
+            },
+        );
+        assert_eq!(m.iface_stats.lookup(&2u32.to_ne_bytes()), None);
+        // Unlike the cgroup accounting hook, xt_bpf only excludes a
+        // system-owned tagged CLAT socket, and only on egress.
+        account_packet(&m, &TCP);
+        account_packet(
+            &m,
+            &Packet {
+                sock_uid: AID_SYSTEM,
+                egress: false,
+                ..TCP
+            },
+        );
+        assert_eq!(
+            stats(m.iface_stats.lookup(&2u32.to_ne_bytes())),
+            [1, 152, 1, 152]
+        );
+        assert_eq!(
+            stats(m.app_uid_stats.lookup(&AID_CLAT.to_ne_bytes())),
+            [1, 152, 0, 0]
+        );
+    }
+
+    #[test]
+    fn pinned_interface_maps_observe_real_socket_sends_and_receives() {
+        use super::super::super::{bpf, fdtab, fs};
+        if fdtab::isolated_kernel_test(
+            "sys::net::traffic::tests::pinned_interface_maps_observe_real_socket_sends_and_receives",
+        ) {
+            return;
+        }
+        let (_view, root) = crate::vfs::test_view();
+        let directory = root.join("root/sys/fs/bpf/netd_shared");
+        std::fs::create_dir_all(&directory).unwrap();
+        for (path, ty, key, value, entries) in [
+            (COOKIE_TAG, 1, 8, 8, 16),
+            (UID_COUNTERSET, 1, 4, 1, 16),
+            (APP_UID_STATS, 1, 4, 32, 16),
+            (STATS_A, 1, 16, 32, 16),
+            (STATS_B, 1, 16, 32, 16),
+            (CONFIGURATION, 2, 4, 4, 2),
+            (IFACE_STATS, 1, 4, 32, 16),
+            (IFACE_NAMES, 1, 4, 16, 16),
+        ] {
+            let attr = [ty, key, value, entries, 0u32, 0, 0, 0, 0, 0, 0, 0];
+            let fd = bpf::bpf([0, attr.as_ptr() as u64, 48, 0, 0, 0]);
+            assert!(fd >= 0, "map create: {fd}");
+            let path = std::ffi::CString::new(path).unwrap();
+            let pin = [path.as_ptr() as u64, fd as u64, 0];
+            assert_eq!(bpf::bpf([6, pin.as_ptr() as u64, 24, 0, 0, 0]), 0);
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+        let reader =
+            aim_storage::bpf_object::Mapped::open(&directory.join("map_netd_iface_stats_map"))
+                .unwrap();
+        assert_eq!(reader.map().lookup(&netif::LO.to_ne_bytes()), None);
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let fd = super::super::socket([2, 2, 0, 0, 0, 0]);
+        assert!(fd >= 0, "socket: {fd}");
+        let mut address = [0u8; 16];
+        address[..2].copy_from_slice(&2u16.to_ne_bytes());
+        address[2..4].copy_from_slice(&peer.local_addr().unwrap().port().to_be_bytes());
+        address[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        assert_eq!(
+            super::super::sendto([
+                fd as u64,
+                b"out".as_ptr() as u64,
+                3,
+                0,
+                address.as_ptr() as u64,
+                16,
+            ]),
+            3
+        );
+        let mut bytes = [0; 16];
+        let (n, sender) = peer.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..n], b"out");
+        assert_eq!(fs::fcntl([fd as u64, 4, 0o4000, 0, 0, 0]), 0);
+        for read in [false, true] {
+            for reply in [b"reply".as_slice(), b"".as_slice()] {
+                assert_eq!(peer.send_to(reply, sender).unwrap(), reply.len());
+                assert_eq!(
+                    fs::read([fd as u64, bytes.as_mut_ptr() as u64, 0, 0, 0, 0]),
+                    0
+                );
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let args = [
+                        fd as u64,
+                        bytes.as_mut_ptr() as u64,
+                        bytes.len() as u64,
+                        0,
+                        0,
+                        0,
+                    ];
+                    let n = if read {
+                        fs::read(args)
+                    } else {
+                        super::super::recvfrom(args)
+                    };
+                    if n == -(crate::errno::EAGAIN as i64) {
+                        assert!(Instant::now() < deadline);
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    assert_eq!(n, reply.len() as i64);
+                    assert_eq!(&bytes[..reply.len()], reply);
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            stats(reader.map().lookup(&netif::LO.to_ne_bytes())),
+            [4, 122, 1, 31]
+        );
+        assert_eq!(reader.map().lookup(&netif::ETH0.to_ne_bytes()), None);
+        let names =
+            aim_storage::bpf_object::Mapped::open(&directory.join("map_netd_iface_index_name_map"))
+                .unwrap();
+        assert_eq!(
+            &names.map().lookup(&netif::LO.to_ne_bytes()).unwrap()[..3],
+            b"lo\0"
+        );
+        assert_eq!(
+            &names.map().lookup(&netif::ETH0.to_ne_bytes()).unwrap()[..5],
+            b"eth0\0"
+        );
+        assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 
     #[test]
