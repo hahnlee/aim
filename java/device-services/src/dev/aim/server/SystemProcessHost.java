@@ -8,6 +8,7 @@ import android.app.IApplicationThread;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.Looper;
 import android.os.RemoteException;
 import android.os.ServiceManager;
@@ -102,9 +103,12 @@ public final class SystemProcessHost extends RuntimeInit {
             Context context = thread.getSystemContext();
             ActivityThread.initializeMainlineModules();
             IApplicationThread applicationThread = thread.getApplicationThread();
-            ISystemProcess.Stub.asInterface(ServiceManager.waitForService("aim.system_process"))
-                    .attachSystemProcess(applicationThread.asBinder(),
-                            DeviceServices.foregroundServicePolicy(context));
+            ISystemProcess host = ISystemProcess.Stub.asInterface(
+                    ServiceManager.waitForService("aim.system_process"));
+            host.attachNetworkActivityBridge(new NetworkActivityBridge(
+                    new Handler(Looper.getMainLooper())));
+            host.attachSystemProcess(applicationThread.asBinder(),
+                    DeviceServices.foregroundServicePolicy(context));
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's

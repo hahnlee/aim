@@ -76,6 +76,24 @@ impl Service for SystemProcess {
                     sp::write_get_internal_service_repository_reply(&mut p, Some(*repository));
                 })
             }
+            sp::ATTACH_NETWORK_ACTIVITY_BRIDGE => {
+                let a =
+                    sp::AttachNetworkActivityBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let Some(Binder::Handle(handle)) = a.bridge else {
+                        return Err(Exception::illegal_argument(
+                            "network activity bridge missing",
+                        ));
+                    };
+                    let connectivity = self.host.connectivity_service.get().ok_or_else(|| {
+                        self.host
+                            .unimplemented_named("connectivity", "not published (#1509)")
+                    })?;
+                    connectivity.attach_activity(self.host.process.strong(handle))?;
+                    sp::write_attach_network_activity_bridge_reply(&mut p);
+                    Ok(())
+                })
+            }
             _ => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
         };
         reply(result.map(|()| p))
