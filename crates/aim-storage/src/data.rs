@@ -83,6 +83,49 @@ fn lock_of(dir: &Path) -> PathBuf {
     dir.with_file_name(name)
 }
 
+fn lock(dir: &Path) -> Result<File, String> {
+    let path = lock_of(dir);
+    let lock = File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // SAFETY: flock on an open descriptor.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(format!(
+            "{}: in use by another guest-init",
+            image_of(dir).display()
+        ));
+    }
+    Ok(lock)
+}
+
+fn detach_image(dir: &Path) -> Result<(), String> {
+    let image = image_of(dir);
+    for attached in disk::attachments_of(&image)? {
+        if attached.shadow.is_some() || attached.mounts.iter().any(|mount| mount != dir) {
+            return Err(format!(
+                "{}: attachment has a foreign mount or shadow",
+                image.display()
+            ));
+        }
+        eprintln!(
+            "aim-storage: {} was left attached ({}); detaching it",
+            image.display(),
+            attached.device
+        );
+        disk::detach(&attached.device, PATIENCE)?;
+    }
+    Ok(())
+}
+
+/// Detaches only the exact backing image of `dir`, after its process owner
+/// has exited. The data lock excludes a live guest; no image is created.
+pub fn detach_existing(dir: &Path) -> Result<(), String> {
+    if !image_of(dir).try_exists().map_err(|e| e.to_string())? {
+        return Ok(());
+    }
+    let dir = mount_point(dir)?;
+    let _lock = lock(&dir)?;
+    detach_image(&dir)
+}
+
 /// `dir` with its parent resolved, which is where its image is mounted (the
 /// mount point must be a real path: linux-run's path maps compare host
 /// paths).
@@ -164,6 +207,7 @@ impl DataImage {
         let dir = mount_point(dir)?;
         let image = image_of(&dir);
         let ceiling = ceiling(&image)?;
+        let lock = lock(&dir)?;
         if !image.exists() {
             if fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some())
                 && !disk::is_mount_point(&dir)
@@ -179,26 +223,13 @@ impl DataImage {
                 None => create(&image)?,
             }
         }
-        let lock_path = lock_of(&dir);
-        let lock = File::create(&lock_path).map_err(|e| format!("{}: {e}", lock_path.display()))?;
-        // SAFETY: flock on an open descriptor.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(format!("{}: in use by another guest-init", image.display()));
-        }
-        for stale in disk::attachments_of(&image)? {
-            eprintln!(
-                "aim-storage: {} was left attached ({}); detaching it",
-                image.display(),
-                stale.device
-            );
-            disk::detach(&stale.device, PATIENCE)?;
-        }
+        detach_image(&dir)?;
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let how = Attach {
             mount: Some(&dir),
             ..Default::default()
         };
-        let mut device = match disk::attach(&image, how) {
+        let device = match disk::attach(&image, how) {
             Ok(device) => device,
             Err(first) => {
                 // A volume a crash left inconsistent: repair it, then retry.
@@ -206,19 +237,28 @@ impl DataImage {
                 disk::attach(&image, how)?
             }
         };
-        // Smaller than the host volume (made with an older ceiling, or
-        // moved to a larger disk): grown while detached.
-        if disk::capacity(&dir).is_some_and(|size| size < ceiling) {
-            disk::detach(&device, PATIENCE)?;
-            disk::resize(&image, ceiling)?;
-            device = disk::attach(&image, how)?;
-        }
-        Ok(Self {
+        // Own the attachment before any further fallible operation.
+        let mut attached = Self {
             dir,
             image,
             device: Some(device),
             _lock: lock,
-        })
+        };
+        // Smaller than the host volume (made with an older ceiling, or
+        // moved to a larger disk): grown while detached.
+        if disk::capacity(&attached.dir).is_some_and(|size| size < ceiling) {
+            disk::detach(attached.device.as_ref().unwrap(), PATIENCE)?;
+            attached.device = None;
+            disk::resize(&attached.image, ceiling)?;
+            attached.device = Some(disk::attach(
+                &attached.image,
+                Attach {
+                    mount: Some(&attached.dir),
+                    ..Default::default()
+                },
+            )?);
+        }
+        Ok(attached)
     }
 
     /// The mount point: the data directory.
@@ -251,7 +291,7 @@ impl DataImage {
     }
 
     fn detach_now(&mut self) -> Result<(), String> {
-        let Some(device) = self.device.take() else {
+        let Some(device) = self.device.as_ref() else {
             return Ok(());
         };
         let compacted = match usage(&self.dir) {
@@ -275,7 +315,8 @@ impl DataImage {
                 PATIENCE
             }
         };
-        disk::detach(&device, patience)?;
+        disk::detach(device, patience)?;
+        self.device = None;
         if let Some(used) = compacted
             && let Ok(allocated) = disk::allocated(&self.image)
             && allocated > used + RECLAIM_THRESHOLD
@@ -394,11 +435,18 @@ fn repair(image: &Path) -> Result<(), String> {
 /// detaching the image first. Nothing of it may be in use.
 pub fn remove(dir: &Path) -> Result<(), String> {
     let dir = mount_point(dir)?;
+    let _lock = lock(&dir)?;
     let image = image_of(&dir);
     if image.exists() {
-        for attached in disk::attachments_of(&image)? {
-            disk::detach(&attached.device, PATIENCE)?;
-        }
+        detach_image(&dir)?;
+    }
+    if disk::is_mount_point(&dir) {
+        return Err(format!(
+            "{}: refusing to remove an unrelated mount",
+            dir.display()
+        ));
+    }
+    if image.exists() {
         fs::remove_file(&image).map_err(|e| format!("{}: {e}", image.display()))?;
     }
     let _ = fs::remove_file(lock_of(&dir));
