@@ -721,7 +721,7 @@ impl ConnectivityService {
             Err(error) => return reply(Err(error)),
         };
         let text = if granted {
-            "connectivity dump (#2140) is not implemented by the app host: networks, providers, UID status, requests, offers and legacy types\n".to_owned()
+            "connectivity dump (#2333) is not implemented by the app host: networks, providers, UID status, requests, offers and legacy types\n".to_owned()
         } else {
             format!(
                 "Permission Denial: can't dump ConnectivityService from from pid={}, uid={uid} due to missing android.permission.DUMP permission\n",
@@ -2318,7 +2318,7 @@ mod tests {
                 let text = std::fs::read_to_string(&path).unwrap();
                 if uid == 1000 {
                     assert!(
-                        text.starts_with("connectivity dump (#2140) is not implemented"),
+                        text.starts_with("connectivity dump (#2333) is not implemented"),
                         "{text}"
                     );
                     assert!(text.contains(
