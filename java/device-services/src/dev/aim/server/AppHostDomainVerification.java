@@ -2,12 +2,16 @@ package dev.aim.server;
 
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.UriRelativeFilterGroupParcel;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.verify.domain.DomainSet;
 import android.content.pm.verify.domain.DomainVerificationInfo;
+import android.os.Bundle;
 import android.os.RemoteException;
 import com.android.server.SystemConfig;
 import com.android.server.compat.PlatformCompat;
 import com.android.server.pm.Computer;
+import com.android.server.pm.verify.domain.AppHostUriRelativeFilterGroups;
 import com.android.server.pm.verify.domain.DomainVerificationEnforcer;
 import com.android.server.pm.verify.domain.DomainVerificationManagerInternal;
 import com.android.server.pm.verify.domain.DomainVerificationManagerStub;
@@ -18,8 +22,8 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Non-hot verifier API: retain android-16.0.0_r1's Stub, public status validation
- * and Enforcer. The existing native package owner owns the state and disk writes.
+ * Non-hot domain API: retain android-16.0.0_r1's Stub, status validation,
+ * Enforcer, Bundle and URI helpers. The native package owner owns state and disk writes.
  * This adapter supplies caller identity only through the system-UID bridge.
  */
 final class AppHostDomainVerification extends IAppHostDomainVerification.Stub {
@@ -55,6 +59,15 @@ final class AppHostDomainVerification extends IAppHostDomainVerification.Stub {
                     int uid, UUID id, Set<String> domains, int state) {
                 enforcer.assertApprovedVerifier(uid, proxy);
                 try { return backend.setDomainVerificationStatus(uid, id.toString(), new DomainSet(domains), state); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
+            @Override public synchronized void setUriRelativeFilterGroups(String name, Bundle groups)
+                    throws NameNotFoundException {
+                try { AppHostUriRelativeFilterGroups.set(context, caller.get(), backend, name, groups); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
+            @Override public synchronized Bundle getUriRelativeFilterGroups(String name, List<String> domains) {
+                try { return AppHostUriRelativeFilterGroups.get(backend, caller.get(), name, domains); }
                 catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
             }
         };
@@ -94,4 +107,17 @@ final class AppHostDomainVerification extends IAppHostDomainVerification.Stub {
         try { return entry.setDomainVerificationStatus(id, domains, state); }
         finally { caller.remove(); }
     }
+    @Override public void setUriRelativeFilterGroups(int uid, String name, Bundle groups) {
+        enter(uid);
+        try { entry.setUriRelativeFilterGroups(name, groups); }
+        finally { caller.remove(); }
+    }
+    @Override public Bundle getUriRelativeFilterGroups(int uid, String name, List<String> domains) {
+        enter(uid);
+        try { return entry.getUriRelativeFilterGroups(name, domains); }
+        finally { caller.remove(); }
+    }
+    @Override public String getDomainVerificationPackageId(String name) { throw unsupported(); }
+    @Override public void setUriRelativeFilterGroup(String name, String id, String domain,
+            List<UriRelativeFilterGroupParcel> groups) { throw unsupported(); }
 }
