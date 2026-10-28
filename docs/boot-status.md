@@ -7572,7 +7572,12 @@ the failed `7f837348` boot (#1245, related to #1228). The owner regression now r
 helper invocations and propagates a failed second helper. A fresh boot has
 not yet verified the correction. A first boot
 clones the image from the template of the `userdata/template` node
-(docs/first-boot.md): its attach ends at 0.41-0.53 s and the mount waits
+(docs/first-boot.md). Native init now uses `aim.<derived sha256>` as the
+build incremental and recomposes its build fingerprint (#575); identical
+content retains its fingerprint, and a changed overlay changes PMS's upgrade
+input. Receipt/identity validation and property composition are host-tested;
+an existing-data upgrade has not been boot-tested with this change.
+The template's attach ends at 0.41-0.53 s and the mount waits
 0-0.07 s (host load 12-14; creating the image held the mount up by
 0.6 s before, #563). The template build boot puts its display socket in
 a short temporary directory so a long worktree path fits Darwin's Unix

@@ -87,6 +87,83 @@ fn property_init_follows_init_rules() {
 }
 
 #[test]
+fn derived_build_number_changes_explicit_and_legacy_fingerprints() {
+    let root = std::env::temp_dir().join(format!("derived-build-props-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("system")).unwrap();
+    let props = "ro.product.brand=Android\nro.product.name=product\nro.product.device=device\n\
+        ro.build.version.release_or_codename=16\nro.build.id=BUILD\nro.build.legacy.id=LEGACY\n\
+        ro.build.type=user\nro.build.tags=dev-keys\nro.build.version.incremental=original\n\
+        ro.build.version.sdk=36\nro.product.first_api_level=36\n\
+        ro.build.fingerprint=explicit-original\nro.build.legacy.fingerprint=legacy-original\n\
+        ro.system.build.fingerprint=original-system\n";
+    std::fs::write(root.join("system/build.prop"), props).unwrap();
+    let image = ImageRoot::new(&root);
+    let info = create_serialized_property_info(&fixture_image(), 36, &mut Vec::new()).unwrap();
+    let load = |incremental| {
+        let mut service = PropertyService::new(info.clone()).unwrap();
+        let diagnostics = property_init(
+            &mut service,
+            &image,
+            &PropertyInitOptions {
+                build_incremental: incremental,
+                ..Default::default()
+            },
+        );
+        assert!(
+            !diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "{diagnostics:?}"
+        );
+        service
+    };
+    let original = load(None);
+    assert_eq!(
+        original.property("ro.build.fingerprint").as_deref(),
+        Some("explicit-original")
+    );
+    assert_eq!(
+        original.property("ro.build.legacy.fingerprint").as_deref(),
+        Some("legacy-original")
+    );
+    let first_id = format!("aim.{}", "a".repeat(64));
+    let first = load(Some(first_id.clone()));
+    assert_eq!(
+        first.property("ro.build.version.incremental"),
+        Some(first_id.clone())
+    );
+    assert_eq!(
+        first.property("ro.build.fingerprint"),
+        Some(format!(
+            "Android/product/device:16/BUILD/{first_id}:user/dev-keys"
+        ))
+    );
+    assert_eq!(
+        first.property("ro.build.legacy.fingerprint"),
+        Some(format!(
+            "Android/product/device:16/LEGACY/{first_id}:user/dev-keys"
+        ))
+    );
+    let same = load(Some(first_id));
+    let changed = load(Some(format!("aim.{}", "b".repeat(64))));
+    assert_eq!(
+        first.property("ro.build.fingerprint"),
+        same.property("ro.build.fingerprint")
+    );
+    assert_ne!(
+        first.property("ro.build.fingerprint"),
+        changed.property("ro.build.fingerprint")
+    );
+    assert_eq!(
+        changed.property("ro.system.build.fingerprint").as_deref(),
+        Some("original-system")
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("system/build.prop")).unwrap(),
+        props
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn setprop_rules_and_serials() {
     let image = fixture_image();
     let mut service = boot_properties(&image);

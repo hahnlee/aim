@@ -415,14 +415,15 @@ remain separate runtime gates.
   they always match it.
 - **Existing data directories** never take a template: `DataImage::attach`
   clones only when there is no image. Users' data is not touched.
-- **When the image changes under existing data**, PMS sees the same
-  fingerprint (the derived image keeps the original's build properties),
-  so it does not take its upgrade path (`isDeviceUpgrading`). It still
-  notices changed system APKs by their mtime ("A package on the system
-  image has changed"), re-parses them (their cache entries are older),
-  and ART rejects compiled code whose boot image or dex checksums
-  changed. That is how it works today, template or not; that a derived
-  image never takes Android's upgrade path is #575.
+- **When the image changes under existing data**, native init publishes
+  `ro.build.version.incremental=aim.<derived sha256>` and recomposes the
+  build fingerprint before services start (#575, ADR 0010). PMS's
+  `PackagePartitions.FINGERPRINT` therefore changes with the overlay's
+  content, allowing its normal upgrade path (`isDeviceUpgrading`), including
+  permission re-grants, code cache clearing and `PRE_BOOT_COMPLETED`.
+  Identical derived content keeps its fingerprint. Host tests verify build
+  property composition and metadata checks; an existing-data upgrade has
+  not been boot-tested with this change.
 
 ## Expected savings
 
