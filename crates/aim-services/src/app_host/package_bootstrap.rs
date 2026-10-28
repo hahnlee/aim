@@ -643,6 +643,18 @@ impl Service for PackageBootstrap {
                     )
                 })
             }
+            bridge::IS_DOMAIN_VERIFIER_UID => {
+                let a = bridge::IsDomainVerifierUid::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    if a.uid < 0 {
+                        return Err(Exception::illegal_argument("invalid domain verifier UID"));
+                    }
+                    let capture = host.package_capture()?;
+                    super::domain_verification::DomainVerification::new(host.clone())
+                        .is_caller_verifier(&capture, a.uid)
+                })()
+                .map(|verified| bridge::write_is_domain_verifier_uid_reply(&mut p, verified))
+            }
             bridge::GET_PACKAGE_SHELL_READ_LEAF => {
                 bridge::GetPackageShellReadLeaf::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let owner = self.leaf(Arc::new(super::package_shell_read::ShellRead(host.clone())));
@@ -1404,6 +1416,10 @@ impl Service for PackageBootstrap {
 #[cfg(test)]
 #[path = "package_bootstrap_existing_tests.rs"]
 mod existing_tests;
+
+#[cfg(test)]
+#[path = "package_bootstrap_query_tests.rs"]
+mod query_tests;
 
 #[cfg(test)]
 mod tests {

@@ -15,7 +15,16 @@ fn session_flags(
     flags: &[(&str, bool)],
     test: impl FnOnce(&Arc<AppHost>, &Arc<PermissionManager>, &AppOps),
 ) {
+    session_setup(flags, |_| {}, test);
+}
+
+fn session_setup(
+    flags: &[(&str, bool)],
+    setup: impl FnOnce(&Arc<AppHost>),
+    test: impl FnOnce(&Arc<AppHost>, &Arc<PermissionManager>, &AppOps),
+) {
     crate::system::with_discovery_session_flags(flags, |host| {
+        setup(host);
         write(
             host,
             "misc/apexdata/com.android.permission/access.abx",
@@ -179,6 +188,70 @@ fn setters_authorize_validate_and_persist_switch_modes() {
             );
         }
     });
+}
+
+#[test]
+fn package_auto_revoke_queries_follow_live_appops_modes() {
+    use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
+    session_setup(
+        &[(APPOP_MODE_CACHING, true)],
+        |host| {
+            // Shell writes consult the original protected provisioning package.
+            std::fs::copy(
+                aim_paths::original_image().join("system/framework/framework-res.apk"),
+                host.root()
+                    .unwrap()
+                    .join("system/framework/framework-res.apk"),
+            )
+            .unwrap();
+        },
+        |host, _, service| {
+            let system = host.package_system().unwrap();
+            let base = host.package_capture().unwrap();
+            let mut context = (**base.context()).clone();
+            context.system.system_permissions =
+                Some([(2000, [MANAGE_APP_OPS_MODES.into()].into())].into());
+            context.scan_version = base.scan().version() + 1;
+            system
+                .publish_package_scan_with_queries(
+                    &system.package_bootstrap().unwrap(),
+                    Some(base.scan()),
+                    base.scan().owner().clone(),
+                    base.scan().usage().clone(),
+                    context,
+                )
+                .unwrap();
+            let leaf = super::super::package_bootstrap::PackageBootstrap::new(host.clone());
+            let op = super::super::package_initial_context::OP_AUTO_REVOKE_PERMISSIONS_IF_UNUSED;
+            for value in [MODE_ALLOWED, MODE_IGNORED, MODE_ERRORED, MODE_ALLOWED] {
+                set(service, 2000, op, APP, Some(Some("p")), value).unwrap();
+                for name in [Some("p"), None, Some("unknown")] {
+                    let mut p = Parcel::new();
+                    bridge::IsAutoRevokeWhitelisted {
+                        calling_uid: APP,
+                        package_name: name.map(str::to_owned),
+                    }
+                    .write(&mut p);
+                    let response = leaf
+                        .transact(&mut Call {
+                            code: bridge::IS_AUTO_REVOKE_WHITELISTED,
+                            flags: 0,
+                            sender_pid: 77,
+                            sender_euid: 1000,
+                            data: p.reader(),
+                        })
+                        .unwrap();
+                    let actual =
+                        bridge::read_is_auto_revoke_whitelisted_reply(&mut response.reader())
+                            .unwrap();
+                    assert_eq!(actual, mode(host, op, APP, name).map(|m| m == MODE_IGNORED));
+                    if name == Some("p") {
+                        assert_eq!(actual.unwrap(), value == MODE_IGNORED);
+                    }
+                }
+            }
+        },
+    );
 }
 
 #[test]

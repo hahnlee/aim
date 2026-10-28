@@ -273,6 +273,10 @@ clone-authority policy over UserManager, retaining caller and target-user scope
 and reporting bridge loss (#2181). Host tests and Java linkage are checked;
 no guest boot was run (2026-10-29).
 
+Package verifier-identity queries share the domain owner's current receiver and
+permission selection; auto-revoke reads the live caller-specific AppOps mode
+(#2183; focused host checks, no guest boot, 2026-10-29).
+
 ## Native system services (2026-09-29, ADR 0013)
 
 `image/native-services` lists the system services implemented natively
