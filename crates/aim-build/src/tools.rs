@@ -4,7 +4,7 @@
 use crate::hash;
 use crate::lockfile::Lock;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -15,7 +15,6 @@ pub enum Tool {
     Ndk,
     Aidl,
     Python,
-    Java,
     N2,
     /// The system ninja, for ANGLE only (docs/build.md, "n2").
     Ninja,
@@ -28,7 +27,6 @@ impl Tool {
             Tool::Ndk => "ndk",
             Tool::Aidl => "aidl",
             Tool::Python => "python3",
-            Tool::Java => "jdk",
             Tool::N2 => "n2",
             Tool::Ninja => "ninja",
         }
@@ -55,7 +53,7 @@ impl Tools {
     }
 }
 
-/// Standard output and error (`java -version` writes to stderr).
+/// Standard output and error.
 fn output(cmd: &mut Command) -> Result<(String, String), String> {
     let out = cmd
         .output()
@@ -82,8 +80,6 @@ fn probe(tool: Tool) -> Result<String, String> {
         }
         Tool::Aidl => aidl().map(|(_, sha)| sha),
         Tool::Python => stdout(Command::new("python3").arg("--version")),
-        Tool::Java => output(Command::new(jdk()?.join("bin/java")).arg("-version"))
-            .map(|(out, err)| out + &err),
         Tool::N2 => Ok(N2_REVISION.into()),
         Tool::Ninja => stdout(Command::new("ninja").arg("--version")),
     }
@@ -118,15 +114,4 @@ pub fn aidl() -> Result<(PathBuf, String), String> {
         ));
     }
     Ok((aidl, got))
-}
-
-/// JDK 17 (Homebrew `openjdk@17`, else `java_home -v 17`).
-pub fn jdk() -> Result<PathBuf, String> {
-    let brew = Path::new("/opt/homebrew/opt/openjdk@17");
-    if brew.join("bin/javac").exists() {
-        return Ok(brew.to_path_buf());
-    }
-    let home = stdout(Command::new("/usr/libexec/java_home").args(["-v", "17"]))
-        .map_err(|_| "JDK 17 not found (brew install openjdk@17)".to_string())?;
-    Ok(PathBuf::from(home.trim()))
 }

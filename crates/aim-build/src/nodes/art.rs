@@ -13,7 +13,7 @@
 //!    Android.bp files; n2 runs it.
 //! 4. The derived image takes copies without debug info (`stripped/`).
 
-use super::{files, repo};
+use super::{files, java, repo};
 use crate::fetch::Source;
 use crate::graph::{Action, Dep, Node};
 use crate::lockfile::Lock;
@@ -43,6 +43,7 @@ const STRIPPED: [&str; 8] = [
 pub fn node() -> Node {
     let mut inputs = files("patches/art-android");
     inputs.extend(files("tools/art-android"));
+    inputs.push(repo(java::LOCK));
     Node {
         name: "art".into(),
         deps: vec![Dep::on("xsdc"), Dep::on("image")],
@@ -51,8 +52,8 @@ pub fn node() -> Node {
             .iter()
             .map(|f| aim_paths::art().join("stripped").join(f))
             .collect(),
-        tools: vec![Tool::Ndk, Tool::Python, Tool::Java, Tool::N2],
-        recipe: 1,
+        tools: vec![Tool::Ndk, Tool::Python, Tool::N2],
+        recipe: 2,
         action: Action::Art,
         boot: true,
     }
@@ -126,6 +127,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
 
     let image = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
     let ndk = tools::ndk()?;
+    let jdk = java::jdk(log)?;
     log.run(
         Command::new("python3")
             .arg(repo("tools/art-android/gen_build.py"))
@@ -142,7 +144,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
             .arg("--apex-xsd")
             .arg(src.join("system/apex/apexd/ApexInfoList.xsd"))
             .arg("--java")
-            .arg(tools::jdk()?.join("bin/java")),
+            .arg(jdk.join("bin/java")),
     )?;
     n2db::build(&out, &[], log)?;
 
