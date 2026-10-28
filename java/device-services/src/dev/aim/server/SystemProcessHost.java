@@ -24,6 +24,7 @@ import com.android.server.SystemService;
 import com.android.server.SystemService.TargetUser;
 import com.android.server.adservices.SystemProcessLifecycle;
 import com.android.server.appsearch.AppSearchModule$Lifecycle;
+import com.android.server.stats.pull.StatsPullAtomService;
 
 import dalvik.system.VMRuntime;
 
@@ -37,7 +38,8 @@ import java.util.List;
  * module, the Connectivity module's NearbyService, the AdServices module's
  * AdServicesManagerService, DeviceLockService, TelecomLoaderService's
  * part ({@link TelecomLoader}), StatsCompanionService's UID-map/receiver
- * lifecycle ({@link StatsCompanionUidMap}) and the components declared in
+ * lifecycle ({@link StatsCompanionUidMap}), the original StatsPullAtomService,
+ * and the components declared in
  * `android:process="system"`, such as Telecom's.
  * This class plays ZygoteInit's part for the system server
  * (`handleSystemServerProcess`): its umask, its class loader of
@@ -73,8 +75,9 @@ public final class SystemProcessHost extends RuntimeInit {
      * given the boot phases from where SystemServer starts each: Nearby,
      * which ConnectivityServiceInitializer starts before
      * PHASE_LOCK_SETTINGS_READY (the app host serves the initializer's
-     * other services natively), and AdServicesManagerService's Lifecycle
-     * after it ({@link SystemProcessLifecycle}), then AppSearch's Lifecycle
+     * other services natively), then StatsPullAtomService and
+     * AdServicesManagerService's Lifecycle ({@link SystemProcessLifecycle}),
+     * then AppSearch's Lifecycle
      * (after PHASE_DEVICE_SPECIFIC_SERVICES_READY), with user 0 started and
      * unlocked; DeviceLockService after AppSearch when FEATURE_DEVICE_LOCK
      * is declared; then TelecomLoaderService at PHASE_ACTIVITY_MANAGER_READY.
@@ -102,6 +105,8 @@ public final class SystemProcessHost extends RuntimeInit {
                 throws ReflectiveOperationException, RemoteException,
                 PackageManager.NameNotFoundException {
             Looper.prepareMainLooper();
+            // SystemServer loads the original JNI registrations before its system context.
+            System.loadLibrary("android_servers");
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
             ActivityThread.initializeMainlineModules();
@@ -142,16 +147,20 @@ public final class SystemProcessHost extends RuntimeInit {
                     null /* classLoaderName */);
             startService("dev.aim.server.nearby.NetworkStatsInitializer", nearbyLoader, context);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
+            SystemService statsPull = new StatsPullAtomService(context);
+            statsPull.onStart();
             SystemService adServices = SystemProcessLifecycle.start(context);
             for (int phase : new int[] {SystemService.PHASE_LOCK_SETTINGS_READY,
                     SystemService.PHASE_SYSTEM_SERVICES_READY,
                     SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY}) {
                 nearby.onBootPhase(phase);
+                statsPull.onBootPhase(phase);
                 adServices.onBootPhase(phase);
             }
             SystemService appSearch = new AppSearchModule$Lifecycle(context);
             appSearch.onStart();
-            List<SystemService> services = new ArrayList<>(List.of(nearby, adServices, appSearch));
+            List<SystemService> services = new ArrayList<>(
+                    List.of(nearby, statsPull, adServices, appSearch));
             if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_DEVICE_LOCK)) {
                 ClassLoader deviceLockLoader = ClassLoaderFactory.createClassLoader(DEVICE_LOCK_JAR,
                         null, null, Server.class.getClassLoader(), Build.VERSION.SDK_INT,

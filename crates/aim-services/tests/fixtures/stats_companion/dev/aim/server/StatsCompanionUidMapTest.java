@@ -39,7 +39,9 @@ public final class StatsCompanionUidMapTest {
         final UserManager users=new UserManager();
         final Map<BroadcastReceiver,IntentFilter> receivers=new LinkedHashMap<>();
         int removed;
-        public Object getSystemService(String name) { check(name.equals(USER_SERVICE),"user service"); return users; }
+        public Object getSystemService(String name) {
+            check(name.equals(USER_SERVICE),"user service"); return users;
+        }
         public PackageManager getPackageManager() { return packages; }
         public Intent registerReceiverForAllUsers(BroadcastReceiver receiver,IntentFilter filter,
                 String permission,Handler handler) {
@@ -58,6 +60,8 @@ public final class StatsCompanionUidMapTest {
         final List<DeathRecipient> deaths=new ArrayList<>();
         int maps,updates,removals,shutdowns;
         boolean dead;
+        boolean propertyFailure;
+        final List<Map<String,String>> properties=new ArrayList<>();
         String name,versionName,installer;
         int uid;
         long version;
@@ -77,6 +81,12 @@ public final class StatsCompanionUidMapTest {
         }
         public void informOnePackageRemoved(String name,int uid) { removals++;this.name=name;this.uid=uid; }
         public void informDeviceShutdown() { shutdowns++; }
+        public void updateProperties(android.util.PropertyParcel[] values) throws RemoteException {
+            if(propertyFailure) throw new RemoteException();
+            Map<String,String> update=new LinkedHashMap<>();
+            for(var value:values) update.put(value.property,value.value);
+            properties.add(update);
+        }
         void die() { dead=true; for(var recipient:List.copyOf(deaths)) recipient.binderDied(); }
     }
     static PackageInfo info(String name,int uid) {
@@ -101,12 +111,28 @@ public final class StatsCompanionUidMapTest {
         byte[] expected=java.security.MessageDigest.getInstance("SHA-256").digest(new byte[]{-5,9});
         var install=new InstallSourceInfo();install.initiating="com.android.shell";install.installing="store";
         pm.sources.put("app",install);
-        var bridge=new StatsCompanionUidMap(env);var statsd=new Daemon();
+        java.nio.file.Path configs=java.nio.file.Files.createTempDirectory("aim-stats-configs-");
+        var bridge=new StatsCompanionUidMap(env,configs.toFile());var statsd=new Daemon();
         Binder.uid=10123;
         try { bridge.start(statsd); throw new AssertionError("non-system start"); }
         catch(SecurityException expectedError) { check(env.receivers.isEmpty(),"unauthorized registration"); }
         Binder.uid=1000;
+        android.provider.DeviceConfig.values.put("enabled","true");
         bridge.start(statsd);bridge.start(statsd);
+        check(statsd.properties.equals(List.of(Map.of("enabled","true"))),"initial properties exactly once");
+        check(android.provider.DeviceConfig.listeners.size()==1,"duplicate properties listener");
+        android.provider.DeviceConfig.change(Map.of("enabled","false"));Handler.drain();
+        check(statsd.properties.get(1).equals(Map.of("enabled","false")),"live property change");
+        var deletion=new HashMap<String,String>();deletion.put("enabled",null);
+        android.provider.DeviceConfig.change(deletion);Handler.drain();
+        check(statsd.properties.get(2).containsKey("enabled") && statsd.properties.get(2).get("enabled")==null,"property deletion tombstone");
+        android.provider.DeviceConfig.change(Map.of());Handler.drain();
+        check(statsd.properties.size()==3,"empty change forwarded");
+        statsd.propertyFailure=true;
+        android.provider.DeviceConfig.change(Map.of("recovered","yes"));Handler.drain();
+        statsd.propertyFailure=false;
+        android.provider.DeviceConfig.change(Map.of("recovered","again"));Handler.drain();
+        check(statsd.properties.get(3).equals(Map.of("recovered","again")),"listener lost after remote failure");
         check(env.receivers.size()==3 && statsd.deaths.size()==1,"registration not idempotent");
         check(env.receivers.values().stream().filter(f->"package".equals(f.scheme)).count()==1,"package scheme");
         Handler.drain();
@@ -148,9 +174,14 @@ public final class StatsCompanionUidMapTest {
         var shutdown=new Intent(Intent.ACTION_SHUTDOWN);shutdown.flags=Intent.FLAG_RECEIVER_FOREGROUND;
         env.send(shutdown);env.send(new Intent(Intent.ACTION_REBOOT));
         check(statsd.shutdowns==2,"shutdown and reboot");
+        int propertyDeliveries=statsd.properties.size();
+        android.provider.DeviceConfig.change(Map.of("stale","queued"));
         var oldDeath=statsd.deaths.get(0);statsd.die();oldDeath.binderDied();
+        check(android.provider.DeviceConfig.listeners.isEmpty(),"property listener not removed on death");
         check(env.receivers.isEmpty() && env.removed==3 && HandlerThread.active==0,"death unregistration exactly once");
         var replacement=new Daemon();bridge.start(replacement);Handler.drain();oldDeath.binderDied();
+        check(statsd.properties.size()==propertyDeliveries,"queued property sent to dead cohort");
+        check(replacement.properties.equals(List.of(Map.of("recovered","again","stale","queued"))),"restart properties snapshot");
         check(env.receivers.size()==3 && replacement.maps==1,"late death removed new receivers");
         var stale=new Daemon();stale.dead=true;
         try { bridge.start(stale);throw new AssertionError("stale start succeeded"); }
@@ -168,6 +199,24 @@ public final class StatsCompanionUidMapTest {
         catch(UnsupportedOperationException expectedError) {}
         check(ParcelFileDescriptor.open==0 && HandlerThread.active==1,"failed writer cleanup");
         pm.scanFailure=false;scanFailure.die();
+        check(android.provider.DeviceConfig.listeners.isEmpty(),"failed scan listener cleanup");
+        Binder.uid=10123;
+        try { bridge.dumpStatsCompanion();throw new AssertionError("non-system dump bridge"); }
+        catch(SecurityException expectedError) {}
+        Binder.uid=1000;
+        check(bridge.dumpStatsCompanion().equals("Number of configuration files deleted: 0\n"),"empty dump");
+        java.nio.file.Files.writeString(configs.resolve("config"),"config");
+        // Earlier deaths shared a millisecond: the original HashSet counts distinct times.
+        for(int i=0;i<9;i++) {
+            SystemClock.elapsed++;
+            var dying=new Daemon();bridge.start(dying);dying.die();Handler.drain();
+        }
+        check(!java.nio.file.Files.exists(configs.resolve("config")),"tenth death did not delete config");
+        check(bridge.dumpStatsCompanion().equals("Number of configuration files deleted: 1\n  timestamp, deleted file name\n  500, config\n"),"original dump timestamp/name");
+        SystemClock.elapsed+=8L*24*60*60*1000;
+        var expired=new Daemon();bridge.start(expired);expired.die();Handler.drain();
+        check(bridge.dumpStatsCompanion().equals("Number of configuration files deleted: 0\n"),"week history expiry");
+        java.nio.file.Files.delete(configs);
         System.out.println("UID map, package/user/shutdown receivers, permissions and death cleanup passed");
     }
 }

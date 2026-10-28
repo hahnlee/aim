@@ -20,8 +20,9 @@
 //! the original's extras. The companion's alarms are exact, on the elapsed
 //! clock, and not wakeups, as the original sets them; the wake locks the
 //! original holds while it calls statsd are not taken. The cold UID-map writer
-//! and its receivers run as retained Java in the system process; the properties'
-//! later changes and system_server's pullers remain unimplemented (#1765).
+//! and its receivers, live properties, deletion history/dump and system atom
+//! registrations run in the system process: the pullers use the original
+//! StatsPullAtomService from services.jar. Missing local data owners are #1765.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::io::{Read, Write};
@@ -44,7 +45,6 @@ use aim_service_aidl::dev_aim_server_istatscompanionuidmap as uid_map;
 use aim_service_aidl::{ReadParcelable, Returned, WriteParcelable};
 
 use super::kept::RawIntent;
-use super::settings::Table;
 use super::{AppHost, reply};
 use crate::bundle::Value;
 
@@ -61,13 +61,6 @@ const DUMP: &str = "android.permission.DUMP";
 const PACKAGE_USAGE_STATS: &str = "android.permission.PACKAGE_USAGE_STATS";
 const REGISTER_STATS_PULL_ATOM: &str = "android.permission.REGISTER_STATS_PULL_ATOM";
 const READ_RESTRICTED_STATS: &str = "android.permission.READ_RESTRICTED_STATS";
-/// `StatsCompanionService.CONFIG_DIR`, below the guest's `/data`, and
-/// `DEATH_THRESHOLD`.
-const CONFIG_DIR: &str = "misc/stats-service";
-const DEATH_THRESHOLD: usize = 10;
-const MILLIS_IN_A_DAY: i64 = 24 * 60 * 60 * 1000;
-/// `DeviceConfig.NAMESPACE_STATSD_JAVA`.
-const NAMESPACE_STATSD_JAVA: &str = "statsd_java";
 /// `StatsManager.ACTION_STATSD_STARTED`, `Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND`.
 const ACTION_STATSD_STARTED: &str = "android.app.action.STATSD_STARTED";
 const FLAG_RECEIVER_INCLUDE_BACKGROUND: i32 = 0x0100_0000;
@@ -376,22 +369,6 @@ impl WriteParcelable for SentFd {
     }
 }
 
-/// `android.util.PropertyParcel`.
-struct PropertyParcel {
-    property: String,
-    value: Option<String>,
-}
-
-impl WriteParcelable for PropertyParcel {
-    fn write_to(&self, p: &mut Parcel) {
-        let start = p.position();
-        p.write_i32(0);
-        p.write_string16(Some(&self.property));
-        p.write_string16(self.value.as_deref());
-        p.set_i32_at(start, (p.position() - start) as i32);
-    }
-}
-
 /// A `StatsDimensionsValueParcel` as statsd wrote it, which
 /// `StatsDimensionsValue.writeToParcel` writes as it is.
 struct DimensionsValue(Vec<u8>);
@@ -424,8 +401,6 @@ struct Linked {
 #[derive(Default)]
 struct Companion {
     statsd: Option<Linked>,
-    /// `mDeathTimeMillis`, on the elapsed clock.
-    deaths: Vec<i64>,
 }
 
 /// The companion's alarms (`mPullingAlarmListener`, `mPeriodicAlarmListener`):
@@ -592,12 +567,15 @@ impl Stats {
             }
             Err(Failure::Thrown(e)) => return Err(e),
         }
-        if let Err(e) = self.update_properties(&statsd) {
-            eprintln!(
-                "app host: statscompanion: the statsd_java properties: {}",
-                e.message
-            );
+        {
+            let mut companion = self.companion.lock().unwrap();
+            if let Some(linked) = companion.statsd.as_mut()
+                && linked.statsd.handle == statsd.handle
+            {
+                linked.ready = true;
+            }
         }
+        self.start_uid_map()?;
         if self.boot_completed.load(Ordering::SeqCst) {
             let mut p = Parcel::new();
             statsd::BootCompleted {}.write(&mut p);
@@ -608,19 +586,6 @@ impl Stats {
                 return Ok(());
             }
         }
-        {
-            let mut companion = self.companion.lock().unwrap();
-            if let Some(linked) = companion.statsd.as_mut()
-                && linked.statsd.handle == statsd.handle
-            {
-                linked.ready = true;
-            }
-        }
-        self.start_uid_map()?;
-        let _ = self.host.unimplemented_named(
-            "statscompanion",
-            "live statsd_java properties, dump and system pullers (#1765)",
-        );
         eprintln!("app host: statscompanion: Told statsd that StatsCompanionService is alive.");
         Ok(())
     }
@@ -678,60 +643,13 @@ impl Stats {
         }
     }
 
-    /// `updateProperties` of `DeviceConfig.getProperties(NAMESPACE_STATSD_JAVA)`.
-    fn update_properties(&self, statsd: &Strong) -> Result<(), Exception> {
-        let prefix = format!("{NAMESPACE_STATSD_JAVA}/");
-        let properties: Vec<Option<PropertyParcel>> = self
-            .host
-            .inputs()?
-            .settings
-            .list(Table::Config, &prefix)
-            .into_iter()
-            .map(|(name, value)| {
-                Some(PropertyParcel {
-                    property: name[prefix.len()..].to_string(),
-                    value,
-                })
-            })
-            .collect();
-        if properties.is_empty() {
-            return Ok(());
-        }
-        let mut p = Parcel::new();
-        statsd::UpdateProperties {
-            properties: Some(properties),
-        }
-        .write(&mut p);
-        if oneway(statsd, statsd::UPDATE_PROPERTIES, &p).is_err() {
-            eprintln!(
-                "app host: statscompanion: Failed to inform statsd of updated statsd_java properties"
-            );
-        }
-        Ok(())
-    }
-
-    /// `StatsdDeathRecipient.binderDied`: a configuration deleted after
-    /// ten deaths in a day, and statsd forgotten if it is still the one
-    /// fetched.
+    /// `StatsdDeathRecipient.binderDied`: forget this daemon; the retained
+    /// Java recipient owns the configuration files and their deletion history.
     fn statsd_died(&self, handle: u32) {
         eprintln!(
             "app host: statscompanion: Statsd is dead - erase all my knowledge, except pullers"
         );
         let mut companion = self.companion.lock().unwrap();
-        let now = super::alarm_service::elapsed_ms();
-        companion.deaths.retain(|&t| now - t <= MILLIS_IN_A_DAY);
-        companion.deaths.push(now);
-        if companion.deaths.len() >= DEATH_THRESHOLD {
-            companion.deaths.clear();
-            if let Ok(dir) = self.host.data().map(|d| d.join(CONFIG_DIR))
-                && let Some(Ok(first)) = std::fs::read_dir(dir)
-                    .ok()
-                    .and_then(|mut entries| entries.next())
-                && let Err(e) = std::fs::remove_file(first.path())
-            {
-                eprintln!("app host: statscompanion: {}: {e}", first.path().display());
-            }
-        }
         if companion
             .statsd
             .as_ref()
@@ -1706,6 +1624,58 @@ impl Service for StatsCompanionService {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         match call.code {
+            aim_binder_host::local::DUMP_TRANSACTION => {
+                let out = call
+                    .data
+                    .read_fd()
+                    .ok()
+                    .and_then(|fd| s.host.process.file(fd))
+                    .and_then(|file| aim_binder_host::server::file_fd(&file));
+                let result = (|| {
+                    // The original dump silently returns without DUMP, and does
+                    // not require PACKAGE_USAGE_STATS or the statsd UID.
+                    if s.host.check_permission(Some(DUMP), uid)? != 0 {
+                        return Ok(());
+                    }
+                    let Some(mut out) = out else {
+                        return Ok(());
+                    };
+                    let controller = s.uid_map.lock().unwrap().clone().ok_or_else(|| {
+                        s.host
+                            .unimplemented_named("statscompanion", "Java dump owner (#1765)")
+                    })?;
+                    let mut request = Parcel::new();
+                    uid_map::DumpStatsCompanion {}.write(&mut request);
+                    let text = match two_way(
+                        &controller,
+                        uid_map::DUMP_STATS_COMPANION,
+                        &request,
+                        uid_map::read_dump_stats_companion_reply,
+                    ) {
+                        Ok(Some(text)) => text,
+                        Ok(None) => {
+                            return Err(Exception::new(
+                                EX_ILLEGAL_STATE,
+                                "null statscompanion dump",
+                            ));
+                        }
+                        Err(Failure::Thrown(e)) => return Err(e),
+                        Err(Failure::Remote(e)) => {
+                            return Err(Exception::new(
+                                EX_ILLEGAL_STATE,
+                                format!("statscompanion dump bridge: {e}"),
+                            ));
+                        }
+                    };
+                    out.write_all(text.as_bytes()).map_err(|e| {
+                        Exception::new(EX_ILLEGAL_STATE, format!("statscompanion dump: {e}"))
+                    })
+                })();
+                return reply(result.map(|()| {
+                    p.write_no_exception();
+                    p
+                }));
+            }
             companion::STATSD_READY => {
                 companion::StatsdReady::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let result = enforce_statsd_calling_uid(uid).and_then(|()| s.say_hi_to_statsd());
@@ -1894,6 +1864,164 @@ impl Service for PendingIntentRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_puller_pair_and_companion_dump_keep_the_original_permissions() {
+        use std::os::fd::AsFd;
+        use std::sync::atomic::AtomicUsize;
+
+        struct JavaOwner(Arc<AtomicUsize>);
+        impl Service for JavaOwner {
+            fn descriptor(&self) -> &str {
+                uid_map::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                assert_eq!(call.code, uid_map::DUMP_STATS_COMPANION);
+                uid_map::DumpStatsCompanion::read(&mut call.data).unwrap();
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let mut p = Parcel::new();
+                uid_map::write_dump_stats_companion_reply(
+                    &mut p,
+                    &Some("Number of configuration files deleted: 0\n".into()),
+                );
+                Ok(p)
+            }
+        }
+        struct Statsd(std::sync::mpsc::Sender<(u32, i32, i32)>);
+        impl Service for Statsd {
+            fn descriptor(&self) -> &str {
+                statsd::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                match call.code {
+                    statsd::ALL_PULLERS_FROM_BOOT_REGISTERED => {}
+                    statsd::REGISTER_PULL_ATOM_CALLBACK => {
+                        let a = statsd::RegisterPullAtomCallback::read(&mut call.data).unwrap();
+                        assert_eq!((a.cool_down_millis, a.timeout_millis), (1000, 500));
+                        assert!(a.additive_fields.is_none());
+                        assert!(a.puller_callback.is_some());
+                        self.0.send((call.code, a.uid, a.atom_tag)).unwrap();
+                    }
+                    statsd::UNREGISTER_PULL_ATOM_CALLBACK => {
+                        let a = statsd::UnregisterPullAtomCallback::read(&mut call.data).unwrap();
+                        self.0.send((call.code, a.uid, a.atom_tag)).unwrap();
+                    }
+                    _ => panic!("unexpected statsd call {}", call.code),
+                }
+                Ok(Parcel::new())
+            }
+        }
+        struct Output(std::fs::File);
+        impl Service for Output {
+            fn descriptor(&self) -> &str {
+                "test.IOutput"
+            }
+            fn transact(&self, _: &mut Call<'_>) -> Reply {
+                let mut p = Parcel::new();
+                p.write_file(aim_binder_host::server::file_from_fd(self.0.as_fd()).unwrap());
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let permissions = Arc::new(
+                super::super::permission_manager::PermissionManager::with_system(
+                    host.clone(),
+                    Default::default(),
+                ),
+            );
+            assert!(host.permission_manager.set(permissions).is_ok());
+            let stats = Stats::new(host.clone());
+            let manager = StatsManagerService(stats.clone());
+            let (sent, received) = std::sync::mpsc::channel();
+            stats.statsd_ready(export(Arc::new(Statsd(sent)))).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let owner = export(Arc::new(JavaOwner(calls.clone())));
+            stats
+                .attach_uid_map(Some(Binder::Handle(owner.handle)))
+                .unwrap();
+            let mut registration = Parcel::new();
+            manager::RegisterPullAtomCallback {
+                atom_tag: 10014,
+                cool_down_millis: 1000,
+                timeout_millis: 500,
+                // Original registerSystemElapsedRealtime metadata (Android 16).
+                additive_fields: None,
+                puller_callback: Some(Binder::Handle(owner.handle)),
+            }
+            .write(&mut registration);
+            let mut removal = Parcel::new();
+            manager::UnregisterPullAtomCallback { atom_tag: 10014 }.write(&mut removal);
+            for (uid, code, request, expected) in [
+                (
+                    10100,
+                    manager::REGISTER_PULL_ATOM_CALLBACK,
+                    &registration,
+                    0,
+                ),
+                (1000, manager::REGISTER_PULL_ATOM_CALLBACK, &registration, 1),
+                (10100, manager::UNREGISTER_PULL_ATOM_CALLBACK, &removal, 1),
+                (1000, manager::UNREGISTER_PULL_ATOM_CALLBACK, &removal, 0),
+            ] {
+                manager
+                    .transact(&mut Call {
+                        code,
+                        flags: 1,
+                        sender_pid: 71,
+                        sender_euid: uid,
+                        data: request.reader(),
+                    })
+                    .unwrap();
+                assert_eq!(
+                    stats.registered.lock().unwrap().pullers.iter().count(),
+                    expected
+                );
+                if uid == 1000 {
+                    let forwarded = if code == manager::REGISTER_PULL_ATOM_CALLBACK {
+                        statsd::REGISTER_PULL_ATOM_CALLBACK
+                    } else {
+                        statsd::UNREGISTER_PULL_ATOM_CALLBACK
+                    };
+                    assert_eq!(
+                        received.recv_timeout(Duration::from_secs(1)).unwrap(),
+                        (forwarded, 1000, 10014)
+                    );
+                }
+                assert!(received.try_recv().is_err());
+            }
+            let dir = super::super::test_temp_dir("statscompanion-dump");
+            let path = dir.join("dump");
+            let output = export(Arc::new(Output(std::fs::File::create(&path).unwrap())));
+            // Receive a real Binder fd into the native endpoint's file table.
+            let fd = output.transact(1, &Parcel::new(), false).unwrap();
+            let companion = StatsCompanionService(stats);
+            for (uid, expected_calls) in [(10100, 0), (1000, 1)] {
+                companion
+                    .transact(&mut Call {
+                        code: aim_binder_host::local::DUMP_TRANSACTION,
+                        flags: 0,
+                        sender_pid: 71,
+                        sender_euid: uid,
+                        data: fd.reader(),
+                    })
+                    .unwrap()
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    if uid == 1000 {
+                        "Number of configuration files deleted: 0\n"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
 
     #[test]
     fn readiness_and_receiver_start_are_statsd_only() {
