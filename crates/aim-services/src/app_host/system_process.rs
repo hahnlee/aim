@@ -230,6 +230,28 @@ impl Service for SystemProcess {
                         .map(|()| sp::write_attach_system_process_reply(&mut p))
                 })
             }
+            sp::ATTACH_PACKAGE_INTENT_PARSER => {
+                let a =
+                    sp::AttachPackageIntentParser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let owner = match a.parser {
+                        Some(Binder::Handle(h)) => crate::system::ServiceOwner::Remote(Arc::new(
+                            self.host.process.strong(h),
+                        )),
+                        Some(Binder::Local(ptr)) => crate::system::ServiceOwner::Local(
+                            self.host.process.local_service(ptr).ok_or_else(|| {
+                                Exception::new(EX_NULL_POINTER, "package Intent parser gone")
+                            })?,
+                        ),
+                        None => {
+                            return Err(Exception::new(EX_NULL_POINTER, "package Intent parser"));
+                        }
+                    };
+                    *self.host.package_intent_parser.lock().unwrap() = Some(Arc::new(owner));
+                    sp::write_attach_package_intent_parser_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_SETTINGS_VALUES => {
                 let a = sp::AttachSettingsValues::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

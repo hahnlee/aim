@@ -2,6 +2,8 @@
 package com.android.modules.utils;
 public abstract class BasicShellCommandHandler {
     public BasicShellCommandHandler(){throw new RuntimeException("stub");}
+    public void init(android.os.Binder target, java.io.FileDescriptor in, java.io.FileDescriptor out,
+            java.io.FileDescriptor err, String[] args, int firstArgPos) {throw new RuntimeException("stub");}
     public abstract int onCommand(String command);
     public abstract void onHelp();
     public String getNextArgRequired(){throw new RuntimeException("stub");}

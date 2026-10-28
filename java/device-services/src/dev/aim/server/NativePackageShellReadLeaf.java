@@ -21,32 +21,7 @@ public final class NativePackageShellReadLeaf extends IPackageShellReadLeaf.Stub
     private static String[] lines(String text){return text.split("\\n",-1).length==1&&text.isEmpty()?new String[0]:text.substring(0,text.endsWith("\n")?text.length()-1:text.length()).split("\\n",-1);}
     @Override public int getMaxSupportedUsers(){enforce();return UserManager.getMaxSupportedUsers();}
     @Override public byte[] parseIntent(String[] arguments) {
-        enforce();Objects.requireNonNull(arguments);
-        final byte[][] result=new byte[1][];
-        ShellCommand parser=new ShellCommand(){
-            @Override public void onHelp(){}
-            @Override public int onCommand(String ignored){
-                final int[] user={-2}, flags={0};final boolean[] brief={false}, components={false};
-                try {
-                    Intent intent=Intent.parseCommandArgs(this,new Intent.CommandOptionHandler(){
-                      @Override public boolean handleOption(String option,ShellCommand command){
-                        switch(option){
-                            case "--user":user[0]=UserHandle.parseUserArg(command.getNextArgRequired());return true;
-                            case "--brief":brief[0]=true;return true;
-                            case "--components":components[0]=true;return true;
-                            case "--query-flags":flags[0]=Integer.decode(command.getNextArgRequired());return true;
-                            default:return false;
-                        }
-                      }
-                    });
-                    Parcel out=Parcel.obtain();try{out.writeInt(user[0]);out.writeInt(flags[0]);out.writeBoolean(brief[0]);out.writeBoolean(components[0]);intent.writeToParcel(out,0);result[0]=out.marshall();}finally{out.recycle();}
-                    return 0;
-                }catch(java.net.URISyntaxException error){throw new IllegalArgumentException(error.getMessage(),error);}
-            }
-        };
-        String[] all=new String[arguments.length+1];all[0]="parse-intent";System.arraycopy(arguments,0,all,1,arguments.length);
-        parser.exec(this,null,null,null,all,null,null);
-        return Objects.requireNonNull(result[0]);
+        enforce();return PackageIntentParser.parse(arguments);
     }
     @Override public String[] dumpResolveInfo(byte[] record,String prefix){
         enforce();Parcel in=Parcel.obtain();try{in.unmarshall(record,0,record.length);in.setDataPosition(0);ResolveInfo info=ResolveInfo.CREATOR.createFromParcel(in);if(in.dataAvail()!=0)throw new IllegalArgumentException("ResolveInfo tail");StringWriter text=new StringWriter();info.dump(new android.util.PrintWriterPrinter(new PrintWriter(text)),prefix);return lines(text.toString());}finally{in.recycle();}

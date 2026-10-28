@@ -424,6 +424,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IMediaArtwork|java/device-services/aidl/dev/aim/server/IMediaArtwork.aidl|*"
   "dev.aim.server.IPreBootNotifications|java/device-services/aidl/dev/aim/server/IPreBootNotifications.aidl|*"
   "dev.aim.server.INetworkStatsBridge|java/device-services/aidl/dev/aim/server/INetworkStatsBridge.aidl|*"
+  "dev.aim.server.IPackageIntentParser|java/device-services/aidl/dev/aim/server/IPackageIntentParser.aidl|*"
   "dev.aim.server.IPackageShellReadLeaf|java/device-services/aidl/dev/aim/server/IPackageShellReadLeaf.aidl|*"
   "dev.aim.server.IPackageShellPolicyBridge|java/device-services/aidl/dev/aim/server/IPackageShellPolicyBridge.aidl|*"
   "dev.aim.server.IPackageShellInstallPolicy|java/device-services/aidl/dev/aim/server/IPackageShellInstallPolicy.aidl|*"
