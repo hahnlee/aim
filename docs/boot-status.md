@@ -394,9 +394,9 @@ Six permission declaration winners differ only within the documented pair of
 system owners; both real APKs and the pinned permission policy confirm it.
 The native nt1 consumer reaches boot completion and rebinds package DATA inodes.
 Actual native init authentication and explicit-image guest-shell entry pass.
-Its Role diagnostic refuses two different original-owner hash results (#1328);
-a retained regular output file proves that failure. The stored hash binding is
-not accepted. After stop, recorded actors and mounts are gone. Apps, rollback,
+Its Role diagnostic once refused two different original-owner hash results;
+a later fresh native consumer returns two equal original digests matching the
+stored primary/reserve hash (#1328, below). After stop, recorded actors and mounts are gone. Apps, rollback,
 BootStats, full66CTS and complete consumer parity remain unverified.
 The current CTS host owner integration passes the official16_r1 launcher,
 selected Java21 JVM and foreground adb with the new strict init helper: exit0
