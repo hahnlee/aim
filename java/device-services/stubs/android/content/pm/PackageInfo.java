@@ -10,4 +10,7 @@ public class PackageInfo implements android.os.Parcelable {
     public String[] requestedPermissions;
     public ApplicationInfo applicationInfo;
     public ProviderInfo[] providers;
+    public String packageName, versionName;
+    public boolean isApex;
+    public long getLongVersionCode() { throw new RuntimeException("stub"); }
 }

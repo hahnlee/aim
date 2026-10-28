@@ -19,9 +19,9 @@
 //! order. statsd sends a PendingIntent through a `PendingIntentRef`, with
 //! the original's extras. The companion's alarms are exact, on the elapsed
 //! clock, and not wakeups, as the original sets them; the wake locks the
-//! original holds while it calls statsd are not taken. The uid map and its
-//! updates, the properties' later changes and system_server's pullers are
-//! not implemented (#1765).
+//! original holds while it calls statsd are not taken. The cold UID-map writer
+//! and its receivers run as retained Java in the system process; the properties'
+//! later changes and system_server's pullers remain unimplemented (#1765).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::io::{Read, Write};
@@ -40,6 +40,7 @@ use aim_service_aidl::android_os_istatscompanionservice as companion;
 use aim_service_aidl::android_os_istatsd as statsd;
 use aim_service_aidl::android_os_istatsmanagerservice as manager;
 use aim_service_aidl::android_os_istatsquerycallback as query;
+use aim_service_aidl::dev_aim_server_istatscompanionuidmap as uid_map;
 use aim_service_aidl::{ReadParcelable, Returned, WriteParcelable};
 
 use super::kept::RawIntent;
@@ -416,6 +417,7 @@ struct Linked {
     statsd: Strong,
     death: u64,
     dead: Arc<AtomicBool>,
+    ready: bool,
 }
 
 /// What StatsCompanionService keeps under `sStatsdLock`.
@@ -441,6 +443,7 @@ pub struct Stats {
     registered: Mutex<Registered>,
     statsd_ready: Condvar,
     companion: Mutex<Companion>,
+    uid_map: Mutex<Option<Arc<Strong>>>,
     alarms: Mutex<Alarms>,
     alarms_changed: Condvar,
     boot_completed: AtomicBool,
@@ -456,6 +459,7 @@ impl Stats {
             registered: Default::default(),
             statsd_ready: Condvar::new(),
             companion: Default::default(),
+            uid_map: Default::default(),
             alarms: Default::default(),
             alarms_changed: Condvar::new(),
             boot_completed: AtomicBool::new(false),
@@ -562,6 +566,7 @@ impl Stats {
                 statsd,
                 death,
                 dead,
+                ready: false,
             }) {
                 self.host.process.clear_death(&old.statsd, old.death);
             }
@@ -587,10 +592,6 @@ impl Stats {
             }
             Err(Failure::Thrown(e)) => return Err(e),
         }
-        let _ = self.host.unimplemented_named(
-            "statscompanion",
-            "the app, user and shutdown receivers (#1765)",
-        );
         if let Err(e) = self.update_properties(&statsd) {
             eprintln!(
                 "app host: statscompanion: the statsd_java properties: {}",
@@ -607,11 +608,74 @@ impl Stats {
                 return Ok(());
             }
         }
-        let _ = self
-            .host
-            .unimplemented_named("statscompanion", "informAllUids (#1765)");
+        {
+            let mut companion = self.companion.lock().unwrap();
+            if let Some(linked) = companion.statsd.as_mut()
+                && linked.statsd.handle == statsd.handle
+            {
+                linked.ready = true;
+            }
+        }
+        self.start_uid_map()?;
+        let _ = self.host.unimplemented_named(
+            "statscompanion",
+            "live statsd_java properties, dump and system pullers (#1765)",
+        );
         eprintln!("app host: statscompanion: Told statsd that StatsCompanionService is alive.");
         Ok(())
+    }
+
+    /// The system process can attach after statsd's handshake, or restart
+    /// while statsd stays alive. Each Java cohort owns its death/unregistration.
+    pub(super) fn attach_uid_map(&self, controller: Option<Binder>) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = controller else {
+            return Err(Exception::illegal_argument(
+                "no statscompanion UID-map bridge",
+            ));
+        };
+        let controller = Arc::new(self.host.process.strong(handle));
+        let me = self.me.clone();
+        self.host.process.link_to_death(
+            &controller,
+            Box::new(move || {
+                if let Some(stats) = me.upgrade() {
+                    let mut owner = stats.uid_map.lock().unwrap();
+                    if owner.as_ref().is_some_and(|c| c.handle == handle) {
+                        owner.take();
+                    }
+                }
+            }),
+        );
+        *self.uid_map.lock().unwrap() = Some(controller);
+        self.start_uid_map()
+    }
+
+    fn start_uid_map(&self) -> Result<(), Exception> {
+        let controller = self.uid_map.lock().unwrap().clone();
+        let statsd = self
+            .companion
+            .lock()
+            .unwrap()
+            .statsd
+            .as_ref()
+            .filter(|l| l.ready && !l.dead.load(Ordering::SeqCst))
+            .map(|l| self.host.process.strong(l.statsd.handle));
+        let (Some(controller), Some(statsd)) = (controller, statsd) else {
+            return Ok(());
+        };
+        let mut p = Parcel::new();
+        uid_map::Start {
+            statsd: Some(Binder::Handle(statsd.handle)),
+        }
+        .write(&mut p);
+        match two_way(&controller, uid_map::START, &p, uid_map::read_start_reply) {
+            Ok(()) => Ok(()),
+            Err(Failure::Thrown(e)) => Err(e),
+            Err(Failure::Remote(e)) => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("statscompanion UID-map bridge: {e}"),
+            )),
+        }
     }
 
     /// `updateProperties` of `DeviceConfig.getProperties(NAMESPACE_STATSD_JAVA)`.
@@ -1830,6 +1894,17 @@ impl Service for PendingIntentRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_and_receiver_start_are_statsd_only() {
+        assert!(enforce_statsd_calling_uid(AID_STATSD).is_ok());
+        for uid in [0, 1000, 2000, 10123] {
+            assert_eq!(
+                enforce_statsd_calling_uid(uid).unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+        }
+    }
 
     /// `String.hashCode`, `Long.hashCode` and `Objects.hash` as Java
     /// computes them.

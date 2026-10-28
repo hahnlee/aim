@@ -1,5 +1,6 @@
 package dev.aim.server;
 import dev.aim.server.IForegroundServicePolicy;
+import dev.aim.server.IStatsCompanionUidMap;
 
 /**
  * The app host's part of system_server for its system process
@@ -23,4 +24,10 @@ interface ISystemProcess {
      * IInternalServiceRetriever), over the app host's DeviceIdleInternal.
      */
     IBinder getInternalServiceRepository();
+
+    /**
+     * Attach the retained cold StatsCompanionService UID-map/receiver owner.
+     * Replays the current statsd after a system-process restart; system UID only.
+     */
+    void attachStatsCompanionUidMap(IStatsCompanionUidMap uidMap);
 }
