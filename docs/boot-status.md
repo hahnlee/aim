@@ -985,9 +985,15 @@ Main already retains guest CLOEXEC descriptors and PTY carriers across host
 exec, restores their owners, and closes the exec receipt immediately before
 guest entry (899907955). A dedicated in-place/host-exec PTY regression now
 checks stdio inheritance, an independent action after last-master close with
-SIGHUP blocked, and SIGHUP termination on unblocking; it compiles, but this
-session's Mach bootstrap registration is denied (1100), so execution did not
-reach PTY allocation. Setting's second reboot still needs a new SystemServer
+SIGHUP blocked, and SIGHUP termination on unblocking. A POSIX timer selects
+host exec, as in the interval-timer tests; the translation cache does not
+select the exec path. Exec-stage assertions now read a hidden `--diag-fd`
+because the child replaces stderr with the PTY slave before exec. The reported
+integration gate passed both C cases but lost that trace evidence. The revised
+test compiles. Boot-free probes with cached linker64 reproduce the lost stages
+on redirected stderr and retain both stages on the hidden fd. This sandbox's
+focused PTY run stops at allocation with ECHILD, before either exec path.
+Setting's second reboot still needs a new SystemServer
 identity; no guest boot or reboot replay was run (#1255).
 The optional constructor export is independent: its existing output directory
 cannot be reclaimed on automatic reboot. Init now consumes only capture

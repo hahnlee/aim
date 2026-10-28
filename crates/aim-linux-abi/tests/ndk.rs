@@ -321,7 +321,15 @@ fn pseudo_terminal_exec_hangup() {
     };
     let guest = Guest::new(&image, "t_pty_exec");
     let program = guest.build(&clang, "t_pty");
-    let (ok, output) = guest.run(&["--trace", &program, "--exec-hangup"]);
+    // The child replaces all stdio with the PTY slave before exec. Keep
+    // the exec-path evidence on a hidden fd, outside that descriptor set.
+    let log = guest.runtime.join("exec-trace");
+    let diagnostics = std::fs::File::create(&log).unwrap();
+    let (ok, mut output) = guest.run_with(
+        &["--trace", "--diag-fd", "3", &program, "--exec-hangup"],
+        vec![diagnostics.into()],
+    );
+    output.push_str(&std::fs::read_to_string(&log).unwrap());
     assert!(
         ok && output.contains("PASS"),
         "PTY exec hangup failed: {output}"
