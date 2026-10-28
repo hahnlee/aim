@@ -39,14 +39,21 @@ fn bsd_info(pid: i32) -> Option<libc::proc_bsdinfo> {
     unsafe {
         let mut info: libc::proc_bsdinfo = std::mem::zeroed();
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
-        let n = libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            // Zombies too.
-            1,
-            (&mut info as *mut libc::proc_bsdinfo).cast(),
-            size,
-        );
+        let n = loop {
+            *libc::__error() = 0;
+            let n = libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                // Zombies too.
+                1,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            );
+            if n != size && *libc::__error() == libc::EINTR {
+                continue;
+            }
+            break n;
+        };
         (n == size).then_some(info)
     }
 }

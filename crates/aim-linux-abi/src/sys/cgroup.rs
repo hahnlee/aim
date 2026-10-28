@@ -164,7 +164,10 @@ fn read_state(root: &Path) -> Membership {
         return Membership::default();
     };
     // SAFETY: locking our open file; released when it closes.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) };
+    if crate::errno::retry_host(|| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) }).is_err()
+    {
+        return Membership::default();
+    }
     let mut text = String::new();
     let _ = file.read_to_string(&mut text);
     Membership::parse(&text)
@@ -176,9 +179,7 @@ fn checked_state(root: &Path) -> Result<Membership, Errno> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Membership::default()),
         Err(e) => return Err(io_error(e)),
     };
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } < 0 {
-        return Err(crate::errno::last());
-    }
+    crate::errno::retry_host(|| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) })?;
     let mut text = String::new();
     file.read_to_string(&mut text).map_err(io_error)?;
     Ok(Membership::parse(&text))
@@ -202,9 +203,7 @@ fn transact<R>(
         .truncate(false)
         .open(lock_root.with_extension("policy-lock"))
         .map_err(io_error)?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } < 0 {
-        return Err(crate::errno::last());
-    }
+    crate::errno::retry_host(|| unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) })?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -213,9 +212,7 @@ fn transact<R>(
         .open(cgroup_v1::state_path(root))
         .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
     // SAFETY: locking our open file; released when it closes.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } < 0 {
-        return Err(crate::errno::last());
-    }
+    crate::errno::retry_host(|| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) })?;
     let mut text = String::new();
     file.read_to_string(&mut text).map_err(io_error)?;
     let mut m = Membership::parse(&text);
@@ -226,13 +223,13 @@ fn transact<R>(
     if new != text {
         host::update(root, &old, &m, None)?;
         if let Err(error) = (|| {
-            file.set_len(0)?;
-            file.rewind()?;
+            crate::errno::retry_io(|| file.set_len(0))?;
+            crate::errno::retry_io(|| file.rewind())?;
             file.write_all(new.as_bytes())
         })() {
-            file.rewind().map_err(io_error)?;
+            crate::errno::retry_io(|| file.rewind()).map_err(io_error)?;
             file.write_all(text.as_bytes()).map_err(io_error)?;
-            file.set_len(text.len() as u64).map_err(io_error)?;
+            crate::errno::retry_io(|| file.set_len(text.len() as u64)).map_err(io_error)?;
             host::update(root, &m, &old, None)?;
             return Err(io_error(error));
         }

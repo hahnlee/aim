@@ -148,22 +148,33 @@ fn timeshare_priority(nice: i32) -> i32 {
 
 /// This task's base priority (`task->priority`): the default moved by the
 /// host process's nice value (Darwin's task importance), or a host clamp.
-fn task_priority() -> i32 {
+fn task_priority() -> Result<i32, errno::Errno> {
     // SAFETY: proc_pidinfo into a local struct of the size given.
     unsafe {
         let mut info: libc::proc_taskinfo = std::mem::zeroed();
         let size = size_of::<libc::proc_taskinfo>() as i32;
-        if libc::proc_pidinfo(
-            libc::getpid(),
-            libc::PROC_PIDTASKINFO,
-            0,
-            (&raw mut info).cast(),
-            size,
-        ) == size
+        if errno::retry_host(|| {
+            *libc::__error() = 0;
+            let n = libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTASKINFO,
+                0,
+                (&raw mut info).cast(),
+                size,
+            );
+            if n == 0 {
+                if *libc::__error() == 0 {
+                    *libc::__error() = libc::EIO;
+                }
+                -1
+            } else {
+                n
+            }
+        })? == size
         {
-            info.pti_priority
+            Ok(info.pti_priority)
         } else {
-            BASEPRI_DEFAULT
+            Err(errno::EIO)
         }
     }
 }
@@ -180,10 +191,15 @@ unsafe extern "C" {
 
 fn apply_host_io(io: i32) -> Result<(), crate::errno::Errno> {
     // Disk policy is per thread, so a task move cannot throttle siblings.
-    if unsafe { setiopolicy_np(0, 1, io) } < 0 {
-        Err(crate::errno::last())
-    } else {
-        Ok(())
+    errno::retry_host(|| unsafe { setiopolicy_np(0, 1, io) }).map(|_| ())
+}
+
+fn retry_pthread(mut call: impl FnMut() -> i32) -> i32 {
+    loop {
+        let result = call();
+        if result != libc::EINTR {
+            return result;
+        }
     }
 }
 
@@ -236,19 +252,18 @@ pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errn
         || io != 0;
     if !needs_policy && !HOST_POLICY.get() {
         // SAFETY: plain call on the calling thread.
-        let result = unsafe {
+        let result = retry_pthread(|| unsafe {
             libc::pthread_set_qos_class_self_np(
                 super::cgroup::clamp_qos(host_qos(nice, policy) as i32, floor, ceiling),
                 0,
             )
-        };
+        });
         return if result == 0 {
             apply_host_io(io)
         } else {
             Err(crate::errno::from_darwin(result))
         };
     }
-    let old_host_policy = HOST_POLICY.replace(true);
     let (policy, priority) = match policy {
         SCHED_FIFO => (libc::SCHED_FIFO, 47),
         SCHED_RR => (libc::SCHED_RR, 47),
@@ -269,20 +284,20 @@ pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errn
     // Darwin's non-QoS user range starts at 15; the separate background
     // thread policy applies MAXPRI_THROTTLE (4) below that range.
     let priority = priority.max(floor_priority).min(ceiling_priority).max(15);
-    let priority = (priority + BASEPRI_DEFAULT - task_priority()).min(MAXPRI_USER);
+    let priority = (priority + BASEPRI_DEFAULT - task_priority()?).min(MAXPRI_USER);
     // SAFETY: sched_param is plain data; plain call on the calling thread.
-    let result = unsafe {
+    let result = retry_pthread(|| unsafe {
         let mut param: libc::sched_param = std::mem::zeroed();
         param.sched_priority = priority;
         libc::pthread_setschedparam(libc::pthread_self(), policy, &param)
-    };
+    });
     if result != 0 {
-        HOST_POLICY.set(old_host_policy);
         return Err(crate::errno::from_darwin(result));
     }
+    HOST_POLICY.set(true);
     // DARWIN_THREAD is used only after leaving QoS: XNU removes a thread's
     // QoS policy and returns EIDRM if both APIs are mixed.
-    let result = unsafe {
+    errno::retry_host(|| unsafe {
         libc::setpriority(
             libc::PRIO_DARWIN_THREAD,
             0,
@@ -292,10 +307,7 @@ pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errn
                 0
             },
         )
-    };
-    if result < 0 {
-        return Err(crate::errno::last());
-    }
+    })?;
     apply_host_io(io)
 }
 

@@ -88,10 +88,6 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn errno() -> i64 {
-    crate::errno::last() as i64
-}
-
 // ---- framing ------------------------------------------------------------------
 
 fn write_all(fd: i32, mut b: &[u8]) -> bool {
@@ -179,11 +175,15 @@ fn at(
     let (a, len) = sockaddr(name);
     // SAFETY: a thread-local working directory, restored to the process's.
     unsafe {
-        if pthread_fchdir_np(dirfd(d)) != 0 {
+        if crate::errno::retry_host(|| pthread_fchdir_np(dirfd(d))).is_err() {
             return -1;
         }
         let r = f(s, (&a as *const libc::sockaddr_un).cast(), len);
-        pthread_fchdir_np(-1);
+        let error = *libc::__error();
+        if crate::errno::retry_host(|| pthread_fchdir_np(-1)).is_err() {
+            return -1;
+        }
+        *libc::__error() = error;
         r
     }
 }
@@ -200,18 +200,21 @@ fn dirfd(d: &std::fs::File) -> i32 {
 fn socket() -> Result<i32, i64> {
     // SAFETY: a fresh socket; SIGPIPE would reach the guest.
     unsafe {
-        let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-        if s < 0 {
-            return Err(-errno());
-        }
+        let s = crate::errno::retry_host(|| libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0))
+            .map_err(|e| -(e as i64))?;
         let one: i32 = 1;
-        libc::setsockopt(
-            s,
-            libc::SOL_SOCKET,
-            libc::SO_NOSIGPIPE,
-            (&one as *const i32).cast(),
-            4,
-        );
+        if let Err(error) = crate::errno::retry_host(|| {
+            libc::setsockopt(
+                s,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&one as *const i32).cast(),
+                4,
+            )
+        }) {
+            libc::close(s);
+            return Err(-(error as i64));
+        }
         Ok(fdtab::hide(s))
     }
 }
@@ -236,18 +239,26 @@ pub(super) fn connect(pid: i32) -> Result<i32, i64> {
             lock(&OWN).push(s);
             return Ok(s);
         }
+        let error = unsafe { *libc::__error() };
         fdtab::unhide(s);
-        // SAFETY: our socket; then ringing a process of the namespace.
-        unsafe {
-            libc::close(s);
-            if !crate::sys::pidns::running(pid) || libc::kill(pid, libc::SIGINFO) != 0 {
-                return Err(esrch);
-            }
+        // A connect interrupted before completion can still be in progress.
+        // No request was sent: restart with a fresh socket, not the RPC.
+        unsafe { libc::close(s) };
+        if !matches!(error, libc::EINTR | libc::ENOENT | libc::ECONNREFUSED) {
+            return Err(-(crate::errno::from_darwin(error) as i64));
         }
         if std::time::Instant::now() >= deadline {
             return Err(esrch);
         }
-        std::thread::sleep(pause);
+        if error == libc::EINTR {
+            continue;
+        }
+        if !crate::sys::pidns::running(pid) || unsafe { libc::kill(pid, libc::SIGINFO) } != 0 {
+            return Err(esrch);
+        }
+        std::thread::sleep(
+            pause.min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
         pause = (pause * 2).min(Duration::from_millis(20));
     }
 }
@@ -763,6 +774,9 @@ pub fn fork_restore(r: &mut Reader) {
 pub fn socket_path(pid: i32) -> Option<std::path::PathBuf> {
     Some(crate::sys::cred::by_pid_dir()?.join(format!("{pid}.sock")))
 }
+
+#[cfg(test)]
+mod signal_tests;
 
 #[cfg(test)]
 mod tests {

@@ -17,25 +17,7 @@ impl ProcessIdentity {
         if pid <= 0 {
             return Err(io::Error::from_raw_os_error(libc::ESRCH));
         }
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        let size = std::mem::size_of_val(&info) as i32;
-        if unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDTBSDINFO,
-                1,
-                (&mut info as *mut libc::proc_bsdinfo).cast(),
-                size,
-            )
-        } != size
-        {
-            return Err(io::Error::from_raw_os_error(libc::ESRCH));
-        }
-        Ok(Self {
-            host_pid: pid,
-            start_seconds: info.pbi_start_tvsec,
-            start_microseconds: info.pbi_start_tvusec,
-        })
+        Self::running_strict(pid).map_err(|_| io::Error::from_raw_os_error(libc::ESRCH))
     }
     /// Preserve metadata errors for owners that must prove process termination.
     pub fn running_strict(pid: i32) -> io::Result<Self> {
@@ -51,27 +33,31 @@ impl ProcessIdentity {
         }
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of_val(&info) as i32;
-        unsafe {
-            *libc::__error() = 0;
+        loop {
+            unsafe {
+                *libc::__error() = 0;
+            }
+            let returned = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    1,
+                    (&mut info as *mut libc::proc_bsdinfo).cast(),
+                    size,
+                )
+            };
+            if returned == size {
+                return Ok(info);
+            }
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if errno != libc::EINTR {
+                return Err(io::Error::from_raw_os_error(if errno != 0 {
+                    errno
+                } else {
+                    libc::EIO
+                }));
+            }
         }
-        let returned = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDTBSDINFO,
-                1,
-                (&mut info as *mut libc::proc_bsdinfo).cast(),
-                size,
-            )
-        };
-        let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        if returned != size {
-            return Err(io::Error::from_raw_os_error(if errno != 0 {
-                errno
-            } else {
-                libc::EIO
-            }));
-        }
-        Ok(info)
     }
     /// A zombie has exited: PROC_PIDTBSDINFO with arg 1 still reports it until it is reaped.
     pub fn is_live(self) -> bool {

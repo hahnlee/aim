@@ -405,7 +405,7 @@ fn open(pid: i32) -> Option<std::fs::File> {
 
 fn read_at(f: &std::fs::File, off: u64, len: usize) -> Vec<u8> {
     let mut v = vec![0u8; len];
-    let n = f.read_at(&mut v, off).unwrap_or(0);
+    let n = crate::errno::retry_io(|| f.read_at(&mut v, off)).unwrap_or(0);
     v.truncate(n);
     v
 }
