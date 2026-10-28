@@ -1546,6 +1546,7 @@ fn project(
     });
     let private = |bit| s.private_flags & (1 << bit) != 0;
     Ok(model::PackageState {
+        protection: Default::default(),
         name: s.name.clone(),
         app_id: s.app_id,
         setting_flags: Some((s.flags, s.private_flags)),

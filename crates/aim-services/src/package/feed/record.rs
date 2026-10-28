@@ -5,6 +5,7 @@
 
 use aim_binder_host::parcel::{Reader, Result};
 use aim_service_aidl::{read_byte_array, read_int_array, read_string_list};
+use std::collections::BTreeMap;
 
 use crate::package::intent_filter::UriRelativeFilterGroup;
 use crate::package::model::{
@@ -14,6 +15,28 @@ use crate::package::model::{
 use crate::package::pkg::Serialized;
 use crate::package::restrictions::{ArchiveActivity, ArchiveState};
 use crate::package::settings::{PRIVATE_FLAG_PRIVILEGED, Signatures, UsesSdkLibrary};
+
+pub fn protection(bytes: &[u8]) -> Result<BTreeMap<i32, (bool, bool)>> {
+    use aim_binder_host::parcel::BAD_VALUE;
+    let mut r = Reader::new(bytes, &[]);
+    let count = r.read_i32()?;
+    if count < 0 || count as usize > r.remaining() / 12 {
+        return Err(BAD_VALUE);
+    }
+    let mut users = BTreeMap::new();
+    for _ in 0..count {
+        let user = r.read_i32()?;
+        let state = r.read_bool()?;
+        let data = r.read_bool()?;
+        if user < 0 || users.insert(user, (state, data)).is_some() {
+            return Err(BAD_VALUE);
+        }
+    }
+    if r.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
+    Ok(users)
+}
 
 /// A package state's record: `PackageState`'s getters, its signing,
 /// install source, installed permissions, domain verification state and
