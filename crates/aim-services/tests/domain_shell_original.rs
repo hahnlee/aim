@@ -8,6 +8,32 @@ mod common {
 #[test]
 #[ignore = "requires pinned JDK and network; no guest boot"]
 fn domain_shell_output_matches_android16() {
+    // The shipped image omits the tag's unused user-state callback.
+    // Bind the oracle's one source adjustment to the actual image contract.
+    let jar = fs::read(aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut callback = std::collections::BTreeSet::new();
+    for bytes in aim_android_image::system_server::dex_files(&jar).unwrap() {
+        let dex = aim_android_image::dex::Dex::parse(bytes).unwrap();
+        if let Some(class) =
+            dex.class("Lcom/android/server/pm/verify/domain/DomainVerificationShell$Callback;")
+        {
+            for id in dex.members(class).unwrap().1 {
+                let (_, name, signature) = dex.method(id).unwrap();
+                callback.insert(format!("{name}{signature}"));
+            }
+        }
+    }
+    assert_eq!(callback, std::collections::BTreeSet::from([
+        "clearDomainVerificationState(Ljava/util/List;)V".to_owned(),
+        "clearUserStates(Ljava/util/List;I)V".to_owned(),
+        "printOwnersForDomains(Landroid/util/IndentingPrintWriter;Ljava/util/List;Ljava/lang/Integer;)V".to_owned(),
+        "printOwnersForPackage(Landroid/util/IndentingPrintWriter;Ljava/lang/String;Ljava/lang/Integer;)V".to_owned(),
+        "printState(Landroid/util/IndentingPrintWriter;Ljava/lang/String;Ljava/lang/Integer;)V".to_owned(),
+        "setDomainVerificationLinkHandlingAllowedInternal(Ljava/lang/String;ZI)V".to_owned(),
+        "setDomainVerificationStatusInternal(Ljava/lang/String;ILandroid/util/ArraySet;)V".to_owned(),
+        "setDomainVerificationUserSelectionInternal(ILjava/lang/String;ZLandroid/util/ArraySet;)V".to_owned(),
+        "verifyPackages(Ljava/util/List;Z)V".to_owned(),
+    ]));
     let data = common::runtime::Data(
         std::env::temp_dir().join(format!("aim-domain-shell-{}", std::process::id())),
     );
@@ -199,6 +225,14 @@ fn domain_shell_output_matches_android16() {
             assert!(original.contains("mDomainVerificationShell.runCommand(this, cmd)"));
             assert!(original.contains("return domainVerificationResult ? 0 : 1;"));
             continue;
+        }
+        if name == "DomainVerificationShell" {
+            let original = String::from_utf8_lossy(&decoded.stdout);
+            let removed = "        /**\n         * @see DomainVerificationManager#getDomainVerificationUserState(String)\n         */\n        @Nullable\n        DomainVerificationUserState getDomainVerificationUserState(\n                @NonNull String packageName, @UserIdInt int userId)\n                throws PackageManager.NameNotFoundException;\n";
+            assert_eq!(original.matches(removed).count(), 1);
+            let shipped = original.replacen(removed, "", 1);
+            assert!(!shipped.contains("getDomainVerificationUserState("));
+            fs::write(&path, shipped).unwrap();
         }
         if name == "DomainVerificationEnforcer" {
             let original = String::from_utf8_lossy(&decoded.stdout);

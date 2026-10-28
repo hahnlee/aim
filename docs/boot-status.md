@@ -2460,6 +2460,15 @@ all-package handling, retained captures, disk reopen and failure replies.
 internal state overrides, original selection revocation and verifier/user reset
 rules. `verify-app-links` uses native attached-state eligibility and the existing
 domain owner's selected original proxy, including its unavailable-agent behavior.
+The device-services stubs now match the shipped image's domain API, including
+its nine-method shell callback without the AOSP tag's unused user-state getter
+(#2187, 2026-10-29). All 104 prior stub members were audited against services.jar;
+debug/helper and package-shell access modifiers match the image too. The package
+shell's three-argument constructor and both debug printState overloads already
+have the correct descriptors. Device-services compilation and pinned-image
+linkage pass. The JVM oracle checks the image callback's complete method set and
+removes only the absent declaration from its hash-pinned AOSP source, preserving
+the parser, formatter and behavior assertions.
 The pinned JVM oracle executes the original modern proxy and request class with
 the production delivery bridge, selector and connection; it records the explicit
 component, request extras, foreground flag, user and temporary allowlist, and

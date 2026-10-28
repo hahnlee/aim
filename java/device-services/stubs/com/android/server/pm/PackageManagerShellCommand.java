@@ -1,7 +1,7 @@
 // Compile-only pinned image API; checked by the device-services build node.
 package com.android.server.pm;
-class PackageManagerShellCommand extends android.os.ShellCommand {
-    PackageManagerShellCommand(android.content.pm.IPackageManager packages,
+public class PackageManagerShellCommand extends android.os.ShellCommand {
+    public PackageManagerShellCommand(android.content.pm.IPackageManager packages,
             android.content.Context context,
             com.android.server.pm.verify.domain.DomainVerificationShell domains) {
         throw new RuntimeException("stub");

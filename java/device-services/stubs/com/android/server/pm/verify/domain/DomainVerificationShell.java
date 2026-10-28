@@ -7,7 +7,6 @@ public class DomainVerificationShell {
         void printOwnersForDomains(android.util.IndentingPrintWriter writer, java.util.List<String> domains, Integer user);
         void setDomainVerificationStatusInternal(String name, int state, android.util.ArraySet<String> domains) throws android.content.pm.PackageManager.NameNotFoundException;
         void setDomainVerificationUserSelectionInternal(int user, String name, boolean enabled, android.util.ArraySet<String> domains) throws android.content.pm.PackageManager.NameNotFoundException;
-        android.content.pm.verify.domain.DomainVerificationUserState getDomainVerificationUserState(String name, int user) throws android.content.pm.PackageManager.NameNotFoundException;
         void setDomainVerificationLinkHandlingAllowedInternal(String name, boolean allowed, int user) throws android.content.pm.PackageManager.NameNotFoundException;
         void clearDomainVerificationState(java.util.List<String> names);
         void clearUserStates(java.util.List<String> names, int user);

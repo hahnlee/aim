@@ -2,7 +2,6 @@ package com.android.server.pm.verify.domain;
 
 import android.content.Context;
 import android.content.pm.PackageManager.NameNotFoundException;
-import android.content.pm.verify.domain.DomainVerificationUserState;
 import android.os.*;
 import android.util.*;
 import com.android.server.pm.pkg.AndroidPackage;
@@ -10,7 +9,7 @@ import com.android.server.pm.verify.domain.models.*;
 import dev.aim.server.IAppHostDomainVerification;
 import java.util.*;
 
-/** Original android-16.0.0_r1 shell and debug presentation over one native read capture. */
+/** Pinned image shell and debug presentation over one native read capture. */
 public final class AppHostDomainShell implements DomainVerificationShell.Callback {
     private final IAppHostDomainVerification backend;
     private final DomainVerificationEnforcer enforcer;
@@ -130,9 +129,6 @@ public final class AppHostDomainShell implements DomainVerificationShell.Callbac
             if (failure.errorCode != 1) throw failure;
             throw new NameNotFoundException(name);
         } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
-    }
-    @Override public DomainVerificationUserState getDomainVerificationUserState(String name, int user) {
-        throw new UnsupportedOperationException("unused domain shell user-state callback");
     }
     @Override public void setDomainVerificationLinkHandlingAllowedInternal(String name,
             boolean allowed, int user) throws NameNotFoundException {
