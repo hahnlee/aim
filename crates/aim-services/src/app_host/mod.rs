@@ -472,18 +472,17 @@ impl App {
     }
 }
 
-/// `getPackageProcessState` over the processes, each its package (its
-/// package list), its package dependencies and the state set on it: the
-/// lowest state of one whose package list or dependencies hold `package`.
+/// `getPackageProcessState`: the lowest set state of a process whose
+/// package list or dependencies hold `package`.
 fn package_process_state<'a>(
-    processes: impl Iterator<Item = (&'a str, &'a [String], i32)>,
+    processes: impl Iterator<Item = (&'a [String], &'a [String], i32)>,
     package: Option<&str>,
 ) -> i32 {
     let Some(package) = package else {
         return PROCESS_STATE_NONEXISTENT;
     };
     processes
-        .filter(|(p, deps, _)| *p == package || deps.iter().any(|d| d == package))
+        .filter(|(packages, deps, _)| packages.iter().chain(*deps).any(|p| p == package))
         .map(|(_, _, state)| state)
         .fold(PROCESS_STATE_NONEXISTENT, i32::min)
 }
@@ -2608,7 +2607,7 @@ impl AppHost {
         let apps = self.apps.lock().unwrap();
         let processes = apps.values().map(|a| {
             let set = a.proc_state;
-            (a.package.as_str(), a.package_deps.as_slice(), set)
+            (a.packages.as_slice(), a.package_deps.as_slice(), set)
         });
         Ok(package_process_state(processes, package))
     }
@@ -5721,11 +5720,14 @@ mod tests {
 
     #[test]
     fn a_package_s_state_is_its_lowest_process_s() {
+        let a = vec!["com.a".to_string()];
+        let b = vec!["com.b".to_string()];
+        let c = vec!["com.c".to_string()];
         let deps = vec!["com.lib".to_string()];
         let processes = [
-            ("com.a", &[][..], PROCESS_STATE_NONEXISTENT),
-            ("com.b", &deps[..], PROCESS_STATE_TOP),
-            ("com.c", &[][..], 6),
+            (&a[..], &[][..], PROCESS_STATE_NONEXISTENT),
+            (&b[..], &deps[..], PROCESS_STATE_TOP),
+            (&c[..], &[][..], 6),
         ];
         let state = |package| package_process_state(processes.iter().copied(), package);
         assert_eq!(state(Some("com.lib")), PROCESS_STATE_TOP);
@@ -5733,6 +5735,31 @@ mod tests {
         assert_eq!(state(Some("com.a")), PROCESS_STATE_NONEXISTENT);
         assert_eq!(state(Some("com.none")), PROCESS_STATE_NONEXISTENT);
         assert_eq!(state(None), PROCESS_STATE_NONEXISTENT);
+    }
+
+    /// ActivityManagerService.getPackageProcessState, android-16.0.0_r1:
+    /// every entry in ProcessRecord.getPkgList participates, along with
+    /// package dependencies, and the lowest set state wins.
+    #[test]
+    fn a_shared_process_counts_every_package_for_process_state() {
+        let shared = vec!["com.first".to_string(), "com.shared".to_string()];
+        let other = vec!["com.other".to_string(), "com.shared".to_string()];
+        let dependent = vec!["com.dependent".to_string()];
+        let deps = vec!["com.shared".to_string()];
+        let processes = [
+            (&shared[..], &[][..], 6),
+            (&other[..], &[][..], PROCESS_STATE_TOP),
+            (&dependent[..], &deps[..], 4),
+        ];
+        let state = |processes: &[_], package| {
+            package_process_state(processes.iter().copied(), Some(package))
+        };
+        assert_eq!(state(&processes[..1], "com.shared"), 6);
+        assert_eq!(state(&processes, "com.shared"), PROCESS_STATE_TOP);
+        assert_eq!(state(&processes[2..], "com.shared"), 4);
+        assert_eq!(state(&processes, "com.first"), 6);
+        assert_eq!(state(&processes, "com.dependent"), 4);
+        assert_eq!(state(&processes, "com.none"), PROCESS_STATE_NONEXISTENT);
     }
 
     #[test]
