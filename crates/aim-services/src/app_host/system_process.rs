@@ -94,6 +94,14 @@ impl Service for SystemProcess {
                         .map(|()| sp::write_attach_system_process_reply(&mut p))
                 })
             }
+            sp::ATTACH_SETTINGS_VALUES => {
+                let a = sp::AttachSettingsValues::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.settings_provider()?.attach_values(a.bridge)?;
+                    sp::write_attach_settings_values_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_STATS_COMPANION_UID_MAP => {
                 let a =
                     sp::AttachStatsCompanionUidMap::read(&mut call.data).map_err(|_| BAD_VALUE)?;

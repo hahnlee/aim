@@ -1,4 +1,4 @@
-//! Host JVM checks of the original TextUtils boundary; no Android boot.
+//! Host JVM checks of the original Java presentation boundaries; no Android boot.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -39,7 +39,7 @@ impl Drop for Data {
 }
 
 #[test]
-fn safe_label_bridge_uses_the_original_parameters_and_checks_the_system_uid() {
+fn presentation_bridges_use_original_strings_and_check_the_system_uid() {
     let data = Data(std::env::temp_dir().join(format!("aim-safe-labels-{}", std::process::id())));
     fs::create_dir(&data.0).unwrap();
     let jdk = aim_paths::fetched().join("java/temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
@@ -63,6 +63,13 @@ fn safe_label_bridge_uses_the_original_parameters_and_checks_the_system_uid() {
             .arg(format!("-o{}", aidl_output.display()))
             .arg(aidl_input.join("dev/aim/server/ISafeLabels.aidl")),
     );
+    run(
+        Command::new(aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"))
+            .args(["--lang=java", "--min_sdk_version", "36"])
+            .arg(format!("-I{}", aidl_input.display()))
+            .arg(format!("-o{}", aidl_output.display()))
+            .arg(aidl_input.join("dev/aim/server/ISettingsValues.aidl")),
+    );
     let api = aidl_output.join("dev/aim/server/ISafeLabels.java");
     let source = aim_paths::root().join("java/device-services/src/dev/aim/server");
     run(Command::new(jdk.join("bin/javac"))
@@ -71,7 +78,9 @@ fn safe_label_bridge_uses_the_original_parameters_and_checks_the_system_uid() {
         .arg("-cp")
         .arg(&stubs)
         .arg(api)
+        .arg(aidl_output.join("dev/aim/server/ISettingsValues.java"))
         .arg(source.join("SafeLabels.java"))
+        .arg(source.join("SettingsValues.java"))
         .arg(source.join("Bridge.java")));
     // Shadows observe only the boundary; HTML and glyph layout stay in framework.jar.
     run(Command::new(jdk.join("bin/javac"))
@@ -81,9 +90,14 @@ fn safe_label_bridge_uses_the_original_parameters_and_checks_the_system_uid() {
         .arg(format!("{}:{}", classes.display(), stubs.display()))
         .args(sources(
             &aim_paths::root().join("crates/aim-services/tests/fixtures/safe_labels"),
-        )));
+        ))
+        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/SettingsValuesTest.java")));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
         .arg(format!("{}:{}", classes.display(), stubs.display()))
         .arg("SafeLabelsTest"));
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(format!("{}:{}", classes.display(), stubs.display()))
+        .arg("dev.aim.server.SettingsValuesTest"));
 }

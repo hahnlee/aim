@@ -643,6 +643,12 @@ and application-key classes run in `aim-system` against the existing keystore2.
 Only this pair is exposed; the remaining missing recovery operations retain their
 explicit UnsupportedOperation naming #1888.
 
+SettingsProvider's cold Float, Double and byte-array `ContentValues.getAsString`
+conversion (#1583) runs in `aim-system` through a system-UID-only vendor bridge.
+Its scalar `toString` calls use the original libcore formatting and object
+identity; the native provider retains validation, permissions and storage.
+This adds vendor classes only, without replacing original framework classes.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

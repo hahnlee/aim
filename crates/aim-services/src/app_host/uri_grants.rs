@@ -19,8 +19,7 @@
 //! reads it and written back as `writeGrantedUriPermissions` writes it
 //! (binary XML), when they change rather than after the original's delay.
 //! The app host hands out no owner tokens (`newUriPermissionOwner` is the
-//! system's own), so `grantUriPermissionFromOwner` knows none. Not yet:
-//! package visibility from grants (`grantImplicitAccess`, #1569), a target
+//! system's own), so `grantUriPermissionFromOwner` knows none. Not yet: a target
 //! activity's `requireContentUriPermissionFromCaller` (#1568), a disabled
 //! package's grants (#1570); the app host removes no package or user.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -986,6 +985,16 @@ impl AppHost {
             grants
                 .find_or_create(&g.source_package, &g.target_package, target_uid, &uri)
                 .init_persisted_modes(g.modes, g.created);
+            self.grant_uri_implicit_access(
+                target_uid,
+                provider
+                    .as_ref()
+                    .expect("source checked")
+                    .info
+                    .application_info
+                    .uid,
+                true,
+            )?;
         }
         Ok(grants)
     }
@@ -1472,6 +1481,7 @@ impl AppHost {
         let basic =
             modes & (FLAG_GRANT_PERSISTABLE_URI_PERMISSION | FLAG_GRANT_PREFIX_URI_PERMISSION) == 0;
         if basic && target_holds {
+            self.grant_uri_implicit_access(target_uid, pi.info.application_info.uid, false)?;
             return Ok(-1);
         }
         // Another user's target may get a basic grant of what anyone in
@@ -1661,7 +1671,32 @@ impl AppHost {
         self.with_grants(|g| {
             g.find_or_create(&source, target, target_uid, uri)
                 .grant_modes(modes, owner)
-        })
+        })?;
+        self.grant_uri_implicit_access(
+            target_uid,
+            pi.info.application_info.uid,
+            modes & FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0,
+        )
+    }
+
+    /// UriGrantsManagerService's indirect visibility of the provider, retained
+    /// across package updates only for persistable (or restored) grants.
+    fn grant_uri_implicit_access(
+        &self,
+        target_uid: i32,
+        provider_uid: i32,
+        retain_on_update: bool,
+    ) -> Result<(), Exception> {
+        self.package_system()?.internal_grant_implicit_access(
+            target_uid / PER_USER_RANGE as i32,
+            None,
+            target_uid % PER_USER_RANGE as i32,
+            provider_uid,
+            false,
+            retain_on_update,
+            SYSTEM_UID,
+            0,
+        )
     }
 
     /// `grantUriPermissionUncheckedFromIntent`: what `needed` grants,
@@ -2190,6 +2225,93 @@ mod tests {
         g.find_or_create("p.provider", "p.target", 10_001, uri)
             .grant_modes(modes, owner);
         g
+    }
+
+    /// UriGrantsManagerService's three grantImplicitAccess sites: the live
+    /// grant, a basic grant needing no permission record, and restored grants.
+    #[test]
+    fn uri_grants_publish_provider_visibility_with_original_retention() {
+        for case in ["live", "persistable", "basic", "restored", "denied"] {
+            crate::system::with_discovery_binders(|host, publish, _, _| {
+                publish(&mut |package| {
+                    if package.package_name == "p" {
+                        let mut provider = crate::package::pkg::Provider {
+                            main: package.activities[0].main.clone(),
+                            authority: Some("p.files".into()),
+                            grant_uri_permissions: true,
+                            ..Default::default()
+                        };
+                        provider.main.component.name = "p.Provider".into();
+                        provider.main.exported = case == "basic";
+                        provider.main.direct_boot_aware = true;
+                        package.providers.push(provider);
+                    }
+                });
+                let capture = || host.package_capture().unwrap();
+                // The shared fixture disables FILTER_APPLICATION_QUERY.
+                let hidden = |target: &str, caller| {
+                    let mut state = (**capture().state()).clone();
+                    for package in state.packages.values_mut() {
+                        package.filter_application_query = Some(true);
+                    }
+                    let filter =
+                        crate::package::apps_filter::AppsFilter::new(&state, &Default::default())
+                            .unwrap();
+                    should_filter_application(
+                        &state,
+                        &filter,
+                        state.packages.get(target),
+                        caller,
+                        0,
+                        true,
+                        true,
+                    )
+                    .unwrap()
+                };
+                let before = capture().state().system.implicit_access.clone();
+                assert!(hidden("p", 10101));
+                let uri = grant_uri("content://p.files/item", READ);
+                match case {
+                    "restored" => {
+                        let mut persisted = Grants::default();
+                        persisted
+                            .find_or_create("p", "q", 10101, &uri)
+                            .init_persisted_modes(READ, 123);
+                        write(host.data().unwrap(), &persisted.document()).unwrap();
+                        assert!(host.read_grants().unwrap().check(&uri, 10101, READ));
+                    }
+                    "basic" => {
+                        assert_eq!(
+                            host.check_grant(10100, Some("q"), &uri, READ, -1).unwrap(),
+                            -1
+                        );
+                        assert!(!host.with_grants(|g| g.check(&uri, 10101, READ)).unwrap());
+                    }
+                    "denied" => {
+                        assert!(host.check_grant(10101, Some("q"), &uri, READ, -1).is_err());
+                        assert_eq!(capture().state().system.implicit_access, before);
+                        return;
+                    }
+                    _ => {
+                        let modes = READ
+                            | if case == "persistable" {
+                                FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                            } else {
+                                0
+                            };
+                        host.grant_unchecked(10101, "q", &uri, modes, Some(Owner::Activity(7)))
+                            .unwrap();
+                        host.release_uri_grants(Owner::Activity(7));
+                        assert!(!host.with_grants(|g| g.check(&uri, 10101, READ)).unwrap());
+                    }
+                }
+                let mut expected = before;
+                expected.grant(10101, 10100, matches!(case, "persistable" | "restored"));
+                assert_eq!(capture().state().system.implicit_access, expected);
+                assert!(!hidden("p", 10101));
+                assert!(hidden("q", 10100));
+            });
+        }
     }
 
     #[test]
