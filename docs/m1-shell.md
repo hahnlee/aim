@@ -91,8 +91,8 @@ running. The entries are image/overlay.toml's "The lightweight shell":
 | The home | `java/lightweight-home`, `/system_ext/app/AimHome`: an empty HOME activity over the wallpaper (section 1's table) |
 | The static wallpaper | `java/image-wallpaper`, a privileged app in `/system_ext/priv-app` with READ_WALLPAPER_INTERNAL: a `WallpaperService` drawing the current bitmap as SystemUI's ImageWallpaper does; the overlay names it in `image_wallpaper_component`, so WallpaperManagerService's static wallpaper, clear and default keep their meaning (#603) |
 | Resource values (the static wallpaper and its check, shell-only service configs) | a static RRO, `java/lightweight-shell-overlay`, in `/system_ext/overlay`: framework-res declares no overlayable, so a preinstalled overlay may override its configs (`cmds/idmap2/libidmap2/ResourceMapping.cpp:60-75`), and `/system_ext` overlays take precedence over `/product`'s (`PackagePartitions`), where `PixelConfigOverlayCommon` names the shell-only services |
-| No caption | `init.aim.rc`: `ro.vendor.aim.freeform_caption_dp=0`, which aim-windows reports ([windows.md](windows.md)) |
-| The native status bar and the window shell | `init.aim.rc`: `ro.vendor.aim.lightweight_shell=true`, on which guest-init starts the native `IStatusBar` (section 3) and the device service the window shell ([task-organizer.md](task-organizer.md)) |
+| No caption | no window decoration; Mac title bars sit above the task ([windows.md](windows.md)) |
+| The native status bar and the window shell | guest-init starts the native `IStatusBar` (section 3), and DeviceServices starts the window shell in both modes ([task-organizer.md](task-organizer.md)) |
 
 ## 2. WMShell's roles
 
@@ -120,10 +120,10 @@ without them (files in `wm/` unless named otherwise):
 
 | Role | Without WMShell | Apps see | M1 |
 | --- | --- | --- | --- |
-| Task organizer | WM positions, crops and shows task surfaces | nothing | none registered; aim-windows keeps its `IActivityTaskManager` calls; its "a pixel and back" commit of bounds (windows.md, "Placement") is checked and removed if WM now places surfaces itself |
+| Task organizer | WM positions, crops and shows task surfaces | nothing | the window shell organizes tasks and places their surfaces; aim-windows reports their bounds |
 | Transition player | changes apply at once, no animation | no in-task activity animations, `overridePendingTransition` has no effect | none; the Mac animates windows |
-| Freeform caption (window decoration) | none, no caption insets | a task's content starts at its top | aim-windows reports caption 0; the title bar sits above the task, not over it (#351 moot) |
-| Bars and taskbar | no status, navigation or task bar windows (`DisplayPolicy.java:1081-1144`) | zero system bar insets | the display is the screen, without `BAR_MARGIN` |
+| Freeform caption (window decoration) | none, no caption insets | a task's content starts at its top | the title bar sits above the task (#351 moot) |
+| Bars and taskbar | no status, navigation or task bar windows (`DisplayPolicy.java:1081-1144`) | zero system bar insets | the display is the screen, without extra rows |
 | Starting windows (splash) | `addStartingWindow` needs an organizer (`TaskOrganizerController.java:629-632`, `StartingSurfaceController.java:83-92`); none is drawn | no splash; `SplashScreen.OnExitAnimationListener` is not called (the API allows a start without splash) | D4 |
 | PiP | with `enablePip2` (phones, not ARC or TV: `ActivityTaskManagerService.java:7601-7612`) entry is a transition that aborts without a player (`:3835-3855`); otherwise a pinned task without bounds policy | `enterPictureInPictureMode` returns true and nothing happens | D3 |
 | Split screen, bubbles | not offered | multi-window apps run as freeform windows | none |

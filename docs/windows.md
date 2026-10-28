@@ -12,14 +12,12 @@ cargo aim boot --windows            # aim-display --mode windows
 ```text
  Mac screen (points)                        Android display (pixels)
  ┌────────────────────────────┐             ┌────────────────────────────┐
- │ menu bar                   │             │ status bar                 │
- │   ┌─title bar─┐            │   s·(x,y)   │   ┌─caption──┐             │
- │   │ Settings  │ ┌─────┐    │ ──────────▶ │   │ task 9   │ ┌──────┐    │
- │   │  content  │ │Chrome│   │             │   │ content  │ │task 11│   │
- │   └───────────┘ └─────┘    │             │   └──────────┘ └──────┘    │
- └────────────────────────────┘             ├────────────────────────────┤
-                                            │ bar margin (nav/taskbar)   │
-                                            └────────────────────────────┘
+ │ menu bar                   │             │                            │
+ │   ┌─title bar─┐            │   s·(x,y)   │                            │
+ │   │ Settings │ ┌──────┐    │ ──────────▶ │   ┌─task 9──┐ ┌─task 11─┐   │
+ │   │ content  │ │Chrome│    │             │   │ content │ │ content │   │
+ │   └──────────┘ └──────┘    │             │   └─────────┘ └─────────┘   │
+ └────────────────────────────┘             └────────────────────────────┘
 ```
 
 ## Design: the display is the screen
@@ -43,13 +41,9 @@ task's window lies exactly over the task. The rest follows from that:
 - **Android pixels and macOS points stay apart.** The display is the
   screen in backing pixels, never an upscale; `aim_host_display::windows`
   is the one place that converts.
-- **No caption.** The image has no WMShell (the lightweight shell,
-  [m1-shell.md](m1-shell.md)), so no window decoration draws a freeform
-  caption: `ro.vendor.aim.freeform_caption_dp` is 0 and the window has a
-  standard title bar (#545); a caption height above 0 would lie inside
-  the top of the task, under a title bar made at least as tall. The
-  display still has `BAR_MARGIN` rows below the screen, for bars nothing
-  draws any more (#681).
+- **No caption or system bars.** The lightweight shell draws neither, so
+  the window's standard Mac title bar sits above the task and the display
+  has exactly the screen's backing pixels (#681).
 
 ## Pieces
 
@@ -75,7 +69,7 @@ task's window lies exactly over the task. The rest follows from that:
 `user system`) that speaks the platform's own binder interfaces:
 `IActivityTaskManager` (`registerTaskStackListener`, `getTaskBounds`,
 `resizeTask`, `setFocusedTask`, `removeTask`, `startActivityAndWait`),
-`IWindowManager` (`get`/`setWindowingMode`, base display size and density)
+`IWindowManager` (base display size)
 and the `ITaskStackListener` it registers (tasks, focus and
 `onActivityRequestedOrientationChanged`). These are Java AIDL interfaces
 with no NDK backend, so the few calls are written by hand with the
@@ -91,18 +85,16 @@ server's mode. Its binders die with system_server, so its rc starts it
 again when zygote restarts (`init.svc.zygote=restarting`); the server
 drops the old connection's tasks. The mode:
 
-- **Device mode:** it sets the default display's windowing mode to
-  fullscreen (`setWindowingMode` persists, so a window-mode boot is undone)
-  and exits.
-- **Window mode:** it sets freeform and reports tasks. A task gets a window
-  once an activity of it ran (it came to the front or had focus) and it has
-  bounds of its own on the display. A task that fills the display (home,
-  anything not freeform), a task without activities (WMShell's split-screen
-  roots) and a task restored from recents but not started get none.
+- **Device mode:** it exits. DeviceServices keeps the default display area
+  fullscreen in both modes, including the migration from old freeform data.
+- **Window mode:** it attaches to the window shell and reports tasks. A task
+  gets a window once an activity of it ran and it has bounds of its own on
+  the display. The shell's activity type identifies the home task; tasks
+  restored from recents but not started get no window.
 
 | Record | From | Meaning |
 | --- | --- | --- |
-| `TASK` | guest | the task's bounds and caption height, new or changed |
+| `TASK` | guest | the task's bounds, new or changed |
 | `PACKAGE`, `TITLE` | guest | the task's package; its `TaskDescription` label |
 | `COLORS` | guest | the task description's ARGB primary and background colors (zero means unset) |
 | `ACTIVITY` | guest | the activity the task was started with, `package/class` (`origActivity`, an alias, else `realActivity`) |
@@ -110,8 +102,8 @@ drops the old connection's tasks. The mode:
 | `MOVED_TO_BACK` | guest | Back on its root activity moved it behind the others |
 | `ORIENTATION` | guest | an activity of it asked for landscape, portrait or neither (`setRequestedOrientation`) |
 | `REMOVED` | guest | the task is gone |
-| `HIDE` | guest | the desktop (a task that fills the display: home) came to the front over the task: its app hides |
-| `DRAWN` | guest | the `LAUNCH` of `package/class` drew its first frame, or ended (with the window shell: its task's window shows its starting window) |
+| `HIDE` | guest | the desktop (the home task) came to the front over the task: its app hides |
+| `DRAWN` | guest | the `LAUNCH` of `package/class` drew its first frame, or ended (its task's window shows its starting window) |
 | `PINNED`, `UNPINNED` | guest | the task entered or left picture-in-picture: its window floats, or no longer ([task-organizer.md](task-organizer.md), "Picture-in-picture") |
 | `SET_BOUNDS` | server | move or resize the task (`resizeTask`); the bridge answers with `TASK` |
 | `FOCUS` | server | `setFocusedTask` |
@@ -173,24 +165,14 @@ visibility included). It connects to the display server itself
 
 - **Placement.** A new task's window takes the bounds Android chose
   (freeform's cascade). When the screen does not allow them (above the
-  menu bar), the task follows the window. Bounds Android gives a task
-  itself (its launch position; a shift away from another task when an
-  activity starts in it) do not always reach the task's surface: the
-  legacy freeform transitions can leave it where it was, and the window
-  would show another part of the display. The bridge commits them by
-  moving the task a pixel and back with `resizeTask`, whose change
-  transitions place the surface (a resize to the bounds the task already
-  has changes nothing). With the window shell (the image's, since the
-  lightweight shell) its transitions place every task's surface, and
-  nothing is committed ([task-organizer.md](task-organizer.md)).
+  menu bar), the task follows the window. The window shell's transitions
+  place every task's surface ([task-organizer.md](task-organizer.md)).
 - **Where a window reopens.** A launcher activity's new task opens where
   its window last was, as a Mac app's window does (#635): the bridge keeps
   each activity's last bounds in `/data/system/aim-windows-places` and
   gives them to a `LAUNCH` as launch bounds while they lie within the
   display. Starts from elsewhere (an app's own new task, a notification)
-  open at Android's default bounds, as on a desktop-windowing device. On a
-  freeform display area (no window shell) the platform's own record
-  (`LaunchParamsPersister`) agrees.
+  open at Android's default bounds, as on a desktop-windowing device.
 - **Move and resize.** Moving the window moves the task at once; a live
   resize resizes it when the resize ends (each resize is a configuration
   change for the app). The window then takes the bounds the task got (a

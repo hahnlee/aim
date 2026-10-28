@@ -84,7 +84,7 @@ the composer's `linux-run`:
   (#1931).
 - **Display mode.** The window's content in backing pixels: by default the
   main screen's visible frame, `--size WxH` otherwise. In window mode
-  (`--mode windows`) it is the main screen and a bar margin, and each task
+  (`--mode windows`) it is the main screen in backing pixels, and each task
   window shows its task's layers ([windows.md](windows.md),
   [layers.md](layers.md)). Its density is the
   screen's (backing pixels per inch from `CGDisplayScreenSize`), its

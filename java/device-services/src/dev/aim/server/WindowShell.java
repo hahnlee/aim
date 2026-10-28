@@ -53,8 +53,6 @@ import java.util.Set;
  */
 final class WindowShell extends TaskOrganizer {
     private static final String TAG = "AimWindowShell";
-    /** Set in the lightweight shell, the image the window shell is for (its rc). */
-    static final String PROPERTY = "ro.vendor.aim.lightweight_shell";
     /** Display.DEFAULT_DISPLAY. */
     private static final int DEFAULT_DISPLAY = 0;
     /** Its name in servicemanager, for aim-windows. */

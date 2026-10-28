@@ -23,7 +23,6 @@ use binder::{
 };
 
 /// `WindowConfiguration.WINDOWING_MODE_*`.
-pub const WINDOWING_MODE_FULLSCREEN: i32 = 1;
 pub const WINDOWING_MODE_FREEFORM: i32 = 5;
 /// `ActivityTaskManager.RESIZE_MODE_USER`: a resize the user asked for.
 const RESIZE_MODE_USER: i32 = 1;
@@ -201,18 +200,6 @@ impl BpActivityTaskManager {
 }
 
 impl BpWindowManager {
-    pub fn windowing_mode(&self, display: i32) -> Result<i32> {
-        Ok(call(&self.binder, wm::GET_WINDOWING_MODE, |p| p.write(&display))?.read()?)
-    }
-
-    pub fn set_windowing_mode(&self, display: i32, mode: i32) -> Result<()> {
-        call(&self.binder, wm::SET_WINDOWING_MODE, |p| {
-            p.write(&display)?;
-            p.write(&mode)
-        })
-        .map(drop)
-    }
-
     /// The display's size in pixels, with any override (`wm size`).
     pub fn display_size(&self, display: i32) -> Result<(i32, i32)> {
         let reply = call(&self.binder, wm::GET_BASE_DISPLAY_SIZE, |p| {
@@ -223,14 +210,6 @@ impl BpWindowManager {
             return Err(Status::new_exception(ExceptionCode::ILLEGAL_STATE, None));
         }
         Ok((reply.read()?, reply.read()?))
-    }
-
-    /// The display's density in dots per inch, with any override.
-    pub fn display_density(&self, display: i32) -> Result<i32> {
-        Ok(call(&self.binder, wm::GET_BASE_DISPLAY_DENSITY, |p| {
-            p.write(&display)
-        })?
-        .read()?)
     }
 }
 

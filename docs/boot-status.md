@@ -8234,10 +8234,13 @@ AIM windows behind another Mac app stay behind it; the active
 host still makes its task key, and minimized windows stay minimized.
 
 `cargo aim boot --windows` ([windows.md](windows.md)): the display is the
-Mac's main screen (3840×2160 at 2×, plus the bar margin: 3840×2352), the
-default display runs freeform windowing, and the task bridge reports its
-tasks. On an M2 Pro with other agents' boots loading the host (load average
-37 to 125):
+Mac's main screen in backing pixels; the window shell makes tasks freeform
+on a fullscreen display area, and the task bridge reports them. The obsolete
+SystemUI bar margin, caption sizing and no-shell task placement were removed
+(#681; host geometry tests and build/linkage checks, 2026-10-28). The Java
+display-mode and launch-params migrations remain for existing data directories.
+Neither mode was booted again. The observations below predate that cleanup,
+on an M2 Pro with other agents' boots loading the host (load average 37 to 125):
 
 | Check | Result |
 | --- | --- |
@@ -8250,12 +8253,8 @@ tasks. On an M2 Pro with other agents' boots loading the host (load average
 | Esc | `KEY_ESC` reaches the app; no Back (Android 16 closes system dialogs instead) |
 | A task restored from recents at boot | no window |
 
-Under that load SystemUI hit ANRs, and freeform positions Android chose
-itself (Chrome's launch, Settings shifted away from Chrome when a page
-opened) did not reach the task surfaces, so those windows showed other
-parts of the display; the bridge now commits such bounds by moving the
-task a pixel and back with `resizeTask` (a resize to the same bounds is a
-no-op and did not help).
+The current image has no SystemUI; the window shell places task surfaces
+and the bridge reports their bounds without a synthetic resize (#681).
 
 **Per-task composition** (2026-10-01, #692, [layers.md](layers.md)):
 window mode now composes each Mac window from its own task's layers
