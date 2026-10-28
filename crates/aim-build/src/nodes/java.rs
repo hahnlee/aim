@@ -17,6 +17,7 @@ use aim_android_image::linkage::ClassPath;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 pub const LOCK: &str = "upstream/java-toolchain.lock";
 
@@ -80,19 +81,28 @@ fn unpacked(archive: &Path, name: &str, log: &mut Log) -> Result<PathBuf, String
     Ok(dest)
 }
 
+/// The pinned JDK, also used by ART and xsdc without the SDK build tools.
+pub fn jdk(log: &mut Log) -> Result<PathBuf, String> {
+    // Independent nodes can fetch the same archive and extraction concurrently.
+    static FETCH: Mutex<()> = Mutex::new(());
+    let _fetch = FETCH.lock().unwrap();
+    let lock = Lock::read(&repo(LOCK))?;
+    let version = lock.get("JDK_VERSION")?;
+    let archive = pinned(
+        lock.get("JDK_URL")?,
+        &format!("temurin-jdk-{version}.tar.gz"),
+        lock.get("JDK_SHA256")?,
+        log,
+    )?;
+    Ok(unpacked(&archive, &format!("temurin-{version}"), log)?
+        .join(format!("jdk-{version}/Contents/Home")))
+}
+
 impl Toolchain {
     /// The pinned toolchain, fetched if needed.
     pub fn fetch(log: &mut Log) -> Result<Self, String> {
         let lock = Lock::read(&repo(LOCK))?;
-        let version = lock.get("JDK_VERSION")?;
-        let jdk = pinned(
-            lock.get("JDK_URL")?,
-            &format!("temurin-jdk-{version}.tar.gz"),
-            lock.get("JDK_SHA256")?,
-            log,
-        )?;
-        let jdk = unpacked(&jdk, &format!("temurin-{version}"), log)?
-            .join(format!("jdk-{version}/Contents/Home"));
+        let jdk = jdk(log)?;
         let version = lock.get("BUILD_TOOLS_VERSION")?;
         let tools = pinned(
             lock.get("BUILD_TOOLS_URL")?,
