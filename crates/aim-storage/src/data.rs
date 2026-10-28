@@ -83,7 +83,27 @@ fn lock_of(dir: &Path) -> PathBuf {
     dir.with_file_name(name)
 }
 
-fn lock(dir: &Path) -> Result<File, String> {
+#[derive(Debug)]
+struct DataLock(File);
+
+impl Drop for DataLock {
+    fn drop(&mut self) {
+        // Only this owner uses the lock. A parallel spawn may still hold a
+        // fork-inherited descriptor before exec, so close alone is too late.
+        loop {
+            if unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                eprintln!("aim-storage: unlocking data image: {error}");
+                break;
+            }
+        }
+    }
+}
+
+fn lock(dir: &Path) -> Result<DataLock, String> {
     let path = lock_of(dir);
     let lock = File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // SAFETY: flock on an open descriptor.
@@ -93,7 +113,7 @@ fn lock(dir: &Path) -> Result<File, String> {
             image_of(dir).display()
         ));
     }
-    Ok(lock)
+    Ok(DataLock(lock))
 }
 
 fn detach_image(dir: &Path) -> Result<(), String> {
@@ -149,7 +169,7 @@ pub struct DataImage {
     dir: PathBuf,
     image: PathBuf,
     device: Option<String>,
-    _lock: File,
+    _lock: DataLock,
 }
 
 /// The empty data image among the data templates.
@@ -520,28 +540,57 @@ mod tests {
     }
 
     #[test]
-    fn detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops() {
-        // The lock's release is observed at once; a concurrent spawn's child
-        // would still hold its descriptor until it execs. The fixture runs alone.
-        const MARKER: &str = "DATA_HANDOFF_LOCK_EXECUTED";
+    fn data_lock_drop_does_not_wait_for_an_unrelated_fork_child() {
+        const MARKER: &str = "DATA_LOCK_FORK_DROP_EXECUTED";
         if crate::inode_lease::tests::isolated_fork_fixture(
-            "data::tests::detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops",
+            "data::tests::data_lock_drop_does_not_wait_for_an_unrelated_fork_child",
             MARKER,
         ) {
             return;
         }
-        let root =
-            std::env::temp_dir().join(format!("aim-data-handoff-lock-{}", std::process::id()));
-        fs::create_dir(&root).unwrap();
+        struct Child(libc::pid_t);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                // SAFETY: this fixture's unreaped child, including on panic.
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    libc::waitpid(self.0, std::ptr::null_mut(), 0);
+                }
+            }
+        }
+        let root = crate::scratch_dir("aim-data-lock-fork");
+        let dir = root.join("data");
+        let owner = lock(&dir).unwrap();
+        // Model a parallel Command::spawn between fork and exec: CLOEXEC
+        // has not closed the child's inherited lock descriptor yet.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        let child = Child(pid);
+        assert!(lock(&dir).unwrap_err().contains("in use"));
+        drop(owner);
+        let result = lock(&dir).map(drop);
+        drop(child);
+        fs::remove_dir_all(root).unwrap();
+        result.unwrap();
+        println!("{MARKER}");
+    }
+
+    #[test]
+    fn detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops() {
+        let root = crate::scratch_dir("aim-data-handoff-lock");
         let lock_path = root.join("data.lock");
-        let lock = File::create(&lock_path).unwrap();
-        assert_eq!(
-            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
+        let dir = root.join("data");
+        let lock = lock(&dir).unwrap();
+        let backing = image_of(&dir);
+        fs::write(&backing, b"live owner's image").unwrap();
         let mut data = DataImage {
-            dir: root.join("data"),
-            image: root.join("data.asif"),
+            dir: dir.clone(),
+            image: backing.clone(),
             device: Some("/dev/not-a-device".into()),
             _lock: lock,
         };
@@ -561,13 +610,20 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::EWOULDBLOCK)
         );
+        assert!(
+            DataImage::attach(&dir, None)
+                .unwrap_err()
+                .contains("in use")
+        );
+        assert!(detach_existing(&dir).unwrap_err().contains("in use"));
+        assert!(remove(&dir).unwrap_err().contains("in use"));
+        assert_eq!(fs::read(&backing).unwrap(), b"live owner's image");
         drop(data);
         assert_eq!(
             unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
             0
         );
         fs::remove_dir_all(root).unwrap();
-        println!("{MARKER}");
     }
 
     #[test]
