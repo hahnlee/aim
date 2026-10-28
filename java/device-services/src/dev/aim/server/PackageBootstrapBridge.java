@@ -20,6 +20,17 @@ import com.android.server.pm.verify.domain.DomainVerificationManagerInternal;
 /** Original package-policy owners, available independently of late services. */
 public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     private IPackageShellReadLeaf packageShellRead;
+    private com.android.server.pm.permission.AppHostDefaultPermissionGrants defaultGrants;
+    private synchronized com.android.server.pm.permission.AppHostDefaultPermissionGrants defaultGrants(IPackageDefaultGrantQueries queries) {
+        if (defaultGrants == null) defaultGrants = new com.android.server.pm.permission.AppHostDefaultPermissionGrants(
+                systemContext(), Objects.requireNonNull(queries));
+        return defaultGrants;
+    }
+    @Override public void grantDefaultPermissions(IPackageDefaultGrantQueries queries, int userId) {
+        enforceSystemUid();
+        defaultGrants(queries).grant(userId);
+    }
+
     public synchronized void installPackageShellReadOwner(Context context,PackageSnapshots.Store snapshots){
         if(packageShellRead!=null)throw new IllegalStateException("package shell read owner already installed");
         packageShellRead=new NativePackageShellReadLeaf(context,snapshots);

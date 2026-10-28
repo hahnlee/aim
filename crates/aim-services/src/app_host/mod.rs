@@ -41,6 +41,7 @@ pub mod bind;
 mod blob_store;
 pub mod bluetooth_manager;
 pub mod boot_policy;
+mod boot_ready;
 mod broadcast_response;
 pub mod broadcasts;
 pub mod bugreport;
@@ -587,6 +588,8 @@ pub struct AppHost {
     system: OnceLock<Arc<crate::system::System>>,
     /// `startBootstrapServices` constructs PMS before `setSystemProcess`.
     package_boot: OnceLock<Result<(), Exception>>,
+    /// AMS.mProcessesReady: default grants committed before application forks.
+    processes_ready: OnceLock<Result<(), Exception>>,
     /// Retained verifier API in the current system process; replaced on attach.
     domain_frontend: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     /// Retained cold MediaRouter2 queries, replaced when aim-system attaches.
@@ -705,6 +708,7 @@ impl AppHost {
             permission_manager: OnceLock::new(),
             system: OnceLock::new(),
             package_boot: OnceLock::new(),
+            processes_ready: OnceLock::new(),
             domain_frontend: Mutex::new(None),
             system_route_queries: Mutex::new(None),
             native_staging_bridge: Mutex::new(None),
@@ -1657,6 +1661,7 @@ impl AppHost {
         from_background: bool,
         isolated: bool,
     ) -> Result<(i64, i32), Exception> {
+        self.processes_ready.wait().clone()?;
         let launch = self.launch_inputs(name)?;
         let owner = launch.application.uid as u32;
         let uid = if isolated {
@@ -5512,6 +5517,7 @@ impl Service for Control {
             // start, and not by the first start.
             let host = self.0.clone();
             std::thread::spawn(move || {
+                let _ready = boot_ready::BootReady(&host);
                 match host.package_boot.get_or_init(|| {
                     host.package_system().and_then(|system| {
                         package_boot::run(&host, system)?;
@@ -5570,6 +5576,9 @@ impl Service for Control {
                     Ok(user) => user,
                     Err(e) => return eprintln!("app host: user storage: {e}"),
                 };
+                if let Err(e) = host.system_ready() {
+                    return eprintln!("app host: system ready: {e:?}");
+                }
                 // BluetoothService's `onUserStarting` of the system user.
                 if let Some(bluetooth) = host.bluetooth.get() {
                     bluetooth.on_user_starting();
@@ -5669,6 +5678,18 @@ impl AppHost {
 
 #[cfg(test)]
 pub(crate) fn configure_test_host(
+    host: &AppHost,
+    root: &Path,
+    data: &Path,
+    runtime: &Path,
+    properties: Properties,
+) {
+    configure_boot_test_host(host, root, data, runtime, properties);
+    host.processes_ready.set(Ok(())).unwrap();
+}
+
+#[cfg(test)]
+pub(crate) fn configure_boot_test_host(
     host: &AppHost,
     root: &Path,
     data: &Path,

@@ -106,7 +106,7 @@ pub struct PackageBootstrap {
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
 /// properties (`deriveFingerprint`).
-fn build_fingerprint(property: impl Fn(&str) -> Option<String>) -> String {
+pub(super) fn build_fingerprint(property: impl Fn(&str) -> Option<String>) -> String {
     if let Some(fingerprint) = property("ro.build.fingerprint").filter(|f| !f.is_empty()) {
         return fingerprint;
     }

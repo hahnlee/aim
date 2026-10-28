@@ -128,6 +128,12 @@ public final class NativePackageManagerInternal extends android.content.pm.Packa
     private volatile boolean closed;
     /** Stable identity retained by original permission constructors before scan capture. */
     public NativePackageManagerInternal() {}
+    /** The four cold local reads used by the original default grant policy in aim-system. */
+    private IPackageDefaultGrantQueries defaultGrantQueries;
+    public NativePackageManagerInternal(IPackageDefaultGrantQueries queries) {
+        defaultGrantQueries = java.util.Objects.requireNonNull(queries);
+    }
+
     private Bound state() {
         Bound value = bound;
         if (closed || value == null) throw new IllegalStateException("native package internal epoch is not ready");
@@ -257,9 +263,9 @@ public final class NativePackageManagerInternal extends android.content.pm.Packa
         } }
     @Override public void removePackageListObserver(PackageListObserver observer) { state(); state().observers().removePackageListObserver(observer); }
     @Override public PackageStateInternal getDisabledSystemPackage(String packageName) { state(); try (var scope = state().snapshots().computer()) { return scope.getDisabledSystemPackage(packageName); } }
-    @Override public String getDisabledSystemPackageName(String packageName) { state(); try (var scope = state().snapshots().computer()) { var state = scope.getDisabledSystemPackage(packageName); var pkg = state == null ? null : state.getPkg(); return pkg == null ? null : pkg.getPackageName(); } }
-    @Override public boolean isResolveActivityComponent(ComponentInfo component) { state(); try (var scope = state().snapshots().computer()) { return scope.isResolveActivityComponent(component); } }
-    @Override public String[] getKnownPackageNames(int knownPackage, int userId) { if(bound==null){try{return initial().getInitialKnownPackageNames(knownPackage,userId);}catch(android.os.RemoteException failure){throw failure.rethrowFromSystemServer();}} state(); try (var scope = state().snapshots().computer()) { return scope.getKnownPackageNames(knownPackage, userId); } }
+    @Override public String getDisabledSystemPackageName(String packageName) { if (defaultGrantQueries != null) try { return defaultGrantQueries.getDisabledSystemPackageName(packageName); } catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); } state(); try (var scope = state().snapshots().computer()) { var state = scope.getDisabledSystemPackage(packageName); var pkg = state == null ? null : state.getPkg(); return pkg == null ? null : pkg.getPackageName(); } }
+    @Override public boolean isResolveActivityComponent(ComponentInfo component) { if (defaultGrantQueries != null) try { return defaultGrantQueries.isResolveActivityComponent(component.packageName, component.name); } catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); } state(); try (var scope = state().snapshots().computer()) { return scope.isResolveActivityComponent(component); } }
+    @Override public String[] getKnownPackageNames(int knownPackage, int userId) { if (defaultGrantQueries != null) try { return defaultGrantQueries.getKnownPackageNames(knownPackage, userId); } catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); } if(bound==null){try{return initial().getInitialKnownPackageNames(knownPackage,userId);}catch(android.os.RemoteException failure){throw failure.rethrowFromSystemServer();}} state(); try (var scope = state().snapshots().computer()) { return scope.getKnownPackageNames(knownPackage, userId); } }
     @Override public boolean isInstantApp(String packageName, int userId) { state(); try (var scope = state().snapshots().computer()) { return scope.isInstantApp(packageName, userId); } }
     @Override public String getInstantAppPackageName(int uid) {
         if (bound == null) try { return initial().getInitialInstantAppPackageName(uid); }
@@ -278,7 +284,7 @@ public final class NativePackageManagerInternal extends android.content.pm.Packa
         catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); }
         state(); return state().snapshots().queryComputer((computer, callerUid, callerPid) -> computer.filterUidAccess(uid, callingUid)); }
     @Override public boolean canQueryPackage(int callingUid, String packageName) { state(); return state().snapshots().queryComputer((computer, uid, pid) -> computer.canQueryPackage(callingUid, packageName, uid, pid)); }
-    @Override public boolean isPlatformSigned(String pkg) { state(); try (var scope = state().snapshots().computer()) { var state = scope.getPackageStateInternal(pkg); if (state == null) return false; var signing = state.getSigningDetails(); var platform = scope.getPlatformSigningDetails(); return signing.hasAncestorOrSelf(platform) || platform.checkCapability(signing, 4); } }
+    @Override public boolean isPlatformSigned(String pkg) { if (defaultGrantQueries != null) try { return defaultGrantQueries.isPlatformSigned(pkg); } catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); } state(); try (var scope = state().snapshots().computer()) { var state = scope.getPackageStateInternal(pkg); if (state == null) return false; var signing = state.getSigningDetails(); var platform = scope.getPlatformSigningDetails(); return signing.hasAncestorOrSelf(platform) || platform.checkCapability(signing, 4); } }
     @Override public boolean isDataRestoreSafe(byte[] restoringFromSigHash, String packageName) { state(); try (var scope = state().snapshots().computer()) { var signing = scope.getSigningDetails(packageName); return signing != null && signing.hasSha256Certificate(restoringFromSigHash, 1); } }
     @Override public boolean isDataRestoreSafe(Signature restoringFromSig, String packageName) { state(); try (var scope = state().snapshots().computer()) { var signing = scope.getSigningDetails(packageName); return signing != null && signing.hasCertificate(restoringFromSig, 1); } }
     @Override public boolean hasSignatureCapability(int serverUid, int clientUid, int capability) { state(); try (var scope = state().snapshots().computer()) { var server = scope.getSigningDetails(serverUid); var client = scope.getSigningDetails(clientUid); return server.checkCapability(client, capability) || client.hasAncestorOrSelf(server); } }
