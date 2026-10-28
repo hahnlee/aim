@@ -423,6 +423,8 @@ pub struct HostLauncher {
         PathBuf,
     )>,
     posix_children: std::collections::BTreeMap<u32, aim_storage::posix_control::Owner>,
+    mount_children:
+        std::collections::BTreeMap<u32, aim_storage::process_namespace::ProcessIdentity>,
 }
 
 impl HostLauncher {
@@ -433,6 +435,7 @@ impl HostLauncher {
             children: BTreeSet::new(),
             posix: None,
             posix_children: Default::default(),
+            mount_children: Default::default(),
         }
     }
 
@@ -456,6 +459,9 @@ impl HostLauncher {
 
     fn forget(&mut self, pid: u32) {
         self.children.remove(&pid);
+        if let Err(error) = self.retire_mount_namespace(pid) {
+            eprintln!("native mount namespace retirement: {error}");
+        }
         if let Some(owner) = self.posix_children.remove(&pid) {
             if let Some((controller, _)) = &self.posix {
                 if let Err(error) = controller.guest_exited(owner) {
@@ -466,6 +472,16 @@ impl HostLauncher {
         let by_pid = self.layout.identity_dir().join("by-pid");
         let _ = fs::remove_file(by_pid.join(pid.to_string()));
         let _ = fs::remove_file(by_pid.join(format!("{pid}.proc")));
+    }
+
+    fn retire_mount_namespace(&mut self, pid: u32) -> io::Result<()> {
+        if let Some(process) = self.mount_children.remove(&pid) {
+            aim_storage::process_namespace::retire_mount_namespace(
+                &self.layout.identity_dir().join("by-pid"),
+                process,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -669,6 +685,7 @@ impl Launcher for HostLauncher {
             let registered = (|| {
                 let process = aim_storage::process_namespace::ProcessIdentity::running(pid as i32)
                     .map_err(|error| error.to_string())?;
+                self.mount_children.insert(pid, process);
                 let table = self.layout.identity_dir().join("by-pid");
                 let init = aim_storage::process_namespace::InitRegistration::read(&table)
                     .map_err(|error| error.to_string())?;
@@ -723,16 +740,14 @@ impl Launcher for HostLauncher {
                         }
                     }
                     let by_pid = self.layout.identity_dir().join("by-pid");
-                    for path in [
-                        by_pid.join(pid.to_string()),
-                        by_pid.join(format!("{pid}.mount-namespace")),
-                    ] {
-                        match fs::remove_file(path) {
-                            Ok(()) => {}
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                            Err(error) => {
-                                return Err(format!("{failure}; native identity cleanup: {error}"));
-                            }
+                    self.retire_mount_namespace(pid).map_err(|error| {
+                        format!("{failure}; native mount namespace cleanup: {error}")
+                    })?;
+                    match fs::remove_file(by_pid.join(pid.to_string())) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!("{failure}; native identity cleanup: {error}"));
                         }
                     }
                     return Err(failure);
@@ -824,12 +839,20 @@ impl Drop for HostLauncher {
             self.kill_group(pid, libc::SIGKILL);
             let mut status = 0;
             // SAFETY: reaping our own child.
-            unsafe { libc::waitpid(pid as i32, &mut status, 0) };
-            if let Some(owner) = self.posix_children.remove(&pid) {
-                if let Some((controller, _)) = &self.posix {
-                    if let Err(error) = controller.guest_exited(owner) {
-                        eprintln!("native POSIX launcher shutdown: {error}");
-                    }
+            loop {
+                let result = unsafe { libc::waitpid(pid as i32, &mut status, 0) };
+                if result == pid as i32
+                    || result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+                {
+                    self.forget(pid);
+                    break;
+                }
+                if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                    eprintln!(
+                        "native launcher shutdown waitpid({pid}): {}",
+                        io::Error::last_os_error()
+                    );
+                    break;
                 }
             }
         }
@@ -928,6 +951,108 @@ fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_mount_receipts_retire_on_exit_error_and_shutdown() {
+        for mode in [
+            "exit",
+            "signal",
+            "echild",
+            "drop",
+            "reused",
+            "foreign",
+            "malformed",
+        ] {
+            let directory = aim_paths::scratch_dir("aim-mount-retire");
+            fs::create_dir(directory.join("image")).unwrap();
+            let layout = Layout::new(
+                directory.join("image"),
+                directory.join("data"),
+                Some(directory.join("run")),
+            );
+            let table = layout.identity_dir().join("by-pid");
+            fs::create_dir_all(&table).unwrap();
+            let log = fs::File::create(directory.join("log")).unwrap();
+            let linux_run = LinuxRun {
+                binary: "/unused/linux-run".into(),
+                image: layout.image.clone(),
+                path_map_file: layout.path_map_file(),
+                binder: None,
+                gpu: None,
+                vulkan: None,
+                display: None,
+                trace: false,
+                options: LinuxRunOptions::default(),
+            };
+            let mut launcher = HostLauncher::new(linux_run, layout);
+            let pid = spawn(&["/usr/bin/true".into()], &[], &[], log.as_raw_fd(), true).unwrap();
+            launcher.children.insert(pid);
+            let process =
+                aim_storage::process_namespace::ProcessIdentity::running(pid as i32).unwrap();
+            launcher.mount_children.insert(pid, process);
+            aim_storage::process_namespace::register_mount_namespace(&table, process, "owned")
+                .unwrap();
+            let receipt = table.join(format!("{pid}.mount-namespace"));
+            match mode {
+                "reused" | "foreign" => fs::write(
+                    &receipt,
+                    format!(
+                        "AIMPROCNS1\t{}\t{}\t{}\treplacement\n",
+                        process.host_pid + i32::from(mode == "foreign"),
+                        process.start_seconds + u64::from(mode == "reused"),
+                        process.start_microseconds,
+                    ),
+                )
+                .unwrap(),
+                "malformed" => fs::write(&receipt, b"damaged").unwrap(),
+                _ => {}
+            }
+            let before = fs::read(&receipt).unwrap();
+            if mode == "drop" {
+                drop(launcher);
+            } else {
+                assert_eq!(
+                    unsafe {
+                        libc::kill(
+                            pid as i32,
+                            if mode == "signal" {
+                                libc::SIGKILL
+                            } else {
+                                libc::SIGCONT
+                            },
+                        )
+                    },
+                    0
+                );
+                if mode == "echild" {
+                    assert_eq!(
+                        unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), 0) },
+                        pid as i32
+                    );
+                    assert!(launcher.reap().is_empty());
+                } else {
+                    let exits = launcher.reap_all().unwrap();
+                    assert_eq!(exits.len(), 1);
+                    assert_eq!(
+                        exits[0].1,
+                        if mode == "signal" {
+                            Exit::Signal(libc::SIGKILL)
+                        } else {
+                            Exit::Code(0)
+                        }
+                    );
+                }
+                assert!(launcher.children.is_empty());
+                assert!(launcher.mount_children.is_empty());
+            }
+            if matches!(mode, "reused" | "foreign" | "malformed") {
+                assert_eq!(fs::read(&receipt).unwrap(), before, "{mode}");
+            } else {
+                assert!(!receipt.exists(), "{mode}");
+            }
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
 
     #[test]
     fn host_reap_all_waits_for_every_owned_child() {

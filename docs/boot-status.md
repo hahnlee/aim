@@ -848,6 +848,12 @@ owner separately admits the audited actor and creates its real lock holder;
 stale/foreign/missing records and absent capabilities fail. Actual process IPC
 and final lock-release checks pass, as do selected all-target compilation and
 shell syntax checks. Corrected boot readiness and CTS replay remain NOT RUN.
+Native launcher retirement now removes an owned child's mount receipt only
+when its recorded PID and birth match (#1244). Normal exit, signal exit,
+already-reaped children and launcher shutdown are covered by host checks;
+replacement births, foreign identities, malformed records and symlinks are
+preserved. Registration and retirement serialize receipt replacement. No guest
+boot was run (2026-10-28).
 
 The f242504e combined ABI gate passes 249 with zero failures and 21 ignored;
 controlled child entries run through their parents, and input-dependent/manual
