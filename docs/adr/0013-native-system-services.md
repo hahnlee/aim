@@ -474,6 +474,15 @@ or deferred permission state on fresh, unchanged or update boots. Role holder
 selection and subsequent grants remain with RoleManager/PermissionController.
 No original class or image replacement is added.
 
+The same cold pass now implements split-permission grants and revocation
+([AppIdPermissionPolicy.kt:1112-1180,1238-1287](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/permission/java/com/android/server/permission/access/permission/AppIdPermissionPolicy.kt#1112)),
+and internal protection flags (1023-1071,1610-1730). Native KnownPackages selection
+precedes permission reconciliation, matching PMS constructor lines 2295-2335.
+Stored package versions upgrade after this pass
+([AccessPolicy.kt:159-170,286-314](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/permission/java/com/android/server/permission/access/AccessPolicy.kt#159)),
+using AppIdPermissionUpgrade's version 3/10/12/14/16 steps. This stays native for
+the same publication-order reason; it introduces no new image exception.
+
 The app host's cold MediaRouter2 system route/session queries (#1663) retain
 MediaRouter2ServiceImpl's scoped Java permission and selection policy in the
 system-UID-only `SystemRouteQueries` bridge, using the image's original

@@ -258,13 +258,18 @@ from Settings, persists migrated state, and leaves a user with no legacy runtime
 file empty and unwritten. Archiving (#1757), shutdown statistics (#2167) and the
 remaining bootstrap owners (#2022) are open.
 
-On a fingerprint change, native permission boot evaluates restricted-permission
-exemptions and preserves existing role grants in Rust before publishing package
-queries (#2282). No Java boot policy bridge is used on fresh, unchanged or update
-boots. Host coverage exercises an absent system process, persistence/reload and
-the retained offline Java rule cases; no guest boot was rerun. The reported
-450-second upgrade stall at checkpoint 01 was a circular dependency on the
-late `aim-system` bridge; upgrade boot completion remains unverified here.
+On a fingerprint change, native permission boot evaluates restricted exemptions,
+split-permission inheritance and internal protection flags, preserving user and
+role decisions before publishing package queries (#2282). Native KnownPackages
+selections precede this pass; module grants use the pinned `0x400000` flag.
+Stored access versions below 17 run the pinned location, media, sensor and health
+upgrades after reconciliation, even without a fingerprint change. A change of
+shared-UID declaration remains explicitly unsupported; unchanged pinned APKs do
+not enter that migration. No Java boot policy bridge is used. Host checks cover
+persisted update state, the pinned image's parsed package inventory and the
+retained offline Java rule cases. The reported upgrade now passes the restricted
+and role step and previously stopped at implicit inheritance; no guest boot was
+rerun here, so upgrade boot completion remains unverified.
 
 The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full

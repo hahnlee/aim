@@ -11,6 +11,8 @@ pub(super) struct Policy {
     pub allowlist: PermissionAllowlist,
     pub debuggable: bool,
     pub control_privapp_permissions: String,
+    pub splits: Vec<SplitPermission>,
+    pub leanback: bool,
 }
 impl Policy {
     fn namespace(ps: &PackageState) -> &str {
@@ -217,12 +219,15 @@ impl Policy {
                     .ok_or_else(|| {
                         unsupported("known-package protection grants before role selection")
                     })?;
-                if selected && ps.is.system {
+                // AppIdPermissionPolicy.kt:1641-1725: KnownPackages already
+                // owns selection; there is no additional isSystem condition.
+                if selected {
                     return Ok(true);
                 }
             }
         }
-        if flags & 0x40000000 != 0 && ps.apex_module_name.is_some() {
+        // PermissionInfo.java:259; AppIdPermissionPolicy.kt:1727-1730.
+        if flags & 0x400000 != 0 && ps.apex_module_name.is_some() {
             return Ok(true);
         }
         Ok(false)

@@ -2,7 +2,11 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::*;
 use crate::package::scan::permission_admissions::Admission;
+mod implicit;
 mod signature;
+#[cfg(test)]
+mod update_tests;
+mod upgrade;
 use signature::Policy;
 
 type Evaluate<'a> = dyn Fn(&Permission, i32, i32, i32, i32) -> Result<i32, Exception> + 'a;
@@ -34,6 +38,12 @@ impl PermissionManager {
                 self.host.property(name)
             });
         let policy = Policy {
+            splits: crate::package::parse::platform::split_permissions(self.host.root()?)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?,
+            leanback: config
+                .features
+                .iter()
+                .any(|(name, _)| name == "android.software.leanback"),
             allowlist: config.permission_allowlist,
             debuggable: self.host.property("ro.debuggable").as_deref() == Some("1"),
             control_privapp_permissions: self
@@ -170,6 +180,8 @@ fn reconcile(
             .as_ref()
             .is_some_and(|old| old.shared_user_id != code.shared_user_id)
         {
+            // PMSImpl.java:4904-4980 migrates leaving/joining shared UIDs.
+            // A fingerprint change alone cannot change this manifest field.
             return Err(unsupported("shared UID migration"));
         }
         let previous = admission.old_package.as_ref();
@@ -184,9 +196,6 @@ fn reconcile(
             .iter()
             .find(|(name, _)| name == &ps.name)
             .map(|(_, version)| *version);
-        if version.is_some_and(|version| version < 17) {
-            return Err(unsupported("access package-state upgrade"));
-        }
         if package_changed || version.is_none() {
             added.insert(ps.name.clone());
         }
@@ -357,13 +366,11 @@ fn reconcile(
                         INSTALL_REVOKED
                     }
                 }
-                PROTECTION_SIGNATURE | 4
-                    if is_role(permission)
-                        || permission.protection_level & PROTECTION_MASK_BASE
-                            == PROTECTION_SIGNATURE =>
-                {
-                    // Constructor role selections are made after this capture.
-                    // Existing grants need no role decision on an unchanged mount.
+                // AppIdPermissionPolicy.kt:1023-1071: internal permissions
+                // use the same static protection flags, never signature trust.
+                PROTECTION_SIGNATURE | 4 => {
+                    // Preserve unchanged mounts captured before constructor selections;
+                    // update boots carry KnownPackages before reconciliation.
                     if !affected
                         && permission.protection_level
                             & (0x100
@@ -379,7 +386,14 @@ fn reconcile(
                     {
                         continue;
                     }
-                    let granted = policy.grant(state, &requesters, permission, declaration)?;
+                    let granted = if old & PROTECTION_GRANTED != 0
+                        && packages.iter().any(|p| p.pkg.is_none())
+                    {
+                        // AppIdPermissionPolicy.kt:1026-1030.
+                        true
+                    } else {
+                        policy.grant(state, &requesters, permission, declaration)?
+                    };
                     let flags = if granted { PROTECTION_GRANTED } else { 0 };
                     if is_development(permission) {
                         flags | (old & RUNTIME_GRANTED)
@@ -387,22 +401,20 @@ fn reconcile(
                         flags
                     }
                 }
-                PROTECTION_DANGEROUS => {
-                    if requesters.iter().any(|p| {
-                        p.pkg
-                            .as_ref()
-                            .is_some_and(|p| p.implicit_permissions.contains(name))
-                    }) {
-                        if affected {
-                            return Err(unsupported("implicit runtime permission inheritance"));
-                        }
-                        continue;
-                    }
-                    runtime_flags(base, &user, id, name, permission, old, &requesters)
-                }
+                PROTECTION_DANGEROUS => runtime_flags(
+                    base,
+                    &user,
+                    id,
+                    name,
+                    permission,
+                    old,
+                    &requesters,
+                    &system,
+                    policy,
+                )?,
                 _ => {
                     if affected {
-                        return Err(unsupported("internal protection evaluation"));
+                        return Err(unsupported("unknown protection level"));
                     }
                     continue;
                 }
@@ -434,11 +446,36 @@ fn reconcile(
             };
             user.set_permission_flags(id, name, flags);
         }
+        // AppIdPermissionPolicy.kt:123-134,1238-1287: inheritance observes
+        // every evaluated source in this UID, including sources sorted later.
+        implicit::inherit(base, &system, &mut user, id, &packages, policy)?;
     }
-    for name in added {
-        if !user.package_versions.iter().any(|(p, _)| *p == name) {
-            user.package_versions.push((name, 17));
-            user.package_versions = info::array_order(user.package_versions, |(name, _)| name);
+    // AccessPolicy.kt:159-170,286-314: upgrades follow the mount policy,
+    // are driven by the stored version, and also run without a fingerprint change.
+    for ps in state
+        .packages
+        .values()
+        .filter(|p| !p.is.apex && p.pkg.is_some())
+    {
+        let version = user
+            .package_versions
+            .iter()
+            .find(|(name, _)| name == &ps.name)
+            .map(|(_, v)| *v);
+        if let Some(version) = version.filter(|v| *v < 17) {
+            upgrade::package(&system, &mut user, ps, version)?;
+        }
+        if version.is_none_or(|v| v < 17) {
+            if let Some((_, v)) = user
+                .package_versions
+                .iter_mut()
+                .find(|(name, _)| name == &ps.name)
+            {
+                *v = 17;
+            } else {
+                user.package_versions.push((ps.name.clone(), 17));
+                user.package_versions = info::array_order(user.package_versions, |(name, _)| name);
+            }
         }
     }
     user.app_id_permissions
@@ -512,7 +549,9 @@ fn runtime_flags(
     permission: &Permission,
     old: i32,
     requesters: &[&PackageState],
-) -> i32 {
+    system: &AccessSystem,
+    policy: &Policy,
+) -> Result<i32, Exception> {
     let mut flags =
         old & (((1 << 24) - 1) & !(INSTALL_GRANTED | INSTALL_REVOKED | PROTECTION_GRANTED));
     let revoked = flags != 0 && !permission_granted(flags);
@@ -544,11 +583,31 @@ fn runtime_flags(
                 flags |= RUNTIME_GRANTED;
             }
         }
-        flags &= !IMPLICIT_GRANTED;
-        if (legacy || implicit_grant) && flags & APP_OP_REVOKED != 0 {
-            flags &= !(RUNTIME_GRANTED | APP_OP_REVOKED);
+        let is_implicit = requesters.iter().any(|p| {
+            p.pkg
+                .as_ref()
+                .unwrap()
+                .implicit_permissions
+                .iter()
+                .any(|p| p == name)
+        });
+        // AppIdPermissionPolicy.kt:1112-1153: a runtime permission split
+        // from a non-runtime one has a compatibility grant of its own.
+        if (policy.leanback && name == POST_NOTIFICATIONS)
+            || (is_implicit && implicit::non_runtime_source(system, name, policy)?)
+        {
+            flags |= IMPLICIT_GRANTED;
+            if revoked {
+                flags |= APP_OP_REVOKED;
+            }
+        } else {
+            flags &= !IMPLICIT_GRANTED;
+            if (legacy || implicit_grant) && flags & APP_OP_REVOKED != 0 {
+                flags &= !(RUNTIME_GRANTED | APP_OP_REVOKED);
+            }
         }
-        if implicit {
+        // AppIdPermissionPolicy.kt:1154-1180; old PMSImpl.java:3011-3064.
+        if !is_implicit && implicit {
             flags &= !IMPLICIT;
             let background = user.permission_flags(id, ACCESS_BACKGROUND_LOCATION);
             let nearby = matches!(
@@ -569,7 +628,7 @@ fn runtime_flags(
             }
         }
     }
-    flags
+    Ok(flags)
 }
 
 #[cfg(test)]
@@ -582,7 +641,7 @@ mod tests {
         settings::Signatures,
     };
 
-    fn declaration(name: &str, level: i32, tree: bool) -> Declaration {
+    pub(super) fn declaration(name: &str, level: i32, tree: bool) -> Declaration {
         Declaration {
             component: Component {
                 name: name.into(),
@@ -594,7 +653,7 @@ mod tests {
             ..Default::default()
         }
     }
-    fn package(
+    pub(super) fn package(
         name: &str,
         id: i32,
         definitions: Vec<Declaration>,
@@ -640,7 +699,7 @@ mod tests {
             ..Default::default()
         }
     }
-    fn admissions(state: &State) -> Vec<Admission> {
+    pub(super) fn admissions(state: &State) -> Vec<Admission> {
         state
             .packages
             .keys()
@@ -1119,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_uid_migration_and_old_access_versions_reject_only_their_branches() {
+    fn shared_uid_migration_rejects_manifest_changes_but_access_versions_upgrade() {
         let state = state();
         let mut receipts = admissions(&state);
         let mut old = (**state.packages["owner"].pkg.as_ref().unwrap()).clone();
@@ -1142,9 +1201,8 @@ mod tests {
         assert!(error.message.contains("shared UID migration") && error.message.contains("#2169"));
         let mut base = base();
         Arc::make_mut(&mut base.user0).package_versions[0].1 = 16;
-        let error = run(&base, &state, false).unwrap_err();
-        assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
-        assert!(error.message.contains("package-state upgrade") && error.message.contains("#2169"));
+        let after = run(&base, &state, false).unwrap();
+        assert!(after.user0.package_versions.iter().all(|(_, v)| *v == 17));
     }
 
     #[test]
