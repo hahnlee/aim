@@ -24,7 +24,7 @@ public final class SystemProcessHostTest {
                     "systemApplication", "network", "domain", "attachDomain", "foreground",
                     "attachSystem", "companion", "NetworkStatsInitializer:construct",
                     "NetworkStatsInitializer:start", "NearbyServiceInitializer:construct",
-                    "NearbyServiceInitializer:start", "StatsPullAtomService:construct",
+                    "NearbyServiceInitializer:start", "activityStats", "StatsPullAtomService:construct",
                     "StatsPullAtomService:start", "AdServices:construct", "AdServices:start"));
             List<String> early = List.of("NearbyServiceInitializer", "StatsPullAtomService", "AdServices");
             for (int phase : new int[] {480, 500, 520}) {

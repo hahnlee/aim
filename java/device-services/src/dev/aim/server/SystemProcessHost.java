@@ -148,6 +148,7 @@ public final class SystemProcessHost extends RuntimeInit {
                     null /* classLoaderName */);
             startService("dev.aim.server.nearby.NetworkStatsInitializer", nearbyLoader, context);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
+            ActivityStats.publish(host);
             SystemService statsPull = new StatsPullAtomService(context);
             statsPull.onStart();
             SystemService adServices = SystemProcessLifecycle.start(context);

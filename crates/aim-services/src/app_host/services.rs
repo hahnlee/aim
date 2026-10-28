@@ -47,6 +47,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::activity_start::Component;
+use super::activity_stats as stats;
 use super::activity_user::AllowMode;
 use super::appops_service::{self as appops, MODE_ALLOWED, MODE_DEFAULT};
 use super::broadcasts::filter_equals;
@@ -802,6 +803,32 @@ impl Record {
         self.bindings
             .iter_mut()
             .find(|b| filter_equals(&b.intent.intent.intent, intent))
+    }
+}
+
+impl Services {
+    pub(super) fn stats_components(&self) -> std::collections::HashMap<i64, i32> {
+        let mut components = std::collections::HashMap::new();
+        let state = self.state.lock().unwrap();
+        for r in &state.records {
+            if let Some(seq) = r.app.filter(|_| r.created) {
+                *components.entry(seq).or_default() |=
+                    if r.start_requested {
+                        stats::HOSTING_STARTED_SERVICE
+                    } else {
+                        0
+                    } | if r.fg.is_foreground {
+                        stats::HOSTING_FOREGROUND_SERVICE
+                    } else {
+                        0
+                    } | if state.connections.iter().any(|c| c.service == r.token) {
+                        stats::HOSTING_BOUND_SERVICE
+                    } else {
+                        0
+                    };
+            }
+        }
+        components
     }
 }
 
@@ -3153,6 +3180,9 @@ impl AppHost {
         r.fg.service_type = service_type;
         if !r.fg.is_foreground {
             r.fg.is_foreground = true;
+            if let Some(seq) = r.app {
+                self.note_stats_component(seq, stats::HOSTING_FOREGROUND_SERVICE);
+            }
             r.fg.start_count += 1;
         }
         r.fg.short = short_timeout;

@@ -4,6 +4,8 @@ import dev.aim.server.IBatteryHealthStats;
 import dev.aim.server.ISafeLabels;
 import dev.aim.server.IStatsCompanionUidMap;
 import dev.aim.server.IRecoverableKeyStoreKeys;
+import dev.aim.server.IActivityStatsSnapshot;
+import dev.aim.server.IActivityStatsHost;
 
 /**
  * The app host's part of system_server for its system process
@@ -50,4 +52,5 @@ interface ISystemProcess {
     void attachSystemRouteQueries(IBinder queries);
     /** Original ContentValues scalar string conversion; system UID only. */
     void attachSettingsValues(IBinder bridge);
+    IActivityStatsHost getActivityStatsHost(IActivityStatsSnapshot snapshot);
 }

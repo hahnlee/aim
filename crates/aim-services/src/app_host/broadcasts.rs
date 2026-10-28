@@ -638,6 +638,12 @@ fn manifest_package(m: &Manifest) -> String {
 }
 
 impl Broadcasts {
+    pub(super) fn stats_running(&self) -> std::collections::HashSet<i64> {
+        self.state.lock().unwrap().busy.clone()
+    }
+}
+
+impl Broadcasts {
     /// `registerReceiverWithFeature`: the first sticky broadcast the
     /// filter matches.
     pub fn register(

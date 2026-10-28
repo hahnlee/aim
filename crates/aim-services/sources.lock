@@ -493,6 +493,8 @@ OWN_INTERFACES=(
   "dev.aim.server.IStatsCompanionUidMap|java/device-services/aidl/dev/aim/server/IStatsCompanionUidMap.aidl|*"
   "dev.aim.server.IAppHostDomainVerification|java/device-services/aidl/dev/aim/server/IAppHostDomainVerification.aidl|*"
   "dev.aim.server.ISystemRouteQueries|java/device-services/aidl/dev/aim/server/ISystemRouteQueries.aidl|*"
+  "dev.aim.server.IActivityStatsHost|java/device-services/aidl/dev/aim/server/IActivityStatsHost.aidl|*"
+  "dev.aim.server.IActivityStatsSnapshot|java/device-services/aidl/dev/aim/server/IActivityStatsSnapshot.aidl|*"
   "dev.aim.server.ISystemProcess|java/device-services/aidl/dev/aim/server/ISystemProcess.aidl|*"
   "dev.aim.server.IWifiBridge|java/device-services/aidl/dev/aim/server/IWifiBridge.aidl|*"
   "dev.aim.server.INetworkActivityBridge|java/device-services/aidl/dev/aim/server/INetworkActivityBridge.aidl|*"

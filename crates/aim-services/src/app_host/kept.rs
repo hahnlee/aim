@@ -23,6 +23,15 @@ pub struct RawIntent {
 }
 
 impl RawIntent {
+    /// android-16.0.0_r1 Intent.getExtrasTotalSize / Bundle.getSize: the
+    /// retained parcelled data size, excluding its length and magic words.
+    pub(super) fn extras_total_size(&self) -> Result<i32> {
+        let p = self.raw.parcel();
+        let mut r = p.reader();
+        r.set_position(Spans::of(&self.raw)?.extras.0);
+        Ok(r.read_i32()?.max(0))
+    }
+
     /// `Intent.getIntExtra`: the default also applies to a value of another type.
     pub fn int_extra(&self, key: &str, default: i32) -> Result<i32> {
         let Some((_, extras, _)) = entries(&self.raw, Spans::of(&self.raw)?.extras)? else {

@@ -113,6 +113,8 @@ fn system_manifest_receivers_are_delivered_and_finished_in_the_attached_process(
                 persistent: true,
                 package_deps: vec![],
                 last_mem_info: None,
+                proc_state: PROCESS_STATE_TOP,
+                oom_adj: 0,
             },
         );
         let record = Arc::new(Record {

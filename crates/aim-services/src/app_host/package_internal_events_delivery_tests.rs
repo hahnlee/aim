@@ -59,6 +59,8 @@ fn register(
             persistent: false,
             package_deps: vec![],
             last_mem_info: None,
+            proc_state: PROCESS_STATE_TOP,
+            oom_adj: 0,
         },
     );
     let mut filter = IntentFilter::default();

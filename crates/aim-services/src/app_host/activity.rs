@@ -315,6 +315,7 @@ impl AppHost {
         };
         let mut records = self.activities.records.lock().unwrap();
         let record = records.get_mut(&ptr)?;
+        self.note_stats_component(record.start_seq, super::activity_stats::HOSTING_ACTIVITY);
         let assist = self.process.add_service(Arc::new(Token));
         let shareable = self.process.add_service(Arc::new(Token));
         let caller_info = self.process.add_service(Arc::new(Token));

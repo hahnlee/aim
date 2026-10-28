@@ -54,6 +54,14 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::GET_ACTIVITY_STATS_HOST => {
+                let a = sp::GetActivityStatsHost::read(&mut call.data)?;
+                system()
+                    .and_then(|()| self.host.activity_stats_host(a.snapshot))
+                    .map(|backend| {
+                        sp::write_get_activity_stats_host_reply(&mut p, Some(backend));
+                    })
+            }
             sp::ATTACH_WIFI_BRIDGE => {
                 let a = sp::AttachWifiBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
