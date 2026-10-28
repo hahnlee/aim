@@ -3,7 +3,9 @@
 //! uid's traffic (`getUidStats`), which `nativeGetUidStat` reads from
 //! netd's `app_uid_stats_map` (filled by the Linux layer's socket
 //! accounting), through the service-side rate-limit cache. The other
-//! statistics, sessions and providers are not implemented (#1671).
+//! statistics and providers are not implemented (#1671). Cold usage sessions
+//! and operation counters use original Java owners in aim-system, forwarding
+//! the authenticated app caller so the original permission checks apply.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::VecDeque;
@@ -14,6 +16,7 @@ use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_net_inetworkstatsservice as ns;
+use aim_service_aidl::dev_aim_server_inetworkstatsbridge as bridge;
 use aim_storage::bpf_object::Mapped;
 
 use super::settings::Table;
@@ -283,6 +286,21 @@ impl Service for NetworkStats {
                     Err(e) => return reply(Err(e)),
                 }
             }
+            ns::OPEN_SESSION_FOR_USAGE_STATS | ns::INCREMENT_OPERATION_COUNT => {
+                let (code, request) = java_request(call)?;
+                let owner = match super::display::check_service(&self.host.process, "aim.netstats")
+                {
+                    Ok(owner) => owner,
+                    Err(e) => return reply(Err(Exception::new(EX_ILLEGAL_STATE, e))),
+                };
+                // This requires a live driver-dispatched inbound transaction; a
+                // synthetic Call cannot assert an app UID to the original owner.
+                return self
+                    .host
+                    .process
+                    .transact_preserving_inbound(owner.handle, code, &request)
+                    .map(|received| received.into_parcel());
+            }
             code => {
                 let name = ns::METHODS
                     .iter()
@@ -297,9 +315,115 @@ impl Service for NetworkStats {
     }
 }
 
+/// Only the two requested calls enter the retained Java owner. Its reply
+/// uses the same AIDL layout (a strong session binder, or void).
+fn java_request(call: &mut Call<'_>) -> Result<(u32, Parcel), i32> {
+    let mut request = Parcel::new();
+    let code = match call.code {
+        ns::OPEN_SESSION_FOR_USAGE_STATS => {
+            let a = ns::OpenSessionForUsageStats::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+            bridge::OpenSessionForUsageStats {
+                flags: a.flags,
+                calling_package: a.calling_package,
+            }
+            .write(&mut request);
+            bridge::OPEN_SESSION_FOR_USAGE_STATS
+        }
+        ns::INCREMENT_OPERATION_COUNT => {
+            let a = ns::IncrementOperationCount::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+            bridge::IncrementOperationCount {
+                uid: a.uid,
+                tag: a.tag,
+                operation_count: a.operation_count,
+            }
+            .write(&mut request);
+            bridge::INCREMENT_OPERATION_COUNT
+        }
+        _ => return Err(BAD_VALUE),
+    };
+    Ok((code, request))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(code: u32, data: &Parcel) -> (u32, Parcel) {
+        java_request(&mut Call {
+            code,
+            flags: 0,
+            sender_pid: 902,
+            sender_euid: 10123,
+            data: data.reader(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn usage_session_request_preserves_flags_and_package_for_java_checks() {
+        for package in [None, Some("app.pkg".into())] {
+            let mut p = Parcel::new();
+            ns::OpenSessionForUsageStats {
+                flags: -1,
+                calling_package: package.clone(),
+            }
+            .write(&mut p);
+            let (code, p) = request(ns::OPEN_SESSION_FOR_USAGE_STATS, &p);
+            assert_eq!(code, bridge::OPEN_SESSION_FOR_USAGE_STATS);
+            let a = bridge::OpenSessionForUsageStats::read(&mut p.reader()).unwrap();
+            assert_eq!(a.flags, -1);
+            assert_eq!(a.calling_package, package);
+        }
+    }
+
+    #[test]
+    fn operation_request_leaves_validation_and_signed_tags_to_java() {
+        for (uid, tag, count) in [(10123, -7, 4), (10124, 0, -1)] {
+            let mut p = Parcel::new();
+            ns::IncrementOperationCount {
+                uid,
+                tag,
+                operation_count: count,
+            }
+            .write(&mut p);
+            let (code, p) = request(ns::INCREMENT_OPERATION_COUNT, &p);
+            assert_eq!(code, bridge::INCREMENT_OPERATION_COUNT);
+            let a = bridge::IncrementOperationCount::read(&mut p.reader()).unwrap();
+            assert_eq!((a.uid, a.tag, a.operation_count), (uid, tag, count));
+        }
+    }
+
+    #[test]
+    fn remaining_calls_keep_the_issue_named_exception() {
+        use aim_binder_driver::{Credentials, Device, Driver};
+        use aim_binder_host::local::LocalProcess;
+        let driver = Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 97160,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let service = NetworkStats::new(AppHost::new(process.clone()));
+        let mut p = Parcel::new();
+        p.write_interface_token(ns::DESCRIPTOR);
+        let result = service
+            .transact(&mut Call {
+                code: ns::OPEN_SESSION,
+                flags: 0,
+                sender_pid: 902,
+                sender_euid: 10123,
+                data: p.reader(),
+            })
+            .unwrap();
+        let e = result.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(e.code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);
+        assert!(e.message.contains("openSession (#1671)"));
+        driver.release(process.proc_handle());
+    }
 
     /// The structured parcelable's size, then its fields.
     #[test]
@@ -382,3 +506,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "netstats_tests.rs"]
+mod transport_tests;

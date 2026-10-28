@@ -84,7 +84,7 @@ public final class SystemProcessHost extends RuntimeInit {
         /** SystemServer's CONNECTIVITY_SERVICE_APEX_PATH. */
         private static final String CONNECTIVITY_JAR =
                 "/apex/com.android.tethering/javalib/service-connectivity.jar";
-        /** ConnectivityServiceInitializer's part for Nearby (java/nearby-initializer). */
+        /** Connectivity initializers for Nearby and cold netstats calls (java/nearby-initializer). */
         private static final String NEARBY_JAR = "/system/framework/aim-nearby.jar";
         private static final String NEARBY_INITIALIZER =
                 "dev.aim.server.nearby.NearbyServiceInitializer";
@@ -120,6 +120,7 @@ public final class SystemProcessHost extends RuntimeInit {
             ClassLoader nearbyLoader = ClassLoaderFactory.createClassLoader(NEARBY_JAR, null,
                     null, connectivity, Build.VERSION.SDK_INT, true /* isNamespaceShared */,
                     null /* classLoaderName */);
+            startService("dev.aim.server.nearby.NetworkStatsInitializer", nearbyLoader, context);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
             SystemService adServices = SystemProcessLifecycle.start(context);
             for (int phase : new int[] {SystemService.PHASE_LOCK_SETTINGS_READY,
