@@ -90,6 +90,11 @@ Foreground services follow the original Java type policy, with native timers for
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun).
 The native appops owner accepts user 0's setMode/setUidMode switch writes with permission checks, persisted defaults and the pinned started-op pause/resume rules; other users (#1594) and storage mode-change effects (#1455) remain unsupported (host tests only, no guest boot).
+The permission owner also grants and revokes development permissions through
+its existing transaction path, persisting their flags and publishing the UID's
+new grants/GIDs before queuing a restart when a permission with GIDs changes
+its effective grant (#1857). Focused host permission tests pass; no guest boot
+was run (2026-10-29).
 Legacy network activity listeners register through the original RemoteCallbackList and hear the default network's activity.
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.

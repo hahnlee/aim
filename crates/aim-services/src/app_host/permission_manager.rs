@@ -18,8 +18,9 @@
 //! `PermissionService` mutates the state: user 0's `access.abx` written back
 //! (`AccessPersistence`), the package model's grants with it, the listeners
 //! told of a runtime permission's change and a uid that lost one killed.
-//! Development permissions' changes (their gids are not
-//! modelled, #1857), allowlist changes, a virtual device's permissions,
+//! Development permissions use the same grant path; a changed grant of a
+//! permission with GIDs restarts the UID after publishing its new grants.
+//! Allowlist changes, a virtual device's permissions,
 //! one-time sessions, auto-revoke, attribution sources and the permission
 //! states are not implemented (#1508).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -34,7 +35,7 @@ pub(super) use policy::PermissionPolicy;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
@@ -176,6 +177,8 @@ const BACKUP: &str = "android.permission.BACKUP";
 const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
 /// `PermissionManager.KILL_APP_REASON_PERMISSIONS_REVOKED`.
 const KILL_APP_REASON_PERMISSIONS_REVOKED: &str = "permissions revoked";
+/// `PermissionManager.KILL_APP_REASON_GIDS_CHANGED`.
+const KILL_APP_REASON_GIDS_CHANGED: &str = "permission grant or revoke changed gids";
 /// `UserManager.DISALLOW_DEBUGGING_FEATURES`, `Process.SHELL_UID`.
 const DISALLOW_DEBUGGING_FEATURES: &str = "no_debugging_features";
 const SHELL_UID: i32 = 2000;
@@ -293,6 +296,26 @@ fn set_flags(new: &mut AccessUser, app_id: i32, permission: &str, flags: i32) ->
         old,
         new: flags,
     }]
+}
+
+/// PermissionService.OnPermissionFlagsChangedListener: any effective grant
+/// transition of a defined permission with GIDs requires a UID restart, even
+/// if another permission supplies the same GID or runtime revocation kills
+/// are skipped. Flag-only changes do not.
+fn gids_changed_uids(
+    definitions: &[Permission],
+    gid_permissions: &BTreeSet<String>,
+    changes: &[FlagsChanged],
+) -> BTreeSet<i32> {
+    changes
+        .iter()
+        .filter(|c| {
+            permission_granted(c.old) != permission_granted(c.new)
+                && gid_permissions.contains(&c.permission)
+                && definitions.iter().any(|p| p.name == c.permission)
+        })
+        .map(|c| c.app_id)
+        .collect()
 }
 
 /// `isRootOrSystemUid`.
@@ -767,9 +790,8 @@ impl Access<'_> {
         })?;
         let name = &ps.name;
         if is_development(definition) {
-            return Err(not_modelled(NotModelled(
-                "a development permission's grant (#1857)",
-            )));
+            // The original admits development permissions without the role
+            // or runtime-only checks below.
         } else if is_role(definition) {
             if !can_manage_role {
                 return Err(Exception::security(format!(
@@ -1481,6 +1503,7 @@ pub struct PermissionManager {
     access_writes: Mutex<Vec<String>>,
     installs: Mutex<BTreeMap<u64, install::Candidate>>,
     groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
+    gid_permissions: OnceLock<BTreeSet<String>>,
     listeners: Mutex<Vec<Binder>>,
     /// `PermissionService.isDelayedPermissionBackupFinished`.
     delayed_backup_finished: Mutex<BTreeSet<i32>>,
@@ -1495,6 +1518,7 @@ impl PermissionManager {
             access_writes: Mutex::new(Vec::new()),
             installs: Mutex::new(BTreeMap::new()),
             groups: Mutex::new(None),
+            gid_permissions: OnceLock::new(),
             listeners: Mutex::new(Vec::new()),
             delayed_backup_finished: Mutex::new(BTreeSet::new()),
         }
@@ -1768,6 +1792,7 @@ impl PermissionManager {
         if changes.is_empty() {
             return Ok(());
         }
+        self.gid_permissions()?;
         self.write_user0(&after)?;
         let after = Arc::new(after);
         held.user0 = Some(after.clone());
@@ -1956,12 +1981,34 @@ impl PermissionManager {
         self.permission_effects(&system.permissions, changes, kill)
     }
 
+    fn gid_permissions(&self) -> Result<&BTreeSet<String>, Exception> {
+        if let Some(permissions) = self.gid_permissions.get() {
+            return Ok(permissions);
+        }
+        let config =
+            crate::package::system_config::SystemConfig::read(self.host.root()?, &|name| {
+                self.host.property(name)
+            });
+        if let Some(error) = config.permission_error {
+            return Err(Exception::new(EX_ILLEGAL_STATE, error));
+        }
+        Ok(self.gid_permissions.get_or_init(|| {
+            config
+                .permissions
+                .into_iter()
+                .filter(|(_, permission)| !permission.gids.is_empty())
+                .map(|(name, _)| name)
+                .collect()
+        }))
+    }
+
     fn permission_effects(
         &self,
         definitions: &[Permission],
         changes: &[FlagsChanged],
         kill: Option<&str>,
     ) -> Result<(), Exception> {
+        let gids_changed = gids_changed_uids(definitions, self.gid_permissions()?, changes);
         let mut changed = Vec::new();
         // By uid, whether only notification permissions were revoked.
         let mut revoked: BTreeMap<i32, bool> = BTreeMap::new();
@@ -2015,17 +2062,25 @@ impl PermissionManager {
                 }
             }
         }
-        let Some(reason) = kill else { return Ok(()) };
-        for (uid, only_notifications) in revoked {
-            if only_notifications && self.backup_and_restore_running(uid)? {
-                continue;
+        if let Some(reason) = kill {
+            for (uid, only_notifications) in revoked {
+                if only_notifications && self.backup_and_restore_running(uid)? {
+                    continue;
+                }
+                self.post_permission_kill(uid, reason);
             }
-            let host = self.host.clone();
-            let reason = reason.to_owned();
-            // `handler.post`: after the call.
-            std::thread::spawn(move || host.kill_uid_for_permission_change(uid as u32, &reason));
+        }
+        for uid in gids_changed {
+            self.post_permission_kill(uid, KILL_APP_REASON_GIDS_CHANGED);
         }
         Ok(())
+    }
+
+    fn post_permission_kill(&self, uid: i32, reason: &str) {
+        let host = self.host.clone();
+        let reason = reason.to_owned();
+        // `handler.post`: after persistence and query publication.
+        std::thread::spawn(move || host.kill_uid_for_permission_change(uid as u32, &reason));
     }
 
     /// `isAppBackupAndRestoreRunning`: a uid holding BACKUP while its
@@ -3687,6 +3742,186 @@ mod tests {
                 err.message
             );
         });
+    }
+
+    /// PermissionService.setRuntimePermissionGranted: development grants use
+    /// RUNTIME_GRANTED even for legacy/instant apps, retaining fixed checks and
+    /// other flags. Reopening AccessPersistence must reproduce the UID's GIDs.
+    #[test]
+    fn development_permissions_are_granted_revoked_and_persisted() {
+        const LOGS: &str = "android.permission.READ_LOGS";
+        let persisted = PersistedAccess::new();
+        let manager = PermissionManager::new(persisted.host.clone());
+        let mut config = crate::package::system_config::SystemConfig::default();
+        config.permissions.insert(
+            LOGS.into(),
+            crate::package::system_config::ConfigPermission {
+                per_user: false,
+                gids: vec![1007],
+            },
+        );
+        with_writable_access(|base, new| {
+            let mut state = base.state.clone();
+            let ps = state.packages.get_mut("asked").unwrap();
+            ps.users.get_mut(&0).unwrap().instant_app = true;
+            let pkg = Arc::make_mut(ps.pkg.as_mut().unwrap());
+            pkg.target_sdk_version = 22;
+            pkg.requested_permissions = vec![LOGS.into()];
+            let defined = vec![definition(
+                LOGS,
+                "android",
+                PROTECTION_SIGNATURE | PROTECTION_FLAG_DEVELOPMENT,
+            )];
+            let access = Access {
+                state: &state,
+                defined: &defined,
+                filter: base.filter,
+                groups: base.groups,
+                user0: base.user0,
+                compat: base.compat,
+            };
+            let change = |new: &mut AccessUser, caller, grant| {
+                access.set_runtime_permission_granted(
+                    new,
+                    &BTreeSet::new(),
+                    caller,
+                    "asked",
+                    LOGS,
+                    0,
+                    grant,
+                )
+            };
+            assert!(
+                change(new, 10100, true)
+                    .unwrap_err()
+                    .message
+                    .contains("GRANT_RUNTIME_PERMISSIONS")
+            );
+            new.set_permission_flags(10005, LOGS, USER_SET | SYSTEM_FIXED);
+            assert!(change(new, 1000, true).unwrap().is_empty());
+            new.set_permission_flags(10005, LOGS, USER_SET | POLICY_FIXED);
+            assert!(change(new, 1041, true).unwrap().is_empty());
+            let flags = USER_SET | POLICY_FIXED | RUNTIME_GRANTED;
+            assert_eq!(change(new, 1000, true).unwrap()[0].new, flags);
+            assert!(change(new, 1000, true).unwrap().is_empty());
+            manager.write_user0(new).unwrap();
+            assert_eq!(
+                PermissionManager::new(persisted.host.clone())
+                    .gids_for_uid(10005, &config)
+                    .unwrap(),
+                [1007]
+            );
+            assert_eq!(
+                change(new, 1000, false).unwrap()[0].new,
+                flags & !RUNTIME_GRANTED
+            );
+            manager.write_user0(new).unwrap();
+            assert!(
+                PermissionManager::new(persisted.host.clone())
+                    .gids_for_uid(10005, &config)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(change(new, 1000, false).unwrap().is_empty());
+            new.set_permission_flags(10005, LOGS, 0);
+            let mut unrequested = state.clone();
+            Arc::make_mut(
+                unrequested
+                    .packages
+                    .get_mut("asked")
+                    .unwrap()
+                    .pkg
+                    .as_mut()
+                    .unwrap(),
+            )
+            .requested_permissions
+            .clear();
+            let access = Access {
+                state: &unrequested,
+                ..access
+            };
+            assert!(
+                access
+                    .set_runtime_permission_granted(
+                        new,
+                        &BTreeSet::new(),
+                        1000,
+                        "asked",
+                        LOGS,
+                        0,
+                        true
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+        persisted.host.process.shutdown().unwrap();
+    }
+
+    /// OnPermissionFlagsChangedListener tracks effective grants, independently
+    /// of runtime-only callbacks and skipKillRuntimePermissionRevokedUids.
+    #[test]
+    fn gid_restarts_follow_effective_grant_transitions_once_per_uid() {
+        let defined = [
+            definition("dev", "android", 0x22),
+            definition("runtime", "android", 1),
+            definition("no-gids", "android", 0x22),
+        ];
+        let configured = BTreeSet::from(["dev".into(), "runtime".into(), "undefined".into()]);
+        let changes = [
+            (10001, "dev", 0, RUNTIME_GRANTED),
+            (10001, "runtime", RUNTIME_GRANTED, 0),
+            (10002, "dev", RUNTIME_GRANTED | USER_SET, USER_SET),
+            (10003, "dev", RUNTIME_GRANTED, RUNTIME_GRANTED | USER_FIXED),
+            (
+                10004,
+                "dev",
+                PROTECTION_GRANTED | RUNTIME_GRANTED,
+                PROTECTION_GRANTED,
+            ),
+            (10005, "no-gids", 0, RUNTIME_GRANTED),
+            (10006, "undefined", 0, RUNTIME_GRANTED),
+        ]
+        .map(|(app_id, permission, old, new)| FlagsChanged {
+            app_id,
+            permission: permission.into(),
+            old,
+            new,
+        });
+        assert_eq!(
+            gids_changed_uids(&defined, &configured, &changes),
+            BTreeSet::from([10001, 10002])
+        );
+    }
+
+    #[test]
+    fn gid_restart_inputs_come_from_system_config_and_reject_invalid_definitions() {
+        let persisted = PersistedAccess::new();
+        let dir = persisted
+            .host
+            .root()
+            .unwrap()
+            .join("system/etc/permissions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gids.xml");
+        std::fs::write(&file, b"<permissions><permission name='dev'><group gid='1007'/></permission><permission name='empty'/></permissions>").unwrap();
+        let manager = PermissionManager::new(persisted.host.clone());
+        assert_eq!(
+            manager.gid_permissions().unwrap(),
+            &BTreeSet::from(["dev".into()])
+        );
+        std::fs::write(
+            &file,
+            b"<permissions><permission name='dev'/><permission name='dev'/></permissions>",
+        )
+        .unwrap();
+        let invalid = PermissionManager::new(persisted.host.clone());
+        assert_eq!(
+            invalid.gid_permissions().unwrap_err().code,
+            EX_ILLEGAL_STATE
+        );
+        assert!(invalid.gid_permissions.get().is_none());
+        persisted.host.process.shutdown().unwrap();
     }
 
     /// `updatePermissionFlags`: the API flags of the mask set, the
