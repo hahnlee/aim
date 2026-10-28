@@ -894,8 +894,8 @@ fn background_qos() {
     qos_steps(&g, &prog, 5);
 }
 
-/// A peer changes both the leader and a worker's nice values; each
-/// target applies them to its Darwin thread when it leaves a syscall.
+/// A peer changes the leader and a worker's nice values and scheduler
+/// policy/priority; each target applies them to its actual Darwin thread.
 #[test]
 fn remote_nice_changes_host_thread_priority() {
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
@@ -905,8 +905,7 @@ fn remote_nice_changes_host_thread_priority() {
     remote_nice_steps(&clang, &image, None);
 }
 
-/// Opcode 22 changes Linux nice while the target's cgroup bounds continue
-/// to constrain both its leader and worker's actual Darwin priorities.
+/// Remote nice and scheduler changes retain the target's cgroup bounds.
 #[test]
 fn remote_nice_honors_cgroup_policy() {
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
@@ -914,19 +913,33 @@ fn remote_nice_honors_cgroup_policy() {
         return;
     };
     for profile in [
-        ("cpu.idle", "1", [4, 4, 4, 4, 4]),
-        ("cpu.shares", "512", [4, 20, 20, 20, 20]),
-        ("cpu.uclamp.min", "60", [46, 46, 46, 47, 46]),
+        ("cpu.idle", "1", [4, 4, 4, 4, 4], [4, 4, 47, 47, 47, 4]),
+        (
+            "cpu.shares",
+            "512",
+            [4, 20, 20, 20, 20],
+            [20, 4, 47, 47, 47, 20],
+        ),
+        (
+            "cpu.uclamp.min",
+            "60",
+            [46, 46, 46, 47, 46],
+            [46, 46, 47, 47, 47, 46],
+        ),
     ] {
         remote_nice_steps(&clang, &image, Some(profile));
     }
 }
 
-fn remote_nice_steps(clang: &Path, image: &Path, profile: Option<(&str, &str, [i32; 5])>) {
+fn remote_nice_steps(
+    clang: &Path,
+    image: &Path,
+    profile: Option<(&str, &str, [i32; 5], [i32; 6])>,
+) {
     use std::io::{BufRead, Write};
     let g = Guest::new(image, "t_remote_nice");
     let prog = g.build(clang, "t_remote_nice");
-    if let Some((name, value, _)) = profile {
+    if let Some((name, value, _, _)) = profile {
         use aim_storage::cgroup_v1::{Controller, populate};
         let root = g.runtime.join("cpu");
         let group = root.join("policy");
@@ -967,12 +980,28 @@ fn remote_nice_steps(clang: &Path, image: &Path, profile: Option<(&str, &str, [i
         .unwrap();
     let mut differences = Vec::new();
     for name in ["main", "worker"] {
-        let priorities = profile.map_or([4, 20, 33, 47, 31], |(_, _, priorities)| priorities);
+        let priorities = profile.map_or([4, 20, 33, 47, 31], |(_, _, priorities, _)| priorities);
         for (nice, want) in [19, 10, -2, -19, 0].into_iter().zip(priorities) {
             line.clear();
             out.read_line(&mut line).unwrap();
             let got = thread_priority(pid, &format!("remote-{name}"));
             if line.trim() != format!("{name} {nice}") || got != Some(want) {
+                differences.push(format!("{line:?}: host {got:?}, expected {want}"));
+            }
+            writeln!(stdin).unwrap();
+        }
+    }
+    for name in ["main", "worker"] {
+        let priorities =
+            profile.map_or([20, 4, 47, 47, 47, 31], |(_, _, _, priorities)| priorities);
+        for ((policy, prio), want) in [(3, 0), (5, 0), (1, 3), (1, 8), (2, 7), (0, 0)]
+            .into_iter()
+            .zip(priorities)
+        {
+            line.clear();
+            out.read_line(&mut line).unwrap();
+            let got = thread_priority(pid, &format!("remote-{name}"));
+            if line.trim() != format!("{name} sched {policy} {prio}") || got != Some(want) {
                 differences.push(format!("{line:?}: host {got:?}, expected {want}"));
             }
             writeln!(stdin).unwrap();
