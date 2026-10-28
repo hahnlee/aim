@@ -136,6 +136,7 @@ public final class SystemProcessHost extends RuntimeInit {
             installer.onStart();
             PackageLocalOwners.publish(host);
             host.attachPackageBootstrapJava(new PackageBootstrapBridge(null, installer));
+            host.attachNativeStagingBridge(new com.android.server.pm.NativeStagingBridge());
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
             PreBootNotifications.publish(context);
             host.attachSystemProcess(applicationThread.asBinder(),

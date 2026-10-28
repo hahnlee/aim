@@ -67,4 +67,6 @@ interface ISystemProcess {
     boolean isPackageCeStoragePrepared(int userId);
     /** PermissionManagerServiceInternal's per-user reset; system UID only. */
     void resetPackageRuntimePermissionsForUser(int userId);
+    /** Original ApexManager staged inventory; system UID only. */
+    void attachNativeStagingBridge(IBinder bridge);
 }

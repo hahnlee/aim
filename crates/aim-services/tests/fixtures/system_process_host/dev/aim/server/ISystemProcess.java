@@ -9,6 +9,7 @@ interface ISystemProcess {
     void attachDevicePolicyDefaults(DevicePolicyDefaults defaults);
     void attachSettingsValues(SettingsValues values);
     void attachPackageBootstrapJava(IBinder bridge);
+    void attachNativeStagingBridge(com.android.server.pm.NativeStagingBridge bridge);
     void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys);
     void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries);
     void attachProviderQueries(ProviderQueries queries);
@@ -31,6 +32,10 @@ interface ISystemProcess {
                 public void attachPackageBootstrapJava(IBinder bridge) {
                     if (!(bridge instanceof PackageBootstrapBridge)) throw new AssertionError("missing package Java owner");
                     SystemProcessHostTest.events.add("packageJava");
+                }
+                public void attachNativeStagingBridge(com.android.server.pm.NativeStagingBridge bridge) {
+                    if (bridge == null) throw new AssertionError("missing staging owner");
+                    SystemProcessHostTest.events.add("staging");
                 }
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
                 public void attachStorageCrates(StorageCrates crates) {
