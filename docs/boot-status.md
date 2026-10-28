@@ -18,7 +18,7 @@ and interface name map alongside its per-UID counters (#224, #1720). Focused
 host checks cover tagged traffic, stats-map switching, CLAT exclusion and real
 UDP send/receive through pinned maps; no guest boot was run (2026-10-28).
 
-The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2232).
+The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2287).
 
 ## How to reproduce
 
