@@ -1567,7 +1567,8 @@ impl PermissionManager {
         path: &str,
         parse: impl Fn(&aim_android_xml::Element) -> Result<T, String>,
     ) -> Result<Option<T>, Exception> {
-        crate::package::atomic(&self.host.data()?.join(path), parse)
+        let data = self.host.data()?;
+        crate::package::atomic(data, &data.join(path), parse)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 
@@ -1862,7 +1863,7 @@ impl PermissionManager {
     }
 
     fn write_user(&self, relative: &str, state: &AccessUser) -> Result<(), Exception> {
-        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{relative}: {e}"));
+        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/{relative}: {e}"));
         let root = self
             .read_access(relative, |root| Ok(root.clone()))?
             .unwrap_or_else(|| {
@@ -1894,7 +1895,7 @@ impl PermissionManager {
     }
 
     fn write_access(&self, relative: &str, bytes: &[u8]) -> Result<(), Exception> {
-        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{relative}: {e}"));
+        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/{relative}: {e}"));
         let path = self.host.data()?.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| fail(e.to_string()))?;
         let backup = path.with_extension("abx.bak");
@@ -2538,6 +2539,50 @@ mod tests {
         pub(super) fn write(&self, path: &str, xml: &[u8]) {
             write_access(&self.host, path, xml);
         }
+    }
+
+    #[test]
+    fn access_io_errors_name_guest_files_at_the_source() {
+        let persisted = PersistedAccess::new();
+        let manager = PermissionManager::new(persisted.host.clone());
+        let path = persisted.data.join(SYSTEM_ACCESS);
+        std::fs::create_dir_all(&path).unwrap();
+        // A directory read fails for privileged users too. Exercise the
+        // base file and AtomicFile's selected backup without a Binder call.
+        for suffix in ["", ".bak"] {
+            if !suffix.is_empty() {
+                std::fs::rename(&path, path.with_extension("abx.bak")).unwrap();
+            }
+            let error = manager
+                .read_access(SYSTEM_ACCESS, AccessSystem::parse)
+                .unwrap_err();
+            assert_eq!(error.code, EX_ILLEGAL_STATE);
+            assert!(
+                error
+                    .message
+                    .starts_with(&format!("/data/{SYSTEM_ACCESS}{suffix}:")),
+                "{error:?}"
+            );
+            assert!(
+                !error.message.contains(persisted.data.to_str().unwrap()),
+                "{error:?}"
+            );
+        }
+        std::fs::remove_dir_all(persisted.data.join("misc")).unwrap();
+        std::fs::write(persisted.data.join("misc"), b"not a directory").unwrap();
+        let error = manager.write_access(SYSTEM_ACCESS, b"state").unwrap_err();
+        assert_eq!(error.code, EX_ILLEGAL_STATE);
+        assert!(
+            error
+                .message
+                .starts_with(&format!("/data/{SYSTEM_ACCESS}:")),
+            "{error:?}"
+        );
+        assert!(
+            !error.message.contains(persisted.data.to_str().unwrap()),
+            "{error:?}"
+        );
+        persisted.host.process.shutdown().unwrap();
     }
 
     pub(super) fn write_access(host: &AppHost, path: &str, xml: &[u8]) {

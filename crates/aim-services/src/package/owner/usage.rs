@@ -59,19 +59,24 @@ impl Usage {
     /// marks historical usage unavailable; parse failures keep the applied prefix.
     pub fn read(&mut self, path: &Path) -> Result<(), String> {
         let backup = super::super::sibling(path, ".bak");
+        let name = if backup.exists() {
+            Path::new("/data/system/package-usage.list.bak")
+        } else {
+            Path::new("/data/system/package-usage.list")
+        };
         let path = if backup.exists() {
             backup.as_path()
         } else {
             path
         };
-        match super::super::bytes(path)? {
+        match super::super::bytes(path, name)? {
             None => {
                 self.historical = false;
                 Ok(())
             }
             Some(bytes) => self
                 .apply(&bytes)
-                .map_err(|error| format!("{}: {error}", path.display())),
+                .map_err(|error| format!("{}: {error}", name.display())),
         }
     }
 

@@ -150,6 +150,7 @@ impl State {
     ) -> Result<Option<State>, String> {
         let system = data.join("system");
         let Some(settings) = resilient(
+            data,
             &system.join("packages.xml"),
             &system.join("packages-backup.xml"),
             |root| Settings::parse_with_config(root, config),
@@ -189,11 +190,12 @@ impl State {
         seed: Option<&settings::native_read::NativeRead>,
     ) -> Result<State, String> {
         let system = data.join("system");
-        let list = journaled(&system.join("packages.list"))?
+        let list = journaled(data, &system.join("packages.list"))?
             .map(|text| list::parse(&text))
             .transpose()?
             .unwrap_or_default();
         let access = atomic(
+            data,
             &data.join("misc").join(PERMISSION_DIR).join("access.abx"),
             AccessSystem::parse,
         )?;
@@ -231,6 +233,7 @@ fn read_user(
     let dir = data.join("system/users").join(user.to_string());
     let file = if restore_package_users {
         resilient(
+            data,
             &dir.join("package-restrictions.xml"),
             &dir.join("package-restrictions-backup.xml"),
             Restrictions::parse,
@@ -278,9 +281,10 @@ fn read_user(
         .join(PERMISSION_DIR);
     Ok(User {
         restrictions,
-        access: atomic(&permissions.join("access.abx"), AccessUser::parse)?,
+        access: atomic(data, &permissions.join("access.abx"), AccessUser::parse)?,
         runtime_permissions: if restore_package_users {
             atomic(
+                data,
                 &permissions.join("runtime-permissions.xml"),
                 RuntimePermissions::parse,
             )?
@@ -289,12 +293,18 @@ fn read_user(
         },
     })
 }
-/// `path`'s bytes; `None` when it does not exist.
-fn bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+
+/// The guest name of a file below the host's data directory.
+pub(crate) fn data_path(data: &Path, path: &Path) -> PathBuf {
+    Path::new("/data").join(path.strip_prefix(data).expect("path below data directory"))
+}
+
+/// `path`'s bytes, reported as `name`; `None` when it does not exist.
+fn bytes(path: &Path, name: &Path) -> Result<Option<Vec<u8>>, String> {
     match fs::read(path) {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+        Err(e) => Err(format!("{}: {e}", name.display())),
     }
 }
 
@@ -310,15 +320,18 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// when none exists, an error when none parses (where the original goes
 /// on without the state).
 fn first<T>(
+    data: &Path,
     candidates: &[PathBuf],
     parse: impl Fn(&Element) -> Result<T, String>,
 ) -> Result<Option<T>, String> {
     let mut failed = Vec::new();
     for path in candidates {
-        let Some(b) = bytes(path)? else { continue };
+        let Some(b) = bytes(path, &data_path(data, path))? else {
+            continue;
+        };
         match aim_android_xml::read_next(&b).and_then(|root| parse(&root)) {
             Ok(v) => return Ok(Some(v)),
-            Err(e) => failed.push(format!("{}: {e}", path.display())),
+            Err(e) => failed.push(format!("{}: {e}", data_path(data, path).display())),
         }
     }
     if failed.is_empty() {
@@ -332,14 +345,19 @@ fn first<T>(
 /// backup a write in progress left, which then wins over the others;
 /// else the file, else its reserve copy.
 pub(crate) fn resilient<T>(
+    data: &Path,
     path: &Path,
     backup: &Path,
     parse: impl Fn(&Element) -> Result<T, String>,
 ) -> Result<Option<T>, String> {
     if backup.exists() {
-        return first(&[backup.to_owned()], parse);
+        return first(data, &[backup.to_owned()], parse);
     }
-    first(&[path.to_owned(), sibling(path, ".reservecopy")], parse)
+    first(
+        data,
+        &[path.to_owned(), sibling(path, ".reservecopy")],
+        parse,
+    )
 }
 
 /// An `AtomicFile` with a reserve copy (`readWithReserveCopy`, the
@@ -347,6 +365,7 @@ pub(crate) fn resilient<T>(
 /// (`.bak`), which replaces it; its reserve copy only when it does not
 /// parse.
 pub(crate) fn atomic<T>(
+    data: &Path,
     path: &Path,
     parse: impl Fn(&Element) -> Result<T, String>,
 ) -> Result<Option<T>, String> {
@@ -359,17 +378,20 @@ pub(crate) fn atomic<T>(
     if !file.exists() {
         return Ok(None);
     }
-    first(&[file, sibling(path, ".reservecopy")], parse)
+    first(data, &[file, sibling(path, ".reservecopy")], parse)
 }
 
 /// A `JournaledFile` (packages.list): the file, or the temporary file a
 /// write left before replacing it.
-fn journaled(path: &Path) -> Result<Option<String>, String> {
-    let b = match bytes(path)? {
+fn journaled(data: &Path, path: &Path) -> Result<Option<String>, String> {
+    let b = match bytes(path, &data_path(data, path))? {
         Some(b) => Some(b),
-        None => bytes(&sibling(path, ".tmp"))?,
+        None => {
+            let temp = sibling(path, ".tmp");
+            bytes(&temp, &data_path(data, &temp))?
+        }
     };
-    b.map(|b| String::from_utf8(b).map_err(|e| format!("{}: {e}", path.display())))
+    b.map(|b| String::from_utf8(b).map_err(|e| format!("{}: {e}", data_path(data, path).display())))
         .transpose()
 }
 
@@ -745,6 +767,26 @@ mod tests {
             rp.shared_users,
             [(Some("android.uid.system".into()), Vec::new())]
         );
+    }
+
+    #[test]
+    fn package_io_errors_name_guest_files_and_backups() {
+        let data = crate::app_host::test_temp_dir("package-read-error");
+        let main = data.join("system/packages.xml");
+        let backup = data.join("system/packages-backup.xml");
+        fs::create_dir_all(&main).unwrap();
+        for (path, name) in [
+            (&main, "/data/system/packages.xml:"),
+            (&backup, "/data/system/packages-backup.xml:"),
+        ] {
+            if path == &backup {
+                fs::rename(&main, &backup).unwrap();
+            }
+            let error = State::read(&data, &[0]).unwrap_err();
+            assert!(error.starts_with(name), "{error}");
+            assert!(!error.contains(data.to_str().unwrap()), "{error}");
+        }
+        fs::remove_dir_all(data).unwrap();
     }
 
     #[test]

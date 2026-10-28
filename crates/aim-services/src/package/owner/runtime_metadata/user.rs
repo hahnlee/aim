@@ -23,8 +23,9 @@ impl super::super::Store {
             .join(user.to_string())
             .join(crate::package::PERMISSION_DIR)
             .join("runtime-permissions.xml");
-        entry.1.runtime_permissions = crate::package::atomic(&path, RuntimePermissions::parse)
-            .map_err(super::super::WriteError::before)?;
+        entry.1.runtime_permissions =
+            crate::package::atomic(&self.data, &path, RuntimePermissions::parse)
+                .map_err(super::super::WriteError::before)?;
         scan.restore_permission_user_from_data(&self.data, &state, config, user as i32)
             .map_err(super::super::WriteError::before)
     }

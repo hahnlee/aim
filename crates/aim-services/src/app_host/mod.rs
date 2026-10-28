@@ -2427,7 +2427,7 @@ impl AppHost {
     pub(super) fn user_file(&self) -> Result<(PathBuf, Vec<u8>), Exception> {
         let path = self.data()?.join("system/users/0.xml");
         let state =
-            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
         self.ensure_system_user().map_err(state)?;
         let bytes = std::fs::read(&path).map_err(|e| state(e.to_string()))?;
         Ok((path, bytes))
@@ -2436,12 +2436,12 @@ impl AppHost {
     /// User 0's `UserInfo` attribute `name` (`/data/system/users/0.xml`).
     fn user_attribute(&self, name: &str) -> Result<i32, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let (path, bytes) = self.user_file()?;
-        let root =
-            aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let (_, bytes) = self.user_file()?;
+        let root = aim_android_xml::read(&bytes)
+            .map_err(|e| state(format!("/data/system/users/0.xml: {e}")))?;
         root.int(name)
             .map_err(state)?
-            .ok_or_else(|| state(format!("{}: no {name}", path.display())))
+            .ok_or_else(|| state(format!("/data/system/users/0.xml: no {name}")))
     }
 
     /// User 0's persisted properties: `users/0.xml`'s `<userProperties>`
@@ -2449,9 +2449,9 @@ impl AppHost {
     /// 0 or 1).
     fn user_properties(&self) -> Result<Vec<(String, i32)>, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let (path, bytes) = self.user_file()?;
-        let root =
-            aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let (_, bytes) = self.user_file()?;
+        let root = aim_android_xml::read(&bytes)
+            .map_err(|e| state(format!("/data/system/users/0.xml: {e}")))?;
         let mut out = Vec::new();
         for props in root.children().filter(|e| e.name == "userProperties") {
             for (name, _) in &props.attrs {
@@ -2654,9 +2654,9 @@ impl AppHost {
             return Ok(r);
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let (path, bytes) = self.user_file()?;
-        let root =
-            aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let (_, bytes) = self.user_file()?;
+        let root = aim_android_xml::read(&bytes)
+            .map_err(|e| state(format!("/data/system/users/0.xml: {e}")))?;
         let restrictions = root
             .children()
             .find(|e| e.name == "restrictions")

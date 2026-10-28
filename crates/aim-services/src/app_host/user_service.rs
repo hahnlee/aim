@@ -487,8 +487,9 @@ pub(super) fn serial_number(host: &AppHost, user: i32) -> Result<Option<i32>, Ex
     if user != SYSTEM_USER {
         return Ok(None);
     }
-    let (path, bytes) = host.user_file()?;
-    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (_, bytes) = host.user_file()?;
+    let state =
+        |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
     Ok(Some(info.serial_number))
 }
@@ -595,8 +596,9 @@ pub(super) fn managed_profiles(host: &AppHost, user: i32) -> Result<Vec<i32>, Ex
 /// excludePreCreated)`'s ids: the system user unless it is partial, or a
 /// pre-created one when those are excluded; it is never dying.
 pub(super) fn user_ids(host: &AppHost, include_pre_created: bool) -> Result<Vec<i32>, Exception> {
-    let (path, bytes) = host.user_file()?;
-    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (_, bytes) = host.user_file()?;
+    let state =
+        |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
     Ok(
         if info.partial || (info.pre_created && !include_pre_created) {
@@ -617,8 +619,9 @@ pub(super) struct ContextUser {
 
 /// `getUsers(true, false, false)`: the system user unless it is partial.
 pub(super) fn boot_context_users(host: &AppHost) -> Result<Vec<ContextUser>, Exception> {
-    let (path, bytes) = host.user_file()?;
-    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (_, bytes) = host.user_file()?;
+    let state =
+        |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
     Ok((!info.partial)
         .then_some(ContextUser {
@@ -638,8 +641,9 @@ pub(super) fn scan_users(host: &AppHost) -> Result<Vec<crate::package::scan::Use
             "a device or profile owner's user restrictions (#1521)",
         ));
     }
-    let (path, bytes) = host.user_file()?;
-    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (_, bytes) = host.user_file()?;
+    let state =
+        |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
     if info.partial {
         return Ok(Vec::new());
@@ -663,8 +667,9 @@ fn user_info(host: &AppHost, user: i32) -> Result<Option<UserInfo>, Exception> {
     if user != SYSTEM_USER {
         return Ok(None);
     }
-    let (path, bytes) = host.user_file()?;
-    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (_, bytes) = host.user_file()?;
+    let state =
+        |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
     Ok((!info.partial).then_some(info))
 }
@@ -696,8 +701,9 @@ pub(super) fn storage_user(
     if user != SYSTEM_USER {
         return Ok(None);
     }
-    let (path, bytes) = host.user_file()?;
-    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (_, bytes) = host.user_file()?;
+    let state =
+        |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
     Ok(Some((
         info.serial_number,
@@ -721,7 +727,8 @@ pub(super) fn user_logged_in(
         return Ok(());
     }
     let (path, bytes) = host.user_file()?;
-    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let state =
+        |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
     let mut root = aim_android_xml::read(&bytes).map_err(state)?;
     if read_user(&root).map_err(state)?.0.partial {
         return Ok(());
@@ -754,7 +761,7 @@ fn set_attr(e: &mut Element, name: &str, after: Option<&str>, value: XmlValue) {
 /// The users directory (`rwxrwxr-x`), the system user's file, then the
 /// user list, each as `ResilientAtomicFile` writes it.
 fn write_users(users: &Path, user: &Element, list: &Element) -> Result<(), String> {
-    let failed = |e: std::io::Error| format!("{}: {e}", users.display());
+    let failed = |e: std::io::Error| format!("/data/system/users: {e}");
     if !users.exists() {
         std::fs::create_dir_all(users).map_err(failed)?;
         aim_storage::guest_inode::record(
@@ -960,9 +967,9 @@ impl UserManager {
 
     /// User 0's file: its `UserInfo` and effective restrictions.
     fn user_data(&self) -> Result<(UserInfo, BTreeSet<String>), Exception> {
-        let (path, bytes) = self.host.user_file()?;
+        let (_, bytes) = self.host.user_file()?;
         let state =
-            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
         read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)
     }
 
@@ -976,9 +983,9 @@ impl UserManager {
         if self.user(id)?.is_none() {
             return Ok(None);
         }
-        let (path, bytes) = self.host.user_file()?;
+        let (_, bytes) = self.host.user_file()?;
         let state =
-            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/system/users/0.xml: {e}"));
         let root = aim_android_xml::read(&bytes).map_err(state)?;
         let string = |name: &str| root.string(name).map(|s| s.into_owned());
         Ok(Some((

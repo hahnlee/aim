@@ -19,6 +19,7 @@ impl PermissionManager {
             &configured.properties,
         );
         let root = crate::package::resilient(
+            data,
             &data.join("system/packages.xml"),
             &data.join("system/packages-backup.xml"),
             |root| Ok(root.clone()),
@@ -26,6 +27,7 @@ impl PermissionManager {
         .map_err(fail)?
         .unwrap_or_else(|| aim_android_xml::read(b"<packages/>").expect("empty settings"));
         let runtime = crate::package::atomic(
+            data,
             &data.join(format!(
                 "misc_de/{user}/apexdata/com.android.permission/runtime-permissions.xml"
             )),
@@ -140,10 +142,11 @@ impl PermissionManager {
     /// AccessPersistence.readSystemState: migrate only when modern state is absent,
     /// then serialize through the same owner as later permission mutations.
     pub(super) fn migrate_system(&self) -> Result<AccessSystem, Exception> {
-        let data = self.host.data()?.join("system");
+        let data = self.host.data()?;
         let system = crate::package::resilient(
-            &data.join("packages.xml"),
-            &data.join("packages-backup.xml"),
+            data,
+            &data.join("system/packages.xml"),
+            &data.join("system/packages-backup.xml"),
             legacy_system,
         )
         .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?

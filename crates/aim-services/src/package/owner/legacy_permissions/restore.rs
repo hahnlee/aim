@@ -61,6 +61,7 @@ fn read_inner(
 ) -> Result<Restored, String> {
     let system = data.join("system");
     let root = crate::package::resilient(
+        data,
         &system.join("packages.xml"),
         &system.join("packages-backup.xml"),
         |root| {

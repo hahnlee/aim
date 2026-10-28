@@ -137,6 +137,7 @@ impl Store {
             return Ok(None);
         };
         let settings_document = resilient(
+            data,
             &data.join("system/packages.xml"),
             &data.join("system/packages-backup.xml"),
             |root| Ok(root.clone()),
@@ -189,6 +190,7 @@ impl Store {
             let dir = data.join("system/users").join(user.to_string());
             let document = if restore_restrictions {
                 resilient(
+                    data,
                     &dir.join("package-restrictions.xml"),
                     &dir.join("package-restrictions-backup.xml"),
                     |root| Ok(root.clone()),
@@ -199,7 +201,7 @@ impl Store {
             .unwrap_or_else(|| element("package-restrictions"));
             restrictions.insert(user, document);
         }
-        let list_document = super::journaled(&data.join("system/packages.list"))?;
+        let list_document = super::journaled(data, &data.join("system/packages.list"))?;
         if list_document
             .as_deref()
             .map(super::list::parse)
@@ -267,7 +269,13 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
+        prepare(
+            &self.data,
+            &path,
+            &backup,
+            &self.durable_restrictions[&user],
+        )
+        .map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.durable_restrictions.insert(user, root.clone());
@@ -485,7 +493,13 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
+        prepare(
+            &self.data,
+            &path,
+            &backup,
+            &self.durable_restrictions[&user],
+        )
+        .map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.durable_restrictions.insert(user, root.clone());
@@ -645,9 +659,13 @@ impl Store {
         let path = self.data.join("system/packages.xml");
         let backup = self.data.join("system/packages-backup.xml");
         if self.settings_present {
-            prepare_document(&path, &backup, &self.settings_document, |root| {
-                super::settings::Settings::parse(root).map(|_| ())
-            })
+            prepare_document(
+                &self.data,
+                &path,
+                &backup,
+                &self.settings_document,
+                |root| super::settings::Settings::parse(root).map(|_| ()),
+            )
             .map_err(WriteError::before)?;
         } else {
             require_initial_files(
@@ -808,7 +826,13 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
+        prepare(
+            &self.data,
+            &path,
+            &backup,
+            &self.durable_restrictions[&user],
+        )
+        .map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.durable_restrictions.insert(user, root.clone());
@@ -927,7 +951,13 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
+        prepare(
+            &self.data,
+            &path,
+            &backup,
+            &self.durable_restrictions[&user],
+        )
+        .map_err(WriteError::before)?;
         let result = write(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.durable_restrictions.insert(user, root.clone());
@@ -1054,13 +1084,14 @@ fn require_initial_files(
 
 /// Refuse another writer's state. If only the reserve parsed, preserve
 /// it as the old backup before startWrite removes the reserve.
-fn prepare(path: &Path, backup: &Path, expected: &Element) -> Result<(), String> {
-    prepare_document(path, backup, expected, |root| {
+fn prepare(data: &Path, path: &Path, backup: &Path, expected: &Element) -> Result<(), String> {
+    prepare_document(data, path, backup, expected, |root| {
         Restrictions::parse(root).map(|_| ())
     })
 }
 
 fn prepare_document(
+    data: &Path,
     path: &Path,
     backup: &Path,
     expected: &Element,
@@ -1070,7 +1101,7 @@ fn prepare_document(
         validate(root)?;
         Ok(root.clone())
     };
-    let current = resilient(path, backup, parse)?;
+    let current = resilient(data, path, backup, parse)?;
     if current.is_none() && expected != &element("package-restrictions") {
         return Err(format!(
             "{} disappeared outside the native owner",
