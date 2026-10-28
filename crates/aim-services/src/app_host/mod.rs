@@ -533,9 +533,9 @@ pub struct AppHost {
     /// user's system grammatical gender, read from its file once.
     grammatical_genders: Mutex<HashMap<i32, i32>>,
     unimplemented: Mutex<std::collections::HashSet<(String, u32)>>,
-    /// The users unlocking or unlocked (`UserController`'s user states at
-    /// `STATE_RUNNING_UNLOCKING` or later).
-    unlocked_users: Mutex<std::collections::BTreeSet<i32>>,
+    /// The users unlocking or unlocked and their unlock elapsed realtime
+    /// (`UserController`'s `STATE_RUNNING_UNLOCKING` or later).
+    unlocked_users: Mutex<std::collections::BTreeMap<i32, i64>>,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
     /// The settings provider, its binder and its connection token.
@@ -3446,7 +3446,11 @@ impl AppHost {
                 "unlocking names an unknown user",
             ));
         }
-        self.unlocked_users.lock().unwrap().insert(user);
+        self.unlocked_users
+            .lock()
+            .unwrap()
+            .entry(user)
+            .or_insert_with(|| clock_ms(libc::CLOCK_MONOTONIC_RAW));
         system.publish_package_user_unlocking(user)
     }
 
@@ -3454,7 +3458,7 @@ impl AppHost {
     pub(crate) fn set_user_unlocked_for_package_test(&self, user: i32, unlocked: bool) {
         let mut users = self.unlocked_users.lock().unwrap();
         if unlocked {
-            users.insert(user);
+            users.insert(user, clock_ms(libc::CLOCK_MONOTONIC_RAW));
         } else {
             users.remove(&user);
         }
@@ -3462,7 +3466,7 @@ impl AppHost {
 
     /// `UserManagerInternal.isUserUnlockingOrUnlocked`.
     pub(super) fn user_unlocking_or_unlocked(&self, user: i32) -> Result<bool, Exception> {
-        Ok(self.unlocked_users.lock().unwrap().contains(&user))
+        Ok(self.unlocked_users.lock().unwrap().contains_key(&user))
     }
 
     /// `PackageManagerInternal.grantImplicitAccess(user, null,

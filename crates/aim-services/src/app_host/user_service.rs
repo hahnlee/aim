@@ -1563,6 +1563,21 @@ impl Service for UserManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            um::GET_USER_UNLOCK_REALTIME => {
+                um::GetUserUnlockRealtime::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                // UserManagerService.getUserUnlockRealtime, android-16.0.0_r1:
+                // only the calling user's UserData, with no permission gate.
+                let user = call.sender_euid as i32 / PER_USER_RANGE as i32;
+                let time = self
+                    .host
+                    .unlocked_users
+                    .lock()
+                    .unwrap()
+                    .get(&user)
+                    .copied()
+                    .unwrap_or(0);
+                um::write_get_user_unlock_realtime_reply(&mut p, time);
+            }
             um::IS_USER_UNLOCKING_OR_UNLOCKED => {
                 let args =
                     um::IsUserUnlockingOrUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -1822,6 +1837,45 @@ pub(super) fn application_restrictions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UserManagerService.LifeCycle.onUserUnlocking / getUserUnlockRealtime,
+    /// android-16.0.0_r1: boot elapsed time, scoped to the calling user.
+    #[test]
+    fn unlock_realtime_follows_the_user_transition_and_caller() {
+        crate::system::with_discovery_binders(|host, publish, _, _| {
+            publish(&mut |_| {});
+            let service = UserManager::new(host.clone());
+            let read = |uid| {
+                let mut request = Parcel::new();
+                um::GetUserUnlockRealtime {}.write(&mut request);
+                let result = service
+                    .transact(&mut Call {
+                        code: um::GET_USER_UNLOCK_REALTIME,
+                        flags: 0,
+                        sender_pid: 77,
+                        sender_euid: uid,
+                        data: request.reader(),
+                    })
+                    .unwrap();
+                um::read_get_user_unlock_realtime_reply(&mut result.reader())
+                    .unwrap()
+                    .unwrap()
+            };
+            assert_eq!(read(10100), 0);
+            assert!(host.user_unlocking(99).is_err());
+            assert_eq!(read(99 * 100_000 + 10100), 0);
+            let before = super::super::clock_ms(libc::CLOCK_MONOTONIC_RAW);
+            host.user_unlocking(0).unwrap();
+            let after = super::super::clock_ms(libc::CLOCK_MONOTONIC_RAW);
+            let unlocked = read(10100);
+            assert!((before..=after).contains(&unlocked));
+            assert!(unlocked > 0);
+            assert_eq!(read(1000), unlocked);
+            assert_eq!(read(100_000 + 10100), 0);
+            host.user_unlocking(0).unwrap();
+            assert_eq!(read(10100), unlocked);
+        });
+    }
 
     /// `fallbackToSingleUserLP`'s records of a full system user, written
     /// and read back: the original's first boot's attributes, the guests'

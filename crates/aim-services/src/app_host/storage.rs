@@ -1849,7 +1849,7 @@ mod tests {
             native
         };
         assert!(!available());
-        host.unlocked_users.lock().unwrap().insert(0);
+        host.unlocked_users.lock().unwrap().insert(0, 0);
         assert!(
             !available(),
             "a lifecycle flag alone cannot permit CE reconciliation"
