@@ -983,6 +983,34 @@ impl Resources<'_> {
         self.tables.iter().find_map(|t| t.type_name(runtime_id(id)))
     }
 
+    /// `getIntArray`: resolve each array item through the selected table.
+    pub fn int_array(&self, id: u32) -> Option<Vec<i32>> {
+        let (table, entry, _) = self.find(runtime_id(id))?;
+        let Entry::Bag(_, items) = entry else {
+            return None;
+        };
+        Some(
+            items
+                .iter()
+                .map(|&(_, kind, data)| {
+                    let mut value = Selected {
+                        kind,
+                        data,
+                        table: Some(table),
+                        resid: 0,
+                        flags: 0,
+                    };
+                    self.resolve(&mut value);
+                    if value.kind >= TYPE_FIRST_INT {
+                        value.data as i32
+                    } else {
+                        0
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// `getStringArray`: a string array's strings (an item that is not a
     /// string is null).
     pub fn string_array(&self, id: u32) -> Option<Vec<Option<String>>> {

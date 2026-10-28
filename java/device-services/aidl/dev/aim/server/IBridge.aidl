@@ -74,4 +74,10 @@ interface IBridge {
     IBinder newUriPermissionOwner(String name);
     void revokeUriPermissionFromOwner(IBinder owner, in android.net.Uri uri,
             int modeFlags, int sourceUserId);
+
+    /** VibrationSettings' internal owners, until they move native. */
+    boolean shouldIgnoreVibration(int uid, int deviceId, in android.os.VibrationAttributes attrs);
+
+    /** HapticFeedbackVibrationProvider: null when no effect is configured. */
+    int[] getHapticFeedbackAttributes(int constant, int inputSource, int flags, int privFlags);
 }

@@ -188,6 +188,7 @@ pub mod usb_service;
 pub mod user_boot;
 pub mod user_service;
 pub mod user_types;
+mod vibrator;
 pub mod volume;
 pub mod vpn_manager;
 mod web_instant_apps;
@@ -717,7 +718,8 @@ impl AppHost {
     /// The binders of the services published with it, which
     /// `bindApplication` hands apps.
     /// The native services' system, whose package boot this runs.
-    pub fn set_system(&self, system: Arc<crate::system::System>) {
+    pub fn set_system(self: &Arc<Self>, system: Arc<crate::system::System>) {
+        system.set_native_app_host(self);
         if let Some(owner) = self.permission_manager.get() {
             system.set_native_permissions(owner);
         }
