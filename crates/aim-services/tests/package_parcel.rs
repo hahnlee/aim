@@ -21,6 +21,7 @@ mod common {
     pub mod settings_owner_defaults;
     pub mod shared_read_events;
     pub mod signature_events;
+    pub mod storage_diagnostics;
     pub mod verifier_events;
     pub mod zip;
 }
@@ -31,17 +32,26 @@ fn assert_guest_success(boot: &Boot, output: &std::process::Output, stage: &str)
     if output.status.success() {
         return;
     }
+    let storage = common::storage_diagnostics::report(&boot.data);
+    eprintln!("{stage}: {storage}");
     let logs = boot
         .command()
         .args(["shell", "logcat", "-d", "-s", "AndroidRuntime:V"])
-        .output()
-        .unwrap();
+        .output();
     panic!(
-        "{stage}: {}; stdout: {}; stderr: {}; AndroidRuntime: {}",
+        "{stage}: {}; stdout: {}; stderr: {}; {storage}AndroidRuntime: {}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
-        String::from_utf8_lossy(&logs.stdout)
+        match logs {
+            Ok(logs) => format!(
+                "{}; stdout: {}; stderr: {}",
+                logs.status,
+                String::from_utf8_lossy(&logs.stdout),
+                String::from_utf8_lossy(&logs.stderr)
+            ),
+            Err(error) => format!("log collection failed: {error}"),
+        }
     );
 }
 fn compile_original_parcel_oracle(
@@ -2046,12 +2056,7 @@ fn native_package_parcels_match_original_read_write() {
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar:/apex/com.android.permission/javalib/service-permission.jar",
         "/system/bin", "PackageRoundTripOracle", "/data/local/tmp/package-parcels",
     ]).output().unwrap();
-    assert!(
-        original.status.success(),
-        "original package oracle: {} {}",
-        String::from_utf8_lossy(&original.stdout),
-        String::from_utf8_lossy(&original.stderr)
-    );
+    assert_guest_success(&boot, &original, "original package oracle");
     {
         use aim_binder_host::parcel::{EX_PARCELABLE, Parcel, Reader};
         let bytes = fs::read(directory.join("original-metadata-missing-exception.parcel")).unwrap();
