@@ -8,6 +8,7 @@
 //! the NDK is not installed.
 
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -333,7 +334,45 @@ fn other_processes_ids_in_proc_and_siginfo() {
 /// its threads under /proc/<pid>/task and /proc/<tid> (#238, #379).
 #[test]
 fn other_processes_names_and_threads_in_proc() {
-    check("other_procs");
+    let Some(root) = root() else { return };
+    // Keep the layer's trace apart from guest stderr: #1913 once exited
+    // with status 1 and neither guest output stream explained why.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let log = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("other-procs-{}-{stamp}.log", std::process::id()));
+    let diagnostics = std::fs::File::create_new(&log).unwrap();
+    let fd = diagnostics.as_raw_fd();
+    let out = linux_run(
+        root,
+        &["--trace", "--diag-fd", "3", PROGRAM, "other_procs"],
+        |command| {
+            // SAFETY: only async-signal-safe fd operations before exec.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        },
+    );
+    drop(diagnostics);
+    let trace = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        out.status.success()
+            && out.stdout.ends_with(b"ok other_procs\n")
+            && trace.contains("[linux] exit_group"),
+        "other_procs: {:?}\nstdout:\n{}\nstderr:\n{}\nlayer log ({}):\n{trace}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        log.display(),
+    );
+    std::fs::remove_file(log).unwrap();
 }
 
 /// A process's entry is rewritten in place on each credential change, and

@@ -1435,6 +1435,7 @@ static void* named_thread(void* arg) {
 /* proc(5) of another process: its command line as its memory holds it,
  * its comm, and its threads under /proc/<pid>/task and /proc/<tid>. */
 static void other_procs(void) {
+  // Preserve observations even if a later CHECK or the layer exits (#1913).
   int p[2];
   CHECK(pipe(p) == 0, "pipe");
   pid_t pid = fork();
@@ -1452,15 +1453,18 @@ static void other_procs(void) {
   close(p[1]);
   pid_t tid = 0;
   CHECK(read(p[0], &tid, sizeof(tid)) == sizeof(tid) && tid != pid, "tid %d", tid);
+  dprintf(STDOUT_FILENO, "other_procs parent=%d child=%d tid=%d\n", getpid(), pid, tid);
   char path[96], cmd[4096];
   snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
   int fd = open(path, O_RDONLY);
   int n = read(fd, cmd, sizeof(cmd));
   close(fd);
-  CHECK(n == (int)arg_len && strcmp(cmd, "com.example.app") == 0, "cmdline %d '%.*s'", n, n, cmd);
+  dprintf(STDOUT_FILENO, "%s bytes=%d expected=%zu '%.*s'\n", path, n, arg_len, n > 0 ? n : 0, cmd);
+  CHECK(n == (int)arg_len && strcmp(cmd, "com.example.app") == 0, "cmdline %d '%.*s'", n, n > 0 ? n : 0, cmd);
   for (int i = 16; i < n; i++) CHECK(cmd[i] == 0, "cmdline byte %d", i);
   snprintf(path, sizeof(path), "/proc/%d/comm", pid);
   char* c = slurp(path);
+  dprintf(STDOUT_FILENO, "%s: %s\n", path, c ? c : "<unreadable>");
   CHECK(c && strcmp(c, "com.example.app\n") == 0, "comm '%s'", c ? c : "");
 
   snprintf(path, sizeof(path), "/proc/%d/task", pid);
@@ -1469,6 +1473,7 @@ static void other_procs(void) {
   int seen_main = 0, seen_tid = 0, others = 0;
   for (struct dirent* e; (e = readdir(d));) {
     if (e->d_name[0] == '.') continue;
+    dprintf(STDOUT_FILENO, "%s entry=%s\n", path, e->d_name);
     int t = atoi(e->d_name);
     if (t == pid) seen_main++;
     else if (t == tid) seen_tid++;
@@ -1478,9 +1483,11 @@ static void other_procs(void) {
   CHECK(seen_main == 1 && seen_tid == 1 && others == 0, "task %d %d %d", seen_main, seen_tid, others);
   snprintf(path, sizeof(path), "/proc/%d/task/%d/comm", pid, tid);
   c = slurp(path);
+  dprintf(STDOUT_FILENO, "%s: %s\n", path, c ? c : "<unreadable>");
   CHECK(c && strcmp(c, "RenderThread\n") == 0, "thread comm '%s'", c ? c : "");
   snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", pid, tid);
   c = slurp(path);
+  dprintf(STDOUT_FILENO, "%s: %s\n", path, c ? c : "<unreadable>");
   char want[64];
   int wn = snprintf(want, sizeof(want), "%d (RenderThread) S ", tid);
   CHECK(c && strncmp(c, want, wn) == 0, "thread stat '%s'", c ? c : "");
@@ -1491,10 +1498,12 @@ static void other_procs(void) {
   CHECK(utime + stime >= 3, "thread ticks %ld %ld", utime, stime);
   snprintf(path, sizeof(path), "/proc/%d/task/%d/status", pid, tid);
   c = slurp(path);
+  dprintf(STDOUT_FILENO, "%s: %s\n", path, c ? c : "<unreadable>");
   snprintf(want, sizeof(want), "\nPid:\t%d\n", tid);
   CHECK(c && strncmp(c, "Name:\tRenderThread\n", 19) == 0 && strstr(c, want), "status '%s'", c ? c : "");
   snprintf(path, sizeof(path), "/proc/%d/stat", tid);
   c = slurp(path);
+  dprintf(STDOUT_FILENO, "%s: %s\n", path, c ? c : "<unreadable>");
   wn = snprintf(want, sizeof(want), "%d (RenderThread) S ", tid);
   CHECK(c && strncmp(c, want, wn) == 0, "/proc/<tid>/stat '%s'", c ? c : "");
   snprintf(path, sizeof(path), "/proc/%d/task/%d", pid, tid + 1);
@@ -1503,7 +1512,10 @@ static void other_procs(void) {
   d = opendir("/proc");
   CHECK(d != NULL, "opendir /proc");
   int listed = 0;
-  for (struct dirent* e; (e = readdir(d));) listed += atoi(e->d_name) == tid;
+  for (struct dirent* e; (e = readdir(d));) {
+    if (e->d_name[0] != '.') dprintf(STDOUT_FILENO, "/proc entry=%s\n", e->d_name);
+    listed += atoi(e->d_name) == tid;
+  }
   closedir(d);
   CHECK(listed == 0, "/proc lists only thread-group leaders");
 
