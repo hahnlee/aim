@@ -490,12 +490,6 @@ const SYSTEM_UID: u32 = 1000;
 const SYSTEM_PROCESS: &str = "system";
 const SYSTEM_PACKAGE: &str = "android";
 
-/// Whether a component of `package` in `process` is system_server's own
-/// code: the `android` package's, in the system process, which
-/// `aim-system` does not run (#1518).
-pub(super) fn is_system_server_code(package: &str, process: &str) -> bool {
-    package == SYSTEM_PACKAGE && process == SYSTEM_PROCESS
-}
 /// `UserHandle.USER_ALL`.
 const USER_ALL: i32 = -1;
 const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
@@ -1588,20 +1582,12 @@ impl AppHost {
         // The system process (`setSystemProcess`) is the `android`
         // package's, `system` of the system uid, which `aim-system`
         // attaches (`attach_system_process`) and nothing starts: a
-        // component of another system package declared in it runs there.
-        // The `android` package's own components are system_server's
-        // services' code, which the system process does not run (#1518).
+        // component declared in it runs there, including android's receivers.
         if process == SYSTEM_PROCESS && !isolated {
             let uid = self
                 .application_info(name, STOCK_PM_FLAGS, None)?
                 .map(|ai| ai.uid as u32);
             if uid == Some(SYSTEM_UID) {
-                if is_system_server_code(name, process) {
-                    return Err(self.unimplemented_named(
-                        "activity",
-                        "a component of system_server's own code (#1518)",
-                    ));
-                }
                 let attached = self
                     .apps
                     .lock()

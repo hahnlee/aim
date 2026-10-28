@@ -1905,24 +1905,13 @@ impl Broadcasts {
     }
 
     /// The queue of the process a manifest receiver runs in: a running
-    /// process's, else one waiting for its process to start; none for
-    /// system_server's own receivers.
-    fn manifest_queue(&self, host: &AppHost, m: &Manifest) -> Option<QueueId> {
-        // The system process runs the system apps' components declared in
-        // it, not system_server's own receivers.
-        if super::is_system_server_code(&manifest_package(m), &m.process) {
-            let e = host
-                .unimplemented_named("activity", "a receiver of system_server's own code (#1518)");
-            eprintln!(
-                "app host: unable to deliver a broadcast to {}: {}",
-                m.process, e.message
-            );
-            return None;
-        }
-        Some(match host.running_process(&m.process, m.uid) {
+    /// process's, else one waiting for its process to start, including the
+    /// system process attached by SystemProcessHost.
+    fn manifest_queue(&self, host: &AppHost, m: &Manifest) -> QueueId {
+        match host.running_process(&m.process, m.uid) {
             Some((seq, _)) => QueueId::Warm(seq),
             None => QueueId::Cold(m.process.clone(), m.uid),
-        })
+        }
     }
 
     /// Puts `delivery` on the queue it goes to, which becomes runnable.
@@ -2176,10 +2165,9 @@ impl Broadcasts {
                     Delivery::Once(record.clone(), r),
                 ),
                 Target::Manifest(m) => {
-                    if let Some(to) = self.manifest_queue(host, &m) {
-                        let delivery = Delivery::Manifest(record.clone(), m.clone(), None);
-                        self.queue_delivery(st, to, Some(&m), delivery);
-                    }
+                    let to = self.manifest_queue(host, &m);
+                    let delivery = Delivery::Manifest(record.clone(), m.clone(), None);
+                    self.queue_delivery(st, to, Some(&m), delivery);
                 }
             }
         }
@@ -2557,9 +2545,7 @@ impl Broadcasts {
                 }
                 Target::Manifest(m) => {
                     let record = chain.record.clone();
-                    let Some(to) = self.manifest_queue(host, &m) else {
-                        continue;
-                    };
+                    let to = self.manifest_queue(host, &m);
                     let delivery = Delivery::Manifest(record, m.clone(), Some(id));
                     self.queue_delivery(st, to, Some(&m), delivery);
                 }
@@ -2854,6 +2840,10 @@ impl Broadcasts {
 #[cfg(test)]
 #[path = "package_internal_events_delivery_tests.rs"]
 mod internal_package_tests;
+
+#[cfg(test)]
+#[path = "system_receiver_tests.rs"]
+mod system_receiver_tests;
 
 #[cfg(test)]
 mod tests {

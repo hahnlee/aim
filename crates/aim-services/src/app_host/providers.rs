@@ -265,6 +265,15 @@ impl AppHost {
         }
         let owner = cpi.info.application_info.uid as u32;
         let process = process_name(&cpi.info);
+        if owner == super::SYSTEM_UID
+            && process == super::SYSTEM_PROCESS
+            && cpi.info.item.package_name.as_deref() == Some(super::SYSTEM_PACKAGE)
+        {
+            return Err(self.unimplemented_named(
+                "activity",
+                "a provider of system_server's own code (#1518)",
+            ));
+        }
         let class = cpi.info.item.name.clone().unwrap_or_default();
         let release = no_release_needed(&cpi);
         // `canRunHere`: the client instantiates it itself.
