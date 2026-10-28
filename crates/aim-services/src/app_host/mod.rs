@@ -593,6 +593,8 @@ pub struct AppHost {
     system_route_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     /// Cold staged APEX inventory from the original ApexManager in aim-system.
     native_staging_bridge: Mutex<Option<Arc<Strong>>>,
+    audio_policy_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
+    sync_adapter_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -708,6 +710,8 @@ impl AppHost {
             domain_frontend: Mutex::new(None),
             system_route_queries: Mutex::new(None),
             native_staging_bridge: Mutex::new(None),
+            audio_policy_queries: Mutex::new(None),
+            sync_adapter_queries: Mutex::new(None),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
@@ -5902,3 +5906,6 @@ mod resources_tests;
 
 #[cfg(test)]
 mod application_info_tests;
+
+#[cfg(test)]
+mod start_read_tests;

@@ -166,10 +166,40 @@ impl ReadParcelable for DeviceAttributes {
         r.read_string16()?; // address
         r.read_string16()?; // name
         let internal_type = r.read_i32()?;
-        // Profiles and descriptors (`writeParcelableArray`): none.
-        for _ in 0..2 {
-            if r.read_i32()? > 0 {
+        // `AudioProfile` and `AudioDescriptor` in `writeParcelableArray`.
+        for profile in [true, false] {
+            let count = r.read_i32()?;
+            if count < 0 {
                 return Err(aim_binder_host::parcel::BAD_VALUE);
+            }
+            for _ in 0..count {
+                let Some(class) = r.read_string16()? else {
+                    continue;
+                };
+                let expected = if profile {
+                    "android.media.AudioProfile"
+                } else {
+                    "android.media.AudioDescriptor"
+                };
+                if class != expected {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                r.read_i32()?; // format or standard
+                if profile {
+                    for _ in 0..3 {
+                        let count = r.read_i32()?;
+                        if count >= 0 {
+                            r.skip(count as usize * 4)?;
+                        }
+                    }
+                    r.read_i32()?; // encapsulation type
+                } else {
+                    r.read_i32()?; // encapsulation type
+                    let count = r.read_i32()?;
+                    if count >= 0 {
+                        r.skip((count as usize + 3) & !3)?;
+                    }
+                }
             }
         }
         Ok(DeviceAttributes {

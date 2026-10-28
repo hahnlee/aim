@@ -69,4 +69,9 @@ interface ISystemProcess {
     void resetPackageRuntimePermissionsForUser(int userId);
     /** Original ApexManager staged inventory; system UID only. */
     void attachNativeStagingBridge(IBinder bridge);
+    /** Original audio policy configuration and sync-adapter discovery; system UID only. */
+    void attachAudioPolicyQueries(IBinder queries);
+    void attachSyncAdapterQueries(IBinder queries);
+    /** PackageManagerInternal.filterAppAccess at the native package owner. */
+    boolean filterSyncAdapterPackageAccess(String packageName, int uid, int userId);
 }

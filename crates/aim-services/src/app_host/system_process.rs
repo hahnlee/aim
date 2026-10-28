@@ -251,25 +251,58 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
-            sp::ATTACH_SYSTEM_ROUTE_QUERIES => {
-                let a =
-                    sp::AttachSystemRouteQueries::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+            sp::ATTACH_SYSTEM_ROUTE_QUERIES
+            | sp::ATTACH_AUDIO_POLICY_QUERIES
+            | sp::ATTACH_SYNC_ADAPTER_QUERIES => {
+                let (queries, slot) = match call.code {
+                    sp::ATTACH_AUDIO_POLICY_QUERIES => (
+                        sp::AttachAudioPolicyQueries::read(&mut call.data)
+                            .map_err(|_| BAD_VALUE)?
+                            .queries,
+                        &self.host.audio_policy_queries,
+                    ),
+                    sp::ATTACH_SYNC_ADAPTER_QUERIES => (
+                        sp::AttachSyncAdapterQueries::read(&mut call.data)
+                            .map_err(|_| BAD_VALUE)?
+                            .queries,
+                        &self.host.sync_adapter_queries,
+                    ),
+                    _ => (
+                        sp::AttachSystemRouteQueries::read(&mut call.data)
+                            .map_err(|_| BAD_VALUE)?
+                            .queries,
+                        &self.host.system_route_queries,
+                    ),
+                };
                 system().and_then(|()| {
-                    let owner = match a.queries {
+                    let owner = match queries {
                         Some(Binder::Handle(h)) => crate::system::ServiceOwner::Remote(Arc::new(
                             self.host.process.strong(h),
                         )),
                         Some(Binder::Local(ptr)) => crate::system::ServiceOwner::Local(
-                            self.host.process.local_service(ptr).ok_or_else(|| {
-                                Exception::new(EX_NULL_POINTER, "system route queries gone")
-                            })?,
+                            self.host
+                                .process
+                                .local_service(ptr)
+                                .ok_or_else(|| Exception::new(EX_NULL_POINTER, "queries gone"))?,
                         ),
                         None => {
-                            return Err(Exception::new(EX_NULL_POINTER, "system route queries"));
+                            return Err(Exception::new(EX_NULL_POINTER, "queries"));
                         }
                     };
-                    *self.host.system_route_queries.lock().unwrap() = Some(Arc::new(owner));
-                    sp::write_attach_system_route_queries_reply(&mut p);
+                    *slot.lock().unwrap() = Some(Arc::new(owner));
+                    p.write_no_exception();
+                    Ok(())
+                })
+            }
+            sp::FILTER_SYNC_ADAPTER_PACKAGE_ACCESS => {
+                let a = sp::FilterSyncAdapterPackageAccess::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let name = a
+                        .package_name
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+                    let filtered = self.host.filter_package_access(&name, a.uid, a.user_id)?;
+                    sp::write_filter_sync_adapter_package_access_reply(&mut p, filtered);
                     Ok(())
                 })
             }
