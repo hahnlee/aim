@@ -631,7 +631,7 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   Settled in P3: maps and pins work, and programs and BTF load. The
   per-uid counters of netd's `cgroupskb/*/stats` and interface counters of
   its xt_bpf programs are filled from the socket layer (#224, #1720).
-  Other programs and ring-buffer producers remain unexecuted.
+  Other programs and ring-buffer producers remain unexecuted (#2268).
 - **Mount namespaces** retain authenticated per-process owner inventories,
   stable mount IDs and private/shared/slave propagation. Native init has
   bootstrap and default owners. Its pinned original per-service selection
