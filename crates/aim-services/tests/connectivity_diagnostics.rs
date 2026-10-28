@@ -36,10 +36,24 @@ fn original_diagnostics_policy_matches_permissions_requests_and_callback_lifetim
     let source = aim_paths::root().join("java/device-services");
     let stubs = dir.join("stubs");
     let classes = dir.join("classes");
+    let aidl = source.join("aidl");
+    let generated = dir.join("aidl");
+    run(
+        Command::new(aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"))
+            .args(["--lang=java", "--min_sdk_version", "36"])
+            .arg(format!("-I{}", aidl.display()))
+            .arg("-o")
+            .arg(&generated)
+            .args(
+                ["ConnectivityDumpSnapshot", "ConnectivityDumpRequest"]
+                    .map(|name| aidl.join(format!("dev/aim/server/{name}.aidl"))),
+            ),
+    );
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&stubs)
-        .args(sources(&source.join("stubs"))));
+        .args(sources(&source.join("stubs")))
+        .args(sources(&generated)));
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
@@ -51,6 +65,7 @@ fn original_diagnostics_policy_matches_permissions_requests_and_callback_lifetim
         .args(
             [
                 "ConnectivityDiagnostics.java",
+                "ConnectivityDump.java",
                 "NetworkActivityBridge.java",
                 "Bridge.java",
             ]

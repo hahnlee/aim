@@ -8,5 +8,6 @@ public interface INetworkActivityBridge {
  void unregisterDiagnostics(android.os.IBinder callback,int uid);
  void onDiagnosticsNetworkChanged(Network network,LinkProperties lp,NetworkCapabilities nc,long timestamp);
  void onNetworkConnectivityReported(Network network,int uid,boolean connected,boolean revalidating);
+ String formatConnectivityDump(ConnectivityDumpSnapshot snapshot,String[] args);
  abstract class Stub extends android.os.Binder implements INetworkActivityBridge {}
 }

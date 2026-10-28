@@ -44,22 +44,26 @@ fn connectivity_dump_exact_output() {
     ] {
         let mut text = fs::read_to_string(source.join(format!("stubs/android/net/{name}.java")))
             .unwrap()
-            .replace("throw new RuntimeException(\"stub\");", "")
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with(&format!("public {name}(")) {
+                    line.replace("throw new RuntimeException(\"stub\");", "")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
             .replace("public final int requestId = 0", "public int requestId = 7")
             .replace(
                 "public final Type type = null",
                 "public Type type = Type.REQUEST",
             );
-        // Methods unused by this fixture still need type-correct boundary bodies.
-        text = text
-            .replace(
-                "int describeContents() {  }",
-                "int describeContents() { return 0; }",
-            )
-            .replace(
-                "String toShortString() {  }",
-                "String toShortString() { return text; }",
-            );
+        // Only construction and rendering are doubled; unused methods keep throwing.
+        text = text.replace(
+            "String toShortString() { throw new RuntimeException(\"stub\"); }",
+            "String toShortString() { return text; }",
+        );
         let at = text.rfind('}').unwrap();
         text.insert_str(
             at,
