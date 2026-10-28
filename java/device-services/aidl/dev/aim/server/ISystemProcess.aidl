@@ -6,6 +6,7 @@ import dev.aim.server.IStatsCompanionUidMap;
 import dev.aim.server.IRecoverableKeyStoreKeys;
 import dev.aim.server.IActivityStatsSnapshot;
 import dev.aim.server.IActivityStatsHost;
+import dev.aim.server.IStorageCrates;
 
 /**
  * The app host's part of system_server for its system process
@@ -55,7 +56,8 @@ interface ISystemProcess {
     IActivityStatsHost getActivityStatsHost(IActivityStatsSnapshot snapshot);
     /** Release a diagnostics listener's shared native request count; system UID only. */
     void releaseConnectivityDiagnosticsRequest(int requestId);
-
     /** Original clone-provider query policy; system UID only. */
     void attachProviderQueries(IBinder queries);
+    /** Original Installer crate queries and CrateInfo conversion; system UID only. */
+    void attachStorageCrates(IStorageCrates crates);
 }

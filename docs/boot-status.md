@@ -119,6 +119,7 @@ A fresh data directory is provisioned: the native settings provider creates its 
 Settings provider inserts and updates convert Float, Double and byte-array values through the original Java scalar `toString` in aim-system, over a system-UID-only bridge (#1583; host storage/JVM tests and pinned-image linkage, no guest boot).
 URI grants publish indirect package visibility of their provider to the target, including basic grants needing no permission record and restored persisted grants. Persistable grants retain visibility across package updates (#1569; focused host tests, no guest boot).
 The app host prepares user 0's CE storage before starting vold's user and mounting the emulated volume at unlocking, and logs external storage failures without aborting boot completion (#2227; host tests only, no guest boot rerun).
+Storage crate queries use the original Java Installer, installd and CrateInfo conversion in aim-system, after native caller permission and package visibility checks (#1826; focused host tests, JVM lifecycle and pinned-image Java linkage, no guest boot, 2026-10-29).
 The app host treats an absent `/data/system/overlays.xml` as empty overlay settings and reports guest paths at the data-file error sources used by its native settings and package readers (#2233; host tests only, no guest boot rerun).
 
 The app host image ([app-host.md](app-host.md)) boots without

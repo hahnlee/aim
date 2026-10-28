@@ -7,11 +7,13 @@ interface ISystemProcess {
     void attachNetworkActivityBridge(IBinder bridge);
     void attachWifiBridge(WifiBridge bridge);
     void attachDevicePolicyDefaults(DevicePolicyDefaults defaults);
+    void attachSettingsValues(SettingsValues values);
     void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys);
     void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries);
     void attachProviderQueries(ProviderQueries queries);
     void attachSettingsValues(SettingsValues values);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
+    void attachStorageCrates(StorageCrates crates);
     abstract class Stub {
         public static ISystemProcess asInterface(IBinder binder) {
             return new ISystemProcess() {
@@ -26,7 +28,12 @@ interface ISystemProcess {
                     ProviderQueriesTest.check(queries);
                 }
                 public void attachDevicePolicyDefaults(DevicePolicyDefaults defaults) {}
+                public void attachSettingsValues(SettingsValues values) {}
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
+                public void attachStorageCrates(StorageCrates crates) {
+                    if (crates == null) throw new AssertionError("missing storage crates");
+                    SystemProcessHostTest.events.add("crates");
+                }
                 public void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries) {}
                 public void attachNetworkActivityBridge(IBinder bridge) {
                     SystemProcessHostTest.events.add("network");

@@ -140,6 +140,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSystemRouteQueries(new com.android.server.media.SystemRouteQueries(context));
             host.attachStatsCompanionUidMap(new StatsCompanionUidMap(context));
             host.attachRecoverableKeyStoreKeys(new RecoverableKeyStoreKeys(context));
+            host.attachStorageCrates(new StorageCrates(context));
             ActivityStats.publish(host);
             TaskManagerLocal.publish();
             SystemService pinner = new PinnerService(context);
