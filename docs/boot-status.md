@@ -3032,8 +3032,12 @@ system GMS/Play Store packages, not the installed GMS cluster. A compiled
 split APK integration test passes for manifest merging, split ordering,
 dependency serialization, missing/cyclic dependencies and malformed
 clusters; a unit test checks ancestor/config asset scopes without sibling
-assets. Installed GMS's full parser parcel has not been compared against
-the original (#760). This remains an incomplete native scan check.
+assets. The shadow parser oracle reads installed and updated APKs through
+the guest path map and excludes scan-owned ABI/library paths and signing
+details from both sides. It runs independently of install-state modelling,
+including multi-user installs (#760; focused host regression, no guest boot).
+Installed GMS's full parser parcel has not been compared against the original.
+This remains an incomplete native scan check.
 Shared-library dependency resolution now has ordered direct selection,
 static/SDK version and signer checks,
 and file-path assembly from resolved provider snapshots. Tests cover
