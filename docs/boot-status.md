@@ -8129,10 +8129,19 @@ memory pressure since #277, see "Memory pressure").
   namespaces. Their procfs inventory lost the source of
   path-map cgroup2/bpffs mounts and reported ordinary filesystems instead;
   netd could not discover its cgroup2 target and returned ENOENT. The inventory
-  now retains the kernel mount source/type. Host checks cover the original
-  APEX loader override and blocking exec order, plus procfs discovery,
-  pin/reopen/attach and enforced socket denial (#2268, 2026-10-29).
-  No guest boot was rerun after this correction. Other hooks and ring
+  now retains the kernel mount source/type. The supplied fresh boot gets past
+  discovery but fails BPF_PROG_ATTACH with EINVAL: reading the loaded program's
+  uncached map opened its backing file read-only, so the shared writable
+  mapping needed for its header lock failed with EACCES, hidden as EINVAL.
+  The syscall owner now opens that private map reference read/write and
+  preserves mapping errors. A host regression loads the real netd.o create
+  section with NetBpfLoad's attributes and ELF map relocation, closes the
+  loader descriptors, reopens the pin and attaches to a cgroup2 directory
+  with no preexisting map mapping, then checks live socket permission changes.
+  Both replacement netd's compact attrs and original BpfHandler's full attrs
+  pass. Earlier tests mapped the permission map before attachment and missed
+  this fresh-process path. No guest boot was rerun after this correction
+  (#2268, 2026-10-29). Other hooks and ring
   producers remain #2268;
   traffic counters retain the socket layer's existing approximation (#224).
 - A forked child gets the stub islands' executable views back as views of

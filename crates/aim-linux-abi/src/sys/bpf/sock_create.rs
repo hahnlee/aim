@@ -93,8 +93,18 @@ impl Program {
             let name = refs.get(4..4 + len).ok_or(EINVAL)?;
             refs = &refs[4 + len..];
             let path = objects_dir().join(std::ffi::OsStr::from_bytes(name));
-            let map = open(&path)?;
-            maps.insert(pc * 8, Kernel::of(map.as_raw_fd()).ok_or(EINVAL)?);
+            // Kernel map access needs the shared header's write lock even
+            // for lookups. A read-only fd cannot back that writable mapping.
+            let map = PrivateFile::allocate(|| {
+                std::fs::File::options()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_CLOEXEC)
+                    .open(&path)
+            })
+            .map_err(io)?;
+            let map = mapped(map.as_raw_fd()).map_err(|error| (-error) as Errno)?;
+            maps.insert(pc * 8, Kernel(map));
         }
         let p = Self { code, maps };
         p.validate()?;
@@ -392,7 +402,7 @@ mod tests {
         let fd = fs::openat([
             (-100i64) as u64,
             c"/sys/fs/cgroup".as_ptr() as u64,
-            0o200000,
+            0o200000 | 0o2000000,
             0,
             0,
             0,
@@ -593,7 +603,7 @@ mod tests {
         close(target);
     }
 
-    fn image_program(root: &Path) -> Vec<u8> {
+    fn image_sections(root: &Path) -> HashMap<String, Vec<u8>> {
         let elf = std::fs::read(root.join("apex/com.android.tethering/etc/bpf/netd_shared/netd.o"))
             .unwrap();
         let word = |at| u64::from_le_bytes(elf[at..at + 8].try_into().unwrap()) as usize;
@@ -601,15 +611,159 @@ mod tests {
         let table = word(40);
         let strings = table + half(62) * 64;
         let names = &elf[word(strings + 24)..][..word(strings + 32)];
+        let mut sections = HashMap::new();
         for i in 0..half(60) {
             let section = table + i * 64;
             let name = u32::from_le_bytes(elf[section..section + 4].try_into().unwrap()) as usize;
             let end = names[name..].iter().position(|b| *b == 0).unwrap() + name;
-            if &names[name..end] == b"cgroupsock/inet_create" {
-                return elf[word(section + 24)..][..word(section + 32)].to_vec();
-            }
+            sections.insert(
+                String::from_utf8(names[name..end].to_vec()).unwrap(),
+                elf[word(section + 24)..][..word(section + 32)].to_vec(),
+            );
         }
-        panic!("image has no socket-create program");
+        sections
+    }
+
+    fn image_program(root: &Path) -> Vec<u8> {
+        image_sections(root)
+            .remove("cgroupsock/inet_create")
+            .unwrap()
+    }
+
+    #[test]
+    fn netbpfload_image_pin_attaches_with_uncached_permission_map() {
+        if fdtab::isolated_kernel_test(
+            "sys::bpf::sock_create::tests::netbpfload_image_pin_attaches_with_uncached_permission_map",
+        ) {
+            return;
+        }
+        let Some(image) =
+            aim_paths::original_image_with("apex/com.android.tethering/etc/bpf/netd_shared/netd.o")
+        else {
+            return;
+        };
+        let (_view, dir, target) = setup();
+        std::fs::create_dir_all(dir.join("data/bpf/netd_shared")).unwrap();
+        vfs::add_mount(
+            "/sys/fs/bpf",
+            dir.join("data/bpf"),
+            vfs::Area::Writable,
+            "bpf",
+            "bpf",
+        )
+        .unwrap();
+        let sections = image_sections(&image);
+        let mut code = sections["cgroupsock/inet_create"].clone();
+        // NetBpfLoad::applyRelo resolves the ELF relocation's map symbol,
+        // creates its real definition and writes BPF_PSEUDO_MAP_FD + fd.
+        let rel = &sections[".relcgroupsock/inet_create"];
+        assert_eq!(rel.len(), 16);
+        let offset = u64::from_le_bytes(rel[..8].try_into().unwrap()) as usize;
+        let info = u64::from_le_bytes(rel[8..].try_into().unwrap());
+        assert_eq!(info as u32, 1); // R_BPF_64_64
+        let sym = &sections[".symtab"][(info >> 32) as usize * 24..][..24];
+        let name = u32::from_le_bytes(sym[..4].try_into().unwrap()) as usize;
+        assert!(sections[".strtab"][name..].starts_with(b"uid_permission_map\0"));
+        let value = u64::from_le_bytes(sym[8..16].try_into().unwrap()) as usize;
+        let def = &sections["maps"][value..];
+        // The image's loader passes sizeof(bpf_attr)=152 (also visible at
+        // its BPF_PROG_LOAD syscall site), with all unused fields zero.
+        let mut attr = [0u32; 38];
+        for (word, bytes) in attr[..5].iter_mut().zip(def.chunks_exact(4)) {
+            *word = u32::from_le_bytes(bytes.try_into().unwrap());
+        }
+        assert_eq!(&attr[..5], &[HASH, 4, 1, 4000, 0]);
+        for (word, bytes) in attr[7..11]
+            .iter_mut()
+            .zip(b"uid_permission_\0".chunks_exact(4))
+        {
+            *word = u32::from_ne_bytes(bytes.try_into().unwrap());
+        }
+        let map = call(MAP_CREATE, &attr);
+        assert!(map >= 0, "BPF_MAP_CREATE: {map}");
+        // Do not map/lookup/update it in this process before attachment:
+        // the loader and netd have separate in-process mapping caches.
+        let map_path = c"/sys/fs/bpf/netd_shared/map_netd_uid_permission_map";
+        let ptr = |p: *const u8| [p as u64 as u32, (p as u64 >> 32) as u32];
+        attr.fill(0);
+        attr[..2].copy_from_slice(&ptr(map_path.as_ptr().cast()));
+        attr[2] = map as u32;
+        assert_eq!(call(OBJ_PIN, &attr), 0);
+        assert_eq!(code[offset], 0x18);
+        code[offset + 1] = (code[offset + 1] & 15) | 0x10;
+        code[offset + 4..offset + 8].copy_from_slice(&(map as i32).to_ne_bytes());
+        let license = &sections["license"];
+        let mut log = vec![0u8; 1 << 20];
+        attr.fill(0);
+        attr[0] = SOCK;
+        attr[1] = code.len() as u32 / 8;
+        attr[2..4].copy_from_slice(&ptr(code.as_ptr()));
+        attr[4..6].copy_from_slice(&ptr(license.as_ptr()));
+        attr[6] = 1;
+        attr[7] = log.len() as u32;
+        attr[8..10].copy_from_slice(&ptr(log.as_mut_ptr()));
+        attr[10] = (6 << 24) | (12 << 16); // NetBpfLoad's kernelVersion()
+        let name = b"cgroupsock_inet\0";
+        for (word, bytes) in attr[12..16].iter_mut().zip(name.chunks_exact(4)) {
+            *word = u32::from_ne_bytes(bytes.try_into().unwrap());
+        }
+        // NetBpfLoad's cgroupsock/ entry leaves expected_attach_type=0.
+        assert_eq!(attr[17], 0);
+        let program = call(PROG_LOAD, &attr);
+        assert!(program >= 0, "NetBpfLoad BPF_PROG_LOAD: {program}");
+        let path = c"/sys/fs/bpf/netd_shared/prog_netd_cgroupsock_inet_create";
+        attr.fill(0);
+        attr[..2].copy_from_slice(&ptr(path.as_ptr().cast()));
+        attr[2] = program as u32;
+        assert_eq!(call(OBJ_PIN, &attr), 0);
+        close(program);
+        close(map);
+        let get = [path.as_ptr() as u64, 0u64];
+        let program = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
+        assert!(program >= 0, "netd BPF_OBJ_GET: {program}");
+        let held = fdtab::pin_guest(target as i32).unwrap();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::fstat(held.descriptor().as_raw_fd(), &mut stat) },
+            0
+        );
+        assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFDIR);
+        drop(held);
+        assert!(
+            MAPPED
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(HashMap::is_empty)
+        );
+        assert_eq!(attach_at(target, program, false), 0, "netd BPF_PROG_ATTACH");
+        close(program);
+        // Original BpfHandler uses BPF_F_RDONLY and a full attr union;
+        // compact zero-extended attrs used by replacement netd are valid too.
+        attr.fill(0);
+        attr[..2].copy_from_slice(&ptr(path.as_ptr().cast()));
+        attr[3] = 8; // BPF_F_RDONLY
+        let program = call(OBJ_GET, &attr);
+        assert!(program >= 0, "BpfHandler BPF_OBJ_GET: {program}");
+        attr.fill(0);
+        attr[..4].copy_from_slice(&[target as u32, program as u32, ATTACH, 0]);
+        assert_eq!(call(PROG_ATTACH, &attr), 0, "BpfHandler BPF_PROG_ATTACH");
+        close(program);
+        // Attachment owns the program/map, and the actual image code sees
+        // both an empty map and subsequent policy writes.
+        close(socket(2, 2));
+        let get = [map_path.as_ptr() as u64, 0u64];
+        let map = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
+        assert!(map >= 0);
+        let uid = cred::current().uid[0] % 100000;
+        let kernel = Kernel::of(map as i32).unwrap();
+        assert!(kernel.update(&uid.to_ne_bytes(), |v| v[0] = 0));
+        assert_eq!(socket(2, 2), -(EPERM as i64));
+        assert!(kernel.update(&uid.to_ne_bytes(), |v| v[0] = 4));
+        close(socket(10, 1));
+        assert_eq!(attach_at(target, 0, true), 0);
+        close(map);
+        close(target);
     }
 
     #[test]
