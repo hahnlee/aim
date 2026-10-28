@@ -157,7 +157,7 @@ pub fn template() -> Node {
         // Named after the SKU, which the build boot names.
         outputs: Vec::new(),
         tools: Vec::new(),
-        recipe: 4,
+        recipe: 5,
         action: Action::UserdataTemplate,
         boot: true,
     }
@@ -757,6 +757,15 @@ fn snapshot(
         {
             return Ok(None);
         }
+        // ResilientAtomicFile creates both files before serializing either.
+        // Matching metadata and matching empty/partial copies are not a commit.
+        let primary = file.strip_suffix(".reservecopy").unwrap_or(file);
+        if bytes.is_empty()
+            || (primary.ends_with(".xml") || primary.ends_with(".abx"))
+                && aim_android_xml::read(&bytes).is_err()
+        {
+            return Ok(None);
+        }
         result.push(CaptureFile {
             device: after.dev(),
             inode: after.ino(),
@@ -1133,6 +1142,42 @@ mod completion_tests {
             );
         }
         assert!(copy_constructor_settings(&source.0, &settings.0, &[]).is_err());
+    }
+
+    #[test]
+    fn capture_waits_for_complete_settings_in_both_copies() {
+        let source = Fixture::new();
+        let capture = Fixture::new();
+        let files = [
+            PACKAGES,
+            "data/system/packages.xml.reservecopy",
+            "data/system/users/0/package-restrictions.xml",
+            "data/system/users/0/package-restrictions.xml.reservecopy",
+            "data/system/packages.list",
+        ];
+        source.write(files[0], "<packages/>");
+        source.write(files[1], "<packages/>");
+        source.write(
+            files[4],
+            "android 1000 0 /data/system default:system 0 none 0\n",
+        );
+        for content in ["", "<package-restrictions>"] {
+            source.write(files[2], content);
+            source.write(files[3], content);
+            assert!(
+                !take(&source.0, &capture.0, &files, &WRITING, Duration::ZERO).unwrap(),
+                "matching unfinished files must not freeze the constructor snapshot"
+            );
+            assert!(!capture.0.join(files[0]).exists());
+        }
+        source.write(files[2], "<package-restrictions/>");
+        assert!(!take(&source.0, &capture.0, &files, &WRITING, Duration::ZERO).unwrap());
+        source.write(files[3], "<package-restrictions/>");
+        assert!(take(&source.0, &capture.0, &files, &WRITING, Duration::ZERO).unwrap());
+        assert_eq!(
+            fs::read(capture.0.join(files[2])).unwrap(),
+            b"<package-restrictions/>"
+        );
     }
 
     #[test]
