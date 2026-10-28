@@ -23,4 +23,9 @@ interface ISystemProcess {
      * IInternalServiceRetriever), over the app host's DeviceIdleInternal.
      */
     IBinder getInternalServiceRepository();
+
+    /** System-UID-only backend and original front end for domain verification (#1763). */
+    IBinder getDomainVerificationBackend();
+    void attachDomainVerification(IBinder frontend);
+    boolean isDomainVerifier(int uid);
 }
