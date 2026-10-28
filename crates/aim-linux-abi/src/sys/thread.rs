@@ -73,7 +73,7 @@ pub struct Sched {
 
 pub struct Thread {
     pub tid: i32,
-    _reservation: Option<super::pidns::tids::Reservation>,
+    reservation: Mutex<Option<super::pidns::tids::Reservation>>,
     /// The host pthread_t; 0 until the thread runs.
     pthread: AtomicUsize,
     ctx: *mut GuestContext,
@@ -102,7 +102,7 @@ impl Thread {
     ) -> Self {
         Thread {
             tid,
-            _reservation: reservation,
+            reservation: Mutex::new(reservation),
             pthread: AtomicUsize::new(0),
             ctx,
             sig: ThreadSignals::new(mask),
@@ -665,7 +665,7 @@ pub fn exit(a: [u64; 6]) -> ! {
     });
     super::cgroup::thread_gone(th.tid);
     if left > 0 {
-        super::ptrace::thread_ended(th.tid, code << 8);
+        super::ptrace::thread_ended(th.tid, code << 8, th.reservation.lock().unwrap().take());
     }
     let ctid = th.clear_child_tid.load(SeqCst);
     if ctid != 0 {

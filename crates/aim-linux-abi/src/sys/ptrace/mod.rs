@@ -30,9 +30,10 @@ use crate::sys::fork_state::{Reader, Writer};
 use crate::sys::{cred, pidns, thread};
 
 pub use agent::{fork_restore, fork_save, socket_path, start};
+pub(in crate::sys) use tracee::thread_ended;
 pub use tracee::{
-    born_traced, clone_event, clone_stop, forget, process_ending, thread_ended, tracer_of,
-    trap_pending, trap_stop,
+    born_traced, clone_event, clone_stop, forget, process_ending, tracer_of, trap_pending,
+    trap_stop,
 };
 
 const PTRACE_PEEKTEXT: u64 = 1;
@@ -238,8 +239,7 @@ pub fn wait(tid: i32, nohang: bool) -> Option<Result<Option<i32>, i64>> {
             1 => break Reader::new(&rest).i32(),
             0 if nohang => return Some(Ok(None)),
             0 => match notify(pid, tid) {
-                Ok(Some(st)) => break st,
-                Ok(None) => {}
+                Ok(()) => {}
                 Err(e) if e == -(EINTR as i64) => return Some(Err(e)),
                 Err(_) => return None,
             },
@@ -253,9 +253,9 @@ pub fn wait(tid: i32, nohang: bool) -> Option<Result<Option<i32>, i64>> {
     Some(Ok(Some(st)))
 }
 
-/// Block until thread `tid` has a status: None for a stop (for WAIT to
-/// take), or its end's status; EINTR when a signal comes first.
-fn notify(pid: i32, tid: i32) -> Result<Option<i32>, i64> {
+/// Block until thread `tid` has a status for WAIT to take; EINTR when a
+/// signal comes first.
+fn notify(pid: i32, tid: i32) -> Result<(), i64> {
     let fd = agent::connect(pid)?;
     let got = if agent::send(fd, &request(agent::NOTIFY, |w| w.i32(tid))) {
         let wake = move || {
@@ -275,8 +275,7 @@ fn notify(pid: i32, tid: i32) -> Result<Option<i32>, i64> {
         Some(Some(b)) => {
             let mut r = Reader::new(&b);
             match r.i64() {
-                0 => Ok(None),
-                1 => Ok(Some(r.i32())),
+                0 => Ok(()),
                 e => Err(e),
             }
         }

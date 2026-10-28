@@ -11,6 +11,13 @@ resume (#1209). Inotify watch and queued-event restoration also rejects failed
 registrations. Focused host checks cover descriptor exhaustion at reserved
 placeholder slots and failed duplication; no guest boot was run (2026-10-28).
 
+Ptrace keeps exited threads' TID reservations and queued statuses until their
+tracer reaps them or exits; process teardown waits for status delivery rather
+than a 200 ms grace period (#2300). Notifications do not consume exit reports,
+and wait replies are sent before releasing the last report. Clone-event stress
+(10,000 iterations with eight CPU-load workers), delayed reaping and focused
+host lifetime checks pass; no guest boot was run (2026-10-28).
+
 `linux-run` embeds the **AIM Runtime** macOS privacy identity and establishes its own process responsibility before initialization ([host privacy](host-privacy.md), #2190).
 
 ART and xsdc use the same pinned Temurin JDK as device services; both build

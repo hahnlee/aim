@@ -366,6 +366,12 @@ fn connection(fd: i32) {
             close(fd);
             return;
         }
+        if op == WAIT {
+            if !wait_status(fd, peer, r.i32()) {
+                break;
+            }
+            continue;
+        }
         if !send(fd, &handle(op, &mut r, peer)) {
             break;
         }
@@ -519,14 +525,6 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
                 err(EIO)
             }
         }
-        WAIT => {
-            let tid = r.i32();
-            match take_status(tid, peer) {
-                Ok(Some(st)) => reply(1, |w| w.i32(st)),
-                Ok(None) => reply(0, |_| {}),
-                Err(e) => err(e),
-            }
-        }
         MEM_OPEN => {
             if !(misc::dumpable() || r.bool()) {
                 return err(crate::errno::EACCES);
@@ -609,26 +607,38 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
     }
 }
 
-/// Take `peer`'s wait status of thread `tid`: a stop not yet reported, or
-/// its end. None: none yet.
-fn take_status(tid: i32, peer: i32) -> Result<Option<i32>, i32> {
+/// Deliver before consuming a status: removing the last exit report lets
+/// the process exit, taking this socket with it.
+fn wait_status(fd: i32, peer: i32, tid: i32) -> bool {
     let mut g = tracee::lock();
     if let Some(t) = g.of(tid, peer, false) {
-        return Ok(t.report.take());
+        let sent = send(
+            fd,
+            &match t.report {
+                Some(st) => reply(1, |w| w.i32(st)),
+                None => reply(0, |_| {}),
+            },
+        );
+        if sent {
+            t.report = None;
+        }
+        return sent;
     }
     match g.ended.get(&tid) {
-        Some(&(tracer, st)) if tracer == peer => {
-            g.ended.remove(&tid);
-            tracee::CHANGED.notify_all();
-            Ok(Some(st))
+        Some(e) if e.tracer == peer => {
+            let sent = send(fd, &reply(1, |w| w.i32(e.status)));
+            if sent {
+                g.ended.remove(&tid);
+                tracee::CHANGED.notify_all();
+            }
+            sent
         }
-        _ => Err(crate::errno::ESRCH),
+        _ => send(fd, &err(crate::errno::ESRCH)),
     }
 }
 
-/// Answer once thread `tid` has a status for `peer`: 0 for a stop (which
-/// a WAIT then takes), 1 and the status for its end (taken here, since
-/// the process may end at once), or ESRCH.
+/// Wake once thread `tid` has a status for `peer`. Only WAIT consumes it:
+/// an interrupted NOTIFY must leave the exit report available for retry.
 fn notify(fd: i32, peer: i32, tid: i32) {
     let mut g = tracee::lock();
     loop {
@@ -643,13 +653,7 @@ fn notify(fd: i32, peer: i32, tid: i32) {
                 continue;
             }
             None => match g.ended.get(&tid) {
-                Some(&(tracer, st)) if tracer == peer => {
-                    // Written before the ending process may go.
-                    g.ended.remove(&tid);
-                    send(fd, &reply(1, |w| w.i32(st)));
-                    tracee::CHANGED.notify_all();
-                    return;
-                }
+                Some(e) if e.tracer == peer => reply(0, |_| {}),
                 _ => err(crate::errno::ESRCH),
             },
         };
@@ -755,5 +759,75 @@ mod tests {
         let (a, len) = sockaddr("12345.sock");
         assert_eq!(len as usize, 2 + 10 + 1);
         assert_eq!(a.sun_path[10], 0);
+    }
+
+    #[test]
+    fn exited_thread_keeps_its_route_until_wait_delivers() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc::{self, RecvTimeoutError};
+
+        let peer = unsafe { libc::getpid() };
+        let end_thread = |tracer| {
+            let reservation = crate::sys::pidns::tids::allocate().unwrap();
+            let tid = reservation.tid;
+            tracee::lock().attach(
+                tid,
+                Traced {
+                    tracer,
+                    options: 0,
+                    trap: false,
+                    stopped: None,
+                    report: None,
+                    message: 0,
+                },
+            );
+            tracee::thread_ended(tid, 3 << 8, Some(reservation));
+            tid
+        };
+        let tid = end_thread(peer);
+        let (done, exited) = mpsc::channel();
+        let ending = std::thread::spawn(move || {
+            tracee::process_ending(0);
+            done.send(()).unwrap();
+        });
+        assert_eq!(
+            exited.recv_timeout(Duration::from_millis(300)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        assert_eq!(thread::owner(tid), peer);
+
+        // Notification is only a wakeup: a cancelled blocking receive
+        // must not consume the exit report.
+        let (writer, reader) = UnixStream::pair().unwrap();
+        notify(writer.as_raw_fd(), peer, tid);
+        assert_eq!(Reader::new(&recv(reader.as_raw_fd()).unwrap()).i64(), 0);
+        assert_eq!(thread::owner(tid), peer);
+
+        // A failed status write also leaves it available for another wait.
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(!wait_status(writer.as_raw_fd(), peer, tid));
+        assert!(tracee::lock().ended.contains_key(&tid));
+        let (writer, reader) = UnixStream::pair().unwrap();
+        assert!(wait_status(writer.as_raw_fd(), peer, tid));
+        let bytes = recv(reader.as_raw_fd()).unwrap();
+        let mut reply = Reader::new(&bytes);
+        assert_eq!(reply.i64(), 1);
+        assert_eq!(reply.i32(), 3 << 8);
+        exited.recv_timeout(Duration::from_secs(2)).unwrap();
+        ending.join().unwrap();
+        assert_eq!(thread::owner(tid), 0);
+
+        // An automatic attach may never get a connection. Such a tracer's
+        // death must still release the report and allow process teardown.
+        let mut tracer = std::process::Command::new("/bin/sleep")
+            .arg("0.3")
+            .spawn()
+            .unwrap();
+        let tid = end_thread(tracer.id() as i32);
+        tracee::process_ending(0);
+        assert!(tracer.wait().unwrap().success());
+        assert_eq!(thread::owner(tid), 0);
+        assert!(tracee::lock().ended.is_empty());
     }
 }

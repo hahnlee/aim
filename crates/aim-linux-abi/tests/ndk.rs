@@ -476,6 +476,16 @@ fn ptrace() {
 }
 
 #[test]
+fn ptrace_clone_events_stress() {
+    check("t_ptrace", &["--trace-clone-events", "1000"]);
+}
+
+#[test]
+fn ptrace_clone_events_delayed_wait() {
+    check("t_ptrace", &["--trace-clone-events", "8", "300000"]);
+}
+
+#[test]
 fn proc_mem() {
     check("t_proc_mem", &[]);
 }
