@@ -39,4 +39,6 @@ interface ISystemProcess {
     IBinder getDomainVerificationBackend();
     void attachDomainVerification(IBinder frontend);
     boolean isDomainVerifier(int uid);
+    /** Retained MediaRouter2 system route/session queries; system UID only. */
+    void attachSystemRouteQueries(IBinder queries);
 }
