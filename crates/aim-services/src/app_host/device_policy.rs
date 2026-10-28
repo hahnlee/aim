@@ -11,7 +11,7 @@
 //! every other method are not implemented (#1521).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -527,6 +527,7 @@ fn encryption_status(crypto_type: Option<&str>, target_sdk: i32) -> i32 {
 
 /// What the service reads beside its own state.
 trait Device {
+    fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception>;
     /// `mHasFeature`.
     fn feature(&self) -> Result<bool, Exception>;
     fn policies(&self) -> Result<&Policies, Exception>;
@@ -541,6 +542,7 @@ trait Device {
     fn property(&self, name: &str) -> Option<String>;
     /// The managed profiles of `user` (`UserManager.getProfiles`).
     fn managed_profiles(&self, user: i32) -> Result<Vec<i32>, Exception>;
+    fn profiles(&self, user: i32) -> Vec<i32>;
     /// The exception of `what`, not implemented.
     fn unimplemented(&self, what: &str) -> Exception;
 }
@@ -667,6 +669,38 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
         }
     };
     let result: Result<(), Exception> = match code {
+        dp::GET_DEFAULT_CROSS_PROFILE_PACKAGES => {
+            dp::GetDefaultCrossProfilePackages::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                // The original has no feature, owner or permission gate here.
+                let mut packages: HashSet<_> = device
+                    .string_array("cross_profile_apps")?
+                    .into_iter()
+                    .collect();
+                packages.extend(device.string_array("vendor_cross_profile_apps")?);
+                let packages: Vec<_> = packages.into_iter().collect();
+                dp::write_get_default_cross_profile_packages_reply(&mut p, &Some(packages));
+                Ok(())
+            })()
+        }
+        dp::RESET_DEFAULT_CROSS_PROFILE_INTENT_FILTERS => {
+            let a = dp::ResetDefaultCrossProfileIntentFilters::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                authorize(
+                    caller.system_or_root()
+                        || caller.permitted(MANAGE_PROFILE_AND_DEVICE_OWNERS)?,
+                )?;
+                // DevicePolicyManagerService.resetDefaultCrossProfileIntentFilters,
+                // android-16.0.0_r1: no filters to reset in a group of at most one.
+                if device.profiles(a.user_id).len() > 1 {
+                    return Err(device.unimplemented(
+                        "resetting cross-profile intent filters for profiles (#1521)",
+                    ));
+                }
+                dp::write_reset_default_cross_profile_intent_filters_reply(&mut p);
+                Ok(())
+            })()
+        }
         dp::GET_PASSWORD_QUALITY => {
             let a = dp::GetPasswordQuality::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
@@ -1248,6 +1282,15 @@ impl DevicePolicy {
 }
 
 impl Device for DevicePolicy {
+    fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception> {
+        self.host
+            .framework()?
+            .framework_string_array(name)
+            .ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, format!("framework array/{name} absent"))
+            })
+    }
+
     fn feature(&self) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
         Ok(state
@@ -1297,6 +1340,10 @@ impl Device for DevicePolicy {
 
     fn managed_profiles(&self, user: i32) -> Result<Vec<i32>, Exception> {
         super::user_service::managed_profiles(&self.host, user)
+    }
+
+    fn profiles(&self, user: i32) -> Vec<i32> {
+        super::user_service::profile_ids(user)
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
@@ -1580,6 +1627,14 @@ mod tests {
     }
 
     impl Device for Fake {
+        fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception> {
+            Ok(match name {
+                "cross_profile_apps" => vec![Some("platform".into()), Some("both".into())],
+                "vendor_cross_profile_apps" => vec![Some("vendor".into()), Some("both".into())],
+                _ => panic!("unexpected resource {name}"),
+            })
+        }
+
         fn feature(&self) -> Result<bool, Exception> {
             Ok(self.feature)
         }
@@ -1620,6 +1675,16 @@ mod tests {
             Ok(self.managed.iter().copied().filter(|_| user == 0).collect())
         }
 
+        fn profiles(&self, user: i32) -> Vec<i32> {
+            if user == 0 {
+                std::iter::once(0)
+                    .chain(self.managed.iter().copied())
+                    .collect()
+            } else {
+                vec![]
+            }
+        }
+
         fn unimplemented(&self, what: &str) -> Exception {
             Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, what)
         }
@@ -1638,6 +1703,81 @@ mod tests {
 
     fn not_authorized() -> Exception {
         Exception::security("Calling identity is not authorized")
+    }
+
+    #[test]
+    fn default_cross_profile_packages_are_the_union_without_permission_or_feature_checks() {
+        for feature in [false, true] {
+            let device = Fake {
+                feature,
+                policies: Policies {
+                    owned: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let r = call(&device, APP, dp::GET_DEFAULT_CROSS_PROFILE_PACKAGES, |p| {
+                dp::GetDefaultCrossProfilePackages {}.write(p)
+            });
+            let packages = dp::read_get_default_cross_profile_packages_reply(&mut r.reader())
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(packages.len(), 3);
+            assert_eq!(
+                packages.into_iter().collect::<HashSet<_>>(),
+                ["platform", "vendor", "both"]
+                    .map(|p| Some(p.into()))
+                    .into()
+            );
+        }
+    }
+
+    /// DevicePolicyManagerService.resetDefaultCrossProfileIntentFilters,
+    /// android-16.0.0_r1: authorize before returning for a group of <= 1.
+    #[test]
+    fn reset_cross_profile_filters_checks_permission_before_the_single_user_return() {
+        let reset = |device: &Fake, uid, user_id| {
+            call(
+                device,
+                uid,
+                dp::RESET_DEFAULT_CROSS_PROFILE_INTENT_FILTERS,
+                |p| dp::ResetDefaultCrossProfileIntentFilters { user_id }.write(p),
+            )
+        };
+        let mut device = Fake::default();
+        for user in [0, 10] {
+            assert_eq!(exception(&reset(&device, APP, user)), not_authorized());
+            assert!(
+                reset(&device, SYSTEM_UID, user)
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .is_ok()
+            );
+        }
+        device.permissions.push((APP, MANAGE_USERS));
+        assert_eq!(exception(&reset(&device, APP, 0)), not_authorized());
+        device
+            .permissions
+            .push((APP, MANAGE_PROFILE_AND_DEVICE_OWNERS));
+        // Neither a missing feature nor persisted policy changes this decision.
+        for feature in [true, false] {
+            device.feature = feature;
+            device.policies.owned = true;
+            assert!(
+                reset(&device, APP, 0)
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .is_ok()
+            );
+        }
+        device.managed.push(10);
+        assert_eq!(
+            exception(&reset(&device, APP, 0)).code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
     }
 
     /// `getSystemUpdatePolicy`: none without a persisted one, which is not

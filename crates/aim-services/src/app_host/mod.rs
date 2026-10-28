@@ -96,6 +96,8 @@ pub mod legacy_permission;
 pub mod locale_manager;
 pub mod lock_settings;
 mod loudness;
+#[cfg(test)]
+mod managed_provisioning_tests;
 mod media_route_providers;
 pub mod media_router;
 mod media_router2;
@@ -389,8 +391,10 @@ struct Isolation {
 
 /// A process started and not yet attached, or attached.
 struct App {
-    /// The package it was started for, and its process name.
+    /// The package it was started for.
     package: String,
+    /// Packages hosted in this process (`ProcessRecord.getPkgList`).
+    packages: Vec<String>,
     process: String,
     uid: u32,
     /// Its package's uid (`ProcessRecord.info.uid`): its own uid, or an
@@ -442,6 +446,25 @@ struct App {
     /// milliseconds (`ProcessProfileRecord.mLastMemInfo`,
     /// `mLastMemInfoTime`).
     last_mem_info: Option<(i64, memory_info::ProcessMemoryInfo)>,
+}
+
+impl App {
+    /// `ProcessRecord.addPackage`, retaining insertion order and uniqueness.
+    fn add_package(&mut self, package: &str) {
+        if !self.packages.iter().any(|p| p == package) {
+            self.packages.push(package.to_string());
+        }
+    }
+
+    /// ContentProviderHelper.generateApplicationProvidersLocked, android-16.0.0_r1.
+    fn add_provider(&mut self, provider: package::info::ProviderInfo) {
+        if let Some(package) = provider.info.application_info.item.package_name.as_deref()
+            && (!provider.multiprocess || package != SYSTEM_PACKAGE)
+        {
+            self.add_package(package);
+        }
+        self.providers.push(provider);
+    }
 }
 
 /// `getPackageProcessState` over the processes, each its package (its
@@ -535,9 +558,9 @@ pub struct AppHost {
     /// user's system grammatical gender, read from its file once.
     grammatical_genders: Mutex<HashMap<i32, i32>>,
     unimplemented: Mutex<std::collections::HashSet<(String, u32)>>,
-    /// The users unlocking or unlocked (`UserController`'s user states at
-    /// `STATE_RUNNING_UNLOCKING` or later).
-    unlocked_users: Mutex<std::collections::BTreeSet<i32>>,
+    /// The users unlocking or unlocked and their unlock elapsed realtime
+    /// (`UserController`'s `STATE_RUNNING_UNLOCKING` or later).
+    unlocked_users: Mutex<std::collections::BTreeMap<i32, i64>>,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
     /// The settings provider, its binder and its connection token.
@@ -1411,6 +1434,7 @@ impl AppHost {
             start_seq,
             App {
                 package: "android".into(),
+                packages: vec!["android".into()],
                 process: process.to_string(),
                 uid,
                 package_uid: SYSTEM_UID,
@@ -1524,6 +1548,7 @@ impl AppHost {
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
+                packages: vec![package.clone()],
                 package,
                 process: process.to_string(),
                 uid,
@@ -1759,6 +1784,7 @@ impl AppHost {
             apps.iter_mut()
                 .find(|(_, a)| a.process == process && a.uid == uid)
                 .map(|(seq, a)| {
+                    a.add_package(name);
                     if a.thread.is_none() {
                         a.activities.extend(request.take());
                     }
@@ -1794,6 +1820,7 @@ impl AppHost {
             start_seq,
             App {
                 package: name.to_string(),
+                packages: vec![name.to_string()],
                 process: process.to_string(),
                 uid,
                 package_uid,
@@ -1999,7 +2026,9 @@ impl AppHost {
         let providers = self.process_providers(&app.process, app.uid)?;
         let (bind, config) = self.bind_application(app, providers.clone())?;
         app.config = Some(config);
-        app.providers = providers;
+        for provider in providers {
+            app.add_provider(provider);
+        }
         strong
             .transact(thread::BIND_APPLICATION, &bind, true)
             .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("bindApplication: {s}")))?;
@@ -2075,6 +2104,7 @@ impl AppHost {
             seq,
             App {
                 package: SYSTEM_PACKAGE.to_string(),
+                packages: vec![SYSTEM_PACKAGE.to_string()],
                 process: SYSTEM_PROCESS.to_string(),
                 uid: SYSTEM_UID,
                 package_uid: SYSTEM_UID,
@@ -2089,7 +2119,7 @@ impl AppHost {
                 thread: Some(strong),
                 activities: Vec::new(),
                 config: Some(config),
-                providers: providers.clone(),
+                providers: Vec::new(),
                 removed: false,
                 first_frame: None,
                 last_activity: 0,
@@ -2098,6 +2128,9 @@ impl AppHost {
                 last_mem_info: None,
             },
         );
+        for provider in &providers {
+            apps.get_mut(&seq).unwrap().add_provider(provider.clone());
+        }
         drop(apps);
         eprintln!("app host: the system process (pid {pid}) attached");
         for provider in providers {
@@ -2730,7 +2763,7 @@ impl AppHost {
             .map(|(seq, a)| {
                 let mut info = RunningAppProcessInfo {
                     process_name: Some(a.process.clone()),
-                    pkg_list: Some(vec![a.package.clone()]),
+                    pkg_list: Some(a.packages.clone()),
                     ..Default::default()
                 };
                 self.fill_in_proc_mem_info(*seq, a, &mut info, front);
@@ -3449,7 +3482,11 @@ impl AppHost {
                 "unlocking names an unknown user",
             ));
         }
-        self.unlocked_users.lock().unwrap().insert(user);
+        self.unlocked_users
+            .lock()
+            .unwrap()
+            .entry(user)
+            .or_insert_with(|| clock_ms(libc::CLOCK_MONOTONIC_RAW));
         system.publish_package_user_unlocking(user)
     }
 
@@ -3457,7 +3494,7 @@ impl AppHost {
     pub(crate) fn set_user_unlocked_for_package_test(&self, user: i32, unlocked: bool) {
         let mut users = self.unlocked_users.lock().unwrap();
         if unlocked {
-            users.insert(user);
+            users.insert(user, clock_ms(libc::CLOCK_MONOTONIC_RAW));
         } else {
             users.remove(&user);
         }
@@ -3465,7 +3502,7 @@ impl AppHost {
 
     /// `UserManagerInternal.isUserUnlockingOrUnlocked`.
     pub(super) fn user_unlocking_or_unlocked(&self, user: i32) -> Result<bool, Exception> {
-        Ok(self.unlocked_users.lock().unwrap().contains(&user))
+        Ok(self.unlocked_users.lock().unwrap().contains_key(&user))
     }
 
     /// `PackageManagerInternal.grantImplicitAccess(user, null,
@@ -5576,6 +5613,11 @@ impl Service for Control {
 pub(crate) use battery_history::tests::temp_dir as test_temp_dir;
 
 #[cfg(test)]
+pub(crate) fn test_activity_service(host: &Arc<AppHost>) -> Arc<dyn Service> {
+    Arc::new(Activity(host.clone()))
+}
+
+#[cfg(test)]
 impl AppHost {
     pub(crate) fn package_booted_for_test(&self) {
         self.package_boot.set(Ok(())).unwrap();
@@ -5727,6 +5769,7 @@ mod tests {
             seq,
             App {
                 package: "android".into(),
+                packages: vec!["android".into()],
                 process: "WebViewLoader-arm64-v8a".into(),
                 uid: FIRST_ISOLATED_UID,
                 package_uid: SYSTEM_UID,

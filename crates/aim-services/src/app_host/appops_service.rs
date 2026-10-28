@@ -30,7 +30,8 @@
 //! watchers (`startWatchingModeWithFlags`, kept until they die) and pauses
 //! or resumes its started ops. PermissionPolicy commits permission-derived
 //! modes through the access owner and updates watchers and started ops;
-//! the other mode writers remain unsupported (#1594). Each attributed op
+//! cross-profile app-op mode writes use that owner too; other mode writes
+//! remain unsupported (#1594). Each attributed op
 //! keeps its last access and rejection by uid
 //! state and flags, a finished start's with its duration
 //! (`appops_history.rs`), which `getPackagesForOps(ForDevice)`,
@@ -77,6 +78,7 @@ pub(super) const MODE_IGNORED: i32 = 1;
 pub(super) const MODE_ERRORED: i32 = 2;
 pub(super) const MODE_DEFAULT: i32 = 3;
 pub(super) const MODE_FOREGROUND: i32 = 4;
+pub(super) const OP_INTERACT_ACROSS_PROFILES: i32 = 93;
 /// `AppOpsManager.OP_SCHEDULE_EXACT_ALARM`, `OP_USE_FULL_SCREEN_INTENT`,
 /// `OP_READ_CONTACTS`, `OP_WRITE_CONTACTS`, `OP_GET_ACCOUNTS`.
 pub(super) const OP_SCHEDULE_EXACT_ALARM: i32 = 107;
@@ -3307,6 +3309,61 @@ impl AppOps {
         }
     }
 
+    /// AppOpsService.setMode / setUidMode for the cross-profile op. With no
+    /// profile owner, enforceManageAppOpsModes requires MANAGE_APP_OPS_MODES.
+    fn set_mode(
+        &self,
+        caller: i32,
+        code: i32,
+        uid: i32,
+        package: Option<Option<&str>>,
+        mode: i32,
+    ) -> Result<(), Exception> {
+        if self
+            .host
+            .check_permission(Some(MANAGE_APP_OPS_MODES), caller)?
+            != 0
+        {
+            return Err(Exception::security(format!(
+                "Neither user {caller} nor current process has {MANAGE_APP_OPS_MODES}."
+            )));
+        }
+        verify_incoming_op(&Host(&self.host), caller, code)?;
+        if code != OP_INTERACT_ACROSS_PROFILES || uid < 0 || uid >= PER_USER_RANGE {
+            return Err(self.host.unimplemented_named(
+                "appops",
+                "mode writes outside user 0's cross-profile op (#1594)",
+            ));
+        }
+        if let Some(package) = package {
+            let Some(package) = package else {
+                return Ok(());
+            };
+            if self.host.filter_package_access(package, caller, 0)?
+                || check_package(&self.host, uid, Some(package))? != MODE_ALLOWED
+            {
+                return Ok(());
+            }
+        }
+        // AppOpsService protects the device provisioning package from shell
+        // writes, using ProtectedPackages' resource (no package-name special case).
+        if app_id(caller) == 2000 {
+            let protected = self
+                .host
+                .framework()?
+                .framework_string("config_deviceProvisioningPackage")
+                .ok_or_else(|| {
+                    Exception::new(EX_ILLEGAL_STATE, "config_deviceProvisioningPackage absent")
+                })?;
+            if check_package(&self.host, uid, Some(&protected))? == MODE_ALLOWED {
+                return Ok(());
+            }
+        }
+        self.permissions
+            .set_cross_profile_mode(uid, package.flatten(), mode)?;
+        Ok(())
+    }
+
     /// `getPackageNamesForSampling`: the packages of user 0 that request a
     /// dangerous permission (`isSamplingTarget`).
     fn sampling_targets(&self) -> Vec<String> {
@@ -3564,6 +3621,32 @@ impl Service for AppOps {
         let mut p = Parcel::new();
         let caller = call.sender_euid as i32;
         match call.code {
+            appops::SET_MODE => {
+                let a = appops::SetMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply(
+                    self.set_mode(
+                        caller,
+                        a.code,
+                        a.uid,
+                        Some(a.package_name.as_deref()),
+                        a.mode,
+                    )
+                    .map(|()| {
+                        appops::write_set_mode_reply(&mut p);
+                        p
+                    }),
+                );
+            }
+            appops::SET_UID_MODE => {
+                let a = appops::SetUidMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply(
+                    self.set_mode(caller, a.code, a.uid, None, a.mode)
+                        .map(|()| {
+                            appops::write_set_uid_mode_reply(&mut p);
+                            p
+                        }),
+                );
+            }
             appops::CHECK_PACKAGE => {
                 let args = appops::CheckPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match check_package(&self.host, args.uid, args.package_name.as_deref()) {

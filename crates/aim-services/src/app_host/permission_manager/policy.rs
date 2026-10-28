@@ -55,6 +55,60 @@ impl PackageListObserver for PermissionPolicy {
 }
 
 impl PermissionManager {
+    /// AppIdAppOpPolicy / PackageAppOpPolicy's non-default modes, committed
+    /// through the same access owner as PermissionPolicy's changes.
+    pub(in crate::app_host) fn set_cross_profile_mode(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        mode: i32,
+    ) -> Result<bool, Exception> {
+        if !(0..PER_USER_RANGE).contains(&uid) {
+            return Err(self
+                .host
+                .unimplemented_named("appops", "cross-profile modes outside user 0 (#1594)"));
+        }
+        self.retained_access()?;
+        let op = &APP_OP_INFOS[appops_service::OP_INTERACT_ACROSS_PROFILES as usize];
+        let default = appops_service::policy_default_mode(&self.host, op.code)?;
+        let mut held = self.owner.lock().unwrap();
+        let before = held.user0.as_ref().expect("loaded");
+        let mut after = (**before).clone();
+        match package {
+            Some(package) => set_mode(
+                &mut after.package_app_ops,
+                package.to_owned(),
+                op.name,
+                mode,
+                default,
+            ),
+            None => set_mode(&mut after.app_id_app_ops, uid, op.name, mode, default),
+        }
+        if after == **before {
+            return Ok(false);
+        }
+        self.write_user0(&after)?;
+        held.user0 = Some(Arc::new(after));
+        drop(held);
+        let packages = match package {
+            Some(package) => vec![package.to_owned()],
+            None => self
+                .host
+                .packages()?
+                .0
+                .packages
+                .values()
+                .filter(|ps| {
+                    ps.shared_user_app_id.unwrap_or(ps.app_id) == uid
+                        && ps.users.get(&0).is_none_or(|u| u.installed)
+                })
+                .map(|ps| ps.name.clone())
+                .collect(),
+        };
+        appops_service::permission_modes_changed(&self.host, uid, &[op.code], &packages)?;
+        Ok(true)
+    }
+
     pub(super) fn synchronize_permission_app_ops(
         &self,
         app_id: i32,

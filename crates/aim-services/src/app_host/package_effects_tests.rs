@@ -406,6 +406,7 @@ fn kill_package_scopes_app_id_and_user_and_preserves_the_exit_reason() {
                 seq,
                 super::super::App {
                     package: package.into(),
+                    packages: vec![package.into()],
                     process: package.into(),
                     uid: app_uid,
                     package_uid: app_uid,

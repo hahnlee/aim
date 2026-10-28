@@ -37,6 +37,7 @@ fn register(
         seq,
         super::super::App {
             package: package.into(),
+            packages: vec![package.into()],
             process: package.into(),
             uid: uid as u32,
             package_uid: uid as u32,
@@ -89,6 +90,87 @@ fn register(
         )
         .unwrap();
     receive
+}
+
+/// BroadcastController.registerReceiverWithFeature and
+/// ContentProviderHelper.generateApplicationProvidersLocked, android-16.0.0_r1:
+/// a package of the same uid becomes a caller only once hosted in the process.
+#[test]
+fn shared_process_receiver_registration_uses_all_hosted_packages() {
+    crate::system::with_discovery_binders(|host, publish, _, export| {
+        publish(&mut |package| {
+            if package.package_name == "p" {
+                let mut provider = crate::package::pkg::Provider {
+                    main: package.activities[0].main.clone(),
+                    authority: Some("shared.provider".into()),
+                    ..Default::default()
+                };
+                provider.main.component.name = "p.SharedProvider".into();
+                provider.main.process_name = Some("shared.process".into());
+                provider.main.direct_boot_aware = true;
+                package.providers.push(provider);
+            }
+        });
+        // A ProcessRecord initially bound to q, with p's uid, as for a shared uid.
+        let _receivers = register(host, export, "q", 10100);
+        let binder = host.apps.lock().unwrap()[&10100]
+            .thread
+            .as_ref()
+            .unwrap()
+            .binder();
+        let data = Parcel::new();
+        let call = Call {
+            code: am::REGISTER_RECEIVER,
+            flags: 0,
+            sender_pid: 10100,
+            sender_euid: 10100,
+            data: data.reader(),
+        };
+        let register_package = |package: &str| {
+            let mut filter = IntentFilter::default();
+            filter.add_action(RESTARTED);
+            host.broadcasts.register(
+                host,
+                &call,
+                Registration {
+                    caller: Some(binder),
+                    caller_package: Some(package.into()),
+                    feature_id: None,
+                    receiver_id: None,
+                    receiver: Some(binder),
+                    filter: Some(ParcelFilter(filter)),
+                    permission: None,
+                    user: 0,
+                    flags: RECEIVER_EXPORTED,
+                },
+            )
+        };
+        assert!(register_package("q").is_ok());
+        // The package exists with this uid, but has not run in the process.
+        assert_eq!(
+            register_package("p").err().unwrap().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        let providers = host.process_providers("shared.process", 10100).unwrap();
+        assert_eq!(providers.len(), 1);
+        {
+            let mut apps = host.apps.lock().unwrap();
+            let app = apps.get_mut(&10100).unwrap();
+            app.add_provider(providers[0].clone());
+            app.add_provider(providers[0].clone());
+            assert_eq!(app.packages, ["q", "p"]);
+            app.package_deps.push("unloaded.dependency".into());
+        }
+        assert!(register_package("p").is_ok());
+        assert_eq!(
+            register_package("unloaded.dependency").err().unwrap().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        assert_eq!(
+            register_package("unrelated").err().unwrap().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+    });
 }
 
 #[derive(Default)]
