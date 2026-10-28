@@ -627,6 +627,7 @@ pub struct MountPolicy {
 pub struct Description {
     pub key: SessionKey,
     pub node: u64,
+    pub generation: u64,
     pub fh: u64,
     pub flags: u32,
     pub directory: bool,
@@ -656,6 +657,7 @@ fn read_text(body: &[u8], at: &mut usize) -> Result<String, Errno> {
 pub fn open_description(
     key: &SessionKey,
     nodeid: u64,
+    generation: u64,
     fh: u64,
     flags: u32,
     directory: bool,
@@ -681,6 +683,7 @@ pub fn open_description(
     body.push(policy.allow_other as u8);
     body.push(policy.default_permissions as u8);
     body.push(policy.read_only as u8);
+    body.extend(generation.to_le_bytes());
     text(&mut body, relative);
     text(&mut body, guest);
     open_on_key(key, flags as i32, OPEN_FILE, &body)
@@ -688,10 +691,10 @@ pub fn open_description(
 pub fn description(fd: RawFd) -> Result<Description, Errno> {
     let (key, number) = descriptor(fd)?;
     let body = rpc(&key, FILE_DESCRIBE, number, &[])?;
-    if body.len() < 44 {
+    if body.len() < 52 {
         return Err(EIO);
     }
-    let mut at = 36;
+    let mut at = 44;
     let policy = MountPolicy {
         uid: u32::from_le_bytes(body[25..29].try_into().unwrap()),
         gid: u32::from_le_bytes(body[29..33].try_into().unwrap()),
@@ -707,6 +710,7 @@ pub fn description(fd: RawFd) -> Result<Description, Errno> {
     Ok(Description {
         key,
         node: u64::from_le_bytes(body[..8].try_into().unwrap()),
+        generation: u64::from_le_bytes(body[36..44].try_into().unwrap()),
         fh: u64::from_le_bytes(body[8..16].try_into().unwrap()),
         flags: u32::from_le_bytes(body[16..20].try_into().unwrap()),
         directory: body[20] != 0,
@@ -784,8 +788,16 @@ fn read_word(bytes: &[u8], at: &mut usize) -> Result<u32, Errno> {
     *at += 4;
     Ok(value)
 }
-pub fn borrow_inode_descriptor(key: &SessionKey, node: u64) -> Result<std::os::fd::OwnedFd, Errno> {
+pub fn borrow_inode_descriptor(
+    key: &SessionKey,
+    node: u64,
+    generation: Option<u64>,
+) -> Result<std::os::fd::OwnedFd, Errno> {
     use std::os::fd::FromRawFd;
-    let fd = open_on_key(key, 0, BORROW_FILE, &node.to_le_bytes())?;
+    let mut body = node.to_le_bytes().to_vec();
+    if let Some(generation) = generation {
+        body.extend(generation.to_le_bytes());
+    }
+    let fd = open_on_key(key, 0, BORROW_FILE, &body)?;
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }

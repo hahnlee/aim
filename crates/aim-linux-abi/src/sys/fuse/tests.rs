@@ -188,6 +188,7 @@ fn fuse_description_shared_offset_flags_directory_and_last_close() {
     let fd = open_description(
         &connection.key,
         5,
+        17,
         71,
         2,
         false,
@@ -202,6 +203,7 @@ fn fuse_description_shared_offset_flags_directory_and_last_close() {
     .unwrap();
     let dup = unsafe { libc::dup(fd) };
     let metadata = description(dup).unwrap();
+    assert_eq!(metadata.generation, 17);
     assert_eq!(metadata.relative, "DCIM/photo");
     assert_eq!(metadata.open_flags, 1);
     assert!(!metadata.policy.default_permissions);
@@ -245,6 +247,7 @@ fn fuse_description_shared_offset_flags_directory_and_last_close() {
     let fd = open_description(
         &connection.key,
         9,
+        0,
         80,
         0,
         true,
@@ -291,6 +294,7 @@ fn fuse_descriptor_survives_real_process_inheritance_and_death_aborts_waiters() 
     let fd = open_description(
         &connection.key,
         2,
+        0,
         22,
         2,
         false,
@@ -359,6 +363,7 @@ fn fuse_negotiated_chunks_notifications_and_borrowed_inode_lifetime() {
     let fd = open_description(
         &connection.key,
         6,
+        41,
         72,
         2,
         false,
@@ -371,7 +376,12 @@ fn fuse_negotiated_chunks_notifications_and_borrowed_inode_lifetime() {
         1,
     )
     .unwrap();
-    let borrowed = borrow_inode_descriptor(&connection.key, 6).unwrap();
+    assert_eq!(
+        borrow_inode_descriptor(&connection.key, 6, Some(42)).err(),
+        Some(crate::errno::ENOENT)
+    );
+    let borrowed = borrow_inode_descriptor(&connection.key, 6, Some(41)).unwrap();
+    assert_eq!(description(borrowed.as_raw_fd()).unwrap().generation, 41);
     assert_eq!(description(borrowed.as_raw_fd()).unwrap().fh, 72);
     assert_eq!(offset(borrowed.as_raw_fd(), Some(9)).unwrap(), 9);
     assert_eq!(offset(fd, None).unwrap(), 9);
@@ -435,7 +445,7 @@ fn fuse_negotiated_chunks_notifications_and_borrowed_inode_lifetime() {
     let forget = next(connection.fd);
     assert_eq!(u32::from_le_bytes(forget[4..8].try_into().unwrap()), FORGET);
     assert_eq!(
-        borrow_inode_descriptor(&connection.key, 6).err(),
+        borrow_inode_descriptor(&connection.key, 6, None).err(),
         Some(crate::errno::ENOENT)
     );
 }

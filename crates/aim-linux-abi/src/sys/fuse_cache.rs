@@ -2,6 +2,10 @@
 //! Linux cached FUSE semantics: docs.kernel.org/filesystems/fuse/fuse-io.html.
 //! The baseline records only bytes acknowledged by the actual FUSE server;
 //! mmap writes remain dirty until their differing bytes are acknowledged.
+//! Inode identity includes the entry generation (fuse(4), FUSE_LOOKUP):
+//! https://man7.org/linux/man-pages/man4/fuse.4.html
+//! https://libfuse.github.io/doxygen/structfuse__entry__param.html
+//! Mapping fd leases retain lookup references until RELEASE, then FORGET.
 use super::{
     fuse::SessionKey,
     fuse_client::{self, Open},
@@ -110,10 +114,14 @@ struct Borrowed {
     _lease: OwnedFd,
     file: Arc<Open>,
 }
-fn borrow(key: &SessionKey, node: u64) -> Result<Borrowed, Errno> {
-    let fd = super::fuse::borrow_inode_descriptor(key, node)?;
+fn borrow(key: &SessionKey, node: u64, generation: Option<u64>) -> Result<Borrowed, Errno> {
+    let fd = super::fuse::borrow_inode_descriptor(key, node, generation)?;
     let description = super::fuse::description(fd.as_raw_fd())?;
-    if description.key != *key || description.node != node || description.directory {
+    if description.key != *key
+        || description.node != node
+        || generation.is_some_and(|g| description.generation != g)
+        || description.directory
+    {
         return Err(EINVAL);
     }
     let policy = description.policy;
@@ -130,6 +138,7 @@ fn borrow(key: &SessionKey, node: u64) -> Result<Borrowed, Errno> {
         guest: description.guest,
         route,
         node: description.node,
+        generation: description.generation,
         fh: description.fh,
         flags: description.flags,
         open_flags: description.open_flags,
@@ -145,10 +154,11 @@ fn borrow(key: &SessionKey, node: u64) -> Result<Borrowed, Errno> {
 pub fn flush_retiring(
     key: &SessionKey,
     node: u64,
+    generation: u64,
     mut write: impl FnMut(u64, &[u8]) -> Result<u32, Errno>,
 ) -> Result<(), Errno> {
     let dir = root(key.transport())?;
-    let control = backing(dir.join(format!("{node}.state")))?;
+    let control = backing(dir.join(format!("{node}.{generation}.state")))?;
     loop {
         if unsafe { libc::flock(control.as_raw_fd(), libc::LOCK_EX) } == 0 {
             break;
@@ -162,8 +172,8 @@ pub fn flush_retiring(
         if control.metadata().map_err(io)?.len() != 8 {
             return Ok(());
         }
-        let data = backing(dir.join(format!("{node}.pages")))?;
-        let baseline = backing(dir.join(format!("{node}.baseline")))?;
+        let data = backing(dir.join(format!("{node}.{generation}.pages")))?;
+        let baseline = backing(dir.join(format!("{node}.{generation}.baseline")))?;
         let size = data.metadata().map_err(io)?.len();
         let mut at = 0;
         while at < size {
@@ -198,7 +208,7 @@ pub fn flush_retiring(
         baseline.sync_data().map_err(io)
     })();
     if let Err(error) = result {
-        let errors = backing(dir.join(format!("{node}.errors")))?;
+        let errors = backing(dir.join(format!("{node}.{generation}.errors")))?;
         let sequence = if errors.metadata().map_err(io)?.len() == 12 {
             let mut bytes = [0; 12];
             read_exact(&errors, &mut bytes, 0)?;
@@ -245,10 +255,10 @@ impl Cache {
             None
         };
         let cache = Arc::new(Self {
-            data: backing(dir.join(format!("{}.pages", source.node)))?,
-            baseline: backing(dir.join(format!("{}.baseline", source.node)))?,
-            control: backing(dir.join(format!("{}.state", source.node)))?,
-            errors: backing(dir.join(format!("{}.errors", source.node)))?,
+            data: backing(dir.join(format!("{}.{}.pages", source.node, source.generation)))?,
+            baseline: backing(dir.join(format!("{}.{}.baseline", source.node, source.generation)))?,
+            control: backing(dir.join(format!("{}.{}.state", source.node, source.generation)))?,
+            errors: backing(dir.join(format!("{}.{}.errors", source.node, source.generation)))?,
             gate: Mutex::new(()),
             source,
             _lease: lease,
@@ -314,6 +324,7 @@ impl Cache {
                             borrowed = Some(borrow(
                                 &SessionKey::from_transport(self.source.route.session.clone()),
                                 self.source.node,
+                                Some(self.source.generation),
                             )?);
                         }
                         let source = &borrowed.as_ref().unwrap().file;
@@ -376,13 +387,13 @@ struct Mapping {
     cache: Arc<Cache>,
 }
 static MAPPINGS: LazyLock<Mutex<Vec<Mapping>>> = LazyLock::new(Default::default);
-static CACHES: LazyLock<Mutex<BTreeMap<(PathBuf, u64), Weak<Cache>>>> =
+static CACHES: LazyLock<Mutex<BTreeMap<(PathBuf, u64, u64), Weak<Cache>>>> =
     LazyLock::new(Default::default);
 struct Cursor {
     file: Weak<Open>,
     sequence: u64,
 }
-static CURSORS: LazyLock<Mutex<BTreeMap<(PathBuf, u64), Vec<Cursor>>>> =
+static CURSORS: LazyLock<Mutex<BTreeMap<(PathBuf, u64, u64), Vec<Cursor>>>> =
     LazyLock::new(Default::default);
 pub fn register_file(file: &Arc<Open>) -> Result<(), Errno> {
     if file.directory || file.flags & 0x200000 != 0 {
@@ -393,7 +404,7 @@ pub fn register_file(file: &Arc<Open>) -> Result<(), Errno> {
     let sequence = cache.error_state()?.0;
     let mut cursors = CURSORS.lock().unwrap();
     let entries = cursors
-        .entry((file.route.session.clone(), file.node))
+        .entry((file.route.session.clone(), file.node, file.generation))
         .or_default();
     entries.retain(|cursor| cursor.file.strong_count() != 0);
     if !entries.iter().any(|cursor| {
@@ -413,7 +424,7 @@ fn check_error(cache: &Cache, file: &Arc<Open>) -> Result<(), Errno> {
     let (sequence, error) = cache.error_state()?;
     let mut cursors = CURSORS.lock().unwrap();
     let entries = cursors
-        .entry((file.route.session.clone(), file.node))
+        .entry((file.route.session.clone(), file.node, file.generation))
         .or_default();
     let Some(cursor) = entries.iter_mut().find(|cursor| {
         cursor
@@ -474,7 +485,7 @@ pub fn drain_notifications(key: &SessionKey) -> Result<(), Errno> {
                         .unwrap(),
                 ) as usize;
                 let bytes = notification.body.get(24..24 + count).ok_or(EIO)?;
-                let borrowed = borrow(key, node)?;
+                let borrowed = borrow(key, node, None)?;
                 let cache = Cache::open(borrowed.file.clone(), None, true)?;
                 let _lock = lock(&cache)?;
                 write_all(&cache.data, bytes, offset)?;
@@ -502,7 +513,7 @@ struct Worker {
     thread: std::thread::JoinHandle<()>,
 }
 static WORKER: Mutex<Option<Worker>> = Mutex::new(None);
-static FAILED: LazyLock<Mutex<BTreeMap<(PathBuf, u64), Arc<Cache>>>> =
+static FAILED: LazyLock<Mutex<BTreeMap<(PathBuf, u64, u64), Arc<Cache>>>> =
     LazyLock::new(Default::default);
 fn mapped_shared() -> Vec<Mapping> {
     MAPPINGS
@@ -518,7 +529,11 @@ fn flush_mappings(maps: Vec<Mapping>) -> Result<(), Errno> {
     for m in maps {
         if let Err(failure) = m.cache.flush(m.offset, m.end - m.start) {
             FAILED.lock().unwrap().insert(
-                (m.cache.source.route.session.clone(), m.cache.source.node),
+                (
+                    m.cache.source.route.session.clone(),
+                    m.cache.source.node,
+                    m.cache.source.generation,
+                ),
                 m.cache.clone(),
             );
             error.get_or_insert(failure);
@@ -532,10 +547,11 @@ fn retry_failed() -> Result<(), Errno> {
     for cache in caches {
         match cache.flush(0, u64::MAX) {
             Ok(()) => {
-                FAILED
-                    .lock()
-                    .unwrap()
-                    .remove(&(cache.source.route.session.clone(), cache.source.node));
+                FAILED.lock().unwrap().remove(&(
+                    cache.source.route.session.clone(),
+                    cache.source.node,
+                    cache.source.generation,
+                ));
             }
             Err(failure) => {
                 error.get_or_insert(failure);
@@ -629,7 +645,7 @@ pub fn shutdown_writeback() -> Result<(), Errno> {
     result
 }
 fn cached(file: &Arc<Open>) -> Result<Arc<Cache>, Errno> {
-    let key = (file.route.session.clone(), file.node);
+    let key = (file.route.session.clone(), file.node, file.generation);
     if let Some(cache) = CACHES.lock().unwrap().get(&key).and_then(Weak::upgrade) {
         return Ok(cache);
     }
@@ -652,7 +668,11 @@ pub fn prepare(
     }
     register_file(&file)?;
     let cache = Cache::open(file, Some(fd), true)?;
-    let key = (cache.source.route.session.clone(), cache.source.node);
+    let key = (
+        cache.source.route.session.clone(),
+        cache.source.node,
+        cache.source.generation,
+    );
     let mut caches = CACHES.lock().unwrap();
     let current = caches.get(&key).and_then(Weak::upgrade);
     if current.is_none_or(|current| current.source.flags & 3 != 2 || cache.source.flags & 3 == 2) {
@@ -727,7 +747,7 @@ pub fn flush_file(file: &Arc<Open>) -> Result<(), Errno> {
     let cache = CACHES
         .lock()
         .unwrap()
-        .get(&(file.route.session.clone(), file.node))
+        .get(&(file.route.session.clone(), file.node, file.generation))
         .and_then(Weak::upgrade);
     let cache = match cache {
         Some(cache) => cache,
@@ -780,23 +800,24 @@ pub fn update_after_write(file: &Arc<Open>, offset: u64, bytes: &[u8]) -> Result
 /// Server notification ordering: acknowledge dirty data before replacing clean
 /// cached bytes. No retained genuine handle means refresh is unavailable.
 pub fn invalidate(key: &SessionKey, node: u64, offset: u64, len: u64) -> Result<(), Errno> {
-    let cache = CACHES
+    let caches = CACHES
         .lock()
         .unwrap()
-        .get(&(key.transport().to_owned(), node))
-        .and_then(Weak::upgrade);
-    if let Some(cache) = cache {
-        return invalidate_cache(&cache, offset, len);
+        .iter()
+        .filter(|((session, inode, _), _)| session == key.transport() && *inode == node)
+        .filter_map(|(_, cache)| cache.upgrade())
+        .collect::<Vec<_>>();
+    if !caches.is_empty() {
+        for cache in caches {
+            invalidate_cache(&cache, offset, len)?;
+        }
+        return Ok(());
     }
-    let directory = root(key.transport())?;
-    let state = directory.join(format!("{node}.state"));
-    match fs::symlink_metadata(state) {
-        Ok(metadata) if metadata.len() == 8 => {}
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(io(error)),
-    }
-    let borrowed = borrow(key, node)?;
+    let borrowed = match borrow(key, node, None) {
+        Ok(borrowed) => borrowed,
+        Err(crate::errno::ENOENT) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     invalidate_with_open(key, node, borrowed.file.clone(), offset, len)
 }
 /// An actual active Open supplied by VFS also refreshes a cache populated by
@@ -806,7 +827,7 @@ pub fn invalidate_range(file: &Arc<Open>, offset: u64, len: u64) -> Result<(), E
     let cache = CACHES
         .lock()
         .unwrap()
-        .get(&(file.route.session.clone(), file.node))
+        .get(&(file.route.session.clone(), file.node, file.generation))
         .and_then(Weak::upgrade);
     let cache = match cache {
         Some(cache) => cache,
@@ -829,20 +850,20 @@ pub fn invalidate_with_open(
     }
     invalidate_range(&file, offset, len)
 }
-/// Called by the broker only after genuine last-FORGET and final description
-/// retirement. Active VMA leases prevent this boundary from being reached.
-pub fn evict_inode(key: &SessionKey, node: u64) -> Result<(), Errno> {
+/// Called by the broker before final FORGET, after description retirement.
+/// Active VMA leases retain their descriptions until the mappings disappear.
+pub fn evict_inode(key: &SessionKey, node: u64, generation: u64) -> Result<(), Errno> {
     if CACHES
         .lock()
         .unwrap()
-        .get(&(key.transport().to_owned(), node))
+        .get(&(key.transport().to_owned(), node, generation))
         .and_then(Weak::upgrade)
         .is_some()
     {
         return Err(crate::errno::EBUSY);
     }
     let dir = root(key.transport())?;
-    let control = backing(dir.join(format!("{node}.state")))?;
+    let control = backing(dir.join(format!("{node}.{generation}.state")))?;
     loop {
         if unsafe { libc::flock(control.as_raw_fd(), libc::LOCK_EX) } == 0 {
             break;
@@ -853,8 +874,8 @@ pub fn evict_inode(key: &SessionKey, node: u64) -> Result<(), Errno> {
         }
     }
     let mut result = Ok(());
-    let data = dir.join(format!("{node}.pages"));
-    let baseline = dir.join(format!("{node}.baseline"));
+    let data = dir.join(format!("{node}.{generation}.pages"));
+    let baseline = dir.join(format!("{node}.{generation}.baseline"));
     if data.exists() && baseline.exists() {
         let data = File::open(data).map_err(io)?;
         let baseline = File::open(baseline).map_err(io)?;
@@ -876,7 +897,7 @@ pub fn evict_inode(key: &SessionKey, node: u64) -> Result<(), Errno> {
         }
     }
     for suffix in ["pages", "baseline", "errors", "state"] {
-        match fs::remove_file(dir.join(format!("{node}.{suffix}"))) {
+        match fs::remove_file(dir.join(format!("{node}.{generation}.{suffix}"))) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -958,6 +979,9 @@ mod tests {
         fail: Arc<AtomicBool>,
         writes: Arc<AtomicU64>,
         released: Arc<AtomicBool>,
+        generation: Arc<AtomicU64>,
+        replacement: Arc<Mutex<Vec<u8>>>,
+        requests: Arc<Mutex<Vec<(u32, u64)>>>,
         _exclusive: std::sync::MutexGuard<'static, ()>,
     }
     /// The process's writeback (`MAPPINGS`, the worker, `FAILED`) is one
@@ -1090,22 +1114,63 @@ mod tests {
             let fail = Arc::new(AtomicBool::new(false));
             let writes = Arc::new(AtomicU64::new(0));
             let released = Arc::new(AtomicBool::new(false));
+            let generation = Arc::new(AtomicU64::new(0));
+            let replacement = Arc::new(Mutex::new(vec![b'b'; 16384]));
+            let requests = Arc::new(Mutex::new(Vec::new()));
             let data = bytes.clone();
+            let new_data = replacement.clone();
+            let current = generation.clone();
+            let received = requests.clone();
             let failures = fail.clone();
             let written = writes.clone();
             let release = released.clone();
             let daemon = std::thread::spawn(move || {
                 while let Ok(packet) = next(fd) {
-                    match u32::from_le_bytes(packet[4..8].try_into().unwrap()) {
-                        3 => {
-                            let mut body = vec![0; 104];
-                            body[24..32].copy_from_slice(
-                                &(data.lock().unwrap().len() as u64).to_le_bytes(),
+                    let opcode = u32::from_le_bytes(packet[4..8].try_into().unwrap());
+                    if matches!(opcode, 1 | 14 | 15 | 16 | 18 | 2) {
+                        let identity = if matches!(opcode, 1 | 14) {
+                            current.load(Ordering::SeqCst)
+                        } else {
+                            word(&packet, 40).unwrap()
+                        };
+                        received.lock().unwrap().push((opcode, identity));
+                    }
+                    let contents = |fh| match fh {
+                        71 => &data,
+                        72 => &new_data,
+                        _ => panic!("unexpected FUSE fh {fh}"),
+                    };
+                    match opcode {
+                        1 => {
+                            assert_eq!(&packet[40..], b"f\0");
+                            let mut body = vec![0; 128];
+                            body[..8].copy_from_slice(&5u64.to_le_bytes());
+                            body[8..16]
+                                .copy_from_slice(&current.load(Ordering::SeqCst).to_le_bytes());
+                            respond(fd, &packet, 0, &body);
+                        }
+                        14 => {
+                            let mut body = vec![0; 16];
+                            body[..8].copy_from_slice(
+                                &(71 + current.load(Ordering::SeqCst)).to_le_bytes(),
                             );
                             respond(fd, &packet, 0, &body);
                         }
+                        3 => {
+                            let mut body = vec![0; 104];
+                            let fh = if word(&packet, 40).unwrap() & 1 != 0 {
+                                word(&packet, 48).unwrap()
+                            } else {
+                                71 + current.load(Ordering::SeqCst)
+                            };
+                            body[24..32].copy_from_slice(
+                                &(contents(fh).lock().unwrap().len() as u64).to_le_bytes(),
+                            );
+                            body[76..80].copy_from_slice(&0o100600u32.to_le_bytes());
+                            respond(fd, &packet, 0, &body);
+                        }
                         15 => {
-                            assert_eq!(word(&packet, 40).unwrap(), 71);
+                            let data = contents(word(&packet, 40).unwrap());
                             let offset = word(&packet, 48).unwrap() as usize;
                             let size =
                                 u32::from_le_bytes(packet[56..60].try_into().unwrap()) as usize;
@@ -1118,7 +1183,7 @@ mod tests {
                             );
                         }
                         16 => {
-                            assert_eq!(word(&packet, 40).unwrap(), 71);
+                            let data = contents(word(&packet, 40).unwrap());
                             written.fetch_add(1, Ordering::SeqCst);
                             if failures.load(Ordering::SeqCst) {
                                 respond(fd, &packet, -EIO, &[]);
@@ -1152,6 +1217,9 @@ mod tests {
                 fail,
                 writes,
                 released,
+                generation,
+                replacement,
+                requests,
                 _exclusive: exclusive,
             }
         }
@@ -1164,7 +1232,7 @@ mod tests {
                 read_only: false,
             };
             let fd = super::super::fuse::open_description(
-                &self.key, 5, 71, 2, false, "f", "/test/f", 0, &policy, 0, 0, 1,
+                &self.key, 5, 0, 71, 2, false, "f", "/test/f", 0, &policy, 0, 0, 1,
             )
             .unwrap();
             let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -1180,6 +1248,7 @@ mod tests {
                     read_only: false,
                 },
                 node: 5,
+                generation: 0,
                 fh: 71,
                 flags: 2,
                 open_flags: 0,
@@ -1206,7 +1275,7 @@ mod tests {
                 FAILED
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .retain(|(owner, _), _| owner != session);
+                    .retain(|(owner, _, _), _| owner != session);
             }
             super::super::fuse::abort(&self.key).unwrap();
             self.device.take();
@@ -1352,7 +1421,7 @@ mod tests {
         drain_notifications(&server.key).unwrap();
         wait(|| unsafe { *(mapping as *const u8).add(3) == b'n' });
         assert_eq!(server.writes.load(Ordering::SeqCst), 0);
-        assert_eq!(evict_inode(&server.key, 5), Err(crate::errno::EBUSY));
+        assert_eq!(evict_inode(&server.key, 5, 0), Err(crate::errno::EBUSY));
         shutdown_writeback().unwrap();
         forget(mapping as u64, 16384);
         unsafe {
@@ -1361,7 +1430,7 @@ mod tests {
         drop(cache);
         drop(fd);
         wait(|| server.released.load(Ordering::SeqCst));
-        evict_inode(&server.key, 5).unwrap();
+        evict_inode(&server.key, 5, 0).unwrap();
         server.bytes.lock().unwrap()[3] = b'g';
         let (fd, file) = server.file();
         let fresh = prepare(file, fd.as_raw_fd(), false, false).unwrap();
@@ -1372,6 +1441,192 @@ mod tests {
         server.released.store(false, Ordering::SeqCst);
         drop(fd);
         wait(|| server.released.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn actual_broker_node_reuse_preserves_mapped_generation_and_request_order() {
+        let server = Server::new();
+        let route = crate::vfs::FuseRoute {
+            session: server.key.transport().to_owned(),
+            relative: "f".into(),
+            uid: 0,
+            gid: 0,
+            allow_other: true,
+            default_permissions: false,
+            read_only: false,
+        };
+        let open = || {
+            let raw = fuse_client::open_fd(route.clone(), "/test/f".into(), 2, 0).unwrap();
+            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+            let file = fuse_client::get(raw).unwrap();
+            (fd, file)
+        };
+        let map = |cache: &Arc<Cache>| {
+            let address = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    16384,
+                    3,
+                    libc::MAP_SHARED,
+                    cache.fd(),
+                    0,
+                )
+            };
+            assert_ne!(address, libc::MAP_FAILED);
+            note(cache.clone(), address as u64, 16384, 0, true).unwrap();
+            shutdown_writeback().unwrap();
+            address
+        };
+        let (old_fd, old_file) = open();
+        assert_eq!(old_file.generation, 0);
+        let old_cache = prepare(old_file.clone(), old_fd.as_raw_fd(), true, true).unwrap();
+        let old = map(&old_cache);
+        fuse_client::close(old_fd.as_raw_fd());
+        drop(old_fd);
+        drop(old_file);
+
+        // Reuse the wire node with a different genuine entry generation while
+        // the old VMA alone retains its description and lookup reference.
+        server.generation.store(1, Ordering::SeqCst);
+        let (new_fd, new_file) = open();
+        assert_eq!(new_file.generation, 1);
+        assert_eq!(
+            super::super::fuse::description(new_fd.as_raw_fd())
+                .unwrap()
+                .generation,
+            1
+        );
+        assert_eq!(
+            super::super::fuse::description_io(new_fd.as_raw_fd(), false, Some(0), &[], 4).unwrap(),
+            b"bbbb"
+        );
+        assert_eq!(read_cached(&new_file, 0, 4).unwrap(), b"bbbb");
+        let new_cache = prepare(new_file.clone(), new_fd.as_raw_fd(), true, true).unwrap();
+        let new = map(&new_cache);
+        unsafe {
+            assert_eq!(
+                std::slice::from_raw_parts(old.cast::<u8>(), 16384),
+                vec![b'a'; 16384]
+            );
+            assert_eq!(
+                std::slice::from_raw_parts(new.cast::<u8>(), 16384),
+                vec![b'b'; 16384]
+            );
+            *old.cast::<u8>().add(17) = b'x';
+            *new.cast::<u8>().add(29) = b'y';
+        }
+        flush_range(old as u64, 16384).unwrap();
+        flush_range(new as u64, 16384).unwrap();
+        assert_eq!(server.bytes.lock().unwrap()[17], b'x');
+        assert_eq!(server.bytes.lock().unwrap()[29], b'a');
+        assert_eq!(server.replacement.lock().unwrap()[17], b'b');
+        assert_eq!(server.replacement.lock().unwrap()[29], b'y');
+        assert_eq!(
+            *server.requests.lock().unwrap(),
+            vec![
+                (1, 0),
+                (14, 0),
+                (15, 71),
+                (1, 1),
+                (14, 1),
+                (15, 72),
+                (15, 72),
+                (16, 71),
+                (16, 72),
+            ]
+        );
+
+        // RELEASE and its lookup decrement wait for the final mapping lease,
+        // regardless of the order in which the two generations disappear.
+        fuse_client::close(new_fd.as_raw_fd());
+        drop(new_fd);
+        drop(new_file);
+        forget(new as u64, 16384);
+        assert_eq!(unsafe { libc::munmap(new, 16384) }, 0);
+        drop(new_cache);
+        wait(|| {
+            server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(op, _)| *op == 2)
+                .count()
+                == 1
+        });
+        assert_eq!(unsafe { *old.cast::<u8>().add(17) }, b'x');
+        unsafe {
+            *old.cast::<u8>().add(18) = b'z';
+        }
+        // Final retirement must write dirty pages before releasing the old FH.
+        forget(old as u64, 16384);
+        assert_eq!(unsafe { libc::munmap(old, 16384) }, 0);
+        drop(old_cache);
+        wait(|| {
+            server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(op, _)| *op == 2)
+                .count()
+                == 2
+        });
+        assert_eq!(server.bytes.lock().unwrap()[18], b'z');
+        assert_eq!(server.replacement.lock().unwrap()[18], b'b');
+
+        // Even the same generation cannot attach to pages from a completed
+        // FORGET lifetime. No direct cache eviction is used by this test.
+        server.replacement.lock().unwrap().fill(b'c');
+        let (fd, file) = open();
+        assert_eq!(read_cached(&file, 0, 4).unwrap(), b"cccc");
+        fuse_client::close(fd.as_raw_fd());
+        drop(fd);
+        drop(file);
+        wait(|| {
+            server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(op, _)| *op == 2)
+                .count()
+                == 3
+        });
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(
+            *requests,
+            vec![
+                (1, 0),
+                (14, 0),
+                (15, 71),
+                (1, 1),
+                (14, 1),
+                (15, 72),
+                (15, 72),
+                (16, 71),
+                (16, 72),
+                (18, 72),
+                (2, 1),
+                (16, 71),
+                (18, 71),
+                (2, 1),
+                (1, 1),
+                (14, 1),
+                (15, 72),
+                (18, 72),
+                (2, 1),
+            ]
+        );
+        let mut nlookup = 0;
+        for &(opcode, value) in requests.iter() {
+            if opcode == 1 {
+                nlookup += 1;
+            }
+            if opcode == 2 {
+                nlookup -= value;
+            }
+        }
+        assert_eq!(nlookup, 0);
     }
     #[test]
     #[ignore = "subprocess helper; invoked with its actual broker key by the SIGKILL test"]
@@ -1390,6 +1645,7 @@ mod tests {
         let raw = super::super::fuse::open_description(
             &key,
             5,
+            0,
             71,
             2,
             false,
@@ -1415,6 +1671,7 @@ mod tests {
                 read_only: false,
             },
             node: 5,
+            generation: 0,
             fh: 71,
             flags: 2,
             open_flags: 0,
