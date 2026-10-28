@@ -97,6 +97,24 @@ fn threads_futexes_and_signals_on_original_bionic() {
     );
 }
 
+/// Delay the sender past the old receiver lifetime, and repeatedly force
+/// standard-signal coalescing alongside queued real-time delivery.
+#[test]
+fn signal_storm_survives_sender_starvation() {
+    let r = root().expect("required pinned original image and NDK: NOT RUN if missing");
+    for round in 0..20 {
+        let (status, out) = run(r, &["signal_storm_delayed", "signal_pending_storm"]);
+        assert!(
+            status.success()
+                && out.contains("ok signal_storm_delayed")
+                && out.contains("ok signal_pending_storm (32 rounds)")
+                && out.contains("ALL PASSED"),
+            "stress round {round}: {status:?}\n{out}"
+        );
+        eprintln!("stress round {round}: {out}");
+    }
+}
+
 #[test]
 fn abort_kills_the_process_with_sigabrt() {
     let Some(r) = root() else { return };
