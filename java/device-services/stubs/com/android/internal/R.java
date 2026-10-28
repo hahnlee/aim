@@ -11,7 +11,9 @@ public final class R {
         public static int config_stopSystemPackagesByDefault;
     }
 
+    public static final class color { public static int system_notification_accent_color; }
     public static final class string {
+        public static final int app_running_notification_title = 17039722, app_running_notification_text = 17039721;
  public static int whichViewApplicationLabel,whichEditApplicationLabel,whichSendApplicationLabel,whichSendToApplicationLabel,whichImageCaptureApplicationLabel,whichApplicationLabel,whichHomeApplicationLabel,config_customResolverActivity=17039906,unarchival_session_app_label;
         public static int config_systemUIServiceComponent;
         private string() { throw new RuntimeException("stub"); }

@@ -49,7 +49,7 @@ use super::activity_start::Component;
 use super::activity_user::AllowMode;
 use super::appops_service::{self as appops, MODE_ALLOWED, MODE_DEFAULT};
 use super::broadcasts::filter_equals;
-use super::fgs_types::{self, Check};
+use super::fgs_types;
 use super::kept::{By, KeptIntent, RawIntent};
 use super::notification_service::{Enqueue, Incoming};
 use super::uri_grants::{NeededUriGrants, Owner};
@@ -57,6 +57,21 @@ use super::{AppHost, PER_USER_RANGE, PROCESS_STATE_TOP, STOCK_PM_FLAGS};
 use crate::bundle::Value;
 use crate::package::info::{ServiceInfo, java_hash};
 use crate::package::list_slice::Slice;
+use aim_service_aidl::dev_aim_server_iforegroundservicepolicy as fgs_policy;
+
+fn policy_error(status: i32) -> Exception {
+    Exception::new(
+        EX_ILLEGAL_STATE,
+        format!("foreground service policy: {status}"),
+    )
+}
+
+struct NotificationParcel<'a>(&'a Incoming);
+impl WriteParcelable for NotificationParcel<'_> {
+    fn write_to(&self, p: &mut Parcel) {
+        self.0.write_to_parcel(p);
+    }
+}
 
 /// `ActiveServices.getAllowMode`.
 fn service_allow_mode(service: &RawIntent, calling_package: Option<&str>) -> AllowMode {
@@ -167,7 +182,6 @@ const CANNOT_POST_FOREGROUND_SERVICE_NOTIFICATION: i32 = 2;
 const LOLLIPOP: i32 = 21;
 const O: i32 = 26;
 const O_MR1: i32 = 27;
-const P: i32 = 28;
 /// `ApplicationInfo.PRIVATE_FLAG_INSTANT`.
 const PRIVATE_FLAG_INSTANT: i32 = 1 << 7;
 
@@ -499,6 +513,8 @@ type Job = Box<dyn FnOnce(&Arc<AppHost>) + Send>;
 #[derive(Default)]
 pub struct Services {
     state: Mutex<State>,
+    policy: Mutex<Option<Arc<Strong>>>,
+    type_host: std::sync::OnceLock<Binder>,
     /// The handler (`mAm.mHandler`) the services' notifications are posted
     /// and cancelled on, in order and outside their lock.
     handler: Mutex<Option<mpsc::Sender<Job>>>,
@@ -2178,46 +2194,42 @@ impl AppHost {
     }
 }
 
-/// What `setServiceForegroundInnerLocked` asks of the system to check a
-/// foreground service's type, for its app.
-struct TypeChecker<'a> {
-    host: &'a Arc<AppHost>,
-    uid: i32,
-    package: &'a str,
-}
-
-impl fgs_types::Checker for TypeChecker<'_> {
-    fn change_enabled(&self, change: i64) -> Result<bool, Exception> {
-        self.host.change_enabled(change, self.uid)
-    }
-
-    fn flag(&self, name: &str) -> Result<bool, Exception> {
-        self.host.flag(name)
-    }
-
-    fn regular(&self, permission: &str, allow_while_in_use: bool) -> Result<bool, Exception> {
-        super::permission_checker::fgs_type_permission(
-            self.host,
-            permission,
-            self.uid,
-            self.package,
-            allow_while_in_use,
-        )
-    }
-
-    /// The app host's ops answer a foreground mode as the uid's state
-    /// decides it (each of its processes is top).
-    fn app_op(&self, op: i32, _: bool) -> Result<bool, Exception> {
-        Ok(appops::mode(self.host, op, self.uid, Some(self.package))? == MODE_ALLOWED)
-    }
-
-    fn unimplemented(&self, what: &str) -> Exception {
-        self.host
-            .unimplemented_named("activity", &format!("{what} (#1552)"))
-    }
-}
-
 impl AppHost {
+    fn foreground_service_policy(&self) -> Result<Arc<Strong>, Exception> {
+        self.services.policy.lock().unwrap().clone().ok_or_else(|| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                "foreground service policy bridge is not attached",
+            )
+        })
+    }
+
+    pub(super) fn attach_foreground_service_policy(
+        &self,
+        policy: Option<Binder>,
+    ) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = policy else {
+            return Err(Exception::illegal_argument(
+                "no foreground service policy bridge",
+            ));
+        };
+        let policy = Arc::new(self.process.strong(handle));
+        let weak = self.me.clone();
+        self.process.link_to_death(
+            &policy,
+            Box::new(move || {
+                if let Some(host) = weak.upgrade() {
+                    let mut owner = host.services.policy.lock().unwrap();
+                    if owner.as_ref().is_some_and(|p| p.handle == handle) {
+                        owner.take();
+                    }
+                }
+            }),
+        );
+        *self.services.policy.lock().unwrap() = Some(policy);
+        Ok(())
+    }
+
     /// Runs `job` on the activity manager's handler, after the jobs before
     /// it and outside the services' lock.
     pub(super) fn post_job(&self, job: impl FnOnce(&Arc<AppHost>) + Send + 'static) {
@@ -2536,24 +2548,23 @@ impl AppHost {
             .map(|a| (a.pid, a.process.clone()))
             .unwrap_or_default();
         let short = short_name(&package, &class);
-        if instant {
-            return Err(
-                self.unimplemented_named("activity", "an instant app's foreground service (#1552)")
-            );
+        let policy = self.foreground_service_policy()?;
+        let mut p = Parcel::new();
+        fgs_policy::CheckForegroundServiceStart {
+            package_name: Some(package.clone()),
+            uid,
+            pid,
+            instant,
+            target_sdk,
         }
-        if target_sdk >= P
-            && self.check_permission(Some("android.permission.FOREGROUND_SERVICE"), uid)? != 0
+        .write(&mut p);
+        let reply = policy
+            .transact(fgs_policy::CHECK_FOREGROUND_SERVICE_START, &p, false)
+            .map_err(policy_error)?;
+        if !fgs_policy::read_check_foreground_service_start_reply(&mut reply.reader())
+            .map_err(policy_error)??
         {
-            return Err(Exception::security(format!(
-                "Permission Denial: startForeground from pid={pid}, uid={uid} requires android.permission.FOREGROUND_SERVICE"
-            )));
-        }
-        if !notification.has_small_icon() {
-            // `postNotification` makes one naming the app.
-            return Err(self.unimplemented_named(
-                "activity",
-                "a foreground service's notification without an icon (#1552)",
-            ));
+            return Ok(());
         }
         let manifest_type = r.info.foreground_service_type;
         let skip_check = super::system_boolean(
@@ -2562,7 +2573,9 @@ impl AppHost {
             false,
         );
         let mut service_type = match effective_type(requested_type, manifest_type) {
-            Err(_) if skip_check => requested_type,
+            Err(_) if skip_check || (instant && !self.change_enabled(261_055_255, uid)?) => {
+                effective_type(requested_type, requested_type)?
+            }
             result => result?,
         };
         if service_type == fgs_types::TYPE_MANIFEST {
@@ -2698,11 +2711,6 @@ impl AppHost {
         package: &str,
         target_sdk: i32,
     ) -> Result<(), Exception> {
-        let checker = TypeChecker {
-            host: self,
-            uid,
-            package,
-        };
         let default_to = if service_type & fgs_types::TYPE_SPECIAL_USE != 0 {
             fgs_types::TYPE_SPECIAL_USE
         } else {
@@ -2718,48 +2726,39 @@ impl AppHost {
                 .collect()
         };
         let app = process_record(pid, process, uid);
+        let policy = self.foreground_service_policy()?;
+        let host = *self.services.type_host.get_or_init(|| {
+            self.process
+                .add_service(Arc::new(fgs_types::TypeHost(self.clone())))
+        });
         for ty in types {
-            let policy = fgs_types::policy_of(ty, default_to)?;
-            let label = fgs_types::label(ty);
-            let foreground_only = if policy.foreground_only {
-                " and the app must be in the eligible state/exemptions to access the foreground only permission"
-            } else {
-                ""
-            };
-            match fgs_types::check(policy, &checker, wiu)? {
-                Check::Ok => {}
-                Check::Deprecated => eprintln!(
-                    "app host: Starting FGS with type {label} callerApp={app} targetSDK={target_sdk}"
-                ),
-                Check::PermissionDeniedPermissive => eprintln!(
-                    "app host: Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} requiredPermissions={}{foreground_only}",
-                    policy.permission_string()
-                ),
-                Check::Disabled
-                    if requested_type == fgs_types::TYPE_MANIFEST && ty == fgs_types::TYPE_NONE =>
-                {
-                    return Err(parcelable_exception(
-                        "android.app.MissingForegroundServiceTypeException",
-                        format!(
-                            "Starting FGS without a type  callerApp={app} targetSDK={target_sdk}"
-                        ),
-                    ));
-                }
-                Check::Disabled => {
-                    return Err(parcelable_exception(
-                        "android.app.InvalidForegroundServiceTypeException",
-                        format!(
-                            "Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} has been prohibited"
-                        ),
-                    ));
-                }
-                Check::PermissionDeniedEnforced => {
-                    return Err(Exception::security(format!(
-                        "Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} requires permissions: {}{foreground_only}",
-                        policy.permission_string()
-                    )));
-                }
+            let mut p = Parcel::new();
+            fgs_policy::ValidateForegroundServiceType {
+                r#type: ty,
+                default_to_type: default_to,
+                start_type: requested_type,
+                package_name: Some(package.into()),
+                uid,
+                pid,
+                allow_while_in_use: wiu,
+                app: Some(app.clone()),
+                target_sdk,
+                host: Some(host),
             }
+            .write(&mut p);
+            let reply = policy
+                .transact(fgs_policy::VALIDATE_FOREGROUND_SERVICE_TYPE, &p, false)
+                .map_err(|e| {
+                    Exception::new(EX_ILLEGAL_STATE, format!("foreground service policy: {e}"))
+                })?;
+            fgs_policy::read_validate_foreground_service_type_reply(&mut reply.reader()).map_err(
+                |e| {
+                    Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("foreground service policy reply: {e}"),
+                    )
+                },
+            )??;
         }
         Ok(())
     }
@@ -2862,19 +2861,41 @@ impl AppHost {
             let Some(nms) = host.notification_service.get() else {
                 return;
             };
-            if !notification.has_small_icon() {
-                // The original posts one naming the app.
-                eprintln!(
-                    "app host: {}",
-                    host.unimplemented_named(
-                        "activity",
-                        "a foreground service's notification without an icon (#1552)"
-                    )
-                    .message
-                );
-                return;
-            }
             let posted = (|| {
+                let notification = if notification.has_small_icon() {
+                    notification
+                } else {
+                    let policy = host.foreground_service_policy()?;
+                    let mut p = Parcel::new();
+                    fgs_policy::RepairForegroundServiceNotification {
+                        package_name: Some(package.clone()),
+                        uid,
+                        notification: Some(NotificationParcel(&notification)),
+                    }
+                    .write(&mut p);
+                    let reply = policy
+                        .transact(
+                            fgs_policy::REPAIR_FOREGROUND_SERVICE_NOTIFICATION,
+                            &p,
+                            false,
+                        )
+                        .map_err(policy_error)?;
+                    let mut r = reply.reader();
+                    r.read_exception().map_err(policy_error)??;
+                    if !r.read_bool().map_err(policy_error)? {
+                        return Err(Exception::new(
+                            EX_ILLEGAL_STATE,
+                            "null foreground notification",
+                        ));
+                    }
+                    Incoming::read(&mut r, &host.process)?
+                };
+                if !notification.has_small_icon() {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "invalid service notification",
+                    ));
+                }
                 let target_sdk = host
                     .packages()?
                     .0

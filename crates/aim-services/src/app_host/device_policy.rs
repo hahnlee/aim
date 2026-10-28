@@ -324,6 +324,20 @@ impl Policies {
         Ok(policies)
     }
 
+    pub(super) fn fgs_owner(&self, packages: &[&str], user: i32, device: bool) -> bool {
+        if device {
+            user == self.device_owner_user
+                && self
+                    .device_owner
+                    .as_deref()
+                    .is_some_and(|p| packages.contains(&p))
+        } else {
+            self.profile_owners
+                .get(&user)
+                .is_some_and(|p| packages.contains(&p.package.as_str()))
+        }
+    }
+
     /// Whether the device has a device owner or a user a profile owner.
     pub fn owned(&self) -> bool {
         self.owned

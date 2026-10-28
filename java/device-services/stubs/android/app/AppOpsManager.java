@@ -1,6 +1,7 @@
 // Compile-only pinned image API; runtime reads the original fields.
 package android.app;
 public class AppOpsManager {
+    public static final int OP_INSTANT_APP_START_FOREGROUND = 68;
     public static final int OP_UNARCHIVAL_CONFIRMATION = 146;
     public int checkOp(int op,int uid,String name) { throw new RuntimeException("stub"); }
     public static final int OP_AUTO_REVOKE_PERMISSIONS_IF_UNUSED = 97;

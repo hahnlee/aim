@@ -93,7 +93,8 @@ public final class SystemProcessHost extends RuntimeInit {
             ActivityThread.initializeMainlineModules();
             IApplicationThread applicationThread = thread.getApplicationThread();
             ISystemProcess.Stub.asInterface(ServiceManager.waitForService("aim.system_process"))
-                    .attachSystemProcess(applicationThread.asBinder());
+                    .attachSystemProcess(applicationThread.asBinder(),
+                            DeviceServices.foregroundServicePolicy(context));
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's

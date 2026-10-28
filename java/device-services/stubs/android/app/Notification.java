@@ -4,13 +4,19 @@ package android.app;
 
 import android.content.Context;
 
-public class Notification {
+public class Notification implements android.os.Parcelable {
+    public int describeContents() { throw new RuntimeException("stub"); }
+    public void writeToParcel(android.os.Parcel out, int flags) { throw new RuntimeException("stub"); }
+    public static final android.os.Parcelable.Creator<Notification> CREATOR = null;
+    public android.graphics.drawable.Icon getSmallIcon() { throw new RuntimeException("stub"); }
+    public String getChannelId() { throw new RuntimeException("stub"); }
     public static final int DEFAULT_LIGHTS = 4;
 
     public Notification() { throw new RuntimeException("stub"); }
 
     public static class Builder {
         public Builder(Context context, String channelId) { throw new RuntimeException("stub"); }
+        public Builder setFlag(int mask, boolean value) { throw new RuntimeException("stub"); }
         public Builder setWhen(long when) { throw new RuntimeException("stub"); }
         public Builder setSmallIcon(int icon) { throw new RuntimeException("stub"); }
         public Builder setContentTitle(CharSequence title) { throw new RuntimeException("stub"); }

@@ -58,6 +58,8 @@ impl Service for SystemProcess {
                 let a = sp::AttachSystemProcess::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
                     self.host
+                        .attach_foreground_service_policy(a.foreground_service_policy)?;
+                    self.host
                         .attach_system_process(call, a.application_thread)
                         .map(|()| sp::write_attach_system_process_reply(&mut p))
                 })
