@@ -1406,6 +1406,37 @@ impl<L> Started<L> {
         }
     }
 
+    /// `AttributedOp.onUidStateChanged`: split running access durations at
+    /// the state boundary, without active/started callbacks or losing nesting.
+    fn uid_state_changed(&mut self, uid: i32, state: i32) {
+        let (now, started) = (history::now_ms(), std::time::Instant::now());
+        for ((op_uid, _, _), tags) in &mut self.ops {
+            if *op_uid != uid {
+                continue;
+            }
+            for attributed in tags.values_mut() {
+                let running = !attributed.running.is_empty();
+                let events = if running {
+                    &mut attributed.running
+                } else {
+                    &mut attributed.paused
+                };
+                for event in events.values_mut() {
+                    if event.uid_state == state {
+                        continue;
+                    }
+                    if running {
+                        let (key, access) = event.access();
+                        attributed.events.accessed(key, access);
+                    }
+                    event.uid_state = state;
+                    event.start_time = now;
+                    event.started = started;
+                }
+            }
+        }
+    }
+
     /// `AttributedOp.onClientDeath`: the client's starts all finished, of
     /// the paused events while any is paused.
     fn client_died(&mut self, client: &Client, effects: &mut Effects) -> Vec<L> {
@@ -2633,6 +2664,12 @@ pub(super) fn uid_state_changed(host: &AppHost, uid: i32) {
 
 fn foreground_changed(host: &AppHost, uid: i32) -> Result<(), Exception> {
     let sys = Host(host);
+    // Event accounting changes even when nobody watches foreground modes.
+    host.app_ops
+        .started
+        .lock()
+        .unwrap()
+        .uid_state_changed(uid, uid_state(&sys, uid));
     // `pkgOps`: the uid's packages with an op, and their ops.
     let pkg_ops: Vec<(String, i32)> = {
         let started = host.app_ops.started.lock().unwrap();
@@ -5392,6 +5429,84 @@ mod tests {
             )
             .1
             .is_empty()
+        );
+    }
+
+    /// AttributedOp.onUidStateChanged: running and paused events keep
+    /// their clients/nesting; only running time is recorded in the old state.
+    #[test]
+    fn uid_state_change_splits_running_access_and_preserves_paused_starts() {
+        let mut f = fake();
+        f.running.insert(APP);
+        let mut started = Started::default();
+        let camera = own(OP_CAMERA, APP, "app");
+        start(&f, &mut started, CLIENT, &camera, NO_CHAIN);
+        start(&f, &mut started, CLIENT, &camera, NO_CHAIN);
+        f.global.insert(OP_RECORD_AUDIO);
+        start(
+            &f,
+            &mut started,
+            OTHER_CLIENT,
+            &own(OP_RECORD_AUDIO, APP, "app"),
+            NO_CHAIN,
+        );
+        start(
+            &f,
+            &mut started,
+            CLIENT,
+            &own(OP_CAMERA, PRIV_APP, "priv"),
+            NO_CHAIN,
+        );
+        let old = std::time::Instant::now() - std::time::Duration::from_millis(100);
+        for ((uid, _, _), tags) in &mut started.ops {
+            if *uid == APP {
+                for attributed in tags.values_mut() {
+                    for event in attributed
+                        .running
+                        .values_mut()
+                        .chain(attributed.paused.values_mut())
+                    {
+                        event.started = old;
+                    }
+                }
+            }
+        }
+        let other_started =
+            started.ops[&(PRIV_APP, "priv".into(), OP_CAMERA)][&None].running[&CLIENT].started;
+        started.uid_state_changed(APP, history::UID_STATE_CACHED);
+        let camera = &started.ops[&(APP, "app".into(), OP_CAMERA)][&None];
+        let event = &camera.running[&CLIENT];
+        assert_eq!(
+            (event.uid_state, event.starts, event.link),
+            (history::UID_STATE_CACHED, 2, CLIENT)
+        );
+        assert!(event.started > old);
+        let top = history::make_key(history::UID_STATE_TOP, OP_FLAG_SELF);
+        assert!(camera.events.access.as_ref().unwrap()[&top].duration >= 100);
+        let paused = &started.ops[&(APP, "app".into(), OP_RECORD_AUDIO)][&None];
+        assert_eq!(
+            paused.paused[&OTHER_CLIENT].uid_state,
+            history::UID_STATE_CACHED
+        );
+        assert!(paused.events.access.is_none());
+        assert_eq!(
+            started.ops[&(PRIV_APP, "priv".into(), OP_CAMERA)][&None].running[&CLIENT].started,
+            other_started
+        );
+        let restarted = event.started;
+        started.uid_state_changed(APP, history::UID_STATE_CACHED);
+        assert_eq!(
+            started.ops[&(APP, "app".into(), OP_CAMERA)][&None].running[&CLIENT].started,
+            restarted
+        );
+        assert!(
+            finish(&f, &mut started, CLIENT, OP_CAMERA, APP, "app")
+                .1
+                .is_empty()
+        );
+        assert_eq!(
+            finish(&f, &mut started, CLIENT, OP_CAMERA, APP, "app").1,
+            [CLIENT]
         );
     }
 

@@ -95,6 +95,7 @@ its existing transaction path, persisting their flags and publishing the UID's
 new grants/GIDs before queuing a restart when a permission with GIDs changes
 its effective grant (#1857). Focused host permission tests pass; no guest boot
 was run (2026-10-29).
+The native appops owner accepts user 0's setMode/setUidMode switch writes with permission checks, persisted defaults and the pinned started-op pause/resume rules; UID state changes split running access durations and restart paused event accounting without watcher callbacks (#1594). Other users and storage mode-change effects (#1455) remain unsupported (host tests only, no guest boot).
 Legacy network activity listeners register through the original RemoteCallbackList and hear the default network's activity.
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
