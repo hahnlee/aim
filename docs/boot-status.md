@@ -2519,11 +2519,15 @@ and the actual frozen common runtime now includes that helper with verified hash
 Standalone linux-run now uses its detached PID-namespace watcher as the native
 POSIX controller, admitting the launch incarnation and its descendants and
 retaining holders across exec (#1189). The Darwin process-lock fallback is
-removed. The new NDK regression reproduces lost locks on origin/main; its
-fixed-runtime run is blocked by sandbox Mach registration (bootstrap status
-1100), as are the existing native holder tests. The fixture passes natively;
-the native root/descendant admission and private locator check passes, along
-with four watcher lifecycle tests. No guest boot was run for this change.
+removed. Fork admission authenticates process birth and the admitted XNU
+parent without requiring matching parent/child mount namespaces. Its native
+admission test reproduces the cross-mount EPERM before the fix and passes
+afterward, including foreign actor, forged birth and stale receipt rejection;
+the private locator and Mach audit-generation checks also pass (2026-10-28).
+The NDK regression reproduces lost locks on origin/main. The release process
+suite (41 tests) and POSIX NDK regression both fail before guest execution here:
+watcher/Mach registration reports EADDRINUSE, or standalone locator visibility
+reports EPERM. No guest integration pass or guest boot is claimed.
 The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional

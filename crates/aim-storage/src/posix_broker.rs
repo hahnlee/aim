@@ -752,9 +752,10 @@ impl State {
                     },
                 )
             })?;
+        // Mount namespaces may diverge at clone/unshare. Admission follows the
+        // authenticated process lineage, not a shared filesystem view.
         if init.process != namespace.init.process
             || init.mount_namespace != namespace.init.mount_namespace
-            || child_namespace != parent_namespace
         {
             return Err(failed("fork-namespace-match", error(libc::EPERM)));
         }
@@ -1529,7 +1530,7 @@ mod standalone_tests {
         }
     }
     #[test]
-    fn standalone_admits_only_root_and_authenticated_parent_namespace() {
+    fn standalone_admits_only_root_and_authenticated_descendants_across_mount_namespaces() {
         let root = ProcessIdentity::running(std::process::id() as i32).unwrap();
         let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
         let actor = ProcessIdentity::running(child.id() as i32).unwrap();
@@ -1581,7 +1582,39 @@ mod standalone_tests {
         let initial = controller.state.admit_fork(root).unwrap();
         assert_eq!(initial.owner.guest_pid, root.host_pid);
         assert!(initial.started().is_none());
-        register_mount_namespace(&table, actor, "other").unwrap();
+        let foreign = ProcessIdentity::running(unsafe { libc::getppid() }).unwrap();
+        register_mount_namespace(&table, foreign, "parent").unwrap();
+        assert_eq!(
+            controller
+                .state
+                .admit_fork(foreign)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
+        let forged = ProcessIdentity {
+            start_seconds: actor.start_seconds + 1,
+            ..actor
+        };
+        assert_eq!(
+            controller
+                .state
+                .admit_fork(forged)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        let receipt = table.join(format!("{}.mount-namespace", actor.host_pid));
+        std::fs::write(
+            receipt,
+            format!(
+                "AIMPROCNS1\t{}\t{}\t{}\tother\n",
+                forged.host_pid, forged.start_seconds, forged.start_microseconds
+            ),
+        )
+        .unwrap();
         assert_eq!(
             controller
                 .state
@@ -1589,9 +1622,10 @@ mod standalone_tests {
                 .err()
                 .unwrap()
                 .raw_os_error(),
-            Some(libc::EPERM)
+            Some(libc::ESRCH)
         );
-        register_mount_namespace(&table, actor, "parent").unwrap();
+        assert_eq!(controller.state.owners.lock().unwrap().len(), 1);
+        register_mount_namespace(&table, actor, "other").unwrap();
         let admitted = controller.state.admit_fork(actor).unwrap();
         assert_eq!(
             admitted.owner,
