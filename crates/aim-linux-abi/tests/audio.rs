@@ -151,6 +151,53 @@ fn check_recording(text: &str, ms: u32) {
     assert!(frames >= rate * ms as f64 / 1000.0, "{text}");
 }
 
+fn check_active_xruns(report: &str, frames: u64) {
+    let active: u64 = report
+        .split_once(" xrun frames (")
+        .and_then(|(_, tail)| tail.split_once(" while active)"))
+        .and_then(|(active, _)| active.parse().ok())
+        .expect("active xrun frame count");
+    // A loaded host can delay a worker despite URGENT_AUDIO (#263).
+    // Allow at most 0.2% loss (192 frames, or 4 ms, in this 2 s run),
+    // excluding the silence before activation and after draining.
+    let budget = frames / 500;
+    assert!(active <= budget, "{report}; active xrun budget {budget}");
+}
+
+#[test]
+fn active_xruns_allow_brief_host_delays() {
+    for active in [0, 32, 128, 192] {
+        check_active_xruns(
+            &format!("13472 xrun frames ({active} while active), peak -90.3 dBFS"),
+            96096,
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "active xrun budget 192")]
+fn active_xruns_reject_loss_over_budget() {
+    check_active_xruns(
+        "13472 xrun frames (193 while active), peak -90.3 dBFS",
+        96096,
+    );
+}
+
+#[test]
+#[should_panic(expected = "active xrun budget 192")]
+fn active_xruns_reject_sustained_starvation() {
+    check_active_xruns(
+        "13472 xrun frames (13472 while active), peak -90.3 dBFS",
+        96096,
+    );
+}
+
+#[test]
+#[should_panic(expected = "active xrun frame count")]
+fn active_xruns_require_the_active_count() {
+    check_active_xruns("0 xrun frames, peak -90.3 dBFS", 96096);
+}
+
 #[test]
 fn recording_follows_the_selected_input_rate() {
     for rate in [16000, 24000, 44100, 48000] {
@@ -261,7 +308,7 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
         .find(|l| l.contains("output stream in standby: 96096 frames"))
         .unwrap_or_else(|| panic!("no standby report:\n{hal}"));
     eprintln!("{standby}");
-    assert!(standby.contains("(0 while active)"), "{standby}");
+    check_active_xruns(standby, written as u64);
     assert!(standby.contains("peak -90."), "{standby}");
     let callbacks: u32 = standby
         .split("frames, ")

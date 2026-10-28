@@ -259,6 +259,8 @@ file, and the test fails if they show the null sink. The boot is stopped
 when the test ends, passed or failed. Re-run with CoreAudio in its own
 process (P3b): same results as below. Every test signal is at -90 dBFS: inaudible, checked through the render
 callback's counters and peak meter, not by ear.
+The playback gate allows active underruns of at most 0.2% of the frames
+written (192 frames, or 4 ms, for its two-second tone) under host load (#263).
 
 - **audioserver**, original: loads `libaudiohal@aidl` for both factories
   (`EffectsFactoryHalAidl with 0 nonProxyEffects`), takes its policy
