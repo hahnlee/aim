@@ -240,7 +240,9 @@ fn origin_visible(
         return Err(errno::EIO);
     };
     if origin.namespace == id {
-        return Ok(true);
+        return Ok(receiving
+            .iter()
+            .any(|mount| mount.id == origin.id && mount.guest == guest));
     }
     let target = receiving
         .iter()
@@ -260,12 +262,37 @@ fn publish_fuse_route(
     source: &str,
     route: Option<&FuseRoute>,
 ) -> Result<(), Errno> {
-    if mount_propagation(guest) != Propagation::Shared {
+    // Unmount propagation belongs to the containing mount, even when the
+    // detached mount itself has become slave/private (mount_namespaces(7)).
+    let propagation_path = if route.is_some() {
+        guest
+    } else {
+        guest.rsplit_once('/').map_or(
+            "/",
+            |(parent, _)| {
+                if parent.is_empty() { "/" } else { parent }
+            },
+        )
+    };
+    if mount_propagation(propagation_path) != Propagation::Shared {
         return Ok(());
     }
     let _lock = fuse_table_lock()?;
-    let mut lines = fuse_table_lines()?;
-    lines.retain(|line| line.split('\t').next() != Some(guest));
+    let lines = fuse_table_lines()?;
+    let namespace = mount_namespace_id().ok_or(errno::ENODEV)?;
+    let mut retained = Vec::new();
+    for line in lines {
+        let (fields, origin) = journal_fields(&line)?;
+        if fields[0] != guest
+            || route.is_none()
+                && origin
+                    .as_ref()
+                    .is_none_or(|origin| origin.namespace != namespace)
+        {
+            retained.push(line);
+        }
+    }
+    let mut lines = retained;
     if let Some(route) = route {
         let origin = published_mount(guest, host)?;
         let fields = [
@@ -738,6 +765,17 @@ fn apply_namespace_state(state: aim_storage::mount_namespace::State) -> Result<(
             load_own_mounts(&event)?;
         }
     }
+    // Propagation replay can already have lost a detached parent from the
+    // live table. The owner records still determine its surviving attachments.
+    vfs().mounts.write().unwrap().retain(|mount| {
+        !mount.own
+            || mount.origin.is_some()
+            || mount.projected_fuse
+            || state
+                .mounts
+                .iter()
+                .any(|record| record.guest == mount.guest && Path::new(&record.host) == mount.host)
+    });
     Ok(())
 }
 fn publish_mount_policy(guest: &str) -> Result<(), Errno> {
@@ -2208,7 +2246,7 @@ pub fn detach_mount(guest: &str) -> Result<bool, Errno> {
             .iter()
             .filter(|mount| {
                 mount.own
-                    && (mount.seq == target.seq
+                    && (mount.guest == target.guest && mount.seq == target.seq
                         || mount.seq > target.seq && below(guest, &mount.guest).is_some())
             })
             .cloned()
@@ -3722,6 +3760,180 @@ mod tests {
 #[cfg(test)]
 mod fuse_route_tests {
     use super::*;
+    fn mount_test_syscall(number: u64, args: [u64; 6]) -> i64 {
+        let mut context: crate::context::GuestContext = unsafe { std::mem::zeroed() };
+        context.x[8] = number;
+        context.x[..6].copy_from_slice(&args);
+        crate::sys::dispatch(&mut context);
+        context.x[0] as i64
+    }
+    fn assert_namespace_mounts(
+        owner: &aim_storage::mount_namespace::Namespace,
+        expected: &[(&str, bool)],
+    ) {
+        load_own_mounts(&format!("namespace-owner\t{}\n", owner.id())).unwrap();
+        refresh_fuse_mounts().unwrap();
+        let path = CString::new("/proc/self/mountinfo").unwrap();
+        let fd = mount_test_syscall(
+            56,
+            [LINUX_AT_FDCWD as u64, path.as_ptr() as u64, 0, 0, 0, 0],
+        );
+        assert!(fd >= 0, "mountinfo open: {fd}");
+        let mut bytes = vec![0; 65536];
+        let n = mount_test_syscall(
+            63,
+            [
+                fd as u64,
+                bytes.as_mut_ptr() as u64,
+                bytes.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        );
+        assert!(n > 0, "mountinfo read: {n}");
+        assert_eq!(mount_test_syscall(57, [fd as u64, 0, 0, 0, 0, 0]), 0);
+        let text = std::str::from_utf8(&bytes[..n as usize]).unwrap();
+        let state = owner.read().unwrap();
+        for (path, present) in expected {
+            let ids: Vec<_> = state
+                .mounts
+                .iter()
+                .filter(|mount| mount.guest == *path)
+                .map(|mount| mount.id)
+                .collect();
+            assert_eq!(!ids.is_empty(), *present, "{} record {path}", owner.id());
+            let listed: Vec<_> = text
+                .lines()
+                .filter_map(|line| {
+                    let fields: Vec<_> = line.split_whitespace().collect();
+                    (fields[4] == *path).then(|| fields[0].parse::<u64>().unwrap())
+                })
+                .collect();
+            assert_eq!(listed, ids, "{} mountinfo {path}", owner.id());
+            assert_eq!(is_mountpoint(path), *present, "{} route {path}", owner.id());
+        }
+    }
+
+    fn pre_reboot_tmp_cleanup(detach: bool) {
+        let (_guard, root) = test_view();
+        const TMP: &str = "/mnt/pre_reboot_dexopt/mount_tmp";
+        const ALIAS: &str = "/mnt/pre_reboot_dexopt/chroot/foo";
+        const CHILD: &str = "/mnt/pre_reboot_dexopt/mount_tmp/child";
+        let owner =
+            aim_storage::mount_namespace::Namespace::open(runtime_dir().unwrap(), "dexopt-source")
+                .unwrap();
+        let host = root.join("dexopt-source");
+        std::fs::create_dir_all(&host).unwrap();
+        owner
+            .initialize(&format!(
+                "root\t/\t{}\nrw\t/foo\t{}\npropagation\t/\tshared\n",
+                crate::vfs::root().display(),
+                host.display()
+            ))
+            .unwrap();
+        let slave = owner.clone_to("dexopt-slave").unwrap();
+        slave.append("propagation-flags\t/\t540672").unwrap(); // MS_SLAVE | MS_REC
+        let private = owner.clone_to("dexopt-private").unwrap();
+        private.append("propagation-flags\t/\t278528").unwrap(); // MS_PRIVATE | MS_REC
+        load_own_mounts(&format!("namespace-owner\t{}\n", owner.id())).unwrap();
+        // ART android-16.0.0_r1 dexopt_chroot_setup.cc, BindMount steps 1–4:
+        // bind /foo to mount_tmp, make it slave, bind it to chroot, unmount tmp.
+        bind_mount_recursive("/foo", TMP, host.clone(), Area::Writable, false).unwrap();
+        let retained = owner.clone_to("dexopt-private-snapshot").unwrap();
+        retained.append("propagation-flags\t/\t278528").unwrap();
+        set_mount_propagation(TMP, 1 << 19).unwrap();
+        bind_mount_recursive(TMP, ALIAS, host.clone(), Area::Writable, false).unwrap();
+        if detach {
+            add_mount(CHILD, host.clone(), Area::Writable, "tmpfs", "tmpfs").unwrap();
+        }
+        assert_namespace_mounts(&slave, &[(TMP, true), (ALIAS, true)]);
+        assert_namespace_mounts(&private, &[(TMP, false), (ALIAS, false)]);
+        assert_namespace_mounts(&retained, &[(TMP, true), (ALIAS, false)]);
+        assert_namespace_mounts(&owner, &[(TMP, true), (ALIAS, true)]);
+        let target = CString::new(TMP).unwrap();
+        let args = [target.as_ptr() as u64, 8, 0, 0, 0, 0]; // UMOUNT_NOFOLLOW
+        let result = mount_test_syscall(39, args);
+        if detach {
+            assert_eq!(result, -(errno::EBUSY as i64));
+            assert_eq!(mount_test_syscall(39, [args[0], 8 | 2, 0, 0, 0, 0]), 0);
+        } else {
+            assert_eq!(result, 0);
+        }
+        assert!(
+            !owner.read().unwrap().mounts.iter().any(|mount| {
+                mount.guest == TMP || detach && below(TMP, &mount.guest).is_some()
+            })
+        );
+        assert_namespace_mounts(
+            &owner,
+            &[(TMP, false), (CHILD, false), (ALIAS, true), ("/foo", true)],
+        );
+        assert_namespace_mounts(
+            &slave,
+            &[(TMP, false), (CHILD, false), (ALIAS, true), ("/foo", true)],
+        );
+        assert_namespace_mounts(&private, &[(TMP, false), (ALIAS, false), ("/foo", true)]);
+        assert_namespace_mounts(&retained, &[(TMP, true), (ALIAS, false), ("/foo", true)]);
+        assert!(
+            !fuse_table_lines()
+                .unwrap()
+                .iter()
+                .any(|line| line.split('\t').next() == Some(TMP))
+        );
+    }
+
+    #[test]
+    fn pre_reboot_tmp_unmount_reaches_slave_but_not_private_namespace() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "vfs::fuse_route_tests::pre_reboot_tmp_unmount_reaches_slave_but_not_private_namespace",
+        ) {
+            return;
+        }
+        pre_reboot_tmp_cleanup(false);
+    }
+
+    #[test]
+    fn pre_reboot_tmp_detach_drops_subtree_and_reaches_slave_namespace() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "vfs::fuse_route_tests::pre_reboot_tmp_detach_drops_subtree_and_reaches_slave_namespace",
+        ) {
+            return;
+        }
+        pre_reboot_tmp_cleanup(true);
+    }
+
+    #[test]
+    fn pre_reboot_private_root_bind_detach_does_not_propagate_to_slave() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "vfs::fuse_route_tests::pre_reboot_private_root_bind_detach_does_not_propagate_to_slave",
+        ) {
+            return;
+        }
+        let (_guard, _) = test_view();
+        const TMP: &str = "/mnt/pre_reboot_dexopt/mount_tmp";
+        let owner = NAMESPACE_VIEW
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .owner
+            .clone();
+        bind_mount_recursive("/", TMP, crate::vfs::root().into(), Area::Image, false).unwrap();
+        let slave = owner.clone_to("private-parent-slave").unwrap();
+        slave.append("propagation-flags\t/\t540672").unwrap();
+        assert_namespace_mounts(&slave, &[(TMP, true)]);
+        assert_namespace_mounts(&owner, &[(TMP, true)]);
+        set_mount_propagation("/", (1 << 18) | 0x4000).unwrap();
+        let target = CString::new(TMP).unwrap();
+        assert_eq!(
+            mount_test_syscall(39, [target.as_ptr() as u64, 8 | 2, 0, 0, 0, 0]),
+            0
+        );
+        assert_namespace_mounts(&owner, &[(TMP, false)]);
+        assert_namespace_mounts(&slave, &[(TMP, true)]);
+    }
+
     fn actual_fuse_publication(
         guest: &str,
         host: &Path,

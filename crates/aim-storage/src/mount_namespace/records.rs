@@ -348,6 +348,26 @@ pub(super) fn apply(
             {
                 mounts.remove(index);
             }
+        } else if let Some(target) = line.strip_prefix("detach\t") {
+            if let Some(mount) = mounts
+                .iter()
+                .rev()
+                .find(|mount| mount.own && mount.guest == target)
+            {
+                let mut detached = BTreeSet::from([mount.id]);
+                loop {
+                    let before = detached.len();
+                    for mount in mounts.iter() {
+                        if detached.contains(&mount.parent) {
+                            detached.insert(mount.id);
+                        }
+                    }
+                    if detached.len() == before {
+                        break;
+                    }
+                }
+                mounts.retain(|mount| !detached.contains(&mount.id));
+            }
         } else if let Some(rest) = line.strip_prefix("move\t") {
             let (from, to) = rest.split_once('\t').ok_or_else(protocol)?;
             for mount in mounts

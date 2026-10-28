@@ -320,6 +320,56 @@ fn protocol() -> io::Error {
 mod tests {
     use super::*;
     #[test]
+    fn detach_drops_attached_tmp_tree_but_preserves_hidden_mount_and_bind_alias() {
+        let root = crate::scratch_dir("aim-mount-detach");
+        let owner = Namespace::open(&root, "dexopt").unwrap();
+        owner
+            .initialize("root\t/\t/image\npropagation\t/\tshared\n")
+            .unwrap();
+        owner
+            .append("rw\t/tmp/hidden\t/old\ttmpfs\ttmpfs\n")
+            .unwrap();
+        let hidden = owner.read().unwrap().mounts.last().unwrap().id;
+        owner.append("rw\t/tmp\t/tree\ttmpfs\ttmpfs\n").unwrap();
+        owner.append("propagation-flags\t/tmp\t524288").unwrap();
+        owner
+            .append("rw\t/tmp/child\t/child\ttmpfs\ttmpfs\n")
+            .unwrap();
+        owner
+            .append("rw\t/tmp/child/nested\t/nested\ttmpfs\ttmpfs\n")
+            .unwrap();
+        owner
+            .append("rw\t/alias\t/tree\t/tmp\tbind\nbind-source\t/alias\t/tmp\n")
+            .unwrap();
+        let before = owner.read().unwrap();
+        let detached: Vec<_> = before
+            .mounts
+            .iter()
+            .filter(|mount| {
+                mount.guest == "/tmp" || mount.guest.starts_with("/tmp/") && mount.id != hidden
+            })
+            .map(|mount| mount.id)
+            .collect();
+        let generation = owner.generation().unwrap();
+        let after = owner.append("detach\t/tmp").unwrap();
+        assert!(generation.current() > before.generation);
+        assert!(
+            after
+                .mounts
+                .iter()
+                .all(|mount| !detached.contains(&mount.id))
+        );
+        assert!(after.mounts.iter().any(|mount| mount.id == hidden));
+        assert!(
+            after
+                .mounts
+                .iter()
+                .any(|mount| mount.guest == "/alias" && mount.host == "/tree")
+        );
+        assert_eq!(after, owner.read().unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn different_children_of_shared_parent_are_not_peers_but_propagated_copy_is() {
         let root = std::env::temp_dir().join(format!("aim-mount-peer-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
