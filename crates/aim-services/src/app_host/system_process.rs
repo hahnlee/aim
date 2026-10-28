@@ -54,6 +54,15 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::ATTACH_DEVICE_POLICY_DEFAULTS => {
+                let a =
+                    sp::AttachDevicePolicyDefaults::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.attach_device_policy_defaults(a.defaults)?;
+                    sp::write_attach_device_policy_defaults_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_SYSTEM_PROCESS => {
                 let a = sp::AttachSystemProcess::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

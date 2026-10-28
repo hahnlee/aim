@@ -39,4 +39,6 @@ interface ISystemProcess {
     IBinder getDomainVerificationBackend();
     void attachDomainVerification(IBinder frontend);
     boolean isDomainVerifier(int uid);
+    /** Original Java policy default; system UID only. */
+    void attachDevicePolicyDefaults(IBinder defaults);
 }
