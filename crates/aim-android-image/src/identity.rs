@@ -16,7 +16,7 @@
 //! comments and entry order. The receipt is written into the derived image,
 //! so anyone can check the identity with `shasum -a 256 .overlay-receipt`.
 
-use crate::plan::{IDENTITY_FILE, Plan, hex};
+use crate::plan::{IDENTITY_FILE, Plan, RECEIPT_FILE, hex};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
@@ -89,6 +89,26 @@ fn read_identity_file(path: &Path) -> Result<Option<String>, String> {
 /// Reads the identity file at the root of an image tree, if present.
 pub fn read_tree_identity(tree: &Path) -> Result<Option<String>, String> {
     read_identity_file(&tree.join(IDENTITY_FILE))
+}
+
+/// A derived build, distinguished from an extraction by its receipt. Refuse
+/// inconsistent metadata rather than booting with the wrong build identity.
+pub fn read_derived_identity(tree: &Path) -> Result<Option<String>, String> {
+    let path = tree.join(RECEIPT_FILE);
+    let receipt = match fs::read(&path) {
+        Ok(receipt) => receipt,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let identity = read_tree_identity(tree)?
+        .ok_or_else(|| format!("{}: missing {IDENTITY_FILE}", tree.display()))?;
+    if hex(&Sha256::digest(&receipt)) != identity {
+        return Err(format!(
+            "{}: receipt does not match {IDENTITY_FILE}",
+            path.display()
+        ));
+    }
+    Ok(Some(identity))
 }
 
 /// `ORIGDIR.identity`, beside the tree: the sha256 of the archive that
