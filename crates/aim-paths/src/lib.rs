@@ -210,6 +210,11 @@ pub fn input(path: PathBuf, node: &str) -> Option<PathBuf> {
     None
 }
 
+/// An official CTS release input (`cts` node), flattened by basename.
+pub fn cts(file: &str) -> Option<PathBuf> {
+    input(fetched().join("cts").join(file), "cts")
+}
+
 /// The original image, resolved, if it holds `file`; otherwise
 /// the test skips.
 pub fn original_image_with(file: &str) -> Option<PathBuf> {

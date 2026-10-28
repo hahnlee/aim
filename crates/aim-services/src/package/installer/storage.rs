@@ -1257,10 +1257,9 @@ mod tests {
     fn inherited_required_split_type_inventory_is_validated_before_copying_original_apks() {
         let input = aim_paths::fetched()
             .join("cts-tradefed/android-cts/testcases/CtsPackageManagerHostTestCases");
-        assert!(
-            input.is_dir(),
-            "Pinned CTS split APK inputs must be available"
-        );
+        let Some(input) = aim_paths::input(input, "cts-tradefed") else {
+            return;
+        };
         let environment = crate::package::parse::lite::Environment {
             sdk: 36,
             codenames: vec![],

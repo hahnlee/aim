@@ -7,12 +7,7 @@ fn apk(name: &str) -> std::path::PathBuf {
     let path = aim_paths::fetched()
         .join("cts-tradefed/android-cts/testcases/CtsAppSecurityHostTestCases/zip-aligned")
         .join(name);
-    assert!(
-        path.is_file(),
-        "pinned CTS input {} must be available",
-        path.display()
-    );
-    path
+    aim_paths::input(path, "cts-tradefed").expect("pinned CTS APK")
 }
 
 fn parse(name: &str) -> Result<String, parse::Error> {
