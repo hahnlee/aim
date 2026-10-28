@@ -141,9 +141,13 @@ migration from the ADR 0012 stack, not a rewrite.
 - The launcher and SystemUI are not in the image (since 2026-10-01, in
   both modes: device mode is a debugging view of the display, #463 D1).
   SystemUI's original APK is retained byte for byte under
-  `/system/framework/aim-shell-res.apk` solely for its translated consent
-  resources (#590). It is not installed as a package or started; the
-  consent activity uses the original Java resource selection and formatting.
+  `/system/usr/share/aim/shell-res.apk` solely for its translated consent
+  resources (#590). The image's `usr/share` holds static data outside package
+  scan roots; `framework` is scanned with privileged flags and would reinstall
+  SystemUI under `/system` without its `/system_ext` permission allowlist,
+  preventing system-ready with permission enforcement. It is not installed as
+  a package or started; the consent activity loads the APK directly with the
+  original Java resource selection and formatting.
 - AGENTS.md changes with this ADR: replacing a system service at its binder
   interface, gated by CTS, is no longer an exception. Reflection, name
   interception and app-specific branches stay forbidden.

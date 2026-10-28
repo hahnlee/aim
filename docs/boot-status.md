@@ -8489,8 +8489,14 @@ bar item through a system-uid Java receiver (#591). Host transition and
 callback-identity tests and Java linkage pass; no guest or live menu bar
 check was run (2026-10-28).
 The capture sheet takes its localized strings from the original SystemUI
-resource APK through the consent activity's Android locale (#590; protocol
-tests and Java linkage, 2026-10-28; no live sheet or guest boot rerun).
+resource APK through the consent activity's Android locale. The unmodified
+container now lives at `/system/usr/share/aim/shell-res.apk`, outside package
+scan roots: `/system/framework` reinstalls it as privileged SystemUI without
+its `/system_ext` permission allowlist. Two reported template gate runs reached
+settings but neither permissions nor boot completion after 300 s; pinned AOSP
+sources explain the fatal system-ready allowlist check (#590). Host overlay
+checks and Java linkage cover the relocation (2026-10-29); no live sheet or
+guest boot rerun verifies recovery.
 
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 

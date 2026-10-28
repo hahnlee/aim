@@ -11,7 +11,7 @@ final class ConsentText {
     static String[] forApp(Context context, String label) {
         AssetManager assets = new AssetManager();
         try {
-            if (assets.addAssetPath("/system/framework/aim-shell-res.apk") == 0) {
+            if (assets.addAssetPath("/system/usr/share/aim/shell-res.apk") == 0) {
                 throw new IllegalStateException("Cannot load the original shell resources");
             }
             Resources current = context.getResources();

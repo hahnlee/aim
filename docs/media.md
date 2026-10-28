@@ -140,9 +140,14 @@ rest to the native service host, which has the system uid:
    app-modal alert.
    `ConsentText` uses the activity's current Android locale and the original
    SystemUI resources. The build retains the unmodified SystemUI APK as
-   `/system/framework/aim-shell-res.apk`, a resource container that is not
-   installed or started; Java selects and formats its translations and the
-   display protocol carries the four strings unchanged (#590).
+   `/system/usr/share/aim/shell-res.apk`. The original image uses `usr/share`
+   for static data (zoneinfo and bmd); it is outside PackageManager's package
+   scan roots. `/system/framework` is scanned as privileged packages and would
+   reinstall SystemUI without its `/system_ext` permission allowlist, preventing
+   system-ready under privileged-permission enforcement. The APK is loaded only
+   through `AssetManager.addAssetPath`, never installed or started; Java selects
+   and formats its translations and the display protocol carries the four
+   strings unchanged (#590).
 4. On Share the host creates the projection for the whole display
    (`createProjection(uid, package, TYPE_SCREEN_CAPTURE, false,
    DEFAULT_DISPLAY)`), or reuses the granted one when the user reviews a

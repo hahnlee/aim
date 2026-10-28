@@ -200,6 +200,32 @@ mod tests {
     }
 
     #[test]
+    fn shell_resources_are_unscanned_and_match_the_consent_asset_path() {
+        let manifest = manifest().unwrap();
+        let resources: Vec<_> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.source.as_deref() == Some("target/aim/device-services/shell-res.apk"))
+            .collect();
+        assert_eq!(resources.len(), 1);
+        let path = &resources[0].path;
+        // android-16.0.0_r1 InitAppsHelper.scanSystemDirs scans framework,
+        // app, priv-app and overlay, not the image's static-data usr/share.
+        assert!(std::path::Path::new(path).starts_with("/system/usr/share"));
+        let loader = fs::read_to_string(repo(
+            "java/media-projection/src/dev/aim/mediaprojection/ConsentText.java",
+        ))
+        .unwrap();
+        assert!(loader.contains(&format!("assets.addAssetPath(\"{path}\")")));
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .any(|e| { e.path == "/system_ext/priv-app/SystemUIGoogle" && e.source.is_none() })
+        );
+    }
+
+    #[test]
     fn a_device_app_comes_with_its_compiled_code() {
         let add = |path: &str| {
             format!(
