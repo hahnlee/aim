@@ -100,6 +100,12 @@ The app host serves `background_install_control` natively, persisting its per-us
 surfaces (#2140) to the supplied output descriptor, including with `--short`.
 Network/provider/request dump formatting remains unimplemented. The focused host
 Binder checks cover actual fileport output and permission denial without a guest boot.
+Staged APEX inventory queries now reach the retained `NativeStagingBridge` in
+`aim-system`, using the image's original `ApexManager.getStagedApexInfos` for
+apexd inputs and failure handling (#2158). System-UID-only attachment and queries
+retain the current Java owner; system-process restart replaces it. Host forwarding,
+system-process startup and pinned-image Java linkage are checked without a guest
+boot; staged APEX activation has not been exercised.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.
 The app host prepares user 0's CE storage before starting vold's user and mounting the emulated volume at unlocking, and logs external storage failures without aborting boot completion (#2227; host tests only, no guest boot rerun).

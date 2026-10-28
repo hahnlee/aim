@@ -7,6 +7,7 @@ interface ISystemProcess {
     void attachNetworkActivityBridge(IBinder bridge);
     void attachWifiBridge(WifiBridge bridge);
     void attachDevicePolicyDefaults(DevicePolicyDefaults defaults);
+    void attachNativeStagingBridge(com.android.server.pm.NativeStagingBridge bridge);
     void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys);
     void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
@@ -20,6 +21,10 @@ interface ISystemProcess {
                 }
                 public void attachWifiBridge(WifiBridge bridge) {}
                 public void attachDevicePolicyDefaults(DevicePolicyDefaults defaults) {}
+                public void attachNativeStagingBridge(com.android.server.pm.NativeStagingBridge bridge) {
+                    if (bridge == null) throw new AssertionError("missing staging owner");
+                    SystemProcessHostTest.events.add("staging");
+                }
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
                 public void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries) {}
                 public void attachNetworkActivityBridge(IBinder bridge) {

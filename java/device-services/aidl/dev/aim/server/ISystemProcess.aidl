@@ -48,4 +48,6 @@ interface ISystemProcess {
     void attachRecoverableKeyStoreKeys(IRecoverableKeyStoreKeys keys);
     /** Retained MediaRouter2 system route/session queries; system UID only. */
     void attachSystemRouteQueries(IBinder queries);
+    /** Original ApexManager staged inventory; system UID only. */
+    void attachNativeStagingBridge(IBinder bridge);
 }
