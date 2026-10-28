@@ -7,6 +7,194 @@ use aim_service_aidl::android_os_iservicemanager as sm;
 use std::collections::HashMap;
 use std::sync::Weak;
 
+fn poll_permissions(host: &Arc<AppHost>, granted: &str) {
+    use crate::package::permissions::{AccessSystem, Permission};
+    let path = host
+        .data()
+        .unwrap()
+        .join("misc_de/0/apexdata/com.android.permission/access.abx");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let xml = format!(
+        "<access><app-id-permissions>
+        <app-id id='10100'><permission name='{granted}' flags='4'/></app-id>
+        <app-id id='10101'><permission name='android.permission.NETWORK_STATS_PROVIDER' flags='4'/></app-id>
+        </app-id-permissions></access>"
+    );
+    let xml = aim_android_xml::read(xml.as_bytes()).unwrap();
+    std::fs::write(path, aim_android_xml::abx::write(&xml).unwrap()).unwrap();
+    let manager = super::super::permission_manager::PermissionManager::with_system(
+        host.clone(),
+        AccessSystem {
+            permissions: [
+                NETWORK_STACK,
+                MAINLINE_NETWORK_STACK,
+                "android.permission.NETWORK_STATS_PROVIDER",
+            ]
+            .into_iter()
+            .map(|name| Permission {
+                name: name.into(),
+                package: "android".into(),
+                protection_level: 2,
+                dynamic: None,
+            })
+            .collect(),
+            ..Default::default()
+        },
+    );
+    assert!(host.permission_manager.set(Arc::new(manager)).is_ok());
+}
+
+fn uid_map(host: &AppHost) -> Mapped {
+    use aim_storage::bpf_object::{HEADER, KIND_MAP, MAGIC};
+    let path = host.bpf().unwrap().join(APP_UID_STATS_MAP);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut data = vec![0u8; 4 * 48 + HEADER];
+    let h = &mut data[4 * 48..];
+    h[..8].copy_from_slice(&MAGIC.to_ne_bytes());
+    for (offset, value) in [(8, KIND_MAP), (12, HASH), (16, 4), (20, 32), (24, 4)] {
+        h[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+    }
+    h[64..72].copy_from_slice(&192u64.to_ne_bytes());
+    std::fs::write(&path, data).unwrap();
+    Mapped::open(&path).unwrap()
+}
+
+fn record(map: &Mapped, uid: i32, values: [u64; 4]) {
+    let map = map.map();
+    let _guard = map.lock();
+    let slot = map.claim(&uid.to_ne_bytes(), 0).unwrap();
+    let value: Vec<u8> = values.into_iter().flat_map(u64::to_ne_bytes).collect();
+    // SAFETY: this fixture's locked map has 32-byte values.
+    unsafe {
+        std::ptr::copy_nonoverlapping(value.as_ptr(), map.value_of(slot), 32);
+    }
+}
+
+fn force_update(service: &NetworkStats, caller: u32) -> Result<(), Exception> {
+    let mut p = Parcel::new();
+    p.write_interface_token(ns::DESCRIPTOR);
+    let result = service
+        .transact(&mut Call {
+            code: ns::FORCE_UPDATE,
+            flags: 0,
+            sender_pid: 71,
+            sender_euid: caller,
+            data: p.reader(),
+        })
+        .unwrap();
+    result.reader().read_exception().unwrap()
+}
+
+#[test]
+fn force_update_checks_both_permissions_before_polling() {
+    use aim_binder_host::parcel::EX_SECURITY;
+    for permission in [NETWORK_STACK, MAINLINE_NETWORK_STACK] {
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            poll_permissions(host, permission);
+            let service = NetworkStats::new(host.clone());
+            // NETWORK_STATS_PROVIDER alone does not pass the network-stack check.
+            let e = force_update(&service, 10101).unwrap_err();
+            assert_eq!(e.code, EX_SECURITY, "{e:?}");
+            assert!(e.message.contains(NETWORK_STACK));
+            assert!(e.message.contains(MAINLINE_NETWORK_STACK));
+            // Authorized callers reach the real poll even when its map is missing.
+            for uid in [10100, 1000] {
+                let e = force_update(&service, uid).unwrap_err();
+                assert_eq!(e.code, EX_ILLEGAL_STATE, "{e:?}");
+            }
+            let _map = uid_map(host);
+            for uid in [10100, 1000] {
+                force_update(&service, uid).unwrap();
+            }
+        });
+    }
+}
+
+#[test]
+fn force_update_refreshes_cached_counters_and_keeps_uid_query_access() {
+    use aim_binder_host::parcel::EX_SECURITY;
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let map = uid_map(host);
+        record(&map, 10123, [1, 100, 2, 200]);
+        let service = NetworkStats::new(host.clone());
+        assert!(
+            service
+                .uid_cache
+                .set(Some(Mutex::new(RateLimitCache {
+                    expiry_ms: 60_000,
+                    max: 400,
+                    entries: VecDeque::new(),
+                })))
+                .is_ok()
+        );
+        let old = service.uid_stats(10123, 10123).unwrap().unwrap();
+        assert_eq!((old.rx_bytes, old.tx_bytes), (100, 200));
+        record(&map, 10123, [3, 300, 4, 400]);
+        assert_eq!(service.uid_stats(10123, 10123).unwrap(), Some(old));
+        assert_eq!(force_update(&service, 10101).unwrap_err().code, EX_SECURITY);
+        assert_eq!(service.uid_stats(10123, 10123).unwrap(), Some(old));
+        force_update(&service, 10100).unwrap();
+        let current = service.uid_stats(10123, 10123).unwrap().unwrap();
+        assert_eq!(
+            (
+                current.rx_packets,
+                current.rx_bytes,
+                current.tx_packets,
+                current.tx_bytes
+            ),
+            (3, 300, 4, 400)
+        );
+        assert_eq!(service.uid_stats(10124, 10123).unwrap(), None);
+        record(&map, 10123, [0; 4]);
+        force_update(&service, 10100).unwrap();
+        assert_eq!(
+            service.uid_stats(1000, 10123).unwrap(),
+            Some(Entry::default())
+        );
+        assert!(
+            service
+                .uid_cache()
+                .unwrap()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    });
+}
+
+#[test]
+fn force_update_polls_without_a_cache_and_rejects_a_bad_map_layout() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let service = NetworkStats::new(host.clone());
+        assert!(service.uid_cache.set(None).is_ok());
+        assert_eq!(
+            force_update(&service, 10100).unwrap_err().code,
+            EX_ILLEGAL_STATE
+        );
+        let map = uid_map(host);
+        record(&map, 10123, [1, 100, 2, 200]);
+        force_update(&service, 10100).unwrap();
+        assert_eq!(
+            service.uid_stats(10123, 10123).unwrap().unwrap().rx_bytes,
+            100
+        );
+        // SAFETY: exclusively mutate this disposable fixture's header, while
+        // no other thread is using it; polling must validate before dereferencing.
+        unsafe {
+            let h = map.map().h() as *const aim_storage::bpf_object::Header
+                as *mut aim_storage::bpf_object::Header;
+            std::ptr::addr_of_mut!((*h).value_size).write(24);
+        }
+        let e = force_update(&service, 10100).unwrap_err();
+        assert_eq!(e.code, EX_ILLEGAL_STATE);
+        assert!(e.message.contains("invalid UID stats layout"));
+    });
+}
+
 struct Registry {
     process: Weak<LocalProcess>,
     names: Mutex<HashMap<String, Strong>>,

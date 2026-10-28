@@ -34,32 +34,75 @@ import android.os.IBinder;
 import android.os.IStatsd;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.provider.DeviceConfig;
 import android.util.Log;
+import android.util.PropertyParcel;
 import android.util.proto.ProtoOutputStream;
+import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Cold lifecycle path retained from StatsCompanionService.java, packages/modules/StatsD
  * at android-16.0.0_r1 (Apache-2.0). The UID writer, installer/signature policy and
  * receiver bodies are original Java. Local changes: extract this scope, bind each
  * receiver cohort to its statsd generation, close pipes/threads on failure, and expose
- * a system-UID-only start bridge.
- * The native companion owns the handshake, alarms and manager; system pullers remain #1765.
+ * a system-UID-only bridge. The original DeviceConfig update, death history and
+ * dump bodies are retained here too; the native endpoint checks DUMP before
+ * requesting text, and expiry uses removeIf to avoid mutating iterated collections.
+ * The native companion owns the handshake, alarms and manager.
  */
 final class StatsCompanionUidMap extends IStatsCompanionUidMap.Stub {
     private final Context context;
+    private final File configDir;
+    private final Object historyLock = new Object();
+    private final HashSet<Long> mDeathTimeMillis = new HashSet<>();
+    private final HashMap<Long, String> mDeletedFiles = new HashMap<>();
+    private static final long MILLIS_IN_A_DAY = 24 * 60 * 60 * 1000L;
+    private static final int DEATH_THRESHOLD = 10;
     private Session session;
 
-    StatsCompanionUidMap(Context context) { this.context = context; }
+    StatsCompanionUidMap(Context context) {
+        this(context, new File("/data/misc/stats-service"));
+    }
+
+    StatsCompanionUidMap(Context context, File configDir) {
+        this.context = context;
+        this.configDir = configDir;
+    }
+
+    @Override public String dumpStatsCompanion() {
+        Bridge.enforceSystemUid();
+        StringWriter text = new StringWriter();
+        PrintWriter writer = new PrintWriter(text);
+        synchronized (historyLock) {
+            writer.println("Number of configuration files deleted: " + mDeletedFiles.size());
+            if (mDeletedFiles.size() > 0) {
+                writer.println("  timestamp, deleted file name");
+            }
+            long lastBootMillis =
+                    SystemClock.currentThreadTimeMillis() - SystemClock.elapsedRealtime();
+            for (Long elapsedMillis : mDeletedFiles.keySet()) {
+                long deletionMillis = lastBootMillis + elapsedMillis;
+                writer.println("  " + deletionMillis + ", " + mDeletedFiles.get(elapsedMillis));
+            }
+        }
+        return text.toString();
+    }
 
     @Override public synchronized void start(IBinder statsd) throws RemoteException {
         Bridge.enforceSystemUid();
@@ -90,6 +133,8 @@ final class StatsCompanionUidMap extends IStatsCompanionUidMap.Stub {
         private final IBinder binder;
         private final List<BroadcastReceiver> receivers = new ArrayList<>();
         private final HandlerThread thread = new HandlerThread(TAG);
+        private final DeviceConfig.OnPropertiesChangedListener propertiesListener = this::updateProperties;
+        private boolean listening;
 
         Session(IStatsd statsd) {
             sStatsd = statsd;
@@ -97,25 +142,31 @@ final class StatsCompanionUidMap extends IStatsCompanionUidMap.Stub {
         }
 
         void start() throws RemoteException {
-            thread.start();
-            Handler handler = new Handler(thread.getLooper());
-            try {
-                IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_REPLACED);
-                filter.addAction(Intent.ACTION_PACKAGE_ADDED);
-                filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
-                filter.addDataScheme("package");
-                register(new AppUpdateReceiver(), filter, handler);
-                filter = new IntentFilter(Intent.ACTION_USER_INITIALIZE);
-                filter.addAction(Intent.ACTION_USER_REMOVED);
-                register(new UserUpdateReceiver(), filter, handler);
-                filter = new IntentFilter(Intent.ACTION_REBOOT);
-                filter.addAction(Intent.ACTION_SHUTDOWN);
-                register(new ShutdownEventReceiver(), filter, handler);
-                binder.linkToDeath(this, 0);
-                informAllUids(context);
-            } catch (RemoteException | RuntimeException e) {
-                close();
-                throw e;
+            synchronized (sStatsdLock) {
+                thread.start();
+                Handler handler = new Handler(thread.getLooper());
+                try {
+                    IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_REPLACED);
+                    filter.addAction(Intent.ACTION_PACKAGE_ADDED);
+                    filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
+                    filter.addDataScheme("package");
+                    register(new AppUpdateReceiver(), filter, handler);
+                    filter = new IntentFilter(Intent.ACTION_USER_INITIALIZE);
+                    filter.addAction(Intent.ACTION_USER_REMOVED);
+                    register(new UserUpdateReceiver(), filter, handler);
+                    filter = new IntentFilter(Intent.ACTION_REBOOT);
+                    filter.addAction(Intent.ACTION_SHUTDOWN);
+                    register(new ShutdownEventReceiver(), filter, handler);
+                    binder.linkToDeath(this, 0);
+                    DeviceConfig.addOnPropertiesChangedListener(DeviceConfig.NAMESPACE_STATSD_JAVA,
+                            context.getMainExecutor(), propertiesListener);
+                    listening = true;
+                    updateProperties(DeviceConfig.getProperties(DeviceConfig.NAMESPACE_STATSD_JAVA));
+                    informAllUids(context);
+                } catch (RemoteException | RuntimeException e) {
+                    close();
+                    throw e;
+                }
             }
         }
 
@@ -128,16 +179,60 @@ final class StatsCompanionUidMap extends IStatsCompanionUidMap.Stub {
             synchronized (sStatsdLock) { return sStatsd; }
         }
 
-        @Override public void binderDied() { close(); }
+        @Override public void binderDied() {
+            if (!close()) return;
+            synchronized (historyLock) {
+                long now = SystemClock.elapsedRealtime();
+                mDeathTimeMillis.removeIf(timeMillis -> now - timeMillis > MILLIS_IN_A_DAY);
+                mDeletedFiles.keySet().removeIf(timeMillis -> now - timeMillis > MILLIS_IN_A_DAY * 7);
+                mDeathTimeMillis.add(now);
+                if (mDeathTimeMillis.size() >= DEATH_THRESHOLD) {
+                    mDeathTimeMillis.clear();
+                    File[] configs = configDir.listFiles();
+                    if (configs != null && configs.length > 0) {
+                        String fileName = configs[0].getName();
+                        if (configs[0].delete()) mDeletedFiles.put(now, fileName);
+                    }
+                }
+            }
+        }
 
-        private void close() {
+        private boolean close() {
             synchronized (sStatsdLock) {
-                if (sStatsd == null) return;
+                if (sStatsd == null) return false;
                 sStatsd = null;
+                if (listening) {
+                    DeviceConfig.removeOnPropertiesChangedListener(propertiesListener);
+                    listening = false;
+                }
                 for (BroadcastReceiver receiver : receivers) context.unregisterReceiver(receiver);
                 receivers.clear();
                 binder.unlinkToDeath(this, 0);
                 thread.quitSafely();
+                return true;
+            }
+        }
+
+        private void updateProperties(final DeviceConfig.Properties properties) {
+            final Set<String> propertyNames = properties.getKeyset();
+            if (propertyNames.isEmpty()) return;
+            final PropertyParcel[] propertyParcels = new PropertyParcel[propertyNames.size()];
+            int index = 0;
+            for (final String propertyName : propertyNames) {
+                propertyParcels[index] = new PropertyParcel();
+                propertyParcels[index].property = propertyName;
+                propertyParcels[index].value = properties.getString(propertyName, null);
+                index++;
+            }
+            final IStatsd statsd = getStatsdNonblocking();
+            if (statsd == null) {
+                Log.w(TAG, "Could not access statsd to inform it of updated statsd_java properties");
+                return;
+            }
+            try {
+                statsd.updateProperties(propertyParcels);
+            } catch (RemoteException e) {
+                Log.w(TAG, "Failed to inform statsd of updated statsd_java properties", e);
             }
         }
 

@@ -6,9 +6,11 @@
 //! statistics and providers are not implemented (#1671). Cold usage sessions
 //! and operation counters use original Java owners in aim-system, forwarding
 //! the authenticated app caller so the original permission checks apply.
+//! `forceUpdate` polls recorded UID counters and refreshes their native cache;
+//! it cannot attribute lifetime totals to interface-associated histories.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +19,7 @@ use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_net_inetworkstatsservice as ns;
 use aim_service_aidl::dev_aim_server_inetworkstatsbridge as bridge;
-use aim_storage::bpf_object::Mapped;
+use aim_storage::bpf_object::{HASH, LRU_HASH, Mapped, SLOT_USED};
 
 use super::settings::Table;
 use super::{AppHost, reply};
@@ -33,6 +35,8 @@ const DEFAULT_CACHE_MAX_ENTRIES: i32 = 400;
 const FORCE_ENABLE_FEATURE_FLAG_VALUE: i32 = 1;
 const FORCE_DISABLE_FEATURE_FLAG_VALUE: i32 = -1;
 const SYSTEM_UID: i32 = 1000;
+const NETWORK_STACK: &str = "android.permission.NETWORK_STACK";
+const MAINLINE_NETWORK_STACK: &str = "android.permission.MAINLINE_NETWORK_STACK";
 /// `APP_UID_STATS_MAP_PATH` below bpffs.
 const APP_UID_STATS_MAP: &str = "netd_shared/map_netd_app_uid_stats_map";
 
@@ -210,22 +214,24 @@ impl NetworkStats {
         Ok(self.uid_cache.get_or_init(|| cache).as_ref())
     }
 
+    fn uid_map(&self) -> Result<&Mapped, Exception> {
+        match self.app_uid_stats.get() {
+            Some(m) => Ok(m),
+            None => match Mapped::open(&self.host.bpf()?.join(APP_UID_STATS_MAP)) {
+                Ok(m) => Ok(self.app_uid_stats.get_or_init(|| m)),
+                // The original's BpfMapRO aborts without its map.
+                Err(e) => Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("netstats: {APP_UID_STATS_MAP}: {e}"),
+                )),
+            },
+        }
+    }
+
     /// `nativeGetUidStat` (libnetworkstats `bpfGetUidStats`): the uid's
     /// counters, zero when it has none.
     fn native_uid_stat(&self, uid: i32) -> Result<Entry, Exception> {
-        let map = match self.app_uid_stats.get() {
-            Some(m) => m,
-            None => match Mapped::open(&self.host.bpf()?.join(APP_UID_STATS_MAP)) {
-                Ok(m) => self.app_uid_stats.get_or_init(|| m),
-                // The original's BpfMapRO aborts without its map.
-                Err(e) => {
-                    return Err(Exception::new(
-                        EX_ILLEGAL_STATE,
-                        format!("netstats: {APP_UID_STATS_MAP}: {e}"),
-                    ));
-                }
-            },
-        };
+        let map = self.uid_map()?;
         match map.map().lookup(&(uid as u32).to_ne_bytes()) {
             Some(v) => Entry::of(&v).ok_or_else(|| {
                 Exception::new(
@@ -238,6 +244,66 @@ impl NetworkStats {
             }),
             None => Ok(Entry::default()),
         }
+    }
+
+    /// Poll the recorded lifetime counters. There are still no interface
+    /// identities with which to attribute these to Java history collections.
+    fn poll_uid_stats(&self) -> Result<BTreeMap<i32, Entry>, Exception> {
+        let map = self.uid_map()?.map();
+        let h = map.h();
+        if !matches!(h.ty, HASH | LRU_HASH)
+            || h.key_size != 4
+            || h.value_size != 32
+            || h.data_len != u64::from(h.max_entries) * 48
+        {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("netstats: {APP_UID_STATS_MAP}: invalid UID stats layout"),
+            ));
+        }
+        let _guard = map.lock();
+        let mut stats = BTreeMap::new();
+        for i in 0..h.max_entries as usize {
+            // SAFETY: the checked hash layout bounds each slot and its
+            // four-byte key and 32-byte value; the map lock excludes writers.
+            unsafe {
+                let slot = map.slot(i);
+                if slot.cast::<u32>().read() == SLOT_USED {
+                    let uid = slot.add(8).cast::<i32>().read();
+                    let value = std::slice::from_raw_parts(map.value_of(i), 32);
+                    stats.insert(uid, Entry::of(value).unwrap());
+                }
+            }
+        }
+        Ok(stats)
+    }
+
+    fn force_update(&self, caller: i32) -> Result<(), Exception> {
+        if self.host.check_permission(Some(NETWORK_STACK), caller)? != 0
+            && self
+                .host
+                .check_permission(Some(MAINLINE_NETWORK_STACK), caller)?
+                != 0
+        {
+            return Err(Exception::security(format!(
+                "Requires one of the following permissions: {NETWORK_STACK}, {MAINLINE_NETWORK_STACK}."
+            )));
+        }
+        // Keep the same cache -> map lock order as getUidStats. A concurrent
+        // query cannot republish an older cached value after this poll.
+        let mut cache = self.uid_cache()?.map(|c| c.lock().unwrap());
+        let stats = self.poll_uid_stats()?;
+        if let Some(cache) = cache.as_mut() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            cache.entries.retain_mut(|(uid, when, entry)| {
+                *entry = stats.get(uid).copied().unwrap_or_default();
+                *when = now;
+                !entry.is_empty()
+            });
+        }
+        Ok(())
     }
 
     /// `getUidStats`: a uid's own traffic, or any uid's for the system.
@@ -267,6 +333,15 @@ impl Service for NetworkStats {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            ns::FORCE_UPDATE => {
+                call.data
+                    .enforce_interface(ns::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                match self.force_update(call.sender_euid as i32) {
+                    Ok(()) => p.write_no_exception(),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
             // `getRateLimitCacheConfig`: the client side configuration,
             // enabled for a caller only if the cache is on (on V+,
             // `useClientSideCache` needs no compat change).
