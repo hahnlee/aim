@@ -113,7 +113,7 @@ public final class PackageStateReplica implements PackageStateInternal {
 
     @Override public int getSharedUserAppId() { return state.getSharedUserAppId(); }
 
-    @Override public SigningInfo getSigningInfo() { return fresh().getSigningInfo(); }
+    @Override public SigningInfo getSigningInfo() { return new SigningInfo(getSigningDetails()); }
 
     @Override public int getTargetSdkVersion() { return state.getTargetSdkVersion(); }
 

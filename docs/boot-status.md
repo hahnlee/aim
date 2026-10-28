@@ -25,6 +25,13 @@ model uses the captured pre-call state, including provisioning and DevicePolicy
 protection, and retains NotModelled when that input is absent. Focused host tests
 and pinned-image Java linkage pass; no guest boot was run (2026-10-28).
 
+PackageStateReplica's SigningInfo getter now copies its retained saved signing
+owner through the original SigningInfo constructor, avoiding a full PackageSetting
+and package-code reconstruction (#1115). Device-services compilation and pinned-image
+linkage pass. The original-ART signer-isolation and reconstruction-counter fixtures
+remain unrun because the explicit M4 cohort input is absent. Chrome startup has not
+been remeasured; no guest boot was run (2026-10-28).
+
 ## How to reproduce
 
 ```
