@@ -627,7 +627,7 @@ pub fn links() -> Vec<Link> {
 
 /// `/proc/net/dev`, as `dev_seq_show`/`dev_seq_printf_stats` in Linux's
 /// net/core/net-procfs.c. These are the backing host devices' totals,
-/// including host traffic; guest-only eBPF interface accounting is #1720.
+/// including host traffic; guest-only eBPF interface accounting is in `net::traffic`.
 pub fn proc_dev() -> Result<Vec<u8>, Errno> {
     let links = links();
     let uplink = uplink::current().map_or(0, |u| u.index);

@@ -2714,9 +2714,16 @@ fn recv(
     ctrl_cap: usize,
     flags: u64,
 ) -> Result<Received, i64> {
+    let socket = any_sock(input);
+    // Unconnected datagrams need their source for interface accounting even
+    // when the caller did not ask for its address.
+    let want_name = want_name
+        || socket
+            .as_ref()
+            .is_some_and(|s| s.ty == SockType::Dgram && matches!(&s.family, Family::Inet(_)));
     let r = receive(input, iov, want_name, ctrl_cap, flags)?;
     if flags & L_MSG_PEEK == 0
-        && let Some(s) = any_sock(input)
+        && let Some(s) = socket
     {
         traffic::account(&s, input.fd(), false, r.n, r.name.as_deref());
     }
@@ -3136,7 +3143,12 @@ pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i6
         Err(error) => return Some(error),
     };
     let s = any_sock(&input)?;
+    // Linux sock_read_iter returns before receiving when the iovec is empty.
+    if s.ty == SockType::Dgram && matches!(&s.family, Family::Inet(_)) && iov_len(iov) == 0 {
+        return Some(0);
+    }
     if let Family::Inet(o) = &s.family
+        && s.ty != SockType::Dgram
         && !o.icmp4.load(Ordering::Relaxed)
         && !o.link_udp.load(Ordering::Relaxed)
     {

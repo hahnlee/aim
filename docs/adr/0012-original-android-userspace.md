@@ -405,7 +405,8 @@ Details in [boot-status.md](../boot-status.md), "Java world".
 - **eBPF scope:** `bpf()` maps live in shared memory and pin into bpffs;
   programs and BTF load but never run (#224). The socket layer does what
   netd's cgroup skb stats programs do for each send and receive
-  (`sys/net/traffic.rs`); the interface counters are #1720.
+  (`sys/net/traffic.rs`), and fills the per-interface maps as netd's xt_bpf
+  programs do, with guest device names registered for their readers (#1720).
 - **Kernel features added to the contract:** per-process mount namespaces
   as path-map entries, cgroup v2 and bpffs as path-map areas, xattrs with
   SELinux labels (from the original inodes and `genfscon`), and threads with
@@ -628,8 +629,9 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   attached to kernel hooks are not run; statistics the stack expects are
   filled in from the syscall layer, which sees every socket operation.
   Settled in P3: maps and pins work, and programs and BTF load. The
-  per-uid counters of netd's `cgroupskb/*/stats` are filled from the
-  socket layer; nothing else runs (#224, #1720).
+  per-uid counters of netd's `cgroupskb/*/stats` and interface counters of
+  its xt_bpf programs are filled from the socket layer (#224, #1720).
+  Other programs and ring-buffer producers remain unexecuted.
 - **Mount namespaces** retain authenticated per-process owner inventories,
   stable mount IDs and private/shared/slave propagation. Native init has
   bootstrap and default owners. Its pinned original per-service selection
