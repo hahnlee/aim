@@ -421,9 +421,8 @@ remain separate runtime gates.
   `PackagePartitions.FINGERPRINT` therefore changes with the overlay's
   content, allowing its normal upgrade path (`isDeviceUpgrading`), including
   permission re-grants, code cache clearing and `PRE_BOOT_COMPLETED`.
-  Identical derived content keeps its fingerprint. Host tests verify build
-  property composition and metadata checks; an existing-data upgrade has
-  not been boot-tested with this change.
+  Identical derived content keeps its fingerprint. An existing-data upgrade
+  boots in 15 s through that path (#2282).
 
 ## Expected savings
 

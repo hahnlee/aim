@@ -7620,8 +7620,10 @@ clones the image from the template of the `userdata/template` node
 (docs/first-boot.md). Native init now uses `aim.<derived sha256>` as the
 build incremental and recomposes its build fingerprint (#575); identical
 content retains its fingerprint, and a changed overlay changes PMS's upgrade
-input. Receipt/identity validation and property composition are host-tested;
-an existing-data upgrade has not been boot-tested with this change.
+input. An existing-data upgrade (data from the previous image, booted with a
+changed overlay) completes in 15 s, delivers `PRE_BOOT_COMPLETED` and attaches
+the system process once, with the native permission boot's update rules (#2282;
+2026-10-28).
 The template's attach ends at 0.41-0.53 s and the mount waits
 0-0.07 s (host load 12-14; creating the image held the mount up by
 0.6 s before, #563). The template build boot puts its display socket in
