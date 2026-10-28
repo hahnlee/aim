@@ -297,6 +297,283 @@ fn publish_with_lifecycle(
         .unwrap()
 }
 
+fn publish_restart_capture(
+    fixture: &Fixture,
+    bridge: &Arc<crate::package::bootstrap::Bridge>,
+) -> Arc<crate::package::scan_snapshot::query_state::Capture> {
+    let capture = publish(fixture, bridge);
+    let mut owner = capture.scan().owner().clone();
+    owner.settings.packages[0].signatures = Some(Default::default());
+    let mut context = (**capture.context()).clone();
+    context.scan_version = capture.scan().version() + 1;
+    context.platform.android_application = Some(Arc::new(crate::package::info::ApplicationInfo {
+        item: crate::package::info::PackageItemInfo {
+            package_name: Some("android".into()),
+            ..Default::default()
+        },
+        uid: 1000,
+        flags: crate::package::info::FLAG_SYSTEM,
+        source_dir: Some("/system/framework/framework-res.apk".into()),
+        ..Default::default()
+    }));
+    fixture
+        .system
+        .publish_package_scan_with_queries(
+            bridge,
+            Some(capture.scan()),
+            owner,
+            capture.scan().usage().clone(),
+            context,
+        )
+        .unwrap()
+}
+
+fn restart_application_info(system: &Arc<System>, name: &str) -> crate::shadow::Value {
+    use aim_service_aidl::android_content_pm_ipackagemanager as pm;
+    // The process-lifetime app-host front, including the first request from a
+    // new aim-system before any of its bridge owners have republished state.
+    let host = crate::app_host::AppHost::new(system.binder_process().clone());
+    host.set_system(system.clone());
+    let service = crate::app_host::package_service::PackageService::new(host);
+    let mut request = Parcel::new();
+    pm::GetApplicationInfo {
+        package_name: Some(name.into()),
+        flags: if name == "android" {
+            crate::package::info::flags::GET_SHARED_LIBRARY_FILES
+                | crate::package::info::flags::MATCH_SYSTEM_ONLY
+        } else {
+            crate::package::info::flags::MATCH_UNINSTALLED_PACKAGES
+        },
+        user_id: 0,
+    }
+    .write(&mut request);
+    let reply = service
+        .transact(&mut Call {
+            code: pm::GET_APPLICATION_INFO,
+            flags: 0,
+            sender_pid: 97200,
+            sender_euid: 1000,
+            data: request.reader(),
+        })
+        .unwrap();
+    crate::package::reply::decode(
+        pm::DESCRIPTOR,
+        pm::GET_APPLICATION_INFO,
+        &mut reply.reader(),
+    )
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn first_application_query_survives_package_bridge_replacement_and_death() {
+    use crate::shadow::Value;
+    for death in [false, true] {
+        let mut fixture = Fixture::new();
+        let old = fixture.attach();
+        let capture = publish_restart_capture(&fixture, &old);
+        let expected = restart_application_info(&fixture.system, "android");
+        assert!(matches!(expected, Value::Fields(_)), "{expected:?}");
+        if death {
+            fixture
+                .driver
+                .release(fixture.original.last().unwrap().proc_handle());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while fixture.system.package_bootstrap().is_ok() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "bridge did not detach"
+                );
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                restart_application_info(&fixture.system, "android"),
+                expected
+            );
+        }
+        let replacement = fixture.attach();
+        assert_eq!(
+            restart_application_info(&fixture.system, "android"),
+            expected
+        );
+        assert!(Arc::ptr_eq(
+            &capture,
+            &fixture.system.capture_package_queries().unwrap()
+        ));
+        assert!(fixture.system.capture_package_queries_for(&old).is_err());
+        assert!(
+            fixture
+                .system
+                .capture_package_queries_for(&replacement)
+                .is_err()
+        );
+        let latest = publish_restart_capture(&fixture, &replacement);
+        assert_eq!(
+            restart_application_info(&fixture.system, "android"),
+            expected
+        );
+        assert!(Arc::ptr_eq(
+            &latest,
+            &fixture
+                .system
+                .capture_package_queries_for(&replacement)
+                .unwrap()
+        ));
+        // A late death/close of the original cannot retire the new publication.
+        fixture.system.detach_package_bootstrap(&old).unwrap();
+        assert!(Arc::ptr_eq(
+            &latest,
+            &fixture.system.capture_package_queries().unwrap()
+        ));
+    }
+}
+
+#[test]
+fn canonical_package_change_during_bridge_gap_invalidates_retained_capture() {
+    use crate::shadow::Value;
+    for usage_only in [true, false] {
+        let mut fixture = Fixture::new();
+        let old = fixture.attach();
+        let capture = publish_restart_capture(&fixture, &old);
+        let snapshots = fixture
+            .system
+            .package_bootstrap
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .unwrap()
+            .snapshots
+            .clone()
+            .unwrap();
+        let expected = restart_application_info(&fixture.system, "p");
+        fixture.attach();
+        let mut owner = capture.scan().owner().clone();
+        let mut usage = capture.scan().usage().clone();
+        if usage_only {
+            usage.notify("p", 0, 17);
+        } else {
+            owner.settings.packages[0].version_code = 1;
+        }
+        owner
+            .capture_replica_runtime(BTreeMap::from([(
+                ("p".into(), false),
+                crate::package::scan::ReplicaRuntime {
+                    usage: *usage.times("p").unwrap(),
+                    seinfo: None,
+                    override_seinfo: None,
+                    library_files: vec![],
+                    libraries: vec![],
+                },
+            )]))
+            .unwrap();
+        // The canonical store is the writer's actual commit point; the query
+        // projection can still be pending when a bridge is replaced.
+        if usage_only {
+            let update = capture.prepare_usage_update(usage).unwrap();
+            snapshots
+                .publish_validated_store_after(capture.scan(), &update.store)
+                .unwrap();
+        } else {
+            snapshots
+                .publish_after(capture.scan(), owner, usage, |_| Ok(()))
+                .unwrap();
+        }
+        let actual = restart_application_info(&fixture.system, "p");
+        if usage_only {
+            assert_eq!(actual, expected);
+        } else {
+            assert!(
+                matches!(
+                    actual,
+                    Value::Exception {
+                        code: aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        ..
+                    }
+                ),
+                "{actual:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn package_change_during_bridge_gap_cannot_resurrect_old_query_capture() {
+    use crate::shadow::Value;
+    let mut fixture = Fixture::new();
+    let old = fixture.attach();
+    let capture = publish_restart_capture(&fixture, &old);
+    let before = restart_application_info(&fixture.system, "p");
+    assert!(matches!(before, Value::Fields(_)), "{before:?}");
+    let replacement = fixture.attach();
+    let mut owner = capture.scan().owner().clone();
+    owner.settings.packages[0].version_code = 1;
+    owner
+        .capture_replica_runtime(BTreeMap::from([(
+            ("p".into(), false),
+            crate::package::scan::ReplicaRuntime {
+                usage: [0; 8],
+                seinfo: None,
+                override_seinfo: None,
+                library_files: vec![],
+                libraries: vec![],
+            },
+        )]))
+        .unwrap();
+    let scan = fixture
+        .system
+        .publish_package_scan(
+            &replacement,
+            None,
+            owner.clone(),
+            capture.scan().usage().clone(),
+        )
+        .unwrap();
+    let unavailable = restart_application_info(&fixture.system, "p");
+    assert!(matches!(
+        unavailable,
+        Value::Exception {
+            code: aim_binder_host::parcel::EX_ILLEGAL_STATE,
+            ..
+        }
+    ));
+    // Reattachment after the real change must not revive the earlier capture.
+    let next = fixture.attach();
+    assert_eq!(restart_application_info(&fixture.system, "p"), unavailable);
+    let mut context = (**capture.context()).clone();
+    context.scan_version = scan.version() + 1;
+    context
+        .packages
+        .get_mut(&("p".into(), false))
+        .unwrap()
+        .version = 1;
+    fixture
+        .system
+        .publish_package_scan_with_queries(
+            &next,
+            None,
+            owner,
+            capture.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    let after = restart_application_info(&fixture.system, "p");
+    assert!(matches!(after, Value::Fields(_)), "{after:?}");
+    let version = |value: &Value| {
+        let Value::Fields(fields) = value else {
+            panic!("{value:?}")
+        };
+        fields
+            .iter()
+            .find(|(key, _)| key == "longVersionCode")
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_eq!(version(&before), Value::Long(0));
+    assert_eq!(version(&after), Value::Long(1));
+}
+
 /// The app-host refresh leaf reads the current native capture's UID and instant
 /// state, even while the joined package inputs cannot load.
 #[test]

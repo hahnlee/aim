@@ -238,7 +238,12 @@ redirect native construction, UserManager/ART adapters and lifecycle calls;
 planned methods are implemented; this is not conformance acceptance. On the
 app host image (2026-10-26) the native package boot runs its scans,
 construction and publication, the system process attaches once after it, and
-the guest reaches BOOT_COMPLETED. Every package read and write of the app
+the guest reaches BOOT_COMPLETED. Ordinary package reads retain the last
+committed capture across bootstrap bridge death/replacement only while its
+canonical package metadata is unchanged (usage-only advances are allowed);
+scoped owners remain fenced until republication (#2276; host regressions,
+2026-10-28, no guest boot).
+Every package read and write of the app
 host goes through the native session: there is no `Packages::load` join or
 host package model, and process starts, domains, permissions and the
 services' package discoveries read the session's capture. The published

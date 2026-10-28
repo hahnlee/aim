@@ -296,8 +296,12 @@ struct PackageBootstrapState {
 
 #[derive(Default)]
 struct PackageQueryPublication {
+    // Only a complete publication belongs to a bridge epoch. Ordinary readers
+    // retain the last committed capture across bridge death/replacement until
+    // a package scan changes it; live leaves still enforce their owner epoch.
     bridge: Option<Weak<crate::package::bootstrap::Bridge>>,
     capture: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
+    snapshots: Option<Arc<crate::package::scan_snapshot::Store>>,
 }
 
 /// IO completes before callback shutdown; retain outside publication locks.
@@ -480,7 +484,6 @@ impl PackageBootstrap {
             .is_some_and(|bridge| Arc::ptr_eq(&bridge, &self.bridge))
         {
             published.bridge = None;
-            published.capture = None;
         }
     }
 
@@ -488,7 +491,10 @@ impl PackageBootstrap {
         &mut self,
         capture: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
     ) {
-        self.published_queries.lock().unwrap().capture = capture.clone();
+        let mut published = self.published_queries.lock().unwrap();
+        published.bridge = Some(Arc::downgrade(&self.bridge));
+        published.capture = capture.clone();
+        published.snapshots = self.snapshots.clone();
         self.queries = capture;
     }
 
@@ -1273,8 +1279,7 @@ impl System {
         });
         {
             let mut published = self.package_queries.lock().unwrap();
-            published.bridge = Some(Arc::downgrade(&bridge));
-            published.capture = None;
+            published.bridge = None;
         }
         drop(current);
         if let Some(previous) = previous {
@@ -1705,11 +1710,24 @@ impl System {
     pub fn capture_package_queries(
         &self,
     ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
-        self.package_queries
-            .lock()
-            .unwrap()
-            .capture
-            .clone()
+        let (capture, retired, snapshots) = {
+            let published = self.package_queries.lock().unwrap();
+            (
+                published.capture.clone(),
+                published.bridge.is_none(),
+                published.snapshots.clone(),
+            )
+        };
+        // A disk commit can advance the canonical store before its query
+        // projection completes, even after bridge retirement. Usage-only
+        // advances preserve metadata; real package changes cannot use fallback.
+        capture
+            .filter(|capture| {
+                !retired
+                    || snapshots.as_ref().is_some_and(|store| {
+                        store.capture().same_metadata_generation(capture.scan())
+                    })
+            })
             .ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
