@@ -127,6 +127,10 @@ impl Service for InstallerRemoval {
                             a.fully_removed,
                             a.uid_removed,
                         )?;
+                    if a.uid_removed {
+                        self.host
+                            .foreground_service_uid_removed(a.user * 100_000 + a.app_id)?;
+                    }
                     bridge::write_send_removed_broadcast_reply(&mut p);
                     Ok(p)
                 })())

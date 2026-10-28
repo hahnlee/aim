@@ -152,6 +152,10 @@ public final class DeviceServices extends SystemService {
         }
     }
 
+    static IForegroundServicePolicy foregroundServicePolicy(Context context) {
+        return new ForegroundServicePolicy(context);
+    }
+
     private static final class Bridge extends IBridge.Stub {
         private com.android.server.vibrator.NativeVibrationPolicy vibrationPolicy;
 
@@ -260,6 +264,12 @@ public final class DeviceServices extends SystemService {
         @Override
         public int[] getPermissionGidsForUid(int uid) {
             return packageBootstrap.getPermissionGidsForUid(uid);
+        }
+
+        @Override
+        public IForegroundServicePolicy getForegroundServicePolicy() {
+            enforceSystemUid();
+            return foregroundServicePolicy(context);
         }
 
         @Override

@@ -574,6 +574,18 @@ impl DeviceIdle {
         self.with(|l| l.on_allowlist(app_id))
     }
 
+    pub(super) fn fgs_allowlisted(&self, uid: i32, system_only: bool) -> Result<bool, Exception> {
+        let id = uid % PER_USER_RANGE;
+        self.with(|l| {
+            l.system
+                .0
+                .iter()
+                .chain(l.except_idle.0.iter())
+                .any(|(_, app_id)| *app_id == id)
+                || (!system_only && l.user.0.iter().any(|(_, app_id)| *app_id == id))
+        })
+    }
+
     /// `isPowerSaveWhitelistExceptIdleApp` of the system: the app host's
     /// own question (`AppStandbyController.isNonIdleWhitelisted`).
     pub(super) fn allowed_except_idle(&self, name: &str) -> Result<bool, Exception> {

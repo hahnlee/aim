@@ -1,5 +1,6 @@
 package dev.aim.server;
 
+import dev.aim.server.IForegroundServicePolicy;
 import dev.aim.server.IPackageDiagnosticInputs;
 import dev.aim.server.ILocationBridge;
 import dev.aim.server.ILocationHost;
@@ -69,6 +70,8 @@ interface IBridge {
     int[] getPermissionGidsForUid(int uid);
 
     IPackageDiagnosticInputs getPackageDiagnosticInputs();
+
+    IForegroundServicePolicy getForegroundServicePolicy();
 
     /** UriGrantsManagerInternal, for native services such as the clipboard. */
     IBinder newUriPermissionOwner(String name);

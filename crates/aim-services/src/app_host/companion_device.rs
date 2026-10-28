@@ -46,7 +46,7 @@ impl CompanionDevice {
 
     /// `AssociationStore`'s associations of `user`: none unless a store
     /// file persists some.
-    fn no_associations(&self, user: i32) -> Result<(), Exception> {
+    pub(super) fn no_associations(&self, user: i32) -> Result<(), Exception> {
         let data = self.host.data()?;
         let files = [
             data.join(format!("system_de/{user}/companion_device_manager.xml")),

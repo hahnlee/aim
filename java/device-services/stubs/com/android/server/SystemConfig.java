@@ -7,6 +7,7 @@ import android.util.ArraySet;
 
 public class SystemConfig {
     public SystemConfig(boolean readPermissions) { throw new RuntimeException("stub"); }
+    public ArraySet<String> getBgRestrictionExemption() { throw new RuntimeException("stub"); }
     public ArraySet<String> getLinkedApps() { throw new RuntimeException("stub"); }
     public static SystemConfig getInstance() { throw new RuntimeException("stub"); }
     public String getSystemAppUpdateOwnerPackageName(String packageName) { throw new RuntimeException("stub"); }

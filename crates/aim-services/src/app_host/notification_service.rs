@@ -2349,6 +2349,10 @@ pub(super) struct Incoming {
 }
 
 impl Incoming {
+    pub(super) fn write_to_parcel(&self, p: &mut Parcel) {
+        self.raw.write(p);
+    }
+
     /// `Notification(Parcel)`, read from `r` after its parcelable's
     /// presence, the binders and files of it held in `process`.
     pub(super) fn read(r: &mut Reader<'_>, process: &LocalProcess) -> Result<Incoming, Exception> {
