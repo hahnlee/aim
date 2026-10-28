@@ -322,6 +322,9 @@ impl InitNamespaceEntry {
     }
 }
 fn entry_lock(table: &Path) -> io::Result<crate::private_fd::PrivateFile> {
+    record_lock(&table.join("namespace-entry-lock"))
+}
+fn record_lock(path: &Path) -> io::Result<crate::private_fd::PrivateFile> {
     use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
     let file = crate::private_fd::PrivateFile::allocate(|| {
         fs::OpenOptions::new()
@@ -331,7 +334,7 @@ fn entry_lock(table: &Path) -> io::Result<crate::private_fd::PrivateFile> {
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(table.join("namespace-entry-lock"))
+            .open(path)
     })?;
     loop {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
@@ -348,6 +351,7 @@ pub fn register_mount_namespace(
     process: ProcessIdentity,
     namespace: &str,
 ) -> io::Result<()> {
+    let _lock = record_lock(&table.join("mount-namespace-lock"))?;
     if !process.is_live() || namespace.is_empty() || namespace.contains(['/', '\t', '\n', '\0']) {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
@@ -359,6 +363,39 @@ pub fn register_mount_namespace(
         )
         .as_bytes(),
     )
+}
+/// Retire only this incarnation's receipt, even after waitpid has reaped it.
+pub fn retire_mount_namespace(table: &Path, process: ProcessIdentity) -> io::Result<()> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    let _lock = record_lock(&table.join("mount-namespace-lock"))?;
+    let path = table.join(format!("{}.mount-namespace", process.host_pid));
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut text = String::new();
+    file.take(4097).read_to_string(&mut text)?;
+    let fields: Vec<_> = text.trim_end_matches('\n').split('\t').collect();
+    if text.len() > 4096
+        || fields.len() != 5
+        || fields[0] != "AIMPROCNS1"
+        || fields[4].is_empty()
+        || fields[4].contains(['/', '\0', '\n'])
+    {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+    if fields[1].parse() != Ok(process.host_pid)
+        || fields[2].parse() != Ok(process.start_seconds)
+        || fields[3].parse() != Ok(process.start_microseconds)
+    {
+        return Err(io::Error::from_raw_os_error(libc::ESTALE));
+    }
+    fs::remove_file(path)
 }
 pub fn mount_namespace_of(table: &Path, process: ProcessIdentity) -> io::Result<String> {
     let text = fs::read_to_string(table.join(format!("{}.mount-namespace", process.host_pid)))?;
@@ -449,6 +486,34 @@ mod tests {
             }
             let _ = self.0.wait();
         }
+    }
+    #[test]
+    fn mount_retirement_preserves_foreign_symlinks_and_is_idempotent() {
+        let table = crate::scratch_dir("aim-mount-retire");
+        let process = ProcessIdentity::running_strict(std::process::id() as i32).unwrap();
+        let receipt = table.join(format!("{}.mount-namespace", process.host_pid));
+        register_mount_namespace(&table, process, "owned").unwrap();
+        let target = table.join("foreign");
+        fs::rename(&receipt, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &receipt).unwrap();
+        assert_eq!(
+            retire_mount_namespace(&table, process)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ELOOP)
+        );
+        assert!(
+            fs::symlink_metadata(&receipt)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_file(&receipt).unwrap();
+        fs::rename(&target, &receipt).unwrap();
+        retire_mount_namespace(&table, process).unwrap();
+        retire_mount_namespace(&table, process).unwrap();
+        assert!(!receipt.exists());
+        fs::remove_dir_all(table).unwrap();
     }
     #[test]
     fn actual_process_start_time_rejects_reused_or_dead_init_identity() {
