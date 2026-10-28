@@ -7,6 +7,8 @@
 //   gles_triangle fork     zygote's pattern: get the display, fork, and
 //                          compile and draw in the child (twice: a display
 //                          only got, and one initialized, before the fork)
+//   gles_triangle pending  import fd 3 without a context, notify the host
+//                          on fd 4 after observing a zero-timeout wait
 //
 // Prints one "ok ..." line per check and "timing ..." lines; exits non-zero
 // on the first failure.
@@ -18,6 +20,7 @@
 #include <GLES2/gl2ext.h>
 #include <android/hardware_buffer.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/sync_file.h>
 #include <media/NdkImageReader.h>
 #include <poll.h>
@@ -357,9 +360,195 @@ static void sample_external(EGLImageKHR image, PFNGLEGLIMAGETARGETTEXTURE2DOESPR
     printf("ok AHardwareBuffer sampled as an external texture (initial state, sampler)\n");
 }
 
+// Chromium's SurfaceControl path submits AHardwareBuffers with acquire
+// fences and reuses them only after their release fences. Exercise that
+// driver boundary without SurfaceFlinger: independent producer/consumer
+// contexts, a three-buffer pool, and a different raster on every frame.
+// This does not test ASurfaceTransaction or compositor layer placement.
+// Fence ownership follows EGL_ANDROID_native_fence_sync, revision 3:
+// https://registry.khronos.org/EGL/extensions/ANDROID/EGL_ANDROID_native_fence_sync.txt
+static int export_fence(EGLDisplay dpy) {
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC duplicate =
+        (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    CHECK(duplicate != NULL, "eglDupNativeFenceFDANDROID");
+    EGLSyncKHR sync = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    CHECK(sync != EGL_NO_SYNC_KHR, "create handoff fence %x", eglGetError());
+    glFlush();
+    int fd = duplicate(dpy, sync);
+    CHECK(fd >= 0, "export handoff fence %x", eglGetError());
+    CHECK(eglDestroySyncKHR(dpy, sync), "destroy exported sync %x", eglGetError());
+    CHECK(fcntl(fd, F_GETFD) >= 0, "export survives sync destruction");
+    return fd;
+}
+
+static void import_fence(EGLDisplay dpy, int fd) {
+    const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fd, EGL_NONE};
+    EGLSyncKHR sync = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    CHECK(sync != EGL_NO_SYNC_KHR, "import handoff fence %x", eglGetError());
+    CHECK(eglWaitSyncKHR(dpy, sync, 0), "wait for handoff fence %x", eglGetError());
+    CHECK(eglClientWaitSyncKHR(dpy, sync, 0, 0) == EGL_CONDITION_SATISFIED_KHR,
+          "handoff fence signaled after server wait");
+    CHECK(eglDestroySyncKHR(dpy, sync), "destroy imported sync %x", eglGetError());
+    CHECK(fcntl(fd, F_GETFD) == -1 && errno == EBADF, "imported fd closed by EGL");
+}
+
+// The host retains the writer until we have observed the pending state.
+// Unlike a freshly exported GPU fence, this cannot signal too early.
+static int pending_native_fence(void) {
+    EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    CHECK(eglInitialize(dpy, NULL, NULL), "pending eglInitialize %x", eglGetError());
+    CHECK(eglGetCurrentContext() == EGL_NO_CONTEXT, "no context for imported fence wait");
+    const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, 3, EGL_NONE};
+    EGLSyncKHR sync = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    CHECK(sync != EGL_NO_SYNC_KHR, "import pending fence %x", eglGetError());
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC duplicate =
+        (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    CHECK(duplicate != NULL, "eglDupNativeFenceFDANDROID");
+    int fd = duplicate(dpy, sync);
+    CHECK(fd >= 0 && fd != 3, "duplicate pending fence");
+    EGLint status = 0;
+    CHECK(eglGetSyncAttribKHR(dpy, sync, EGL_SYNC_STATUS_KHR, &status) &&
+              status == EGL_UNSIGNALED_KHR, "imported fence starts pending");
+    CHECK(eglClientWaitSyncKHR(dpy, sync, 0, 0) == EGL_TIMEOUT_EXPIRED_KHR,
+          "pending fence zero-timeout wait");
+    CHECK(!fence_signals(fd, 0), "exported copy is also pending");
+    uint64_t timestamp = 0;
+    CHECK(fence_info(fd, &timestamp) == 0 && timestamp == 0, "active sync_file status and time");
+    CHECK(write(4, "P", 1) == 1, "notify host of pending state");
+    CHECK(eglClientWaitSyncKHR(dpy, sync, 0, 5000000000ULL) == EGL_CONDITION_SATISFIED_KHR,
+          "context-free wait for host signal");
+    CHECK(eglGetSyncAttribKHR(dpy, sync, EGL_SYNC_STATUS_KHR, &status) &&
+              status == EGL_SIGNALED_KHR, "imported fence becomes signaled");
+    CHECK(eglDestroySyncKHR(dpy, sync), "destroy pending import");
+    CHECK(fcntl(3, F_GETFD) == -1 && errno == EBADF, "import owns fd 3");
+    CHECK(fence_signals(fd, 0), "export outlives imported sync");
+    CHECK(fence_info(fd, &timestamp) == 1 && timestamp > 0, "exported fence status and time");
+    CHECK(close(fd) == 0 && close(4) == 0, "close pending test descriptors");
+    CHECK(eglTerminate(dpy), "terminate pending display");
+    printf("ok pending native fence: timeout, context-free wait, ownership\n");
+    return 0;
+}
+
+static void surface_control_buffers(EGLDisplay dpy, EGLConfig config, EGLContext producer,
+                                   EGLSurface pbuffer,
+                                   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC target) {
+    enum { POOL = 3, FRAMES = 240 };
+    AHardwareBuffer* buffers[POOL];
+    EGLImageKHR images[POOL];
+    GLuint textures[POOL], fbos[POOL], external[POOL];
+    int release[POOL] = {-1, -1, -1};
+    const AHardwareBuffer_Desc desc = {
+        .width = W, .height = H, .layers = 1,
+        .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
+        .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT,
+    };
+    glGenTextures(POOL, textures);
+    glGenFramebuffers(POOL, fbos);
+    for (int i = 0; i < POOL; i++) {
+        CHECK(AHardwareBuffer_allocate(&desc, &buffers[i]) == 0, "handoff buffer %d", i);
+        images[i] = eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+                                      eglGetNativeClientBufferANDROID(buffers[i]), NULL);
+        CHECK(images[i] != EGL_NO_IMAGE_KHR, "handoff image %d: %x", i, eglGetError());
+        glBindTexture(GL_TEXTURE_2D, textures[i]);
+        target(GL_TEXTURE_2D, (GLeglImageOES)images[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbos[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                              textures[i], 0);
+        CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "handoff framebuffer %d", i);
+    }
+    const EGLint context_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLContext consumer = eglCreateContext(dpy, config, EGL_NO_CONTEXT, context_attribs);
+    CHECK(consumer != EGL_NO_CONTEXT, "consumer context %x", eglGetError());
+    const EGLint surface_attribs[] = {EGL_WIDTH, W, EGL_HEIGHT, H, EGL_NONE};
+    EGLSurface output = eglCreatePbufferSurface(dpy, config, surface_attribs);
+    CHECK(output != EGL_NO_SURFACE, "consumer surface %x", eglGetError());
+    CHECK(eglMakeCurrent(dpy, output, output, consumer), "consumer current %x", eglGetError());
+    GLuint sample = glCreateProgram();
+    glAttachShader(sample, shader(GL_VERTEX_SHADER, kQuadVertex));
+    glAttachShader(sample, shader(GL_FRAGMENT_SHADER, kExternalFragment));
+    glBindAttribLocation(sample, 0, "pos");
+    glLinkProgram(sample);
+    GLint linked = 0;
+    glGetProgramiv(sample, GL_LINK_STATUS, &linked);
+    CHECK(linked, "handoff sampling program");
+    glUseProgram(sample);
+    glUniform1i(glGetUniformLocation(sample, "tex"), 0);
+    glUniform4f(glGetUniformLocation(sample, "rect"), 0, 0, 1, 1);
+    glGenTextures(POOL, external);
+    for (int i = 0; i < POOL; i++) {
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, external[i]);
+        target(GL_TEXTURE_EXTERNAL_OES, (GLeglImageOES)images[i]);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    static const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+    glViewport(0, 0, W, H);
+    glDisable(GL_DITHER);
+    uint8_t pixels[W * H * 4];
+    for (int frame = 0; frame < FRAMES; frame++) {
+        int slot = frame % POOL;
+        CHECK(eglMakeCurrent(dpy, pbuffer, pbuffer, producer), "producer current");
+        if (release[slot] >= 0) import_fence(dpy, release[slot]);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbos[slot]);
+        glDisable(GL_DITHER);
+        unsigned r = frame, g = 255 - frame, b = frame ^ 0x5a;
+        glClearColor(r / 255.0f, g / 255.0f, b / 255.0f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(W / 4, H / 4, W / 2, H / 2);
+        glClearColor(0, 1, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glScissor(0, H - 8, W, 8);
+        glClearColor(1, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+        int acquire = export_fence(dpy);
+        CHECK(glGetError() == GL_NO_ERROR, "producer GL error at frame %d", frame);
+
+        CHECK(eglMakeCurrent(dpy, output, output, consumer), "consumer current");
+        import_fence(dpy, acquire);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, external[slot]);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        release[slot] = export_fence(dpy);
+        // No producer readback or glFinish before the handoff. Inspect
+        // the consumer's output only after it has submitted its release.
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        CHECK(glGetError() == GL_NO_ERROR, "consumer GL error at frame %d", frame);
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                uint32_t want = r << 24 | g << 16 | b << 8 | 0xff;
+                if (x >= W / 4 && x < 3 * W / 4 && y >= H / 4 && y < 3 * H / 4)
+                    want = 0x00ff00ff;
+                if (y >= H - 8) want = 0xff00ffff;
+                CHECK(at(pixels, W * 4, x, y) == want,
+                      "handoff frame %d slot %d pixel (%d,%d): %08x want %08x",
+                      frame, slot, x, y, at(pixels, W * 4, x, y), want);
+            }
+        }
+    }
+    glDeleteTextures(POOL, external);
+    glDeleteProgram(sample);
+    CHECK(eglMakeCurrent(dpy, pbuffer, pbuffer, producer), "restore producer");
+    for (int i = 0; i < POOL; i++) import_fence(dpy, release[i]);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(POOL, fbos);
+    glDeleteTextures(POOL, textures);
+    for (int i = 0; i < POOL; i++) {
+        CHECK(eglDestroyImageKHR(dpy, images[i]), "destroy handoff image");
+        AHardwareBuffer_release(buffers[i]);
+    }
+    CHECK(eglDestroySurface(dpy, output), "destroy consumer surface");
+    CHECK(eglDestroyContext(dpy, consumer), "destroy consumer context");
+    printf("ok SurfaceControl-style handoff: 240 frames, 3 buffers, acquire/release fences, all pixels\n");
+}
+
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc > 1 && strcmp(argv[1], "fork") == 0) return zygote();
+    if (argc > 1 && strcmp(argv[1], "pending") == 0) return pending_native_fence();
     // 1. A buffer through AHardwareBuffer (libui's Gralloc5: IAllocator
     // over binder, then mapper.aim.so in this process).
     AHardwareBuffer_Desc desc = {
@@ -451,6 +640,7 @@ int main(int argc, char** argv) {
     printf("ok AHardwareBuffer EGLImage clear + triangle (GPU and CPU views)\n");
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     sample_external(image, target_texture);
+    surface_control_buffers(dpy, config, ctx, pbuffer, target_texture);
 
     // 5. Timings: one GL call, and whole triangle frames.
     const int calls = 1000000;

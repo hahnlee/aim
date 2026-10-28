@@ -4,13 +4,17 @@
 //! binder, our mapper in-process), creates an EGL context through the
 //! original libEGL loader (our GLES driver, ANGLE on the host) and renders
 //! into a pbuffer, into the buffer and into a window surface (an
-//! ImageReader's queue).
+//! ImageReader's queue). It also checks SurfaceControl-style buffer/fence
+//! handoffs between independent contexts; no SurfaceFlinger is started.
 //!
 //! Skipped unless the pinned NDK, the ANGLE build and the derived image
 //! (`cargo aim build`) are all present.
 //! Run it with a private CARGO_TARGET_DIR: it executes linux-run.
 
 use std::io::Read;
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{Receiver, channel};
@@ -131,8 +135,11 @@ impl Guest<'_> {
     }
 
     fn run(&self, argv: &[&str]) -> Output {
-        let mut child = self
-            .command("u:r:shell:s0", argv)
+        Self::output(self.command("u:r:shell:s0", argv))
+    }
+
+    fn output(mut command: Command) -> Output {
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -146,6 +153,59 @@ impl Guest<'_> {
             std::thread::sleep(Duration::from_millis(20));
         }
         child.wait_with_output().unwrap()
+    }
+
+    fn pending_fence(&self) -> Output {
+        let (file, writer) = aim_sync_file::pair().unwrap();
+        let (mut ready, notify) = UnixStream::pair().unwrap();
+        ready
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
+        // Keep sources clear of the guest's fd 3 and 4 before pre_exec.
+        let high = |fd| {
+            // SAFETY: duplicating a live descriptor for the child.
+            let raw = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 64) };
+            assert!(raw >= 0);
+            // SAFETY: this new descriptor is ours.
+            unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) }
+        };
+        let inherited = [high(file.as_raw_fd()), high(notify.as_raw_fd())];
+        let raw = inherited.each_ref().map(|fd| fd.as_raw_fd());
+        let mut command = self.command(
+            "u:r:shell:s0",
+            &["/data/local/tmp/gles_triangle", "pending"],
+        );
+        // SAFETY: only async-signal-safe dup2 between fork and exec.
+        unsafe {
+            command.pre_exec(move || {
+                for (i, fd) in raw.into_iter().enumerate() {
+                    if libc::dup2(fd, 3 + i as i32) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        std::thread::scope(|scope| {
+            let signal = scope.spawn(move || {
+                let mut byte = [0];
+                ready
+                    .read_exact(&mut byte)
+                    .expect("guest observed pending fence");
+                assert_eq!(byte, *b"P");
+                writer.signal(1);
+            });
+            let out = Self::output(command);
+            drop((inherited, notify, file));
+            assert!(
+                signal.join().is_ok(),
+                "pending fence handshake: {:?}\n{}\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            out
+        })
     }
 }
 
@@ -271,11 +331,24 @@ fn allocates_and_renders_through_the_original_libui_and_libegl() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     eprintln!("{stdout}");
     assert!(
-        out.status.success() && stdout.contains("ok done"),
+        out.status.success()
+            && stdout.contains("ok SurfaceControl-style handoff: 240 frames, 3 buffers, acquire/release fences, all pixels")
+            && stdout.contains("ok native fences: sync_file wait, info, merge, import, fork")
+            && stdout.contains("ok done"),
         "{:?}\n{stdout}\n{}\nallocator:\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr),
         log_of(&allocator_log)
+    );
+    let out = guest.pending_fence();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    eprintln!("{stdout}");
+    assert!(
+        out.status.success()
+            && stdout.contains("ok pending native fence: timeout, context-free wait, ownership"),
+        "{:?}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
     );
     // Zygote's pattern: the display got (or initialized) before a fork
     // without exec, and a shader no cache has seen compiled in the child.
