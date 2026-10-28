@@ -387,8 +387,10 @@ struct Isolation {
 
 /// A process started and not yet attached, or attached.
 struct App {
-    /// The package it was started for, and its process name.
+    /// The package it was started for.
     package: String,
+    /// Packages hosted in this process (`ProcessRecord.getPkgList`).
+    packages: Vec<String>,
     process: String,
     uid: u32,
     /// Its package's uid (`ProcessRecord.info.uid`): its own uid, or an
@@ -440,6 +442,25 @@ struct App {
     /// milliseconds (`ProcessProfileRecord.mLastMemInfo`,
     /// `mLastMemInfoTime`).
     last_mem_info: Option<(i64, memory_info::ProcessMemoryInfo)>,
+}
+
+impl App {
+    /// `ProcessRecord.addPackage`, retaining insertion order and uniqueness.
+    fn add_package(&mut self, package: &str) {
+        if !self.packages.iter().any(|p| p == package) {
+            self.packages.push(package.to_string());
+        }
+    }
+
+    /// ContentProviderHelper.generateApplicationProvidersLocked, android-16.0.0_r1.
+    fn add_provider(&mut self, provider: package::info::ProviderInfo) {
+        if let Some(package) = provider.info.application_info.item.package_name.as_deref()
+            && (!provider.multiprocess || package != SYSTEM_PACKAGE)
+        {
+            self.add_package(package);
+        }
+        self.providers.push(provider);
+    }
 }
 
 /// `getPackageProcessState` over the processes, each its package (its
@@ -1408,6 +1429,7 @@ impl AppHost {
             start_seq,
             App {
                 package: "android".into(),
+                packages: vec!["android".into()],
                 process: process.to_string(),
                 uid,
                 package_uid: SYSTEM_UID,
@@ -1521,6 +1543,7 @@ impl AppHost {
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
+                packages: vec![package.clone()],
                 package,
                 process: process.to_string(),
                 uid,
@@ -1756,6 +1779,7 @@ impl AppHost {
             apps.iter_mut()
                 .find(|(_, a)| a.process == process && a.uid == uid)
                 .map(|(seq, a)| {
+                    a.add_package(name);
                     if a.thread.is_none() {
                         a.activities.extend(request.take());
                     }
@@ -1791,6 +1815,7 @@ impl AppHost {
             start_seq,
             App {
                 package: name.to_string(),
+                packages: vec![name.to_string()],
                 process: process.to_string(),
                 uid,
                 package_uid,
@@ -1996,7 +2021,9 @@ impl AppHost {
         let providers = self.process_providers(&app.process, app.uid)?;
         let (bind, config) = self.bind_application(app, providers.clone())?;
         app.config = Some(config);
-        app.providers = providers;
+        for provider in providers {
+            app.add_provider(provider);
+        }
         strong
             .transact(thread::BIND_APPLICATION, &bind, true)
             .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("bindApplication: {s}")))?;
@@ -2072,6 +2099,7 @@ impl AppHost {
             seq,
             App {
                 package: SYSTEM_PACKAGE.to_string(),
+                packages: vec![SYSTEM_PACKAGE.to_string()],
                 process: SYSTEM_PROCESS.to_string(),
                 uid: SYSTEM_UID,
                 package_uid: SYSTEM_UID,
@@ -2086,7 +2114,7 @@ impl AppHost {
                 thread: Some(strong),
                 activities: Vec::new(),
                 config: Some(config),
-                providers: providers.clone(),
+                providers: Vec::new(),
                 removed: false,
                 first_frame: None,
                 last_activity: 0,
@@ -2095,6 +2123,9 @@ impl AppHost {
                 last_mem_info: None,
             },
         );
+        for provider in &providers {
+            apps.get_mut(&seq).unwrap().add_provider(provider.clone());
+        }
         drop(apps);
         eprintln!("app host: the system process (pid {pid}) attached");
         for provider in providers {
@@ -2727,7 +2758,7 @@ impl AppHost {
             .map(|(seq, a)| {
                 let mut info = RunningAppProcessInfo {
                     process_name: Some(a.process.clone()),
-                    pkg_list: Some(vec![a.package.clone()]),
+                    pkg_list: Some(a.packages.clone()),
                     ..Default::default()
                 };
                 self.fill_in_proc_mem_info(*seq, a, &mut info, front);
@@ -5698,6 +5729,7 @@ mod tests {
             seq,
             App {
                 package: "android".into(),
+                packages: vec!["android".into()],
                 process: "WebViewLoader-arm64-v8a".into(),
                 uid: FIRST_ISOLATED_UID,
                 package_uid: SYSTEM_UID,
