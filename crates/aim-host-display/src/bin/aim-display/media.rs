@@ -235,7 +235,7 @@ pub fn handle(m: Message) {
     match m {
         Message::NowPlaying(n) => crate::nowplaying::show(n),
         Message::Gone { package } => crate::nowplaying::clear(package),
-        Message::Consent { id, label, .. } => crate::consent::ask(id, label),
+        Message::Consent { id, texts, .. } => crate::consent::ask(id, texts),
         Message::Command { .. } | Message::Consented { .. } => {}
     }
 }

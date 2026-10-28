@@ -72,23 +72,18 @@ fn window() -> Id {
         .unwrap_or(std::ptr::null_mut())
 }
 
-/// Ask whether `label` may capture the screen; the answer goes back as
+/// Ask with Android's localized title, warning and buttons; the answer goes back as
 /// [`Message::Consented`] `id`.
-pub fn ask(id: u32, label: String) {
+pub fn ask(id: u32, texts: [String; 4]) {
     on_main(move || {
         let _pool = crate::objc::Pool::new();
         let alert = send!(class(c"NSAlert"), c"new" => Id);
         send!(alert, c"setAlertStyle:" => (), usize = WARNING);
-        let title = format!("Share your screen with \u{201c}{label}\u{201d}?");
-        let text = format!(
-            "While you share, \u{201c}{label}\u{201d} can see everything Android shows \
-             and plays, in every Android app\u{2019}s window. Be careful with things like \
-             passwords, payment details, messages, photos, and audio and video."
-        );
+        let [title, warning, share, cancel] = texts;
         send!(alert, c"setMessageText:" => (), Id = nsstring(&title));
-        send!(alert, c"setInformativeText:" => (), Id = nsstring(&text));
-        send!(alert, c"addButtonWithTitle:" => Id, Id = nsstring("Share screen"));
-        send!(alert, c"addButtonWithTitle:" => Id, Id = nsstring("Cancel"));
+        send!(alert, c"setInformativeText:" => (), Id = nsstring(&warning));
+        send!(alert, c"addButtonWithTitle:" => Id, Id = nsstring(&share));
+        send!(alert, c"addButtonWithTitle:" => Id, Id = nsstring(&cancel));
         let window = window();
         if window.is_null() {
             // A shim started in the background has no window: an

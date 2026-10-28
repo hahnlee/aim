@@ -85,7 +85,7 @@ pub enum Message {
     Consent {
         id: u32,
         package: String,
-        label: String,
+        texts: [String; 4],
     },
     /// Host to bridge: the user's answer to [`Message::Consent`] `id`.
     Consented { id: u32, allowed: bool },
@@ -205,11 +205,13 @@ impl Message {
                 o.u8(kind);
                 o.u64(position);
             }
-            Message::Consent { id, package, label } => {
+            Message::Consent { id, package, texts } => {
                 o.u8(CONSENT);
                 o.u32(*id);
                 o.str(package);
-                o.str(label);
+                for text in texts {
+                    o.str(text);
+                }
             }
             Message::Consented { id, allowed } => {
                 o.u8(CONSENTED);
@@ -290,7 +292,7 @@ impl Message {
             CONSENT => Message::Consent {
                 id: i.u32()?,
                 package: i.str()?,
-                label: i.str()?,
+                texts: [i.str()?, i.str()?, i.str()?, i.str()?],
             },
             CONSENTED => Message::Consented {
                 id: i.u32()?,
@@ -378,7 +380,13 @@ mod tests {
             Message::Consent {
                 id: 7,
                 package: "p".into(),
-                label: "App".into(),
+                texts: [
+                    "화면을 공유할까요?",
+                    "모든 화면이 표시됩니다.",
+                    "화면 공유",
+                    "취소",
+                ]
+                .map(str::to_owned),
             },
             Message::Consented {
                 id: 7,

@@ -567,6 +567,11 @@ reason = "its code compiled by the `oat` node, so that no first boot compiles it
 # place of SystemUI's, so screen capture works without SystemUI.
 
 [[add]]
+path = "/system/framework/aim-shell-res.apk"
+source = "target/aim/device-services/shell-res.apk"
+reason = "the original, unmodified SystemUI APK used only as a resource container for the shell's translated consent text (#590); it is neither installed as an app nor started"
+
+[[add]]
 path = "/system/app/AimMediaProjection/AimMediaProjection.apk"
 source = "target/aim/device-services/media-projection.apk"
 reason = "the MediaProjection consent activity apps start for a screen capture (config_mediaProjectionPermissionDialogComponent), in place of SystemUI's: it asks the Mac through the native service host, which creates the projection through the original MediaProjectionManagerService, and returns SystemUI's result"

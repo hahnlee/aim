@@ -134,10 +134,15 @@ rest to the native service host, which has the system uid:
    (`IMediaProjection.setLaunchCookie`), as SystemUI does for a
    system-privileged recorder.
 3. Otherwise the display server asks on the app's window: its shim shows
-   a sheet ("Share your screen with “App”?", Share screen, Cancel); when
+   a sheet with Android's localized title, warning and Share/Cancel buttons; when
    the server's own window shows the app's task (no shim of the app
    runs), the server does. A sheet with no window to attach to is an
    app-modal alert.
+   `ConsentText` uses the activity's current Android locale and the original
+   SystemUI resources. The build retains the unmodified SystemUI APK as
+   `/system/framework/aim-shell-res.apk`, a resource container that is not
+   installed or started; Java selects and formats its translations and the
+   display protocol carries the four strings unchanged (#590).
 4. On Share the host creates the projection for the whole display
    (`createProjection(uid, package, TYPE_SCREEN_CAPTURE, false,
    DEFAULT_DISPLAY)`), or reuses the granted one when the user reviews a
@@ -181,4 +186,8 @@ sheet (#632; [system-services.md](system-services.md#media-projection-consent-63
 Non-UI API checks and checks using the platform's `PROJECT_MEDIA` pre-grant
 remain the conformance path; this classification adds no CTS run.
 
-Open: the single-app option (#589), a localized sheet (#590).
+Host protocol tests round-trip localized consent text; Java compilation and
+original-image linkage pass. The original resource table contains the consent
+strings in English and Korean. No localized sheet was exercised live.
+
+Open: the single-app option (#589).

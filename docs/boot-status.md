@@ -8488,6 +8488,9 @@ The system user's next alarm now supplies its show-intent creator's menu
 bar item through a system-uid Java receiver (#591). Host transition and
 callback-identity tests and Java linkage pass; no guest or live menu bar
 check was run (2026-10-28).
+The capture sheet takes its localized strings from the original SystemUI
+resource APK through the consent activity's Android locale (#590; protocol
+tests and Java linkage, 2026-10-28; no live sheet or guest boot rerun).
 
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
