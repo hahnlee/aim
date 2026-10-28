@@ -53,4 +53,6 @@ interface ISystemProcess {
     /** Original ContentValues scalar string conversion; system UID only. */
     void attachSettingsValues(IBinder bridge);
     IActivityStatsHost getActivityStatsHost(IActivityStatsSnapshot snapshot);
+    /** Release a diagnostics listener's shared native request count; system UID only. */
+    void releaseConnectivityDiagnosticsRequest(int requestId);
 }

@@ -231,6 +231,19 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::RELEASE_CONNECTIVITY_DIAGNOSTICS_REQUEST => {
+                let a = sp::ReleaseConnectivityDiagnosticsRequest::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let connectivity = self.host.connectivity_service.get().ok_or_else(|| {
+                        self.host
+                            .unimplemented_named("connectivity", "not published (#1509)")
+                    })?;
+                    connectivity.release_diagnostics(a.request_id);
+                    sp::write_release_connectivity_diagnostics_request_reply(&mut p);
+                    Ok(())
+                })
+            }
             _ => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
         };
         reply(result.map(|()| p))
