@@ -504,8 +504,7 @@ pub mod display {
     /// changes. Bounds are the task's, in display pixels.
     pub mod window {
         /// Guest: a task that gets a window, new or changed:
-        /// [`super::Window::bounds`], and [`super::Window::caption`] at
-        /// their top.
+        /// [`super::Window::bounds`].
         pub const TASK: u32 = 1;
         /// Guest: the task's title (its `TaskDescription` label), in
         /// [`super::Window::text`].
@@ -570,8 +569,8 @@ pub mod display {
         pub task: i32,
         /// Left, top, right, bottom.
         pub bounds: [i32; 4],
-        /// The height of the task's caption, inside the top of `bounds`.
-        pub caption: i32,
+        /// Reserved, zero. Retains the window record ABI.
+        pub _reserved: i32,
         /// One of [`orientation`], with [`window::ORIENTATION`].
         pub orientation: u32,
         /// Task description colors, with [`window::COLORS`].
@@ -587,7 +586,7 @@ pub mod display {
                 op: 0,
                 task: 0,
                 bounds: [0; 4],
-                caption: 0,
+                _reserved: 0,
                 orientation: 0,
                 primary_color: 0,
                 background_color: 0,

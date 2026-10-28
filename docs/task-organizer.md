@@ -6,8 +6,7 @@ task organizer and the transition player. This document is the design of
 the device's own, a "Mac-specific WMShell" (decisions D3, D4 and D5 of
 #463): a task organizer and a transition player in Java, in system_server,
 that make window mode Android 16's desktop windowing and tell aim-windows
-what only an organizer learns. It is active in the lightweight shell
-(`ro.vendor.aim.lightweight_shell`), the image in both modes since
+what only an organizer learns. It is active in the lightweight shell, the image in both modes since
 2026-10-01.
 
 Evidence is from the pinned sources (`android-16.0.0_r1`,
@@ -118,8 +117,7 @@ transition (`wm/ActivityTaskManagerService.java:2969-2990`), queued behind
 a running one and ready once the app redrew; visibility is committed when
 the transition is ready, not at once (`wm/ActivityRecord.java:5490`). This
 is how every device behaves, so the CTS expectations get closer, and
-aim-windows' "a pixel and back" commit, which exists because the legacy
-path could leave a surface behind (windows.md, "Placement"), goes.
+aim-windows reports the placed bounds directly (windows.md, "Placement").
 
 ## 2. #613: window mode as desktop windowing
 
@@ -201,7 +199,7 @@ the switch finds either.
 `dev.aim.server.WindowShell`, in `aim-services.jar`
 (`java/device-services`): the device-specific system service
 (`DeviceServices`, docs/system-services.md, "The system_server bridge")
-creates it when `ro.vendor.aim.lightweight_shell` is true, and registers the
+creates it in both modes, and registers the
 organizer and the player at its first boot phase
 (`PHASE_DEVICE_SPECIFIC_SERVICES_READY`), before the home activity starts.
 
@@ -277,8 +275,7 @@ answers only the system uid:
   (`onTaskChanged(taskId, activityType, orientation)`), and each task that
   took part in a finished transition (`onTaskPlaced(taskId)`); a dead
   listener is dropped (`linkToDeath`).
-- aim-windows, when `ro.vendor.aim.lightweight_shell` is true: waits for
-  `aim.window_shell`, sets the default display fullscreen, attaches,
+- aim-windows in window mode: waits for `aim.window_shell`, attaches,
   launches a shim's activity freeform, turns
   a change of a task's top orientation into its `ORIENTATION` record (as
   it does `setRequestedOrientation`, so aim-display keeps the one policy:
@@ -414,11 +411,9 @@ SystemUI's WMShell registers its own organizer and player when SystemUI
 starts. Both registrations are last-wins
 (`wm/TaskOrganizerController.java:569`,
 `wm/TransitionController.java:380-382`), so two shells would take tasks
-from each other. The shell is therefore on only where the image says so:
-`ro.vendor.aim.lightweight_shell`, which init.aim.rc sets in the image
-without SystemUI. Without it, `DeviceServices` creates nothing,
-`aim.window_shell` does not exist, and aim-windows sets the display
-freeform and commits bounds as before (#681).
+from each other. The derived image removes SystemUI and starts only the
+window shell. The old SystemUI property checks and aim-windows' freeform
+fallback are retired (#681).
 
 ## 8. Failure modes
 

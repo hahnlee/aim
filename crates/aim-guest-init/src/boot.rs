@@ -357,10 +357,6 @@ pub struct Boot {
 /// `servicemanager` sets it once it serves calls.
 const SERVICEMANAGER_READY: &str = "servicemanager.ready";
 
-/// The lightweight shell's init script sets it (docs/m1-shell.md): the
-/// image has no SystemUI, so the native status bar takes its place.
-const LIGHTWEIGHT_SHELL: &str = "ro.vendor.aim.lightweight_shell";
-
 /// The app host agent's zygote relay socket (`aim-app-host-agent`,
 /// docs/app-host.md).
 const APP_HOST_ZYGOTE_RELAY: &str = "aim_zygote_relay";
@@ -1361,13 +1357,10 @@ impl Boot {
             });
     }
 
-    /// The native `IStatusBar` in SystemUI's place, where the image says
-    /// so: once per boot, once servicemanager is ready (the init script's
-    /// property is set by then). It follows system_server's restarts.
+    /// The native `IStatusBar` in SystemUI's place: once per boot, once
+    /// servicemanager is ready. It follows system_server's restarts.
     fn start_status_bar(&mut self) {
-        if self.status_bar
-            || self.props.borrow().property(LIGHTWEIGHT_SHELL).as_deref() != Some("true")
-        {
+        if self.status_bar {
             return;
         }
         if let (Some(server), Some(display)) = (&self.binder, &self.options.display) {

@@ -6,18 +6,6 @@
 //! exactly over the task. Android pixels and macOS points stay separate
 //! coordinate systems; this module is the one place that converts.
 //!
-//! Below the screen the display has [`BAR_MARGIN`] more rows. Android's
-//! navigation bar or taskbar lies there, under no window. Its status bar
-//! lies under the menu bar, which no window covers either.
-//!
-//! A freeform task's caption is the original window decoration's, inside
-//! the top of the task's bounds. The window shows the rest of the task,
-//! its content; the caption lies under the window's own title bar.
-
-/// Rows below the screen for Android's bottom bars: a taskbar or
-/// navigation bar is 48 to 60 dp, 96 to 120 pixels at the image's density.
-pub const BAR_MARGIN: u32 = 192;
-
 /// The Mac's main screen: its size in points and pixels per point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
@@ -37,11 +25,11 @@ pub struct Frame {
 }
 
 impl Screen {
-    /// The display's size in pixels: the screen and the bar margin.
+    /// The display's size in backing pixels.
     pub fn display_size(&self) -> (u32, u32) {
         (
             (self.width * self.scale).round() as u32,
-            (self.height * self.scale).round() as u32 + BAR_MARGIN,
+            (self.height * self.scale).round() as u32,
         )
     }
 
@@ -70,18 +58,6 @@ impl Screen {
             px(self.height - f.y),
         ]
     }
-}
-
-/// A task's content: its bounds below the caption.
-pub fn content(bounds: [i32; 4], caption: i32) -> [i32; 4] {
-    let [l, t, r, b] = bounds;
-    [l, (t + caption).min(b), r, b]
-}
-
-/// The task bounds whose content is `content`.
-pub fn bounds(content: [i32; 4], caption: i32) -> [i32; 4] {
-    let [l, t, r, b] = content;
-    [l, t - caption, r, b]
 }
 
 /// Window content `c` (a frame) turned to landscape or portrait
@@ -135,14 +111,14 @@ mod tests {
     };
 
     #[test]
-    fn the_display_is_the_screen_and_the_bar_margin() {
-        assert_eq!(RETINA.display_size(), (3456, 2234 + BAR_MARGIN));
+    fn the_display_is_the_screen_in_backing_pixels() {
+        assert_eq!(RETINA.display_size(), (3456, 2234));
         let one_x = Screen {
             width: 1920.0,
             height: 1080.0,
             scale: 1.0,
         };
-        assert_eq!(one_x.display_size(), (1920, 1080 + BAR_MARGIN));
+        assert_eq!(one_x.display_size(), (1920, 1080));
     }
 
     #[test]
@@ -169,15 +145,6 @@ mod tests {
             height: 50.0,
         };
         assert_eq!(RETINA.to_pixels(f), [21, 2094, 221, 2194]);
-    }
-
-    #[test]
-    fn content_is_below_the_caption() {
-        let b = [100, 200, 1180, 2120];
-        assert_eq!(content(b, 84), [100, 284, 1180, 2120]);
-        assert_eq!(bounds(content(b, 84), 84), b);
-        // A task shorter than its caption has no content.
-        assert_eq!(content([0, 0, 10, 50], 84), [0, 50, 10, 50]);
     }
 
     fn f(x: f64, y: f64, width: f64, height: f64) -> Frame {

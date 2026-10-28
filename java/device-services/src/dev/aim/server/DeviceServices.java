@@ -9,7 +9,6 @@ import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
-import android.os.SystemProperties;
 import android.util.Slog;
 import android.view.IWindowManager;
 
@@ -26,7 +25,7 @@ import java.io.IOException;
  * publishes nothing: at its first boot phase it hands the native service
  * host (ADR 0013) the bridge to system_server's internal state
  * (docs/system-services.md, "The system_server bridge").
- * In the lightweight shell it also starts the window shell (WindowShell,
+ * It also starts the window shell (WindowShell,
  * docs/task-organizer.md), which aim-windows finds as aim.window_shell.
  */
 public final class DeviceServices extends SystemService {
@@ -64,10 +63,8 @@ public final class DeviceServices extends SystemService {
     public void onBootPhase(int phase) {
         if (phase == PHASE_DEVICE_SPECIFIC_SERVICES_READY) {
             // Before the home activity starts: every task is organized.
-            if (SystemProperties.getBoolean(WindowShell.PROPERTY, false)) {
-                fullscreenDisplayArea();
-                WindowShell.start(getContext());
-            }
+            fullscreenDisplayArea();
+            WindowShell.start(getContext());
             attachBridge();
         } else if (phase == PHASE_THIRD_PARTY_APPS_CAN_START) {
             mLocation.onThirdPartyAppsCanStart();
@@ -82,9 +79,7 @@ public final class DeviceServices extends SystemService {
 
     @Override
     public void onUserUnlocking(TargetUser user) {
-        if (SystemProperties.getBoolean(WindowShell.PROPERTY, false)) {
-            dropFreeformLaunchParams(user.getUserIdentifier());
-        }
+        dropFreeformLaunchParams(user.getUserIdentifier());
     }
 
     @Override

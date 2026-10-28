@@ -49,7 +49,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_host_display::input::translate::Phase;
-use aim_host_display::windows::{Frame, Screen, bounds, content, fit, turn, view_to_display};
+use aim_host_display::windows::{Frame, Screen, fit, turn, view_to_display};
 use aim_hostcall::display::{Window as Record, orientation, window};
 
 use crate::hosts::Host;
@@ -72,8 +72,6 @@ const ALL_SPACES: usize = 1 << 0;
 /// `NSFloatingWindowLevel` and `NSNormalWindowLevel`.
 const FLOATING_LEVEL: isize = 3;
 const NORMAL_LEVEL: isize = 0;
-/// `NSWindowToolbarStyleUnified`.
-const TOOLBAR_UNIFIED: isize = 3;
 /// `NSWindowOcclusionStateVisible`.
 const OCCLUSION_VISIBLE: usize = 1 << 1;
 /// `NSViewWidthSizable | NSViewHeightSizable`.
@@ -106,9 +104,8 @@ struct TaskWindow {
     window: Id,
     layer: Id,
     view: Id,
-    /// The task's bounds and caption, in display pixels.
+    /// The task's bounds, in display pixels.
     bounds: [i32; 4],
-    caption: i32,
     visible: bool,
     closed: bool,
     /// When the user last moved or resized the window.
@@ -116,12 +113,6 @@ struct TaskWindow {
     /// The content's size (points) the user gave the window, while it is
     /// turned for an orientation an activity asked for.
     user: Option<CGSize>,
-}
-
-impl TaskWindow {
-    fn content(&self) -> [i32; 4] {
-        content(self.bounds, self.caption)
-    }
 }
 
 /// Touches held for a task to come to the front.
@@ -140,8 +131,8 @@ struct Info {
     title: String,
     primary_color: u32,
     background_color: u32,
-    /// Its bounds and caption, once it has a window.
-    bounds: Option<([i32; 4], i32)>,
+    /// Its bounds, once it has a window.
+    bounds: Option<[i32; 4]>,
     /// The window host that shows it (in the server).
     host: Option<Arc<Host>>,
     /// Its window asked to close it.
@@ -324,7 +315,7 @@ fn note(s: &mut State, r: &Record) -> Info {
             info.primary_color = r.primary_color;
             info.background_color = r.background_color;
         }
-        window::TASK => info.bounds = Some((r.bounds, r.caption)),
+        window::TASK => info.bounds = Some(r.bounds),
         window::ORIENTATION => info.orientation = r.orientation,
         window::PINNED => info.pinned = true,
         window::UNPINNED => info.pinned = false,
@@ -379,7 +370,7 @@ fn publish_tasks() {
     let Some((tasks, front)) = with(|s| {
         let tasks = s.infos.iter().filter_map(|(&id, i)| {
             i.bounds
-                .map(|(bounds, _)| aim_host_display::layers::Task { id, bounds })
+                .map(|bounds| aim_host_display::layers::Task { id, bounds })
         });
         (tasks.collect(), s.front)
     }) else {
@@ -402,7 +393,7 @@ pub fn on_host_record(r: &Record, relative: isize) {
 /// Show what `r` says in this process's windows.
 fn apply(r: &Record, relative: isize) {
     match r.op {
-        window::TASK => task(r.task, r.bounds, r.caption),
+        window::TASK => task(r.task, r.bounds),
         window::PACKAGE | window::ACTIVITY | window::TITLE => {
             let shown = with(|s| {
                 let w = s.tasks.get(&r.task)?.window;
@@ -468,12 +459,11 @@ fn route(task: i32) -> bool {
             h.send_window(&text(window::ACTIVITY, &info.activity));
             h.send_window(&text(window::TITLE, &info.title));
             h.send_window(&info.color_record(task));
-            if let Some((bounds, caption)) = info.bounds {
+            if let Some(bounds) = info.bounds {
                 h.send_window(&Record {
                     op: window::TASK,
                     task,
                     bounds,
-                    caption,
                     ..Default::default()
                 });
             }
@@ -504,8 +494,8 @@ fn route(task: i32) -> bool {
             }
         }
         None => {
-            if let Some((b, caption)) = info.bounds {
-                create(task, b, caption);
+            if let Some(b) = info.bounds {
+                create(task, b);
             }
         }
     }
@@ -616,18 +606,17 @@ fn place(screen: &Screen, w: Id, c: [i32; 4]) {
 }
 
 /// A task's bounds, new or changed.
-fn task(task: i32, b: [i32; 4], caption: i32) {
+fn task(task: i32, b: [i32; 4]) {
     let Some(known) = with(|s| s.tasks.contains_key(&task)) else {
         return;
     };
     if !known {
-        return create(task, b, caption);
+        return create(task, b);
     }
     with(|s| {
         if let Some(t) = s.tasks.get_mut(&task) {
             t.bounds = b;
-            t.caption = caption;
-            let c = t.content();
+            let c = t.bounds;
             send!(t.layer, c"setDrawableSize:" => (), CGSize = CGSize {
                 width: (c[2] - c[0]).max(1) as f64,
                 height: (c[3] - c[1]).max(1) as f64,
@@ -646,7 +635,7 @@ fn task(task: i32, b: [i32; 4], caption: i32) {
 fn follow(task: i32) {
     let Some(Some((w, screen, c, recent))) = with(|s| {
         let t = s.tasks.get(&task)?;
-        let c = t.content();
+        let c = t.bounds;
         let live = send!(t.window, c"inLiveResize" => bool);
         if t.closed || live || window_content(&s.screen, t.window) == c {
             return None;
@@ -668,7 +657,7 @@ fn follow(task: i32) {
 }
 
 /// A new task window over the task's content.
-fn create(task: i32, b: [i32; 4], caption: i32) {
+fn create(task: i32, b: [i32; 4]) {
     let Some((screen, device, info)) = with(|s| {
         s.applying = true;
         let info = s.infos.get(&task).cloned().unwrap_or_default();
@@ -676,23 +665,13 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
     }) else {
         return;
     };
-    let c = content(b, caption);
+    let c = b;
     let f = screen.to_frame(c);
     let w = send!(class(c"NSWindow"), c"alloc" => Id);
     let w = send!(w, c"initWithContentRect:styleMask:backing:defer:" => Id,
         CGRect = cg(f), usize = NS_WINDOW_STYLE, usize = NS_BACKING_STORE_BUFFERED, bool = false);
     send!(w, c"setReleasedWhenClosed:" => (), bool = false);
     send!(w, c"setCollectionBehavior:" => (), usize = FULL_SCREEN_NONE);
-    // The caption lies under the title bar, so the bar must be as tall.
-    let whole = send!(w, c"frame" => CGRect);
-    let inner = send!(w, c"contentRectForFrameRect:" => CGRect, CGRect = whole);
-    if (whole.size.height - inner.size.height) * screen.scale < caption as f64 {
-        let toolbar = send!(class(c"NSToolbar"), c"alloc" => Id);
-        let toolbar = send!(toolbar, c"initWithIdentifier:" => Id, Id = nsstring("dev.aim.window"));
-        send!(w, c"setToolbar:" => (), Id = toolbar);
-        release(toolbar);
-        send!(w, c"setToolbarStyle:" => (), isize = TOOLBAR_UNIFIED);
-    }
     let (cw, ch) = ((c[2] - c[0]).max(1) as u32, (c[3] - c[1]).max(1) as u32);
     let bounds_pt = CGRect {
         size: CGSize {
@@ -731,7 +710,6 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
         layer,
         view,
         bounds: b,
-        caption,
         visible: true,
         closed: false,
         moved: None,
@@ -759,7 +737,7 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
     eprintln!("aim-display: task {task} window {number}");
     window_order(task, number);
     if placed != c {
-        set_bounds(task, bounds(placed, caption));
+        set_bounds(task, placed);
     }
     float(task);
     update_targets(Some(task));
@@ -771,7 +749,7 @@ fn create(task: i32, b: [i32; 4], caption: i32) {
 fn float(task: i32) {
     let Some(Some((w, c, pinned))) = with(|s| {
         let t = s.tasks.get(&task)?;
-        Some((t.window, t.content(), s.infos.get(&task)?.pinned))
+        Some((t.window, t.bounds, s.infos.get(&task)?.pinned))
     }) else {
         return;
     };
@@ -1037,7 +1015,7 @@ fn update_targets(changed: Option<i32>) {
             if !t.visible || t.closed {
                 continue;
             }
-            let target = Target::showing(t.layer, Some(t.content()), Show::Task(task));
+            let target = Target::showing(t.layer, Some(t.bounds), Show::Task(task));
             if changed == Some(task) {
                 fresh.push(target.clone());
             }
@@ -1066,7 +1044,7 @@ pub fn locate(
 ) -> Option<(i32, f64, f64, [i32; 4], f64)> {
     with(|s| {
         let (&task, tw) = s.tasks.iter().find(|(_, tw)| tw.view == view)?;
-        let c = tw.content();
+        let c = tw.bounds;
         let (px, py) = view_to_display(x, y, view_height, [c[0], c[1]], s.screen.scale);
         Some((task, px, py, c, s.screen.scale))
     })
@@ -1218,7 +1196,7 @@ fn moved(note: Id) {
     let Some(Some(b)) = with(|s| {
         let t = s.tasks.get_mut(&task)?;
         t.moved = Some(Instant::now());
-        let b = bounds(window_content(&s.screen, w), t.caption);
+        let b = window_content(&s.screen, w);
         (b != t.bounds).then_some(b)
     }) else {
         return;
