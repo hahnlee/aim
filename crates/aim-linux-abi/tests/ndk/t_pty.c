@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
@@ -366,7 +367,14 @@ static void locked_slave_metadata(void) {
   CHECK(openat(path, ".", O_PATH) == -1 && errno == ENOTDIR);
   char byte;
   CHECK(read(path, &byte, 1) == -1 && errno == EBADF);
-  CHECK(fchmod(path, 0600) == -1 && errno == EBADF);
+  CHECK(write(path, &byte, 1) == -1 && errno == EBADF);
+  // Bionic's fchmod retries EBADF through /proc/self/fd; test the syscall
+  // separately from that permitted path operation.
+  CHECK(syscall(SYS_fchmod, path, 0600) == -1 && errno == EBADF);
+  CHECK(fchown(path, getuid(), getgid()) == -1 && errno == EBADF);
+  int available;
+  CHECK(ioctl(path, FIONREAD, &available) == -1 && errno == EBADF);
+  CHECK(fchmod(path, 0620) == 0);
   CHECK(fgetxattr(path, "user.test", &byte, 1) == -1 && errno == EBADF);
   int locked = -1;
   CHECK(ioctl(master, TIOCGPTLCK, &locked) == 0 && locked == 1);

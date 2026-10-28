@@ -1917,14 +1917,33 @@ mod tests {
             super::super::fs::fcntl([fd as u64, 3, 0, 0, 0, 0]),
             super::super::fs::O_PATH as i64
         );
-        assert_eq!(
-            super::super::fs::read([fd as u64, name.as_mut_ptr() as u64, 1, 0, 0, 0]),
-            -(crate::errno::EBADF as i64)
-        );
-        assert_eq!(
-            fchmod_as([fd as u64, 0o666, 0, 0, 0, 0], &owner),
-            -(crate::errno::EBADF as i64)
-        );
+        // Exercise syscall dispatch without bionic's fchmod wrapper, which
+        // retries EBADF by changing the inode through /proc/self/fd.
+        let buffer = name.as_mut_ptr() as u64;
+        let reject_fd_ops = |fd: i32| {
+            for (nr, args) in [
+                (52, [fd as u64, 0o666, 0, 0, 0, 0]),
+                (55, [fd as u64, 2001, 2001, 0, 0, 0]),
+                (63, [fd as u64, buffer, 1, 0, 0, 0]),
+                (64, [fd as u64, buffer, 1, 0, 0, 0]),
+                (29, [fd as u64, 0x541b, buffer, 0, 0, 0]),
+            ] {
+                let mut context: crate::context::GuestContext = unsafe { std::mem::zeroed() };
+                context.x[..6].copy_from_slice(&args);
+                context.x[8] = nr;
+                super::super::dispatch(&mut context);
+                assert_eq!(
+                    context.x[0] as i64,
+                    -(crate::errno::EBADF as i64),
+                    "syscall {nr}"
+                );
+            }
+        };
+        reject_fd_ops(fd);
+        let copy = super::super::fs::dup([fd as u64, 0, 0, 0, 0, 0]);
+        assert!(copy >= 0);
+        reject_fd_ops(copy as i32);
+        assert_eq!(super::super::fs::close([copy as u64, 0, 0, 0, 0, 0]), 0);
         let text = super::super::fdtab::regular_exec_text().unwrap();
         let record = text
             .lines()
@@ -1937,6 +1956,7 @@ mod tests {
             )),
         );
         super::super::fdtab::restore_regular_exec(record).unwrap();
+        reject_fd_ops(fd);
         assert_eq!(
             super::super::fs::stat_fd_kernel(fd).unwrap().st_mode & 0o7777,
             0o620

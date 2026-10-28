@@ -2215,11 +2215,17 @@ full CTS acceptance. Locked-slave O_PATH now holds a directory-relative characte
 reference with the allocation inode/generation/birth identity, without a host
 slave descriptor (#1161). Descriptor stat, procfs metadata, empty-path chown,
 exec restoration and typed transfer use that reference; I/O and foreign metadata
-changes remain denied. Native metadata tests pass 11/0 (one ignored), and focused
-path/transport tests pass 12/0. The expanded original-bionic t_pty checks include
-foreign-UID DAC and lock preservation, but both its run and the allocator/reuse
-regression stop at native PTY service registration (Address already in use),
-including after rebuilding the helper; they provide no executed guest acceptance.
+changes remain denied. Host syscall dispatch checks confirm EBADF for fchmod,
+fchown, read, write and ioctl on the original, duplicated and exec-restored
+reference. Original bionic's fchmod wrapper retries EBADF through /proc/self/fd,
+so t_pty checks SYS_fchmod separately and preserves that permitted path fallback.
+A standalone original-bionic regular-file probe confirms syscall EBADF and
+successful wrapper chmod through procfs.
+Native metadata tests pass 11/0 (one ignored), and the earlier focused
+path/transport tests pass 12/0. The expanded original-bionic t_pty checks retain
+foreign-UID DAC and lock preservation, but its rerun still stops at native PTY
+service registration (Address already in use); the earlier allocator/reuse run
+stopped there too. They provide no executed guest acceptance.
 No guest boot was run for this change. C111 now completes actual adbd exec-out getprop on its first
 probe: exit0,27949 bytes,660 parsed property rows,SDK36 and boot_completed1,
 with no PTY error. Its fresh full66 campaign allocates the device and starts the
