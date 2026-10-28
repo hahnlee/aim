@@ -72,9 +72,12 @@ pub struct Client {
     key: SessionKey,
 }
 impl Client {
+    pub fn new(key: &SessionKey) -> Self {
+        Self { key: key.clone() }
+    }
     pub fn from_key(key: &SessionKey) -> Result<Self, Errno> {
         rpc(key, IDENTIFY, 0, &[])?;
-        Ok(Self { key: key.clone() })
+        Ok(Self::new(key))
     }
     pub fn request(
         &self,

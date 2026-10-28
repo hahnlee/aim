@@ -49,7 +49,14 @@ FUSE cached inodes retain the server's entry generation through open description
 mapping leases, cache files and writeback (#1070). Final FORGET waits for cache
 eviction. Host tests through the actual broker verify old/new mapping isolation,
 fresh pages after FORGET, and READ/WRITE/RELEASE/FORGET ordering; the focused
-FUSE cohort passes. No guest boot was run (2026-10-28).
+FUSE cohort passes. The connection broker also honors daemon entry/attribute
+timeouts, invalidates metadata on mutations and notifications, and retains
+cached lookup references through eviction (#2242). Its accept loop waits for
+socket readiness rather than sleeping after every RPC; filesystem requests no
+longer send a separate IDENTIFY. Existing dentries, including the FUSE mount
+root, return EEXIST from mkdir before the daemon's MKDIR. Host syscall and
+protocol checks pass; Maps startup has not been remeasured and no guest boot
+was run (2026-10-29).
 
 The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2287).
 The original-PMS shadow feed captures per-package, per-user state/data protection

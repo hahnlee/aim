@@ -1,4 +1,5 @@
 use super::*;
+mod metadata;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Condvar, Mutex, mpsc},
@@ -9,6 +10,7 @@ struct Pending {
     reply: mpsc::Sender<Result<Vec<u8>, Errno>>,
     delivered: bool,
     packet: Vec<u8>,
+    epoch: u64,
 }
 struct Device {
     signal: Arc<UnixStream>,
@@ -33,6 +35,7 @@ struct Description {
     offset: Mutex<u64>,
 }
 struct State {
+    metadata: metadata::Cache,
     mounted: bool,
     initialized: Option<Result<(), Errno>>,
     init_reply: Option<Vec<u8>>,
@@ -156,12 +159,14 @@ impl Owner {
             None
         } else {
             let (send, receive) = mpsc::channel();
+            let epoch = state.metadata.epoch;
             state.pending.insert(
                 unique,
                 Pending {
                     reply: send,
                     delivered: false,
                     packet: packet.clone(),
+                    epoch,
                 },
             );
             Some(receive)
@@ -260,6 +265,33 @@ impl Owner {
             }
             state.initialized.unwrap()?;
         }
+        if op == BATCH_FORGET {
+            let count = u32_at(body, 24)? as usize;
+            if body.len() != 32 + count * 16 {
+                return Err(EINVAL);
+            }
+            for entry in body[32..].chunks_exact(16) {
+                self.submit(
+                    &request_body(FORGET, u64_at(entry, 0)?, &entry[8..], uid, gid, pid),
+                    true,
+                    peer,
+                )?;
+            }
+            return Ok(Vec::new());
+        }
+        let (cached, forgets) = {
+            let mut state = self.state.lock().unwrap();
+            if state.aborted {
+                return Err(ENOTCONN);
+            }
+            state.metadata.prepare(op, node, &body[24..])?
+        };
+        for (node, count) in forgets {
+            self.enqueue(FORGET, node, &count.to_le_bytes(), uid, gid, pid, true)?;
+        }
+        if let Some(reply) = cached {
+            return Ok(reply);
+        }
         let (unique, receive) = self.enqueue(op, node, &body[24..], uid, gid, pid, no_reply)?;
         let Some(receive) = receive else {
             return Ok(Vec::new());
@@ -321,11 +353,11 @@ impl Owner {
                 return Err(EINVAL);
             }
             // Preserve kernel notifications for the routing/cache owner; never treat them as replies.
-            self.state
-                .lock()
-                .unwrap()
-                .notifications
-                .push_back((error, body[16..].to_vec()));
+            let mut state = self.state.lock().unwrap();
+            if matches!(error, 2 | 3 | 6) {
+                state.metadata.notify(error, notification)?;
+            }
+            state.notifications.push_back((error, body[16..].to_vec()));
             return Ok((body.len() as u64).to_le_bytes().to_vec());
         }
         if error > 0 || error <= -4096 || error != 0 && body.len() != 16 {
@@ -345,6 +377,11 @@ impl Owner {
             validate_reply(&pending.packet, body.len() - 16)?;
         }
         let pending = state.pending.remove(&unique).unwrap();
+        if error == 0 {
+            state
+                .metadata
+                .record(&pending.packet, &body[16..], pending.epoch)?;
+        }
         drop(state);
         pending
             .reply
@@ -455,7 +492,7 @@ fn validate_reply(packet: &[u8], length: usize) -> Result<(), Errno> {
         16 => Some(8),
         17 => Some(80),
         18 | 20 | 25 | 29 | 30 | 34 | 38 | 10 | 11 | 12 | 45 => Some(0),
-        35 => Some(144),
+        35 | 51 => Some(144),
         _ => None,
     };
     if fixed.is_some_and(|expected| length != expected) {
@@ -763,14 +800,17 @@ fn retire(owner: Arc<Owner>, description: Retiring) {
             }
         }
     }
-    if let Err(error) = owner.enqueue(
-        FORGET,
-        node,
-        &1u64.to_le_bytes(),
-        description.uid,
-        description.gid,
-        description.pid,
+    if let Err(error) = owner.submit(
+        &request_body(
+            FORGET,
+            node,
+            &1u64.to_le_bytes(),
+            description.uid,
+            description.gid,
+            description.pid,
+        ),
         true,
+        None,
     ) {
         if error != ENOTCONN {
             eprintln!("FUSE FORGET failed: {error}");
@@ -1289,6 +1329,7 @@ pub fn serve(path: &Path) -> Result<(), Errno> {
     let owner = Arc::new(Owner {
         key: SessionKey(path.to_owned()),
         state: Mutex::new(State {
+            metadata: metadata::Cache::default(),
             mounted: false,
             initialized: None,
             init_reply: None,
@@ -1329,7 +1370,16 @@ pub fn serve(path: &Path) -> Result<(), Errno> {
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(2));
+        // Wait only when accept drained the queue. Sleeping after each accept
+        // serialized every request/read/reply RPC behind a 2 ms timer.
+        let mut ready = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut ready, 1, 50) } < 0 && errno::last() != errno::EINTR {
+            return Err(errno::last());
+        }
     }
     owner.abort();
     Ok(())
@@ -1359,6 +1409,7 @@ mod readiness_tests {
         let owner = Arc::new(Owner {
             key: SessionKey(PathBuf::from("unused-owned-test-transport")),
             state: Mutex::new(State {
+                metadata: metadata::Cache::default(),
                 mounted: true,
                 initialized: Some(Ok(())),
                 init_reply: None,

@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::mpsc;
+mod metadata;
 struct Connection {
     key: SessionKey,
     fd: RawFd,

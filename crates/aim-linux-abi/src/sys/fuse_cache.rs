@@ -464,14 +464,13 @@ pub fn drain_notifications(key: &SessionKey) -> Result<(), Errno> {
                 let offset = word(&notification.body, 8)?;
                 let len = word(&notification.body, 16)?;
                 // A negative signed offset invalidates only inode attributes.
-                // VFS fetches attributes from the daemon on every query.
+                // The broker already invalidated cached inode attributes.
                 if (offset as i64) < 0 {
                     continue;
                 }
                 invalidate(key, node, offset, if len == 0 { u64::MAX } else { len })?;
             }
-            // Every VFS name lookup reaches the daemon; this owner retains no
-            // dentry/name cache for ENTRY/DELETE to invalidate.
+            // The broker invalidates cached dentries when ENTRY/DELETE arrives.
             3 | 6 => {}
             4 => {
                 let node = word(&notification.body, 0)?;

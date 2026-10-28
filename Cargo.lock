@@ -287,6 +287,7 @@ dependencies = [
  "aim-ashmem",
  "aim-binder-driver",
  "aim-binder-host",
+ "aim-emulated-storage",
  "aim-guest-init",
  "aim-host-audio",
  "aim-host-bluetooth",
