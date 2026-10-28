@@ -19,14 +19,11 @@ host checks cover tagged traffic, stats-map switching, CLAT exclusion and real
 UDP send/receive through pinned maps; no guest boot was run (2026-10-28).
 
 The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2287).
-<<<<<<< HEAD
 The original-PMS shadow feed captures per-package, per-user state/data protection
 through the original PackageManagerInternal (#754). The enabled-setting write
 model uses the captured pre-call state, including provisioning and DevicePolicy
 protection, and retains NotModelled when that input is absent. Focused host tests
 and pinned-image Java linkage pass; no guest boot was run (2026-10-28).
-=======
->>>>>>> c49ee63a6 (fix(package): authorize live static libraries against prior versions)
 
 ## How to reproduce
 
