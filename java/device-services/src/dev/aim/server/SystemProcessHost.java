@@ -113,6 +113,9 @@ public final class SystemProcessHost extends RuntimeInit {
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
             ActivityThread.initializeMainlineModules();
+            // SystemServer.startBootstrapServices: required by DexUseManagerLocal's Injector.
+            com.android.server.art.ArtModuleServiceInitializer.setArtModuleServiceManager(
+                    new android.os.ArtModuleServiceManager());
             // SystemServer initializes mutable nonce storage after the modules and
             // before services: PlatformCompat invalidates IpcDataCache at construction.
             // Keep its mutable mapping and fd for the lifetime of this system process.
@@ -125,6 +128,8 @@ public final class SystemProcessHost extends RuntimeInit {
             IApplicationThread applicationThread = thread.getApplicationThread();
             ISystemProcess host = ISystemProcess.Stub.asInterface(
                     ServiceManager.waitForService("aim.system_process"));
+            host.attachDexUseBridge(new com.android.server.art.AppHostDexUse(
+                    context, host.getDexUsePackages()));
             host.attachNetworkActivityBridge(new NetworkActivityBridge(
                     context, new Handler(Looper.getMainLooper()), host));
             host.attachActivityAnimations(new ActivityAnimations(context));

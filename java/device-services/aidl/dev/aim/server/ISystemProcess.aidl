@@ -8,6 +8,8 @@ import dev.aim.server.IActivityStatsSnapshot;
 import dev.aim.server.IActivityStatsHost;
 import dev.aim.server.IStorageCrates;
 import dev.aim.server.IAppHostPackageShellRead;
+import dev.aim.server.IDexUseBridge;
+import dev.aim.server.IDexUsePackages;
 
 /**
  * The app host's part of system_server for its system process
@@ -85,4 +87,6 @@ interface ISystemProcess {
     void attachPackageIntentParser(IBinder parser);
     void attachPackageShellRead(IAppHostPackageShellRead owner);
     void attachActivityAnimations(IBinder animations);
+    IDexUsePackages getDexUsePackages();
+    void attachDexUseBridge(IDexUseBridge bridge);
 }
