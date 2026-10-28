@@ -5,6 +5,8 @@
 //! their priority order. The settings are not reconciled with the
 //! installed packages, and nothing changes them; the other methods are not
 //! implemented (#1640).
+//! The original service's constructor needs UserManagerService's singleton
+//! and local package/user owners, absent from the app host's system process.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, OnceLock};
@@ -120,12 +122,16 @@ impl OverlayManager {
     }
 
     fn settings(&self) -> Result<&[OverlayInfo], Exception> {
-        let data = self.host.inputs()?.data.clone();
+        let data = self.host.data()?;
         let settings = self.settings.get_or_init(|| {
             let path = data.join("system/overlays.xml");
-            std::fs::read(&path)
-                .map_err(|e| format!("{}: {e}", path.display()))
-                .and_then(|b| restore(&b))
+            match std::fs::read(&path) {
+                Ok(bytes) => restore(&bytes),
+                // OverlayManagerService.restoreSettingsLocked leaves the
+                // initial settings empty until the first persisted change.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(e) => Err(format!("/data/system/overlays.xml: {e}")),
+            }
         });
         settings
             .as_deref()
@@ -190,6 +196,90 @@ impl Service for OverlayManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query(
+        process: &aim_binder_host::local::LocalService,
+        target: Option<&str>,
+        user: i32,
+    ) -> Parcel {
+        let mut request = Parcel::new();
+        request.write_interface_token(om::DESCRIPTOR);
+        request.write_string16(target);
+        request.write_i32(user);
+        let response = process
+            .transact(om::GET_OVERLAY_INFOS_FOR_TARGET, &request, false)
+            .unwrap();
+        response.into_parcel()
+    }
+
+    /// OverlayManagerService.restoreSettingsLocked skips a missing base
+    /// file; getOverlayInfosForTarget returns a non-null empty list.
+    #[test]
+    fn fresh_data_queries_have_empty_settings_without_creating_a_file() {
+        let data = super::super::test_temp_dir("overlay-fresh");
+        std::fs::create_dir_all(data.join("system")).unwrap();
+        let host = AppHost::new(crate::test_process(super::super::SYSTEM_UID));
+        super::super::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        let manager = Arc::new(OverlayManager::new(host.clone()));
+        let aim_binder_host::parcel::Binder::Local(node) =
+            host.process.add_service(manager.clone())
+        else {
+            unreachable!()
+        };
+        let service = host.process.local_service(node).unwrap();
+        for target in [
+            Some("android"),
+            Some("com.android.documentsui"),
+            Some("missing.target"),
+            None,
+        ] {
+            for user in [0, 10] {
+                let response = query(&service, target, user);
+                let mut reader = response.reader();
+                assert_eq!(reader.read_exception(), Ok(Ok(())));
+                assert_eq!(reader.read_i32(), Ok(0));
+                assert_eq!(reader.remaining(), 0);
+            }
+        }
+        assert_eq!(manager.settings(), Ok([].as_slice()));
+        assert!(!data.join("system/overlays.xml").exists());
+        host.process.shutdown().unwrap();
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn read_failures_are_exceptions_with_guest_paths() {
+        let data = super::super::test_temp_dir("overlay-error");
+        // Reading a directory fails even when tests run as a privileged user.
+        std::fs::create_dir_all(data.join("system/overlays.xml")).unwrap();
+        let host = AppHost::new(crate::test_process(super::super::SYSTEM_UID));
+        super::super::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        let manager = Arc::new(OverlayManager::new(host.clone()));
+        let error = manager.settings().unwrap_err();
+        assert!(
+            error.message.starts_with("/data/system/overlays.xml:"),
+            "{error:?}"
+        );
+        assert!(!error.message.contains(data.to_str().unwrap()), "{error:?}");
+        let aim_binder_host::parcel::Binder::Local(node) =
+            host.process.add_service(manager.clone())
+        else {
+            unreachable!()
+        };
+        let service = host.process.local_service(node).unwrap();
+        for _ in 0..2 {
+            let response = query(&service, Some("com.android.documentsui"), 0);
+            let error = response.reader().read_exception().unwrap().unwrap_err();
+            assert_eq!(error.code, EX_ILLEGAL_STATE);
+            assert!(
+                error.message.starts_with("/data/system/overlays.xml:"),
+                "{error:?}"
+            );
+            assert!(!error.message.contains(data.to_str().unwrap()), "{error:?}");
+        }
+        host.process.shutdown().unwrap();
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     /// A target's overlays keep the settings' order; a static one is not
     /// mutable; constraints are read.

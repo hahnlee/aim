@@ -1446,7 +1446,7 @@ fn preserves_a_recovered_reserve_across_a_failed_write() {
     fs::write(&path, b"bad xml").unwrap();
     fs::write(sibling(&path, ".reservecopy"), RESTRICTIONS).unwrap();
     let store = Store::open(&data.0, &[0]).unwrap().unwrap();
-    prepare(&path, &backup, &store.restrictions[&0]).unwrap();
+    prepare(&data.0, &path, &backup, &store.restrictions[&0]).unwrap();
     let error = write_with(&path, &backup, |_| Err(io::Error::other("interrupted"))).unwrap_err();
     assert!(!error.committed);
     assert_eq!(fs::read(backup).unwrap(), RESTRICTIONS);

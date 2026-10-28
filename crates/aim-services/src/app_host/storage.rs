@@ -539,15 +539,15 @@ impl AppHost {
 
     /// `storage.xml`, as `readSettingsLocked` reads it; none when missing.
     fn storage_settings(&self) -> Result<Option<aim_android_xml::Element>, Exception> {
-        let path = self.inputs()?.data.join("system/storage.xml");
+        let path = self.data()?.join("system/storage.xml");
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(io_exception(&format!("{}: {e}", path.display()))),
+            Err(e) => return Err(io_exception(&format!("/data/system/storage.xml: {e}"))),
         };
         aim_android_xml::read(&bytes)
             .map(Some)
-            .map_err(|e| io_exception(&format!("{}: {e}", path.display())))
+            .map_err(|e| io_exception(&format!("/data/system/storage.xml: {e}")))
     }
 
     /// `getVolumeRecords`: `mRecords`, read from `storage.xml`
@@ -1687,6 +1687,39 @@ impl Service for TrimListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_read_errors_name_guest_files_in_the_exception_and_cause() {
+        let data = super::super::test_temp_dir("storage-read-error");
+        std::fs::create_dir_all(data.join("system/storage.xml")).unwrap();
+        let host = AppHost::new(crate::test_process(1000));
+        super::super::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        let error = host.storage_settings().unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("java.io.IOException: /data/system/storage.xml:"),
+            "{error:?}"
+        );
+        assert!(!error.message.contains(data.to_str().unwrap()), "{error:?}");
+        let mut payload = Parcel::new();
+        payload.write_raw(error.parcelable.unwrap().bytes(), &[]);
+        let mut reader = payload.reader();
+        assert_eq!(
+            reader.read_string16().unwrap().as_deref(),
+            Some("android.os.ParcelableException")
+        );
+        assert_eq!(
+            reader.read_string16().unwrap().as_deref(),
+            Some("java.io.IOException")
+        );
+        let cause = reader.read_string16().unwrap().unwrap();
+        assert!(cause.starts_with("/data/system/storage.xml:"), "{cause}");
+        assert!(!cause.contains(data.to_str().unwrap()), "{cause}");
+        assert_eq!(reader.remaining(), 0);
+        host.process.shutdown().unwrap();
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     struct UnlockStorage {
         host: std::sync::Weak<AppHost>,

@@ -720,7 +720,7 @@ impl SettingsProvider {
             .open(&path)
             .map_err(|e| Thrown::Database(FILE_NOT_FOUND, open_failed(&e)))?;
         if create && !existed {
-            record_system(&path, 0o700)?;
+            record_system(self.host.data()?, &path, 0o700)?;
         }
         let file = aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file))
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "settings provider: no fileport"))?;
@@ -734,9 +734,13 @@ impl SettingsProvider {
             .data()?
             .join(format!("system_de/{user}/ringtones"));
         if !dir.exists() {
-            std::fs::create_dir(&dir)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
-            record_system(&dir, 0o700)?;
+            std::fs::create_dir(&dir).map_err(|e| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("/data/system_de/{user}/ringtones: {e}"),
+                )
+            })?;
+            record_system(self.host.data()?, &dir, 0o700)?;
         }
         Ok(dir)
     }
@@ -815,7 +819,8 @@ impl SettingsProvider {
             let mut out = std::fs::File::create(path)
                 .map_err(|e| format!("java.io.FileNotFoundException: {}", open_failed(&e)))?;
             if !existed {
-                record_system(path, 0o600).map_err(|e| e.message)?;
+                record_system(self.host.data().map_err(|e| e.message)?, path, 0o600)
+                    .map_err(|e| e.message)?;
             }
             std::io::copy(&mut input, &mut out)
                 .map(|_| ())
@@ -828,14 +833,18 @@ impl SettingsProvider {
 }
 
 /// A file or directory the system made, as the guest sees it.
-fn record_system(path: &Path, mode: u32) -> Result<(), Exception> {
+fn record_system(data: &Path, path: &Path, mode: u32) -> Result<(), Exception> {
     let inode = aim_storage::guest_inode::GuestInode {
         uid: Some(SYSTEM_UID as u32),
         gid: Some(SYSTEM_UID as u32),
         mode: Some(mode),
     };
-    aim_storage::guest_inode::record(path, inode)
-        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display())))
+    aim_storage::guest_inode::record(path, inode).map_err(|e| {
+        Exception::new(
+            EX_ILLEGAL_STATE,
+            format!("{}: {e}", crate::package::data_path(data, path).display()),
+        )
+    })
 }
 
 /// `ErrnoException.getMessage` of `Os.open`'s failure.

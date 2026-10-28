@@ -18,7 +18,7 @@ fn write_with(
 ) -> Result<(), WriteError> {
     let path = data.join("system/packages.list");
     let temp = data.join("system/packages.list.tmp");
-    let current = crate::package::journaled(&path).map_err(WriteError::before)?;
+    let current = crate::package::journaled(data, &path).map_err(WriteError::before)?;
     if current.as_deref().unwrap_or("") != expected.unwrap_or("") {
         return Err(WriteError::before(
             "packages.list changed outside the native owner",

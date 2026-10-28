@@ -646,22 +646,23 @@ impl Settings {
         let mut tables = HashMap::new();
         for table in Table::ALL {
             let path = data.join("system/users/0").join(table.file());
+            let guest = format!("/data/system/users/0/{}", table.file());
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     if let Some(state) = State::defaults(table) {
                         std::fs::create_dir_all(data.join("system/users/0"))
                             .and_then(|()| write(data, table, &state.document(table)))
-                            .map_err(|e| format!("{}: {e}", path.display()))?;
+                            .map_err(|e| format!("{guest}: {e}"))?;
                         tables.insert(table, state);
                     }
                     continue;
                 }
-                Err(e) => return Err(format!("{}: {e}", path.display())),
+                Err(e) => return Err(format!("{guest}: {e}")),
             };
             tables.insert(
                 table,
-                State::parse(table, &bytes).map_err(|e| format!("{}: {e}", path.display()))?,
+                State::parse(table, &bytes).map_err(|e| format!("{guest}: {e}"))?,
             );
         }
         Ok(Settings {
@@ -1232,6 +1233,23 @@ mod tests {
             caller_system: false,
             overrideable_by_restore: false,
         }
+    }
+
+    #[test]
+    fn settings_io_errors_name_guest_files() {
+        let data = super::super::test_temp_dir("settings-error");
+        let path = data.join("system/users/0/settings_system.xml");
+        std::fs::create_dir_all(&path).unwrap();
+        let error = match Settings::load(&data, &data) {
+            Ok(_) => panic!("a directory is not a settings file"),
+            Err(error) => error,
+        };
+        assert!(
+            error.starts_with("/data/system/users/0/settings_system.xml:"),
+            "{error:?}"
+        );
+        assert!(!error.contains(data.to_str().unwrap()), "{error:?}");
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     /// `DatabaseHelper`'s vendor provisioning defaults, migrated with
