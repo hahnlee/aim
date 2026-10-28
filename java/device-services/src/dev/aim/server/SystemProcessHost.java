@@ -104,6 +104,7 @@ public final class SystemProcessHost extends RuntimeInit {
             Looper.prepareMainLooper();
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
+            MediaArtwork.publish(context);
             ActivityThread.initializeMainlineModules();
             // SystemServer initializes mutable nonce storage after the modules and
             // before services: PlatformCompat invalidates IpcDataCache at construction.

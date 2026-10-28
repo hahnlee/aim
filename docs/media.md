@@ -69,7 +69,7 @@ cleared and the bridge registers again.
 | `DURATION` | playback duration |
 | the state's position, advanced by its speed since its update time (`elapsedRealtime`, the host's `CLOCK_BOOTTIME`), within the duration | elapsed time, as of the message |
 | speed while playing, fast-forwarding or rewinding, else 0 | playback rate |
-| `ART`, else `ALBUM_ART`, else `DISPLAY_ICON` (bitmaps; ashmem ones are mapped) | artwork (`MPMediaItemArtwork`) |
+| `ALBUM_ART_URI`, `ART_URI`, `DISPLAY_ICON_URI` in order; then `ART`, `ALBUM_ART`, `DISPLAY_ICON` bitmaps | artwork (`MPMediaItemArtwork`) |
 | playing, fast-forwarding, rewinding; paused; none, stopped, error; buffering, connecting, skipping | playing; paused; stopped; interrupted |
 
 The session goes to the shim that stands for its package, else the system
@@ -77,6 +77,15 @@ shim ("Android System"); a shim that does not run is opened in the
 background (`--notifications`, no Dock icon until a window opens), since a
 player may play with its window closed. A shim that loses the session
 clears its Now Playing.
+
+URI artwork is loaded by `MediaArtwork` in the original system server or
+the app host's Java system process, through `aim.media_artwork` (system UID
+only). Android's `ImageDecoder` reads `content:`, `file:` and
+`android.resource:` URIs as that process, scales to at most 256 pixels per
+side and returns PNG bytes. Failed loads are logged and the next URI or
+bitmap is tried, following Android 16's `MediaDataLoader` order (#588).
+Host metadata tests cover URI order and bitmap fallback; the Java compiles
+against the pinned API. No guest boot or live provider load was rerun.
 
 **Commands.** The shim enables the Mac's remote commands the state's
 actions allow and sends each back as the controller's transport control,
@@ -169,5 +178,4 @@ clicks the check sessions could not make. The CTS modules
 `upstream/cts.lock`) click SystemUI's dialog with UiAutomator and wait for
 it, so they fail or hang (#632).
 
-Open: artwork given as a URI (#588), the single-app option (#589), a
-localized sheet (#590).
+Open: the single-app option (#589), a localized sheet (#590).
