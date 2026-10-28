@@ -152,6 +152,156 @@ fn force_update(service: &NetworkStats, caller: u32) -> Result<(), Exception> {
     result.reader().read_exception().unwrap()
 }
 
+fn transport_stats(service: &NetworkStats, caller: u32, transport: i32) -> Parcel {
+    let mut p = Parcel::new();
+    p.write_interface_token(ns::DESCRIPTOR);
+    p.write_i32(transport);
+    service
+        .transact(&mut Call {
+            code: ns::GET_UID_STATS_FOR_TRANSPORT,
+            flags: 0,
+            sender_pid: 71,
+            sender_euid: caller,
+            data: p.reader(),
+        })
+        .unwrap()
+}
+
+// NetworkStats(Parcel), including withoutInterfaces/mapKeysNotNull's empty
+// result (elapsedRealtime=0, size=0, capacity=1), android-16.0.0_r1.
+fn assert_empty_transport_stats(p: Parcel) {
+    let mut r = p.reader();
+    r.read_exception().unwrap().unwrap();
+    assert_eq!(r.read_i32().unwrap(), 1); // typed object present
+    assert_eq!(r.read_i64().unwrap(), 0);
+    assert_eq!(r.read_i32().unwrap(), 0);
+    assert_eq!(r.read_i32().unwrap(), 1);
+    assert_eq!(r.read_i32().unwrap(), 1);
+    assert_eq!(r.read_string16().unwrap(), None);
+    for _ in 0..6 {
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(r.read_i32().unwrap(), 0);
+    }
+    for _ in 0..5 {
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(r.read_i64().unwrap(), 0);
+    }
+    assert_eq!(r.remaining(), 0);
+}
+
+fn connectivity_inventory(
+    host: &Arc<AppHost>,
+    ethernet: bool,
+) -> Arc<super::super::connectivity_service::ConnectivityService> {
+    use super::super::connectivity_service::ConnectivityService;
+    use std::net::Ipv4Addr;
+    let network = ethernet.then(|| {
+        (
+            aim_uplink::Uplink {
+                index: 2,
+                addr: Ipv4Addr::new(192, 168, 1, 20),
+                prefix: 24,
+                gateway: Ipv4Addr::new(192, 168, 1, 1),
+                mtu: 1500,
+            },
+            vec![Ipv4Addr::new(192, 168, 1, 1)],
+        )
+    });
+    let connectivity = Arc::new(ConnectivityService::for_test(host.clone(), network));
+    assert!(host.connectivity_service.set(connectivity.clone()).is_ok());
+    connectivity
+}
+
+#[test]
+fn cellular_uid_stats_without_cellular_networks_are_empty() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        connectivity_inventory(host, false);
+        let service = NetworkStats::new(host.clone());
+        // No detail maps need be present for an empty interface selection.
+        assert_empty_transport_stats(transport_stats(&service, 1000, TRANSPORT_CELLULAR as i32));
+        assert_empty_transport_stats(transport_stats(&service, 10100, TRANSPORT_WIFI as i32));
+    });
+}
+
+#[test]
+fn another_recorded_transport_does_not_leak_uid_totals_into_cellular_or_wifi() {
+    use super::super::network::TRANSPORT_ETHERNET;
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let connectivity = connectivity_inventory(host, true);
+        assert_eq!(connectivity.ifaces_since_boot(TRANSPORT_ETHERNET), ["eth0"]);
+        assert!(
+            connectivity
+                .ifaces_since_boot(TRANSPORT_CELLULAR)
+                .is_empty()
+        );
+        let map = uid_map(host);
+        record(&map, 10123, [1, 100, 2, 200]);
+        let service = NetworkStats::new(host.clone());
+        for transport in [TRANSPORT_CELLULAR, TRANSPORT_WIFI] {
+            assert_empty_transport_stats(transport_stats(&service, 10100, transport as i32));
+        }
+        assert_eq!(
+            service.uid_stats(10123, 10123).unwrap().unwrap().rx_bytes,
+            100
+        );
+        let p = transport_stats(&service, 1000, TRANSPORT_ETHERNET as i32);
+        let e = p.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(e, Exception::illegal_argument("Invalid transport 3"));
+    });
+}
+
+#[test]
+fn transport_stats_require_either_stack_permission_before_transport_validation() {
+    use aim_binder_host::parcel::EX_SECURITY;
+    for permission in [NETWORK_STACK, MAINLINE_NETWORK_STACK] {
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            poll_permissions(host, permission);
+            connectivity_inventory(host, false);
+            let service = NetworkStats::new(host.clone());
+            for caller in [10101, 99001] {
+                for transport in [TRANSPORT_CELLULAR as i32, -1, 3] {
+                    let p = transport_stats(&service, caller, transport);
+                    let e = p.reader().read_exception().unwrap().unwrap_err();
+                    assert_eq!(e.code, EX_SECURITY, "{e:?}");
+                    assert!(e.message.contains(NETWORK_STACK));
+                    assert!(e.message.contains(MAINLINE_NETWORK_STACK));
+                }
+            }
+            for caller in [0, 1000, 10100] {
+                assert_empty_transport_stats(transport_stats(
+                    &service,
+                    caller,
+                    TRANSPORT_CELLULAR as i32,
+                ));
+                for transport in [-1, 2, 3, 10, 11] {
+                    let p = transport_stats(&service, caller, transport);
+                    assert_eq!(
+                        p.reader().read_exception().unwrap().unwrap_err(),
+                        Exception::illegal_argument(format!("Invalid transport {transport}"))
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn transport_stats_never_claim_empty_without_inventory_or_with_selected_interfaces() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        poll_permissions(host, NETWORK_STACK);
+        let service = NetworkStats::new(host.clone());
+        let p = transport_stats(&service, 1000, TRANSPORT_CELLULAR as i32);
+        let e = p.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(e.code, EX_ILLEGAL_STATE);
+        assert!(e.message.contains("transport inventory"));
+        let e = service.uid_detail(&["wlan0".into()]).err().unwrap();
+        assert_eq!(e.code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);
+        assert!(e.message.contains("#1671"));
+    });
+}
+
 #[test]
 fn force_update_checks_both_permissions_before_polling() {
     use aim_binder_host::parcel::EX_SECURITY;

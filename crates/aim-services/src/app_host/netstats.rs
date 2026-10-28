@@ -8,6 +8,8 @@
 //! the authenticated app caller so the original permission checks apply.
 //! `forceUpdate` polls recorded UID counters and refreshes their native cache;
 //! it cannot attribute lifetime totals to interface-associated histories.
+//! `getUidStatsForTransport` filters by connectivity's since-boot inventory;
+//! an empty interface selection excludes every detail source and operation.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -21,6 +23,7 @@ use aim_service_aidl::android_net_inetworkstatsservice as ns;
 use aim_service_aidl::dev_aim_server_inetworkstatsbridge as bridge;
 use aim_storage::bpf_object::{HASH, LRU_HASH, Mapped};
 
+use super::network::{TRANSPORT_CELLULAR, TRANSPORT_WIFI};
 use super::settings::Table;
 use super::{AppHost, reply};
 
@@ -39,6 +42,30 @@ const NETWORK_STACK: &str = "android.permission.NETWORK_STACK";
 const MAINLINE_NETWORK_STACK: &str = "android.permission.MAINLINE_NETWORK_STACK";
 /// `APP_UID_STATS_MAP_PATH` below bpffs.
 const APP_UID_STATS_MAP: &str = "netd_shared/map_netd_app_uid_stats_map";
+
+/// An empty `NetworkStats.withoutInterfaces()` result. `mapKeysNotNull`
+/// creates it with elapsedRealtime 0 and capacity 1, even with no rows.
+struct EmptyUidStats;
+
+impl WriteParcelable for EmptyUidStats {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i64(0);
+        p.write_i32(0); // size
+        p.write_i32(1); // capacity
+        p.write_i32(1);
+        p.write_string16(None); // iface[0]
+        for _ in 0..6 {
+            // uid, set, tag, metered, roaming, defaultNetwork
+            p.write_i32(1);
+            p.write_i32(0);
+        }
+        for _ in 0..5 {
+            // rxBytes, rxPackets, txBytes, txPackets, operations
+            p.write_i32(1);
+            p.write_i64(0);
+        }
+    }
+}
 
 /// `TrafficStatsRateLimitCacheConfig`, a structured parcelable.
 struct CacheConfig {
@@ -282,7 +309,7 @@ impl NetworkStats {
         Ok(stats)
     }
 
-    fn force_update(&self, caller: i32) -> Result<(), Exception> {
+    fn enforce_network_stack(&self, caller: i32) -> Result<(), Exception> {
         if self.host.check_permission(Some(NETWORK_STACK), caller)? != 0
             && self
                 .host
@@ -293,6 +320,48 @@ impl NetworkStats {
                 "Requires one of the following permissions: {NETWORK_STACK}, {MAINLINE_NETWORK_STACK}."
             )));
         }
+        Ok(())
+    }
+
+    fn uid_stats_for_transport(
+        &self,
+        caller: i32,
+        transport: i32,
+    ) -> Result<EmptyUidStats, Exception> {
+        self.enforce_network_stack(caller)?;
+        // getAllIfacesSinceBoot rejects every other transport, even one
+        // connectivity has recorded (such as the Mac's guest Ethernet).
+        if transport != TRANSPORT_CELLULAR as i32 && transport != TRANSPORT_WIFI as i32 {
+            return Err(Exception::illegal_argument(format!(
+                "Invalid transport {transport}"
+            )));
+        }
+        let connectivity = self.host.connectivity_service.get().ok_or_else(|| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                "netstats: no connectivity transport inventory",
+            )
+        })?;
+        let ifaces = connectivity.ifaces_since_boot(transport as u32);
+        self.uid_detail(&ifaces)
+    }
+
+    fn uid_detail(&self, ifaces: &[String]) -> Result<EmptyUidStats, Exception> {
+        // getNetworkStatsUidDetail filters UID, tethering and provider rows,
+        // combines mUidOperations, then filters again. With no selected
+        // interfaces, even IFACE_ALL operation rows are excluded. No lifetime
+        // UID aggregate can be substituted when the selection is nonempty.
+        if !ifaces.is_empty() {
+            return Err(self.host.unimplemented_named(
+                "netstats",
+                "per-interface UID detail, tethering and provider accounting (#1671)",
+            ));
+        }
+        Ok(EmptyUidStats)
+    }
+
+    fn force_update(&self, caller: i32) -> Result<(), Exception> {
+        self.enforce_network_stack(caller)?;
         // Keep the same cache -> map lock order as getUidStats. A concurrent
         // query cannot republish an older cached value after this poll.
         let mut cache = self.uid_cache()?.map(|c| c.lock().unwrap());
@@ -348,6 +417,19 @@ impl Service for NetworkStats {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            ns::GET_UID_STATS_FOR_TRANSPORT => {
+                call.data
+                    .enforce_interface(ns::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let transport = call.data.read_i32().map_err(|_| BAD_VALUE)?;
+                match self.uid_stats_for_transport(call.sender_euid as i32, transport) {
+                    Ok(stats) => {
+                        p.write_no_exception();
+                        aim_service_aidl::write_typed(&mut p, Some(&stats));
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
+            }
             ns::FORCE_UPDATE => {
                 call.data
                     .enforce_interface(ns::DESCRIPTOR)
