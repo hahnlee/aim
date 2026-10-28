@@ -149,6 +149,12 @@ update `PRE_BOOT_COMPLETED` (8 system receivers in turn, then on), and
 reschedules, Settings, Play services, ...) start about 40 processes at once
 (#2005). Some receivers fail once per boot on gaps of their owners
 (#1521, #1843, #1919, #2001-#2004).
+The upgrade notification now follows each pre-boot receiver and is cancelled
+after the final receiver, through a system-process Java helper that creates the
+original UPDATES channel on fresh data. Storage sends its permission-protected
+`ACTION_VOLUME_STATE_CHANGED` after its boot-completed phase for the original
+broadcast-worthy type/state combinations (#2006; host matrix tests and Java
+compilation/linkage, 2026-10-29; no guest boot or notification UI check).
 The times above are from before these joined. Calculator, started through
 the app host, draws its first frame about 0.36 s after its process starts,
 its window is on the display, and taps on the display's touchscreen

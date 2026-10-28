@@ -129,6 +129,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
             host.attachSettingsValues(new SettingsValues());
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
+            PreBootNotifications.publish(context);
             host.attachSystemProcess(applicationThread.asBinder(),
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));

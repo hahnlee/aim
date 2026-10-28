@@ -18,6 +18,8 @@ public final class R {
         public static int config_systemUIServiceComponent;
         private string() { throw new RuntimeException("stub"); }
         public static final int config_icon_mask = 17040011;
+        public static int android_upgrading_notification_title = 0x01040154;
+        public static int notification_channel_updates;
     }
 
     public static final class dimen {
@@ -27,6 +29,6 @@ public final class R {
         public static final int config_pictureInPictureMinAspectRatio = 17105155;
     }
  public static final class style {public static int Theme_Material_Dialog_Alert;}
- public static final class drawable {public static int archived_app_cloud_overlay;}
+ public static final class drawable {public static int archived_app_cloud_overlay,stat_sys_adb;}
  public static final class integer {public static int config_criticalBatteryWarningLevel;}
 }

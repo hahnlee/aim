@@ -5575,6 +5575,7 @@ impl Service for Control {
                 if let Some(dropbox) = host.dropbox.get() {
                     dropbox.boot_completed();
                 }
+                host.storage.boot_completed.store(true, Ordering::Release);
                 let services = host.clone();
                 let unlocking = move || {
                     // BluetoothService's and TextServicesManagerService's
