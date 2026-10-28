@@ -652,6 +652,7 @@ pub struct AppHost {
     system_user: OnceLock<Result<(), String>>,
     /// What SensorPrivacyService persisted, read once.
     sensor_privacy: OnceLock<sensor_privacy::Persisted>,
+    camera_privacy_allowlist: Mutex<Option<Vec<Option<String>>>>,
     /// audioserver, once it registered, and the stream volumes.
     audio_policy: OnceLock<audio_policy::AudioPolicy>,
     audio_permission_update: Mutex<()>,
@@ -757,6 +758,7 @@ impl AppHost {
             user_restrictions: OnceLock::new(),
             system_user: OnceLock::new(),
             sensor_privacy: OnceLock::new(),
+            camera_privacy_allowlist: Mutex::new(None),
             audio_policy: OnceLock::new(),
             audio_permission_update: Mutex::new(()),
             audio_permission_controller: Mutex::new(None),

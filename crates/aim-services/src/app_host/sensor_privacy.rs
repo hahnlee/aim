@@ -4,7 +4,9 @@
 //! toggles are supported, and the all-sensor and toggle states the
 //! original last persisted (`/data/system/sensor_privacy.xml`,
 //! `sensor_privacy_impl.xml`), and the ops the toggles restrict for
-//! `appops`. Listeners are kept; nothing changes the states (the Mac's
+//! `appops`. Camera privacy also applies the original SystemConfig allowlist
+//! in the software toggle's allowlisted-apps state. Listeners are kept;
+//! nothing changes the toggle states (the Mac's
 //! microphone and camera privacy: #1476).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -26,7 +28,9 @@ const MICROPHONE: i32 = 1;
 const CAMERA: i32 = 2;
 const ENABLED: i32 = 1;
 const DISABLED: i32 = 2;
+const ENABLED_EXCEPT_ALLOWLISTED_APPS: i32 = 3;
 const OBSERVE_SENSOR_PRIVACY: &str = "android.permission.OBSERVE_SENSOR_PRIVACY";
+const MANAGE_SENSOR_PRIVACY: &str = "android.permission.MANAGE_SENSOR_PRIVACY";
 /// The ops the toggles restrict: `AppOpsManager.OP_CAMERA`,
 /// `OP_RECORD_AUDIO`, `OP_PHONE_CALL_MICROPHONE`, `OP_PHONE_CALL_CAMERA`,
 /// `OP_RECEIVE_AMBIENT_TRIGGER_AUDIO`,
@@ -127,6 +131,35 @@ fn combined_enabled(host: &AppHost, sensor: i32) -> Result<bool, Exception> {
         || toggle_enabled(host, TOGGLE_TYPE_HARDWARE, sensor)?)
 }
 
+/// `SensorPrivacyServiceImpl.isCameraPrivacyEnabled`: only the software
+/// toggle decides this package query. Hardware privacy is a global op restriction.
+pub(super) fn camera_privacy_enabled(
+    host: &AppHost,
+    package: Option<&str>,
+) -> Result<bool, Exception> {
+    match persisted(host)?.state(TOGGLE_TYPE_SOFTWARE, 0, CAMERA) {
+        ENABLED => Ok(true),
+        ENABLED_EXCEPT_ALLOWLISTED_APPS => {
+            let allowlist = host.camera_privacy_allowlist.lock().unwrap();
+            let allowlist = allowlist.as_ref().ok_or_else(|| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "camera privacy SystemConfig not initialized",
+                )
+            })?;
+            for entry in allowlist {
+                let package =
+                    package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+                if entry.as_deref() == Some(package) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// `setGlobalRestriction` as the service sets it for the current user:
 /// whether its toggles restrict `op` for every app (an app ops global
 /// restriction), the explicit user interaction audio unless
@@ -217,6 +250,47 @@ impl Service for SensorPrivacy {
         let mut p = Parcel::new();
         let result: Result<(), Failure> = (|| {
             match call.code {
+                spm::GET_CAMERA_PRIVACY_ALLOWLIST => {
+                    spm::GetCameraPrivacyAllowlist::read(&mut call.data)
+                        .map_err(|_| Failure::Status(BAD_VALUE))?;
+                    self.observe(uid)?;
+                    let allowlist = self.host.camera_privacy_allowlist.lock().unwrap();
+                    if allowlist.is_none() {
+                        return Err(Exception::new(
+                            EX_ILLEGAL_STATE,
+                            "camera privacy SystemConfig not initialized",
+                        )
+                        .into());
+                    }
+                    spm::write_get_camera_privacy_allowlist_reply(&mut p, &allowlist);
+                }
+                spm::SET_CAMERA_PRIVACY_ALLOWLIST => {
+                    let a = spm::SetCameraPrivacyAllowlist::read(&mut call.data)
+                        .map_err(|_| Failure::Status(BAD_VALUE))?;
+                    if self
+                        .host
+                        .check_permission(Some(MANAGE_SENSOR_PRIVACY), uid)?
+                        != 0
+                    {
+                        return Err(Exception::security(format!(
+                            "Changing sensor privacy requires the following permission: {MANAGE_SENSOR_PRIVACY}"
+                        )).into());
+                    }
+                    let allowlist = a
+                        .allowlist
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "allowlist"))?;
+                    *self.host.camera_privacy_allowlist.lock().unwrap() = Some(allowlist);
+                    spm::write_set_camera_privacy_allowlist_reply(&mut p);
+                }
+                spm::IS_CAMERA_PRIVACY_ENABLED => {
+                    let a = spm::IsCameraPrivacyEnabled::read(&mut call.data)
+                        .map_err(|_| Failure::Status(BAD_VALUE))?;
+                    self.observe(uid)?;
+                    spm::write_is_camera_privacy_enabled_reply(
+                        &mut p,
+                        camera_privacy_enabled(&self.host, a.package_name.as_deref())?,
+                    );
+                }
                 spm::SUPPORTS_SENSOR_TOGGLE => {
                     let a = spm::SupportsSensorToggle::read(&mut call.data)
                         .map_err(|_| Failure::Status(BAD_VALUE))?;
@@ -316,6 +390,154 @@ impl Service for SensorPrivacy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SensorPrivacyServiceImpl.isCameraPrivacyEnabled, android-16.0.0_r1.
+    #[test]
+    fn camera_software_states_and_global_hardware_restriction() {
+        for (state, allowed, other) in [
+            (ENABLED, true, true),
+            (DISABLED, false, false),
+            (ENABLED_EXCEPT_ALLOWLISTED_APPS, false, true),
+            (99, false, false),
+        ] {
+            let host = AppHost::new(crate::test_process(1000));
+            host.sensor_privacy
+                .set(Persisted {
+                    all_sensors: false,
+                    toggles: vec![
+                        (TOGGLE_TYPE_SOFTWARE, 0, CAMERA, state),
+                        (TOGGLE_TYPE_HARDWARE, 0, CAMERA, ENABLED),
+                    ],
+                })
+                .unwrap();
+            *host.camera_privacy_allowlist.lock().unwrap() = Some(vec![Some("adas".into()), None]);
+            assert_eq!(
+                camera_privacy_enabled(&host, Some("adas")).unwrap(),
+                allowed
+            );
+            assert_eq!(camera_privacy_enabled(&host, Some("other")).unwrap(), other);
+            assert!(restricts(&host, OP_CAMERA).unwrap());
+        }
+    }
+
+    fn call(
+        service: &dyn Service,
+        uid: u32,
+        code: u32,
+        data: &Parcel,
+    ) -> Result<Parcel, Exception> {
+        let reply = service
+            .transact(&mut Call {
+                code,
+                flags: 0,
+                sender_pid: 77,
+                sender_euid: uid,
+                data: data.reader(),
+            })
+            .unwrap();
+        reply.reader().read_exception().unwrap()?;
+        Ok(reply)
+    }
+
+    #[test]
+    fn camera_allowlist_binder_permissions_initialization_and_updates() {
+        use aim_binder_host::parcel::EX_SECURITY;
+        use aim_service_aidl::dev_aim_server_isystemprocess as sp;
+        const INIT: u32 = sp::INITIALIZE_CAMERA_PRIVACY_ALLOWLIST;
+        crate::system::with_discovery_session_flags(&[], |host| {
+            for path in [
+                "misc/apexdata/com.android.permission/access.abx",
+                "misc_de/0/apexdata/com.android.permission/access.abx",
+            ] {
+                let path = host.data().unwrap().join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"<access/>").unwrap();
+            }
+            let permissions = Arc::new(super::super::permission_manager::PermissionManager::new(
+                host.clone(),
+            ));
+            host.permission_manager.set(permissions).ok().unwrap();
+            host.sensor_privacy
+                .set(Persisted {
+                    all_sensors: false,
+                    toggles: vec![(
+                        TOGGLE_TYPE_SOFTWARE,
+                        0,
+                        CAMERA,
+                        ENABLED_EXCEPT_ALLOWLISTED_APPS,
+                    )],
+                })
+                .unwrap();
+            let system = super::super::system_process::SystemProcess::new(host.clone());
+            let sensor = SensorPrivacy::new(host.clone());
+            let mut init = Parcel::new();
+            sp::InitializeCameraPrivacyAllowlist {
+                packages: Some(vec![Some("adas".into())]),
+            }
+            .write(&mut init);
+            assert_eq!(
+                call(&system, 10100, INIT, &init).unwrap_err().code,
+                EX_SECURITY
+            );
+            call(&system, 1000, INIT, &init).unwrap();
+            let mut query = Parcel::new();
+            spm::IsCameraPrivacyEnabled {
+                package_name: Some("adas".into()),
+            }
+            .write(&mut query);
+            let private = || {
+                spm::read_is_camera_privacy_enabled_reply(
+                    &mut call(&sensor, 1000, spm::IS_CAMERA_PRIVACY_ENABLED, &query)
+                        .unwrap()
+                        .reader(),
+                )
+                .unwrap()
+                .unwrap()
+            };
+            assert!(!private());
+            let mut set = Parcel::new();
+            spm::SetCameraPrivacyAllowlist {
+                allowlist: Some(vec![]),
+            }
+            .write(&mut set);
+            assert_eq!(
+                call(&sensor, 10100, spm::SET_CAMERA_PRIVACY_ALLOWLIST, &set)
+                    .unwrap_err()
+                    .code,
+                EX_SECURITY
+            );
+            assert_eq!(
+                call(&sensor, 10100, spm::IS_CAMERA_PRIVACY_ENABLED, &query)
+                    .unwrap_err()
+                    .code,
+                EX_SECURITY
+            );
+            call(&sensor, 1000, spm::SET_CAMERA_PRIVACY_ALLOWLIST, &set).unwrap();
+            // Restarting aim-system must not overwrite a live setter's list.
+            call(&system, 1000, INIT, &init).unwrap();
+            assert!(private());
+            let mut get = Parcel::new();
+            spm::GetCameraPrivacyAllowlist {}.write(&mut get);
+            assert_eq!(
+                spm::read_get_camera_privacy_allowlist_reply(
+                    &mut call(&sensor, 1000, spm::GET_CAMERA_PRIVACY_ALLOWLIST, &get)
+                        .unwrap()
+                        .reader()
+                )
+                .unwrap()
+                .unwrap(),
+                Some(vec![])
+            );
+            let mut null = Parcel::new();
+            spm::SetCameraPrivacyAllowlist { allowlist: None }.write(&mut null);
+            assert_eq!(
+                call(&sensor, 1000, spm::SET_CAMERA_PRIVACY_ALLOWLIST, &null)
+                    .unwrap_err()
+                    .code,
+                EX_NULL_POINTER
+            );
+        });
+    }
 
     #[test]
     fn a_missing_toggle_is_disabled() {

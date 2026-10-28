@@ -235,6 +235,7 @@ trait System {
     /// Whether sensor privacy restricts `op` for every app (a global
     /// restriction).
     fn global_restriction(&self, op: i32) -> Result<bool, Exception>;
+    fn camera_privacy_enabled(&self, package: &str) -> Result<bool, Exception>;
     /// The package `name` (`getPackageStateInternal`), in `user`.
     fn package(&self, name: &str, user: i32) -> Result<Option<Package>, Exception>;
     /// Whether a package of `uid` is installed (`initializeUidStates`).
@@ -536,8 +537,9 @@ fn restricted(
     if info.code == OP_CAMERA
         && sys.feature(FEATURE_AUTOMOTIVE)?
         && sys.flag(CAMERA_PRIVACY_ALLOWLIST)?
+        && sys.camera_privacy_enabled(package)?
     {
-        return Err(sys.unimplemented("the camera privacy allowlist (#1563)"));
+        return Ok(true);
     }
     let user = uid.div_euclid(PER_USER_RANGE);
     let by_user_manager = match info.restriction {
@@ -2321,6 +2323,10 @@ impl System for Host<'_> {
 
     fn global_restriction(&self, op: i32) -> Result<bool, Exception> {
         super::sensor_privacy::restricts(self.0, op)
+    }
+
+    fn camera_privacy_enabled(&self, package: &str) -> Result<bool, Exception> {
+        super::sensor_privacy::camera_privacy_enabled(self.0, Some(package))
     }
 
     fn package(&self, name: &str, user: i32) -> Result<Option<Package>, Exception> {
@@ -4503,6 +4509,8 @@ mod tests {
         flags: BTreeSet<&'static str>,
         restrictions: BTreeSet<&'static str>,
         global: BTreeSet<i32>,
+        features: BTreeSet<&'static str>,
+        camera_private: BTreeSet<&'static str>,
         packages: BTreeMap<&'static str, Package>,
         granted: BTreeSet<(i32, &'static str)>,
         uid_modes: BTreeMap<(i32, &'static str), i32>,
@@ -4523,8 +4531,8 @@ mod tests {
             None
         }
 
-        fn feature(&self, _: &str) -> Result<bool, Exception> {
-            Ok(false)
+        fn feature(&self, name: &str) -> Result<bool, Exception> {
+            Ok(self.features.contains(name))
         }
 
         fn user_restriction(&self, name: &str) -> Result<bool, Exception> {
@@ -4544,6 +4552,10 @@ mod tests {
 
         fn global_restriction(&self, op: i32) -> Result<bool, Exception> {
             Ok(self.global.contains(&op))
+        }
+
+        fn camera_privacy_enabled(&self, package: &str) -> Result<bool, Exception> {
+            Ok(self.camera_private.contains(package))
         }
 
         fn package(&self, name: &str, _: i32) -> Result<Option<Package>, Exception> {
@@ -4800,6 +4812,39 @@ mod tests {
         assert_eq!(check_mode(&f, OP_READ_CLIPBOARD, APP, "app"), MODE_ALLOWED);
         // Notes are not suspended.
         assert_eq!(note_mode(&f, APP, OP_CAMERA, APP, "app"), MODE_ALLOWED);
+    }
+
+    /// Android 16 AppOpsService.isOpRestrictedLocked: the automotive
+    /// camera rule precedes the ordinary user-restriction bypasses.
+    #[test]
+    fn automotive_camera_privacy_checks_notes_and_starts() {
+        let mut f = fake();
+        f.camera_private.extend(["app", "priv"]);
+        assert_eq!(check_mode(&f, OP_CAMERA, APP, "app"), MODE_ALLOWED);
+        f.features.insert(FEATURE_AUTOMOTIVE);
+        assert_eq!(check_mode(&f, OP_CAMERA, APP, "app"), MODE_ALLOWED);
+        f.flags.insert(CAMERA_PRIVACY_ALLOWLIST);
+        assert_eq!(check_mode(&f, OP_CAMERA, APP, "app"), MODE_IGNORED);
+        assert_eq!(check_mode(&f, OP_CAMERA, PRIV_APP, "priv"), MODE_IGNORED);
+        assert_eq!(check_mode(&f, OP_RECORD_AUDIO, APP, "app"), MODE_ALLOWED);
+        assert_eq!(note_mode(&f, APP, OP_CAMERA, APP, "app"), MODE_IGNORED);
+        let mut started = Started::default();
+        assert_eq!(
+            start(
+                &f,
+                &mut started,
+                CLIENT,
+                &own(OP_CAMERA, APP, "app"),
+                NO_CHAIN
+            )
+            .0
+            .mode,
+            MODE_IGNORED
+        );
+        f.camera_private.remove("app");
+        assert_eq!(check_mode(&f, OP_CAMERA, APP, "app"), MODE_ALLOWED);
+        f.global.insert(OP_CAMERA);
+        assert_eq!(check_mode(&f, OP_CAMERA, APP, "app"), MODE_IGNORED);
     }
 
     #[test]

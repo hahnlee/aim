@@ -165,6 +165,22 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::INITIALIZE_CAMERA_PRIVACY_ALLOWLIST => {
+                let a = sp::InitializeCameraPrivacyAllowlist::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let packages = a
+                        .packages
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "packages"))?;
+                    self.host
+                        .camera_privacy_allowlist
+                        .lock()
+                        .unwrap()
+                        .get_or_insert(packages);
+                    sp::write_initialize_camera_privacy_allowlist_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_WIFI_BRIDGE => {
                 let a = sp::AttachWifiBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
