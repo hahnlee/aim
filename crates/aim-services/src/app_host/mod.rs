@@ -157,6 +157,7 @@ mod resources;
 pub mod restrictions_service;
 pub mod role_service;
 pub mod rollback_service;
+mod safe_labels;
 pub mod safety_center;
 pub mod safety_center_config;
 pub mod safety_center_data;
@@ -568,6 +569,8 @@ pub struct AppHost {
     windows: window_manager::Windows,
     composer: OnceLock<surface::Composer>,
     agent: Mutex<Option<Strong>>,
+    /// PackageItemInfo's retained original text presentation in aim-system.
+    safe_labels: Mutex<Option<Arc<Strong>>>,
     tasks: tasks::Tasks,
     /// The server's launches, by package, until the package's task is made.
     pending_launches: Mutex<HashMap<String, String>>,
@@ -677,6 +680,7 @@ impl AppHost {
             windows: Default::default(),
             composer: OnceLock::new(),
             agent: Mutex::new(None),
+            safe_labels: Mutex::new(None),
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
             providers: Default::default(),

@@ -59,6 +59,7 @@ impl Service for SystemProcess {
                 system().and_then(|()| {
                     self.host
                         .attach_foreground_service_policy(a.foreground_service_policy)?;
+                    self.host.attach_safe_labels(a.safe_labels)?;
                     self.host
                         .attach_system_process(call, a.application_thread)
                         .map(|()| sp::write_attach_system_process_reply(&mut p))
