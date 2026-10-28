@@ -164,6 +164,7 @@ pub fn indicator(package: &str, indicator: Indicator, on: bool) {
         Indicator::Microphone => ("mic.fill", "Microphone"),
         Indicator::Camera => ("video.fill", "Camera"),
         Indicator::Location => ("location.fill", "Location"),
+        Indicator::Alarm => ("alarm", "Next alarm"),
     };
     let item = launch_item();
     let image = send!(class(c"NSImage"), c"imageWithSystemSymbolName:accessibilityDescription:" => Id,

@@ -111,6 +111,8 @@ pub struct Metadata {
     pub art: Option<Image>,
     pub album_art: Option<Image>,
     pub display_icon: Option<Image>,
+    /// MediaDataLoader.ART_URIS, in priority order.
+    pub art_uris: [Option<String>; 3],
 }
 
 impl Metadata {
@@ -124,6 +126,9 @@ impl Metadata {
                 "android.media.metadata.ARTIST" => &mut m.artist,
                 "android.media.metadata.ALBUM_ARTIST" => &mut m.album_artist,
                 "android.media.metadata.ALBUM" => &mut m.album,
+                "android.media.metadata.ALBUM_ART_URI" => &mut m.art_uris[0],
+                "android.media.metadata.ART_URI" => &mut m.art_uris[1],
+                "android.media.metadata.DISPLAY_ICON_URI" => &mut m.art_uris[2],
                 "android.media.metadata.DURATION" if kind == VAL_LONG => {
                     m.duration = Some(r.read_i64()?);
                     return Ok(true);
@@ -167,6 +172,13 @@ impl Metadata {
             .flatten()
             .next()
     }
+
+    /// URI artwork precedes bitmap artwork in the pinned MediaDataLoader.
+    pub fn load_artwork(&mut self, mut load: impl FnMut(&str) -> Option<Image>) {
+        if let Some(image) = self.art_uris.iter().flatten().find_map(|uri| load(uri)) {
+            self.art = Some(image);
+        }
+    }
 }
 
 /// `ActivityOptions.LaunchCookie`: its binder.
@@ -199,7 +211,16 @@ mod tests {
     /// as a length-prefixed `Bitmap`.
     fn java_metadata() -> Vec<u8> {
         let mut entries = Parcel::new();
-        entries.write_i32(4);
+        entries.write_i32(7);
+        for (key, uri) in [
+            ("ALBUM_ART_URI", "content://album/art"),
+            ("ART_URI", "file:///art.png"),
+            ("DISPLAY_ICON_URI", "content://display/icon"),
+        ] {
+            string16(&mut entries, &format!("android.media.metadata.{key}"));
+            entries.write_i32(0); // VAL_STRING
+            string16(&mut entries, uri);
+        }
         string16(&mut entries, "android.media.metadata.TITLE");
         entries.write_i32(10); // VAL_CHARSEQUENCE: TextUtils, a plain string
         entries.write_i32(1);
@@ -254,6 +275,30 @@ mod tests {
                 pixels: vec![1, 2, 3, 255],
             })
         );
+    }
+
+    #[test]
+    fn uri_artwork_uses_the_pinned_order_and_falls_back_on_failure() {
+        let bytes = java_metadata();
+        let mut m = Metadata::read(&mut Reader::new(&bytes, &[]), &NoFiles).unwrap();
+        assert_eq!(
+            m.art_uris.each_ref().map(|s| s.as_deref()),
+            [
+                Some("content://album/art"),
+                Some("file:///art.png"),
+                Some("content://display/icon"),
+            ]
+        );
+        let bitmap = m.artwork().cloned();
+        m.load_artwork(|_| None);
+        assert_eq!(m.artwork(), bitmap.as_ref());
+        let mut tried = Vec::new();
+        m.load_artwork(|uri| {
+            tried.push(uri.to_owned());
+            (uri == "file:///art.png").then(|| Image::Encoded(vec![1, 2, 3]))
+        });
+        assert_eq!(tried, ["content://album/art", "file:///art.png"]);
+        assert_eq!(m.artwork(), Some(&Image::Encoded(vec![1, 2, 3])));
     }
 
     #[test]

@@ -43,6 +43,7 @@ use aim_service_aidl::{
     android_media_session_isessioncontroller as controller,
     android_media_session_isessioncontrollercallback as callback,
     android_media_session_isessionmanager as sm_media, android_os_iservicemanager as sm,
+    dev_aim_server_imediaartwork as artwork,
 };
 
 use crate::notifications::ProcessFiles;
@@ -340,9 +341,35 @@ impl Bridge {
         if r.read_exception().ok()?.is_err() || r.read_i32().ok()? == 0 {
             return None;
         }
-        Metadata::read(&mut r, &ProcessFiles(&self.process))
+        let mut metadata = Metadata::read(&mut r, &ProcessFiles(&self.process))
             .inspect_err(|s| eprintln!("guest-init: media: metadata: status {s}"))
-            .ok()
+            .ok()?;
+        metadata.load_artwork(|uri| {
+            let loaded = self
+                .find("aim.media_artwork")
+                .ok_or_else(|| "no artwork bridge".into())
+                .and_then(|service| {
+                    call(
+                        &service,
+                        artwork::LOAD,
+                        |p| {
+                            artwork::Load {
+                                uri: Some(uri.into()),
+                            }
+                            .write(p)
+                        },
+                        artwork::read_load_reply,
+                    )
+                });
+            match loaded {
+                Ok(bytes) => bytes.map(aim_host_display::notify::Image::Encoded),
+                Err(e) => {
+                    eprintln!("guest-init: media: artwork: {e}");
+                    None
+                }
+            }
+        });
+        Some(metadata)
     }
 
     fn playback(&self, session: &Strong) -> Option<PlaybackState> {

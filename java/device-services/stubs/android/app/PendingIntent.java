@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.os.UserHandle;
 
 public final class PendingIntent implements android.os.Parcelable {
+    public String getCreatorPackage() { throw new RuntimeException("stub"); }
     public int describeContents(){throw new RuntimeException("stub");}
     public void writeToParcel(android.os.Parcel p,int flags){throw new RuntimeException("stub");}
     public static final int FLAG_MUTABLE = 1 << 25;

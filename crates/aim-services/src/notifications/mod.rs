@@ -24,6 +24,7 @@
 //!
 //! Only in window mode: in device mode SystemUI's shade shows them.
 
+mod alarm;
 mod icons;
 mod indicators;
 pub(crate) mod parcels;
@@ -123,6 +124,7 @@ pub struct Bridge {
     requests: Mutex<HashMap<String, Vec<(i32, Answer)>>>,
     /// The app ops active that the indicators show.
     active: Mutex<indicators::Active>,
+    alarm: Mutex<Option<String>>,
 }
 
 /// The listener node.
@@ -176,9 +178,15 @@ impl Bridge {
             gone: Condvar::new(),
             requests: Mutex::new(HashMap::new()),
             active: Mutex::default(),
+            alarm: Mutex::default(),
         });
         process.start();
         *MAC.lock().unwrap() = Arc::downgrade(&bridge);
+        let this = bridge.clone();
+        std::thread::Builder::new()
+            .name("next-alarm".into())
+            .spawn(move || this.follow_alarm())
+            .map_err(|e| e.to_string())?;
         let this = bridge.clone();
         std::thread::Builder::new()
             .name("notifications-mac".into())

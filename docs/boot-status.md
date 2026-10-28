@@ -8320,6 +8320,14 @@ the projection through MediaProjectionManagerService. The Mac's Now
 Playing UI and an answer to the sheet were not exercised (no clicks);
 CtsMediaProjection* wait for SystemUI's dialog (#632).
 
+URI artwork now loads through the system-uid Java process's original
+ImageDecoder, with Android 16's URI order and bitmap fallback (#588;
+host metadata tests and Java compilation, 2026-10-28; no guest boot rerun).
+The system user's next alarm now supplies its show-intent creator's menu
+bar item through a system-uid Java receiver (#591). Host transition and
+callback-identity tests and Java linkage pass; no guest or live menu bar
+check was run (2026-10-28).
+
 ## Pointer, scrolling and shortcuts (2026-09-29, #214, #288)
 
 Input device lifetimes now emit kernel add/remove uevents for `inputN` and `eventN`, and `inputN/uevent` reports the live identity and capability bitmaps.
