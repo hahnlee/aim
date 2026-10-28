@@ -306,7 +306,7 @@ does. Without `access.abx`, the permission manager migrates legacy definitions
 and trees from `packages.xml` and runtime user grants, flags and package versions
 from Settings, persists migrated state, and leaves a user with no legacy runtime
 file empty and unwritten. Archiving (#1757), shutdown statistics (#2167) and the
-remaining bootstrap owners (#2022) are open.
+remaining bootstrap owners (#2330) and Intent shell options (#2331) are open.
 
 On a fingerprint change, native permission boot evaluates restricted exemptions,
 split-permission inheritance and internal protection flags, preserving user and

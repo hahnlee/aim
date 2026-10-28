@@ -36,7 +36,7 @@ fn component(value: &str) -> Option<ComponentName> {
 }
 
 /// The filter fields and scalar extras of Intent's command syntax. Unsupported
-/// compound syntax fails explicitly until its codec owner is implemented (#2022).
+/// compound syntax fails explicitly until its codec owner is implemented (#2331).
 fn parse(arguments: &[Option<String>]) -> Result<Vec<u8>, Exception> {
     let mut args = arguments
         .iter()
@@ -183,7 +183,7 @@ fn parse(arguments: &[Option<String>]) -> Result<Vec<u8>, Exception> {
             | "--efal" | "--ed" | "--eda" | "--edal" | "--esa" | "--esal" => {
                 return Err(Exception::new(
                     aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
-                    format!("Intent command option {option} (#2022)"),
+                    format!("Intent command option {option} (#2331)"),
                 ));
             }
             _ => {
