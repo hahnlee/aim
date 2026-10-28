@@ -471,8 +471,11 @@ fn text_input_link(socket: &Path) -> Result<UnixStream, String> {
         ..Default::default()
     };
     wire::send(link.as_fd(), wire::bytes(&hello), None).map_err(|e| e.to_string())?;
-    wire::recv_record::<u32>(link.as_fd())
+    let mode = wire::recv_record::<u32>(link.as_fd())
         .map_err(|e| e.to_string())?
         .ok_or("the display server closed the connection")?;
+    if mode == aim_hostcall::display::mode::HEADLESS {
+        return Err("headless display has no native UI surface".into());
+    }
     Ok(link)
 }

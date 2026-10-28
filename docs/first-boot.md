@@ -264,8 +264,8 @@ original's first boot at build time and keeps the shipped set of item 3:
 
 1. **Boot.** guest-init boots the derived image on a scratch data
    directory made from the empty image, the same boot as a user's first
-   boot, in window mode (which shows only app tasks; a first-run task
-   may still show a window for a moment, #607). While it runs, the node
+   boot, with a headless 1080x1920 display and a 60 Hz software clock
+   (#607). Tasks, panels and native UI have no host window. While it runs, the node
    copies PMS's settings out of the data volume as PMS's constructor
    first writes them (`write settings`, about 7.5 s in), before any app
    runs, and the permission module's files once the role controller has

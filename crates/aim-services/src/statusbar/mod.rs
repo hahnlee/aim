@@ -446,9 +446,12 @@ fn connect(display: &Path) -> Result<UnixStream, String> {
     };
     wire::send(link.as_fd(), wire::bytes(&hello), None).map_err(|e| e.to_string())?;
     // The server's mode: toasts and sheets are shown in either.
-    wire::recv_record::<u32>(link.as_fd())
+    let mode = wire::recv_record::<u32>(link.as_fd())
         .map_err(|e| e.to_string())?
         .ok_or("the display server closed the connection")?;
+    if mode == aim_hostcall::display::mode::HEADLESS {
+        return Err("headless display has no native UI surface".into());
+    }
     // SO_NOSIGPIPE: a write after the server has gone fails instead.
     let on: libc::c_int = 1;
     // SAFETY: setsockopt on our socket with a local int.

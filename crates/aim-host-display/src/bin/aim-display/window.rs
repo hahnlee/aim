@@ -39,6 +39,7 @@ pub const NS_WINDOW_STYLE: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturi
 pub const NS_BACKING_STORE_BUFFERED: usize = 2;
 const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: isize = 0;
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
+const NS_APPLICATION_ACTIVATION_POLICY_PROHIBITED: isize = 2;
 const MTL_PIXEL_FORMAT_BGRA8_UNORM: usize = 80;
 
 /// The display server's mode, one of `aim_hostcall::display::mode`.
@@ -155,7 +156,9 @@ pub fn main_display_dpi() -> (f64, f64) {
 pub fn app(display_mode: u32, server: bool) {
     MODE.store(display_mode, Ordering::Relaxed);
     let app = send!(class(c"NSApplication"), c"sharedApplication" => Id);
-    let policy = if server && display_mode == mode::WINDOWS {
+    let policy = if display_mode == mode::HEADLESS {
+        NS_APPLICATION_ACTIVATION_POLICY_PROHIBITED
+    } else if server && display_mode == mode::WINDOWS {
         NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
     } else {
         NS_APPLICATION_ACTIVATION_POLICY_REGULAR

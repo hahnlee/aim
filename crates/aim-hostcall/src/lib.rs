@@ -487,6 +487,8 @@ pub mod display {
         /// One window per task: the display is congruent with the Mac's
         /// main screen, and each task's window shows its part of it.
         pub const WINDOWS: u32 = 2;
+        /// A fixed-size display without windows or native UI surfaces.
+        pub const HEADLESS: u32 = 3;
     }
 
     /// Argument block of [`FN_WINDOWS`].
