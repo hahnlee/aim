@@ -291,6 +291,113 @@ static void raw_read_timer(void) {
 }
 
 static const char* executable;
+
+// The exec-error pipe closes at exec commit; the service client immediately
+// closes its last master. Linux sends SIGHUP even though stdio retains the
+// slave. Blocking it across exec lets an independent action finish, then
+// unblocking must take the default action (a caught handler does not survive).
+static int exec_hangup_child(int report, int closed, int control) {
+  alarm(10);
+  for (int fd = 0; fd < 3; fd++) {
+    if (fcntl(fd, F_GETFD) != 0) return 10;
+  }
+  errno = 0;
+  if (fcntl(closed, F_GETFD) != -1 || errno != EBADF) return 11;
+  sigset_t blocked, pending;
+  sigemptyset(&blocked);
+  sigaddset(&blocked, SIGHUP);
+  if (sigprocmask(SIG_BLOCK, NULL, &pending) != 0 ||
+      !sigismember(&pending, SIGHUP)) return 12;
+  char byte;
+  if (read(control, &byte, 1) != 1 || byte != 'c') return 18;
+  close(control);
+  // This pipe write stands for work independent of the hung-up terminal,
+  // such as the reboot command's property socket transaction.
+  if (write(report, "action", 6) != 6) return 13;
+  for (int i = 0; i < 500; i++) {
+    if (sigpending(&pending) != 0) return 14;
+    if (sigismember(&pending, SIGHUP)) {
+      if (sigprocmask(SIG_UNBLOCK, &blocked, NULL) != 0) return 15;
+      return 16;
+    }
+    usleep(10000);
+  }
+  return 17;
+}
+
+static void exec_hangup(int host_exec) {
+  char name[64];
+  int master = open_master(name, sizeof(name));
+  CHECK(master >= 0);
+  int error[2], report[2], control[2];
+  CHECK(pipe2(error, O_CLOEXEC) == 0 && pipe(report) == 0 && pipe(control) == 0);
+  pid_t pid = fork();
+  CHECK(pid >= 0);
+  if (pid == 0) {
+    alarm(10);
+    close(error[0]);
+    close(report[0]);
+    close(control[1]);
+    close(master);
+    if (setsid() < 0) _exit(1);
+    int slave = open(name, O_RDWR | O_CLOEXEC);
+    if (slave < 0 || tcgetsid(slave) != getpid() || tcgetpgrp(slave) != getpid()) _exit(2);
+    struct termios mode;
+    if (tcgetattr(slave, &mode) != 0) _exit(8);
+    cfmakeraw(&mode);
+    if (tcsetattr(slave, TCSANOW, &mode) != 0) _exit(9);
+    for (int fd = 0; fd < 3; fd++) if (dup2(slave, fd) != fd) _exit(3);
+    close(slave);
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGHUP);
+    if (sigprocmask(SIG_BLOCK, &blocked, NULL) != 0) _exit(4);
+    struct sigaction caught = {.sa_sigaction = job_handler, .sa_flags = SA_SIGINFO};
+    if (sigaction(SIGHUP, &caught, NULL) != 0) _exit(5);
+    if (host_exec) {
+      // A POSIX timer prevents in-place replacement, exercising the real
+      // Darwin exec and the new linux-run's descriptor/carrier restoration.
+      struct sigevent event = {.sigev_notify = SIGEV_NONE};
+      timer_t timer;
+      if (timer_create(CLOCK_MONOTONIC, &event, &timer) != 0) _exit(6);
+    }
+    char output[32], closed[32], input[32];
+    snprintf(output, sizeof(output), "%d", report[1]);
+    snprintf(closed, sizeof(closed), "%d", error[1]);
+    snprintf(input, sizeof(input), "%d", control[0]);
+    execl(executable, executable, "--exec-hangup-child", output, closed, input, NULL);
+    write(error[1], "failed", 6);
+    _exit(7);
+  }
+  close(error[1]);
+  close(report[1]);
+  close(control[0]);
+  char action[6];
+  struct pollfd ready = {.fd = error[0], .events = POLLIN};
+  int committed = poll(&ready, 1, 10000) == 1 && read(error[0], action, sizeof(action)) == 0;
+  close(error[0]);
+  close(master);
+  // Allow the action only after closing the last master, without racing
+  // the terminal owner's asynchronous signal notification.
+  void (*old_pipe)(int) = signal(SIGPIPE, SIG_IGN);
+  int released = write(control[1], "c", 1) == 1;
+  close(control[1]);
+  signal(SIGPIPE, old_pipe);
+  ready = (struct pollfd){.fd = report[0], .events = POLLIN};
+  int acted = poll(&ready, 1, 10000) == 1 && read(report[0], action, sizeof(action)) == 6 &&
+      memcmp(action, "action", 6) == 0;
+  close(report[0]);
+  int status = 0;
+  pid_t waited = waitpid(pid, &status, 0);
+  fprintf(stderr, "exec-hangup host=%d commit=%d action=%d status=%#x\n",
+          host_exec, committed, acted, status);
+  CHECK(committed && released && acted && waited == pid && WIFSIGNALED(status) &&
+        WTERMSIG(status) == SIGHUP);
+}
+
+static void in_place_exec_hangup(void) { exec_hangup(0); }
+static void host_exec_hangup(void) { exec_hangup(1); }
+
 static void opaque_exec_description(void) {
   char name[64];
   int master = open_master(name, sizeof(name));
@@ -475,6 +582,14 @@ static void allocate_and_close(void) {
 
 int main(int argc, char** argv) {
   executable = argv[0];
+  if (argc == 5 && strcmp(argv[1], "--exec-hangup-child") == 0) {
+    return exec_hangup_child(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]));
+  }
+  if (argc == 2 && strcmp(argv[1], "--exec-hangup") == 0) {
+    RUN(in_place_exec_hangup);
+    RUN(host_exec_hangup);
+    DONE();
+  }
   if (argc == 4 && strcmp(argv[1], "--write-fd") == 0) {
     if (getuid() != (uid_t)atoi(argv[3]) || geteuid() != (uid_t)atoi(argv[3])) return 6;
     errno = 0;
