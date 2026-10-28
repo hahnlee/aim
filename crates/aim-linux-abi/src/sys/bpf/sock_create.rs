@@ -411,6 +411,89 @@ mod tests {
     }
 
     #[test]
+    fn boot_mount_table_finds_cgroup_before_attaching_loader_pin() {
+        if fdtab::isolated_kernel_test(
+            "sys::bpf::sock_create::tests::boot_mount_table_finds_cgroup_before_attaching_loader_pin",
+        ) {
+            return;
+        }
+        let (_view, dir) = vfs::test_view();
+        let runtime = vfs::runtime_dir().unwrap();
+        let namespace = aim_storage::mount_namespace::Namespace::open(
+            runtime,
+            &vfs::mount_namespace_id().unwrap(),
+        )
+        .unwrap();
+        let cgroup = dir.join("data/boot-cgroup");
+        let bpf_root = dir.join("data/boot-bpf");
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::create_dir_all(bpf_root.join("netd_shared")).unwrap();
+        // guest-init's Layout publishes three-field path-map entries, not
+        // mount(2) events with explicit source/type fields.
+        let base = format!(
+            "{}\ncgroup2\t/sys/fs/cgroup\t{}\nbpf\t/sys/fs/bpf\t{}\n",
+            namespace.read().unwrap().base,
+            cgroup.display(),
+            bpf_root.display()
+        );
+        namespace.update_base(&base).unwrap();
+        vfs::refresh_fuse_mounts().unwrap();
+        let read = |path: &str| {
+            let fd = crate::sys::procfs::open(path, 0, libc::O_RDONLY).unwrap();
+            assert!(fd >= 0, "{path}: {fd}");
+            let mut data = vec![0; 65536];
+            let n = unsafe { libc::pread(fd as i32, data.as_mut_ptr().cast(), data.len(), 0) };
+            assert!(n >= 0);
+            data.truncate(n as usize);
+            close(fd);
+            String::from_utf8(data).unwrap()
+        };
+        let mounts = read("/proc/mounts");
+        assert_eq!(mounts, read("/proc/self/mounts"));
+        // This is how netd finds its attachment target. A directory that
+        // exists but is reported as tmpfs is not a cgroup mount.
+        let mount = mounts.lines().find_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            (fields[2] == "cgroup2").then_some(fields[1])
+        });
+        assert_eq!(mount, Some("/sys/fs/cgroup"), "{mounts}");
+        assert!(mounts.contains("bpf /sys/fs/bpf bpf "), "{mounts}");
+        let info = read("/proc/self/mountinfo");
+        assert!(info.contains(" - cgroup2 none rw\n"), "{info}");
+        assert!(info.contains(" - bpf bpf rw\n"), "{info}");
+        let mount = CString::new(mount.unwrap()).unwrap();
+        let target = fs::openat([
+            vfs::LINUX_AT_FDCWD as u64,
+            mount.as_ptr() as u64,
+            0o200000,
+            0,
+            0,
+            0,
+        ]);
+        assert!(target >= 0, "open cgroup: {target}");
+        let path = c"/sys/fs/bpf/netd_shared/prog_netd_cgroupsock_inet_create";
+        let get = [path.as_ptr() as u64, 0u64];
+        assert_eq!(
+            bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]),
+            -(ENOENT as i64)
+        );
+        let program = load(&constant(0));
+        assert!(program >= 0);
+        let pin = [path.as_ptr() as u64, program as u64];
+        assert_eq!(bpf([OBJ_PIN, pin.as_ptr() as u64, 16, 0, 0, 0]), 0);
+        close(program);
+        // Loading and pinning precede attachment; neither enables policy.
+        close(socket(2, 2));
+        let program = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
+        assert!(program >= 0, "reopen loader pin: {program}");
+        assert_eq!(attach_at(target, program, false), 0);
+        close(program);
+        assert_eq!(socket(2, 2), -(EPERM as i64));
+        assert_eq!(attach_at(target, 0, true), 0);
+        close(target);
+    }
+
+    #[test]
     fn socket_create_attach_replace_detach_and_family_scope() {
         if let Some(dir) =
             std::env::args().find_map(|a| a.strip_prefix("bpf-shared-root=").map(PathBuf::from))

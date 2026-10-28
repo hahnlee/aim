@@ -636,7 +636,13 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   instructions at attachment; it is not a full BPF verifier or interpreter.
   Other attachment modes remain unsupported. This keeps policy in the
   loaded program, below unmodified userspace, instead of recognizing its
-  name or duplicating Android permission policy. The
+  name or duplicating Android permission policy. The original tethering
+  APEX NetBpfLoad overrides init's `bpfloader` service, loads and pins its
+  networking programs, then chains through the remaining loaders before
+  `bpf.progs_loaded=1`; replacement netd waits for that completion and
+  attaches the pinned socket-create program to the cgroup2 root. Procfs
+  preserves the path-map kernel mounts' source/type for its discovery
+  (#2268). The
   per-uid counters of netd's `cgroupskb/*/stats` and interface counters of
   its xt_bpf programs are filled from the socket layer (#224, #1720).
   Other hooks and ring-buffer producers remain unexecuted (#2268).

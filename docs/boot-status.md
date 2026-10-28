@@ -8124,8 +8124,16 @@ memory pressure since #277, see "Memory pressure").
   program and map references survive loader FD closure and map unpinning.
   Host regressions cover actual image bytecode, UID/profile permissions,
   attachment replacement/detachment, family scope and exec'd consumers.
-  Host BPF tests and the Android netd build pass (2026-10-29).
-  No guest boot was rerun. Other hooks and ring producers remain #2268;
+  Retained app-host boot artifacts show NetBpfLoad (logged to kmsg), its
+  pinned create program and permission map, and cgroup2 in both mount
+  namespaces. Their procfs inventory lost the source of
+  path-map cgroup2/bpffs mounts and reported ordinary filesystems instead;
+  netd could not discover its cgroup2 target and returned ENOENT. The inventory
+  now retains the kernel mount source/type. Host checks cover the original
+  APEX loader override and blocking exec order, plus procfs discovery,
+  pin/reopen/attach and enforced socket denial (#2268, 2026-10-29).
+  No guest boot was rerun after this correction. Other hooks and ring
+  producers remain #2268;
   traffic counters retain the socket layer's existing approximation (#224).
 - A forked child gets the stub islands' executable views back as views of
   writable memory (SIGILL in system_server's first JNI call).

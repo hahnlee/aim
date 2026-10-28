@@ -1570,7 +1570,14 @@ fn record_points(records: &[aim_storage::mount_namespace::MountRecord]) -> Vec<M
             source: if record.kind == "root" {
                 Some("/dev/root".into())
             } else if record.source.is_empty() {
-                None
+                // Three-field path-map records carry the filesystem in
+                // kind. Preserve parse_map's source as well as its type,
+                // or procfs reports these kernel mounts as tmpfs/ext4.
+                match record.kind.as_str() {
+                    "bpf" => Some("bpf".into()),
+                    "cgroup2" => Some("none".into()),
+                    _ => None,
+                }
             } else {
                 Some(record.source.clone())
             },
