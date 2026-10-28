@@ -8365,6 +8365,15 @@ next syscall. Original-bionic leader/worker tests check actual Darwin thread
 priorities, remote readback, foreign-UID rejection and exited TIDs (#1616;
 host tests only, no guest boot rerun, 2026-10-28).
 
+Cgroup scheduling setup retries interrupted membership/policy locks and host
+metadata, CPU and I/O policy calls at their owners (#2363). Agent channels keep
+partial read/write progress and connection retries retain the original deadline.
+A boot-free signal-storm regression forces EINTR on a contended membership lock,
+then covers startup refresh, controller writes and cross-process scheduler/nice/
+cgroup requests with signals on both peers: 20/20 runs with eight CPU workers.
+The original-bionic cgroup and two remote-priority tests also pass.
+Non-interruption errors still fail; no guest boot was run (2026-10-29).
+
 Measured on a loaded host (load average 90, other agents' boots running),
 `cargo aim boot` with a reused data directory, seven apps opened with
 `am start -W` and then HOME:

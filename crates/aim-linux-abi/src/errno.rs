@@ -117,6 +117,30 @@ pub fn last() -> Errno {
     )
 }
 
+/// Finish an internal BSD operation on the guest's behalf. Guest syscalls
+/// that expose interruption must keep using their own restart rules.
+pub(crate) fn retry_host(mut call: impl FnMut() -> i32) -> Result<i32, Errno> {
+    loop {
+        let result = call();
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = last();
+        if error != EINTR {
+            return Err(error);
+        }
+    }
+}
+
+pub(crate) fn retry_io<T>(mut call: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    loop {
+        match call() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
 /// Convert a Darwin libc return value into a Linux syscall result.
 pub fn check(r: i64) -> i64 {
     if r < 0 { -(last() as i64) } else { r }

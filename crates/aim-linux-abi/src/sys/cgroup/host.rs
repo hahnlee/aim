@@ -200,6 +200,8 @@ pub(crate) fn apply(policies: &[(i32, Policy)]) -> Result<Vec<(i32, Policy)>, Er
     // TASK_SUPPRESSION_POLICY applies the same MAXPRI_THROTTLE CPU cap to
     // this entire task without PRIO_DARWIN_PROCESS's MAC scheduling check.
     // No suspension is requested: the control agent must continue to run.
+    // MIG's mach_msg restarts interrupted IPC. Its result is a Mach code,
+    // not errno (in particular, 4 is KERN_INVALID_ARGUMENT, not EINTR).
     let result = unsafe { task_policy_set(mach_task_self_, 3, (&raw mut policy).cast(), 16) };
     if result != 0 {
         return Err(match result {
