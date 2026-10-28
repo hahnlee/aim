@@ -509,6 +509,10 @@ impl Bridge {
             }
             window::FOCUS => self.atm.set_focused_task(task),
             window::CLOSE => self.atm.remove_task(task).map(drop),
+            window::EXPAND_PIP => match self.window_shell.get() {
+                Some(shell) => shell.expand_pip(task),
+                None => Err(binder::StatusCode::INVALID_OPERATION.into()),
+            },
             window::LAUNCH => {
                 // It waits for the app's first frame; other requests go on.
                 let (bridge, activity) = (self.clone(), w.text().to_string());

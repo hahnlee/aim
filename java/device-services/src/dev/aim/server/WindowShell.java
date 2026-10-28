@@ -76,10 +76,31 @@ final class WindowShell extends TaskOrganizer {
      * (`StartingData.mResizedFromTransfer`).
      */
     private final Map<Integer, StartingWindowInfo> mHeldStarts = new HashMap<>();
-    /** The tasks in PiP the shell placed, with their aspect ratio. */
-    private final Map<Integer, Float> mPip = new HashMap<>();
+    /** The tasks in PiP the shell placed, with their entry bounds and aspect ratio. */
+    private final Map<Integer, Pip> mPip = new HashMap<>();
     /** aim-windows in window mode, null otherwise; on the shell's thread only. */
     private IWindowShellListener mWindows;
+
+    static final class Pip {
+        final Rect restoreBounds;
+        float ratio;
+        boolean expanding;
+
+        Pip(Rect bounds, float aspectRatio) {
+            restoreBounds = new Rect(bounds);
+            ratio = aspectRatio;
+        }
+
+        /** PipTaskOrganizer.applyWindowingModeChangeOnExit, without an animation. */
+        WindowContainerTransaction exit(WindowContainerToken token, boolean desktop) {
+            return new WindowContainerTransaction()
+                    .setWindowingMode(token, desktop
+                            ? WindowConfiguration.WINDOWING_MODE_FREEFORM
+                            : WindowConfiguration.WINDOWING_MODE_UNDEFINED)
+                    .setActivityWindowingMode(token, WindowConfiguration.WINDOWING_MODE_UNDEFINED)
+                    .setBounds(token, restoreBounds);
+        }
+    }
 
     private static final class Task {
         final SurfaceControl leash;
@@ -130,18 +151,21 @@ final class WindowShell extends TaskOrganizer {
         if (task != null && update(info, task)) {
             report(info.taskId, task);
         }
-        Float ratio = mPip.get(info.taskId);
-        if (ratio == null) {
+        Pip pip = mPip.get(info.taskId);
+        if (pip == null) {
             return;
         }
         if (info.getWindowingMode() != WindowConfiguration.WINDOWING_MODE_PINNED) {
             mPip.remove(info.taskId);
             return;
         }
+        if (pip.expanding) {
+            return;
+        }
         // The app asked for another aspect ratio (setPictureInPictureParams).
         float now = PipBounds.aspectRatio(info, mContext.getResources());
-        if (now != ratio) {
-            mPip.put(info.taskId, now);
+        if (now != pip.ratio) {
+            pip.ratio = now;
             startNewTransition(WindowManager.TRANSIT_CHANGE, new WindowContainerTransaction()
                     .setBounds(info.token, PipBounds.bounds(info, now,
                             info.configuration.windowConfiguration.getBounds())));
@@ -283,7 +307,7 @@ final class WindowShell extends TaskOrganizer {
      */
     private WindowContainerTransaction pip(WindowContainerTransaction wct, RunningTaskInfo task) {
         float ratio = PipBounds.aspectRatio(task, mContext.getResources());
-        mPip.put(task.taskId, ratio);
+        mPip.put(task.taskId, new Pip(task.configuration.windowConfiguration.getBounds(), ratio));
         return wct.setActivityWindowingMode(task.token, WindowConfiguration.WINDOWING_MODE_UNDEFINED)
                 .setBounds(task.token, PipBounds.bounds(task, ratio, null));
     }
@@ -382,9 +406,27 @@ final class WindowShell extends TaskOrganizer {
             Rect bounds = new Rect(left, top, right, bottom);
             mHandler.post(() -> {
                 Task task = mTasks.get(taskId);
-                if (task != null && mPip.containsKey(taskId)) {
+                Pip pip = mPip.get(taskId);
+                if (task != null && pip != null && !pip.expanding) {
                     startNewTransition(WindowManager.TRANSIT_CHANGE,
                             new WindowContainerTransaction().setBounds(task.token, bounds));
+                }
+            });
+        }
+
+        @Override
+        public void expandPip(int taskId) {
+            enforceSystem();
+            mHandler.post(() -> {
+                Task task = mTasks.get(taskId);
+                Pip pip = mPip.get(taskId);
+                if (task != null && pip != null && !pip.expanding
+                        && task.windowingMode == WindowConfiguration.WINDOWING_MODE_PINNED) {
+                    // The display stays fullscreen in desktop mode, so restore
+                    // freeform explicitly (PipTaskOrganizer.getOutPipWindowingMode).
+                    startNewTransition(WindowManager.TRANSIT_CHANGE,
+                            pip.exit(task.token, mWindows != null));
+                    pip.expanding = true;
                 }
             });
         }

@@ -21,6 +21,8 @@ const SERVICE: &str = "aim.window_shell";
 const ATTACH: u32 = 1;
 /// `IWindowShell.setPipBounds`.
 const SET_PIP_BOUNDS: u32 = 2;
+/// `IWindowShell.expandPip`.
+const EXPAND_PIP: u32 = 3;
 /// `IWindowShellListener.onTaskChanged` (oneway).
 const ON_TASK_CHANGED: u32 = 1;
 /// `IWindowShellListener.onTaskPlaced` (oneway).
@@ -50,6 +52,10 @@ impl BpWindowShell {
             bounds.iter().try_for_each(|b| p.write(b))
         })
         .map(drop)
+    }
+
+    pub fn expand_pip(&self, task: i32) -> Result<(), Status> {
+        call(&self.binder, EXPAND_PIP, |p| p.write(&task)).map(drop)
     }
 }
 

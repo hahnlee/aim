@@ -8297,6 +8297,11 @@ bounds was reported for it).
 
 Window-mode boots of 2026-10-01 (#463):
 
+The PiP window's zoom button now requests the window shell's exit WCT and
+restores its entry bounds (#673; 2026-10-28). Host zoom-routing and JVM WCT
+checks cover this path; no guest boot or live PiP check was run. The PiP
+feature declaration remains gated as described in [task-organizer.md](task-organizer.md).
+
 | Check | Result |
 | --- | --- |
 | Splash (D4) | opening YouTube.app cold: its window with the YouTube icon on YouTube's splash color (white; Clock's black), YouTube's UI in it about a second later. The host shows the splash before it sets up its renderer, notification center and connection (#605): 0.22-0.26 s from `open` to the window on screen on an idle Mac, against 0.28-0.31 s before (a probe shim); the first recording's 1.1 s was at load 7. The color is the launcher activity's `windowSplashScreenBackground` or `windowBackground`, light and dark (#606) |

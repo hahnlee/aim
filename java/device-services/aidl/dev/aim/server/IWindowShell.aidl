@@ -21,4 +21,7 @@ interface IWindowShell {
      * the shell.
      */
     void setPipBounds(int taskId, int left, int top, int right, int bottom);
+
+    /** Expands a picture-in-picture task back to its normal window. */
+    void expandPip(int taskId);
 }

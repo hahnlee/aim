@@ -399,8 +399,12 @@ Its close button removes the task, as WMShell's dismiss does. Moving or
 resizing it goes to the shell (`IWindowShell.setPipBounds`), since
 `resizeTask` refuses a pinned task; the window takes the bounds once the
 task is placed. Its place is not remembered as the app's (#635). The
-app's own expand works as above; the Mac has no expand control of its
-own yet (#673).
+zoom button expands it through `IWindowShell.expandPip`, restoring the bounds
+saved before the shell placed it in PiP and clearing the activity's mode.
+Since the desktop display stays fullscreen, the exit WCT explicitly restores
+freeform (WMShell's desktop exit rule); device mode inherits its parent's mode.
+Repeated expand requests and PiP resizes are ignored until the task reports
+that it left PiP (#673). Ordinary windows keep AppKit's zoom behavior.
 
 **The gate.** CtsWindowManagerDeviceOther's `PinnedStackTests`, and
 `ActivityLifecyclePipTests` of CtsWindowManagerDeviceActivity, on the

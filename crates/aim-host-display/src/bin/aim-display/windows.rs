@@ -1282,6 +1282,24 @@ extern "C" fn should_close(_: Id, _: Sel, w: Id) -> bool {
     true
 }
 
+/// A PiP window's zoom button expands its task; ordinary windows keep AppKit's zoom.
+extern "C" fn should_zoom(_: Id, _: Sel, w: Id, _: CGRect) -> bool {
+    let task = with(|s| pip_to_expand(s, w)).flatten();
+    if let Some(task) = task {
+        request(window::EXPAND_PIP, task, [0; 4]);
+    }
+    task.is_none()
+}
+
+fn pip_to_expand(s: &State, w: Id) -> Option<i32> {
+    if s.applying {
+        return None;
+    }
+    s.tasks.iter().find_map(|(&task, t)| {
+        (t.window == w && !t.closed && s.infos.get(&task).is_some_and(|i| i.pinned)).then_some(task)
+    })
+}
+
 /// Activation raises this application's windows together. Read only
 /// this process's AppKit windows and report their relative order.
 pub extern "C" fn did_activate(_: Id, _: Sel, _: Id) {
@@ -1454,6 +1472,12 @@ fn delegate() -> Id {
                 should_close as *const c_void,
                 c"B@:@".as_ptr(),
             );
+            class_addMethod(
+                cls,
+                sel(c"windowShouldZoom:toFrame:"),
+                should_zoom as *const c_void,
+                c"B@:@{CGRect={CGPoint=dd}{CGSize=dd}}".as_ptr(),
+            );
         }
         send!(cls, c"new" => Id) as usize
     }) as Id
@@ -1531,5 +1555,65 @@ mod tests {
             .primary_color,
             0
         );
+    }
+
+    #[test]
+    fn only_pip_windows_intercept_zoom() {
+        let mut state = State {
+            screen: Screen {
+                width: 1920.0,
+                height: 1080.0,
+                scale: 2.0,
+            },
+            device: std::ptr::null_mut(),
+            tasks: HashMap::new(),
+            infos: HashMap::new(),
+            front: None,
+            held: None,
+            generation: 0,
+            applying: false,
+            order: Vec::new(),
+            splash: None,
+        };
+        let window = std::ptr::without_provenance_mut(1);
+        state.tasks.insert(
+            42,
+            TaskWindow {
+                window,
+                layer: std::ptr::null_mut(),
+                view: std::ptr::null_mut(),
+                bounds: [0, 0, 100, 100],
+                caption: 0,
+                visible: true,
+                closed: false,
+                moved: None,
+                user: None,
+            },
+        );
+        note(
+            &mut state,
+            &Record {
+                op: window::PINNED,
+                task: 42,
+                ..Default::default()
+            },
+        );
+        assert_eq!(pip_to_expand(&state, window), Some(42));
+        assert_eq!(pip_to_expand(&state, std::ptr::null_mut()), None);
+        state.applying = true;
+        assert_eq!(pip_to_expand(&state, window), None);
+        state.applying = false;
+        state.tasks.get_mut(&42).unwrap().closed = true;
+        assert_eq!(pip_to_expand(&state, window), None);
+        state.tasks.get_mut(&42).unwrap().closed = false;
+        note(
+            &mut state,
+            &Record {
+                op: window::UNPINNED,
+                task: 42,
+                ..Default::default()
+            },
+        );
+        assert_eq!(pip_to_expand(&state, window), None);
     }
 }
