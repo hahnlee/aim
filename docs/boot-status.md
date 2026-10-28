@@ -2509,12 +2509,21 @@ let read-only ENABLE callers share write denial while competing for the distinct
 ENABLE slot; eight primitive tests pass with writer/alias/SCM lifetime checks.
 Native ENABLE dispatch is implemented and its real issuer checks pass. The
 complete image/CTS gate remains pending.
-Native POSIX lock startup now has an explicit `host/aim-lock-holder` dependency
-under `host/guest-init`; isolated template inputs require and hash that same
-helper beside the frozen linux-run/guest-init binaries. The actual build graph
+Native POSIX lock startup has an explicit `host/aim-lock-holder` dependency
+under both `host/guest-init` and `host/linux-run`; isolated template inputs
+require and hash that same helper beside the frozen linux-run/guest-init
+binaries. The actual build graph
 loads both nodes and compile-checks successfully; the explicit helper build
 completes in 3.0 seconds with no failures. The Source release helper exists,
 and the actual frozen common runtime now includes that helper with verified hashes (#1193).
+Standalone linux-run now uses its detached PID-namespace watcher as the native
+POSIX controller, admitting the launch incarnation and its descendants and
+retaining holders across exec (#1189). The Darwin process-lock fallback is
+removed. The new NDK regression reproduces lost locks on origin/main; its
+fixed-runtime run is blocked by sandbox Mach registration (bootstrap status
+1100), as are the existing native holder tests. The fixture passes natively;
+the native root/descendant admission and private locator check passes, along
+with four watcher lifecycle tests. No guest boot was run for this change.
 The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional

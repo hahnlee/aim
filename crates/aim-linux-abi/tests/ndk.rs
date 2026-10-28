@@ -212,6 +212,11 @@ fn files() {
 }
 
 #[test]
+fn posix_record_locks() {
+    check("t_posix_locks", &[]);
+}
+
+#[test]
 fn sqlite_concurrent_create() {
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
         aim_paths::skip("the pinned NDK or the extracted image is missing");
