@@ -243,6 +243,8 @@ struct Pointer {
     next_tracking_id: i32,
     /// Physical keys down: scan code and the key sent for it.
     keys: Vec<(u32, u16)>,
+    /// The last Caps Lock state reported by AppKit; focus loss does not unlock it.
+    caps_lock: bool,
     /// Scroll not sent yet, per axis (vertical, horizontal): fractions of a
     /// `_HI_RES` unit, and `_HI_RES` units not yet a whole unit.
     hi_res_rest: [f64; 2],
@@ -716,7 +718,14 @@ impl Input {
         let mut s = self.state.lock().unwrap();
         match m {
             Modifier::Held(down) => self.set_key(&mut s, usage, down, t),
-            Modifier::Toggled => {
+            Modifier::Locked(locked) => {
+                // macOS also sends Caps Lock events for input-source switching.
+                // Only a change of NSEventModifierFlagCapsLock toggles Android's
+                // lock, with an EV_KEY press/release as on a Linux keyboard.
+                if s.caps_lock == locked {
+                    return;
+                }
+                s.caps_lock = locked;
                 self.set_key(&mut s, usage, true, t);
                 self.set_key(&mut s, usage, false, t);
             }
@@ -947,6 +956,31 @@ mod tests {
         input.flags_changed(0x3b, 1 << 18 | 0x01, 8);
         input.key(0x09, true, false, COMMAND | 1 << 18, 9);
         assert_eq!(keys(&mut k, 6), [(KEY_LEFTCTRL, 1), (47, 1), (47, 0)]);
+        input.close();
+    }
+
+    #[test]
+    fn caps_lock_follows_the_lock_flag_not_input_source_switches() {
+        let (input, dir) = setup("caps");
+        let mut k = open(&dir, KEYBOARD);
+        let caps = 1 << 16;
+        // A source switch without a lock change must not toggle Android.
+        input.flags_changed(0x39, 0, 1);
+        input.flags_changed(0x39, 0, 2);
+        input.flags_changed(0x39, caps, 3);
+        input.flags_changed(0x39, caps, 4);
+        // Losing focus releases held keys, not the lock state.
+        input.release_all(5);
+        input.flags_changed(0x39, caps, 6);
+        input.flags_changed(0x39, 0, 7);
+        input.flags_changed(0x39, 0, 8);
+        // A sentinel makes any unwanted Caps Lock events visible in the read.
+        input.key(0x00, true, false, 0, 9);
+        input.release_all(10);
+        assert_eq!(
+            keys(&mut k, 12),
+            [(58, 1), (58, 0), (58, 1), (58, 0), (30, 1), (30, 0)]
+        );
         input.close();
     }
 
