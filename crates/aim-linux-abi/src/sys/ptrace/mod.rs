@@ -405,6 +405,18 @@ pub fn remote_priority(pid: i32, tid: i32, nice: Option<i32>) -> i64 {
     call(pid, &req).map_or_else(|e| e, |(r, _)| r)
 }
 
+/// Read or change scheduling at the thread's owner. Getters return the
+/// scalar policy/priority so guest pointers stay in the calling process.
+pub(super) fn remote_sched(pid: i32, tid: i32, nr: u64, policy: i32, prio: i32) -> i64 {
+    let req = request(agent::SCHED, |w| {
+        w.i32(tid);
+        w.u64(nr);
+        w.i32(policy);
+        w.i32(prio);
+    });
+    call(pid, &req).map_or_else(|e| e, |(r, _)| r)
+}
+
 /// prlimit64 setting another process's limit `res`, which the process
 /// applies (`cred::own_rlimit`): the limit before. The caller has checked
 /// `check_prlimit_permission`; `may_raise` is its CAP_SYS_RESOURCE.

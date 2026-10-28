@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
@@ -14,10 +15,21 @@
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "line %d: %s (errno %d)\n", __LINE__, #x, errno); _exit(1); } } while (0)
 static int command[2], reply[2], work[2], done[2];
+static const int policies[] = {SCHED_BATCH, SCHED_IDLE, SCHED_FIFO, SCHED_FIFO, SCHED_RR, SCHED_OTHER};
+static const int priorities[] = {0, 0, 3, 8, 7, 0};
 
 static void step(const char *name, int want) {
-  CHECK(getpriority(PRIO_PROCESS, 0) == want);
-  printf("%s %d\n", name, want);
+  if (want >= 100) {
+    unsigned i = want - 100;
+    struct sched_param param;
+    CHECK(i < sizeof policies / sizeof policies[0]);
+    CHECK(sched_getscheduler(0) == policies[i]);
+    CHECK(sched_getparam(0, &param) == 0 && param.sched_priority == priorities[i]);
+    printf("%s sched %d %d\n", name, policies[i], priorities[i]);
+  } else {
+    CHECK(getpriority(PRIO_PROCESS, 0) == want);
+    printf("%s %d\n", name, want);
+  }
   fflush(stdout);
   char line[16];
   CHECK(fgets(line, sizeof line, stdin));
@@ -127,6 +139,34 @@ int main(int argc, char **argv) {
       CHECK(read(reply[0], &c, 1) == 1);
     }
   }
+  // An unprivileged foreign uid may read, but cannot change, either thread.
+  pid_t probe = fork();
+  CHECK(probe >= 0);
+  if (!probe) {
+    CHECK(setuid(12345) == 0);
+    struct sched_param param = {0};
+    CHECK(sched_getscheduler(tid) == SCHED_OTHER);
+    CHECK(sched_setscheduler(tid, SCHED_BATCH, &param) == -1 && errno == EPERM);
+    CHECK(sched_setparam(child, &param) == -1 && errno == EPERM);
+    _exit(0);
+  }
+  int probe_status;
+  CHECK(waitpid(probe, &probe_status, 0) == probe && WIFEXITED(probe_status) && WEXITSTATUS(probe_status) == 0);
+  for (int which = 0; which < 2; ++which) {
+    pid_t target = which ? tid : child, other = which ? child : tid;
+    for (unsigned i = 0; i < sizeof policies / sizeof policies[0]; ++i) {
+      struct sched_param param = {.sched_priority = priorities[i]};
+      CHECK((i == 3 ? sched_setparam(target, &param) : sched_setscheduler(target, policies[i], &param)) == 0);
+      CHECK(sched_getscheduler(target) == policies[i]);
+      CHECK(sched_getparam(target, &param) == 0 && param.sched_priority == priorities[i]);
+      CHECK(sched_getscheduler(other) == SCHED_OTHER);
+      CHECK(sched_getparam(other, &param) == 0 && param.sched_priority == 0);
+      int values[] = {which, 100 + (int)i};
+      CHECK(write(command[1], values, sizeof values) == sizeof values);
+      char c;
+      CHECK(read(reply[0], &c, 1) == 1);
+    }
+  }
   CHECK(setpriority(PRIO_PGRP, 0, -4) == 0);
   CHECK(getpriority(PRIO_PROCESS, child) == -4 && getpriority(PRIO_PROCESS, tid) == -4);
   CHECK(setpriority(PRIO_PROCESS, 0, 0) == 0 && setpriority(PRIO_PROCESS, child, 0) == 0);
@@ -141,6 +181,10 @@ int main(int argc, char **argv) {
   CHECK(read(reply[0], &c, 1) == 1);
   CHECK(setpriority(PRIO_PROCESS, tid, 0) == -1 && errno == ESRCH);
   CHECK(getpriority(PRIO_PROCESS, tid) == -1 && errno == ESRCH);
+  struct sched_param param = {0};
+  CHECK(sched_setscheduler(tid, SCHED_BATCH, &param) == -1 && errno == ESRCH);
+  CHECK(sched_getscheduler(tid) == -1 && errno == ESRCH);
+  CHECK(sched_getparam(tid, &param) == -1 && errno == ESRCH);
   CHECK(getpriority(PRIO_PROCESS, child) == 0);
   CHECK(write(command[1], "r", 1) == 1);
   int status;

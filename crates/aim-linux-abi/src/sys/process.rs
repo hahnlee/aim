@@ -86,8 +86,7 @@ const SCHED_RESET_ON_FORK: i32 = 0x4000_0000;
 
 /// The thread a scheduling call names: 0 is the caller, a pid means the
 /// main thread (Linux applies these per thread). None: a thread of another
-/// live process, whose attributes are accepted and not kept (Darwin
-/// schedules the host threads anyway).
+/// process, reached through its agent.
 fn sched_target(pid: i64) -> Result<Option<std::sync::Arc<Thread>>, i64> {
     // The kernel takes a pid_t.
     let pid = pid as i32;
@@ -337,8 +336,8 @@ fn may_change(pid: i64) -> Result<(), i64> {
 
 /// sched_setparam (118), sched_setscheduler (119), sched_getscheduler
 /// (120), sched_getparam (121). The policy and priority are recorded per
-/// thread and set its host scheduling ([`apply_host_sched`]); another
-/// process's threads are checked, not changed (#1616).
+/// thread and set its host scheduling ([`apply_host_sched`]). Remote calls
+/// carry scalar arguments to the owner, never the caller's guest pointers.
 pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
     let mut a = a;
     a[0] = match super::pidns::syscall_pid(a[0] as i32) {
@@ -349,56 +348,76 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let s = th.as_ref().map(|t| &t.sched);
-    let get = |v: fn(&thread::Sched) -> i32| s.map_or(0, v);
-    match nr {
-        120 => get(|s| s.policy.load(SeqCst)) as i64,
-        121 => {
-            // SAFETY: guest struct sched_param { int sched_priority; }.
-            user_write!(a[1], i32, get(|s| s.priority.load(SeqCst)));
-            0
+    let prio = if nr == 118 || nr == 119 {
+        let param = if nr == 119 { a[2] } else { a[1] };
+        if param == 0 {
+            return -(EINVAL as i64);
         }
-        _ => {
-            let policy = if nr == 119 {
-                a[1] as i32 & !SCHED_RESET_ON_FORK
-            } else {
-                get(|s| s.policy.load(SeqCst))
-            };
-            let param = if nr == 119 { a[2] } else { a[1] };
-            if param == 0 {
-                return -(EINVAL as i64);
-            }
-            // SAFETY: guest struct sched_param.
-            let prio = user_read!(param, i32);
-            match priority_range(policy) {
-                Some((lo, hi)) if (lo..=hi).contains(&prio) => {
-                    if th.is_none()
-                        && let Err(e) = may_change(a[0] as i64)
-                    {
-                        return e;
-                    }
-                    if let Some(th) = &th {
-                        th.sched.policy.store(policy, SeqCst);
-                        th.sched.priority.store(prio, SeqCst);
-                        if let Err(error) = super::cgroup::refresh_own() {
-                            return -(error as i64);
-                        }
-                        if th.tid == thread::gettid() as i32 {
-                            if let Err(error) =
-                                apply_host_sched(super::cred::thread_nice(th.tid), policy)
-                            {
-                                return -(error as i64);
-                            }
-                        } else {
-                            th.sched.host_stale.store(true, SeqCst);
-                        }
-                    }
-                    0
-                }
-                _ => -(EINVAL as i64),
-            }
+        // SAFETY: guest struct sched_param { int sched_priority; }.
+        user_read!(param, i32)
+    } else {
+        0
+    };
+    let policy = a[1] as i32 & !SCHED_RESET_ON_FORK;
+    let result = match th {
+        Some(th) => own_sched(th.tid, nr, policy, prio, &super::cred::current()),
+        None => {
+            super::ptrace::remote_sched(thread::owner(a[0] as i32), a[0] as i32, nr, policy, prio)
+        }
+    };
+    if nr == 121 && result >= 0 {
+        user_write!(a[1], i32, result as i32);
+        0
+    } else {
+        result
+    }
+}
+
+/// Scheduling state at its thread's owner, also used by the process agent.
+pub(super) fn own_sched(
+    tid: i32,
+    nr: u64,
+    policy: i32,
+    prio: i32,
+    caller: &super::cred::Identity,
+) -> i64 {
+    let Some(th) = thread::find(tid) else {
+        return -(ESRCH as i64);
+    };
+    match nr {
+        120 => return th.sched.policy.load(SeqCst) as i64,
+        121 => return th.sched.priority.load(SeqCst) as i64,
+        118 | 119 => {}
+        _ => return -(EINVAL as i64),
+    }
+    let policy = if nr == 118 {
+        th.sched.policy.load(SeqCst)
+    } else {
+        policy
+    };
+    if !priority_range(policy).is_some_and(|(lo, hi)| (lo..=hi).contains(&prio)) {
+        return -(EINVAL as i64);
+    }
+    let target = super::cred::current();
+    // Linux check_same_owner, with credentials obtained from the socket peer.
+    if caller.cap_eff & (1 << 23) == 0
+        && caller.uid[1] != target.uid[0]
+        && caller.uid[1] != target.uid[1]
+    {
+        return -(EPERM as i64);
+    }
+    th.sched.policy.store(policy, SeqCst);
+    th.sched.priority.store(prio, SeqCst);
+    th.sched.host_stale.store(true, SeqCst);
+    if let Err(error) = super::cgroup::refresh_own() {
+        return -(error as i64);
+    }
+    if thread::is_current(&th) {
+        if let Err(error) = apply_stale_sched(&th) {
+            return -(error as i64);
         }
     }
+    0
 }
 
 /// sched_get_priority_max (125) and sched_get_priority_min (126).

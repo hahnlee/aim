@@ -8253,10 +8253,13 @@ kills on the Mac's memory pressure, which the host-call module `memory`
 reports (ADR 0012's lmkd row, [host-call.md](host-call.md)). A thread's
 Linux scheduling sets its host QoS: a nice value of 10 or more or
 SCHED_BATCH runs at utility, 19 or SCHED_IDLE at background.
-Cross-process `setpriority` keeps the target's owner/RLIMIT_NICE checks and
-records each thread's nice value through its agent (opcode 22); the target
+Cross-process `setpriority` and `sched_setparam`/`sched_setscheduler` record
+each thread's state through its agent (opcodes 22 and 24), with caller
+credentials checked at the owner; getters read that state back. The target
 applies its Darwin scheduling, including cgroup CPU and disk bounds, at its
-next syscall.
+next syscall. Original-bionic leader/worker tests check actual Darwin thread
+priorities, remote readback, foreign-UID rejection and exited TIDs (#1616;
+host tests only, no guest boot rerun, 2026-10-28).
 
 Measured on a loaded host (load average 90, other agents' boots running),
 `cargo aim boot` with a reused data directory, seven apps opened with

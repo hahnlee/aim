@@ -41,6 +41,7 @@ pub(super) const MEM_OPEN: u32 = 19;
 pub(super) const MEM_IO: u32 = 20;
 pub(super) const PRIORITY: u32 = 22;
 pub(super) const CGROUP_POLICY: u32 = 23;
+pub(super) const SCHED: u32 = 24;
 
 const NT_PRSTATUS: u32 = 1;
 const NT_PRFPREG: u32 = 2;
@@ -562,6 +563,19 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
                 return err(ESRCH);
             };
             reply(crate::sys::cred::own_priority(tid, nice, &caller), |_| {})
+        }
+        SCHED => {
+            let (tid, nr, policy, prio) = (r.i32(), r.u64(), r.i32(), r.i32());
+            if !crate::sys::pidns::contains(peer) {
+                return err(ESRCH);
+            }
+            let Some(caller) = crate::sys::cred::identity_of(peer) else {
+                return err(ESRCH);
+            };
+            reply(
+                crate::sys::process::own_sched(tid, nr, policy, prio, &caller),
+                |_| {},
+            )
         }
         RLIMIT => {
             let res = r.u32();
