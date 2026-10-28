@@ -54,6 +54,24 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::RESET_PACKAGE_RUNTIME_PERMISSIONS_FOR_USER => {
+                let a = sp::ResetPackageRuntimePermissionsForUser::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host
+                        .permission_manager
+                        .get()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "permission owner is unavailable",
+                            )
+                        })?
+                        .reset_runtime_permissions_for_user(a.user_id)?;
+                    sp::write_reset_package_runtime_permissions_for_user_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_PROVIDER_QUERIES => {
                 let a = sp::AttachProviderQueries::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

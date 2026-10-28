@@ -25,7 +25,14 @@ final class PackageLocalOwners {
         private final android.os.IUserManager owner;
         Users(android.os.IUserManager owner) { this.owner = owner; }
         @Override public boolean exists(int user) {
-            try { return owner.getUserInfo(user) != null; }
+            return getUserInfo(user) != null;
+        }
+        @Override public android.content.pm.UserInfo getUserInfo(int user) {
+            try { return owner.getUserInfo(user); }
+            catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+        }
+        @Override public android.content.pm.UserProperties getUserProperties(int user) {
+            try { return exists(user) ? owner.getUserPropertiesCopy(user) : null; }
             catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
         }
         @Override public boolean hasUserRestriction(String restriction, int user) {
@@ -46,9 +53,7 @@ final class PackageLocalOwners {
         @Override public int[] getUserIds() { throw unsupported(); }
         @Override public java.util.List<android.content.pm.UserInfo> getUsers(boolean a, boolean b, boolean c) { throw unsupported(); }
         @Override public android.content.pm.UserInfo[] getUserInfos() { throw unsupported(); }
-        @Override public android.content.pm.UserInfo getUserInfo(int user) { throw unsupported(); }
         @Override public int getProfileParentId(int user) { throw unsupported(); }
-        @Override public android.content.pm.UserProperties getUserProperties(int user) { throw unsupported(); }
         @Override public int[] getProfileIds(int user, boolean enabled) { throw unsupported(); }
     }
 
@@ -88,7 +93,10 @@ final class PackageLocalOwners {
             catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
         }
         @Override public void restoreDelayedRuntimePermissions(String name, int user) { throw unsupported(); }
-        @Override public void resetRuntimePermissionsForUser(int user) { throw unsupported(); }
+        @Override public void resetRuntimePermissionsForUser(int user) {
+            try { owner.resetPackageRuntimePermissionsForUser(user); }
+            catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+        }
         @Override public void resetRuntimePermissions(com.android.server.pm.pkg.AndroidPackage pkg, int user) { throw unsupported(); }
         @Override public java.util.List<android.content.pm.PermissionInfo> getAllPermissionsWithProtection(int protection) { throw unsupported(); }
         @Override public boolean isPermissionsReviewRequired(String name, int user) { throw unsupported(); }

@@ -8,6 +8,7 @@ public interface IUserManager extends IInterface {
     boolean removeUser(int userId) throws RemoteException;
     int removeUserWhenPossible(int userId, boolean overrideDevicePolicy) throws RemoteException;
     android.content.pm.UserInfo getUserInfo(int user) throws RemoteException;
+    android.content.pm.UserProperties getUserPropertiesCopy(int user) throws RemoteException;
     boolean hasUserRestriction(String restriction, int user) throws RemoteException;
     boolean isUserRunning(int user) throws RemoteException;
     boolean isUserUnlockingOrUnlocked(int user) throws RemoteException;

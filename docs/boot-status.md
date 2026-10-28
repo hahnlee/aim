@@ -111,8 +111,14 @@ permission/user/storage adapters over the native owners. The retained Java
 keeps batch recovery, CE/DE inode receipts and 32-bit library linking; the
 permission owner persists and publishes restricted exemptions with its usual
 revocation effects. Host Java, transport, permission-publication and lifecycle
-checks pass; no guest boot was run. Per-user preferred permission reset and
-cross-profile UserProperties access remain unsupported (#2330).
+checks pass; no guest boot was run. Preferred per-user runtime permission reset
+also uses the Java bridge's local adapter and the native permission owner: one
+mutation over non-APEX packages persists and publishes grants before callbacks
+and revocation kills. Cross-profile preferred access retains UserManagerService's
+Java maximum-access rule over the user owner's UserProperties (user 0 on this
+device; absent users contribute ACCESS_LEVEL_ALL). Both boundaries admit only
+system UID. Host tests cover transport, Java adapters, persisted properties and
+permission publication/effects; no guest boot was run (#2330, 2026-10-29).
 
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHORTCUTS or its package is user 0's HOME role holder; package-scoped queries retain their events (#1870; host tests only, no guest boot rerun).

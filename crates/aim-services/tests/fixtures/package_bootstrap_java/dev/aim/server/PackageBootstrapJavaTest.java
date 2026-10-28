@@ -17,6 +17,8 @@ public final class PackageBootstrapJavaTest {
             Binder.uid = uid;
             for (Runnable action : new Runnable[] {
                     () -> bridge.onExistingPackageInstalled(null, 0, 0),
+                    () -> bridge.resetPreferredRuntimePermissions(0),
+                    () -> bridge.getPreferredCrossProfileAccessControl(0, 10),
                     () -> bridge.formatPackageTimestamp(0),
                     () -> bridge.waitPackageBackgroundHandler(100),
                     () -> bridge.sendPreferredActivityChanged(0)}) {

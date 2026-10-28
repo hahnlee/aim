@@ -8,7 +8,7 @@ import android.os.Binder;
 import android.os.UserHandle;
 import com.android.server.LocalServices;
 import com.android.server.FgThread;
-import com.android.server.pm.UserManagerService;
+import com.android.server.pm.UserManagerInternal;
 import com.android.server.pm.permission.PermissionManagerServiceInternal;
 import com.android.server.net.NetworkPolicyManagerInternal;
 
@@ -20,11 +20,18 @@ final class PreferredPolicyBridge {
         return thread.getSystemContext();
     }
     static int crossProfileAccess(int source, int target) {
-        var users = UserManagerService.getInstance();
+        var users = LocalServices.getService(UserManagerInternal.class);
         if (users == null) throw new IllegalStateException("UserManager owner unavailable");
         // Authorization uses the actual original caller UID in the native owner,
         // not this privileged bridge's Binder UID.
-        return users.getCrossProfileIntentFilterAccessControl(source, target);
+        // UserManagerService.getCrossProfileIntentFilterAccessControl,
+        // android-16.0.0_r1 (Apache-2.0), over its local properties owner.
+        return Math.max(crossProfileAccess(users, source), crossProfileAccess(users, target));
+    }
+    private static int crossProfileAccess(UserManagerInternal users, int user) {
+        var properties = users.getUserProperties(user);
+        // CrossProfileIntentFilter.ACCESS_LEVEL_ALL = 0.
+        return properties == null ? 0 : properties.getCrossProfileIntentFilterAccessControl();
     }
     static String roleHolder(String role, int user) {
         var manager = context().getSystemService(RoleManager.class);

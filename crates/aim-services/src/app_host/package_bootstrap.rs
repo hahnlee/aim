@@ -22,6 +22,8 @@
 //! permission owner and delivers its status; backup restore has no owner
 //! (#1925). The install-existing leaf runs through that Java bridge, with
 //! local adapters over the native permission, user and storage owners.
+//! Preferred per-user resets use that permission owner; the retained Java
+//! cross-profile policy reads the user owner's original UserProperties.
 //! The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2330).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -523,6 +525,18 @@ impl Service for PackageBootstrap {
             }
             bridge::ON_EXISTING_PACKAGE_INSTALLED => {
                 let a = bridge::OnExistingPackageInstalled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
+            bridge::RESET_PREFERRED_RUNTIME_PERMISSIONS => {
+                let a = bridge::ResetPreferredRuntimePermissions::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
+            bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL => {
+                let a = bridge::GetPreferredCrossProfileAccessControl::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
                 a.write(&mut p);
                 return self.java(call.code, &p);

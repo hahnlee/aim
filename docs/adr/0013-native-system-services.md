@@ -620,6 +620,15 @@ with the access owner and its persistence/publication effects; app-data recovery
 inode receipts, library links and OBB preparation stay in Java. These are vendor
 class additions, with no new original-class or image replacement.
 
+The preferred-policy leaves (#2330) use the same system-UID Java bridge and
+local adapters. Per-user runtime reset batches non-APEX packages in the native
+permission owner's single access mutation, preserving its persistence,
+publication and revocation effects. The cold cross-profile access rule stays
+in Java, retained from UserManagerService at android-16.0.0_r1, over
+UserManagerInternal's UserProperties; aim-system's adapter reads the native
+user owner's full system-UID property copy and returns null for absent users.
+No additional original class or image replacement is introduced.
+
 The cold statscompanion UID-map writer and its app, user and shutdown receivers
 are extracted from the original [StatsCompanionService.java](https://android.googlesource.com/platform/packages/modules/StatsD/+/refs/tags/android-16.0.0_r1/service/java/com/android/server/stats/StatsCompanionService.java)
 into `StatsCompanionUidMap` in the existing vendor jar (#1765): the system-UID-only

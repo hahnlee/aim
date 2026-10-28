@@ -12,7 +12,6 @@ interface ISystemProcess {
     void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys);
     void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries);
     void attachProviderQueries(ProviderQueries queries);
-    void attachSettingsValues(SettingsValues values);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     void attachStorageCrates(StorageCrates crates);
     abstract class Stub {
@@ -29,7 +28,6 @@ interface ISystemProcess {
                     ProviderQueriesTest.check(queries);
                 }
                 public void attachDevicePolicyDefaults(DevicePolicyDefaults defaults) {}
-                public void attachSettingsValues(SettingsValues values) {}
                 public void attachPackageBootstrapJava(IBinder bridge) {
                     if (!(bridge instanceof PackageBootstrapBridge)) throw new AssertionError("missing package Java owner");
                     SystemProcessHostTest.events.add("packageJava");

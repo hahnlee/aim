@@ -33,6 +33,16 @@ impl Service for Java {
         }
         let mut p = Parcel::new();
         match call.code {
+            bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL => {
+                let a = bridge::GetPreferredCrossProfileAccessControl::read(&mut call.data)?;
+                assert_eq!((a.source_user_id, a.target_user_id), (0, 10));
+                bridge::write_get_preferred_cross_profile_access_control_reply(&mut p, 20);
+            }
+            bridge::RESET_PREFERRED_RUNTIME_PERMISSIONS => {
+                let a = bridge::ResetPreferredRuntimePermissions::read(&mut call.data)?;
+                assert_eq!(a.user_id, 0);
+                bridge::write_reset_preferred_runtime_permissions_reply(&mut p);
+            }
             bridge::ON_EXISTING_PACKAGE_INSTALLED => {
                 let a = bridge::OnExistingPackageInstalled::read(&mut call.data)?;
                 assert!(a.record.is_some());
@@ -86,7 +96,20 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             install_flags: 0x00400000,
         }
         .write(&mut installed);
+        let mut reset = Parcel::new();
+        bridge::ResetPreferredRuntimePermissions { user_id: 0 }.write(&mut reset);
+        let mut cross_profile = Parcel::new();
+        bridge::GetPreferredCrossProfileAccessControl {
+            source_user_id: 0,
+            target_user_id: 10,
+        }
+        .write(&mut cross_profile);
         let requests = [
+            (
+                bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL,
+                cross_profile,
+            ),
+            (bridge::RESET_PREFERRED_RUNTIME_PERMISSIONS, reset),
             (bridge::ON_EXISTING_PACKAGE_INSTALLED, installed),
             (bridge::SEND_PREFERRED_ACTIVITY_CHANGED, broadcast),
             (bridge::WAIT_PACKAGE_BACKGROUND_HANDLER, wait),
@@ -141,6 +164,19 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             let p = call(&leaf, 1000, *code, data).unwrap();
             let mut r = p.reader();
             match *code {
+                bridge::GET_PREFERRED_CROSS_PROFILE_ACCESS_CONTROL => {
+                    assert_eq!(
+                        bridge::read_get_preferred_cross_profile_access_control_reply(&mut r)
+                            .unwrap()
+                            .unwrap(),
+                        20
+                    );
+                }
+                bridge::RESET_PREFERRED_RUNTIME_PERMISSIONS => {
+                    bridge::read_reset_preferred_runtime_permissions_reply(&mut r)
+                        .unwrap()
+                        .unwrap()
+                }
                 bridge::SEND_PREFERRED_ACTIVITY_CHANGED => {
                     bridge::read_send_preferred_activity_changed_reply(&mut r)
                         .unwrap()
@@ -179,7 +215,7 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             );
             mode.store(0, Ordering::SeqCst);
         }
-        assert_eq!(calls.lock().unwrap().len(), 12);
+        assert_eq!(calls.lock().unwrap().len(), 18);
         let mut wait = Parcel::new();
         bridge::WaitPackageBackgroundHandler {
             timeout_millis: i64::MAX,
