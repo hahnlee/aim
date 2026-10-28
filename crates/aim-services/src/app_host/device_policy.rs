@@ -7,8 +7,8 @@
 //! and the policies the policy engine resolved (`DevicePolicyEngine`:
 //! `device_policy_state.xml`), as the original persisted them, with the
 //! original's checks and its answers when none of them is set. A device
-//! that has an owner, an admin, a delegation or a policy, every write and
-//! every other method are not implemented (#1521).
+//! that has an owner, an admin, a delegation or a policy, authorized policy
+//! writes and every other method are not implemented (#1521).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet};
@@ -20,9 +20,10 @@ use std::sync::Arc;
 use aim_android_xml::Element;
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
-    BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader,
 };
 use aim_service_aidl::android_app_admin_idevicepolicymanager as dp;
+use aim_service_aidl::dev_aim_server_idevicepolicydefaults as defaults;
 
 use super::account_service::UserHandle;
 use super::activity_start::Component;
@@ -61,6 +62,11 @@ const MANAGE_PROFILE_AND_DEVICE_OWNERS: &str =
 const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
 const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
 const QUERY_ADMIN_POLICY: &str = "android.permission.QUERY_ADMIN_POLICY";
+const MANAGE_DEVICE_POLICY_APPS_CONTROL: &str =
+    "android.permission.MANAGE_DEVICE_POLICY_APPS_CONTROL";
+const MANAGE_DEVICE_POLICY_CONTENT_PROTECTION: &str =
+    "android.permission.MANAGE_DEVICE_POLICY_CONTENT_PROTECTION";
+const MANAGE_DEVICE_POLICY_KEYGUARD: &str = "android.permission.MANAGE_DEVICE_POLICY_KEYGUARD";
 const MANAGE_DEVICE_POLICY_CAMERA: &str = "android.permission.MANAGE_DEVICE_POLICY_CAMERA";
 /// `CROSS_USER_PERMISSIONS`' permission of `MANAGE_DEVICE_POLICY_CAMERA`.
 const MANAGE_DEVICE_POLICY_ACROSS_USERS: &str =
@@ -68,6 +74,10 @@ const MANAGE_DEVICE_POLICY_ACROSS_USERS: &str =
 const SET_TIME: &str = "android.permission.SET_TIME";
 const SET_TIME_ZONE: &str = "android.permission.SET_TIME_ZONE";
 /// The aconfig flags the service reads.
+const MANAGE_CONTENT_PROTECTION: &str =
+    "android.view.contentprotection.flags.manage_device_policy_enabled";
+const SET_KEYGUARD_DISABLED_FEATURES_COEXISTENCE: &str =
+    "android.app.admin.flags.set_keyguard_disabled_features_coexistence";
 const SET_AUTO_TIME_ENABLED_COEXISTENCE: &str =
     "android.app.admin.flags.set_auto_time_enabled_coexistence";
 const SET_AUTO_TIME_ZONE_ENABLED_COEXISTENCE: &str =
@@ -527,6 +537,7 @@ fn encryption_status(crypto_type: Option<&str>, target_sdk: i32) -> i32 {
 
 /// What the service reads beside its own state.
 trait Device {
+    fn content_protection_default(&self, user: i32) -> Result<i32, Exception>;
     fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception>;
     /// `mHasFeature`.
     fn feature(&self) -> Result<bool, Exception>;
@@ -651,6 +662,33 @@ impl<D: Device> Caller<'_, D> {
         Ok(self.has_permission(permission, package)?
             && (self.user() == user || self.has_permission(across, package)?))
     }
+
+    /// `enforcePermission`: no DPC, role holder or delegation grants it here.
+    fn enforce_permission(&self, permission: &str, package: Option<&str>) -> Result<(), Exception> {
+        if !self.has_permission(permission, package)? {
+            return Err(Exception::security(format!(
+                "Caller does not have the required permissions for this user. Permission required: {permission}."
+            )));
+        }
+        Ok(())
+    }
+
+    /// `enforceCanQuery`: QUERY_ADMIN_POLICY also permits cross-user queries.
+    fn can_query(
+        &self,
+        permission: &str,
+        package: Option<&str>,
+        user: i32,
+    ) -> Result<(), Exception> {
+        if self.has_permission(QUERY_ADMIN_POLICY, package)? {
+            return Ok(());
+        }
+        self.enforce_permission(permission, package)?;
+        if self.user() != user {
+            self.enforce_permission(MANAGE_DEVICE_POLICY_ACROSS_USERS, package)?;
+        }
+        Ok(())
+    }
 }
 
 /// The reply to `code` of `uid`, with its arguments in `r`.
@@ -669,6 +707,97 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
         }
     };
     let result: Result<(), Exception> = match code {
+        dp::GET_CONTENT_PROTECTION_POLICY => {
+            let a =
+                dp::GetContentProtectionPolicy::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                if device.flag(MANAGE_CONTENT_PROTECTION)? {
+                    unmanaged()?;
+                    caller.identity(a.who.as_ref(), a.caller_package_name.as_deref())?;
+                    caller.can_query(
+                        MANAGE_DEVICE_POLICY_CONTENT_PROTECTION,
+                        a.caller_package_name.as_deref(),
+                        a.user_id,
+                    )?;
+                }
+                dp::write_get_content_protection_policy_reply(
+                    &mut p,
+                    device.content_protection_default(a.user_id)?,
+                );
+                Ok(())
+            })()
+        }
+        dp::SET_CONTENT_PROTECTION_POLICY => {
+            let a =
+                dp::SetContentProtectionPolicy::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                if device.flag(MANAGE_CONTENT_PROTECTION)? {
+                    unmanaged()?;
+                    caller.identity(a.who.as_ref(), a.caller_package_name.as_deref())?;
+                    caller.enforce_permission(
+                        MANAGE_DEVICE_POLICY_CONTENT_PROTECTION,
+                        a.caller_package_name.as_deref(),
+                    )?;
+                    return Err(device.unimplemented("setContentProtectionPolicy (#1521)"));
+                }
+                dp::write_set_content_protection_policy_reply(&mut p);
+                Ok(())
+            })()
+        }
+        dp::SET_USER_CONTROL_DISABLED_PACKAGES => {
+            let a = dp::SetUserControlDisabledPackages::<ComponentName>::read(r)
+                .map_err(|_| BAD_VALUE)?;
+            (|| {
+                a.packages.as_ref().ok_or_else(|| null("packages"))?;
+                unmanaged()?;
+                caller.identity(a.admin.as_ref(), a.caller_package_name.as_deref())?;
+                // The original has no safety checker on an unmanaged device.
+                caller.enforce_permission(
+                    MANAGE_DEVICE_POLICY_APPS_CONTROL,
+                    a.caller_package_name.as_deref(),
+                )?;
+                Err(device.unimplemented("setUserControlDisabledPackages (#1521)"))
+            })()
+        }
+        dp::GET_USER_CONTROL_DISABLED_PACKAGES => {
+            let a = dp::GetUserControlDisabledPackages::<ComponentName>::read(r)
+                .map_err(|_| BAD_VALUE)?;
+            (|| {
+                unmanaged()?;
+                caller.identity(a.admin.as_ref(), a.caller_package_name.as_deref())?;
+                caller.can_query(
+                    MANAGE_DEVICE_POLICY_APPS_CONTROL,
+                    a.caller_package_name.as_deref(),
+                    caller.user(),
+                )?;
+                dp::write_get_user_control_disabled_packages_reply(&mut p, &Some(vec![]));
+                Ok(())
+            })()
+        }
+        dp::SET_KEYGUARD_DISABLED_FEATURES => {
+            let a =
+                dp::SetKeyguardDisabledFeatures::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                if feature()? {
+                    unmanaged()?;
+                    if device.flag(SET_KEYGUARD_DISABLED_FEATURES_COEXISTENCE)? {
+                        caller.identity(a.who.as_ref(), a.caller_package_name.as_deref())?;
+                        // A privileged policy write, including the parent's policy,
+                        // still needs the policy engine (#1521).
+                        caller.enforce_permission(
+                            MANAGE_DEVICE_POLICY_KEYGUARD,
+                            a.caller_package_name.as_deref(),
+                        )?;
+                        return Err(device.unimplemented("setKeyguardDisabledFeatures (#1521)"));
+                    }
+                    caller.identity(a.who.as_ref(), None)?;
+                    // No active admin passed identity, so requireNonNull(who) fails.
+                    return Err(null("ComponentName"));
+                }
+                dp::write_set_keyguard_disabled_features_reply(&mut p);
+                Ok(())
+            })()
+        }
         dp::GET_DEFAULT_CROSS_PROFILE_PACKAGES => {
             dp::GetDefaultCrossProfilePackages::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
@@ -1282,6 +1411,16 @@ impl DevicePolicy {
 }
 
 impl Device for DevicePolicy {
+    fn content_protection_default(&self, user_id: i32) -> Result<i32, Exception> {
+        let mut data = Parcel::new();
+        defaults::GetContentProtectionPolicyDefault { user_id }.write(&mut data);
+        let result = self
+            .host
+            .device_policy_default(defaults::GET_CONTENT_PROTECTION_POLICY_DEFAULT, &data)?;
+        defaults::read_get_content_protection_policy_default_reply(&mut result.reader())
+            .map_err(default_transport)?
+    }
+
     fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception> {
         self.host
             .framework()?
@@ -1348,6 +1487,60 @@ impl Device for DevicePolicy {
 
     fn unimplemented(&self, what: &str) -> Exception {
         self.host.unimplemented_named("device_policy", what)
+    }
+}
+
+fn default_transport(status: i32) -> Exception {
+    Exception::new(
+        EX_ILLEGAL_STATE,
+        format!("device policy defaults: binder status {status}"),
+    )
+}
+
+impl AppHost {
+    pub(super) fn attach_device_policy_defaults(
+        &self,
+        owner: Option<Binder>,
+    ) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = owner else {
+            return Err(Exception::illegal_argument(
+                "no device policy defaults bridge",
+            ));
+        };
+        let owner = Arc::new(self.process.strong(handle));
+        let weak = self.me.clone();
+        self.process.link_to_death(
+            &owner,
+            Box::new(move || {
+                if let Some(host) = weak.upgrade() {
+                    let mut current = host.device_policy_defaults.lock().unwrap();
+                    if current.as_ref().is_some_and(|p| p.handle == handle) {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        *self.device_policy_defaults.lock().unwrap() = Some(owner);
+        Ok(())
+    }
+
+    fn device_policy_default(
+        &self,
+        code: u32,
+        data: &Parcel,
+    ) -> Result<aim_binder_host::local::Received, Exception> {
+        let owner = self
+            .device_policy_defaults
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                self.unimplemented_named(
+                    "device_policy",
+                    "original defaults bridge is not attached (#1521)",
+                )
+            })?;
+        owner.transact(code, data, false).map_err(default_transport)
     }
 }
 
@@ -1604,6 +1797,8 @@ mod tests {
     /// A device with `com.example` (app id 10100) in every user, the
     /// permissions by uid, user 0's settings and the flags on or off.
     struct Fake {
+        content_protection: bool,
+        keyguard_coexistence: bool,
         feature: bool,
         policies: Policies,
         permissions: Vec<(i32, &'static str)>,
@@ -1616,6 +1811,8 @@ mod tests {
     impl Default for Fake {
         fn default() -> Self {
             Fake {
+                content_protection: false,
+                keyguard_coexistence: true,
                 feature: true,
                 policies: Policies::default(),
                 permissions: vec![],
@@ -1627,6 +1824,10 @@ mod tests {
     }
 
     impl Device for Fake {
+        fn content_protection_default(&self, _user: i32) -> Result<i32, Exception> {
+            Ok(0)
+        }
+
         fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception> {
             Ok(match name {
                 "cross_profile_apps" => vec![Some("platform".into()), Some("both".into())],
@@ -1655,8 +1856,12 @@ mod tests {
             Ok((package == "com.example").then_some(36))
         }
 
-        fn flag(&self, _name: &str) -> Result<bool, Exception> {
-            Ok(self.flags)
+        fn flag(&self, name: &str) -> Result<bool, Exception> {
+            Ok(match name {
+                MANAGE_CONTENT_PROTECTION => self.content_protection,
+                SET_KEYGUARD_DISABLED_FEATURES_COEXISTENCE => self.keyguard_coexistence,
+                _ => self.flags,
+            })
         }
 
         fn setting(&self, _table: Table, name: &str) -> Result<Option<String>, Exception> {
@@ -1703,6 +1908,371 @@ mod tests {
 
     fn not_authorized() -> Exception {
         Exception::security("Calling identity is not authorized")
+    }
+
+    fn permission_required(permission: &str) -> Exception {
+        Exception::security(format!(
+            "Caller does not have the required permissions for this user. Permission required: {permission}."
+        ))
+    }
+
+    #[test]
+    fn original_defaults_bridge_authenticates_attachment_and_preserves_java_results() {
+        struct Original;
+        impl Service for Original {
+            fn descriptor(&self) -> &str {
+                defaults::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                let mut p = Parcel::new();
+                match call.code {
+                    defaults::GET_CONTENT_PROTECTION_POLICY_DEFAULT => {
+                        let a = defaults::GetContentProtectionPolicyDefault::read(&mut call.data)?;
+                        if a.user_id == 10 {
+                            p.write_exception(&Exception::security("original exception"));
+                        } else if a.user_id == 11 {
+                            return Err(BAD_VALUE);
+                        } else {
+                            defaults::write_get_content_protection_policy_default_reply(&mut p, 37);
+                        }
+                    }
+                    _ => return Err(BAD_VALUE),
+                }
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            use aim_service_aidl::dev_aim_server_isystemprocess as sp;
+            let service = DevicePolicy::new(host.clone());
+            let error = service.content_protection_default(0).unwrap_err();
+            assert_eq!(
+                error.code,
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+            );
+            assert!(error.message.contains("#1521"));
+            for owner in [None, Some(Binder::Local(1))] {
+                assert!(host.attach_device_policy_defaults(owner).is_err());
+            }
+            let owner = export(Arc::new(Original));
+            let mut data = Parcel::new();
+            sp::AttachDevicePolicyDefaults {
+                defaults: Some(Binder::Handle(owner.handle)),
+            }
+            .write(&mut data);
+            let system = super::super::system_process::SystemProcess::new(host.clone());
+            for uid in [APP as u32, 1000] {
+                let p = system
+                    .transact(&mut Call {
+                        code: sp::ATTACH_DEVICE_POLICY_DEFAULTS,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: uid,
+                        data: data.reader(),
+                    })
+                    .unwrap();
+                let result = sp::read_attach_device_policy_defaults_reply(&mut p.reader()).unwrap();
+                if uid == 1000 {
+                    result.unwrap();
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        aim_binder_host::parcel::EX_SECURITY
+                    );
+                }
+            }
+            assert_eq!(service.content_protection_default(0).unwrap(), 37);
+            assert_eq!(
+                service.content_protection_default(10).unwrap_err(),
+                Exception::security("original exception")
+            );
+            assert_eq!(
+                service.content_protection_default(11).unwrap_err().code,
+                EX_ILLEGAL_STATE
+            );
+        });
+    }
+
+    /// DPMS.get/setContentProtectionPolicy, android-16.0.0_r1;
+    /// the flag-off path precedes identity checks, and the flag-on query
+    /// permits QUERY_ADMIN_POLICY or the policy and cross-user permissions.
+    #[test]
+    fn content_protection_and_its_setter_follow_the_original_flag_and_checks() {
+        let mut device = Fake::default();
+        let get = |d: &Fake, package: Option<&str>, user_id| {
+            call(d, APP, dp::GET_CONTENT_PROTECTION_POLICY, |p| {
+                dp::GetContentProtectionPolicy::<Component> {
+                    who: None,
+                    caller_package_name: package.map(Into::into),
+                    user_id,
+                }
+                .write(p)
+            })
+        };
+        let set = |d: &Fake, who, package: Option<&str>| {
+            call(d, APP, dp::SET_CONTENT_PROTECTION_POLICY, |p| {
+                dp::SetContentProtectionPolicy::<Component> {
+                    who,
+                    caller_package_name: package.map(Into::into),
+                    policy: 1,
+                }
+                .write(p)
+            })
+        };
+        assert_eq!(
+            dp::read_get_content_protection_policy_reply(
+                &mut get(&device, Some("other"), -1).reader()
+            )
+            .unwrap(),
+            Ok(0)
+        );
+        assert_eq!(
+            dp::read_set_content_protection_policy_reply(
+                &mut set(&device, Some(Component("other", "Admin")), None).reader()
+            )
+            .unwrap(),
+            Ok(())
+        );
+        device.content_protection = true;
+        assert_eq!(exception(&get(&device, None, 0)), null("callerPackageName"));
+        let package = Some("com.example");
+        assert_eq!(
+            exception(&get(&device, package, 0)),
+            permission_required(MANAGE_DEVICE_POLICY_CONTENT_PROTECTION)
+        );
+        assert_eq!(
+            exception(&set(&device, None, package)),
+            permission_required(MANAGE_DEVICE_POLICY_CONTENT_PROTECTION)
+        );
+        assert_eq!(
+            exception(&set(
+                &device,
+                Some(Component("com.example", "com.example.Admin")),
+                package
+            )),
+            Caller {
+                device: &device,
+                uid: APP
+            }
+            .not_admin(&ComponentName {
+                package: "com.example".into(),
+                class: "com.example.Admin".into()
+            })
+        );
+        assert_eq!(
+            exception(&get(&device, Some("other"), 0)),
+            Exception::security(format!("Caller with uid {APP} is not other"))
+        );
+        device
+            .permissions
+            .push((APP, MANAGE_DEVICE_POLICY_CONTENT_PROTECTION));
+        assert_eq!(
+            dp::read_get_content_protection_policy_reply(&mut get(&device, package, 0).reader())
+                .unwrap(),
+            Ok(0)
+        );
+        assert_eq!(
+            exception(&get(&device, package, 10)),
+            permission_required(MANAGE_DEVICE_POLICY_ACROSS_USERS)
+        );
+        device
+            .permissions
+            .push((APP, MANAGE_DEVICE_POLICY_ACROSS_USERS));
+        assert_eq!(
+            dp::read_get_content_protection_policy_reply(&mut get(&device, package, 10).reader())
+                .unwrap(),
+            Ok(0)
+        );
+        let error = exception(&set(&device, None, package));
+        assert_eq!(
+            error.code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
+        assert!(error.message.contains("#1521"));
+        device.permissions = vec![(APP, QUERY_ADMIN_POLICY)];
+        assert_eq!(
+            dp::read_get_content_protection_policy_reply(&mut get(&device, package, 10).reader())
+                .unwrap(),
+            Ok(0)
+        );
+        assert_eq!(
+            exception(&set(&device, None, package)),
+            permission_required(MANAGE_DEVICE_POLICY_CONTENT_PROTECTION)
+        );
+        device.policies.owned = true;
+        assert_eq!(
+            exception(&get(&device, package, 0)).code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
+    }
+
+    /// DPMS.set/getUserControlDisabledPackages: packages null is checked
+    /// first, including for clearing; neither a component nor a package
+    /// supplied by a non-admin bypasses the original caller checks.
+    #[test]
+    fn user_control_disabled_packages_checks_both_directions_and_clearing() {
+        let mut device = Fake::default();
+        let set = |d: &Fake, who, package: Option<&str>, packages| {
+            call(d, APP, dp::SET_USER_CONTROL_DISABLED_PACKAGES, |p| {
+                dp::SetUserControlDisabledPackages::<Component> {
+                    admin: who,
+                    caller_package_name: package.map(Into::into),
+                    packages,
+                }
+                .write(p)
+            })
+        };
+        let get = |d: &Fake, who, package: Option<&str>| {
+            call(d, APP, dp::GET_USER_CONTROL_DISABLED_PACKAGES, |p| {
+                dp::GetUserControlDisabledPackages::<Component> {
+                    admin: who,
+                    caller_package_name: package.map(Into::into),
+                }
+                .write(p)
+            })
+        };
+        assert_eq!(
+            exception(&set(
+                &device,
+                Some(Component("other", "Admin")),
+                Some("other"),
+                None
+            )),
+            null("packages")
+        );
+        assert_eq!(
+            exception(&set(&device, None, None, Some(vec![]))),
+            null("callerPackageName")
+        );
+        for packages in [vec![], vec![Some("example.disabled".into())]] {
+            assert_eq!(
+                exception(&set(&device, None, Some("com.example"), Some(packages))),
+                permission_required(MANAGE_DEVICE_POLICY_APPS_CONTROL)
+            );
+        }
+        let who = || Some(Component("com.example", "com.example.Admin"));
+        let denied = Exception::security(format!(
+            "Admin ComponentInfo{{com.example/com.example.Admin}} does not exist or is not owned by uid {APP}"
+        ));
+        assert_eq!(exception(&get(&device, who(), Some("com.example"))), denied);
+        assert_eq!(
+            exception(&set(&device, who(), Some("com.example"), Some(vec![]))),
+            denied
+        );
+        assert_eq!(
+            exception(&get(&device, None, Some("other"))),
+            Exception::security(format!("Caller with uid {APP} is not other"))
+        );
+        assert_eq!(
+            exception(&get(&device, None, Some("com.example"))),
+            permission_required(MANAGE_DEVICE_POLICY_APPS_CONTROL)
+        );
+        device.permissions.push((APP, QUERY_ADMIN_POLICY));
+        assert_eq!(
+            dp::read_get_user_control_disabled_packages_reply(
+                &mut get(&device, None, Some("com.example")).reader()
+            )
+            .unwrap(),
+            Ok(Some(vec![]))
+        );
+        device.permissions = vec![(APP, MANAGE_DEVICE_POLICY_APPS_CONTROL)];
+        assert_eq!(
+            dp::read_get_user_control_disabled_packages_reply(
+                &mut get(&device, None, Some("com.example")).reader()
+            )
+            .unwrap(),
+            Ok(Some(vec![]))
+        );
+        let error = exception(&set(&device, None, Some("com.example"), Some(vec![])));
+        assert_eq!(
+            error.code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
+        assert!(error.message.contains("#1521"));
+        // Unlike keyguard, these calls have no mHasFeature early return.
+        device.feature = false;
+        device.permissions.clear();
+        assert_eq!(
+            exception(&set(&device, None, Some("com.example"), Some(vec![]))),
+            permission_required(MANAGE_DEVICE_POLICY_APPS_CONTROL)
+        );
+    }
+
+    /// DPMS.setKeyguardDisabledFeatures and its getter on an admin-less
+    /// device (CTS DevicePolicyManagerTest): feature, coexistence flag,
+    /// admin identity, null component and policy permission ordering.
+    #[test]
+    fn keyguard_setter_rejects_non_admins_and_getter_keeps_the_default() {
+        let mut device = Fake::default();
+        let set = |d: &Fake, who, package: Option<&str>, which, parent| {
+            call(d, APP, dp::SET_KEYGUARD_DISABLED_FEATURES, |p| {
+                dp::SetKeyguardDisabledFeatures::<Component> {
+                    who,
+                    caller_package_name: package.map(Into::into),
+                    which,
+                    parent,
+                }
+                .write(p)
+            })
+        };
+        for coexistence in [false, true] {
+            device.keyguard_coexistence = coexistence;
+            for which in [0, 0x7fffffff] {
+                for parent in [false, true] {
+                    let r = set(
+                        &device,
+                        Some(Component("com.example", "com.example.Admin")),
+                        Some("com.example"),
+                        which,
+                        parent,
+                    );
+                    assert_eq!(
+                        exception(&r),
+                        Exception::security(format!(
+                            "Admin ComponentInfo{{com.example/com.example.Admin}} does not exist or is not owned by uid {APP}"
+                        ))
+                    );
+                }
+            }
+            let error = exception(&set(&device, None, Some("com.example"), 0, false));
+            assert_eq!(
+                error,
+                if coexistence {
+                    permission_required(MANAGE_DEVICE_POLICY_KEYGUARD)
+                } else {
+                    null("ComponentName")
+                }
+            );
+            let r = call(&device, APP, dp::GET_KEYGUARD_DISABLED_FEATURES, |p| {
+                dp::GetKeyguardDisabledFeatures::<Component> {
+                    who: None,
+                    user_handle: 0,
+                    parent: false,
+                }
+                .write(p)
+            });
+            assert_eq!(
+                dp::read_get_keyguard_disabled_features_reply(&mut r.reader()).unwrap(),
+                Ok(0)
+            );
+        }
+        device
+            .permissions
+            .push((APP, MANAGE_DEVICE_POLICY_KEYGUARD));
+        let error = exception(&set(&device, None, Some("com.example"), 0, false));
+        assert_eq!(
+            error.code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
+        assert!(error.message.contains("#1521"));
+        device.feature = false;
+        assert_eq!(
+            dp::read_set_keyguard_disabled_features_reply(
+                &mut set(&device, None, Some("other"), -1, true).reader()
+            )
+            .unwrap(),
+            Ok(())
+        );
     }
 
     #[test]
