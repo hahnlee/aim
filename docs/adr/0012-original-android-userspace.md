@@ -403,7 +403,10 @@ Details in [boot-status.md](../boot-status.md), "Java world".
   original vold_prepare_subdirs, as pinned FsCrypt.cpp does, and propagates its
   failure (#948); this retains original SDK CE/DE root modes, owners and labels.
 - **eBPF scope:** `bpf()` maps live in shared memory and pin into bpffs;
-  programs and BTF load but never run (#224). The socket layer does what
+  BTF and programs load. Attached cgroup socket-create programs run through
+  a bounded interpreter in the socket layer, including their allow/EPERM
+  result (#2268). The image's program only reads its permission map; it
+  writes no maps. The socket layer also does what
   netd's cgroup skb stats programs do for each send and receive
   (`sys/net/traffic.rs`), and fills the per-interface maps as netd's xt_bpf
   programs do, with guest device names registered for their readers (#1720).
@@ -625,13 +628,18 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   EthernetService and IpClient provision it; guest sockets stay host
   sockets.
 
-- **eBPF:** the `bpf()` syscall with maps backed by shared memory. Programs
-  attached to kernel hooks are not run; statistics the stack expects are
-  filled in from the syscall layer, which sees every socket operation.
-  Settled in P3: maps and pins work, and programs and BTF load. The
+- **eBPF:** the `bpf()` syscall with maps backed by shared memory. Cgroup
+  socket-create bytecode and referenced map identities survive the loader's
+  descriptors; single non-overridable attachments execute at INET/INET6
+  creation, using the current real UID/GID. The bounded interpreter supports
+  the image program's instructions and read-only helpers, rejecting other
+  instructions at attachment; it is not a full BPF verifier or interpreter.
+  Other attachment modes remain unsupported. This keeps policy in the
+  loaded program, below unmodified userspace, instead of recognizing its
+  name or duplicating Android permission policy. The
   per-uid counters of netd's `cgroupskb/*/stats` and interface counters of
   its xt_bpf programs are filled from the socket layer (#224, #1720).
-  Other programs and ring-buffer producers remain unexecuted (#2268).
+  Other hooks and ring-buffer producers remain unexecuted (#2268).
 - **Mount namespaces** retain authenticated per-process owner inventories,
   stable mount IDs and private/shared/slave propagation. Native init has
   bootstrap and default owners. Its pinned original per-service selection

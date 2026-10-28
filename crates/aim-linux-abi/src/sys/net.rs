@@ -993,6 +993,12 @@ pub fn socket(a: [u64; 6]) -> i64 {
             if fd < 0 {
                 return -(errno::last() as i64);
             }
+            if let Err(error) = super::bpf::socket_create() {
+                unsafe {
+                    libc::close(fd);
+                }
+                return -(error as i64);
+            }
             set_int(fd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1);
             let o = InetOpts::default();
             o.icmp4.store(

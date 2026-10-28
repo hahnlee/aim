@@ -8115,8 +8115,18 @@ memory pressure since #277, see "Memory pressure").
   and the layer logs to a hidden descriptor (zygote refused its
   non-allowlisted stdout).
 - cgroup v2 and bpffs are areas of the path map; `bpf()` creates maps in
-  shared memory and pins them, and loads programs and BTF without running
-  them (#224), so NetBpfLoad and uprobestats load everything.
+  shared memory and pins them, and loads programs and BTF. Single,
+  non-overridable cgroup socket-create attachments now execute the loaded
+  bytecode at INET/INET6 creation and return EPERM on denial (#2268).
+  Replacement netd attaches the pinned create program after BPF readiness;
+  attachment failure prevents its service publication, as in the original.
+  The image's permission program reads its live map without writing it;
+  program and map references survive loader FD closure and map unpinning.
+  Host regressions cover actual image bytecode, UID/profile permissions,
+  attachment replacement/detachment, family scope and exec'd consumers.
+  Host BPF tests and the Android netd build pass (2026-10-29).
+  No guest boot was rerun. Other hooks and ring producers remain #2268;
+  traffic counters retain the socket layer's existing approximation (#224).
 - A forked child gets the stub islands' executable views back as views of
   writable memory (SIGILL in system_server's first JNI call).
 - xattrs, with `security.selinux` from the original image (re-extract with

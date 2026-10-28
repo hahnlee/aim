@@ -1,6 +1,7 @@
 //! `netd` of the derived image (ADR 0012 appendix, "Replaced native
 //! daemons"; docs/network.md): INetd (netd_aidl_interface V17) without
-//! iptables, policy routing or eBPF, which the original drives.
+//! iptables or policy routing. It attaches the original socket-create BPF
+//! policy after loader readiness; the syscall layer executes it.
 //!
 //! - Guest sockets are host sockets: the host's networking carries them,
 //!   so the network, route, firewall, bandwidth and traffic-accounting
@@ -14,6 +15,7 @@
 //!   `dnsresolver` and the `dnsproxyd` socket, and answers `fwmarkd`
 //!   (`fwmark`), which libnetd_client in every process talks to.
 
+mod bpf;
 mod fwmark;
 mod interfaces;
 mod networks;
@@ -612,6 +614,10 @@ fn control_socket(name: &str) -> Option<i32> {
 fn main() {
     daemon_log::init("netd");
     readiness::wait();
+    if let Err(e) = bpf::attach_socket_create() {
+        log::error!("BPF socket-create attachment: {e}");
+        std::process::exit(1);
+    }
     sysctl::initialize_all();
     if let Err(e) = resolv::start() {
         log::error!("DnsResolver: {e}");

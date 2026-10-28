@@ -1,12 +1,10 @@
-//! `bpf(2)`: maps backed by shared memory; programs are loaded but never
-//! run (ADR 0012 appendix, "Kernel features to emulate").
+//! `bpf(2)`: shared maps and socket-create program execution (ADR 0012).
 //!
 //! Android's network stack keeps its state in eBPF maps that the loader
 //! (NetBpfLoad) creates and pins under `/sys/fs/bpf`, and that netd,
 //! system_server (BpfNetMaps, TrafficStats) and the DnsResolver open and
-//! read. The programs that would fill the maps from kernel hooks (socket
-//! creation, cgroup ingress/egress) are accepted and attached, and do
-//! nothing.
+//! read. Attached cgroup socket-create programs run in the socket owner;
+//! traffic counters are filled there too. Other hooks remain #2268.
 //!
 //! Every map and program is a file in the boot's runtime directory
 //! (`<runtime>/bpf-objects`), so a pin is a hard link into the bpffs area
@@ -36,6 +34,9 @@ use crate::vfs::{self, LINUX_AT_FDCWD};
 use aim_storage::bpf_object::*;
 use aim_storage::private_fd::PrivateFile;
 use std::os::fd::{AsRawFd, FromRawFd};
+
+mod sock_create;
+pub(crate) use sock_create::check as socket_create;
 
 const MAP_CREATE: u64 = 0;
 const MAP_LOOKUP_ELEM: u64 = 1;
@@ -505,6 +506,16 @@ fn prog_load(a: &[u32]) -> i64 {
     for (i, w) in a[12..16].iter().enumerate() {
         name[i * 4..i * 4 + 4].copy_from_slice(&w.to_ne_bytes());
     }
+    let data = if a[0] == 9 {
+        match sock_create::prepare(a) {
+            Ok(data) => data,
+            Err(error) => return error,
+        }
+    } else {
+        Vec::new()
+    };
+    let mut pad = [0; 56];
+    pad[..4].copy_from_slice(&a[17].to_ne_bytes());
     let header = Header {
         magic: MAGIC,
         kind: KIND_PROG,
@@ -519,20 +530,31 @@ fn prog_load(a: &[u32]) -> i64 {
         frozen: 0,
         name,
         data_len: 0,
-        _pad: [0; 56],
+        _pad: pad,
     };
-    create_object(header, 0, None)
+    create_object(header, data.len(), Some(&data))
 }
 
 /// The host path of the object behind `fd`.
 fn object_path(fd: i32) -> Option<CString> {
+    use std::os::unix::fs::MetadataExt;
     let mut buf = [0u8; libc::PATH_MAX as usize];
     // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
-    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } != 0 {
-        return None;
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == 0 {
+        let n = buf.iter().position(|&c| c == 0)?;
+        return CString::new(&buf[..n]).ok();
     }
-    let n = buf.iter().position(|&c| c == 0)?;
-    CString::new(&buf[..n]).ok()
+    // Darwin may cache the last hard-link name on the vnode. Unpin/detach
+    // can remove that name while the original boot-owned object still lives.
+    let (_, stat) = read_header(fd)?;
+    for entry in std::fs::read_dir(objects_dir()).ok()? {
+        let entry = entry.ok()?;
+        let metadata = entry.metadata().ok()?;
+        if metadata.ino() == stat.st_ino && metadata.dev() == stat.st_dev as u32 as u64 {
+            return CString::new(entry.path().as_os_str().as_bytes()).ok();
+        }
+    }
+    None
 }
 
 fn obj_pin(path: u64, fd: i32) -> i64 {
@@ -684,7 +706,11 @@ pub fn bpf(a: [u64; 6]) -> i64 {
         BTF_LOAD => btf_load(u64_at(0), u32s[4]),
         OBJ_PIN => obj_pin(u64_at(0), object_fd.unwrap()),
         OBJ_GET => obj_get(u64_at(0)),
-        // Attached programs never run.
+        PROG_ATTACH | PROG_DETACH if u32s[2] == sock_create::ATTACH => {
+            sock_create::attach(&u32s, cmd == PROG_DETACH)
+                .map_or_else(|error| -(error as i64), |()| 0)
+        }
+        // Other hook families remain #2268.
         PROG_ATTACH | PROG_DETACH => 0,
         LINK_CREATE => -(EINVAL as i64),
         OBJ_GET_INFO_BY_FD => {
