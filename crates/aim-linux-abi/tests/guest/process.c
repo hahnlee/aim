@@ -917,12 +917,17 @@ static void identity_file(void) {
   close(go[0]);
   char c, path[128], text[1024] = {0};
   CHECK(read(ready[0], &c, 1) == 1, "child ready");
-  snprintf(path, sizeof(path), "/data/local/tmp/id/by-pid/%d", pid);
+  // The native fixture checks the private identity file before releasing
+  // this barrier; guest-init exposes credentials through /proc, not that file.
+  CHECK(write(3, &pid, sizeof(pid)) == sizeof(pid), "report child");
+  CHECK(read(3, &c, 1) == 1, "identity file checked");
+  snprintf(path, sizeof(path), "/proc/%d/status", pid);
   int fd = open(path, O_RDONLY);
   CHECK(fd >= 0, "%s", path);
   read(fd, text, sizeof(text) - 1);
   close(fd);
-  CHECK(strstr(text, "\nuid\t10057\n") && strstr(text, "\ngroups\t3003 1065\n"), "entry '%s'", text);
+  CHECK(strstr(text, "\nUid:\t10057\t10057\t10057\t10057\n") &&
+        strstr(text, "\nGroups:\t3003 1065 \n"), "status '%s'", text);
   // /proc holds the process table's processes (a pid namespace), not the
   // host's: the child and this process, not the test that started it.
   int listed_self = 0, listed_child = 0, listed_other = 0;
@@ -946,7 +951,6 @@ static void identity_file(void) {
   fclose(stat);
   snprintf(path, sizeof(path), "/proc/%d/stat", pid);
   CHECK(access(path, F_OK) == 0, "the child is in /proc");
-  snprintf(path, sizeof(path), "/data/local/tmp/id/by-pid/%d", pid);
   write(go[1], "g", 1);
   int st;
   CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st), "child");

@@ -71,7 +71,7 @@ fn root() -> Option<&'static Path> {
         ] {
             mirror(&root, g);
         }
-        std::fs::create_dir_all(root.join("data/local/tmp/id/by-pid")).unwrap();
+        std::fs::create_dir_all(root.join("data/local/tmp")).unwrap();
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/process.c");
         let out = Command::new(clang)
             .args(["-O1", "-Wall", "-Werror", "-o"])
@@ -412,6 +412,10 @@ fn credential_changes_are_seen_whole() {
 
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
     let Some(root) = root() else { return };
     let namespace = NativeNamespace::new("identity");
     let id = namespace.directory.join("svc");
@@ -424,9 +428,22 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
          oom_score_adj\t-1000\nrlimit\t13\t40\t40\n",
     )
     .unwrap();
-    let mut fds = [0; 2];
-    // SAFETY: a pipe whose read end the guest inherits as fd 3.
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // Identity files have no guest path in guest-init's path map. Read the
+    // live child's entry natively while the guest holds it at a barrier.
+    let (mut observer, inherited) = UnixStream::pair().unwrap();
+    observer
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let table = namespace.directory.join("by-pid");
+    let observation = std::thread::spawn(move || -> std::io::Result<_> {
+        let mut pid = [0; 4];
+        observer.read_exact(&mut pid)?;
+        let entry = table.join(i32::from_ne_bytes(pid).to_string());
+        let text = std::fs::read_to_string(&entry);
+        // Release even if reading failed, so the guest can reap its child.
+        observer.write_all(b"g")?;
+        Ok((entry, text))
+    });
     let id_arg = id.to_str().unwrap().to_string();
     let out = linux_run(
         root,
@@ -441,11 +458,11 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
         ],
         |c| {
             c.env_clear().env("ANDROID_SOCKET_test", "3");
-            let fd = fds[0];
+            let fd = inherited.as_raw_fd();
             // SAFETY: only async-signal-safe calls between fork and exec.
             unsafe {
                 c.pre_exec(move || {
-                    if libc::dup2(fd, 3) < 0 {
+                    if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -453,11 +470,8 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
             };
         },
     );
-    // SAFETY: closing our pipe.
-    unsafe {
-        libc::close(fds[0]);
-        libc::close(fds[1]);
-    }
+    drop(inherited);
+    let observed = observation.join().unwrap();
     let (so, se) = (
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
@@ -466,6 +480,18 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
         out.status.success() && so.contains("ok identity_file\n"),
         "{:?}\nstdout:\n{so}\nstderr:\n{se}",
         out.status
+    );
+    let (entry, text) = observed.unwrap();
+    let text = text.unwrap();
+    assert!(
+        text.contains("\nuid\t10057\n") && text.contains("\ngroups\t3003 1065\n"),
+        "entry {text:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(&entry).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound,
+        "entry removed at exit: {}",
+        entry.display()
     );
 }
 

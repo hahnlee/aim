@@ -2527,11 +2527,16 @@ namespaces, foreign actors, forged births, stale and malformed receipts
 (2026-10-29). The two process tests using `--identity` now supply a real native
 controller and private receipt table, including launcher admission before an
 orphaned guest is released; guest-visible admission evidence remains rejected.
+Identity files have no guest path: the process fixture now checks the live
+child's private identity file and its removal natively, with an inherited-fd
+barrier, while the guest checks the child's credentials through `/proc`.
 The NDK regression reproduces lost locks on origin/main. The current release
-process suite (41 tests) and NDK suite (57 tests) stop before guest execution:
-Mach registration reports EADDRINUSE, with a native probe confirming bootstrap
-status 1100 (BOOTSTRAP_NOT_PRIVILEGED). No guest integration pass or guest boot
-is claimed.
+NDK suite (57 tests) and the full debug process rerun (41 tests, with the debug
+lock holder built) stop before guest execution: Mach registration reports
+EADDRINUSE, with Binder check-in reporting bootstrap status 1100
+(BOOTSTRAP_NOT_PRIVILEGED). The process fixture and NDK program compile, but
+none of their guest assertions or the native identity-file content/removal
+assertions ran. No guest integration pass or guest boot is claimed.
 The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional
