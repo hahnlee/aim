@@ -4666,7 +4666,12 @@ requests and missing owners fail. Installer exceptions retain their original
 code/message and Java's original IOException message conversion. The replacement
 vold now calls original vold_prepare_subdirs after preparing each user's storage
 and propagates helper failure (#948); the missing call had left SDK CE/DE roots
-absent. On a disposable original-PMS boot, original ART verifies native SDK
+absent. Its remountUid, remountAppStorageDirs and unmountAppStorageDirs calls
+now reject unsupported per-process external-storage view changes explicitly
+instead of returning success without changing mounts; monitor probes the shared
+state and live mount locks for the watchdog (#1387; 2026-10-28). Android-target
+compilation passes; no guest boot was run for this change.
+On a disposable original-PMS boot, original ART verifies native SDK
 creation, CE/DE selection, same-UID pruning, SDK/cache directories, exact request
 bytes, invalid-user exception type/message and actual UID 19001 denial. Pinned
 installd's invalid-user guard returns its Binder worker's current errno, so

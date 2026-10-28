@@ -231,8 +231,20 @@ impl IVold::IVold for Vold {
         Ok(())
     }
     fn monitor(&self) -> binder::Result<()> {
-        // The original takes and releases its locks for the watchdog; each
-        // call here takes its own.
+        // The original probes its volume and crypt locks for the watchdog.
+        // Release the inventory lock before probing each live mount: mount
+        // operations can themselves need the inventory lock.
+        let mounts = self
+            .state
+            .lock()
+            .unwrap()
+            .mounts
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for mount in mounts {
+            drop(mount.lock().unwrap());
+        }
         Ok(())
     }
     fn reset(&self) -> binder::Result<()> {
@@ -437,14 +449,17 @@ impl IVold::IVold for Vold {
     ) -> binder::Result<()> {
         unsupported("moveStorage")
     }
+    // VolumeManager changes live apps' mount namespaces here. Until the
+    // layer supports those remote storage-view changes, report the gap
+    // instead of acknowledging a remount that never happened (#1387).
     fn remountUid(&self, _: i32, _: i32) -> binder::Result<()> {
-        Ok(())
+        unsupported("remountUid: per-process external storage views (#1387)")
     }
     fn remountAppStorageDirs(&self, _: i32, _: i32, _: &[String]) -> binder::Result<()> {
-        Ok(())
+        unsupported("remountAppStorageDirs: per-process external storage views (#1387)")
     }
     fn unmountAppStorageDirs(&self, _: i32, _: i32, _: &[String]) -> binder::Result<()> {
-        Ok(())
+        unsupported("unmountAppStorageDirs: per-process external storage views (#1387)")
     }
     fn setupAppDir(&self, path: &str, app_uid: i32) -> binder::Result<()> {
         self.ensureAppDirsCreated(&[path.to_string()], app_uid)
@@ -508,6 +523,8 @@ impl IVold::IVold for Vold {
         _: i32,
         _: i32,
     ) -> binder::Result<()> {
+        // IdleMaint::SetGCUrgentPace returns without work when fstab has no
+        // F2FS data block device, as on this host-backed device.
         Ok(())
     }
     fn refreshLatestWrite(&self) -> binder::Result<()> {
