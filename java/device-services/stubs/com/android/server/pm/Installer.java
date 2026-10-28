@@ -2,6 +2,8 @@
 package com.android.server.pm;
 public class Installer extends com.android.server.SystemService {
     public void onStart() { throw new RuntimeException("stub"); }
+    public android.os.storage.CrateMetadata[] getAppCrates(String uuid, String[] names, int user) throws InstallerException { throw new RuntimeException("stub"); }
+    public android.os.storage.CrateMetadata[] getUserCrates(String uuid, int user) throws InstallerException { throw new RuntimeException("stub"); }
     public Installer(android.content.Context context) { super(context); throw new RuntimeException("stub"); }
     static android.os.CreateAppDataArgs buildCreateAppDataArgs(String uuid, String packageName,
             int userId, int flags, int appId, String seInfo, int targetSdkVersion, boolean usesSdk) {

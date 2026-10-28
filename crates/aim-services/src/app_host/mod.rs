@@ -571,6 +571,7 @@ pub struct AppHost {
     /// PackageItemInfo's retained original text presentation in aim-system.
     safe_labels: Mutex<Option<Arc<Strong>>>,
     provider_queries: Mutex<Option<Arc<Strong>>>,
+    storage_crates: Mutex<Option<Arc<Strong>>>,
     device_policy_defaults: Mutex<Option<Arc<Strong>>>,
     tasks: tasks::Tasks,
     /// The server's launches, by package, until the package's task is made.
@@ -690,6 +691,7 @@ impl AppHost {
             agent: Mutex::new(None),
             safe_labels: Mutex::new(None),
             provider_queries: Mutex::new(None),
+            storage_crates: Mutex::new(None),
             device_policy_defaults: Mutex::new(None),
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),

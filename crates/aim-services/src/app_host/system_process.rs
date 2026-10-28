@@ -71,6 +71,14 @@ impl Service for SystemProcess {
                         sp::write_get_activity_stats_host_reply(&mut p, Some(backend));
                     })
             }
+            sp::ATTACH_STORAGE_CRATES => {
+                let a = sp::AttachStorageCrates::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.attach_storage_crates(a.crates)?;
+                    sp::write_attach_storage_crates_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_WIFI_BRIDGE => {
                 let a = sp::AttachWifiBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

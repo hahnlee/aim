@@ -3,6 +3,7 @@
 package android.text;
 
 public class TextUtils {
+    public static boolean isEmpty(CharSequence text) { throw new RuntimeException("stub"); }
     private TextUtils() {}
     public static final int SAFE_STRING_FLAG_TRIM = 1;
     public static final int SAFE_STRING_FLAG_FIRST_LINE = 4;
