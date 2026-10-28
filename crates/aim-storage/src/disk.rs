@@ -32,6 +32,8 @@ pub struct Attached {
 const LIMIT: Duration = Duration::from_secs(120);
 /// How long converting a whole image may take.
 const CONVERT_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// A newly attached blank device may still be unavailable to the formatter.
+const FORMAT_LIMIT: Duration = Duration::from_secs(20);
 
 fn run(command: &mut Command) -> Result<Output, String> {
     run_within(command, LIMIT)
@@ -42,6 +44,29 @@ fn run_within(command: &mut Command, limit: Duration) -> Result<Output, String> 
 }
 
 fn run_until(command: &mut Command, deadline: Instant) -> Result<Output, String> {
+    let output = run_output_until(command, deadline)?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(command_error(command, &output))
+    }
+}
+
+fn command_error(command: &Command, output: &Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        text = format!("{} {text}", stdout.trim());
+    }
+    let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+    format!(
+        "{} {}: {text}",
+        command.get_program().to_string_lossy(),
+        args.join(" ")
+    )
+}
+
+fn run_output_until(command: &mut Command, deadline: Instant) -> Result<Output, String> {
     let limit = deadline.saturating_duration_since(Instant::now());
     if limit.is_zero() {
         return Err("disk command cleanup deadline reached".into());
@@ -87,21 +112,11 @@ fn run_until(command: &mut Command, deadline: Instant) -> Result<Output, String>
             Err(e) => return Err(format!("{}: {e}", describe(command))),
         }
     };
-    let output = Output {
+    Ok(Output {
         status,
         stdout: stdout.join().unwrap_or_default(),
         stderr: stderr.join().unwrap_or_default(),
-    };
-    if output.status.success() {
-        Ok(output)
-    } else {
-        let mut text = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.trim().is_empty() {
-            text = format!("{} {text}", stdout.trim());
-        }
-        Err(format!("{}: {text}", describe(command)))
-    }
+    })
 }
 
 /// Every attached image, from the IORegistry: an `AppleDiskImageDevice`
@@ -371,9 +386,226 @@ pub fn create_case_sensitive(image: &Path, size: &str, volume: &str) -> Result<(
         .arg(image))?;
     let device = attach(image, Attach::default())?;
     let raw = device.replacen("/dev/disk", "/dev/rdisk", 1);
-    let formatted = run(Command::new("newfs_apfs").args(["-e", "-v", volume, &raw]));
+    let formatted = format_apfs(&raw, volume);
     let detached = detach(&device, Duration::from_secs(10));
-    formatted.and(detached).map(|_| ())
+    match (formatted, detached) {
+        (Err(format), Err(detach)) => Err(format!("{format}; cleanup failed: {detach}")),
+        (format, detach) => format.and(detach),
+    }
+}
+
+fn format_apfs(raw: &str, volume: &str) -> Result<(), String> {
+    format_with_clock(
+        Command::new("newfs_apfs")
+            .args(["-e", "-v", volume, raw])
+            .env("LC_ALL", "C"),
+        raw,
+        FORMAT_LIMIT,
+        run_output_until,
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
+fn format_with_clock(
+    command: &mut Command,
+    raw: &str,
+    patience: Duration,
+    mut format: impl FnMut(&mut Command, Instant) -> Result<Output, String>,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> Result<(), String> {
+    let start = now();
+    let deadline = start + patience;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let result = format(command, deadline);
+        let error = match result {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                let error = command_error(command, &output);
+                // Retry only the formatter's device-open diagnostic, without
+                // format progress. Persistent permission failures still fail.
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let unavailable = output.status.code().is_some()
+                    && output.stdout.is_empty()
+                    && ["Operation not permitted", "Resource busy"]
+                        .iter()
+                        .any(|reason| stderr.trim() == format!("newfs_apfs: {raw}: {reason}"));
+                if unavailable && now() < deadline {
+                    sleep(
+                        Duration::from_millis(200).min(deadline.saturating_duration_since(now())),
+                    );
+                    if now() < deadline {
+                        continue;
+                    }
+                }
+                error
+            }
+            Err(error) => error,
+        };
+        return Err(format!(
+            "format {raw} failed after {attempts} attempt(s) in {:.1} s: {error}",
+            now().saturating_duration_since(start).as_secs_f64()
+        ));
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn output(stderr: &str) -> Output {
+        Output {
+            status: std::process::ExitStatus::from_raw(if stderr.is_empty() { 0 } else { 256 }),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    fn command() -> Command {
+        let mut command = Command::new("newfs_apfs");
+        command.args(["-e", "-v", "aim-data", "/dev/rdisk-fixture"]);
+        command
+    }
+
+    #[test]
+    fn device_open_eperm_and_ebusy_recover_with_one_deadline() {
+        for reason in ["Operation not permitted", "Resource busy"] {
+            let start = Instant::now();
+            let elapsed = Cell::new(Duration::ZERO);
+            let patience = Duration::from_secs(1);
+            let mut calls = 0;
+            format_with_clock(
+                &mut command(),
+                "/dev/rdisk-fixture",
+                patience,
+                |_, deadline| {
+                    assert_eq!(deadline, start + patience);
+                    calls += 1;
+                    if calls == 3 {
+                        Ok(output(""))
+                    } else {
+                        Ok(output(&format!(
+                            "newfs_apfs: /dev/rdisk-fixture: {reason}\n"
+                        )))
+                    }
+                },
+                || start + elapsed.get(),
+                |delay| elapsed.set(elapsed.get() + delay),
+            )
+            .unwrap();
+            assert_eq!(calls, 3);
+            assert_eq!(elapsed.get(), Duration::from_millis(400));
+        }
+    }
+
+    #[test]
+    fn persistent_permission_failure_is_bounded_and_preserves_the_error() {
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut calls = 0;
+        let error = format_with_clock(
+            &mut command(),
+            "/dev/rdisk-fixture",
+            Duration::from_millis(750),
+            |_, _| {
+                calls += 1;
+                Ok(output(
+                    "newfs_apfs: /dev/rdisk-fixture: Operation not permitted\n",
+                ))
+            },
+            || start + elapsed.get(),
+            |delay| elapsed.set(elapsed.get() + delay),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 4);
+        assert_eq!(elapsed.get(), Duration::from_millis(750));
+        assert!(error.contains("4 attempt(s) in 0.8 s"), "{error}");
+        assert!(
+            error.ends_with("newfs_apfs: /dev/rdisk-fixture: Operation not permitted"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unrelated_errors_and_partial_formatting_are_not_retried() {
+        let errors = [
+            output("newfs_apfs: /dev/rdisk-fixture: Permission denied"),
+            output("newfs_apfs: /dev/rdisk-other: Operation not permitted"),
+            output("newfs_apfs: /dev/rdisk-fixture: Input/output error"),
+            Output {
+                stdout: b"Creating a new APFS Container\n".to_vec(),
+                ..output("newfs_apfs: /dev/rdisk-fixture: Operation not permitted")
+            },
+            Output {
+                status: std::process::ExitStatus::from_raw(libc::SIGKILL),
+                ..output("newfs_apfs: /dev/rdisk-fixture: Operation not permitted")
+            },
+        ];
+        for output in errors {
+            let mut calls = 0;
+            let error = format_with_clock(
+                &mut command(),
+                "/dev/rdisk-fixture",
+                FORMAT_LIMIT,
+                |_, _| {
+                    calls += 1;
+                    Ok(output.clone())
+                },
+                Instant::now,
+                |_| panic!("must not wait on an unrelated failure"),
+            )
+            .unwrap_err();
+            assert_eq!(calls, 1);
+            assert!(error.contains(String::from_utf8_lossy(&output.stderr).as_ref()));
+        }
+    }
+
+    #[test]
+    fn command_failure_and_timeout_are_not_retried() {
+        let mut calls = 0;
+        let error = format_with_clock(
+            &mut command(),
+            "/dev/rdisk-fixture",
+            FORMAT_LIMIT,
+            |_, _| {
+                calls += 1;
+                Err("no answer (Operation not permitted)".into())
+            },
+            Instant::now,
+            |_| panic!("must not retry a failed command"),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(error.ends_with("no answer (Operation not permitted)"));
+    }
+
+    #[test]
+    fn time_spent_in_the_formatter_consumes_the_retry_budget() {
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut calls = 0;
+        let error = format_with_clock(
+            &mut command(),
+            "/dev/rdisk-fixture",
+            Duration::from_secs(1),
+            |_, deadline| {
+                assert_eq!(deadline, start + Duration::from_secs(1));
+                elapsed.set(Duration::from_secs(1));
+                calls += 1;
+                Ok(output("newfs_apfs: /dev/rdisk-fixture: Resource busy"))
+            },
+            || start + elapsed.get(),
+            |_| panic!("must not wait beyond the deadline"),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(error.contains("1 attempt(s) in 1.0 s"));
+    }
 }
 
 /// Grows or shrinks the detached image `image` to `bytes`, with the

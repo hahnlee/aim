@@ -58,6 +58,12 @@ bench`) keeps everything of `DATA` in `DATA.asif` beside it:
 - **Bounded waits**: every disk image tool call has a time limit (two
   minutes; half an hour for converting an image). A hung storagekitd
   (#425) makes the boot fail with that call named instead of hanging it.
+  Formatting a freshly attached blank image retries `newfs_apfs`'s raw-device
+  EPERM/EBUSY diagnostic every 200 ms, sharing a 20-second deadline across
+  attempts (#2278). Other errors and failures with format progress are returned
+  immediately. A persistent denial reports the device, attempt count, elapsed
+  time and last error; normal eject is attempted on either outcome, with any
+  cleanup failure retained.
 - A data directory from before data images (a plain directory with
   content) is refused; move it away or remove it.
   `aim_storage::data::remove` removes a data directory with its image.
