@@ -1830,6 +1830,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "proxy_file_tests.rs"]
+mod proxy_file_tests;
+
+#[cfg(test)]
 mod fd_owner_tests {
     use super::*;
     use std::{

@@ -2810,6 +2810,11 @@ Binder imports its typed proxy FD, writes and reads back 17,003 bytes, duplicate
 its shared offset, transfers and retransfers it through original SCM_RIGHTS,
 executes a new original ART process image with the inherited capability and
 rejects every writer with EPERM after abandon.
+Host fork-receipt tests verify the proxy class before registry refresh, child
+I/O and revocation, and independent last-close references (#1005, 2026-10-28).
+The fork SCM re-export test compiles but its fixture and the existing SCM
+fixture are blocked here by `bootstrap_check_in` returning `0x44c`; no guest
+boot was run.
 The image selector remains unchanged; this is not default installer publication. This does not prove live SystemServer policy or SELinux
 restorecon. The complete derived-image build passes (118.5s, 12 rebuilt/30 fresh nodes); the original
 first-system-scan test passes all six restart cases (174.25s, no skips). Session names, real read-only file descriptors, split markers, sealing, transfer
