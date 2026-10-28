@@ -388,6 +388,9 @@ fn registered(kq: i32, fd: i32, i: &Interest) -> bool {
 }
 
 fn epoll_of(epfd: i32) -> Result<Arc<Epoll>, i64> {
+    if super::fs::is_path_fd(epfd) {
+        return Err(-(EBADF as i64));
+    }
     match fdtab::get(epfd) {
         Some(Kind::Epoll(e)) => Ok(e),
         // SAFETY: plain fcntl to tell EBADF from EINVAL.
@@ -432,6 +435,9 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
         Ok(e) => e,
         Err(e) => return e,
     };
+    if super::fs::is_path_fd(fd) {
+        return -(EBADF as i64);
+    }
     if let Some(Kind::Pty(description)) = fdtab::get(fd) {
         return pty_ctl(&ep, epfd, fd, op, ev, &description);
     }

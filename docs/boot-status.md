@@ -2216,16 +2216,25 @@ reference with the allocation inode/generation/birth identity, without a host
 slave descriptor (#1161). Descriptor stat, procfs metadata, empty-path chown,
 exec restoration and typed transfer use that reference; I/O and foreign metadata
 changes remain denied. Host syscall dispatch checks confirm EBADF for fchmod,
-fchown, read, write and ioctl on the original, duplicated and exec-restored
-reference. Original bionic's fchmod wrapper retries EBADF through /proc/self/fd,
-so t_pty checks SYS_fchmod separately and preserves that permitted path fallback.
+fchown, read, write, ioctl, all four f*xattr calls, truncate/allocation, directory
+reads, seek, sync, flock, fd-only utimensat and epoll_ctl on the original,
+duplicated and exec-restored reference. Epoll rejects O_PATH before classifying
+the reference's backing directory. Xattr's common descriptor guard also rejects
+FUSE O_PATH before user-memory, namespace or filesystem work. Original bionic's
+fchmod, fgetxattr, fsetxattr and flistxattr wrappers retry EBADF through
+/proc/self/fd, so t_pty checks their raw syscalls separately and preserves
+the permitted chmod fallback.
 A standalone original-bionic regular-file probe confirms syscall EBADF and
 successful wrapper chmod through procfs.
-Native metadata tests pass 11/0 (one ignored), and the earlier focused
-path/transport tests pass 12/0. The expanded original-bionic t_pty checks retain
-foreign-UID DAC and lock preservation, but its rerun still stops at native PTY
-service registration (Address already in use); the earlier allocator/reuse run
-stopped there too. They provide no executed guest acceptance.
+The standalone NDK xattr test passes its owner, O_PATH and foreign-permission
+groups (2026-10-29). A test-only manifest excluding the unrelated services
+dependency executes the syscall crate's host suite: 363 pass, 22 fail, 24 ignored;
+the expanded character-reference and FUSE xattr checks pass. Failures include
+native service registration and socket EPERM. Standard test builds stop at an
+unrelated missing media-consent Ask.label field. The expanded original-bionic
+t_pty checks retain foreign-UID DAC and lock preservation, but its rerun still
+stops at native PTY service registration (Address already in use); they provide
+no executed PTY guest acceptance.
 No guest boot was run for this change. C111 now completes actual adbd exec-out getprop on its first
 probe: exit0,27949 bytes,660 parsed property rows,SDK36 and boot_completed1,
 with no PTY error. Its fresh full66 campaign allocates the device and starts the

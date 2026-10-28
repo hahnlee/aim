@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -27,6 +28,53 @@ static void owner_reads_and_writes(void) {
   CHECK(getxattr(file, "user.k", v, sizeof v) == 1 && v[0] == 'v');
   CHECK(removexattr(file, "user.k") == 0);
   close(fd);
+}
+
+// open(2) O_PATH and Linux v6.6 fs/xattr.c: fdget rejects FMODE_PATH
+// before copying names/values or checking inode permissions and namespaces.
+static void path_descriptors_are_refused(void) {
+  char file[512], dir[512], link[512];
+  path(file, sizeof file, "path-file");
+  path(dir, sizeof dir, "path-dir");
+  path(link, sizeof link, "path-link");
+  int control = open(file, O_RDWR | O_CREAT | O_EXCL, 0600);
+  CHECK(control >= 0);
+  CHECK(fsetxattr(control, "user.k", "v", 1, 0) == 0);
+  CHECK(mkdir(dir, 0700) == 0 && symlink(file, link) == 0);
+  const char* paths[] = {file, dir, link, "/dev/null"};
+  const char* names[] = {"user.k", "user.missing", "security.selinux", "trusted.k"};
+  for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+    int fd = open(paths[i], O_PATH | O_NOFOLLOW);
+    CHECK(fd >= 0);
+    int copy = dup(fd);
+    CHECK(copy >= 0 && close(fd) == 0);
+    for (size_t j = 0; j < sizeof names / sizeof names[0]; j++) {
+      for (size_t size = 0; size <= 1; size++) {
+        char byte = 'w';
+        errno = 0;
+        CHECK(syscall(SYS_fgetxattr, copy, names[j], &byte, size) == -1 && errno == EBADF);
+        errno = 0;
+        CHECK(syscall(SYS_fsetxattr, copy, names[j], &byte, size, 0) == -1 && errno == EBADF);
+        errno = 0;
+        CHECK(syscall(SYS_flistxattr, copy, &byte, size) == -1 && errno == EBADF);
+        errno = 0;
+        CHECK(syscall(SYS_fremovexattr, copy, names[j]) == -1 && errno == EBADF);
+      }
+    }
+    // Invalid pointers and flags must not override the descriptor error.
+    const int calls[] = {SYS_fgetxattr, SYS_fsetxattr, SYS_flistxattr, SYS_fremovexattr};
+    for (size_t j = 0; j < sizeof calls / sizeof calls[0]; j++) {
+      errno = 0;
+      CHECK(syscall(calls[j], copy, 0, 0, 1, -1) == -1 && errno == EBADF);
+    }
+    CHECK(close(copy) == 0);
+  }
+  char byte;
+  CHECK(fgetxattr(control, "user.k", &byte, 1) == 1 && byte == 'v');
+  CHECK(flistxattr(control, NULL, 0) >= (ssize_t)sizeof("user.k"));
+  CHECK(getxattr(file, "user.k", &byte, 1) == 1 && byte == 'v');
+  CHECK(fremovexattr(control, "user.k") == 0 && close(control) == 0);
+  CHECK(unlink(file) == 0 && unlink(link) == 0 && rmdir(dir) == 0);
 }
 
 static void others_are_refused(void) {
@@ -76,6 +124,7 @@ int main(int argc, char** argv) {
   snprintf(base, sizeof base, "%s/xattr-%d", argc > 1 ? argv[1] : "/data/local/tmp", getpid());
   mkdir(base, 0755);
   RUN(owner_reads_and_writes);
+  RUN(path_descriptors_are_refused);
   RUN(others_are_refused);
   DONE();
 }

@@ -1920,6 +1920,9 @@ mod tests {
         // Exercise syscall dispatch without bionic's fchmod wrapper, which
         // retries EBADF by changing the inode through /proc/self/fd.
         let buffer = name.as_mut_ptr() as u64;
+        let epfd = super::super::epoll::epoll_create1([0; 6]);
+        assert!(epfd >= 0);
+        let event = [1u64, 0];
         let reject_fd_ops = |fd: i32| {
             for (nr, args) in [
                 (52, [fd as u64, 0o666, 0, 0, 0, 0]),
@@ -1927,6 +1930,28 @@ mod tests {
                 (63, [fd as u64, buffer, 1, 0, 0, 0]),
                 (64, [fd as u64, buffer, 1, 0, 0, 0]),
                 (29, [fd as u64, 0x541b, buffer, 0, 0, 0]),
+                (
+                    7,
+                    [fd as u64, c"user.test".as_ptr() as u64, buffer, 1, 0, 0],
+                ),
+                (
+                    10,
+                    [fd as u64, c"user.test".as_ptr() as u64, buffer, 1, 0, 0],
+                ),
+                (13, [fd as u64, buffer, 1, 0, 0, 0]),
+                (16, [fd as u64, c"user.test".as_ptr() as u64, 0, 0, 0, 0]),
+                (46, [fd as u64, 0, 0, 0, 0, 0]),
+                (47, [fd as u64, 0, 0, 1, 0, 0]),
+                (61, [fd as u64, buffer, 1, 0, 0, 0]),
+                (62, [fd as u64, 0, 0, 0, 0, 0]),
+                (82, [fd as u64, 0, 0, 0, 0, 0]),
+                (83, [fd as u64, 0, 0, 0, 0, 0]),
+                (84, [fd as u64, 0, 1, 0, 0, 0]),
+                (267, [fd as u64, 0, 0, 0, 0, 0]),
+                (32, [fd as u64, 2, 0, 0, 0, 0]),
+                (88, [fd as u64, 0, 0, 0, 0, 0]),
+                (21, [epfd as u64, 1, fd as u64, event.as_ptr() as u64, 0, 0]),
+                (21, [fd as u64, 1, epfd as u64, event.as_ptr() as u64, 0, 0]),
             ] {
                 let mut context: crate::context::GuestContext = unsafe { std::mem::zeroed() };
                 context.x[..6].copy_from_slice(&args);
@@ -1963,6 +1988,7 @@ mod tests {
         );
         assert_eq!(chmod_fd(fd, 0o600, &owner, true), 0);
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(super::super::fs::close([epfd as u64, 0, 0, 0, 0, 0]), 0);
     }
     #[test]
     fn fd_metadata_pin_rejects_private_and_preserves_closed_inode() {

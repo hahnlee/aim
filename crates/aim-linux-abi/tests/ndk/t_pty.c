@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -375,7 +376,17 @@ static void locked_slave_metadata(void) {
   int available;
   CHECK(ioctl(path, FIONREAD, &available) == -1 && errno == EBADF);
   CHECK(fchmod(path, 0620) == 0);
-  CHECK(fgetxattr(path, "user.test", &byte, 1) == -1 && errno == EBADF);
+  // Bionic also retries fgetxattr/fsetxattr/flistxattr through procfs.
+  CHECK(syscall(SYS_fgetxattr, path, "user.test", &byte, 1) == -1 && errno == EBADF);
+  CHECK(syscall(SYS_fsetxattr, path, "user.test", &byte, 1, 0) == -1 && errno == EBADF);
+  CHECK(syscall(SYS_flistxattr, path, &byte, 1) == -1 && errno == EBADF);
+  CHECK(fremovexattr(path, "user.test") == -1 && errno == EBADF);
+  int epfd = epoll_create1(EPOLL_CLOEXEC);
+  CHECK(epfd >= 0);
+  struct epoll_event event = {.events = EPOLLIN};
+  CHECK(epoll_ctl(epfd, EPOLL_CTL_ADD, path, &event) == -1 && errno == EBADF);
+  CHECK(epoll_ctl(path, EPOLL_CTL_ADD, epfd, &event) == -1 && errno == EBADF);
+  CHECK(close(epfd) == 0);
   int locked = -1;
   CHECK(ioctl(master, TIOCGPTLCK, &locked) == 0 && locked == 1);
   CHECK(open(name, O_RDWR | O_NOCTTY) == -1 && errno == EIO);
