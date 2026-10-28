@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -14,6 +15,8 @@
 
 static int command[2][2], answer[2][2];
 static pid_t tids[2];
+static atomic_uint ready[2], released;
+static unsigned epoch;
 
 static void put(const char* path, const char* value) {
   int fd = open(path, O_WRONLY | O_CLOEXEC);
@@ -35,9 +38,15 @@ static void* worker(void* arg) {
   prctl(PR_SET_NAME, i == 0 ? "cg-one" : "cg-two");
   pid_t tid = syscall(SYS_gettid);
   if (write(answer[i][1], &tid, sizeof tid) != sizeof tid) _exit(3);
+  unsigned epoch = 0;
   char c;
   while (read(command[i][0], &c, 1) == 1) {
     if (c == 'q') return NULL;
+    if (c == 'x') {
+      atomic_store_explicit(&ready[i], ++epoch, memory_order_release);
+      while (atomic_load_explicit(&released, memory_order_acquire) < epoch) {}
+      continue;
+    }
     if (c == 'f' || c == 'n') {
       struct sched_param p = {.sched_priority = c == 'f' ? 3 : 0};
       if (sched_setscheduler(0, c == 'f' ? SCHED_FIFO : SCHED_OTHER, &p) != 0) _exit(9);
@@ -50,9 +59,15 @@ static void* worker(void* arg) {
 }
 
 static void sync_workers(void) {
+  ++epoch;
   for (int i = 0; i < 2; i++) {
-    char c;
-    if (write(command[i][1], "x", 1) != 1 || read(answer[i][0], &c, 1) != 1) _exit(5);
+    if (write(command[i][1], "x", 1) != 1) _exit(5);
+  }
+  // A pipe acknowledgement lets the observer race the worker's next syscall
+  // and its temporary Darwin lock-owner priority promotion. Sample only after
+  // both workers have returned to guest code, with no more syscalls until release.
+  for (int i = 0; i < 2; i++) {
+    while (atomic_load_explicit(&ready[i], memory_order_acquire) != epoch) {}
   }
 }
 
@@ -62,6 +77,7 @@ static void step(const char* name, pid_t child) {
   fflush(stdout);
   char text[16];
   if (!fgets(text, sizeof text, stdin)) _exit(6);
+  atomic_store_explicit(&released, epoch, memory_order_release);
 }
 
 int main(void) {
