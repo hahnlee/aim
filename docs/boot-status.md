@@ -36,6 +36,7 @@ guest-init --image <derived> --data <data> --run \
 ## The app host boot (2026-10-16)
 
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
+The app host routes verifier status writes and their package-name/info queries through the retained Android 16 Java entry point and permission enforcer, with status persistence in the native domain owner (#1763; host tests and pinned-image Java linkage only, no guest boot rerun).
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.
 The app host prepares user 0's CE storage before starting vold's user and mounting the emulated volume at unlocking, and logs external storage failures without aborting boot completion (#2227; host tests only, no guest boot rerun).
