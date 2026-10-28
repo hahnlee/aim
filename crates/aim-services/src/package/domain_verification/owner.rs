@@ -685,6 +685,56 @@ impl Owner {
         Ok(0)
     }
 
+    /// Shell-only internal state override, after collecting valid auto-verify hosts.
+    /// The all-package branch deliberately does not revoke user selections.
+    pub fn set_status_internal(&mut self, name: &str, hosts: &[String], state: i32, revoke: bool) {
+        let package = self.attached.iter_mut().find(|p| p.name == name).unwrap();
+        let verified = |state| matches!(state, 1 | 2 | 4 | 5 | 7 | 8);
+        let newly_verified: Vec<_> = hosts
+            .iter()
+            .filter(|host| {
+                revoke
+                    && verified(state)
+                    && !package
+                        .domains
+                        .iter()
+                        .any(|(h, s)| h.as_ref() == Some(*host) && verified(*s))
+            })
+            .cloned()
+            .collect();
+        for host in hosts {
+            set(package, host, state);
+        }
+        let disabled: std::collections::BTreeSet<_> = package
+            .users
+            .iter()
+            .filter(|u| !u.allow_link_handling)
+            .map(|u| u.id)
+            .collect();
+        for package in &mut self.attached {
+            for user in &mut package.users {
+                if !disabled.contains(&user.id) {
+                    user.enabled_hosts
+                        .retain(|host| !newly_verified.contains(host));
+                }
+            }
+        }
+    }
+
+    /// resetDomainState: only SUCCESS, RESTORED and verifier-defined values reset.
+    pub fn reset_verification(&mut self, name: &str, auto: &[String], immutable: bool) {
+        let package = self.attached.iter_mut().find(|p| p.name == name).unwrap();
+        package
+            .domains
+            .retain(|(_, s)| !matches!(*s, 1 | 5) && *s < 1024);
+        apply_immutable(package, immutable, auto);
+    }
+
+    pub fn reset_users(&mut self, name: &str, user: i32) {
+        let package = self.attached.iter_mut().find(|p| p.name == name).unwrap();
+        package.users.retain(|u| user != -1 && u.id != user);
+    }
+
     /// After ID/code/host validation: public user selection's two-pass revocation.
     /// Even approval failure retains the newly allocated user state, as original.
     pub fn set_user_selection<'a>(
@@ -1163,7 +1213,14 @@ fn domains(
     )
 }
 fn immutable(p: &mut Package, input: &Input<'_>, config: &SystemConfig, auto: &[String]) -> bool {
-    if input.system && config.linked_apps.contains(&p.name) {
+    apply_immutable(
+        p,
+        input.system && config.linked_apps.contains(&p.name),
+        auto,
+    )
+}
+fn apply_immutable(p: &mut Package, linked_system: bool, auto: &[String]) -> bool {
+    if linked_system {
         for host in auto {
             set(p, host, 7);
         }
@@ -1572,6 +1629,125 @@ mod tests {
         assert!(p.domains.is_empty());
         assert!(p.users.is_empty());
     }
+    #[test]
+    fn shell_status_override_revocation_and_reset_match_android16() {
+        let code = code(&["a.test", "b.test"]);
+        let config = SystemConfig::default();
+        let mut base = Owner::new(State::default(), BTreeMap::new());
+        base.add(input(&code), &config).unwrap();
+        let mut p = base.remove("fixture").unwrap();
+        p.domains = vec![(Some("a.test".into()), 7), (Some("b.test".into()), 1024)];
+        p.users = [0, 10]
+            .map(|id| User {
+                id,
+                allow_link_handling: id == 0,
+                enabled_hosts: vec!["a.test".into(), "b.test".into(), "web.test".into()],
+            })
+            .into();
+        let mut other = p.clone();
+        other.name = "other".into();
+        other.id = OLD.into();
+        base.put(p);
+        base.put(other);
+        let hosts = vec!["a.test".into(), "b.test".into()];
+        for state in 0..=3 {
+            for named in [false, true] {
+                let mut owner = base.clone();
+                owner.set_status_internal("fixture", &hosts, state, named);
+                assert!(
+                    owner
+                        .package("fixture")
+                        .unwrap()
+                        .domains
+                        .iter()
+                        .all(|(_, s)| *s == state)
+                );
+                for name in ["fixture", "other"] {
+                    let users = &owner.package(name).unwrap().users;
+                    // a.test was already verified; a disabled owning user keeps selections.
+                    assert_eq!(
+                        users[0].enabled_hosts,
+                        if named && matches!(state, 1 | 2) {
+                            vec!["a.test", "web.test"]
+                        } else {
+                            vec!["a.test", "b.test", "web.test"]
+                        }
+                    );
+                    assert_eq!(users[1].enabled_hosts, ["a.test", "b.test", "web.test"]);
+                }
+            }
+        }
+        // No owning user row also permits revocation; repeated verified writes do not revoke.
+        let mut owner = base.clone();
+        owner
+            .attached
+            .iter_mut()
+            .find(|p| p.name == "fixture")
+            .unwrap()
+            .users
+            .clear();
+        owner.set_status_internal("fixture", &hosts, 1, true);
+        assert_eq!(
+            owner.package("other").unwrap().users[1].enabled_hosts,
+            ["a.test", "web.test"]
+        );
+        let before = owner.persisted();
+        owner.set_status_internal("fixture", &hosts, 2, true);
+        assert_eq!(
+            owner.package("other"),
+            before.active.iter().find(|p| p.name == "other")
+        );
+        for immutable in [false, true] {
+            let mut owner = base.clone();
+            let mut p = owner.remove("fixture").unwrap();
+            p.domains = (0..=8)
+                .chain([1023, 1024, 2048])
+                .map(|s| (Some(format!("h{s}.test")), s))
+                .collect();
+            owner.put(p);
+            let before = owner.package("fixture").unwrap().clone();
+            owner.reset_verification("fixture", &hosts, immutable);
+            let p = owner.package("fixture").unwrap();
+            for state in [0, 2, 3, 4, 6, 8, 1023] {
+                assert!(p.domains.contains(&(Some(format!("h{state}.test")), state)));
+            }
+            for state in [1, 5, 1024, 2048] {
+                assert!(
+                    !p.domains
+                        .iter()
+                        .any(|(h, _)| h.as_deref() == Some(&format!("h{state}.test")))
+                );
+            }
+            assert_eq!(p.domains.contains(&(Some("h7.test".into()), 7)), immutable);
+            assert_eq!(p.users, before.users);
+            assert_eq!(
+                p.uri_relative_filter_groups,
+                before.uri_relative_filter_groups
+            );
+            if immutable {
+                for host in &hosts {
+                    assert!(p.domains.contains(&(Some(host.clone()), 7)));
+                }
+            }
+            let domains = p.domains.clone();
+            owner.reset_users("fixture", 0);
+            assert_eq!(
+                owner
+                    .package("fixture")
+                    .unwrap()
+                    .users
+                    .iter()
+                    .map(|u| u.id)
+                    .collect::<Vec<_>>(),
+                [10]
+            );
+            assert_eq!(owner.package("fixture").unwrap().domains, domains);
+            owner.reset_users("fixture", -1);
+            assert!(owner.package("fixture").unwrap().users.is_empty());
+            assert_eq!(owner.package("other"), base.package("other"));
+        }
+    }
+
     #[test]
     fn shell_selection_applies_after_approval_failure_and_revokes_on_disable() {
         let code = code(&["a.test"]);

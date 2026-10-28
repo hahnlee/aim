@@ -33,6 +33,16 @@ public class DomainShellTest {
     }
     static final class Backend implements dev.aim.server.IAppHostDomainVerification {
         final List<String> writes = new ArrayList<>();
+        RuntimeException failure;
+        public void setShellStatus(String name,int state,List<String> domains){
+            if(failure!=null)throw failure;
+            if("missing".equals(name))throw new ServiceSpecificException(1);
+            writes.add("status:"+name+":"+state+":"+domains);
+        }
+        public void resetShellState(List<String> names,int user,boolean userOnly){
+            if(failure!=null)throw failure;
+            writes.add("reset:"+names+":"+user+":"+userOnly);
+        }
         public byte[] readShellState(int kind,String name,List<String> domains,int user,boolean hasUser){return capture(kind,name,domains,user,hasUser);}
         public void setShellUserSelection(String name,int user,boolean enabled,List<String> domains){
             if(name.equals("missing"))throw new ServiceSpecificException(1);
@@ -79,6 +89,42 @@ public class DomainShellTest {
             catch(SecurityException expected){if(!expected.getMessage().equals("Caller 10100 is not allowed to change internal state"))throw expected;}
             Binder.uid=2000;
             if(!backend.writes.equals(expectedWrites))throw new AssertionError("denied write reached backend");
+            backend.writes.clear();
+            for(String state:new String[]{"0","1","2","3","STATE_NO_RESPONSE","STATE_SUCCESS","STATE_APPROVED","STATE_DENIED"})
+                check(pm,"","set-app-links","--package","p",state,"a.test","undeclared.test");
+            check(pm,"","set-app-links","--package","ALL","1","all");
+            check(pm,"","reset-app-links","p","q");
+            check(pm,"","reset-app-links","ALL");
+            check(pm,"","reset-app-links","--user","0","p");
+            check(pm,"","reset-app-links","--user","all","all");
+            var expectedStatus=new ArrayList<String>();
+            for(int i=0;i<8;i++)expectedStatus.add("status:p:"+(i%4)+":[a.test, undeclared.test]");
+            expectedStatus.addAll(List.of("status:null:1:null","reset:[p, q]:0:false",
+                "reset:null:0:false","reset:[p]:0:true","reset:null:-1:true"));
+            if(!backend.writes.equals(expectedStatus))throw new AssertionError(backend.writes);
+            checkResult(pm,1,"","Package not found: missing\n","set-app-links","--package","missing","0","all");
+            checkResult(pm,1,"","Error: no package specified\n","set-app-links","0","all");
+            checkResult(pm,1,"","Invalid state option: 4\n","set-app-links","--package","p","4","all");
+            checkResult(pm,1,"","No domains specified\n","set-app-links","--package","p","1");
+            checkResult(pm,1,"","Error: unknown option: --invalid\n","reset-app-links","--invalid");
+            checkResult(pm,1,"","Error: no package specified\n","reset-app-links");
+            Binder.uid=10100;
+            for(int operation=0;operation<3;operation++){
+                try {
+                    if(operation==0)shell.setDomainVerificationStatusInternal("p",1,null);
+                    else if(operation==1)shell.clearDomainVerificationState(null);
+                    else shell.clearUserStates(null,-1);
+                    throw new AssertionError("permission bypass");
+                }catch(SecurityException expected){if(!expected.getMessage().equals("Caller 10100 is not allowed to change internal state"))throw expected;}
+            }
+            Binder.uid=2000;
+            if(!backend.writes.equals(expectedStatus))throw new AssertionError("denied write reached backend");
+            backend.failure=new ServiceSpecificException(7);
+            try {shell.setDomainVerificationStatusInternal("p",1,null);throw new AssertionError("swallowed status error");}
+            catch(ServiceSpecificException expected){if(expected.errorCode!=7)throw expected;}
+            try {shell.clearDomainVerificationState(null);throw new AssertionError("swallowed reset error");}
+            catch(ServiceSpecificException expected){if(expected.errorCode!=7)throw expected;}
+            backend.failure=null;
             check(pm,links(false),"get-app-links","p");
             check(pm,links(true),"get-app-links","--user","0","p");
             check(pm,links(true),"get-app-links","--user","all");

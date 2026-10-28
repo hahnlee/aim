@@ -115,7 +115,15 @@ public final class AppHostDomainShell implements DomainVerificationShell.Callbac
     private static UnsupportedOperationException pending() {
         return new UnsupportedOperationException("domain shell writes are not served (#2187)");
     }
-    @Override public void setDomainVerificationStatusInternal(String name, int state, ArraySet<String> domains) { throw pending(); }
+    @Override public void setDomainVerificationStatusInternal(String name, int state,
+            ArraySet<String> domains) throws NameNotFoundException {
+        enforcer.assertInternal(Binder.getCallingUid());
+        try { backend.setShellStatus(name, state, domains == null ? null : new ArrayList<>(domains)); }
+        catch (ServiceSpecificException failure) {
+            if (failure.errorCode != 1) throw failure;
+            throw new NameNotFoundException(name);
+        } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+    }
     @Override public void setDomainVerificationUserSelectionInternal(int user, String name,
             boolean enabled, ArraySet<String> domains) throws NameNotFoundException {
         enforcer.assertInternal(Binder.getCallingUid());
@@ -136,7 +144,12 @@ public final class AppHostDomainShell implements DomainVerificationShell.Callbac
             throw new NameNotFoundException(name);
         } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
     }
-    @Override public void clearDomainVerificationState(List<String> names) { throw pending(); }
-    @Override public void clearUserStates(List<String> names, int user) { throw pending(); }
+    private void reset(List<String> names, int user, boolean userOnly) {
+        enforcer.assertInternal(Binder.getCallingUid());
+        try { backend.resetShellState(names, user, userOnly); }
+        catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+    }
+    @Override public void clearDomainVerificationState(List<String> names) { reset(names, 0, false); }
+    @Override public void clearUserStates(List<String> names, int user) { reset(names, user, true); }
     @Override public void verifyPackages(List<String> names, boolean reVerify) { throw pending(); }
 }

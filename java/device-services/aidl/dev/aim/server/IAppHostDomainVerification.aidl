@@ -21,4 +21,6 @@ interface IAppHostDomainVerification {
     byte[] readShellState(int kind, String packageName, in List<String> domains, int user, boolean hasUser);
     void setShellUserSelection(String packageName, int user, boolean enabled, in List<String> domains);
     void setShellLinkHandling(String packageName, int user, boolean allowed);
+    void setShellStatus(String packageName, int state, in List<String> domains);
+    void resetShellState(in List<String> packageNames, int user, boolean userOnly);
 }

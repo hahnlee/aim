@@ -4,8 +4,10 @@ use crate::package::{
     domain_verification::{
         collector::{self, Kind},
         names,
+        owner::Owner,
     },
     info::array_order,
+    scan_snapshot::query_state::Capture,
 };
 use aim_binder_host::{
     local::{Call, Reply},
@@ -318,11 +320,8 @@ pub(super) fn write_user(
     selection: bool,
 ) -> Result<(), Exception> {
     use crate::package::domain_verification::owner::{ApprovalInput, approval_eligible};
-    let system = host.package_system()?;
-    let bridge = system.package_bootstrap()?;
-    loop {
-        let capture = system.capture_package_queries_for(&bridge)?;
-        let native = DomainVerification::domains(&capture)?;
+    write(host, |capture, owner, bridge| {
+        let native = DomainVerification::domains(capture)?;
         let missing = || Exception {
             code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
             message: String::new(),
@@ -339,7 +338,6 @@ pub(super) fn write_user(
         } else {
             vec![user]
         };
-        let mut owner = native.owner().clone();
         if selection {
             let name = name.unwrap();
             let state = capture.state();
@@ -395,6 +393,39 @@ pub(super) fn write_user(
                 .set_link_handling_internal(name, enabled, user, &users)
                 .map_err(failure)?;
         }
+        Ok(())
+    })
+}
+
+pub(super) fn write(
+    host: &Arc<AppHost>,
+    mut mutate: impl FnMut(
+        &Arc<Capture>,
+        &mut Owner,
+        &Arc<crate::package::bootstrap::Bridge>,
+    ) -> Result<(), Exception>,
+) -> Result<(), Exception> {
+    let system = host.package_system()?;
+    let bridge = system.package_bootstrap()?;
+    loop {
+        let capture = system.capture_package_queries_for(&bridge)?;
+        let mut owner = DomainVerification::domains(&capture)?.owner().clone();
+        if let Err(error) = mutate(&capture, &mut owner, &bridge) {
+            if owner.persisted() != DomainVerification::domains(&capture)?.owner().persisted() {
+                // DVS keeps earlier in-memory changes if a later list entry throws,
+                // without reaching scheduleWriteSettings.
+                let update = capture
+                    .prepare_runtime_domain_update(owner)
+                    .map_err(failure)?;
+                if system
+                    .publish_runtime_package_domains(&bridge, update)?
+                    .is_none()
+                {
+                    continue;
+                }
+            }
+            return Err(error);
+        }
         system.check_package_bootstrap(&bridge)?;
         let disk = match system.package_persistence_owner(&capture) {
             Ok((_, disk)) => disk,
@@ -417,4 +448,110 @@ pub(super) fn write_user(
             }
         }
     }
+}
+
+pub(super) fn write_status(
+    host: &Arc<AppHost>,
+    args: api::SetShellStatus,
+) -> Result<(), Exception> {
+    if !(0..=3).contains(&args.state) {
+        return Err(Exception::illegal_argument(
+            "State must be one of NO_RESPONSE, SUCCESS, APPROVED, or DENIED",
+        ));
+    }
+    write(host, |capture, owner, _| {
+        let native = DomainVerification::domains(capture)?;
+        let names = args.package_name.as_ref().map_or_else(
+            || {
+                owner
+                    .attached_names()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            },
+            |name| vec![name.clone()],
+        );
+        for name in names {
+            let code = capture
+                .state()
+                .packages
+                .get(&name)
+                .and_then(|p| p.pkg.as_deref());
+            if owner.package(&name).is_none() || code.is_none() {
+                if args.package_name.is_none() {
+                    continue;
+                }
+                return Err(Exception {
+                    code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
+                    message: String::new(),
+                    service_specific: 1,
+                    parcelable: None,
+                });
+            }
+            let declared = collector::collect(
+                code.unwrap(),
+                native.collector_policy(&name).map_err(failure)?,
+                Kind::ValidAutoVerify,
+            );
+            let hosts = args.domains.as_ref().map_or_else(
+                || declared.clone(),
+                |hosts| {
+                    hosts
+                        .iter()
+                        .flatten()
+                        .filter(|h| declared.contains(h))
+                        .cloned()
+                        .collect()
+                },
+            );
+            owner.set_status_internal(&name, &hosts, args.state, args.package_name.is_some());
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn reset(host: &Arc<AppHost>, args: api::ResetShellState) -> Result<(), Exception> {
+    write(host, |capture, owner, _| {
+        let native = DomainVerification::domains(capture)?;
+        let names = args.package_names.as_ref().map_or_else(
+            || {
+                owner
+                    .attached_names()
+                    .map(|n| Some(n.to_owned()))
+                    .collect::<Vec<_>>()
+            },
+            Clone::clone,
+        );
+        for name in names {
+            let code = name.as_ref().and_then(|n| capture.state().packages.get(n));
+            let pkg = code.and_then(|p| p.pkg.as_deref());
+            if !args.user_only && pkg.is_none() {
+                continue;
+            }
+            let name = name.as_deref().filter(|n| owner.package(n).is_some()).ok_or_else(||
+                Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, format!(
+                    "Attempt to invoke virtual method '{}' on a null object reference",
+                    if !args.user_only { "android.util.ArrayMap com.android.server.pm.verify.domain.models.DomainVerificationPkgState.getStateMap()" }
+                    else if args.user == -1 { "void com.android.server.pm.verify.domain.models.DomainVerificationPkgState.removeAllUsers()" }
+                    else { "void com.android.server.pm.verify.domain.models.DomainVerificationPkgState.removeUser(int)" })))?;
+            if args.user_only {
+                owner.reset_users(name, args.user);
+            } else {
+                let policy = native.collector_policy(name).map_err(failure)?;
+                let auto = collector::collect(pkg.unwrap(), policy, Kind::ValidAutoVerify);
+                owner.reset_verification(
+                    name,
+                    &auto,
+                    policy.linked_app
+                        && code
+                            .unwrap()
+                            .setting_flags
+                            .ok_or_else(|| failure("missing current package flags"))?
+                            .0
+                            & crate::package::settings::FLAG_SYSTEM
+                            != 0,
+                );
+            }
+        }
+        Ok(())
+    })
 }

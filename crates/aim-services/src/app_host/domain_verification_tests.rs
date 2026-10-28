@@ -1035,6 +1035,32 @@ fn shell_user_writes_filter_hosts_preserve_captures_and_reopen_disk() {
                 .read_exception()
                 .unwrap()
         };
+        let status = |name: Option<&str>, state, hosts: Option<Vec<&str>>| {
+            let mut p = Parcel::new();
+            original::SetShellStatus {
+                package_name: name.map(str::to_owned),
+                state,
+                domains: hosts.map(|v| v.into_iter().map(|s| Some(s.into())).collect()),
+            }
+            .write(&mut p);
+            invoke(&backend, 1000, original::SET_SHELL_STATUS, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let reset = |names: Option<Vec<&str>>, user, user_only| {
+            let mut p = Parcel::new();
+            original::ResetShellState {
+                package_names: names.map(|v| v.into_iter().map(|s| Some(s.into())).collect()),
+                user,
+                user_only,
+            }
+            .write(&mut p);
+            invoke(&backend, 1000, original::RESET_SHELL_STATE, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
         let users = |capture: &Arc<Capture>| {
             capture
                 .domains()
@@ -1122,10 +1148,66 @@ fn shell_user_writes_filter_hosts_preserve_captures_and_reopen_disk() {
             reopened.state().settings.domain_verification,
             current.domains().unwrap().owner().persisted()
         );
+        // Both internal-state branches filter independently against auto-verify hosts.
+        status(None, 3, Some(vec!["a.test", "c.test", "invalid.test"])).unwrap();
+        let denied = host.package_capture().unwrap();
+        assert_eq!(
+            denied
+                .domains()
+                .unwrap()
+                .owner()
+                .package("p")
+                .unwrap()
+                .domains,
+            [(Some("a.test".into()), 3)]
+        );
+        assert_eq!(users(&denied), users(&current));
+        status(Some("p"), 2, Some(vec!["b.test", "c.test"])).unwrap();
+        reset(Some(vec!["p"]), 0, true).unwrap();
+        assert!(users(&host.package_capture().unwrap()).is_empty());
+        status(Some("p"), 1, None).unwrap();
+        reset(None, 0, false).unwrap();
+        assert!(
+            host.package_capture()
+                .unwrap()
+                .domains()
+                .unwrap()
+                .owner()
+                .package("p")
+                .unwrap()
+                .domains
+                .is_empty()
+        );
+        // Force a competing publication during mutation: retry the entire operation.
+        let mut attempts = 0;
+        super::super::domain_shell::write(host, |_, owner, _| {
+            attempts += 1;
+            owner.set_status_internal("p", &["a.test".into()], 1, true);
+            if attempts == 1 {
+                enabled(Some("p.Main"), 1);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        let current = host.package_capture().unwrap();
+        assert!(
+            current.state().packages["p"].users[&0]
+                .disabled_components
+                .is_empty()
+        );
+        let reopened = crate::package::owner::Store::open(host.data().unwrap(), &[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened.state().settings.domain_verification,
+            current.domains().unwrap().owner().persisted()
+        );
         let bytes = std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap();
         for failure in [
             selection("missing", 0, true, None),
             allowed(Some("missing"), 0, true),
+            status(Some("missing"), 1, None),
         ] {
             assert_eq!(failure.unwrap_err().service_specific, 1);
         }
@@ -1134,9 +1216,43 @@ fn shell_user_writes_filter_hosts_preserve_captures_and_reopen_disk() {
             std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap(),
             bytes
         );
+        assert_eq!(
+            status(Some("p"), 4, None).unwrap_err().message,
+            "State must be one of NO_RESPONSE, SUCCESS, APPROVED, or DENIED"
+        );
+        reset(Some(vec!["missing"]), 0, false).unwrap(); // no code: original skips it
+        selection("p", 0, true, None).unwrap();
+        let before = host.package_capture().unwrap();
+        let disk_bytes = std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap();
+        assert_eq!(
+            reset(Some(vec!["p", "missing"]), -1, true)
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_NULL_POINTER
+        );
+        assert!(!users(&before).is_empty());
+        assert!(users(&host.package_capture().unwrap()).is_empty());
+        assert_eq!(
+            std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap(),
+            disk_bytes
+        );
+        // An external writer is a hard failure, with no state publication.
+        let before = host.package_capture().unwrap();
+        std::fs::write(
+            host.data().unwrap().join("system/packages.xml"),
+            b"<packages future='external'/>",
+        )
+        .unwrap();
+        let error = status(Some("p"), 0, None).unwrap_err();
+        assert!(error.message.contains("committed=false"), "{error:?}");
+        let error = reset(None, 0, false).unwrap_err();
+        assert!(error.message.contains("committed=false"), "{error:?}");
+        assert!(Arc::ptr_eq(&before, &host.package_capture().unwrap()));
         for code in [
             original::SET_SHELL_USER_SELECTION,
             original::SET_SHELL_LINK_HANDLING,
+            original::SET_SHELL_STATUS,
+            original::RESET_SHELL_STATE,
         ] {
             assert_eq!(
                 invoke(&backend, 2000, code, &Parcel::new())

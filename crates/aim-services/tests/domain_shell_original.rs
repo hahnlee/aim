@@ -27,6 +27,11 @@ fn domain_shell_output_matches_android16() {
     let mut sources = Vec::new();
     for (name, url, hash) in [
         (
+            "DomainVerificationService",
+            "platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/verify/domain/DomainVerificationService.java",
+            "d1c6744e9b4f161cf7002839c4b9a0867af92f37f951c2fe3fca4e3dca5615b3",
+        ),
+        (
             "DomainVerificationShell",
             "platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/pm/verify/domain/DomainVerificationShell.java",
             "f205a6ca250bb8d956774c6504940e6e200e75cda42abcdb44d08499d628579f",
@@ -82,6 +87,45 @@ fn domain_shell_output_matches_android16() {
             Command::new("shasum").args(["-a", "256"]).arg(&path),
         );
         assert!(String::from_utf8(digest.stdout).unwrap().starts_with(hash));
+        if name == "DomainVerificationService" {
+            let original = String::from_utf8_lossy(&decoded.stdout);
+            let mut methods = String::new();
+            for signature in [
+                "    public void setDomainVerificationStatusInternal(@Nullable String",
+                "    private void setDomainVerificationStatusInternal(@NonNull DomainVerificationPkgState",
+                "    private void removeUserStatesForDomain(",
+                "    public void clearDomainVerificationState(",
+                "    private void resetDomainState(",
+                "    private boolean applyImmutableState(",
+                "    public void clearUserStates(",
+            ] {
+                let method = &original[original.find(signature).unwrap()..];
+                let mut depth = 0;
+                let start = method.find('{').unwrap();
+                let end = method
+                    .char_indices()
+                    .skip_while(|(i, _)| *i < start)
+                    .find_map(|(i, c)| {
+                        if c == '{' {
+                            depth += 1;
+                        }
+                        if c == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(i + 1);
+                            }
+                        }
+                        None
+                    })
+                    .unwrap();
+                methods.push_str(&method[..end]);
+                methods.push('\n');
+            }
+            let path = data.0.join("OriginalDomainMutations.java");
+            fs::write(&path, format!("package com.android.server.pm.verify.domain; import android.annotation.*; import android.util.*; import android.os.UserHandle; import android.content.pm.PackageManager.NameNotFoundException; import android.content.pm.verify.domain.DomainVerificationState; import java.util.*; public class OriginalDomainMutations extends MutationFixture {{ {methods} }}")).unwrap();
+            sources.push(path);
+            continue;
+        }
         if name == "PackageManagerShellCommand" {
             let original = String::from_utf8_lossy(&decoded.stdout);
             assert!(original.contains("mDomainVerificationShell.runCommand(this, cmd)"));
@@ -138,6 +182,12 @@ fn domain_shell_output_matches_android16() {
             .arg("-d")
             .arg(&classes)
             .args(sources),
+    );
+    common::runtime::run(
+        Command::new(jdk.join("java"))
+            .arg("-cp")
+            .arg(format!("{}:{}", classes.display(), stubs.display()))
+            .arg("com.android.server.pm.verify.domain.MutationFixture"),
     );
     for (args, expected) in [
         (

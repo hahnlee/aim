@@ -384,6 +384,16 @@ impl Service for Backend {
         }
         let mut reply = Parcel::new();
         let result = match call.code {
+            original::SET_SHELL_STATUS => {
+                let a = original::SetShellStatus::read(&mut call.data)?;
+                super::domain_shell::write_status(&self.0.host, a)
+                    .map(|()| original::write_set_shell_status_reply(&mut reply))
+            }
+            original::RESET_SHELL_STATE => {
+                let a = original::ResetShellState::read(&mut call.data)?;
+                super::domain_shell::reset(&self.0.host, a)
+                    .map(|()| original::write_reset_shell_state_reply(&mut reply))
+            }
             original::SET_SHELL_USER_SELECTION => {
                 let a = original::SetShellUserSelection::read(&mut call.data)?;
                 super::domain_shell::write_user(
