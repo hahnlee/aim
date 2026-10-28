@@ -87,6 +87,31 @@ The default `cargo aim build` builds every node except the HALs' test
 clients (`[package.metadata.vendor-hal] test = ...`), which `cargo aim test
 --integration` adds.
 
+### Reclaiming completed Cargo batches
+
+After a batch completes, inspect one Cargo profile and explicitly apply the result:
+
+```sh
+python3 tools/reclaim-cargo-objects.py target/debug
+python3 tools/reclaim-cargo-objects.py target/debug --apply
+```
+
+The same command accepts nested local profiles such as `target/host/release`.
+It requires that profile's existing `.cargo-lock`, taking an exclusive,
+nonblocking Cargo lock for the entire inspection/removal. A busy profile fails
+immediately. Paths must stay under this checkout's `target`; directory and lock
+symlinks are rejected. Only regular `deps/*.rcgu.o` files are removed, without
+recursing. Executables, rlibs, incremental caches, generated outputs and evidence
+are retained. The JSON result reports file count and logical bytes, not promised
+free disk space: incremental caches can hold other links to the same objects.
+
+A completed incremental Cargo build can retain these per-generation link objects;
+the maintenance tests exercise a real completed build, an incremental rebuild
+after removal, and a concurrent Cargo build holding the profile lock (#1278).
+This bounds the cleanup to disposable link inputs without requiring a diagnosis
+of the producer of each historical generation. Run it explicitly between batches;
+it never removes a whole profile or worktree.
+
 ### Where the graph comes from
 
 - **Rust crates:** `cargo metadata`. Every binary of the host crates (the
