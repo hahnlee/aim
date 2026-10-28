@@ -89,6 +89,7 @@ guest-init --image <derived> --data <data> --run \
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun).
+Permission-checker preflights read raw app-op modes with the attribution source tag/device; attributed delivery keeps evaluated checks (#1595; focused host tests, no guest boot).
 The native appops owner accepts user 0's setMode/setUidMode switch writes with permission checks, persisted defaults and the pinned started-op pause/resume rules; UID state changes split running access durations and restart paused event accounting without watcher callbacks (#1594). Other users and storage mode-change effects (#1455) remain unsupported (host tests only, no guest boot).
 Legacy network activity listeners register through the original RemoteCallbackList and hear the default network's activity.
 Package and appwidget labels are made safe for presentation by the original TextUtils.

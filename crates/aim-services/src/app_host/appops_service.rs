@@ -664,6 +664,20 @@ fn check(
     device: i32,
     raw: bool,
 ) -> Result<i32, Exception> {
+    check_attribution(sys, caller, code, uid, package, None, device, raw)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_attribution(
+    sys: &dyn System,
+    caller: i32,
+    code: i32,
+    uid: i32,
+    package: Option<&str>,
+    tag: Option<&str>,
+    device: i32,
+    raw: bool,
+) -> Result<i32, Exception> {
     let user = uid.div_euclid(PER_USER_RANGE);
     let validate = sys.flag(CHECK_OP_VALIDATE_PACKAGE)?;
     let info = verify_incoming_op(sys, caller, code)?;
@@ -694,7 +708,7 @@ fn check(
     {
         return Ok(MODE_IGNORED);
     }
-    if restricted(sys, uid, info, bypass, &package, None, true)? {
+    if restricted(sys, uid, info, bypass, &package, tag, true)? {
         return Ok(MODE_IGNORED);
     }
     if allowed_for_uid(sys, uid)? {
@@ -2947,6 +2961,26 @@ pub(super) fn check_from(
     )
 }
 
+/// `checkOperationRawForDevice` with the attribution source's tag.
+pub(super) fn check_raw_from(
+    host: &AppHost,
+    caller: i32,
+    code: i32,
+    source: &AttributionSourceState,
+    package: &str,
+) -> Result<i32, Exception> {
+    check_attribution(
+        &Host(host),
+        caller,
+        code,
+        source.uid,
+        Some(package),
+        source.tag.as_deref(),
+        source.device_id,
+        true,
+    )
+}
+
 /// `noteOperation` as the system server asks it.
 pub(super) fn note(
     host: &AppHost,
@@ -3855,12 +3889,13 @@ impl Service for AppOps {
                 let args = appops::CheckOperationRawForDevice::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
                 let package = args.package_name.as_deref();
-                match check(
+                match check_attribution(
                     &Host(&self.host),
                     caller,
                     args.code,
                     args.uid,
                     package,
+                    args.attribution_tag.as_deref(),
                     args.virtual_device_id,
                     true,
                 ) {
