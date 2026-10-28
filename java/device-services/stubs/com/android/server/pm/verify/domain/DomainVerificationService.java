@@ -21,6 +21,7 @@ public class DomainVerificationService extends com.android.server.SystemService 
     public void setUriRelativeFilterGroups(String name, android.os.Bundle groups) throws android.content.pm.PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
     public int setDomainVerificationUserSelection(java.util.UUID id, java.util.Set<String> domains, boolean enabled, int user) throws android.content.pm.PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
     public int setDomainVerificationStatus(java.util.UUID id, java.util.Set<String> domains, int state) throws android.content.pm.PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
+    public int setDomainVerificationStatusInternal(int uid, java.util.UUID id, java.util.Set<String> domains, int state) throws android.content.pm.PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
     public void setDomainVerificationLinkHandlingAllowedInternal(String name, boolean allowed, int user) throws android.content.pm.PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
     public java.util.List<android.content.pm.verify.domain.DomainOwner> getOwnersForDomain(String domain, int user) { throw new RuntimeException("stub"); }
     public int approvalLevelForDomain(com.android.server.pm.pkg.PackageStateInternal setting, android.content.Intent intent, long flags, int user) { throw new RuntimeException("stub"); }
