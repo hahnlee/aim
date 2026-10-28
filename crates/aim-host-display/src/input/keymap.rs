@@ -162,6 +162,7 @@ pub fn keymap() -> Vec<(u32, u16)> {
 // NSEventModifierFlags and the device-dependent bits (IOLLEvent.h
 // NX_DEVICE*KEYMASK) that tell left from right.
 const FUNCTION: u64 = 1 << 23;
+const CAPS_LOCK: u64 = 1 << 16;
 const LEFT_CONTROL: u64 = 0x0001;
 const LEFT_SHIFT: u64 = 0x0002;
 const RIGHT_SHIFT: u64 = 0x0004;
@@ -176,16 +177,15 @@ const RIGHT_CONTROL: u64 = 0x2000;
 pub enum Modifier {
     /// The key is now down (true) or up.
     Held(bool),
-    /// Caps Lock: AppKit reports the lock's state changing, once per press,
-    /// so the key goes down and up.
-    Toggled,
+    /// Caps Lock's current state, not the physical key's state.
+    Locked(bool),
 }
 
 /// The modifier key `mac` of a `flagsChanged:` event with `flags`
 /// (`NSEvent.modifierFlags`); None for other keys.
 pub fn modifier(mac: u16, flags: u64) -> Option<Modifier> {
     let mask = match mac {
-        0x39 => return Some(Modifier::Toggled),
+        0x39 => return Some(Modifier::Locked(flags & CAPS_LOCK != 0)),
         0x38 => LEFT_SHIFT,
         0x3c => RIGHT_SHIFT,
         0x3b => LEFT_CONTROL,
@@ -246,7 +246,8 @@ mod tests {
         let flags = (1 << 17) | RIGHT_SHIFT;
         assert_eq!(modifier(0x3c, flags), Some(Modifier::Held(true)));
         assert_eq!(modifier(0x38, flags), Some(Modifier::Held(false)));
-        assert_eq!(modifier(0x39, 0), Some(Modifier::Toggled));
+        assert_eq!(modifier(0x39, 0), Some(Modifier::Locked(false)));
+        assert_eq!(modifier(0x39, CAPS_LOCK), Some(Modifier::Locked(true)));
         assert_eq!(modifier(0x00, flags), None);
     }
 }

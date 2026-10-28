@@ -123,7 +123,9 @@ manager policy's key interception and the mouse are not modelled (#1434).
   `EVIOCSKEYCODE` remaps it. Characters are Android's: its key character
   map for the keyboard, and its input method. Modifiers come from
   `flagsChanged:` and tell left from right by the device-dependent flag
-  bits; Caps Lock goes down and up once per toggle. The keyboard has no
+  bits; Caps Lock goes down and up only when AppKit's Caps Lock flag
+  changes, so input-source switching without a lock change sends no key
+  (#392). Losing focus preserves that lock state. The keyboard has no
   `EV_REP`: Android repeats keys itself, so AppKit's repeats are dropped
   (EventHub's `EVIOCSREP` gets `ENOSYS`, as with any keyboard without
   kernel repeat). Function keys are `KEY_F1` to `KEY_F20` when macOS sends
@@ -379,7 +381,7 @@ decision):
 | Option | How | For | Against |
 | --- | --- | --- | --- |
 | **A. The Mac's input method through a bridging IME** (recommended) | The content view adopts `NSTextInputClient` and sends `keyDown:` through `interpretKeyEvents:`; keys the input method does not consume still go out as evdev keys. Marked and committed text go to a minimal Android IME (an `InputMethodService` in an APK in the derived image, the default IME) over the display server's connection, which applies them with `InputConnection.setComposingText` and `commitText`, and reports `onUpdateCursorAnchorInfo` so `firstRectForCharacterRange:` puts the candidate window at the caret (pixels mapped back to points). Non-editor focus keeps the raw key path, so games still get keys. | Every Mac input source, its candidates and dictionaries, dictation and the emoji picker; switching as on the Mac; ChromeOS (ARC) and Windows Subsystem for Android bridge the same way | A new APK (Java, the one framework class an IME must extend) replacing Gboard as the IME; the IME's protocol to the host; `EditorInfo` and selection kept in sync both ways |
-| B. Android's IME, following the Mac's input source | Keys as now; a system tool (as `aim-keyboard`) switches Gboard's subtype when the Mac's input source changes (`com.apple.inputmethod.Korean` → Korean) | No new component; Gboard's composition works today | Gboard's candidates and dictionaries, not the Mac's; subtype switching needs the IME's own subtype ids; the Mac keeps intercepting its switching keys (Caps Lock, Ctrl+Space), whose Caps Lock still reaches Android |
+| B. Android's IME, following the Mac's input source | Keys as now; a system tool (as `aim-keyboard`) switches Gboard's subtype when the Mac's input source changes (`com.apple.inputmethod.Korean` → Korean) | No new component; Gboard's composition works today | Gboard's candidates and dictionaries, not the Mac's; subtype switching needs the IME's own subtype ids; the Mac keeps intercepting its switching keys (Caps Lock, Ctrl+Space) |
 | C. Committed text as key events | `injectInputEvent` of `ACTION_MULTIPLE` key events with characters | Nothing in the guest | No composing text, no candidates; apps handle it unevenly; deprecated |
 
 A needs an ADR on input method ownership (a host input method provider

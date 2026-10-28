@@ -944,6 +944,57 @@ fn evdev() {
     assert!(ok && out.contains("PASS"), "t_evdev failed:\n{out}");
 }
 
+/// Caps Lock follows AppKit's lock flag, including input-source switching
+/// and focus loss, through the guest's evdev ABI.
+#[test]
+fn capslock() {
+    use aim_host_display::input::{device_dir, devices, server::Devices, translate::Input};
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_capslock");
+    let prog = g.build(&clang, "t_capslock");
+    let socket = g.runtime.join("display.sock");
+    let devs = Devices::create(&device_dir(&socket), devices(1080, 1920, 254.0, 254.0)).unwrap();
+    let input = Input::new(devs, 1080, 1920, 254.0, 320);
+    let (mut host, guest) = UnixStream::pair().unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let controller = std::thread::spawn(move || {
+        let mut step = [0];
+        let mut steps = Vec::new();
+        while host.read(&mut step).unwrap() == 1 {
+            let n = step[0];
+            assert!(n < 7);
+            steps.push(n);
+            let t = aim_host_display::monotonic_ns();
+            if n == 4 {
+                input.release_all(t);
+            }
+            let flags = if (2..=4).contains(&n) { 1 << 16 } else { 0 };
+            input.flags_changed(0x39, flags, t);
+            // Bound each step's stream with an ordinary key so extra lock
+            // events fail deterministically, without a timing-based absence check.
+            input.key(0x00, true, false, flags, t);
+            input.key(0x00, false, false, flags, t);
+            host.write_all(&step).unwrap();
+        }
+        input.close();
+        steps
+    });
+    let (ok, out) = g.run_with(
+        &["--display", socket.to_str().unwrap(), &prog],
+        vec![guest.into()],
+    );
+    let steps = controller.join().unwrap();
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_capslock failed:\n{out}");
+    assert_eq!(steps, [0, 1, 2, 3, 4, 5, 6]);
+}
+
 /// The original EventHub (libinputreader.so) opens and classifies the
 /// devices with the derived image's `.idc` files and reads their events.
 #[test]
