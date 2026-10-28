@@ -30,8 +30,10 @@
 //! watchers (`startWatchingModeWithFlags`, kept until they die) and pauses
 //! or resumes its started ops. PermissionPolicy commits permission-derived
 //! modes through the access owner and updates watchers and started ops;
-//! cross-profile app-op mode writes use that owner too; other mode writes
-//! remain unsupported (#1594). Each attributed op
+//! setMode/setUidMode commit user 0's switch modes through that owner too,
+//! with the original's started-op transitions; other users and the retired
+//! op (#1594), and storage mode-change effects (#1455), remain unsupported.
+//! Each attributed op
 //! keeps its last access and rejection by uid
 //! state and flags, a finished start's with its duration
 //! (`appops_history.rs`), which `getPackagesForOps(ForDevice)`,
@@ -203,7 +205,7 @@ const READ_RESTRICTED: [&str; 3] = [
     "android.permission.GET_APP_OPS_STATS",
     "android.permission.MANAGE_APP_OPS_MODES",
 ];
-const RUNTIME_PERMISSION_APPOPS_MAPPING: &str =
+pub(super) const RUNTIME_PERMISSION_APPOPS_MAPPING: &str =
     "android.permission.flags.runtime_permission_appops_mapping_enabled";
 const APPOP_MODE_CACHING: &str = "android.permission.flags.appop_mode_caching_enabled";
 const CHECK_OP_VALIDATE_PACKAGE: &str = "android.permission.flags.check_op_validate_package";
@@ -1502,6 +1504,18 @@ impl<L> Ops<'_, L> {
         restricted_now: bool,
         user: i32,
     ) -> Result<(), Exception> {
+        self.update_started_mode_for_uid(code, restricted_now, user, None)
+    }
+
+    /// `updateStartedOpModeForUidForDefaultDeviceLocked`: only the exact
+    /// changed switch op, and only packages whose package mode permits it.
+    fn update_started_mode_for_uid(
+        &mut self,
+        code: i32,
+        restricted_now: bool,
+        user: i32,
+        target_uid: Option<i32>,
+    ) -> Result<(), Exception> {
         let sys = self.sys;
         let info = &APP_OP_INFOS[code as usize];
         let mut keys: Vec<OpKey> = self
@@ -1509,7 +1523,9 @@ impl<L> Ops<'_, L> {
             .ops
             .keys()
             .filter(|(uid, _, op)| {
-                *op == code && (user == USER_ALL || uid.div_euclid(PER_USER_RANGE) == user)
+                *op == code
+                    && target_uid.is_none_or(|target| target == *uid)
+                    && (user == USER_ALL || uid.div_euclid(PER_USER_RANGE) == user)
             })
             .cloned()
             .collect();
@@ -2461,6 +2477,33 @@ pub(super) fn permission_modes_changed(
     Ok(())
 }
 
+/// setUidMode / notifyOpChangedForPkg after the checking-service commit.
+/// MODE_ERRORED leaves started ops alone; other modes pause only for IGNORE.
+pub(super) fn written_mode_changed(
+    host: &AppHost,
+    uid: i32,
+    code: i32,
+    mode: i32,
+    update_started: bool,
+    packages: &[String],
+) -> Result<(), Exception> {
+    if mode != MODE_ERRORED && update_started {
+        with_ops(host, SYSTEM_UID, |ops| {
+            ops.update_started_mode_for_uid(code, mode == MODE_IGNORED, USER_ALL, Some(uid))
+        })?;
+    }
+    let changes = host
+        .app_ops
+        .mode_watchers
+        .lock()
+        .unwrap()
+        .uid_packages_changes(code, uid, packages, false);
+    for (change, package) in changes {
+        notify_op_changed(host, change, uid, &package);
+    }
+    Ok(())
+}
+
 /// AppOpsService's state in the app host: the started ops and their
 /// watchers, the async-noted watchers and the ops none took, the clients'
 /// user restrictions with the binders their tokens keep, and the mode
@@ -3309,7 +3352,7 @@ impl AppOps {
         }
     }
 
-    /// AppOpsService.setMode / setUidMode for the cross-profile op. With no
+    /// AppOpsService.setMode / setUidMode at android-16.0.0_r1. With no
     /// profile owner, enforceManageAppOpsModes requires MANAGE_APP_OPS_MODES.
     fn set_mode(
         &self,
@@ -3328,19 +3371,24 @@ impl AppOps {
                 "Neither user {caller} nor current process has {MANAGE_APP_OPS_MODES}."
             )));
         }
-        verify_incoming_op(&Host(&self.host), caller, code)?;
-        if code != OP_INTERACT_ACROSS_PROFILES || uid < 0 || uid >= PER_USER_RANGE {
-            return Err(self.host.unimplemented_named(
-                "appops",
-                "mode writes outside user 0's cross-profile op (#1594)",
-            ));
+        let sys = Host(&self.host);
+        let info = verify_incoming_op(&sys, caller, code)?;
+        if !(0..PER_USER_RANGE).contains(&uid) {
+            return Err(self
+                .host
+                .unimplemented_named("appops", "mode writes outside user 0 (#1594)"));
         }
         if let Some(package) = package {
             let Some(package) = package else {
                 return Ok(());
             };
-            if self.host.filter_package_access(package, caller, 0)?
-                || check_package(&self.host, uid, Some(package))? != MODE_ALLOWED
+            if !valid_package(&sys, caller, Some(package), 0)? {
+                return Ok(());
+            }
+            if !matches!(
+                verify_and_get_bypass(&sys, caller, uid, Some(package), None, None)?,
+                Verified::Bypass(..)
+            ) || !has_ops(&sys, uid)?
             {
                 return Ok(());
             }
@@ -3359,8 +3407,34 @@ impl AppOps {
                 return Ok(());
             }
         }
+        let code = info.switch_code;
+        if code == OP_NONE {
+            return Err(self
+                .host
+                .unimplemented_named("appops", "retired op mode writes (#1594)"));
+        }
+        // StorageManagerInternal has effects for these modes that the app
+        // host's storage owner does not yet provide; fail before mutation.
+        if matches!(code, 66 | 87 | 92) {
+            return Err(self
+                .host
+                .unimplemented_named("appops", "storage mode-change effects (#1455)"));
+        }
+        if package.is_none() {
+            self.permissions
+                .update_app_op_revoked_compat(uid, code, mode)?;
+        } else {
+            self.host
+                .app_ops
+                .started
+                .lock()
+                .unwrap()
+                .ops
+                .entry((uid, package.flatten().unwrap().to_owned(), code))
+                .or_default();
+        }
         self.permissions
-            .set_cross_profile_mode(uid, package.flatten(), mode)?;
+            .set_app_op_mode(uid, package.flatten(), code, mode)?;
         Ok(())
     }
 
@@ -5364,6 +5438,59 @@ mod tests {
         assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
     }
 
+    /// AppOpsService.updateStartedOpModeForUidForDefaultDeviceLocked:
+    /// notifications keep attribution/chain/nesting, and changing a switch
+    /// does not transition a running child op with a different code.
+    #[test]
+    fn written_modes_keep_started_notifications_and_exact_op_selection() {
+        let f = fake();
+        let mut started = Started::default();
+        started.watch(Watch::Active, WATCHER, &[OP_CAMERA], APP, APP, || {
+            Binder::Handle(WATCHER)
+        });
+        started.watch(Watch::Started, WATCHER + 1, &[OP_CAMERA], APP, APP, || {
+            Binder::Handle(WATCHER + 1)
+        });
+        let attribution = Attribution {
+            flags: ATTRIBUTION_FLAG_TRUSTED,
+            chain_id: 7,
+            ..NO_CHAIN
+        };
+        let camera = own(OP_CAMERA, APP, "app");
+        start(&f, &mut started, CLIENT, &camera, attribution);
+        start(&f, &mut started, CLIENT, &camera, attribution);
+        start(&f, &mut started, CLIENT, &own(OP_GPS, APP, "app"), NO_CHAIN);
+        let transition = |started: &mut Started<Binder>, code, restricted| {
+            let (result, effects, _) = run(&f, SYSTEM_UID, started, |ops| {
+                ops.update_started_mode_for_uid(code, restricted, USER_ALL, Some(APP))
+            });
+            result.unwrap();
+            effects.notices
+        };
+        let paused = transition(&mut started, OP_CAMERA, true);
+        assert_eq!(paused.len(), 1);
+        assert_eq!(paused[0].heard, Heard::Active(false));
+        let resumed = transition(&mut started, OP_CAMERA, false);
+        assert_eq!(resumed.len(), 2);
+        assert_eq!(resumed[0].heard, Heard::Active(true));
+        assert_eq!(
+            resumed[1].heard,
+            Heard::Started {
+                flags: OP_FLAG_SELF,
+                mode: MODE_ALLOWED,
+                start_type: START_TYPE_RESUMED
+            }
+        );
+        assert_eq!(resumed[1].attribution_flags, ATTRIBUTION_FLAG_TRUSTED);
+        assert_eq!(resumed[1].chain_id, 7);
+        assert_eq!(
+            started.ops[&(APP, "app".into(), OP_CAMERA)][&None].running[&CLIENT].starts,
+            2
+        );
+        assert!(transition(&mut started, OP_COARSE_LOCATION, true).is_empty());
+        assert!(is_active(&f, &mut started, OP_GPS, APP, "app"));
+    }
+
     /// A start the mode rejects starts nothing; a default mode starts only
     /// with `startIfModeDefault`; a restricted op starts paused, inactive.
     #[test]
@@ -5731,3 +5858,6 @@ mod tests {
         assert!(effects.collected.is_empty());
     }
 }
+
+#[cfg(test)]
+mod mode_tests;
