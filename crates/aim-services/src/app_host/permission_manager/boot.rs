@@ -3,7 +3,10 @@
 use super::*;
 use crate::package::scan::permission_admissions::Admission;
 mod signature;
+use aim_service_aidl::dev_aim_server_ipermissionbootpolicy as original;
 use signature::Policy;
+
+type Evaluate<'a> = dyn Fn(&Permission, i32, i32, i32, i32) -> Result<i32, Exception> + 'a;
 
 fn unsupported(branch: &str) -> Exception {
     Exception::new(
@@ -13,6 +16,68 @@ fn unsupported(branch: &str) -> Exception {
 }
 
 impl PermissionManager {
+    pub(in crate::app_host) fn attach_boot_policy(
+        &self,
+        policy: Option<Binder>,
+    ) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = policy else {
+            return Err(Exception::illegal_argument(
+                "no permission boot policy bridge",
+            ));
+        };
+        *self.boot_policy.0.lock().unwrap() = Some(Arc::new(self.host.process.strong(handle)));
+        self.boot_policy.1.notify_all();
+        Ok(())
+    }
+
+    fn evaluate_boot_permission(
+        &self,
+        permission: &Permission,
+        info_flags: i32,
+        target: i32,
+        old: i32,
+        new: i32,
+    ) -> Result<i32, Exception> {
+        let transport = |s| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("permission boot policy: binder status {s}"),
+            )
+        };
+        let owner = {
+            let (owner, _) = self
+                .boot_policy
+                .1
+                .wait_timeout_while(
+                    self.boot_policy.0.lock().unwrap(),
+                    std::time::Duration::from_secs(30),
+                    |owner| owner.is_none(),
+                )
+                .unwrap();
+            owner.clone()
+        }
+        .ok_or_else(|| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                "permission boot policy is not attached (#2282)",
+            )
+        })?;
+        let mut data = Parcel::new();
+        original::EvaluatePermission {
+            name: Some(permission.name.clone()),
+            protection_level: permission.protection_level,
+            info_flags,
+            target_sdk_version: target,
+            old_flags: old,
+            new_flags: new,
+        }
+        .write(&mut data);
+        let result = owner
+            .transact(original::EVALUATE_PERMISSION, &data, false)
+            .map_err(transport)?;
+        original::read_evaluate_permission_reply(&mut result.reader()).map_err(transport)?
+    }
+
     /// PermissionService queues onPackageAdded until onStorageVolumeMounted.
     /// Commit the batch through the sole access owner before query publication.
     pub(crate) fn reconcile_boot(
@@ -39,7 +104,14 @@ impl PermissionManager {
                 .property("ro.control_privapp_permissions")
                 .unwrap_or_default(),
         };
-        let after = reconcile(&base, state, admissions, is_system_updated, &policy)?;
+        let after = reconcile(
+            &base,
+            state,
+            admissions,
+            is_system_updated,
+            &policy,
+            &|p, info, target, old, new| self.evaluate_boot_permission(p, info, target, old, new),
+        )?;
         if *after.system != *base.system {
             self.write_system(&after.system)?;
             owner.system = Some(after.system.clone());
@@ -124,6 +196,7 @@ fn reconcile(
     admissions: &[&Admission],
     is_system_updated: bool,
     policy: &Policy,
+    evaluate: &Evaluate<'_>,
 ) -> Result<permissions::AccessView, Exception> {
     let mut system = (*base.system).clone();
     let mut user = (*base.user0).clone();
@@ -319,18 +392,10 @@ fn reconcile(
                         .iter()
                         .find(|p| !p.tree && p.component.name == *name)
                 });
-            if declaration.is_some_and(|p| {
+            let restricted = declaration.is_some_and(|p| {
                 p.component.flags & (FLAG_HARD_RESTRICTED | FLAG_SOFT_RESTRICTED) != 0
-            }) {
-                if affected {
-                    return Err(unsupported("restricted permission evaluation"));
-                }
-                continue;
-            }
-            if is_role(permission) {
-                if affected {
-                    return Err(unsupported("role permission grants"));
-                }
+            });
+            if !affected && (restricted || is_role(permission)) {
                 continue;
             }
             let requesters: Vec<_> = packages
@@ -355,7 +420,11 @@ fn reconcile(
                         INSTALL_REVOKED
                     }
                 }
-                PROTECTION_SIGNATURE => {
+                PROTECTION_SIGNATURE | 4
+                    if is_role(permission)
+                        || permission.protection_level & PROTECTION_MASK_BASE
+                            == PROTECTION_SIGNATURE =>
+                {
                     // Constructor role selections are made after this capture.
                     // Existing grants need no role decision on an unchanged mount.
                     if !affected
@@ -406,6 +475,26 @@ fn reconcile(
             } else {
                 flags
             };
+            let flags = if restricted
+                || is_role(permission)
+                || old & (RESTRICTION_REVOKED | SOFT_RESTRICTED) != 0
+            {
+                let target = requesters
+                    .iter()
+                    .filter_map(|p| p.pkg.as_ref())
+                    .map(|p| p.target_sdk_version)
+                    .min()
+                    .unwrap_or(CUR_DEVELOPMENT);
+                evaluate(
+                    permission,
+                    declaration.map_or(0, |p| p.component.flags),
+                    target,
+                    old,
+                    flags,
+                )?
+            } else {
+                flags
+            };
             user.set_permission_flags(id, name, flags);
         }
     }
@@ -423,7 +512,7 @@ fn reconcile(
     })
 }
 
-/// evaluatePermissionState's runtime branch, with no restricted/implicit grant.
+/// Existing runtime transitions; Java evaluates restrictions before publication.
 fn runtime_flags(
     base: &permissions::AccessView,
     user: &AccessUser,
@@ -489,7 +578,7 @@ fn runtime_flags(
             }
         }
     }
-    flags & !(RESTRICTION_REVOKED | SOFT_RESTRICTED)
+    flags
 }
 
 #[cfg(test)]
@@ -592,6 +681,9 @@ mod tests {
             }),
         }
     }
+    fn no_dynamic(_: &Permission, _: i32, _: i32, _: i32, _: i32) -> Result<i32, Exception> {
+        panic!("unexpected cold policy evaluation")
+    }
     fn run(
         base: &permissions::AccessView,
         state: &State,
@@ -603,6 +695,7 @@ mod tests {
             &admissions(state).iter().collect::<Vec<_>>(),
             updated,
             &Policy::default(),
+            &no_dynamic,
         )
     }
     #[test]
@@ -734,6 +827,7 @@ mod tests {
             &order.iter().collect::<Vec<_>>(),
             false,
             &Policy::default(),
+            &no_dynamic,
         )
         .unwrap();
         assert_eq!(
@@ -863,6 +957,7 @@ mod tests {
                 &admissions(state).iter().collect::<Vec<_>>(),
                 true,
                 &policy,
+                &no_dynamic,
             )
             .unwrap()
             .user0
@@ -979,6 +1074,7 @@ mod tests {
                 &receipts.iter().collect::<Vec<_>>(),
                 false,
                 &Policy::default(),
+                &no_dynamic,
             )
             .unwrap();
             assert_eq!(after.system.permissions[0].package, order[0]);
@@ -1015,6 +1111,7 @@ mod tests {
             &receipts.iter().collect::<Vec<_>>(),
             false,
             &Policy::default(),
+            &no_dynamic,
         )
         .unwrap();
         assert!(after.system.permission_trees.is_empty());
@@ -1047,6 +1144,7 @@ mod tests {
             &receipts.iter().collect::<Vec<_>>(),
             false,
             &Policy::default(),
+            &no_dynamic,
         )
         .unwrap_err();
         assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
@@ -1092,6 +1190,7 @@ mod tests {
             &receipts.iter().collect::<Vec<_>>(),
             false,
             &Policy::default(),
+            &no_dynamic,
         )
         .unwrap();
         assert_eq!(after.user0.permission_flags(10002, "owner.TEST"), 0);
@@ -1110,31 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_policy_branches_are_local_and_do_not_persist() {
-        for (flags, level, message) in [
-            (FLAG_HARD_RESTRICTED, 1, "restricted"),
-            (0, 2 | PROTECTION_FLAG_ROLE, "role"),
-        ] {
-            let mut state = state();
-            let p = &mut Arc::make_mut(
-                state
-                    .packages
-                    .get_mut("owner")
-                    .unwrap()
-                    .pkg
-                    .as_mut()
-                    .unwrap(),
-            )
-            .permissions[0];
-            p.component.flags = flags;
-            p.protection_level = level;
-            let mut base = base();
-            Arc::make_mut(&mut base.system).permissions[0].protection_level = level;
-            assert!(run(&base, &state, false).is_ok());
-            let error = run(&base, &state, true).unwrap_err();
-            assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
-            assert!(error.message.contains("#2169") && error.message.contains(message));
-        }
+    fn persistence_failure_does_not_publish_access_state() {
         let fixture = PersistedAccess::new();
         fixture.write(
             SYSTEM_ACCESS,
@@ -1165,5 +1240,151 @@ mod tests {
         );
         assert!(before.same_base(&manager.retained_access().unwrap()));
         assert!(manager.access_writes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_projects_restricted_and_role_state_through_cold_policy() {
+        // The JVM test executes the policy. Here verify that reconciliation
+        // passes the native snapshot intact and publishes only the returned flags.
+        for (info, level, old, result) in [
+            (
+                FLAG_HARD_RESTRICTED,
+                1,
+                RUNTIME_GRANTED | RESTRICTION_REVOKED,
+                RUNTIME_GRANTED | RESTRICTION_REVOKED,
+            ),
+            (
+                FLAG_SOFT_RESTRICTED,
+                1,
+                RUNTIME_GRANTED | SOFT_RESTRICTED,
+                RUNTIME_GRANTED | SOFT_RESTRICTED,
+            ),
+            (
+                FLAG_HARD_RESTRICTED,
+                1,
+                RUNTIME_GRANTED | SYSTEM_EXEMPT,
+                RUNTIME_GRANTED | SYSTEM_EXEMPT,
+            ),
+            (
+                FLAG_SOFT_RESTRICTED,
+                1,
+                RUNTIME_GRANTED | INSTALLER_EXEMPT,
+                RUNTIME_GRANTED | INSTALLER_EXEMPT,
+            ),
+            (
+                FLAG_HARD_RESTRICTED,
+                1,
+                RUNTIME_GRANTED | UPGRADE_EXEMPT,
+                RUNTIME_GRANTED | UPGRADE_EXEMPT,
+            ),
+            (
+                0,
+                2 | PROTECTION_FLAG_ROLE,
+                ROLE | RUNTIME_GRANTED,
+                ROLE | RUNTIME_GRANTED,
+            ),
+            (
+                0,
+                4 | PROTECTION_FLAG_ROLE,
+                ROLE | RUNTIME_GRANTED,
+                ROLE | RUNTIME_GRANTED,
+            ),
+            (0, 4 | PROTECTION_FLAG_ROLE, 0, 0),
+        ] {
+            let mut state = state();
+            let declaration = &mut Arc::make_mut(
+                state
+                    .packages
+                    .get_mut("owner")
+                    .unwrap()
+                    .pkg
+                    .as_mut()
+                    .unwrap(),
+            )
+            .permissions[0];
+            declaration.protection_level = level;
+            declaration.component.flags = info;
+            // Internal role permissions cannot gain a static signature grant,
+            // even when their requesting package shares the declaring signature.
+            if level & PROTECTION_MASK_BASE == 4 {
+                state.packages.get_mut("owner").unwrap().signatures =
+                    state.packages["client"].signatures.clone();
+            }
+            let mut base = base();
+            Arc::make_mut(&mut base.system).permissions[0].protection_level = level;
+            Arc::make_mut(&mut base.user0).set_permission_flags(10002, "owner.TEST", old);
+            let calls = std::cell::Cell::new(0);
+            let evaluate = |p: &Permission, flags, target, before, computed| {
+                calls.set(calls.get() + 1);
+                assert_eq!(
+                    (&*p.name, p.protection_level, flags, target, before),
+                    ("owner.TEST", level, info, 36, old)
+                );
+                assert_eq!(computed, if level == 1 { old } else { 0 });
+                Ok(result)
+            };
+            let after = reconcile(
+                &base,
+                &state,
+                &admissions(&state).iter().collect::<Vec<_>>(),
+                true,
+                &Policy::default(),
+                &evaluate,
+            )
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(after.user0.permission_flags(10002, "owner.TEST"), result);
+            assert_eq!(base.user0.permission_flags(10002, "owner.TEST"), old);
+            let error = reconcile(
+                &base,
+                &state,
+                &admissions(&state).iter().collect::<Vec<_>>(),
+                true,
+                &Policy::default(),
+                &|_, _, _, _, _| Err(Exception::security("policy failed")),
+            )
+            .unwrap_err();
+            assert_eq!(error.message, "policy failed");
+            assert_eq!(base.user0.permission_flags(10002, "owner.TEST"), old);
+        }
+    }
+
+    #[test]
+    fn policy_attachment_requires_system_uid_and_a_bridge() {
+        use aim_service_aidl::dev_aim_server_isystemprocess as sp;
+        let fixture = PersistedAccess::new();
+        assert!(
+            fixture
+                .host
+                .permission_manager
+                .set(Arc::new(PermissionManager::new(fixture.host.clone())))
+                .is_ok()
+        );
+        let endpoint = crate::app_host::system_process::SystemProcess::new(fixture.host.clone());
+        let mut data = Parcel::new();
+        sp::AttachPermissionBootPolicy { policy: None }.write(&mut data);
+        for (uid, expected) in [
+            (10100, aim_binder_host::parcel::EX_SECURITY),
+            (1000, aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT),
+        ] {
+            let response = endpoint
+                .transact(&mut Call {
+                    code: sp::ATTACH_PERMISSION_BOOT_POLICY,
+                    flags: 0,
+                    sender_pid: 42,
+                    sender_euid: uid,
+                    data: data.reader(),
+                })
+                .unwrap();
+            assert_eq!(
+                response
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                expected
+            );
+        }
     }
 }

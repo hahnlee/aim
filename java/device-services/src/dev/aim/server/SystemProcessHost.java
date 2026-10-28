@@ -102,6 +102,11 @@ public final class SystemProcessHost extends RuntimeInit {
                 throws ReflectiveOperationException, RemoteException,
                 PackageManager.NameNotFoundException {
             Looper.prepareMainLooper();
+            // Reconciliation precedes package publication. Attach this context-free
+            // bridge before systemMain or any package query can wait for it.
+            ISystemProcess host = ISystemProcess.Stub.asInterface(
+                    ServiceManager.waitForService("aim.system_process"));
+            host.attachPermissionBootPolicy(new PermissionBootPolicy());
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
             ActivityThread.initializeMainlineModules();
@@ -115,8 +120,6 @@ public final class SystemProcessHost extends RuntimeInit {
                     "android", PackageManager.GET_SHARED_LIBRARY_FILES
                             | PackageManager.MATCH_SYSTEM_ONLY), Server.class.getClassLoader());
             IApplicationThread applicationThread = thread.getApplicationThread();
-            ISystemProcess host = ISystemProcess.Stub.asInterface(
-                    ServiceManager.waitForService("aim.system_process"));
             host.attachNetworkActivityBridge(new NetworkActivityBridge(
                     new Handler(Looper.getMainLooper())));
             host.attachWifiBridge(new WifiBridge(new Handler(Looper.getMainLooper())));
