@@ -219,6 +219,11 @@ reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
+Clipboard writes cache enabled profile ids using the original UserManager
+nonce supplied by the shared-memory bridge (#432, #460). Host regressions
+cover invalidation, reserved nonces, query failure and owner replacement;
+guest CTS and latency were not rerun (2026-10-28).
+
 Native Binder reference and reply cleanup survives host-thread TLS teardown
 (2026-10-28, #2189). If `Strong` or `Received` drops after the thread's Binder
 state, cleanup owns a temporary driver thread through `BINDER_THREAD_EXIT`

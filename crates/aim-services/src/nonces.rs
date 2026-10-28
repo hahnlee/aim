@@ -166,6 +166,10 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn nonce_file(nonce: i64) -> std::fs::File {
+        named_nonce_file("package_info_cache", nonce)
+    }
+
+    pub(crate) fn named_nonce_file(name: &str, nonce: i64) -> std::fs::File {
         use std::io::Write;
         use std::sync::atomic::AtomicU64;
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -182,14 +186,16 @@ pub(crate) mod tests {
             .unwrap();
         // Unlink the fixture immediately; only owned fds/fileports keep it alive.
         std::fs::remove_file(path).unwrap();
-        let names = b"\x12package_info_cache\x00";
+        let mut names = vec![u8::try_from(name.len()).unwrap()];
+        names.extend_from_slice(name.as_bytes());
+        names.push(0);
         let mut bytes = vec![0; STORE + HEADER + 8 + names.len()];
         for (index, value) in [
             1,
             names.len() as i32,
             HEADER as i32,
             (HEADER + 8) as i32,
-            java_hash(names),
+            java_hash(&names),
         ]
         .into_iter()
         .enumerate()
@@ -197,7 +203,7 @@ pub(crate) mod tests {
             bytes[STORE + index * 4..STORE + index * 4 + 4].copy_from_slice(&value.to_ne_bytes());
         }
         bytes[STORE + HEADER..STORE + HEADER + 8].copy_from_slice(&nonce.to_ne_bytes());
-        bytes[STORE + HEADER + 8..].copy_from_slice(names);
+        bytes[STORE + HEADER + 8..].copy_from_slice(&names);
         file.write_all(&bytes).unwrap();
         file
     }
