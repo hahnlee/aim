@@ -618,6 +618,9 @@ pub(crate) fn lifecycle() -> Lifecycle {
     Lifecycle { guard: Some(guard) }
 }
 fn retire(kind: Option<Kind>) {
+    if let Some(Kind::Memfd(k)) = &kind {
+        memfd::closed(*k);
+    }
     let mut kind = kind;
     RETIRED.with(|owners| {
         if let Some(retired) = owners.borrow_mut().as_mut() {
@@ -996,7 +999,10 @@ pub fn withdraw_guest(fd: i32) -> Result<(), crate::errno::Errno> {
 }
 
 pub fn insert(fd: i32, kind: Kind) {
-    let previous = TABLE.write().unwrap().insert(fd, kind);
+    let previous = match kind {
+        Kind::Memfd(k) => memfd::install(fd, k, || TABLE.write().unwrap().insert(fd, kind)),
+        _ => TABLE.write().unwrap().insert(fd, kind),
+    };
     set_slow(fd, true);
     retire(previous);
 }

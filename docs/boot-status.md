@@ -7477,6 +7477,12 @@ parked and 2 spinning threads: 115 to 58 µs of kernel time per call,
 the file's ctime shows nobody changed it (an UNPIN+PIN pair: 32-39 to
 19-21 µs, #504). Neither is measured in a boot yet.
 
+Executable memfd backing is reclaimed when this process has no descriptor
+(including syscall pins) or view left (#552). Returned descriptors preserve
+live converted contents; mapping replacement and deferred thread-exit unmaps
+also retry reclamation. Focused host tests cover repeated 64 MiB allocations,
+partial unmaps, returned descriptors, pins and deferred cleanup.
+
 The large file mappings were ART's JIT cache: its memfd's first
 executable view looked for the memfd's other views by walking the whole
 VM map, 3.5-4.8 ms of kernel time in a process with 3,000 mappings. The

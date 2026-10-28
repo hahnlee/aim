@@ -55,7 +55,7 @@ use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::cred::{self, CAP_DAC_OVERRIDE, CAP_SYS_ADMIN};
@@ -112,6 +112,7 @@ struct Memfd {
     /// The file's path once this process put its [`VIEW_ATTR`] on it (a
     /// fork child puts its own there by it).
     viewer: Option<PathBuf>,
+    orphaned: bool,
 }
 
 impl Memfd {
@@ -121,14 +122,136 @@ impl Memfd {
             anon: None,
             views: Vec::new(),
             viewer: None,
+            orphaned: false,
         }
     }
 }
 
 static MEMFDS: Mutex<Option<HashMap<Key, Memfd>>> = Mutex::new(None);
+// Conversion temporarily replaces the file views before publishing anon.
+static RECLAIM: Mutex<()> = Mutex::new(());
+static ORPHANS: AtomicBool = AtomicBool::new(false);
 
 fn with<T>(f: impl FnOnce(&mut HashMap<Key, Memfd>) -> T) -> T {
     f(MEMFDS.lock().unwrap().get_or_insert_with(HashMap::new))
+}
+
+/// Publish a descriptor atomically with cancelling its orphan status. Take
+/// MEMFDS before the fd table, also used by the last-descriptor check.
+pub(super) fn install<T>(fd: i32, k: Key, publish: impl FnOnce() -> T) -> T {
+    with(|m| {
+        m.entry(k)
+            .or_insert_with(|| Memfd::new(read_name(fd)))
+            .orphaned = false;
+        publish()
+    })
+}
+
+pub(super) fn closed(k: Key) {
+    with(|m| {
+        if let Some(f) = m.get_mut(&k) {
+            f.orphaned =
+                fdtab::fds_where(|kind| matches!(kind, Kind::Memfd(key) if *key == k)).is_empty();
+            if f.orphaned {
+                ORPHANS.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+    reclaim();
+}
+
+/// Retry only objects with no descriptors, including private syscall pins.
+/// Keep the converted contents while a view could receive its fd again.
+pub(super) fn reclaim() {
+    if !ORPHANS.load(Ordering::Relaxed) {
+        return;
+    }
+    let _guard = RECLAIM.lock().unwrap();
+    with(|m| {
+        m.retain(|&k, f| {
+            if !f.orphaned || has_views(k, f) {
+                return true;
+            }
+            if let Some((base, size)) = f.anon {
+                // Seal checks in another process must not identify a later
+                // allocation at this address as an alias of this memfd.
+                if !set_attr(
+                    None,
+                    f.viewer.as_deref(),
+                    &format!("{VIEW_ATTR}{}", std::process::id()),
+                    "",
+                ) && errno::last() != errno::ENOENT
+                {
+                    crate::diag!("memfd viewer retirement failed: errno={}", errno::last());
+                    return true;
+                }
+                // Each other process's mappings retain their own VM reference.
+                let result = unsafe { libc::munmap(base as *mut _, size as usize) };
+                if result != 0 {
+                    crate::diag!("memfd backing retirement failed: errno={}", errno::last());
+                    return true;
+                }
+            }
+            false
+        });
+        ORPHANS.store(m.values().any(|f| f.orphaned), Ordering::Relaxed);
+    });
+}
+
+fn has_views(k: Key, f: &Memfd) -> bool {
+    let Some((base, len)) = f.anon else {
+        return f.views.iter().any(|&(start, len, _)| {
+            vmmap::regions(start, start + len)
+                .any(|r| r.file.as_ref().is_some_and(|file| (file.1, file.2) == k))
+        });
+    };
+    let size = std::mem::size_of::<RegionWithPath>() as i32;
+    let mut backing: RegionWithPath = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            PROC_PIDREGIONPATHINFO,
+            base,
+            (&raw mut backing).cast(),
+            size,
+        )
+    } != size
+        || backing.info.address != base
+        || backing.info.size != len
+    {
+        return true;
+    }
+    if backing.info.ref_count == 1 {
+        return false;
+    }
+    // Fork children also hold VM references. Inspect this process's views
+    // rather than retaining two orphaned masters forever after a fork.
+    let mut at = super::arena::LO;
+    while at < super::arena::HI {
+        let mut r: RegionWithPath = unsafe { std::mem::zeroed() };
+        let n = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                PROC_PIDREGIONPATHINFO,
+                at,
+                (&raw mut r).cast(),
+                size,
+            )
+        };
+        if n != size {
+            return errno::last() != EINVAL;
+        }
+        if r.info.address >= super::arena::HI {
+            break;
+        }
+        if r.info.obj_id == backing.info.obj_id
+            && !(r.info.address >= base && r.info.address + r.info.size <= base + len)
+        {
+            return true;
+        }
+        at = r.info.address + r.info.size.max(1);
+    }
+    false
 }
 
 fn stat_fd(fd: i32) -> Option<libc::stat> {
@@ -933,8 +1056,12 @@ pub fn anon_name(addr: u64) -> Option<String> {
 /// existing view of it onto that memory. `fd`, when known, supplies the
 /// contents; otherwise the existing views do.
 fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
+    let _guard = RECLAIM.lock().unwrap();
     if let Some(a) = with(|m| m.get(&k).and_then(|f| f.anon)) {
         return Ok(a);
+    }
+    if let Some(fd) = fd {
+        note_viewer(k, fd);
     }
     // The guest's views: those this process made that still map the file.
     // Walking the whole map for them took milliseconds in a process with
@@ -1245,6 +1372,8 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
                 anon: r.opt(|r| (r.u64(), r.u64())),
                 views: r.seq(|r| (r.u64(), r.u64(), r.u64())),
                 viewer: r.opt(|r| PathBuf::from(r.str())),
+                // fdtab restores next; each inherited descriptor clears this.
+                orphaned: true,
             },
         )
     });
@@ -1258,7 +1387,10 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             set_attr(None, Some(path), &format!("{VIEW_ATTR}{me}"), &value);
         }
     }
-    with(|m| m.extend(v));
+    with(|m| {
+        m.extend(v);
+        ORPHANS.store(m.values().any(|f| f.orphaned), Ordering::Relaxed);
+    });
 }
 
 #[cfg(test)]
@@ -1274,6 +1406,128 @@ mod tests {
         fdtab::on_close(fd);
         // SAFETY: our test fd.
         unsafe { libc::close(fd) };
+    }
+
+    fn unmap(start: u64, len: u64) {
+        let ctx = unsafe { std::mem::zeroed() };
+        assert_eq!(super::super::mem::munmap(&ctx, [start, len, 0, 0, 0, 0]), 0);
+    }
+
+    /// Linux memfd_create(2): pages go with the last reference, regardless
+    /// of whether descriptors or mappings are dropped first (#552).
+    #[test]
+    fn executable_backing_goes_with_the_last_view() {
+        let _view = crate::vfs::test_view();
+        let size = 64 << 20;
+        for round in 0..3 {
+            let fd = create("short-jit", 0);
+            assert!(fd >= 0);
+            assert_eq!(unsafe { libc::ftruncate(fd, size as i64) }, 0);
+            let k = key(fd).unwrap();
+            let views: Vec<_> = [3, 5, 3]
+                .into_iter()
+                .map(|prot| {
+                    let addr = super::super::mem::mmap([0, size, prot, 1, fd as u64, 0]);
+                    assert!(addr > 0, "round {round}: {addr}");
+                    addr as u64
+                })
+                .collect();
+            let (base, _) = with(|m| m[&k].anon.unwrap());
+            let path = with(|m| m[&k].viewer.clone().unwrap());
+            unsafe { (views[0] as *mut u8).write(42) };
+            close(fd);
+            for &addr in &views[..2] {
+                unmap(addr, size);
+                assert!(with(|m| m.contains_key(&k)));
+            }
+            assert_eq!(unsafe { (views[2] as *const u8).read() }, 42);
+            unmap(views[2], size / 2);
+            assert!(with(|m| m.contains_key(&k)));
+            unmap(views[2] + size / 2, size / 2);
+            assert!(!with(|m| m.contains_key(&k)));
+            assert!(anon_name(base).is_none());
+            assert!(!vmmap::region_at(base).is_some_and(|r| r.start <= base && base < r.end));
+            let file = std::fs::File::open(path).unwrap();
+            let attr = CString::new(format!("{VIEW_ATTR}{}", std::process::id())).unwrap();
+            assert_eq!(attr_text(file.as_raw_fd(), &attr), Some(String::new()));
+        }
+    }
+
+    #[test]
+    fn returned_descriptor_and_syscall_pin_keep_converted_contents() {
+        let _view = crate::vfs::test_view();
+        let fd = create("returned-jit", 0);
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, PAGE as i64) }, 0);
+        let k = key(fd).unwrap();
+        let view = super::super::mem::mmap([0, PAGE, 3, 1, fd as u64, 0]);
+        assert!(view > 0);
+        let executable = super::super::mem::mmap([0, PAGE, 5, 1, fd as u64, 0]);
+        assert!(executable > 0);
+        unmap(executable as u64, PAGE);
+        let foreign = unsafe { libc::dup(fd) };
+        assert!(foreign >= 0);
+        close(fd);
+        unsafe { (view as *mut u8).write(91) };
+        adopt(foreign);
+        assert!(!with(|m| m[&k].orphaned));
+        let pin = fdtab::pin_guest(foreign).unwrap();
+        close(foreign);
+        unmap(view as u64, PAGE);
+        assert!(with(|m| m.contains_key(&k)));
+        let mut byte = 0u8;
+        assert_eq!(
+            rw(
+                pin.descriptor().as_raw_fd(),
+                (&raw mut byte) as u64,
+                1,
+                Some(0),
+                false
+            ),
+            Some(1)
+        );
+        assert_eq!(byte, 91);
+        drop(pin);
+        assert!(!with(|m| m.contains_key(&k)));
+    }
+
+    #[test]
+    fn closed_file_view_can_still_become_executable_and_be_replaced() {
+        let _view = crate::vfs::test_view();
+        let fd = create("closed-jit", 0);
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, PAGE as i64) }, 0);
+        let k = key(fd).unwrap();
+        let view = super::super::mem::mmap([0, PAGE, 3, 1, fd as u64, 0]);
+        assert!(view > 0);
+        close(fd);
+        assert!(with(|m| m.contains_key(&k)));
+        before_exec_protect(view as u64, view as u64 + PAGE).unwrap();
+        let replaced = super::super::mem::mmap([view as u64, PAGE, 3, 0x32, u64::MAX, 0]);
+        assert_eq!(replaced, view);
+        assert!(!with(|m| m.contains_key(&k)));
+        unmap(view as u64, PAGE);
+    }
+
+    #[test]
+    fn deferred_last_view_is_reclaimed_at_thread_exit() {
+        let _view = crate::vfs::test_view();
+        let fd = create("deferred-jit", 0);
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, PAGE as i64) }, 0);
+        let k = key(fd).unwrap();
+        let view = super::super::mem::mmap([0, PAGE, 5, 1, fd as u64, 0]);
+        assert!(view > 0);
+        close(fd);
+        let mut ctx: crate::context::GuestContext = unsafe { std::mem::zeroed() };
+        ctx.sp = view as u64 + PAGE / 2;
+        assert_eq!(
+            super::super::mem::munmap(&ctx, [view as u64, PAGE, 0, 0, 0, 0]),
+            0
+        );
+        assert!(with(|m| m.contains_key(&k)));
+        assert_eq!(super::super::mem::run_deferred_unmaps(), 1);
+        assert!(!with(|m| m.contains_key(&k)));
     }
 
     #[test]
