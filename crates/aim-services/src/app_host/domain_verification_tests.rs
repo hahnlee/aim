@@ -158,7 +158,7 @@ fn original_frontend_receives_authenticated_uid_and_preserves_replies() {
     let error = invoke(
         &public,
         10100,
-        dv::SET_URI_RELATIVE_FILTER_GROUPS,
+        dv::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED,
         &Parcel::new(),
     )
     .reader()
@@ -167,6 +167,113 @@ fn original_frontend_receives_authenticated_uid_and_preserves_replies() {
     .unwrap_err();
     assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
     assert!(error.message.contains("#1763"));
+}
+
+#[test]
+fn uri_bundle_is_forwarded_opaque_and_paired_query_keeps_authenticated_caller() {
+    use aim_service_aidl::{ReadParcelable, WriteParcelable};
+    struct UriFrontend(Vec<u8>);
+    impl Service for UriFrontend {
+        fn descriptor(&self) -> &str {
+            original::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.sender_euid, 1000);
+            let mut reply = Parcel::new();
+            match call.code {
+                original::SET_URI_RELATIVE_FILTER_GROUPS => {
+                    let a =
+                        original::SetUriRelativeFilterGroups::<RawBundle>::read(&mut call.data)?;
+                    assert_eq!(a.uid, 10100);
+                    assert_eq!(a.package_name.as_deref(), Some("p"));
+                    let mut bundle = Parcel::new();
+                    a.groups.unwrap().write_to(&mut bundle);
+                    assert_eq!(bundle.data(), self.0);
+                    // Original Java errors must reach the app unchanged.
+                    reply.write_exception(&Exception::security("URI agent permission denied"));
+                }
+                original::GET_URI_RELATIVE_FILTER_GROUPS => {
+                    let a = original::GetUriRelativeFilterGroups::read(&mut call.data)?;
+                    assert_eq!(a.uid, 10100);
+                    assert_eq!(a.package_name.as_deref(), Some("p"));
+                    assert_eq!(a.domains, Some(vec![Some("example.org".into()), None]));
+                    original::write_get_uri_relative_filter_groups_reply(
+                        &mut reply,
+                        Some(&RawBundle::empty()),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(call.data.remaining(), 0);
+            Ok(reply)
+        }
+    }
+    let process = crate::test_process(1000);
+    let host = AppHost::new(process.clone());
+    let public = DomainVerification::new(host.clone());
+    let mut bundle = Parcel::new();
+    // A lazy Serializable with deliberately invalid stream bytes. Rust must
+    // forward it without inspecting the class or attempting deserialization.
+    crate::bundle::write(
+        &mut bundle,
+        &[(
+            "example.org",
+            crate::bundle::Value::Serializable {
+                class: "java.lang.String".into(),
+                data: vec![0xff, 0, 1],
+            },
+        )],
+    );
+    let Binder::Local(ptr) = process.add_service(Arc::new(UriFrontend(bundle.data().to_vec())))
+    else {
+        unreachable!()
+    };
+    *host.domain_frontend.lock().unwrap() = Some(Arc::new(crate::system::ServiceOwner::Local(
+        process.local_service(ptr).unwrap(),
+    )));
+    let mut set = Parcel::new();
+    dv::SetUriRelativeFilterGroups {
+        package_name: Some("p".into()),
+        domain_to_groups_bundle: Some(RawBundle::read_from(&mut bundle.reader()).unwrap()),
+    }
+    .write(&mut set);
+    let error = invoke(&public, 10100, dv::SET_URI_RELATIVE_FILTER_GROUPS, &set)
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error, Exception::security("URI agent permission denied"));
+    let mut get = Parcel::new();
+    dv::GetUriRelativeFilterGroups {
+        package_name: Some("p".into()),
+        domains: Some(vec![Some("example.org".into()), None]),
+    }
+    .write(&mut get);
+    let response = invoke(&public, 10100, dv::GET_URI_RELATIVE_FILTER_GROUPS, &get);
+    let result = dv::read_get_uri_relative_filter_groups_reply::<RawBundle>(&mut response.reader())
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let mut parcel = Parcel::new();
+    result.write_to(&mut parcel);
+    assert_eq!(parcel.data(), &[0, 0, 0, 0]);
+    let backend = Backend::new(host);
+    for code in [
+        original::SET_URI_RELATIVE_FILTER_GROUPS,
+        original::GET_URI_RELATIVE_FILTER_GROUPS,
+        original::SET_URI_RELATIVE_FILTER_GROUP,
+        original::GET_DOMAIN_VERIFICATION_PACKAGE_ID,
+    ] {
+        assert_eq!(
+            invoke(&backend, 10100, code, &Parcel::new())
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_SECURITY
+        );
+    }
 }
 
 #[test]
@@ -406,6 +513,131 @@ fn verifier_status_retries_package_write_and_persists_without_mutating_retained_
             )
             .contains(&"example.org".into())
         );
+        // URI groups use the same attached native owner, but unlike verifier
+        // status, original DVS never schedules persistence from this setter.
+        let before = host.package_capture().unwrap();
+        let disk_path = host.data().unwrap().join("system/packages.xml");
+        let disk_bytes = std::fs::read(&disk_path).unwrap();
+        let set_group = |name: &str, groups: Vec<Option<Group>>| {
+            let mut request = Parcel::new();
+            original::SetUriRelativeFilterGroup {
+                package_name: Some(name.into()),
+                id: Some(id.clone()),
+                domain: Some("example.org".into()),
+                groups: Some(groups),
+            }
+            .write(&mut request);
+            invoke(
+                &backend,
+                1000,
+                original::SET_URI_RELATIVE_FILTER_GROUP,
+                &request,
+            )
+            .reader()
+            .read_exception()
+            .unwrap()
+        };
+        set_group(
+            "p",
+            vec![Some(Group {
+                action: 1,
+                filters: Some(vec![Some(uri_parcel::Filter {
+                    uri_part: 0,
+                    pattern_type: 1,
+                    filter: Some("/path".into()),
+                })]),
+            })],
+        )
+        .unwrap();
+        let current = host.package_capture().unwrap();
+        assert!(
+            before
+                .domains()
+                .unwrap()
+                .owner()
+                .uri_groups("p", &["example.org".into()])
+                .is_empty()
+        );
+        assert_eq!(
+            current
+                .domains()
+                .unwrap()
+                .owner()
+                .uri_groups("p", &["example.org".into()])[0]
+                .1[0]
+                .action,
+            1
+        );
+        let mut get = Parcel::new();
+        original::GetUriRelativeFilterGroups {
+            uid: 10100,
+            package_name: Some("p".into()),
+            domains: Some(vec![Some("example.org".into()), Some("missing.org".into())]),
+        }
+        .write(&mut get);
+        let response = invoke(
+            &backend,
+            1000,
+            original::GET_URI_RELATIVE_FILTER_GROUPS,
+            &get,
+        );
+        let groups = original::read_get_uri_relative_filter_groups_reply::<
+            crate::package::domain_verification::uri_bundle::Bundle,
+        >(&mut response.reader())
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let entries = groups.entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key.as_deref(), Some("example.org"));
+        assert_eq!(
+            entries[0].groups().unwrap().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .action,
+            1
+        );
+        // Retired/missing attachments cannot apply a delayed Java update.
+        set_group("missing", vec![]).unwrap();
+        let mut stale = Parcel::new();
+        original::SetUriRelativeFilterGroup {
+            package_name: Some("p".into()),
+            id: Some("00000000-0000-0000-0000-000000000099".into()),
+            domain: Some("example.org".into()),
+            groups: Some(Vec::<Option<Group>>::new()),
+        }
+        .write(&mut stale);
+        invoke(
+            &backend,
+            1000,
+            original::SET_URI_RELATIVE_FILTER_GROUP,
+            &stale,
+        )
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+        assert!(Arc::ptr_eq(&current, &host.package_capture().unwrap()));
+        set_group("p", vec![]).unwrap();
+        assert!(
+            host.package_capture()
+                .unwrap()
+                .domains()
+                .unwrap()
+                .owner()
+                .uri_groups("p", &["example.org".into()])
+                .is_empty()
+        );
+        assert!(
+            !current
+                .domains()
+                .unwrap()
+                .owner()
+                .uri_groups("p", &["example.org".into()])
+                .is_empty()
+        );
+        assert_eq!(std::fs::read(disk_path).unwrap(), disk_bytes);
+        let current = host.package_capture().unwrap();
         // A replacement package's new domain-set id invalidates the old request.
         let replacement_id = "00000000-0000-0000-0000-000000000003";
         let mut scan = current.scan().owner().clone();

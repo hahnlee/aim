@@ -27,6 +27,7 @@ public class BaseBundle {
     public int[] getIntArray(String key) { throw new RuntimeException("stub"); }
 
     public int size() { throw new RuntimeException("stub"); }
+    public boolean isEmpty() { throw new RuntimeException("stub"); }
 
     public int getInt(String key, int defaultValue) { throw new RuntimeException("stub"); }
 }

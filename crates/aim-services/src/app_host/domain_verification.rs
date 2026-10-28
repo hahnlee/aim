@@ -10,8 +10,10 @@ use aim_binder_host::parcel::{
 };
 use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as dv;
 
+use super::kept::RawBundle;
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::apps_filter::should_filter_application;
+use crate::package::domain_verification::uri_parcel::{self, Group};
 use crate::package::domain_verification::{agent, domain_set::DomainSet, parcels};
 use crate::package::query::Query;
 use crate::package::scan_snapshot::query_state::{Capture, NativeDomains};
@@ -207,6 +209,56 @@ impl DomainVerification {
             .map(Some)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("domain info parcel: {e}")))
     }
+
+    /// Only typed, original-Java-converted groups reach this system-UID backend.
+    /// DVS publishes each key in order, including before a later conversion fails,
+    /// and does not schedule a settings write from this setter.
+    fn set_uri_group(
+        &self,
+        name: Option<&str>,
+        id: Option<&str>,
+        domain: Option<&str>,
+        groups: Option<Vec<Option<Group>>>,
+    ) -> Result<(), Exception> {
+        let groups =
+            uri_parcel::groups_to_model(groups).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let name = name.ok_or_else(name_not_found)?;
+        let id =
+            id.ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "missing URI package identity"))?;
+        let domain =
+            domain.ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "unvalidated URI domain"))?;
+        let system = self.host.package_system()?;
+        let bridge = system.package_bootstrap()?;
+        loop {
+            let capture = system.capture_package_queries_for(&bridge)?;
+            let domains = Self::domains(&capture)?;
+            if !domains
+                .owner()
+                .package(name)
+                .is_some_and(|package| package.id == id)
+            {
+                // A lifecycle change after Java acquired the attached state
+                // retires that map; never apply its updates to a new attachment.
+                return Ok(());
+            }
+            let mut owner = domains.owner().clone();
+            owner
+                .set_uri_groups(name, &[(domain.to_owned(), Some(groups.clone()))])
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            if owner.persisted() == domains.owner().persisted() {
+                return Ok(());
+            }
+            let update = capture
+                .prepare_runtime_domain_update(owner)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            if system
+                .publish_runtime_package_domains(&bridge, update)?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+    }
 }
 
 impl DomainVerification {
@@ -240,6 +292,26 @@ impl DomainVerification {
                 }
                 .write(&mut request);
                 original::SET_DOMAIN_VERIFICATION_STATUS
+            }
+            dv::SET_URI_RELATIVE_FILTER_GROUPS => {
+                let a = dv::SetUriRelativeFilterGroups::<RawBundle>::read(&mut call.data)?;
+                original::SetUriRelativeFilterGroups {
+                    uid,
+                    package_name: a.package_name,
+                    groups: a.domain_to_groups_bundle,
+                }
+                .write(&mut request);
+                original::SET_URI_RELATIVE_FILTER_GROUPS
+            }
+            dv::GET_URI_RELATIVE_FILTER_GROUPS => {
+                let a = dv::GetUriRelativeFilterGroups::read(&mut call.data)?;
+                original::GetUriRelativeFilterGroups {
+                    uid,
+                    package_name: a.package_name,
+                    domains: a.domains,
+                }
+                .write(&mut request);
+                original::GET_URI_RELATIVE_FILTER_GROUPS
             }
             _ => unreachable!(),
         };
@@ -336,6 +408,45 @@ impl Service for Backend {
                     Ok(())
                 })()
             }
+            original::GET_DOMAIN_VERIFICATION_PACKAGE_ID => {
+                let a = original::GetDomainVerificationPackageId::read(&mut call.data)?;
+                (|| {
+                    let capture = self.0.host.package_capture()?;
+                    let domains = DomainVerification::domains(&capture)?;
+                    let id = a
+                        .package_name
+                        .as_deref()
+                        .and_then(|name| domains.owner().package(name))
+                        .map(|package| package.id.clone());
+                    original::write_get_domain_verification_package_id_reply(&mut reply, &id);
+                    Ok(())
+                })()
+            }
+            original::SET_URI_RELATIVE_FILTER_GROUP => {
+                let a = original::SetUriRelativeFilterGroup::<Group>::read(&mut call.data)?;
+                self.0
+                    .set_uri_group(
+                        a.package_name.as_deref(),
+                        a.id.as_deref(),
+                        a.domain.as_deref(),
+                        a.groups,
+                    )
+                    .map(|()| original::write_set_uri_relative_filter_group_reply(&mut reply))
+            }
+            original::GET_URI_RELATIVE_FILTER_GROUPS => {
+                let a = original::GetUriRelativeFilterGroups::read(&mut call.data)?;
+                (|| {
+                    let capture = self.0.host.package_capture()?;
+                    let groups = DomainVerification::domains(&capture)?
+                        .owner()
+                        .uri_groups_query(a.package_name.as_deref(), a.domains.as_deref())
+                        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                    let groups = parcels::UriGroups::prepare(&groups)
+                        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
+                    original::write_get_uri_relative_filter_groups_reply(&mut reply, Some(&groups));
+                    Ok(())
+                })()
+            }
             code => {
                 let name = original::METHODS
                     .iter()
@@ -362,7 +473,9 @@ impl Service for DomainVerification {
         let result = match call.code {
             dv::QUERY_VALID_VERIFICATION_PACKAGE_NAMES
             | dv::GET_DOMAIN_VERIFICATION_INFO
-            | dv::SET_DOMAIN_VERIFICATION_STATUS => return self.forward(call, uid),
+            | dv::SET_DOMAIN_VERIFICATION_STATUS
+            | dv::SET_URI_RELATIVE_FILTER_GROUPS
+            | dv::GET_URI_RELATIVE_FILTER_GROUPS => return self.forward(call, uid),
             dv::GET_DOMAIN_VERIFICATION_USER_STATE => {
                 let a = dv::GetDomainVerificationUserState::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
