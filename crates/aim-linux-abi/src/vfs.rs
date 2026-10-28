@@ -852,13 +852,19 @@ pub struct FuseRoute {
     pub default_permissions: bool,
     pub read_only: bool,
 }
-/// The cgroup v1 hierarchy that holds the normalized guest path: its
-/// controller and the host directory of its root.
-pub fn cgroup_v1(guest: &str) -> Option<(aim_storage::cgroup_v1::Controller, PathBuf)> {
+/// The cgroup filesystem owning `guest`: a v1 controller or the unified
+/// hierarchy. Select the holding mount, so nested ordinary mounts stay out.
+pub fn cgroup(guest: &str) -> Option<(Option<aim_storage::cgroup_v1::Controller>, PathBuf)> {
     let mounts = VFS.get()?.mounts.read().unwrap();
     let (mount, _) = holder(&mounts, guest)?;
-    let controller = aim_storage::cgroup_v1::Controller::from_map_kind(mount.fstype.as_deref()?)?;
-    Some((controller, mount.host.clone()))
+    let fstype = mount.fstype.as_deref()?;
+    if fstype == "cgroup2" {
+        return Some((None, mount.host.clone()));
+    }
+    Some((
+        Some(aim_storage::cgroup_v1::Controller::from_map_kind(fstype)?),
+        mount.host.clone(),
+    ))
 }
 
 /// The host directory of the root of the mounted kernel filesystem
@@ -1149,9 +1155,8 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
         if !guest.starts_with('/') {
             return Err(format!("line {}: guest path must be absolute", n + 1));
         }
-        // A cgroup v2 hierarchy is a plain directory: groups can be made
-        // and joined, but no controller acts on them. A cgroup v1
-        // hierarchy's fstype names its controller (`sys::cgroup`).
+        // Cgroup filesystems are served by sys::cgroup; v1's fstype names
+        // its controller, and cgroup2 is the unified membership hierarchy.
         let fstype = (matches!(kind, "cgroup2" | "bpf") || kind.starts_with("cgroup:"))
             .then(|| kind.to_string());
         mounts.push(Mount {

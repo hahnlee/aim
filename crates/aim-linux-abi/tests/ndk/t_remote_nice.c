@@ -1,6 +1,8 @@
 // setpriority(2): another process's leader and worker keep independent
 // nice values. The host test reads each target's actual Darwin priority.
 #include <errno.h>
+#include <fcntl.h>
+#include <string.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,7 +87,7 @@ static void target(void) {
 }
 
 int main(int argc, char **argv) {
-  if (argc == 2) {
+  if (argc == 2 && strcmp(argv[1], "--cgroup") != 0) {
     CHECK(getpriority(PRIO_PROCESS, 0) == atoi(argv[1]));
     return 0;
   }
@@ -101,6 +103,14 @@ int main(int argc, char **argv) {
   close(done[1]);
   pid_t tid;
   CHECK(read(reply[0], &tid, sizeof tid) == sizeof tid);
+  if (argc == 2) {
+    int fd = open("/dev/cpuctl/policy/cgroup.procs", O_WRONLY | O_CLOEXEC);
+    CHECK(fd >= 0);
+    char pid[32];
+    int len = snprintf(pid, sizeof pid, "%d", child);
+    CHECK(write(fd, pid, len) == len);
+    CHECK(close(fd) == 0);
+  }
   printf("target %d\n", child);
   fflush(stdout);
   for (int which = 0; which < 2; ++which) {

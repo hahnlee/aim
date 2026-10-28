@@ -40,6 +40,7 @@ pub(super) const RLIMIT: u32 = 18;
 pub(super) const MEM_OPEN: u32 = 19;
 pub(super) const MEM_IO: u32 = 20;
 pub(super) const PRIORITY: u32 = 22;
+pub(super) const CGROUP_POLICY: u32 = 23;
 
 const NT_PRSTATUS: u32 = 1;
 const NT_PRFPREG: u32 = 2;
@@ -378,6 +379,43 @@ fn connection(fd: i32) {
 fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
     use crate::errno::{EINVAL, EIO, ENOENT, EPERM, ESRCH};
     match op {
+        CGROUP_POLICY => {
+            let policies = r.seq(|r| {
+                (
+                    r.i32(),
+                    crate::sys::cgroup::Policy {
+                        min: r.i32(),
+                        max: r.i32(),
+                        fair_max: r.i32(),
+                        io: r.i32(),
+                    },
+                )
+            });
+            if !r.ok()
+                || policies.iter().any(|(tid, p)| {
+                    thread::owner(*tid) != unsafe { libc::getpid() }
+                        || ![0, 9, 17, 21, 25, 33].contains(&p.min)
+                        || ![9, 17, 21, 25, 33].contains(&p.max)
+                        || ![9, 17, 33].contains(&p.fair_max)
+                        || p.min > p.max
+                        || ![0, 1, 3, 4].contains(&p.io)
+                })
+            {
+                return err(EINVAL);
+            }
+            match crate::sys::cgroup::apply_policy(&policies) {
+                Ok(before) => reply(0, |w| {
+                    w.seq(before.iter(), |w, (tid, p)| {
+                        w.i32(*tid);
+                        w.i32(p.min);
+                        w.i32(p.max);
+                        w.i32(p.fair_max);
+                        w.i32(p.io);
+                    })
+                }),
+                Err(e) => err(e),
+            }
+        }
         SEIZE => {
             let (tid, options, privileged) = (r.i32(), r.u64(), r.bool());
             let mut g = tracee::lock();

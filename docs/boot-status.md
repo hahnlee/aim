@@ -8110,7 +8110,10 @@ kills on the Mac's memory pressure, which the host-call module `memory`
 reports (ADR 0012's lmkd row, [host-call.md](host-call.md)). A thread's
 Linux scheduling sets its host QoS: a nice value of 10 or more or
 SCHED_BATCH runs at utility, 19 or SCHED_IDLE at background.
-Cross-process `setpriority` records each target thread's nice value and applies its Darwin scheduling at the target's next syscall, including privileged raises.
+Cross-process `setpriority` keeps the target's owner/RLIMIT_NICE checks and
+records each thread's nice value through its agent (opcode 22); the target
+applies its Darwin scheduling, including cgroup CPU and disk bounds, at its
+next syscall.
 
 Measured on a loaded host (load average 90, other agents' boots running),
 `cargo aim boot` with a reused data directory, seven apps opened with
@@ -8127,11 +8130,15 @@ Measured on a loaded host (load average 90, other agents' boots running),
   an event while the level read warn for a minute. The module polls the
   level every 250 ms instead.
 
-What is not covered: ActivityManager's process groups
-(`setProcessGroup`) change nothing on the host. The `blkio`, `cpu` and
-`cpuset` hierarchies are mounted, so libprocessgroup's profiles join
-their groups as on a device, but no Darwin policy follows a group yet
-(#297). Kills name their process: another process's
+ActivityManager's process groups constrain Darwin CPU/QoS and disk policy
+through the cgroup controllers, with freezer explicitly unavailable. Cpuset
+masks and uclamp maxima preserve Linux scheduling class: reduced placement
+or frequency hints cannot background foreground/system audio or throttle its
+I/O (#297). The audio profiles' neutral controller defaults and reduced-mask/
+uclamp cases have mapping unit coverage. Cgroup host checks cover process/
+thread moves and inheritance, and remote renicing of leaders/workers under
+background, utility and boosted CPU policies (2026-10-28); no guest boot or
+CoreAudio integration gate was run for this re-application. Kills name their process: another process's
 `/proc/<pid>/cmdline` and `comm` come from its record (#238).
 
 **Morning check** (one boot slot, after the throttle is lifted):
