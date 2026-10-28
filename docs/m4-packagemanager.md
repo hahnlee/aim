@@ -1075,8 +1075,11 @@ owner without side effects, and compared with the original's outcome.
   file inputs and cluster base names other than `base.apk` (#801). It
   rejects null/unreadable paths; an original signed APK test checks both
   nonstandard base/split guest paths and its v3 signing lineage without
-  altering the original. Not yet: the
-  parser's oracle on installs (#760), restoring a system package,
+  altering the original. The parser oracle compares installed and updated
+  APKs through the guest path map, excluding scan-owned ABI/library paths
+  and signing details on both sides. It also runs when the install-state
+  change is not modelled, including multi-user installs (#760).
+  Not yet: restoring a system package,
   suspension, preferred activities.
 - The parser's oracle runs here too: every APK the original parses
   (boot, install) is parsed natively and the parcels compared.

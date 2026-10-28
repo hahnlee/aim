@@ -546,6 +546,70 @@ fn an_install_session_decides_the_install_reason_and_the_enabler() {
 }
 
 #[test]
+fn install_parse_is_checked_when_the_state_change_is_not_modelled() {
+    const GSF: &str = "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk";
+    let Some(root) = aim_paths::original_image_with(GSF) else {
+        return;
+    };
+    let source = root.join(GSF);
+    let guest = "/data/app/oracle/base.apk";
+    let apks = apk::Apks {
+        signing_overrides: None,
+        files: Box::new(move |path| (path == guest).then(|| source.clone())),
+        platform: crate::package::parse::Platform::load(&root, Default::default()).unwrap(),
+    };
+    let parsed = apks.parsed_path(guest, 0).unwrap();
+    let name = parsed.package_name.clone();
+    let writes = Writes::default();
+    writes.read_apks(apks);
+    let pre = state(|s| {
+        s.users.insert(
+            1,
+            User {
+                id: 1,
+                ..User::default()
+            },
+        );
+    });
+    for kind in [change::Kind::Install, change::Kind::Update] {
+        for differs in [false, true] {
+            let post = state(|s| {
+                let mut original = parsed.clone();
+                if differs {
+                    original.version_code += 1;
+                }
+                let ps = installed(&name, 10000, |ps| {
+                    ps.path = guest.into();
+                    ps.pkg = Some(Arc::new(original));
+                });
+                s.packages.insert(name.clone(), ps);
+            });
+            let checks = writes.check_change(
+                Change {
+                    name: name.clone(),
+                    kind,
+                    pre: pre.clone(),
+                    found: Instant::now(),
+                },
+                Some(&post),
+            );
+            assert_eq!(checks.len(), 2);
+            assert!(matches!(
+                &checks[0].outcome,
+                CheckOutcome::NotModelled(reason) if reason.contains("several users")
+            ));
+            assert_eq!(checks[1].operation, "install parse");
+            assert_eq!(checks[1].subject, name);
+            if differs {
+                assert!(matches!(checks[1].outcome, CheckOutcome::Differed { .. }));
+            } else {
+                assert_matched(&checks[1]);
+            }
+        }
+    }
+}
+
+#[test]
 fn an_install_s_signers_are_verified_from_its_apks() {
     // Signed with v3 and a proof-of-rotation lineage of two certificates.
     const GSF: &str = "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk";

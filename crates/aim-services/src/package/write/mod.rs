@@ -361,6 +361,19 @@ impl Writes {
             Some(post) => {
                 let mut inner = self.inner.lock().unwrap();
                 let pkg = post.packages.get(&c.name).and_then(|ps| ps.pkg.as_deref());
+                let installed = matches!(c.kind, change::Kind::Install | change::Kind::Update);
+                if let (true, Some(apks), Some(ps), Some(pkg)) =
+                    (installed, &inner.apks, post.packages.get(&c.name), pkg)
+                {
+                    checks.push(Check {
+                        service: "package".into(),
+                        descriptor: pm::DESCRIPTOR.into(),
+                        operation: "install parse".into(),
+                        calls: Vec::new(),
+                        subject: c.name.clone(),
+                        outcome: oracle::compare(apks.parsed(ps), pkg),
+                    });
+                }
                 let session = match c.kind {
                     change::Kind::Install | change::Kind::Update => {
                         inner.sessions.as_ref().and_then(|s| s.installed(&c.name))
@@ -387,8 +400,6 @@ impl Writes {
                         let mut original =
                             change::original(c.kind, &c.pre, post, &c.name, session.is_some());
                         // The signers, verified from the installed APKs.
-                        let installed =
-                            matches!(c.kind, change::Kind::Install | change::Kind::Update);
                         if let (true, Some(apks), Some(ps), Some(pkg), Some(m), Some(o)) = (
                             installed,
                             &inner.apks,
@@ -400,14 +411,6 @@ impl Writes {
                             m.signatures = Some(apks.signatures(pkg));
                             o.signatures =
                                 Some(ps.signatures.clone().ok_or_else(|| "unsigned".to_string()));
-                            checks.push(Check {
-                                service: "package".into(),
-                                descriptor: pm::DESCRIPTOR.into(),
-                                operation: "install parse".into(),
-                                calls: Vec::new(),
-                                subject: c.name.clone(),
-                                outcome: oracle::compare(apks.parsed(ps), pkg),
-                            });
                         }
                         if original == model {
                             CheckOutcome::Matched
