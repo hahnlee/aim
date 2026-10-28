@@ -1,6 +1,8 @@
 // Compile-only pinned image API; checked by the device-services build node.
 package android.os;
 public class UserManager {
+    public static boolean supportsMultipleUsers() { throw new RuntimeException("stub"); }
+    public static boolean isDeviceInDemoMode(android.content.Context context) { throw new RuntimeException("stub"); }
     public static int getMaxSupportedUsers(){throw new RuntimeException("stub");}
     public UserManager(android.content.Context context, IUserManager service) { throw new RuntimeException("stub"); }
     public static final String DISALLOW_INSTALL_UNKNOWN_SOURCES = "no_install_unknown_sources";

@@ -479,6 +479,7 @@ fn on_transact(
                     reply.write(&k.keyboard_type)?;
                     reply.write(&i32::from(k.is_external))?;
                     reply.write(&k.key_character_map)?;
+                    reply.write(&k.supported_keys)?;
                 }
             }
             Ok(())

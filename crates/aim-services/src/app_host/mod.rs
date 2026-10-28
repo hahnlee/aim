@@ -576,6 +576,7 @@ pub struct AppHost {
     /// Cold package helpers in the current system process.
     package_bootstrap_java: Mutex<Option<Arc<Strong>>>,
     device_policy_defaults: Mutex<Option<Arc<Strong>>>,
+    user_switcher_policy: Mutex<Option<Arc<Strong>>>,
     tasks: tasks::Tasks,
     /// The server's launches, by package, until the package's task is made.
     pending_launches: Mutex<HashMap<String, String>>,
@@ -704,6 +705,7 @@ impl AppHost {
             storage_crates: Mutex::new(None),
             package_bootstrap_java: Mutex::new(None),
             device_policy_defaults: Mutex::new(None),
+            user_switcher_policy: Mutex::new(None),
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
             providers: Default::default(),

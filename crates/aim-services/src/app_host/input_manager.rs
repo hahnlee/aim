@@ -79,6 +79,7 @@ pub struct InputDevice {
     keyboard_type: i32,
     key_character_map: KeyCharacterMap,
     associated_display: i32,
+    supported_keys: Option<Vec<i32>>,
 }
 
 impl WriteParcelable for InputDevice {
@@ -275,6 +276,9 @@ impl InputManager {
             keyboard_type: KEYBOARD_TYPE_ALPHABETIC,
             key_character_map: map,
             associated_display: DISPLAY_NONE,
+            // EventHub's virtual device has no EV_KEY bits. Load its layout
+            // to distinguish a successful lookup from a device with no layout.
+            supported_keys: virtual_key_layout(&self.host)?.map(|_| Vec::new()),
         });
         Ok(self.virtual_keyboard.get_or_init(|| device).clone())
     }
@@ -288,7 +292,7 @@ impl InputManager {
         let reply = self.host.call_agent(GET_KEYBOARD, "getKeyboard", |_| {})?;
         let mut r = reply.reader();
         let bad = |e| Exception::new(EX_ILLEGAL_STATE, format!("getKeyboard: {e}"));
-        r.read_exception().map_err(bad)?.ok();
+        r.read_exception().map_err(bad)??;
         let device = if r.read_i32().map_err(bad)? == 0 {
             None
         } else {
@@ -299,6 +303,7 @@ impl InputManager {
             let (bus, vendor, product, version) = (int()?, int()?, int()?, int()?);
             let (sources, keyboard_type, is_external) = (int()?, int()?, int()? != 0);
             let kcm = r.read_string16().map_err(bad)?.unwrap_or_default();
+            let supported_keys = aim_service_aidl::read_int_array(&mut r).map_err(bad)?;
             let identifier = aim_input_transport::keyboard::Identifier {
                 name: name.clone(),
                 bus: bus as u16,
@@ -322,9 +327,89 @@ impl InputManager {
                 keyboard_type,
                 key_character_map: map,
                 associated_display: DISPLAY_NONE,
+                supported_keys,
             }))
         };
         Ok(self.keyboard.get_or_init(|| device).clone())
+    }
+}
+
+fn virtual_key_layout(
+    host: &AppHost,
+) -> Result<Option<aim_input_transport::keylayout::KeyLayoutMap>, Exception> {
+    let root = host.root()?;
+    let files = aim_input_transport::keyboard::ConfigFiles {
+        prefixes: CONFIGURATION_DIRS
+            .iter()
+            .map(|p| format!("/{p}/"))
+            .collect(),
+        readable: &|p| root.join(p.trim_start_matches('/')).is_file(),
+    };
+    let id = aim_input_transport::keyboard::Identifier {
+        name: "Virtual".into(),
+        unique_id: "<virtual>".into(),
+        bus: 0,
+        vendor: 0,
+        product: 0,
+        version: 0,
+    };
+    aim_input_transport::keyboard::KeyMap::load(&id, &[], &files, &|p| guest_file(host, p).ok())
+        .map(|map| map.layout)
+        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
+}
+
+impl InputManager {
+    fn has_keys(
+        &self,
+        device: i32,
+        sources: i32,
+        codes: Option<Vec<i32>>,
+        count: i32,
+    ) -> Result<im::HasKeysReply, Exception> {
+        let codes = codes.ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "keyCodes must not be null",
+            )
+        })?;
+        if count < 0 {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "keyExists must not be null",
+            ));
+        }
+        if (count as usize) < codes.len() {
+            return Err(Exception::illegal_argument(
+                "keyExists must be at least as large as keyCodes",
+            ));
+        }
+        let mut result = im::HasKeysReply {
+            result: false,
+            key_exists: Some(vec![false; count as usize]),
+        };
+        // nativeHasKeys rejects a larger array too (without a Java exception).
+        if count as usize != codes.len() {
+            return Ok(result);
+        }
+        // sourcesMatchMask excludes AINPUT_SOURCE_CLASS_MASK. Negative ids
+        // select all devices, including the virtual keyboard, as InputReader does.
+        let mut mark = |d: &InputDevice| {
+            if (device < 0 || device == d.id) && d.sources & sources & !0xff != 0 {
+                if let Some(keys) = &d.supported_keys {
+                    result.result = true;
+                    for (out, code) in result.key_exists.as_mut().unwrap().iter_mut().zip(&codes) {
+                        *out |= keys.contains(code);
+                    }
+                }
+            }
+        };
+        if device < 0 {
+            mark(self.virtual_keyboard()?.as_ref());
+        }
+        if let Some(keyboard) = self.keyboard()? {
+            mark(&keyboard);
+        }
+        Ok(result)
     }
 }
 
@@ -341,6 +426,18 @@ impl Service for InputManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            im::HAS_KEYS => {
+                let a = im::HasKeys::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                // Java AIDL sends the allocated out-array's length after the inputs.
+                let count = call.data.read_i32().map_err(|_| BAD_VALUE)?;
+                return reply(
+                    self.has_keys(a.device_id, a.source_mask, a.key_codes, count)
+                        .map(|value| {
+                            im::write_has_keys_reply(&mut p, &value);
+                            p
+                        }),
+                );
+            }
             im::GET_VELOCITY_TRACKER_STRATEGY => {
                 im::GetVelocityTrackerStrategy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // The device config's, as the original read it at its start.
@@ -425,6 +522,113 @@ impl Service for InputManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// InputManagerService.hasKeys / InputReader.markSupportedKeyCodesLocked:
+    /// no permission is required; ids, source classes, out-array and errors
+    /// follow the original Binder contract.
+    #[test]
+    fn has_keys_reads_devices_and_validates_the_out_array_without_a_permission_gate() {
+        crate::system::with_discovery_session_flags(&[], |host| {
+            let manager = InputManager::new(host.clone());
+            let device = |id, keys| {
+                Arc::new(InputDevice {
+                    id,
+                    generation: 1,
+                    name: "test".into(),
+                    vendor: 0,
+                    product: 0,
+                    bus: 0,
+                    descriptor: "test".into(),
+                    is_external: false,
+                    sources: SOURCE_KEYBOARD_DPAD,
+                    keyboard_type: KEYBOARD_TYPE_ALPHABETIC,
+                    key_character_map: KeyCharacterMap::load("test.kcm", b"type FULL\n").unwrap(),
+                    associated_display: DISPLAY_NONE,
+                    supported_keys: keys,
+                })
+            };
+            manager
+                .virtual_keyboard
+                .set(device(-1, Some(vec![])))
+                .ok()
+                .unwrap();
+            manager
+                .keyboard
+                .set(Some(device(0, Some(vec![29, 66]))))
+                .ok()
+                .unwrap();
+            let call = |uid, id, mask, codes, count| {
+                let mut data = Parcel::new();
+                im::HasKeys {
+                    device_id: id,
+                    source_mask: mask,
+                    key_codes: codes,
+                }
+                .write(&mut data);
+                data.write_i32(count);
+                let p = manager
+                    .transact(&mut Call {
+                        code: im::HAS_KEYS,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: uid,
+                        data: data.reader(),
+                    })
+                    .unwrap();
+                im::read_has_keys_reply(&mut p.reader()).unwrap()
+            };
+            for uid in [0, 1000, 10100, 110100] {
+                for id in [-2, -1, 0] {
+                    let r = call(uid, id, 0x101, Some(vec![29, 30, 66, -1]), 4).unwrap();
+                    assert!(r.result);
+                    assert_eq!(r.key_exists.unwrap(), [true, false, true, false]);
+                }
+            }
+            for (id, mask) in [(99, -1), (0, 0), (0, 1), (0, 0x1002)] {
+                let r = call(10100, id, mask, Some(vec![29]), 1).unwrap();
+                assert!(!r.result);
+                assert_eq!(r.key_exists.unwrap(), [false]);
+            }
+            assert!(call(10100, 0, -1, Some(vec![]), 0).unwrap().result);
+            let larger = call(10100, 0, -1, Some(vec![29]), 2).unwrap();
+            assert!(!larger.result);
+            assert_eq!(larger.key_exists.unwrap(), [false, false]);
+            for (keys, count, code) in [
+                (None, 1, aim_binder_host::parcel::EX_NULL_POINTER),
+                (Some(vec![29]), -1, aim_binder_host::parcel::EX_NULL_POINTER),
+                (
+                    Some(vec![29, 66]),
+                    1,
+                    aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT,
+                ),
+            ] {
+                assert_eq!(call(10100, -1, -1, keys, count).unwrap_err().code, code);
+            }
+            let no_keys = InputManager::new(host.clone());
+            no_keys
+                .virtual_keyboard
+                .set(device(-1, Some(vec![])))
+                .ok()
+                .unwrap();
+            no_keys.keyboard.set(None).ok().unwrap();
+            let result = no_keys.has_keys(-1, 0x101, Some(vec![29]), 1).unwrap();
+            assert!(result.result); // virtual layout exists, but has no EV_KEY bits
+            assert_eq!(result.key_exists.unwrap(), [false]);
+            let no_layout = InputManager::new(host.clone());
+            no_layout
+                .virtual_keyboard
+                .set(device(-1, None))
+                .ok()
+                .unwrap();
+            no_layout.keyboard.set(None).ok().unwrap();
+            assert!(
+                !no_layout
+                    .has_keys(-1, 0x101, Some(vec![29]), 1)
+                    .unwrap()
+                    .result
+            );
+        });
+    }
 
     #[test]
     fn the_virtual_keyboard_has_the_original_descriptor() {

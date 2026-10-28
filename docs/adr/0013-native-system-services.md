@@ -749,3 +749,8 @@ vendor classes only, with no original class or image replacement.
   the app-start path), hardening compatibility with derived tests as
   each part lands.
 
+
+The app host's cold user-switcher read retains UserManagerService's Android 16
+Java policy in the vendor jar, with native user state and authenticated access
+decisions over a system-UID-only bridge. The original UserManager and UserInfo
+helpers retain resource/property and switchability policy; no original is replaced.

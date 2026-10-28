@@ -78,4 +78,6 @@ interface ISystemProcess {
     void writePackageCompilerStats();
     /** Initial camera privacy allowlist from original SystemConfig; system UID only. */
     void initializeCameraPrivacyAllowlist(in List<String> packages);
+    /** Original UserManagerService user-switcher policy; system UID only. */
+    void attachUserSwitcherPolicy(IBinder policy);
 }

@@ -6,6 +6,7 @@ public final class R {
     private R() { throw new RuntimeException("stub"); }
 
     public static final class bool {
+        public static final int config_showUserSwitcherByDefault = 0;
  public static int config_allow3rdPartyAppOnInternal;
         public static int config_isPreApprovalRequestAvailable;
         public static int config_stopSystemPackagesByDefault;

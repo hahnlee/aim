@@ -70,6 +70,13 @@ fn presentation_bridges_use_original_strings_and_check_the_system_uid() {
             .arg(format!("-o{}", aidl_output.display()))
             .arg(aidl_input.join("dev/aim/server/ISettingsValues.aidl")),
     );
+    run(
+        Command::new(aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"))
+            .args(["--lang=java", "--min_sdk_version", "36"])
+            .arg(format!("-I{}", aidl_input.display()))
+            .arg(format!("-o{}", aidl_output.display()))
+            .arg(aidl_input.join("dev/aim/server/IUserSwitcherPolicy.aidl")),
+    );
     let api = aidl_output.join("dev/aim/server/ISafeLabels.java");
     let source = aim_paths::root().join("java/device-services/src/dev/aim/server");
     run(Command::new(jdk.join("bin/javac"))
@@ -81,6 +88,8 @@ fn presentation_bridges_use_original_strings_and_check_the_system_uid() {
         .arg(aidl_output.join("dev/aim/server/ISettingsValues.java"))
         .arg(source.join("SafeLabels.java"))
         .arg(source.join("SettingsValues.java"))
+        .arg(aidl_output.join("dev/aim/server/IUserSwitcherPolicy.java"))
+        .arg(source.join("UserSwitcherPolicy.java"))
         .arg(source.join("Bridge.java")));
     // Shadows observe only the boundary; HTML and glyph layout stay in framework.jar.
     run(Command::new(jdk.join("bin/javac"))
@@ -100,4 +109,16 @@ fn presentation_bridges_use_original_strings_and_check_the_system_uid() {
         .arg("-cp")
         .arg(format!("{}:{}", classes.display(), stubs.display()))
         .arg("dev.aim.server.SettingsValuesTest"));
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&classes)
+        .arg("-cp")
+        .arg(format!("{}:{}", classes.display(), stubs.display()))
+        .args(sources(
+            &aim_paths::root().join("crates/aim-services/tests/fixtures/user_switcher"),
+        )));
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(format!("{}:{}", classes.display(), stubs.display()))
+        .arg("dev.aim.server.UserSwitcherPolicyTest"));
 }

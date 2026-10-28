@@ -195,6 +195,15 @@ impl Service for SystemProcess {
                         .map(|()| sp::write_attach_wifi_bridge_reply(&mut p))
                 })
             }
+            sp::ATTACH_USER_SWITCHER_POLICY => {
+                let a =
+                    sp::AttachUserSwitcherPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.attach_user_switcher_policy(a.policy)?;
+                    sp::write_attach_user_switcher_policy_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_DEVICE_POLICY_DEFAULTS => {
                 let a =
                     sp::AttachDevicePolicyDefaults::read(&mut call.data).map_err(|_| BAD_VALUE)?;
