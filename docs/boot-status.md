@@ -37,6 +37,7 @@ guest-init --image <derived> --data <data> --run \
 
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
+BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.

@@ -58,6 +58,12 @@ impl Service for SystemProcess {
                 let a = sp::AttachSystemProcess::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
                     self.host
+                        .battery_stats
+                        .get_or_init(|| {
+                            Arc::new(super::battery_stats::BatteryStats::new(&self.host))
+                        })
+                        .attach_health(a.battery_health_stats)?;
+                    self.host
                         .attach_foreground_service_policy(a.foreground_service_policy)?;
                     self.host
                         .attach_system_process(call, a.application_thread)

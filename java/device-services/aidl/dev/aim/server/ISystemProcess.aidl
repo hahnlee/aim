@@ -1,5 +1,6 @@
 package dev.aim.server;
 import dev.aim.server.IForegroundServicePolicy;
+import dev.aim.server.IBatteryHealthStats;
 
 /**
  * The app host's part of system_server for its system process
@@ -16,7 +17,7 @@ interface ISystemProcess {
      * system uid there and installs their providers in it
      * (`installSystemProviders`), as it runs an app's in an app's process.
      */
-    void attachSystemProcess(IBinder applicationThread, IForegroundServicePolicy foregroundServicePolicy);
+    void attachSystemProcess(IBinder applicationThread, IForegroundServicePolicy foregroundServicePolicy, IBatteryHealthStats batteryHealthStats);
 
     /**
      * TelecomLoaderService's `InternalServiceRepository` (an
