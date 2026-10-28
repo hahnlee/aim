@@ -431,6 +431,14 @@ mod tests {
         frame.extend_from_slice(b"hello");
         deliver(&frame).unwrap();
         for fd in [a.as_raw_fd(), b.as_raw_fd()] {
+            // Darwin's loopback queue can become readable after send_to returns.
+            let mut ready = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut ready, 1, 5000) }, 1);
+            assert_eq!(ready.revents, libc::POLLIN);
             let mut data = [0; 2];
             let v = [libc::iovec {
                 iov_base: data.as_mut_ptr().cast(),

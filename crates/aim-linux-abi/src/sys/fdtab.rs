@@ -952,7 +952,7 @@ pub(crate) fn isolated_kernel_test(name: &str) -> bool {
         .unwrap()
         .read_to_string(&mut output)
         .unwrap();
-    assert!(status.success(), "{name}: {output}");
+    assert!(status.success(), "{name}: {status}\n{output}");
     assert!(
         output.contains("1 passed"),
         "kernel fixture did not execute: {output}"
