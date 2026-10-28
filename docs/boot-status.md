@@ -86,6 +86,15 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The app host applies supported finishDrawing transactions to SurfaceFlinger,
+preserving buffers/fences, barriers, display/input state, cache operations and
+callbacks with the host's ordered apply token (#1431). It requests no BLAST
+sync; older and repeated draw seqIds still apply. WindowInfo and DisplayLuts
+payloads fail explicitly. Host parcel and Binder apply-path checks cover this
+change, using the captured original layer state plus constructed full parcels;
+a complete original Transaction oracle and guest validation remain unrun
+(2026-10-28; no guest boot).
+
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun).

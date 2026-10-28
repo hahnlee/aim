@@ -438,6 +438,49 @@ struct Session {
 }
 
 impl Session {
+    fn finish_drawing(&self, call: &mut Call<'_>) -> Result<(), String> {
+        let bad = |s| format!("finishDrawing parcel: {s}");
+        call.data.enforce_interface(ws::DESCRIPTOR).map_err(bad)?;
+        let window = call.data.read_binder().map_err(bad)?;
+        let draw = if call.data.read_bool().map_err(bad)? {
+            surface::DrawTransaction::read(&mut call.data, &self.host.process)
+                .map_err(|e| e.to_string())?
+        } else {
+            None
+        };
+        let seq_id = call.data.read_i32().map_err(bad)?;
+        if call.data.remaining() != 0 {
+            return Err("finishDrawing: trailing parcel data".into());
+        }
+        let Some(Binder::Handle(window)) = window else {
+            return Err("finishDrawing: no window".into());
+        };
+        let windows = self.host.windows.windows.lock().unwrap();
+        let Some(w) = windows.get(&window) else {
+            // WindowManagerService.windowForClientLocked: it was removed
+            // while the oneway completion was in flight.
+            return Ok(());
+        };
+        if w.uid != self.uid || w.pid != self.pid {
+            return Err("finishDrawing: window belongs to another session".into());
+        }
+        // WindowState.finishDrawing compares seqId with mPrepareSyncSeqId,
+        // not with the previous finishDrawing. This host never prepares a
+        // BLAST sync: relayout and WindowStateResizeItem report syncSeqId=-1.
+        // Thus even an older seqId merges into the pending transaction;
+        // no buffer may be dropped and no draw may complete a sync group.
+        // Keep the windows lock across submission so remove/relayout and
+        // concurrent completions preserve the window's transaction order.
+        if let Some(draw) = draw {
+            self.host
+                .composer()
+                .map_err(|e| format!("{e:?}"))?
+                .apply_draw(&draw)
+                .map_err(|e| format!("finishDrawing seqId={seq_id}: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// The window of a call whose first argument is its `IWindow`, and the
     /// call's trailing `int`s (after the layout parameters).
     fn window_and_tail(call: &mut Call<'_>, tail: usize) -> Result<(u32, Vec<i32>), i32> {
@@ -1319,9 +1362,16 @@ impl Service for Session {
                     p
                 }))
             }
-            // The window's buffers reach SurfaceFlinger through the app's
-            // own transactions; its draw transaction is not applied (#1431).
-            ws::FINISH_DRAWING | ws::SET_ON_BACK_INVOKED_CALLBACK_INFO => Ok(Parcel::new()),
+            ws::FINISH_DRAWING => {
+                // Oneway: Java cannot receive an exception, but unsupported
+                // fields and failed submissions must remain visible errors.
+                self.finish_drawing(call).map_err(|e| {
+                    eprintln!("app host: {e}");
+                    BAD_VALUE
+                })?;
+                Ok(Parcel::new())
+            }
+            ws::SET_ON_BACK_INVOKED_CALLBACK_INFO => Ok(Parcel::new()),
             // Oneway: WindowManager passes it to accessibility's
             // magnification (`AccessibilityController`), which no service
             // runs here.
@@ -1357,5 +1407,240 @@ mod tests {
         config.write_to(&mut expected);
         expected.write_i32(0);
         assert_eq!(p.data(), expected.data());
+    }
+
+    struct Recorder(
+        std::sync::mpsc::Sender<(Vec<u8>, Vec<u64>, bool)>,
+        Arc<std::sync::atomic::AtomicI32>,
+    );
+
+    impl Service for Recorder {
+        fn descriptor(&self) -> &str {
+            "android.ui.ISurfaceComposer"
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.code, 8);
+            let start = call.data.position();
+            call.data.skip(call.data.remaining())?;
+            let (bytes, objects) = call.data.since(start);
+            self.0
+                .send((bytes.to_vec(), objects, call.is_oneway()))
+                .unwrap();
+            // Native BnSurfaceComposer returns an empty body; errors are
+            // Binder status, not Java exception parcels.
+            match self.1.load(std::sync::atomic::Ordering::Relaxed) {
+                0 => Ok(Parcel::new()),
+                status => Err(status),
+            }
+        }
+    }
+
+    struct NoMemory;
+    impl aim_binder_driver::GuestProcess for NoMemory {
+        fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), i32> {
+            Err(libc::EFAULT)
+        }
+        fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), i32> {
+            Err(libc::EFAULT)
+        }
+        fn get_file(&mut self, _: u32) -> Result<aim_binder_driver::File, i32> {
+            Err(libc::EBADF)
+        }
+        fn install_file(&mut self, _: aim_binder_driver::File) -> Result<u32, i32> {
+            Err(libc::EBADF)
+        }
+        fn close_fd(&mut self, _: u32) {
+            unreachable!()
+        }
+    }
+
+    fn draw_request(draw: Option<&Parcel>, seq: i32) -> Parcel {
+        let mut p = Parcel::new();
+        p.write_interface_token(ws::DESCRIPTOR);
+        p.write_binder(Some(Binder::Handle(0)));
+        p.write_bool(draw.is_some());
+        if let Some(draw) = draw {
+            p.write_raw_files(draw.data(), draw.objects(), draw.files());
+        }
+        p.write_i32(seq);
+        p
+    }
+
+    #[test]
+    fn finish_drawing_submits_each_draw_without_a_blast_sync() {
+        use aim_binder_driver::{Credentials, Device, Driver, uapi::*};
+        use aim_binder_host::parcel::Reader;
+        use std::time::Duration;
+        let driver = Driver::new();
+        let process = aim_binder_host::local::LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 99131,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let remote = aim_binder_host::local::LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 99132,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let (send, receive) = std::sync::mpsc::channel();
+        let status = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let Binder::Local(ptr) = remote.add_service(Arc::new(Recorder(send, status.clone())))
+        else {
+            unreachable!()
+        };
+        let mut object = FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: FLAT_BINDER_FLAG_ACCEPTS_FDS,
+            binder: ptr,
+            cookie: ptr,
+        }
+        .encode();
+        // Register this process's mock as SurfaceFlinger's transaction service.
+        driver
+            .ioctl(
+                remote.proc_handle(),
+                99132,
+                BINDER_SET_CONTEXT_MGR_EXT,
+                &mut object,
+                &mut NoMemory,
+            )
+            .unwrap();
+        remote.start();
+        let host = AppHost::new(process.clone());
+        assert!(
+            host.composer
+                .set(surface::Composer::for_test(&process, 0))
+                .is_ok()
+        );
+        let frame = Rect {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        host.windows.windows.lock().unwrap().insert(
+            0,
+            Window {
+                _client: process.strong(0),
+                id: 1,
+                name: "test".into(),
+                uid: 10001,
+                pid: 42,
+                task: None,
+                activity: None,
+                parent: None,
+                attrs: LayoutParams::default(),
+                requested: (100, 100),
+                frames: Frames {
+                    frame,
+                    display: frame,
+                    parent: frame,
+                    attached: None,
+                },
+                channel: 0,
+                container: None,
+                layer: None,
+                frames_seq: FIRST_SEQ,
+                insets_seq: FIRST_SEQ,
+                requested_visible_types: 0,
+                window_id: None,
+            },
+        );
+        let session = Session {
+            host: host.clone(),
+            uid: 10001,
+            pid: 42,
+        };
+        let finish = |request: &Parcel| {
+            session.transact(&mut Call {
+                code: ws::FINISH_DRAWING,
+                flags: TF_ONE_WAY,
+                sender_pid: 42,
+                sender_euid: 10001,
+                data: request.reader(),
+            })
+        };
+        let draw = surface::draw_for_test();
+        let mut ids = Vec::new();
+        // No active sync: older, repeated and future seqIds must all apply.
+        for seq in [0, 9, 3, 3, i32::MAX] {
+            finish(&draw_request(Some(&draw), seq)).unwrap();
+            let (bytes, objects, one_way) = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(!one_way);
+            let mut r = Reader::new(&bytes, &objects);
+            r.enforce_interface("android.ui.ISurfaceComposer").unwrap();
+            ids.push(r.read_i64().unwrap());
+            assert_eq!(r.read_i32(), Ok(0));
+            assert_eq!(r.read_i64(), Ok(0));
+            assert_eq!(r.read_bool(), Ok(true));
+            // FrameTimelineInfo's presence and size (44).
+            assert_eq!(r.read_i32(), Ok(1));
+            assert_eq!(r.read_i32(), Ok(44));
+            r.skip(40).unwrap();
+            assert!(r.read_binder().unwrap().is_some());
+            assert_eq!(r.read_bool(), Ok(false));
+            assert_eq!(r.read_bool(), Ok(false));
+            assert_eq!(r.read_i32(), Ok(0)); // displays
+            assert_eq!(r.read_i32(), Ok(1)); // layer
+            assert!(r.read_binder().unwrap().is_some());
+            assert_eq!(r.read_i32(), Ok(7));
+            assert_eq!(r.read_i64(), Ok(1)); // position changed
+            assert_eq!(r.read_f32(), Ok(12.0));
+            assert_eq!(r.read_f32(), Ok(34.0));
+        }
+        assert!(ids.windows(2).all(|p| p[0] + 1 == p[1]));
+        finish(&draw_request(None, 10)).unwrap();
+        let mut closed = Parcel::new();
+        closed.write_i32(0);
+        finish(&draw_request(Some(&closed), 10)).unwrap();
+        assert!(receive.try_recv().is_err());
+        // Invalid parcels, including trailing data, cannot reach the composer.
+        let mut truncated = draw_request(Some(&closed), 11);
+        truncated.write_i32(99);
+        assert_eq!(finish(&truncated).err(), Some(BAD_VALUE));
+        let foreign = Session {
+            host: host.clone(),
+            uid: 10002,
+            pid: 43,
+        };
+        let request = draw_request(Some(&draw), 11);
+        assert!(
+            foreign
+                .finish_drawing(&mut Call {
+                    code: ws::FINISH_DRAWING,
+                    flags: TF_ONE_WAY,
+                    sender_pid: 43,
+                    sender_euid: 10002,
+                    data: request.reader()
+                })
+                .is_err()
+        );
+        let mut one_way = surface::draw_for_test();
+        one_way.set_i32_at(12, 0x20);
+        finish(&draw_request(Some(&one_way), 11)).unwrap();
+        assert!(receive.recv_timeout(Duration::from_secs(5)).unwrap().2);
+        status.store(
+            aim_binder_host::parcel::DEAD_OBJECT,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert_eq!(
+            finish(&draw_request(Some(&draw), 11)).err(),
+            Some(BAD_VALUE)
+        );
+        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        status.store(0, std::sync::atomic::Ordering::Relaxed);
+        host.windows.windows.lock().unwrap().remove(&0);
+        finish(&draw_request(Some(&draw), 11)).unwrap(); // removed during delivery
+        assert!(receive.try_recv().is_err());
+        process.shutdown().unwrap();
+        remote.shutdown().unwrap();
     }
 }
