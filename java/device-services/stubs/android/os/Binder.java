@@ -3,6 +3,7 @@
 package android.os;
 
 public class Binder implements IBinder {
+    public static void setWarnOnBlocking(boolean warnOnBlocking) { throw new RuntimeException("stub"); }
     public static IBinder allowBlocking(IBinder binder) { throw new RuntimeException("stub"); }
     public Binder() { throw new RuntimeException("stub"); }
     public static final UserHandle getCallingUserHandle() { throw new RuntimeException("stub"); }
