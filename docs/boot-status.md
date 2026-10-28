@@ -98,6 +98,15 @@ was run (2026-10-29).
 Permission-checker preflights read raw app-op modes with the attribution source tag/device; attributed delivery keeps evaluated checks (#1595; focused host tests, no guest boot).
 The native appops owner accepts user 0's setMode/setUidMode switch writes with permission checks, persisted defaults and the pinned started-op pause/resume rules; UID state changes split running access durations and restart paused event accounting without watcher callbacks (#1594). Other users and storage mode-change effects (#1455) remain unsupported (host tests only, no guest boot).
 Legacy network activity listeners register through the original RemoteCallbackList and hear the default network's activity.
+Connectivity diagnostics callbacks register in the system-UID Java bridge with
+Binder death/unregister cleanup, shared native request quotas and per-delivery
+permissions (#1509). The accepted Mac Ethernet uplink supplies cached `SKIPPED`
+reports with zero probes; new uplinks and explicit reevaluation publish fresh
+reports, while DNS-only changes retain the cached report. Agreeing connectivity
+reports notify only the reporter's matching permissioned callbacks; reevaluation
+notifies all matching permissioned callbacks before its fresh report. There is no
+data-stall detector. Host Binder/JVM tests and pinned-image Java linkage are
+checked; no guest boot or live Settings check was run (2026-10-29).
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
 The app host routes `lock_settings.generateKey` and `removeKey` through retained Android 16 Java and its original keystore owners with `RECOVER_KEYSTORE` checks (#1888; host tests, fresh-data app-host boot).

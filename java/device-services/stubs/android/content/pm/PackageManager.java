@@ -6,6 +6,7 @@ import android.os.UserHandle;
 
 public abstract class PackageManager {
     public ResolveInfo resolveActivity(android.content.Intent intent, int flags) { throw new RuntimeException("stub"); }
+    public java.util.List<ResolveInfo> queryIntentActivities(android.content.Intent intent, int flags) { throw new RuntimeException("stub"); }
     public static final String FEATURE_DEVICE_LOCK = "android.software.device_lock";
     public static final int MATCH_KNOWN_PACKAGES = 0x402000;
     public static final int MATCH_HIDDEN_UNTIL_INSTALLED_COMPONENTS=0x20000000, MATCH_DISABLED_UNTIL_USED_COMPONENTS=0x8000;

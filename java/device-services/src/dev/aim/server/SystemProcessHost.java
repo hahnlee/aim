@@ -124,7 +124,7 @@ public final class SystemProcessHost extends RuntimeInit {
             ISystemProcess host = ISystemProcess.Stub.asInterface(
                     ServiceManager.waitForService("aim.system_process"));
             host.attachNetworkActivityBridge(new NetworkActivityBridge(
-                    new Handler(Looper.getMainLooper())));
+                    context, new Handler(Looper.getMainLooper()), host));
             host.attachWifiBridge(new WifiBridge(new Handler(Looper.getMainLooper())));
             host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
             host.attachSettingsValues(new SettingsValues());

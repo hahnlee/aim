@@ -672,6 +672,14 @@ Its scalar `toString` calls use the original libcore formatting and object
 identity; the native provider retains validation, permissions and storage.
 This adds vendor classes only, without replacing original framework classes.
 
+Connectivity diagnostics (#1509) uses the existing system-UID network-activity
+bridge for the pinned ConnectivityService's callback policy and Binder lifetimes.
+The image's original NetworkCapabilities matching/redaction and ConnectivityReport
+parcelables run in Java; native connectivity owns the shared request quota and
+accepted Ethernet network. Without NetworkMonitor probes, that acceptance is
+reported as SKIPPED with zero probes, including explicit reevaluation. No
+data-stall events are invented. This adds vendor classes and AIDL methods only.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

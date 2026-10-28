@@ -7,6 +7,10 @@ import android.os.IBinder;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
 import android.util.Slog;
+import android.content.Context;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.LinkProperties;
 
 /**
  * ConnectivityService.LegacyNetworkActivityTracker (android-16.0.0_r1),
@@ -24,11 +28,36 @@ import android.util.Slog;
  */
 public final class NetworkActivityBridge extends INetworkActivityBridge.Stub {
     private final Handler mHandler;
+    private final ConnectivityDiagnostics mDiagnostics;
     private final RemoteCallbackList<INetworkActivityListener> mNetworkActivityListeners =
             new RemoteCallbackList<>();
 
-    public NetworkActivityBridge(Handler handler) {
+    public NetworkActivityBridge(Context context, Handler handler, ISystemProcess host) {
         mHandler = handler;
+        mDiagnostics = new ConnectivityDiagnostics(context, handler, host);
+    }
+
+    @Override public void registerDiagnostics(IBinder callback, NetworkCapabilities request,
+            int uid, int pid, int requestId) {
+        Bridge.enforceSystemUid();
+        mDiagnostics.register(callback, request, uid, pid, requestId);
+    }
+
+    @Override public void unregisterDiagnostics(IBinder callback, int uid) {
+        Bridge.enforceSystemUid();
+        mDiagnostics.unregister(callback, uid);
+    }
+
+    @Override public void onDiagnosticsNetworkChanged(Network network, LinkProperties properties,
+            NetworkCapabilities capabilities, long timestamp) {
+        Bridge.enforceSystemUid();
+        mHandler.post(() -> mDiagnostics.networkChanged(network, properties, capabilities, timestamp));
+    }
+
+    @Override public void onNetworkConnectivityReported(Network network, int uid, boolean connected,
+            boolean revalidating) {
+        Bridge.enforceSystemUid();
+        mHandler.post(() -> mDiagnostics.connectivityReported(network, uid, connected, revalidating));
     }
 
     @Override

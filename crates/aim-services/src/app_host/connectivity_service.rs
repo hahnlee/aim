@@ -16,7 +16,7 @@
 //! declares. The app host's apps are all top, so no firewall chain and
 //! no data saver blocks them; an app without INTERNET is blocked as the
 //! original blocks it. PendingIntent requests, reservations, agents,
-//! providers and offers, VPNs, keepalives, tethering, diagnostics and the
+//! providers and offers, VPNs, keepalives, tethering and the
 //! rest are not implemented (#1509).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -157,6 +157,7 @@ struct Net {
     id: i32,
     uplink: Uplink,
     dns: Vec<Ipv4Addr>,
+    accepted_at: i64,
 }
 
 /// The network's capabilities: `EthernetTracker.DEFAULT_CAPABILITIES`
@@ -443,6 +444,8 @@ struct State {
     requests: Vec<Nri>,
     /// `RequestInfoPerUidCounter`s: each uid's requests, by counter.
     counts: HashMap<(bool, i32), i32>,
+    diagnostics: HashMap<i32, (bool, i32)>,
+    bridge_epoch: u64,
 }
 
 impl State {
@@ -454,6 +457,8 @@ impl State {
             next_request_id: FIRST_REQUEST_ID,
             requests: Vec::new(),
             counts: HashMap::new(),
+            diagnostics: HashMap::new(),
+            bridge_epoch: 0,
         };
         state.follow(now);
         state
@@ -514,6 +519,7 @@ impl State {
                 id: self.next_net_id,
                 uplink,
                 dns,
+                accepted_at: super::clock_ms(libc::CLOCK_MONOTONIC_RAW),
             });
             self.next_net_id += 1;
             out.extend(self.satisfy());
@@ -662,7 +668,8 @@ pub struct ConnectivityService {
     shared: Arc<Shared>,
     /// The cold legacy activity API uses the original Java RemoteCallbackList
     /// in aim-system, not a second native callback registry.
-    activity: Mutex<Option<Arc<Strong>>>,
+    activity: Mutex<Option<(Arc<Strong>, u64)>>,
+    bridge_calls: Mutex<()>,
     /// netd and DnsResolver, once registered, and the network they were
     /// last given.
     native: Mutex<(
@@ -713,6 +720,7 @@ impl ConnectivityService {
                 changed: Condvar::new(),
             }),
             activity: Mutex::new(None),
+            bridge_calls: Mutex::new(()),
             native: Mutex::new((None, None)),
         }
     }
@@ -797,6 +805,7 @@ impl ConnectivityService {
             host,
             shared,
             activity: Mutex::new(None),
+            bridge_calls: Mutex::new(()),
             native: Mutex::new((None, None)),
         }
     }
@@ -814,8 +823,10 @@ impl ConnectivityService {
             self.deliver(&state, &callbacks);
             let new = state.network.as_ref().map(|n| n.id);
             if old != new {
-                if let Some(bridge) = self.activity.lock().unwrap().as_ref() {
-                    if let Err(e) = notify_activity(bridge, new.is_some()) {
+                if let Some((bridge, _)) = self.activity.lock().unwrap().as_ref() {
+                    if let Err(e) = notify_activity(bridge, new.is_some())
+                        .and_then(|()| self.notify_diagnostics_network(bridge, &state))
+                    {
                         eprintln!("app host: connectivity: network activity: {e:?}");
                     }
                 }
@@ -827,10 +838,120 @@ impl ConnectivityService {
     /// Called only by the system-uid attach endpoint. Serialize the initial
     /// default with follow(), before apps can use this registry.
     pub(super) fn attach_activity(&self, bridge: Strong) -> Result<(), Exception> {
-        let state = self.shared.state.lock().unwrap();
+        let _operation = self.bridge_calls.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap();
         notify_activity(&bridge, state.network.is_some())?;
-        *self.activity.lock().unwrap() = Some(Arc::new(bridge));
+        self.notify_diagnostics_network(&bridge, &state)?;
+        Self::clear_diagnostics(&mut state);
+        state.bridge_epoch += 1;
+        let epoch = state.bridge_epoch;
+        let weak = Arc::downgrade(&self.shared);
+        let death = self.host.process.link_to_death(
+            &bridge,
+            Box::new(move || {
+                if let Some(shared) = weak.upgrade() {
+                    let mut state = shared.state.lock().unwrap();
+                    if state.bridge_epoch == epoch {
+                        Self::clear_diagnostics(&mut state);
+                    }
+                }
+            }),
+        );
+        if let Some((old, death)) = self
+            .activity
+            .lock()
+            .unwrap()
+            .replace((Arc::new(bridge), death))
+        {
+            self.host.process.clear_death(&old, death);
+        }
         Ok(())
+    }
+
+    fn notify_diagnostics_network(&self, bridge: &Strong, state: &State) -> Result<(), Exception> {
+        let net = state.network.as_ref();
+        let network = net.map(|n| Network(n.id));
+        let properties = net.map(|n| self.link_properties(n)).transpose()?;
+        let capabilities = net.map(|_| network_capabilities());
+        let mut p = Parcel::new();
+        activity::OnDiagnosticsNetworkChanged {
+            network,
+            properties,
+            capabilities,
+            timestamp: net.map_or(0, |n| n.accepted_at),
+        }
+        .write(&mut p);
+        bridge
+            .transact(activity::ON_DIAGNOSTICS_NETWORK_CHANGED, &p, true)
+            .map(|_| ())
+            .map_err(activity_error)
+    }
+
+    fn clear_diagnostics(state: &mut State) {
+        for (_, key) in state.diagnostics.drain() {
+            *state.counts.get_mut(&key).unwrap() -= 1;
+        }
+    }
+
+    pub(super) fn release_diagnostics(&self, id: i32) {
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(key) = state.diagnostics.remove(&id) {
+            *state.counts.get_mut(&key).unwrap() -= 1;
+        }
+    }
+
+    fn register_diagnostics(
+        &self,
+        call: &Call<'_>,
+        a: cm::RegisterConnectivityDiagnosticsCallback<NetworkRequest>,
+    ) -> Result<(), Exception> {
+        let callback = a
+            .callback
+            .ok_or_else(|| Exception::new(EX_NULL_POINTER, "callback must not be null"))?;
+        let request = a
+            .request
+            .ok_or_else(|| Exception::new(EX_NULL_POINTER, "request must not be null"))?;
+        let package = a.calling_package_name.ok_or_else(|| {
+            Exception::new(EX_NULL_POINTER, "callingPackageName must not be null")
+        })?;
+        if request.legacy_type != TYPE_NONE {
+            return Err(Exception::illegal_argument(
+                "ConnectivityManager.TYPE_* are deprecated. Please use NetworkCapabilities instead.",
+            ));
+        }
+        let uid = call.sender_euid as i32;
+        self.check_package(uid, Some(&package))?;
+        let mut caps = request.caps;
+        let settings = self.has_any(uid, &[NETWORK_SETTINGS, MAINLINE_NETWORK_STACK])?;
+        restrict_uids_and_set_requestor(&mut caps, uid, Some(package), settings);
+        self.maybe_disable_local_network_matching(&mut caps, uid)?;
+        let system = self.has(uid, MAINLINE_NETWORK_STACK)?;
+        let _operation = self.bridge_calls.lock().unwrap();
+        let id = {
+            let mut state = self.shared.state.lock().unwrap();
+            let id = state.request_id();
+            state.admit(system, uid)?;
+            state.diagnostics.insert(id, (system, uid));
+            id
+        };
+        let mut p = Parcel::new();
+        activity::RegisterDiagnostics {
+            callback: Some(callback),
+            request: Some(caps),
+            uid,
+            pid: call.sender_pid,
+            request_id: id,
+        }
+        .write(&mut p);
+        let result = self.activity_call(
+            activity::REGISTER_DIAGNOSTICS,
+            &p,
+            activity::read_register_diagnostics_reply,
+        );
+        if result.is_err() {
+            self.release_diagnostics(id);
+        }
+        result.map(|_| ())
     }
 
     fn activity_call<T>(
@@ -841,12 +962,18 @@ impl ConnectivityService {
             &mut aim_binder_host::parcel::Reader<'_>,
         ) -> aim_binder_host::parcel::Result<aim_service_aidl::Returned<T>>,
     ) -> Result<T, Exception> {
-        let bridge = self.activity.lock().unwrap().clone().ok_or_else(|| {
-            self.host.unimplemented_named(
-                "connectivity",
-                "network activity before its system-process bridge attaches (#1509)",
-            )
-        })?;
+        let bridge = self
+            .activity
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(b, _)| b.clone())
+            .ok_or_else(|| {
+                self.host.unimplemented_named(
+                    "connectivity",
+                    "network activity before its system-process bridge attaches (#1509)",
+                )
+            })?;
         let reply = bridge.transact(code, data, false).map_err(activity_error)?;
         read(&mut reply.reader()).map_err(activity_error)?
     }
@@ -1889,10 +2016,40 @@ impl Service for ConnectivityService {
                 )
                 .map(|active| cm::write_is_default_network_active_reply(&mut p, active))
             }
-            // `reportNetworkConnectivity`: a report that agrees with the
-            // network's validation only goes to the connectivity diagnostics
-            // callbacks, which none registers; one that disagrees revalidates
-            // the network, which is not implemented.
+            cm::REGISTER_CONNECTIVITY_DIAGNOSTICS_CALLBACK => {
+                match cm::RegisterConnectivityDiagnosticsCallback::<NetworkRequest>::read(
+                    &mut call.data,
+                ) {
+                    Ok(a) => self.register_diagnostics(call, a).map(|()| {
+                        cm::write_register_connectivity_diagnostics_callback_reply(&mut p)
+                    }),
+                    Err(BAD_TYPE) => Err(unreadable(&self.host)),
+                    Err(s) => return Err(s),
+                }
+            }
+            cm::UNREGISTER_CONNECTIVITY_DIAGNOSTICS_CALLBACK => {
+                let a = cm::UnregisterConnectivityDiagnosticsCallback::read(&mut call.data)
+                    .map_err(bad)?;
+                (|| {
+                    let callback = a.callback.ok_or_else(|| {
+                        Exception::new(EX_NULL_POINTER, "callback must be non-null")
+                    })?;
+                    let _operation = self.bridge_calls.lock().unwrap();
+                    let mut data = Parcel::new();
+                    activity::UnregisterDiagnostics {
+                        callback: Some(callback),
+                        uid,
+                    }
+                    .write(&mut data);
+                    self.activity_call(
+                        activity::UNREGISTER_DIAGNOSTICS,
+                        &data,
+                        activity::read_unregister_diagnostics_reply,
+                    )?;
+                    cm::write_unregister_connectivity_diagnostics_callback_reply(&mut p);
+                    Ok(())
+                })()
+            }
             cm::REPORT_NETWORK_CONNECTIVITY => {
                 let a =
                     cm::ReportNetworkConnectivity::<Network>::read(&mut call.data).map_err(bad)?;
@@ -1903,21 +2060,38 @@ impl Service for ConnectivityService {
                             "ConnectivityService: Neither user {uid} nor current process has {INTERNET_PERMISSION}."
                         )));
                     }
-                    let known = match a.network.as_ref() {
-                        None => self.default_network().is_some(),
-                        Some(_) => self
-                            .shared
-                            .state
+                    let mut state = self.shared.state.lock().unwrap();
+                    let net = match a.network.as_ref() {
+                        None => state.network.as_ref(),
+                        Some(_) => state.net(a.network.as_ref()),
+                    };
+                    if let Some(net) = net {
+                        let mut data = Parcel::new();
+                        activity::OnNetworkConnectivityReported {
+                            network: Some(Network(net.id)),
+                            uid,
+                            connected: a.has_connectivity,
+                            revalidating: !a.has_connectivity,
+                        }
+                        .write(&mut data);
+                        let bridge = self
+                            .activity
                             .lock()
                             .unwrap()
-                            .net(a.network.as_ref())
-                            .is_some(),
-                    };
-                    if known && !a.has_connectivity {
-                        return Err(self.host.unimplemented_named(
-                            "connectivity",
-                            "revalidating a network an app reports without connectivity (#1509)",
-                        ));
+                            .as_ref()
+                            .map(|(b, _)| b.clone())
+                            .ok_or_else(|| activity_error(aim_binder_host::parcel::DEAD_OBJECT))?;
+                        bridge
+                            .transact(activity::ON_NETWORK_CONNECTIVITY_REPORTED, &data, true)
+                            .map_err(activity_error)?;
+                        if !a.has_connectivity {
+                            // This owner accepts the Mac uplink without active probes. As for
+                            // NetworkMonitor's validation-exempt networks, reevaluation completes
+                            // with SKIPPED; the reported event precedes the fresh report.
+                            state.network.as_mut().unwrap().accepted_at =
+                                super::clock_ms(libc::CLOCK_MONOTONIC_RAW);
+                            self.notify_diagnostics_network(&bridge, &state)?;
+                        }
                     }
                     cm::write_report_network_connectivity_reply(&mut p);
                     Ok(())
@@ -2092,6 +2266,9 @@ mod tests {
                 activity::ON_DEFAULT_NETWORK_CHANGED => {
                     let a = activity::OnDefaultNetworkChanged::read(&mut call.data)?;
                     self.0.send((call.code, None, a.available)).unwrap();
+                }
+                activity::ON_DIAGNOSTICS_NETWORK_CHANGED => {
+                    call.data.enforce_interface(activity::DESCRIPTOR)?;
                 }
                 _ => panic!("unexpected activity bridge call"),
             }
@@ -2588,3 +2765,7 @@ mod tests {
         assert_eq!(every.uids, None);
     }
 }
+
+#[cfg(test)]
+#[path = "connectivity_diagnostics_tests.rs"]
+mod diagnostics_tests;
