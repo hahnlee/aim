@@ -550,6 +550,8 @@ pub mod display {
         /// [`super::Window::text`], in a new task (or bring its task to the
         /// front).
         pub const LAUNCH: u32 = 19;
+        /// Server: expand a picture-in-picture task to its normal window.
+        pub const EXPAND_PIP: u32 = 20;
     }
 
     /// [`Window::orientation`] values.
