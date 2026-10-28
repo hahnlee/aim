@@ -584,6 +584,21 @@ into `StatsCompanionUidMap` in the existing vendor jar (#1765): the system-UID-o
 bridge starts them after the native handshake, querying the app host's published
 package/user state, with a receiver cohort per statsd generation and pipe/thread
 cleanup on death or failure; the native companion and original statsd stay in place.
+The same retained Java cohort now owns the original live `statsd_java` listener,
+configuration deletion history and dump text; the native dump endpoint checks the
+original caller's DUMP permission before crossing the system-UID bridge.
+The system process constructs the image's original
+`com.android.server.stats.pull.StatsPullAtomService`, calls `onStart` before
+AdServices, and delivers its boot phases in SystemServer order (500 initializes
+native/Java pullers; 600 initializes network statistics and deferred pullers).
+It loads the original `android_servers` JNI library before creating the system
+context. No StatsPullAtomService source is copied or replaced. Host lifecycle,
+original DEX registration-route and native statsmanager forwarding tests are
+separate checks, not a running-original integration result. Original callbacks
+still require ActivityManagerInternal and PinnerService local owners (and
+BatteryStatsInternal when its BPF/feature guards enable that pull); these are
+not installed in aim-system, so runtime pull coverage remains open under #1765.
+No guest boot was run.
 
 The cold `lock_settings.generateKey` and paired `removeKey` bodies are extracted
 from the pinned [RecoverableKeyStoreManager.java](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/locksettings/recoverablekeystore/RecoverableKeyStoreManager.java)

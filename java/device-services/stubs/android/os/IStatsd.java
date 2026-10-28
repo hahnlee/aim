@@ -6,6 +6,7 @@ public interface IStatsd extends IInterface {
             String installer, byte[] certificateHash) throws RemoteException;
     void informOnePackageRemoved(String name, int uid) throws RemoteException;
     void informDeviceShutdown() throws RemoteException;
+    void updateProperties(android.util.PropertyParcel[] properties) throws RemoteException;
     abstract class Stub extends Binder implements IStatsd {
         public static IStatsd asInterface(IBinder binder) { throw new RuntimeException("stub"); }
     }

@@ -54,7 +54,7 @@ Legacy network activity listeners register through the original RemoteCallbackLi
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
 The app host routes `lock_settings.generateKey` and `removeKey` through retained Android 16 Java and its original keystore owners with `RECOVER_KEYSTORE` checks (#1888; host tests, fresh-data app-host boot).
-statsd receives the UID map from the original StatsCompanionService code and its package, user and shutdown updates.
+statsd receives the retained Java UID map, receivers and live statsd_java updates, with a permission-checked deletion-history dump. aim-system starts the image's original StatsPullAtomService and delivers its boot phases; the fork is removed. A reported fresh-data boot died at phase 600's netstats `forceUpdate`; that native owner now polls its recorded UID counters and refreshes cached queries. The startup audit also finds uncaught `getUidStatsForTransport` when mobile aggregation is enabled; transport-associated accounting and ActivityManagerInternal/PinnerService local owners remain missing (#1765, #1671). Host checks pass; no guest boot was rerun, and the separately reported restart failure #2276 is unchanged.
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.
@@ -129,7 +129,7 @@ format, restores saved bounds before freeform placement on the recorded
 display, loads them when the user unlocks, and removes package records
 through the PackageList callback.
 
-The app host forwards cold netstats usage sessions (queries and `close`) and operation counts to retained Android 16 Java owners with the app's Binder identity, returning empty histories while no interface-associated snapshots are recorded (#1671; host checks and image linkage only, no guest boot).
+The app host forwards cold netstats usage sessions (queries and `close`) and operation counts to retained Android 16 Java owners with the app's Binder identity, returning empty histories while no interface-associated snapshots are recorded. Native `forceUpdate` checks NETWORK_STACK or MAINLINE_NETWORK_STACK as the original does, polls the live UID map, and refreshes resident query-cache entries; missing or invalid maps report errors (#1671, #1765).
 
 The app host’s cold MediaRouter2 system route and paired session queries use retained Android 16 Java policy and the original system provider through a system-UID bridge, including proxy permission checks; mirroring and other unserved manager operations remain explicit #1663 (host tests, image linkage, fresh-data app-host boot).
 

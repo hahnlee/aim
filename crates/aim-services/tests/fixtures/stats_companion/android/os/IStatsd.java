@@ -7,5 +7,6 @@ public interface IStatsd {
         String installer,byte[] hash) throws RemoteException;
     void informOnePackageRemoved(String name,int uid) throws RemoteException;
     void informDeviceShutdown() throws RemoteException;
+    void updateProperties(android.util.PropertyParcel[] properties) throws RemoteException;
     abstract class Stub { public static IStatsd asInterface(IBinder binder) { return (IStatsd)binder; } }
 }
