@@ -5,6 +5,14 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+Slice pins retain the native default-home lookup's exception code and cause
+instead of replacing them with a generic UnsupportedOperationException (#2362).
+Host Binder tests cover a non-home caller with zero, one and two HOME activities,
+stale preferred-home cleanup, system-home fallback and role/selection failures.
+Those ordinary HOME states already answered normally; the discarded cause of
+the reported post-app-open crash remains unknown. No guest boot was run
+(2026-10-29).
+
 Build freshness checks regular-file output fingerprints and includes the Rust
 AIDL generators as inputs, so restoring sources cannot leave an externally
 replaced runtime binary marked fresh (#1429). Host build-graph regressions pass;

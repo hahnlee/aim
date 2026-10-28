@@ -71,12 +71,19 @@ pub fn activities(
 }
 
 pub fn default_home(query: &Query<'_>, user: i32) -> Result<Option<ComponentName>, NotModelled> {
-    home_plan(query, user).map(|home| home.default_home())
+    home_plan(query, user)
+        .map(|home| home.default_home())
+        .map_err(|error| match error {
+            ActionError::Unavailable(error) => error,
+            ActionError::Exception(_) => {
+                NotModelled("native default-home lookup threw an exception")
+            }
+        })
 }
 
 /// `PackageManagerInternal.getHomeActivitiesAsUser`: the home activities
 /// and the default one among them, if any.
-pub fn home_plan(query: &Query<'_>, user: i32) -> Result<HomePlan, NotModelled> {
+pub fn home_plan(query: &Query<'_>, user: i32) -> Result<HomePlan, ActionError> {
     let owner = query
         .state
         .system
@@ -85,8 +92,5 @@ pub fn home_plan(query: &Query<'_>, user: i32) -> Result<HomePlan, NotModelled> 
         .ok_or(NotModelled("native default-home owner unavailable"))?;
     let resolution = Resolution::from_native_query(query)
         .map_err(|_| NotModelled("native default-home component owner unavailable"))?;
-    plan(query, &resolution, user, owner).map_err(|error| match error {
-        ActionError::Unavailable(error) => error,
-        ActionError::Exception(_) => NotModelled("native default-home lookup threw an exception"),
-    })
+    plan(query, &resolution, user, owner)
 }
