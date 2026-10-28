@@ -4,6 +4,7 @@ package android;
 
 public final class Manifest {
     public static final class permission {
+        public static final String DOMAIN_VERIFICATION_AGENT = "android.permission.DOMAIN_VERIFICATION_AGENT";
         public static final String UPDATE_DEVICE_STATS = "android.permission.UPDATE_DEVICE_STATS";
         public static final String REVOKE_RUNTIME_PERMISSIONS = "android.permission.REVOKE_RUNTIME_PERMISSIONS";
         public static final String INTERACT_ACROSS_USERS_FULL = "android.permission.INTERACT_ACROSS_USERS_FULL";
