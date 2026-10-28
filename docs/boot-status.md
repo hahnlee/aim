@@ -7,6 +7,10 @@ from.
 
 `linux-run` embeds the **AIM Runtime** macOS privacy identity and establishes its own process responsibility before initialization ([host privacy](host-privacy.md), #2190).
 
+ART and xsdc use the same pinned Temurin JDK as device services; both build
+keys include `upstream/java-toolchain.lock` (#530; integration gate with the
+rebuilt ART, 2026-10-28).
+
 Syscall user-memory copies and futex atomics initialize host fault recovery before direct arm64 accesses, including calls without guest context setup; exception-table fixups retry pager-owned faults and return EFAULT for invalid or concurrently revoked mappings (#495; host-buffer and fault-recovery unit checks, 2026-10-28).
 
 Socket-layer traffic accounting now fills netd's guest-only interface counters

@@ -3,13 +3,12 @@
 //! ApexInfoList.xsd. The checkout is `_build/xsdc`; the jar and its one
 //! dependency go to `target/aim/xsdc`.
 
-use super::repo;
+use super::{java, repo};
 use crate::fetch;
 use crate::graph::{Action, Node};
 use crate::hash;
 use crate::lockfile::Lock;
 use crate::log::Log;
-use crate::tools::{self, Tool};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -25,10 +24,10 @@ pub fn node() -> Node {
     Node {
         name: "xsdc".into(),
         deps: Vec::new(),
-        inputs: vec![repo(LOCK)],
+        inputs: vec![repo(LOCK), repo(java::LOCK)],
         outputs: vec![out().join("xsdc.jar"), out().join(COMMONS_CLI)],
-        tools: vec![Tool::Java],
-        recipe: 1,
+        tools: Vec::new(),
+        recipe: 2,
         action: Action::Xsdc,
         boot: true,
     }
@@ -106,7 +105,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "java"))
         .collect();
-    let jdk = tools::jdk()?;
+    let jdk = java::jdk(log)?;
     log.run(
         Command::new(jdk.join("bin/javac"))
             .args(["--release", "17", "-cp"])

@@ -33,9 +33,8 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
   NDK `28.2.13676358`, `build-tools/36.0.0` (its `aidl` is pinned by
   sha256 in `hal/sources.lock`) and, for aim-build's tests,
   `platforms/android-36`.
-- JDK 17 (Homebrew `openjdk@17`) for the ART build and xsdc, `python3`,
-  `git`, `curl`, `unzip`. The device services' toolchain is fetched
-  ("Java").
+- `python3`, `git`, `curl`, `unzip`. The pinned Java toolchain for ART,
+  xsdc and device services is fetched ("Java").
 - The pinned image archive in `_prebuilt` (`image/original.lock`).
 - For ANGLE only: an ANGLE checkout (fetched when missing, ~15 GB with its
   toolchain; see "ANGLE"), the system `ninja`, and the macOS SDK of
@@ -71,8 +70,8 @@ non-cargo stages are declared in code:
 | `image` | `host/android-image-extract`, `host/linux-translate` (order only) | `image/original.lock` | `_build/android16-image.dmg`, attached |
 | `aidl-gen` | `image` (order only) | `hal/sources.lock`, `daemons/sources.lock`, `crates/aim-services/sources.lock`, `image/original.lock`, `tools/lib/*.py`, AIDL crate manifests | `target/aim/gen/{hal,daemon,service}-aidl` |
 | `hal/<package>`, `daemon/<package>` | `image`; `aidl-gen` when a dependency's sources are generated or fetched | as `host/*` | `target/aim/{hal,daemons}/...` |
-| `xsdc` | | `upstream/android16-xsdc.lock` | `target/aim/xsdc` |
-| `art` | `xsdc`, `image` | `patches/art-android/*`, `tools/art-android/*`; found: n2's deps log | `target/aim/art/stripped` |
+| `xsdc` | | `upstream/android16-xsdc.lock`, `upstream/java-toolchain.lock` | `target/aim/xsdc` |
+| `art` | `xsdc`, `image` | `patches/art-android/*`, `tools/art-android/*`, `upstream/java-toolchain.lock`; found: n2's deps log | `target/aim/art/stripped` |
 | `boot-image` | `art`, `image`, `host/linux-run` (order only) | | `target/aim/boot-image/framework` |
 | `angle` | | `upstream/angle.lock`, `upstream/angle-args.gn` | `_build/angle-source/out/AimRelease` |
 | `moltenvk` | | `upstream/moltenvk.lock` | `target/aim/moltenvk` (`libMoltenVK.dylib`, `LICENSE`, `vk.xml`) |
@@ -115,8 +114,9 @@ table, and `image/overlay.toml` entries whose sources are its outputs
 
 A node's key is the sha256 of its recipe version (bumped in code when a
 node's recipe changes its output), the versions of the tools it runs
-(`rustc -vV`, the NDK's `source.properties`, the pinned `aidl`'s hash, JDK,
+(`rustc -vV`, the NDK's `source.properties`, the pinned `aidl`'s hash,
 Python, n2), the keys of its upstream nodes and the content of its inputs.
+Java nodes include `upstream/java-toolchain.lock` in their inputs.
 An order-only upstream is built first but is not part of the key: the boot
 image does not change with the syscall layer that runs dex2oat.
 
@@ -241,6 +241,8 @@ against its sha256 and unpacked into `_build/java`: a Temurin JDK 17
 (`javac`, and the runtime of d8 and apksigner), the SDK Build-Tools'
 d8, aapt2, apksigner and aidl, and AOSP's public test key. They are build
 tools; nothing of them is linked into the output or put in the image.
+ART and xsdc fetch the same pinned JDK without the SDK tools or test key;
+their keys include the lockfile, with no locally installed JDK probe.
 
 - `java/device-services/src` and the Java of its AIDL
   (`java/device-services/aidl`, whose Rust side `aidl-gen` generates,
