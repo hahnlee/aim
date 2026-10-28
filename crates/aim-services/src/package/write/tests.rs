@@ -306,10 +306,64 @@ fn the_original_s_exceptions() {
 
 #[test]
 fn another_package_s_protection_is_not_modelled() {
-    let writes = Writes::default();
-    writes.observe(&state(|_| {}), 0);
-    let a = answer(&writes, 1000, 1, Instant::now(), set(None, APP, 2));
-    assert!(matches!(a, Answer::NotModelled));
+    for protection in [BTreeMap::new(), BTreeMap::from([(10, (false, false))])] {
+        let writes = Writes::default();
+        writes.observe(
+            &state(|s| s.packages.get_mut(APP).unwrap().protection = protection),
+            0,
+        );
+        let a = answer(&writes, 1000, 1, Instant::now(), set(None, APP, 2));
+        assert!(matches!(a, Answer::NotModelled));
+    }
+}
+
+#[test]
+fn original_protection_decisions_guard_privileged_writes_and_allow_the_owner() {
+    // android-16.0.0_r1 PMS.setEnabledSettings: protection is checked only
+    // after permission/visibility, and only when the caller is not the target.
+    for class in [None, Some(MAIN)] {
+        for protected in [false, true] {
+            let writes = Writes::default();
+            let pre = state(|s| {
+                s.packages.get_mut(APP).unwrap().protection =
+                    BTreeMap::from([(0, (protected, protected)), (10, (!protected, true))]);
+                s.packages
+                    .get_mut(OTHER)
+                    .unwrap()
+                    .users
+                    .get_mut(&0)
+                    .unwrap()
+                    .granted_permissions
+                    .push("android.permission.CHANGE_COMPONENT_ENABLED_STATE".into());
+                s.platform.query_filtering_disabled = true;
+            });
+            writes.observe(&pre, 0);
+            let sent = Instant::now();
+            // A later policy publication must not replace the call's pre-state.
+            let mut later = (*pre).clone();
+            later
+                .packages
+                .get_mut(APP)
+                .unwrap()
+                .protection
+                .insert(0, (!protected, false));
+            writes.observe(&Arc::new(later), 0);
+            let expected = protected.then(|| {
+                (
+                    EX_SECURITY,
+                    format!("Cannot disable a protected package: {APP}"),
+                )
+            });
+            for uid in [1000, 10101] {
+                let reply = answer(&writes, uid, 1, sent, set(class, APP, 2));
+                assert_eq!(exception(&reply), expected);
+            }
+            assert_eq!(
+                exception(&answer(&writes, 10100, 2, sent, set(class, APP, 2))),
+                None
+            );
+        }
+    }
 }
 
 #[test]

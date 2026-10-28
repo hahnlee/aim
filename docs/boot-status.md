@@ -18,6 +18,12 @@ and interface name map alongside its per-UID counters (#224, #1720). Focused
 host checks cover tagged traffic, stats-map switching, CLAT exclusion and real
 UDP send/receive through pinned maps; no guest boot was run (2026-10-28).
 
+The original-PMS shadow feed captures per-package, per-user state/data protection
+through the original PackageManagerInternal (#754). The enabled-setting write
+model uses the captured pre-call state, including provisioning and DevicePolicy
+protection, and retains NotModelled when that input is absent. Focused host tests
+and pinned-image Java linkage pass; no guest boot was run (2026-10-28).
+
 ## How to reproduce
 
 ```

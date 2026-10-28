@@ -80,6 +80,8 @@ pub struct Platform {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageState {
     pub name: String,
+    /// Original ProtectedPackages state/data decisions, by user; absent without a capture.
+    pub protection: BTreeMap<i32, (bool, bool)>,
     pub app_id: i32,
     /// Raw SettingBase flags; absent in the legacy shadow feed.
     pub setting_flags: Option<(i32, i32)>,

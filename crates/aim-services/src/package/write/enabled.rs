@@ -119,7 +119,16 @@ pub fn decide(
     calling_pid: i32,
     current: &dyn Fn(&PackageState, i32) -> Enabled,
 ) -> Result<Result<Option<Enabled>, Exception>, NotModelled> {
-    decide_with_policy(q, s, calling_pid, current, None)
+    let policy = q
+        .state
+        .packages
+        .get(&s.package)
+        .and_then(|package| package.protection.get(&s.user))
+        .map(|&(protected, _)| Policy {
+            protected: Some(protected),
+            ..Policy::default()
+        });
+    decide_with_policy(q, s, calling_pid, current, policy)
 }
 pub fn decide_with_policy(
     q: &Query<'_>,

@@ -11,6 +11,7 @@ import android.content.pm.IPackageManager;
 import android.content.pm.InstallSourceInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageManagerInternal;
 import android.content.pm.PermissionGroupInfo;
 import android.content.pm.PermissionInfo;
 import android.content.pm.ProviderInfo;
@@ -45,6 +46,7 @@ import com.android.internal.pm.pkg.component.ParsedPermission;
 import com.android.internal.pm.pkg.component.ParsedComponent;
 import com.android.internal.pm.pkg.component.ParsedProvider;
 import com.android.server.LocalManagerRegistry;
+import com.android.server.LocalServices;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.parsing.PackageCacher;
 import com.android.server.pm.pkg.AndroidPackage;
@@ -107,6 +109,7 @@ final class PackageFeed extends IPackageFeed.Stub {
     private static final int SCAN_USERS = 12;
     private static final int APEX_INVENTORY = 13;
     private static final int SDK_SANDBOX_PACKAGE = 14;
+    private static final int PACKAGE_PROTECTION = 15;
     /** The largest chunk of a record in one transaction. */
     private static final int CHUNK = 128 * 1024;
     /** UserHandle.USER_ALL. */
@@ -268,12 +271,14 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
         TreeMap<Key, byte[]> records = new TreeMap<>();
         TreeSet<Integer> users = new TreeSet<>();
+        TreeSet<String> packages = new TreeSet<>();
         mDeclaredBefore = mDeclared;
         mDeclared = new IdentityHashMap<>();
         PackageManagerLocal local = LocalManagerRegistry.getManager(PackageManagerLocal.class);
         try (PackageManagerLocal.UnfilteredSnapshot snapshot = local.withUnfilteredSnapshot()) {
             mInstalledPermissions = installedPermissions(snapshot.getPackageStates().values());
             for (PackageState state : snapshot.getPackageStates().values()) {
+                packages.add(state.getPackageName());
                 add(records, users, PACKAGE, PARSED, state);
                 records.put(new Key(USER_SCOPE, state.getPackageName()), PackageUserScopeFeed.capture(state, null, false));
             }
@@ -289,6 +294,9 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
         for (int user : users) {
             records.put(new Key(USER, Integer.toString(user)), user(user));
+        }
+        for (String name : packages) {
+            records.put(new Key(PACKAGE_PROTECTION, name), protection(name, users));
         }
         records.put(new Key(SYSTEM, ""), system());
         records.put(new Key(SCAN_USERS, ""), PackageScanUsers.capture());
@@ -326,6 +334,22 @@ final class PackageFeed extends IPackageFeed.Stub {
         for (int i = 0; i < states.size(); i++) {
             users.add(states.keyAt(i));
         }
+    }
+
+    /** Original ProtectedPackages policy, including provisioning and live DevicePolicy owners. */
+    private byte[] protection(String name, Set<Integer> users) {
+        PackageManagerInternal pm = LocalServices.getService(PackageManagerInternal.class);
+        if (pm == null) {
+            throw new IllegalStateException("missing package protection owner");
+        }
+        return record(p -> {
+            p.writeInt(users.size());
+            for (int user : users) {
+                p.writeInt(user);
+                p.writeBoolean(pm.isPackageStateProtected(name, user));
+                p.writeBoolean(pm.isPackageDataProtected(user, name));
+            }
+        });
     }
 
     private static void put(IPackageFeedHost host, Key key, byte[] record) throws RemoteException {
