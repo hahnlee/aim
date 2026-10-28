@@ -73,6 +73,22 @@ def configure(name, source, options, out, env, jobs, install=True):
     stamp.write_text(key)
 
 
+def cmake_build_directory(name, source, out):
+    build = out / 'build' / name
+    cache = build / 'CMakeCache.txt'
+    if cache.exists():
+        entries = {}
+        for line in cache.read_text().splitlines():
+            entry, separator, value = line.partition('=')
+            if separator:
+                entries[entry.partition(':')[0]] = value
+        expected = {'CMAKE_CACHEFILE_DIR': build, 'CMAKE_HOME_DIRECTORY': source}
+        if any(entries.get(key) != str(path.resolve()) for key, path in expected.items()):
+            shutil.rmtree(build)
+    build.mkdir(parents=True, exist_ok=True)
+    return build
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=ROOT / 'target/aim/cts-host-tools')
@@ -114,12 +130,13 @@ def main():
     run(['make', '-j' + str(args.jobs), 'PREFIX=' + str(out / 'prefix'), 'install-static', 'install-pc', 'install-includes'],
         sources['zstd'] / 'lib', env)
     cmake = sources['cmake'] / 'CMake.app/Contents/bin/cmake'
-    run([cmake, '-S', sources['protobuf'], '-B', out / 'build/protobuf',
+    build = cmake_build_directory('protobuf', sources['protobuf'], out)
+    run([cmake, '-S', sources['protobuf'], '-B', build,
          '-DCMAKE_INSTALL_PREFIX=' + str(out / 'prefix'), '-Dprotobuf_BUILD_TESTS=OFF',
          '-Dprotobuf_BUILD_SHARED_LIBS=OFF', '-DCMAKE_BUILD_TYPE=Release',
          '-DCMAKE_CXX_FLAGS=-I' + str(sources['protobuf'] / 'config')], out, env)
-    run([cmake, '--build', out / 'build/protobuf', '--parallel', args.jobs], out, env)
-    run([cmake, '--install', out / 'build/protobuf'], out, env)
+    run([cmake, '--build', build, '--parallel', args.jobs], out, env)
+    run([cmake, '--install', build], out, env)
     configure('e2fsprogs', sources['e2fsprogs'], ['--disable-nls', '--disable-fsck', '--disable-e2fsck',
               '--disable-uuidd', '--disable-fuse2fs', '--enable-libuuid', '--enable-libblkid'], out, env, args.jobs, install=False)
     uuid = out / 'build/e2fsprogs/lib/uuid'
