@@ -182,7 +182,8 @@ mod boot_configuration_epoch {
         let replacement=fixture.attach();
         assert!(lifecycle.freeze("retired-owner".into()).is_err());
         assert!(fixture.system.check_package_bootstrap(&replacement).is_ok());
-        assert!(fixture.system.capture_package_queries().is_err());
+        assert!(Arc::ptr_eq(&released,&fixture.system.capture_package_queries().unwrap()));
+        assert!(fixture.system.capture_package_queries_for(&replacement).is_err());
     }
 
     #[test]
