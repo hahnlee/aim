@@ -630,8 +630,14 @@ impl Grants {
     /// `checkAuthorityGrantsLocked`: whether `uid` holds a grant of a URI
     /// of one of `cpi`'s authorities in `user` (in any, unless
     /// `check_user`).
-    fn authority_granted(&self, uid: i32, cpi: &ProviderInfo, user: i32, check_user: bool) -> bool {
-        let Some(authorities) = cpi.authority.as_deref() else {
+    fn authority_granted(
+        &self,
+        uid: i32,
+        authorities: Option<&str>,
+        user: i32,
+        check_user: bool,
+    ) -> bool {
+        let Some(authorities) = authorities else {
             return false;
         };
         self.0.get(&uid).is_some_and(|perms| {
@@ -1722,7 +1728,16 @@ impl AppHost {
         cpi: &ProviderInfo,
         user: i32,
     ) -> Result<bool, Exception> {
-        self.with_grants(|g| g.authority_granted(uid, cpi, user, true))
+        self.provider_authority_granted(uid, cpi.authority.as_deref(), user)
+    }
+
+    pub(super) fn provider_authority_granted(
+        &self,
+        uid: i32,
+        authority: Option<&str>,
+        user: i32,
+    ) -> Result<bool, Exception> {
+        self.with_grants(|g| g.authority_granted(uid, authority, user, true))
     }
 
     /// `ActivityManagerService.grantUriPermission`: the caller's process
@@ -2312,6 +2327,79 @@ mod tests {
                 assert!(hidden("q", 10100));
             });
         }
+    }
+
+
+    #[test]
+    fn package_provider_queries_use_live_authority_grants_and_user_scope() {
+        use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
+        crate::system::with_discovery_session(|host, _, _| {
+            let leaf = super::super::package_bootstrap::PackageBootstrap::new(host.clone());
+            let (state, _) = host.packages().unwrap();
+            let ps = &state.packages["p"];
+            let mut provider = crate::package::info::generate_provider_info(
+                &crate::package::info::Target {
+                    sys: &state.system,
+                    pkg: ps.pkg.as_ref().unwrap(),
+                    ps,
+                    state: &ps.users[&0],
+                    user: 0,
+                },
+                &crate::package::pkg::Provider::default(),
+                0,
+                None,
+            )
+            .unwrap();
+            *host.uri_grants.grants.lock().unwrap() = Some(granted(
+                &grant_uri("content://a.b/x", 0),
+                READ,
+                Some(Owner::Activity(7)),
+            ));
+            for (uid, user, authority, expected) in [
+                (10001, 0, "a.b", true),
+                (10001, 0, "other;a.b", true),
+                (10001, 10, "a.b", false),
+                (1010001, 0, "a.b", false),
+                (10001, 0, "other", false),
+            ] {
+                let mut data = Parcel::new();
+                provider.authority = Some(authority.into());
+                bridge::CheckProviderAuthorityGrants {
+                    calling_uid: uid,
+                    user_id: user,
+                    provider_info: Some(provider.clone()),
+                }
+                .write(&mut data);
+                for sender in [1000, 10100] {
+                    let response = leaf
+                        .transact(&mut Call {
+                            code: bridge::CHECK_PROVIDER_AUTHORITY_GRANTS,
+                            flags: 0,
+                            sender_pid: 77,
+                            sender_euid: sender,
+                            data: data.reader(),
+                        })
+                        .unwrap();
+                    let answer =
+                        bridge::read_check_provider_authority_grants_reply(&mut response.reader())
+                            .unwrap();
+                    if sender == 1000 {
+                        assert_eq!(answer.unwrap(), expected);
+                    } else {
+                        assert_eq!(
+                            answer.unwrap_err().code,
+                            aim_binder_host::parcel::EX_SECURITY
+                        );
+                    }
+                }
+            }
+            host.with_grants(|g| g.release(Owner::Activity(7))).unwrap();
+            assert!(
+                !host
+                    .provider_authority_granted(10001, Some("a.b"), 0)
+                    .unwrap()
+            );
+        });
     }
 
     #[test]

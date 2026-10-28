@@ -1,7 +1,9 @@
 package android.os;
 public final class UserManager {
+    public static android.content.pm.UserInfo info;
+    public static int requested;
     public android.content.pm.UserInfo getUserInfo(int user) {
-        if (user != 0) throw new AssertionError(user);
-        return null;
+        requested = user;
+        return info;
     }
 }

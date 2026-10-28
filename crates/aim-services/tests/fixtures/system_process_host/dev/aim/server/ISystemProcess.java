@@ -9,6 +9,8 @@ interface ISystemProcess {
     void attachDevicePolicyDefaults(DevicePolicyDefaults defaults);
     void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys);
     void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries);
+    void attachProviderQueries(ProviderQueries queries);
+    void attachSettingsValues(SettingsValues values);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     abstract class Stub {
         public static ISystemProcess asInterface(IBinder binder) {
@@ -19,6 +21,10 @@ interface ISystemProcess {
                     SystemProcessHostTest.events.add("attachDomain");
                 }
                 public void attachWifiBridge(WifiBridge bridge) {}
+                public void attachSettingsValues(SettingsValues values) {}
+                public void attachProviderQueries(ProviderQueries queries) {
+                    ProviderQueriesTest.check(queries);
+                }
                 public void attachDevicePolicyDefaults(DevicePolicyDefaults defaults) {}
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
                 public void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries) {}

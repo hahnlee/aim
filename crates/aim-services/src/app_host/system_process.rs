@@ -54,6 +54,15 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+
+            sp::ATTACH_PROVIDER_QUERIES => {
+                let a = sp::AttachProviderQueries::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.attach_provider_queries(a.queries)?;
+                    sp::write_attach_provider_queries_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::GET_ACTIVITY_STATS_HOST => {
                 let a = sp::GetActivityStatsHost::read(&mut call.data)?;
                 system()
