@@ -150,6 +150,7 @@ definitions; it does not start the role controller. `device_policy` serves
 Java policy readers over the retained engine XML, including a resolved disabled
 global policy (#1521). Host tests and pinned-image Java linkage cover these
 reads; no guest boot was run (2026-10-29).
+The app host initializes camera privacy's allowlist from original Java SystemConfig and serves its permission-checked queries and updates; AppOps applies the software camera privacy state per package on automotive images while retaining global hardware restrictions (#1563; host tests and pinned-image Java linkage, no guest boot, 2026-10-28).
 The native appops owner accepts user 0's setMode/setUidMode switch writes with permission checks, persisted defaults and the pinned started-op pause/resume rules; other users (#1594) and storage mode-change effects (#1455) remain unsupported (host tests only, no guest boot).
 The permission owner also grants and revokes development permissions through
 its existing transaction path, persisting their flags and publishing the UID's

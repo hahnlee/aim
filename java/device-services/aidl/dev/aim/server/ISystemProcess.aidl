@@ -76,4 +76,6 @@ interface ISystemProcess {
     boolean filterSyncAdapterPackageAccess(String packageName, int uid, int userId);
     /** Synchronous write of the live native CompilerStats; system UID only. */
     void writePackageCompilerStats();
+    /** Initial camera privacy allowlist from original SystemConfig; system UID only. */
+    void initializeCameraPrivacyAllowlist(in List<String> packages);
 }

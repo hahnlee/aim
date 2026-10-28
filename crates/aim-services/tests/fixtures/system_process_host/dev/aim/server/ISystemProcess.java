@@ -15,6 +15,7 @@ interface ISystemProcess {
     void attachProviderQueries(ProviderQueries queries);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     void attachStorageCrates(StorageCrates crates);
+    void initializeCameraPrivacyAllowlist(java.util.List<String> packages);
     void attachAudioPolicyQueries(AudioPolicyQueries queries);
     void attachSyncAdapterQueries(SyncAdapterQueries queries);
     abstract class Stub {
@@ -40,6 +41,9 @@ interface ISystemProcess {
                     SystemProcessHostTest.events.add("staging");
                 }
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
+                public void initializeCameraPrivacyAllowlist(java.util.List<String> packages) {
+                    if (packages == null) throw new AssertionError("missing camera privacy allowlist");
+                }
                 public void attachAudioPolicyQueries(AudioPolicyQueries queries) {
                     if (queries == null) throw new AssertionError("missing audio policy owner");
                 }

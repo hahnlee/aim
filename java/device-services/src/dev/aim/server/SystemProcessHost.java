@@ -141,6 +141,8 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachNativeStagingBridge(new com.android.server.pm.NativeStagingBridge());
             host.attachAudioPolicyQueries(new AudioPolicyQueries());
             host.attachSyncAdapterQueries(new SyncAdapterQueries(context, host));
+            host.initializeCameraPrivacyAllowlist(new ArrayList<>(
+                    com.android.server.SystemConfig.getInstance().getCameraPrivacyAllowlist()));
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
             PreBootNotifications.publish(context);
             host.attachSystemProcess(applicationThread.asBinder(),

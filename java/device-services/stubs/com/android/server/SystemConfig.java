@@ -10,6 +10,7 @@ public class SystemConfig {
     public ArraySet<String> getBgRestrictionExemption() { throw new RuntimeException("stub"); }
     public ArraySet<String> getLinkedApps() { throw new RuntimeException("stub"); }
     public static SystemConfig getInstance() { throw new RuntimeException("stub"); }
+    public ArraySet<String> getCameraPrivacyAllowlist() { throw new RuntimeException("stub"); }
     public String getSystemAppUpdateOwnerPackageName(String packageName) { throw new RuntimeException("stub"); }
     public ArrayMap<String, Integer> getOemDefinedUids() { throw new RuntimeException("stub"); }
     public java.util.Set<String> getInitialNonStoppedSystemPackages() { throw new RuntimeException("stub"); }
