@@ -1400,6 +1400,67 @@ impl Service for AudioService {
                 }
                 audio::write_is_spatializer_enabled_reply(&mut p, false);
             }
+            audio::IS_SPATIALIZER_AVAILABLE_FOR_DEVICE => {
+                let a = audio::IsSpatializerAvailableForDevice::<DeviceAttributes>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
+                let result = (|| {
+                    let permission = "android.permission.MODIFY_DEFAULT_AUDIO_EFFECTS";
+                    if !host.granted(permission, uid)? {
+                        return Err(Exception::security(format!("Requires {permission}")));
+                    }
+                    a.device
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "device"))?;
+                    // The HAL's effect factory exposes no effects (docs/audio.md).
+                    // SpatializerHelper.init cannot enable either spatialization mode;
+                    // isSADevice therefore rejects even persisted inventory entries.
+                    audio::write_is_spatializer_available_for_device_reply(&mut p, false);
+                    Ok(p)
+                })();
+                return reply(result);
+            }
+            audio::GET_AUDIO_PRODUCT_STRATEGIES => {
+                audio::GetAudioProductStrategies::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply((|| {
+                    if !host.granted(MODIFY_AUDIO_ROUTING, uid)? {
+                        return Err(Exception::security(format!(
+                            "Requires {MODIFY_AUDIO_ROUTING}"
+                        )));
+                    }
+                    use aim_service_aidl::dev_aim_server_iaudiopolicyqueries as queries;
+                    let owner = host
+                        .audio_policy_queries
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "audio policy queries not attached",
+                            )
+                        })?;
+                    let mut data = Parcel::new();
+                    queries::GetAudioProductStrategies {}.write(&mut data);
+                    let result = owner
+                        .transact_as_owner(queries::GET_AUDIO_PRODUCT_STRATEGIES, &data, false)
+                        .map_err(|s| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                format!("audio policy query: {s:?}"),
+                            )
+                        })?;
+                    let bytes =
+                        queries::read_get_audio_product_strategies_reply(&mut result.reader())
+                            .map_err(|_| Exception::illegal_argument("audio policy query reply"))??
+                            .ok_or_else(|| {
+                                Exception::new(EX_NULL_POINTER, "audio product strategies")
+                            })?;
+                    p.write_no_exception();
+                    p.write_raw(&bytes, &[]);
+                    Ok(p)
+                })());
+            }
             audio::GET_AVAILABLE_COMMUNICATION_DEVICE_IDS => {
                 audio::GetAvailableCommunicationDeviceIds::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

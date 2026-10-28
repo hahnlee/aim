@@ -151,6 +151,7 @@ reports notify only the reporter's matching permissioned callbacks; reevaluation
 notifies all matching permissioned callbacks before its fresh report. There is no
 data-stall detector. Host Binder/JVM tests and pinned-image Java linkage are
 checked; no guest boot or live Settings check was run (2026-10-29).
+The audio owner serves product strategies through the original Java AudioProductStrategy and audioserver policy configuration, with MODIFY_AUDIO_ROUTING checks. Its device spatializer query checks MODIFY_DEFAULT_AUDIO_EFFECTS and rejects null devices; the HAL has no effects or supported spatialization modes, so availability is false. ContentService's sync-adapter type reads retain the original SyncAdaptersCache's package-scan metadata, UID ownership, persistence and package-change receivers, and filter packages for the Binder caller; cross-user reads require INTERACT_ACROSS_USERS_FULL (#1460). Focused native/JVM tests and pinned-image Java linkage pass; no guest boot was run (2026-10-29).
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
 The app host routes `lock_settings.generateKey` and `removeKey` through retained Android 16 Java and its original keystore owners with `RECOVER_KEYSTORE` checks (#1888; host tests, fresh-data app-host boot).

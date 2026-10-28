@@ -6,7 +6,9 @@
 //! is ActivityManager's `checkContentProviderAccess`. Sync adapters
 //! (SyncManager) are not run (#1460): of SyncStorageEngine there are the
 //! master sync settings it persisted (`/data/system/sync/accounts.xml`)
-//! and its status listeners, which no sync's progress notifies.
+//! and its status listeners, which no sync's progress notifies. Adapter
+//! discovery retains the original SyncAdaptersCache in the system-UID
+//! Java process, including package-change receivers and UID ownership.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -812,6 +814,54 @@ impl Service for ContentService {
                     p.write_i32(0);
                     p
                 }))
+            }
+            cs::GET_SYNC_ADAPTER_TYPES_AS_USER | cs::GET_SYNC_ADAPTER_TYPES => {
+                let uid = call.sender_euid as i32;
+                let user = if call.code == cs::GET_SYNC_ADAPTER_TYPES_AS_USER {
+                    cs::GetSyncAdapterTypesAsUser::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .user_id
+                } else {
+                    cs::GetSyncAdapterTypes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    uid / PER_USER_RANGE as i32
+                };
+                reply((|| {
+                    if uid / PER_USER_RANGE as i32 != user {
+                        self.enforce(
+                            uid,
+                            "android.permission.INTERACT_ACROSS_USERS_FULL",
+                            &format!("no permission to read sync settings for user {user}"),
+                        )?;
+                    }
+                    use aim_service_aidl::dev_aim_server_isyncadapterqueries as queries;
+                    let owner = self
+                        .host
+                        .sync_adapter_queries
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| {
+                            Exception::new(EX_ILLEGAL_STATE, "sync adapter queries not attached")
+                        })?;
+                    let mut data = Parcel::new();
+                    queries::GetSyncAdapterTypes {
+                        calling_uid: uid,
+                        user_id: user,
+                    }
+                    .write(&mut data);
+                    let result = owner
+                        .transact_as_owner(queries::GET_SYNC_ADAPTER_TYPES, &data, false)
+                        .map_err(|s| {
+                            Exception::new(EX_ILLEGAL_STATE, format!("sync adapter query: {s:?}"))
+                        })?;
+                    let bytes = queries::read_get_sync_adapter_types_reply(&mut result.reader())
+                        .map_err(|_| Exception::illegal_argument("sync adapter query reply"))??
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "sync adapter types"))?;
+                    let mut p = Parcel::new();
+                    p.write_no_exception();
+                    p.write_raw(&bytes, &[]);
+                    Ok(p)
+                })())
             }
             cs::SYNC => {
                 let a = cs::Sync::<SyncRequest>::read(&mut call.data).map_err(|_| BAD_VALUE)?;

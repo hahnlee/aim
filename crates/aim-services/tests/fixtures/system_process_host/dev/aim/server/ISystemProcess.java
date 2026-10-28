@@ -15,6 +15,8 @@ interface ISystemProcess {
     void attachProviderQueries(ProviderQueries queries);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     void attachStorageCrates(StorageCrates crates);
+    void attachAudioPolicyQueries(AudioPolicyQueries queries);
+    void attachSyncAdapterQueries(SyncAdapterQueries queries);
     abstract class Stub {
         public static ISystemProcess asInterface(IBinder binder) {
             return new ISystemProcess() {
@@ -38,6 +40,12 @@ interface ISystemProcess {
                     SystemProcessHostTest.events.add("staging");
                 }
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
+                public void attachAudioPolicyQueries(AudioPolicyQueries queries) {
+                    if (queries == null) throw new AssertionError("missing audio policy owner");
+                }
+                public void attachSyncAdapterQueries(SyncAdapterQueries queries) {
+                    if (queries == null) throw new AssertionError("missing sync adapter owner");
+                }
                 public void attachStorageCrates(StorageCrates crates) {
                     if (crates == null) throw new AssertionError("missing storage crates");
                     SystemProcessHostTest.events.add("crates");
