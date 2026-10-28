@@ -13,6 +13,15 @@ rebuilt ART, 2026-10-28).
 
 Syscall user-memory copies and futex atomics initialize host fault recovery before direct arm64 accesses, including calls without guest context setup; exception-table fixups retry pager-owned faults and return EFAULT for invalid or concurrently revoked mappings (#495; host-buffer and fault-recovery unit checks, 2026-10-28).
 
+Regular-file opens serialize with creation through the actual parent inode until
+guest ownership and mode are recorded (#2288). A boot-free test with the pinned
+SQLite and original bionic reproduced a concurrent uid-1017 `O_RDWR|O_CREAT`
+open returning EACCES while the creator's host inode still appeared root-owned;
+SQLite's succeeding `O_RDONLY` retry made the connection read-only. The Rust
+publication test and 200 fresh-database rounds (direct and in-memory/attached
+connections, including a directory alias) pass after the fix. No guest boot was
+run (2026-10-28).
+
 Socket-layer traffic accounting now fills netd's guest-only interface counters
 and interface name map alongside its per-UID counters (#224, #1720). Focused
 host checks cover tagged traffic, stats-map switching, CLAT exclusion and real

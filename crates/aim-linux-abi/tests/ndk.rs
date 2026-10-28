@@ -211,6 +211,23 @@ fn files() {
     check("t_fs", &["/data/local/tmp"]);
 }
 
+#[test]
+fn sqlite_concurrent_create() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_sqlite_create");
+    g.map(
+        "/data/sqlite-alias",
+        &g.runtime.join("data/local/tmp/sqlite-create"),
+    );
+    let prog = g.build(&clang, "t_sqlite_create");
+    let (ok, out) = g.run(&[&prog]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "{out}");
+}
+
 /// Broker transport follows the last device description, including _exit.
 #[test]
 fn fuse_transport_lifetime() {
