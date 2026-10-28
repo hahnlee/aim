@@ -1280,8 +1280,32 @@ pub fn after_fork_child() -> Result<(), crate::errno::Errno> {
     super::display::init();
     super::host_descriptors::init();
     epoll::after_fork_child()?;
-    inotify::after_fork_child();
+    inotify::after_fork_child()?;
     event::after_fork_child();
+    Ok(())
+}
+
+/// Install a borrowed kqueue on its reserved child slot, preserving errors
+/// before the caller releases a temporary source descriptor.
+pub(super) fn restore_kqueue(
+    fd: i32,
+    source: i32,
+    cloexec: bool,
+) -> Result<(), crate::errno::Errno> {
+    // SAFETY: descriptor operations do not dereference guest memory.
+    unsafe {
+        if source != fd && libc::dup2(source, fd) < 0 {
+            return Err(crate::errno::last());
+        }
+        if libc::fcntl(
+            fd,
+            libc::F_SETFD,
+            if cloexec { libc::FD_CLOEXEC } else { 0 },
+        ) < 0
+        {
+            return Err(crate::errno::last());
+        }
+    }
     Ok(())
 }
 

@@ -1528,7 +1528,7 @@ fn become_child(h: Handover) -> String {
     if !state::restore(&mut r) {
         if let Some(error) = r.owner_error() {
             return format!(
-                "fork child: POSIX owner admission errno={error} ({})",
+                "fork child: owner restore errno={error} ({})",
                 r.diagnostic()
             );
         }

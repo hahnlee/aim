@@ -891,16 +891,14 @@ fn rebuild(epolls: Vec<(i32, Arc<Epoll>)>) -> Result<(), errno::Errno> {
                 None => libc::kqueue(),
             };
             if kq < 0 {
-                continue;
+                return Err(errno::last());
             }
-            if kq != fd {
-                libc::dup2(kq, fd);
-                if src.is_none() {
-                    libc::close(kq);
-                }
+            let result = fdtab::restore_kqueue(fd, kq, ep.cloexec);
+            if kq != fd && src.is_none() {
+                libc::close(kq);
             }
+            result?;
         }
-        fdtab::set_flags(fd, false, ep.cloexec);
         if src.is_none() {
             made.push((fd, ep));
         }
