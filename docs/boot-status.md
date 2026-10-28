@@ -88,6 +88,7 @@ guest-init --image <derived> --data <data> --run \
 
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
 Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHORTCUTS or its package is user 0's HOME role holder; package-scoped queries retain their events (#1870; host tests only, no guest boot rerun).
+`aimctl open` checks user readiness before opening a window shim, so an open during app-host startup returns the booting error before showing its splash (#1875; host regression, no guest boot rerun).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun).
 The native appops owner accepts user 0's setMode/setUidMode switch writes with permission checks, persisted defaults and the pinned started-op pause/resume rules; other users (#1594) and storage mode-change effects (#1455) remain unsupported (host tests only, no guest boot).
