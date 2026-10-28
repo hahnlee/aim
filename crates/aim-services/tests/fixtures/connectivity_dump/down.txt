@@ -1,0 +1,47 @@
+NetworkProviders for:
+  1: EthernetNetworkFactory
+
+Active default network: none
+
+Current network preferences: 
+  Error: profile/OEM/default network preferences owner unavailable in app host (#2333)
+
+Current Networks:
+
+Status for known UIDs:
+  UID=10100 blockedReasons=100
+  Error: NetworkPolicyManager firewall/data saver blocked reasons owner unavailable in app host (#2333)
+
+Network Requests:
+  uid/pid:10100/42 activeRequest: null callbackRequest: 7 [NetworkRequest [ REQUEST id=7, [ Capabilities: INTERNET ] ]] callback flags: 0 order: 2147483647 isUidTracked: true declaredMethods: ALL
+
+Network Offers:
+
+mLegacyTypeTracker:
+  Supported types: 9 17
+  Current state:
+
+
+KeepaliveTracker:
+  Error: KeepaliveTracker owner unavailable in app host (#2333)
+
+Error: MultinetworkPolicyTracker avoid bad Wi-Fi settings owner unavailable in app host (#2333)
+
+Error: ConnectivityService socket destruction policy owner unavailable in app host (#2333)
+
+Error: ConnectivityService BPF program status owner unavailable in app host (#2333)
+
+Error: CarrierPrivilegeAuthenticator owner unavailable in app host (#2333)
+
+
+
+Permission Monitor:
+  Error: PermissionMonitor owner unavailable in app host (#2333)
+
+Legacy network activity:
+  mIsDefaultNetworkActive=true
+  Error: NetworkActivityTracker cellular/Wi-Fi idle timers owner unavailable in app host (#2333)
+
+Error: MulticastRoutingCoordinatorService owner unavailable in app host (#2333)
+Error: ConnectivityService background firewall chain owner unavailable in app host (#2333)
+Error: ConnectivityService ingress-to-VPN filtering owner unavailable in app host (#2333)

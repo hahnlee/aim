@@ -67,7 +67,7 @@ fn connectivity_dump_exact_output() {
         let at = text.rfind('}').unwrap();
         text.insert_str(
             at,
-            "public static String text; public String toString() { return text; }\n",
+            "public static String text; public String value; public String toString() { return value == null ? text : value; }\n",
         );
         let path = dir.join(format!("{name}.java"));
         fs::write(&path, text).unwrap();

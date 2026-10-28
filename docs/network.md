@@ -25,6 +25,20 @@ writes.
 | `android.hardware.ethernet` | `image/vendor/etc/permissions/android.hardware.ethernet.xml` |
 | NDK tests | `crates/aim-linux-abi/tests/ndk/t_netif.c`, `t_netwatch.c`, `t_ipv6.c` |
 
+The app host's native connectivity owner presents the same Ethernet capabilities
+without starting EthernetService. It owns the `EthernetNetworkFactory` provider
+(the first provider ID), retaining it across outages, and registers its offer
+only while the uplink is present, as `updateLinkState` does at android-16.0.0_r1.
+The offer's needed set follows matching requests, excluding listens and default
+tracking. Agent and offer use NetworkScore's default policies/keep-connected
+reason; FullScore adds the observed validation/evaluation and unmetered policies.
+Registration uses wall time, connection and validation use elapsed realtime,
+and netd creation is recorded at successful `networkCreate`, independently of
+later resolver setup. Validation times describe acceptance of the host uplink
+(diagnostics reports `SKIPPED`), with no invented probe events. DNS changes keep
+the lifecycle; reevaluation updates only the latest validation time. These fields
+travel in the typed dump snapshot for the pinned Java formatting (#2333).
+
 ## Bring-up
 
 ```text
