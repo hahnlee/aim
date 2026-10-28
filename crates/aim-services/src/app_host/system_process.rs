@@ -152,6 +152,28 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::ATTACH_SYSTEM_ROUTE_QUERIES => {
+                let a =
+                    sp::AttachSystemRouteQueries::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let owner = match a.queries {
+                        Some(Binder::Handle(h)) => crate::system::ServiceOwner::Remote(Arc::new(
+                            self.host.process.strong(h),
+                        )),
+                        Some(Binder::Local(ptr)) => crate::system::ServiceOwner::Local(
+                            self.host.process.local_service(ptr).ok_or_else(|| {
+                                Exception::new(EX_NULL_POINTER, "system route queries gone")
+                            })?,
+                        ),
+                        None => {
+                            return Err(Exception::new(EX_NULL_POINTER, "system route queries"));
+                        }
+                    };
+                    *self.host.system_route_queries.lock().unwrap() = Some(Arc::new(owner));
+                    sp::write_attach_system_route_queries_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::IS_DOMAIN_VERIFIER => {
                 let a = sp::IsDomainVerifier::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

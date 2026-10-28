@@ -46,4 +46,6 @@ interface ISystemProcess {
     void attachDevicePolicyDefaults(IBinder defaults);
     /** Attach the cold original recoverable-key owner; system UID only (#1888). */
     void attachRecoverableKeyStoreKeys(IRecoverableKeyStoreKeys keys);
+    /** Retained MediaRouter2 system route/session queries; system UID only. */
+    void attachSystemRouteQueries(IBinder queries);
 }

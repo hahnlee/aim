@@ -3,6 +3,7 @@
 package android.os;
 
 public final class Parcel {
+    public <T extends Parcelable> void writeTypedList(java.util.List<T> list) { throw new RuntimeException("stub"); }
     public boolean pushAllowFds(boolean allow) { throw new RuntimeException("stub"); }
     public void restoreAllowFds(boolean previous) { throw new RuntimeException("stub"); }
     public void writeParcelable(Parcelable value, int flags) { throw new RuntimeException("stub"); }

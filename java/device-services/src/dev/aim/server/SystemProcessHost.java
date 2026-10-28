@@ -125,6 +125,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSystemProcess(applicationThread.asBinder(),
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));
+            host.attachSystemRouteQueries(new com.android.server.media.SystemRouteQueries(context));
             host.attachStatsCompanionUidMap(new StatsCompanionUidMap(context));
             host.attachRecoverableKeyStoreKeys(new RecoverableKeyStoreKeys(context));
             // ZygoteInit's class loader of the standalone jar

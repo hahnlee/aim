@@ -125,6 +125,8 @@ through the PackageList callback.
 
 The app host forwards cold netstats usage sessions (queries and `close`) and operation counts to retained Android 16 Java owners with the app's Binder identity, returning empty histories while no interface-associated snapshots are recorded (#1671; host checks and image linkage only, no guest boot).
 
+The app host’s cold MediaRouter2 system route and paired session queries use retained Android 16 Java policy and the original system provider through a system-UID bridge, including proxy permission checks; mirroring and other unserved manager operations remain explicit #1663 (host tests, image linkage, fresh-data app-host boot).
+
 In window mode (2026-10-19), Files draws its Downloads root and Photos its
 home with its terms-of-service dialog: their launcher activities start the
 real one in a new task, which now answers the launch, so the window's

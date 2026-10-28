@@ -18,6 +18,7 @@ use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_UNSUPPORTED_OPERATION, Excep
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_media_imediarouter2 as router2;
 use aim_service_aidl::android_media_imediarouterservice as mr;
+use aim_service_aidl::dev_aim_server_isystemroutequeries as queries;
 
 use super::activity_user;
 use super::media_route_providers::{Providers, Told, visible};
@@ -46,6 +47,7 @@ struct Client {
     binder: Strong,
     death: u64,
     uid: i32,
+    package: String,
     /// Its `UserRecord`'s user.
     user: i32,
     trusted: bool,
@@ -195,6 +197,7 @@ impl MediaRouter {
                 binder,
                 death,
                 uid,
+                package: package.unwrap(),
                 user,
                 trusted,
                 route_types: 0,
@@ -318,6 +321,89 @@ impl MediaRouter {
             self.host.process.clear_death(&r.binder, r.death);
             self.providers.update_discovery(r.user);
         }
+    }
+
+    fn validate_query_package(&self, uid: i32, package: &Option<String>) -> Result<(), Exception> {
+        if let Some(package) = package {
+            // MediaRouterService.validatePackageName uses getPackagesForUid,
+            // including installed-user state and isolated/SDK UID resolution.
+            let (state, resolution) = self.host.packages()?;
+            let query = crate::package::query::Query {
+                state: &state,
+                filter: &resolution.apps_filter,
+                calling_uid: super::SYSTEM_UID as i32,
+            };
+            let names = query.packages_for_uid(uid).map_err(|e| {
+                self.host.unimplemented_named(
+                    "media_router",
+                    &format!("getPackagesForUid: {} (#1663)", e.0),
+                )
+            })?;
+            if names
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|name| &name == package)
+            {
+                return Ok(());
+            }
+        }
+        Err(Exception::security(
+            "callerPackageName does not match calling uid.",
+        ))
+    }
+
+    fn query_session(
+        &self,
+        call: &Call<'_>,
+        caller: Option<String>,
+        target: Option<String>,
+        selected: bool,
+    ) -> Result<Parcel, Exception> {
+        let mut data = Parcel::new();
+        queries::GetSystemSessionInfo {
+            uid: call.sender_euid as i32,
+            pid: call.sender_pid as i32,
+            caller_package_name: caller,
+            target_package_name: target,
+            set_device_route_selected: selected,
+        }
+        .write(&mut data);
+        self.query(queries::GET_SYSTEM_SESSION_INFO, &data)
+    }
+
+    /// Cold policy and parcelables stay in the system process's original Java scope.
+    fn query(&self, code: u32, data: &Parcel) -> Result<Parcel, Exception> {
+        let owner = self
+            .host
+            .system_route_queries
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                self.host.unimplemented_named(
+                    "media_router",
+                    "system route queries not attached (#1663)",
+                )
+            })?;
+        let result = owner.transact_as_owner(code, data, false).map_err(|e| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("system route queries (#1663): {e:?}"),
+            )
+        })?;
+        let bytes = match code {
+            queries::GET_SYSTEM_ROUTES => {
+                queries::read_get_system_routes_reply(&mut result.reader())
+            }
+            _ => queries::read_get_system_session_info_reply(&mut result.reader()),
+        }
+        .map_err(|e| Exception::illegal_argument(format!("system route queries: {e:?}")))??
+        .ok_or_else(|| Exception::illegal_argument("null system route query result"))?;
+        let mut p = Parcel::new();
+        p.write_no_exception();
+        p.write_raw(&bytes, &[]);
+        Ok(p)
     }
 
     fn unregister(&self, handle: u32) {
@@ -470,34 +556,63 @@ impl Service for MediaRouter {
                     Ok(())
                 })()
             }
-            // `MediaRouterService.getSystemRoutes`: of the caller's own
-            // package (`validatePackageName`); a proxy router's is not
-            // implemented.
             mr::GET_SYSTEM_ROUTES => {
                 let a = mr::GetSystemRoutes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let uid = call.sender_euid as i32;
-                (|| {
-                    let package = a.caller_package_name.as_deref().unwrap_or_default();
-                    if a.caller_package_name.is_none() || !self.host.owns_package(uid, package)? {
-                        return Err(Exception::security(
-                            "callerPackageName does not match calling uid.",
-                        ));
-                    }
-                    if a.is_proxy_router {
-                        return Err(self.host.unimplemented_named(
-                            "media_router",
-                            "a proxy router's system routes (#1663)",
-                        ));
-                    }
-                    let routes: Vec<_> = self
-                        .host
-                        .media_router2_system_routes(uid)?
-                        .into_iter()
-                        .map(Some)
-                        .collect();
-                    mr::write_get_system_routes_reply(&mut p, Some(&routes[..]));
-                    Ok(())
-                })()
+                self.validate_query_package(call.sender_euid as i32, &a.caller_package_name)
+                    .and_then(|()| {
+                        let mut data = Parcel::new();
+                        queries::GetSystemRoutes {
+                            uid: call.sender_euid as i32,
+                            pid: call.sender_pid as i32,
+                            caller_package_name: a.caller_package_name,
+                            is_proxy_router: a.is_proxy_router,
+                        }
+                        .write(&mut data);
+                        self.query(queries::GET_SYSTEM_ROUTES, &data)
+                    })
+                    .map(|result| p = result)
+            }
+            mr::GET_SYSTEM_SESSION_INFO_FOR_PACKAGE => {
+                let a = mr::GetSystemSessionInfoForPackage::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.validate_query_package(call.sender_euid as i32, &a.caller_package_name)
+                    .and_then(|()| {
+                        let user = call.sender_euid as i32 / PER_USER_RANGE as i32;
+                        // MediaRouterService.getSystemSessionInfoForPackage: any v1
+                        // client of this user/package explicitly selecting the default.
+                        let selected_routes: Vec<_> = self
+                            .clients
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .filter(|c| {
+                                c.user == user && Some(&c.package) == a.target_package_name.as_ref()
+                            })
+                            .filter_map(|c| c.selected_route.clone())
+                            .collect();
+                        let selected = if selected_routes.is_empty() {
+                            false
+                        } else {
+                            let default = self
+                                .host
+                                .framework()?
+                                .framework_string("default_audio_route_id")
+                                .ok_or_else(|| {
+                                    Exception::new(
+                                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                        "no default_audio_route_id",
+                                    )
+                                })?;
+                            selected_routes.contains(&default)
+                        };
+                        self.query_session(
+                            call,
+                            a.caller_package_name,
+                            a.target_package_name,
+                            selected,
+                        )
+                    })
+                    .map(|result| p = result)
             }
             mr::REGISTER_ROUTER2 => {
                 let a = mr::RegisterRouter2::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -529,9 +644,8 @@ impl Service for MediaRouter {
             }
             mr::GET_SYSTEM_SESSION_INFO => {
                 mr::GetSystemSessionInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.host
-                    .media_router2_system_session(call.sender_euid as i32)
-                    .map(|s| mr::write_get_system_session_info_reply(&mut p, Some(&s)))
+                self.query_session(call, None, None, false)
+                    .map(|result| p = result)
             }
             code => Err(self.host.unimplemented_named(
                 "media_router",
@@ -547,3 +661,7 @@ impl Service for MediaRouter {
         reply(result.map(|()| p))
     }
 }
+
+#[cfg(test)]
+#[path = "media_router_tests.rs"]
+mod tests;
