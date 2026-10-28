@@ -758,12 +758,7 @@ impl AppWidgetService {
             .or_else(|| text(1, app.label_res))
             .or_else(|| item.name.clone())
             .unwrap_or_default();
-        info.label = Some(safe_label(&unsafe_label).ok_or_else(|| {
-            self.host.unimplemented_named(
-                "appwidget",
-                &format!("the safe label of {unsafe_label:?} (#1855)"),
-            )
-        })?);
+        info.label = Some(self.host.safe_label(&unsafe_label)?);
         // `ComponentInfo.getIconResource`.
         info.icon = if item.icon != 0 { item.icon } else { app.icon };
         Ok(Some(info))
@@ -1099,34 +1094,6 @@ fn read_provider_info(a: &TypedArray, package: &str) -> Persisted {
         description_res: a.resource_id("description", 0),
         extended_from_app_widget_provider: false,
     }
-}
-
-/// `TextUtils.makeSafeForPresentation(label, 1000, 1000, TRIM |
-/// FIRST_LINE)` of a label it leaves as it is: one line without HTML
-/// markup, control characters or white space to collapse or trim, of at
-/// most 20 characters each at most an em wide, so that at the 42 px the
-/// ellipsizing assumes it fits 1000 px; none for any other, which needs
-/// `Html.fromHtml` and the system font's measures (#1855).
-fn safe_label(label: &str) -> Option<String> {
-    let narrow = |c: char| {
-        (c as u32) < 0x0370
-            || ('\u{3040}'..='\u{30ff}').contains(&c)
-            || ('\u{3130}'..='\u{318f}').contains(&c)
-            || ('\u{4e00}'..='\u{9fff}').contains(&c)
-            || ('\u{ac00}'..='\u{d7a3}').contains(&c)
-    };
-    let plain = !label.is_empty()
-        && label.chars().count() <= 20
-        && !label.starts_with(' ')
-        && !label.ends_with(' ')
-        && !label.contains("  ")
-        && label.chars().all(|c| {
-            narrow(c)
-                && !c.is_control()
-                && !matches!(c, '<' | '>' | '&')
-                && (c == ' ' || !c.is_whitespace())
-        });
-    plain.then(|| label.to_string())
 }
 
 /// `ComponentName.flattenToShortString`.
@@ -1673,27 +1640,6 @@ mod tests {
             ),
             (3, WIDGET_CATEGORY_HOME_SCREEN, 5, -1, 0)
         );
-    }
-
-    /// The labels `makeSafeForPresentation` leaves as they are, and those
-    /// it would change, which are not taken.
-    #[test]
-    fn plain_labels_are_their_safe_labels() {
-        assert_eq!(safe_label("Clock").as_deref(), Some("Clock"));
-        assert_eq!(safe_label("디지털 시계").as_deref(), Some("디지털 시계"));
-        for label in [
-            "",
-            " Clock",
-            "Clock ",
-            "a  b",
-            "a\nb",
-            "a&amp;b",
-            "<b>x</b>",
-            "an extremely long widget label",
-            "🙂",
-        ] {
-            assert_eq!(safe_label(label), None, "{label:?}");
-        }
     }
 
     #[test]

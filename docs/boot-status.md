@@ -35,6 +35,7 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The app host delegates appwidget provider safe labels to the retained `TextUtils.makeSafeForPresentation` in its system-UID process (#1855; host boundary/transport tests and pinned-image linkage, no guest boot).
 The app host uses original Java foreground-service type policy and time-limit accounting with native shortService and time-limited deadlines, onTimeout callbacks and ANR termination (#1552, #1551; host tests and pinned-image linkage, no guest boot).
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
