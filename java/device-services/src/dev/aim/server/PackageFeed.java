@@ -42,6 +42,7 @@ import android.util.SparseArray;
 import com.android.internal.compat.IPlatformCompat;
 import com.android.internal.pm.parsing.pkg.ParsedPackage;
 import com.android.internal.pm.pkg.component.ParsedPermission;
+import com.android.internal.pm.pkg.component.ParsedComponent;
 import com.android.internal.pm.pkg.component.ParsedProvider;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.pm.PackageManagerLocal;
@@ -49,7 +50,9 @@ import com.android.server.pm.parsing.PackageCacher;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.ArchiveState;
 import com.android.server.pm.pkg.PackageState;
+import com.android.server.pm.pkg.PackageStateInternal;
 import com.android.server.pm.pkg.PackageUserState;
+import com.android.server.pm.pkg.PackageUserStateInternal;
 import com.android.server.pm.pkg.SharedUserApi;
 
 import java.io.File;
@@ -417,7 +420,8 @@ final class PackageFeed extends IPackageFeed.Stub {
                     s.isPageSizeAppCompatEnabled(), s.isPendingRestore(), s.isPersistent(),
                     s.isPrivileged(), s.isProduct(), s.isRequiredForSystemUser(),
                     s.isScannedAsStoppedSystemApp(), s.isSystem(), s.isSystemExt(),
-                    s.isUpdateAvailable(), s.isUpdatedSystemApp(), s.isVendor()));
+                    s.isUpdateAvailable(), s.isUpdatedSystemApp(), s.isVendor(),
+                    ((PackageStateInternal) s).isLoading()));
             PackageMimeGroups.write(p, s.getMimeGroups());
             String[] staticLibraries = s.getUsesStaticLibraries();
             long[] staticVersions = s.getUsesStaticLibrariesVersions();
@@ -451,6 +455,7 @@ final class PackageFeed extends IPackageFeed.Stub {
             for (int i = 0; i < users.size(); i++) {
                 p.writeInt(users.keyAt(i));
                 userState(p, users.valueAt(i), s.getPackageName(), users.keyAt(i));
+                labelIconOverrides(p, users.valueAt(i), s.getAndroidPackage());
             }
             uriRelativeFilterGroups(p, s.getPackageName(), users);
             p.writeBoolean(filterApplicationQuery(s));
@@ -769,6 +774,30 @@ final class PackageFeed extends IPackageFeed.Stub {
 
     private static String path(Path path) {
         return path == null ? null : path.toString();
+    }
+
+    /** Read the original user's override for every ComponentInfo the model can generate. */
+    private static void labelIconOverrides(Parcel p, PackageUserState user, AndroidPackage pkg) {
+        TreeMap<String, android.util.Pair<String, Integer>> overrides = new TreeMap<>();
+        if (pkg != null) {
+            PackageUserStateInternal internal = (PackageUserStateInternal) user;
+            for (List<? extends ParsedComponent> components : List.of(pkg.getActivities(),
+                    pkg.getReceivers(), pkg.getServices(), pkg.getProviders())) {
+                for (ParsedComponent component : components) {
+                    var value = internal.getOverrideLabelIconForComponent(
+                            new ComponentName(pkg.getPackageName(), component.getName()));
+                    if (value != null) overrides.put(component.getName(), value);
+                }
+            }
+        }
+        p.writeInt(overrides.size());
+        for (var entry : overrides.entrySet()) {
+            p.writeString(entry.getKey());
+            p.writeString(entry.getValue().first);
+            Integer icon = entry.getValue().second;
+            p.writeBoolean(icon != null);
+            if (icon != null) p.writeInt(icon);
+        }
     }
 
     /** getDomainVerificationUserState in `userId`; null where not visible. */

@@ -5940,8 +5940,13 @@ linkage passes (4.19s, including the shared-process producer dependency fix
 window boot reaches sys.boot_completed at 6.729s and generation 74 contains
 290 user scopes, zero factory aliases, 16 shared-process aggregates and 290
 runtime owners, with no feed errors or remaining owned processes/probe mounts.
-This source feed does not export full raw user values or component label maps
-(#862), and native daemon bootstrap remains unwired. Legacy domain migration
+The query feed captures the original Java loading getter and declared
+components' per-user label/icon overrides (#716). Sixteen focused feed tests
+cover publication, clearing, null/zero values and malformed override rejection;
+device-services builds with original-image API linkage (2026-10-28). No guest
+boot or CTS was run for this change. Full raw user values and component-map
+allocation remain outside this query feed (#862), and native daemon bootstrap
+remains unwired. Legacy domain migration
 inputs now stay in the restrictions reader separately from PackageUserState
 values (#876); the resolver reads that separate inventory. They no longer
 participate in user alias equality/copying or user-state snapshot transport.

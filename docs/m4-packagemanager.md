@@ -1011,10 +1011,12 @@ nothing.
   digest, else asks for every record again. A batch follows each package
   monitor callback; `Feed::fresh`, before a comparison, reads the nonce
   and, when it moved, asks for one (one-way, with a token the batch
-  ends with) and waits for it. Nothing reads what only the internal
-  interfaces hold: part of the install source (#714), the persistent
-  preferred activities and cross-profile filters (#715), component label
-  and icon overrides and the loading state (#716).
+  ends with) and waits for it. The Java feed reads the original internal
+  loading getter and each declared activity/receiver/service/provider's
+  per-user label/icon override (#716), preserving nullable labels/icons
+  and zero icons. Persistent preferred activities and cross-profile filters
+  come from each user's last persisted restrictions (#715), with the
+  original write delay. Part of the install source remains unavailable (#714).
 - **The comparison.** guest-init's binder driver, given `--binder-shadow
   package,package_native` (a diagnostic CLI option, like
   `--binder-trace`), hands the service host a copy of each transaction
