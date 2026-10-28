@@ -40,6 +40,7 @@ User 0's unlock time is recorded and returned; device_policy answers ManagedProv
 Legacy network activity listeners register through the original RemoteCallbackList and hear the default network's activity.
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
+The app host routes `lock_settings.generateKey` and `removeKey` through retained Android 16 Java and its original keystore owners with `RECOVER_KEYSTORE` checks (#1888; host tests only, no guest boot rerun).
 statsd receives the UID map from the original StatsCompanionService code and its package, user and shutdown updates.
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.

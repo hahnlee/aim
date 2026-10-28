@@ -3,6 +3,7 @@ import dev.aim.server.IForegroundServicePolicy;
 import dev.aim.server.IBatteryHealthStats;
 import dev.aim.server.ISafeLabels;
 import dev.aim.server.IStatsCompanionUidMap;
+import dev.aim.server.IRecoverableKeyStoreKeys;
 
 /**
  * The app host's part of system_server for its system process
@@ -39,4 +40,6 @@ interface ISystemProcess {
     IBinder getDomainVerificationBackend();
     void attachDomainVerification(IBinder frontend);
     boolean isDomainVerifier(int uid);
+    /** Attach the cold original recoverable-key owner; system UID only (#1888). */
+    void attachRecoverableKeyStoreKeys(IRecoverableKeyStoreKeys keys);
 }

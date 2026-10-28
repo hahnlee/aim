@@ -577,6 +577,15 @@ bridge starts them after the native handshake, querying the app host's published
 package/user state, with a receiver cohort per statsd generation and pipe/thread
 cleanup on death or failure; the native companion and original statsd stay in place.
 
+The cold `lock_settings.generateKey` and paired `removeKey` bodies are extracted
+from the pinned [RecoverableKeyStoreManager.java](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r1/services/core/java/com/android/server/locksettings/recoverablekeystore/RecoverableKeyStoreManager.java)
+into `RecoverableKeyStoreKeys` in the existing vendor jar (#1888): the native
+endpoint checks `RECOVER_KEYSTORE` and forwards the authenticated caller UID over
+a system-UID-only bridge; the original platform-key, wrapping, database, cleanup
+and application-key classes run in `aim-system` against the existing keystore2.
+Only this pair is exposed; the remaining missing recovery operations retain their
+explicit UnsupportedOperation naming #1888.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

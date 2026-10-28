@@ -13,8 +13,8 @@
 //! never has a snapshot to take, which needs the lock screen's knowledge
 //! factor. Tying a profile's lock to its parent's, the special users'
 //! credentials (FRP, repair mode), strong auth, escrow tokens, the
-//! agents' keys' generation, import and removal (the platform key) and
-//! the rest of recovery are not implemented (#1888).
+//! agents' keys' import and the rest of recovery are not implemented (#1888).
+//! Cold key generation and removal use retained original Java in aim-system.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -28,6 +28,7 @@ use aim_binder_host::parcel::{
     Exception, Parcel,
 };
 use aim_service_aidl::com_android_internal_widget_ilocksettings as ls;
+use aim_service_aidl::dev_aim_server_irecoverablekeystorekeys as keys;
 use aim_service_aidl::{
     ParcelValue, ReadParcelable, WriteParcelable, android_system_keystore2_ikeystoreservice as ks,
 };
@@ -553,6 +554,37 @@ pub struct LockSettings {
     snapshot_listeners: Mutex<HashMap<i32, Strong>>,
 }
 
+impl AppHost {
+    pub(super) fn attach_recoverable_keys(
+        self: &Arc<Self>,
+        owner: Option<Binder>,
+    ) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = owner else {
+            return Err(Exception::illegal_argument("no recoverable-key bridge"));
+        };
+        let strong = Arc::new(self.process.strong(handle));
+        let owner = Arc::new(crate::system::ServiceOwner::Remote(strong.clone()));
+        let weak_host = Arc::downgrade(self);
+        let weak_owner = Arc::downgrade(&owner);
+        self.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(host) = weak_host.upgrade() {
+                    let mut current = host.recoverable_keys.lock().unwrap();
+                    if current
+                        .as_ref()
+                        .is_some_and(|o| weak_owner.ptr_eq(&Arc::downgrade(o)))
+                    {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        *self.recoverable_keys.lock().unwrap() = Some(owner);
+        Ok(())
+    }
+}
+
 impl LockSettings {
     pub fn new(host: Arc<AppHost>) -> Self {
         LockSettings {
@@ -789,16 +821,22 @@ impl LockSettings {
         })
     }
 
-    /// `checkRecoverKeyStorePermission` for the agent `uid`:
-    /// RECOVER_KEYSTORE, and its user registered
-    /// (`CleanupManager.registerRecoveryAgent`, which records the user's
-    /// serial number once). The keystore's database, open.
-    fn check_recovery_agent(&self, uid: i32) -> Result<(Connection, PathBuf), Exception> {
+    /// `checkRecoverKeyStorePermission` before invoking a recovery owner.
+    fn enforce_recover_keystore(&self, uid: i32) -> Result<(), Exception> {
         if self.host.check_permission(Some(RECOVER_KEYSTORE), uid)? != 0 {
             return Err(Exception::security(format!(
                 "Caller {uid} doesn't have RecoverKeyStore permission.: Neither user {uid} nor current process has {RECOVER_KEYSTORE}."
             )));
         }
+        Ok(())
+    }
+
+    /// `checkRecoverKeyStorePermission` for the agent `uid`:
+    /// RECOVER_KEYSTORE, and its user registered
+    /// (`CleanupManager.registerRecoveryAgent`, which records the user's
+    /// serial number once). The keystore's database, open.
+    fn check_recovery_agent(&self, uid: i32) -> Result<(Connection, PathBuf), Exception> {
+        self.enforce_recover_keystore(uid)?;
         let path = self.host.data()?.join("system/recoverablekeystore.db");
         let locale = self.host.inputs()?.locales.clone();
         let db = open_keystore(&path, &locale).map_err(|e| db_error(&path, e))?;
@@ -821,6 +859,33 @@ impl LockSettings {
         keep_system_owned(&path)
             .map_err(|e| Exception::new(BAD_VALUE, format!("{}: {e}", path.display())))?;
         Ok((db, path))
+    }
+
+    /// Cold original Java owns platform keys, wrapping and keystore2 access as UID 1000.
+    /// Permission precedes construction, registration and alias validation, as in AOSP.
+    fn recoverable_key_call(
+        &self,
+        uid: i32,
+        code: u32,
+        data: &Parcel,
+    ) -> Result<Parcel, Exception> {
+        self.enforce_recover_keystore(uid)?;
+        let owner = self
+            .host
+            .recoverable_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                self.host.unimplemented_named(
+                    "lock_settings",
+                    "recoverable-key bridge not attached (#1888)",
+                )
+            })?;
+        owner
+            .transact_as_owner(code, data, false)
+            .map(|r| r.into_parcel())
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("recoverable-key bridge: {e:?}")))
     }
 
     /// `RecoverableKeyStoreManager.getRecoverySecretTypes` for `uid`.
@@ -1358,6 +1423,38 @@ impl Service for LockSettings {
                 self.key(uid, a.alias)
                     .map(|k| ls::write_get_key_reply(&mut p, &k))
             }
+            ls::GENERATE_KEY => {
+                let a = ls::GenerateKey::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut data = Parcel::new();
+                keys::GenerateKey {
+                    uid,
+                    alias: a.alias,
+                }
+                .write(&mut data);
+                self.recoverable_key_call(uid, keys::GENERATE_KEY, &data)
+                    .and_then(|r| {
+                        keys::read_generate_key_reply(&mut r.reader()).map_err(|e| {
+                            Exception::illegal_argument(format!("recoverable-key reply: {e:?}"))
+                        })?
+                    })
+                    .map(|key| ls::write_generate_key_reply(&mut p, &key))
+            }
+            ls::REMOVE_KEY => {
+                let a = ls::RemoveKey::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut data = Parcel::new();
+                keys::RemoveKey {
+                    uid,
+                    alias: a.alias,
+                }
+                .write(&mut data);
+                self.recoverable_key_call(uid, keys::REMOVE_KEY, &data)
+                    .and_then(|r| {
+                        keys::read_remove_key_reply(&mut r.reader()).map_err(|e| {
+                            Exception::illegal_argument(format!("recoverable-key reply: {e:?}"))
+                        })?
+                    })
+                    .map(|()| ls::write_remove_key_reply(&mut p))
+            }
             ls::GET_RECOVERY_STATUS => {
                 ls::GetRecoveryStatus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.recovery_status(uid)
@@ -1713,3 +1810,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "lock_settings_keys_tests.rs"]
+mod keys_tests;

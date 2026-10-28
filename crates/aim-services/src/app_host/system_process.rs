@@ -88,6 +88,15 @@ impl Service for SystemProcess {
                         .map(|()| sp::write_attach_stats_companion_uid_map_reply(&mut p))
                 })
             }
+            sp::ATTACH_RECOVERABLE_KEY_STORE_KEYS => {
+                let a = sp::AttachRecoverableKeyStoreKeys::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host.attach_recoverable_keys(a.keys)?;
+                    sp::write_attach_recoverable_key_store_keys_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::GET_DOMAIN_VERIFICATION_BACKEND => {
                 sp::GetDomainVerificationBackend::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().map(|()| {
