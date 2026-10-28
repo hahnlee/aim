@@ -117,9 +117,11 @@ Metal has no queue families) and offers several alike general-purpose
 families instead: four on an M2 Pro. HWUI's `VulkanManager`, like other
 Vulkan applications, asks for two queues of its graphics family. When all
 of a physical device's families are alike, the driver presents them as one
-family with all their queues: queue `i` of family 0 is the host's family
-`i` (`vkGetPhysicalDeviceQueueFamilyProperties{,2}`, `vkCreateDevice`,
-`vkGetDeviceQueue{,2}`).
+family, reserving the last host family for the driver's sync-file work:
+three application queues on an M2 Pro. Queue `i` of family 0 is the host's
+family `i` (`vkGetPhysicalDeviceQueueFamilyProperties{,2}`, `vkCreateDevice`,
+`vkGetDeviceQueue{,2}`). The private queue is created with the device,
+independently of which application queues are requested or retrieved.
 
 Family 0 is the host's first family, so every other family index means the
 same to MoltenVK and passes through: command pools, barriers (an ownership
@@ -222,7 +224,7 @@ of the driver's own, which MoltenVK makes of `MTLSharedEvent`s:
 - **From a sync_file** (`driver::signal_after`): host call `FN_SIGNAL` sets
   the timeline's event to a value once the fd has signaled (the sync-file
   waiter thread, `aim_sync_file::on_signal`), and a submission on the
-  device's first queue waits for that value and signals the application's
+  device's private queue waits for that value and signals the application's
   semaphore or fence.
 
 A timeline is taken for one value at a time, and again once it has reached
@@ -238,11 +240,13 @@ enabled. On top of these:
   consumes the payload, as the copy transference of a sync fd does); an
   import makes the semaphore signal after the fd (-1 is signaled).
 
-A wait for a sync_file holds up the device's first queue until the fd
-signals, as the wait of the semaphore it feeds would. The driver's own
-submissions take a per-queue lock that the application's `vkQueueSubmit*`,
-`vkQueueWaitIdle` and `vkQueueBindSparse` also take, since they are not
-synchronized with the application's use of the queue.
+A wait for a sync_file on the reserved queue leaves unrelated application
+queues running; a submission waiting for the imported semaphore still
+waits for the fd. If the host families cannot be merged, the driver keeps
+the host's layout and uses the first application queue for sync-file work.
+The driver's own submissions take a per-queue lock that the application's
+`vkQueueSubmit*`, `vkQueueWaitIdle` and `vkQueueBindSparse` also take, since
+they are not synchronized with the application's use of the queue.
 
 ## Conformance gaps
 

@@ -194,6 +194,8 @@ static uint32_t family;
 static VkQueue queue;
 // The second queue of the graphics family, as HWUI asks for two.
 static VkQueue queue2;
+static VkQueue* queues;
+static uint32_t queue_count;
 static VkCommandPool pool;
 static VkRenderPass pass;
 static VkPipelineLayout layout;
@@ -826,6 +828,25 @@ static void sync_fd(void) {
     VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence done;
     VK(vkCreateFence(device, &fci, NULL, &done));
+    // An imported pending payload must not put a wait ahead of unrelated
+    // work on any application queue. Queue 1 has the producer's gate, so
+    // it is intentionally excluded. Requesting every advertised queue at
+    // device creation also checks that the driver kept its reserve hidden.
+    VkSubmitInfo empty = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    for (uint32_t i = 0; i < queue_count; i++) {
+        if (i == 1) continue;
+        VK(vkQueueSubmit(queues[i], 1, &empty, done));
+        r = vkWaitForFences(device, 1, &done, VK_TRUE, 5000000000ull);
+        if (r != VK_SUCCESS) {
+            // Release the producer even on failure, before reporting it.
+            VkSemaphoreSignalInfo open = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+                                          .semaphore = gate, .value = 1};
+            VK(signal_semaphore(device, &open));
+        }
+        CHECK(r == VK_SUCCESS, "imported sync_file blocked unrelated queue %u: %d", i, r);
+        VK(vkResetFences(device, 1, &done));
+    }
+    printf("ok pending sync-fd import leaves unrelated application queues running\n");
     VkSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                          .waitSemaphoreCount = 1,
                          .pWaitSemaphores = &imported,
@@ -973,7 +994,8 @@ int main(int argc, char** argv) {
                           VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
     for (int i = 0; i < 4; i++) CHECK(has(e, n, exts[i]), "no %s", exts[i]);
     free(e);
-    // As HWUI's VulkanManager: two queues of the first graphics family.
+    // Include HWUI's two queues, but request every exposed queue so a
+    // private driver queue cannot alias an application queue.
     uint32_t families = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(gpu, &families, NULL);
     VkQueueFamilyProperties* fp = calloc(families, sizeof(*fp));
@@ -984,11 +1006,21 @@ int main(int argc, char** argv) {
           family < families ? fp[family].queueCount : 0);
     printf("ok %u queue family, graphics family %u with %u queues\n", families, family,
            fp[family].queueCount);
+    queue_count = fp[family].queueCount;
+    uint32_t families2 = families;
+    VkQueueFamilyProperties2* fp2 = calloc(families2, sizeof(*fp2));
+    for (uint32_t i = 0; i < families2; i++)
+        fp2[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+    vkGetPhysicalDeviceQueueFamilyProperties2(gpu, &families2, fp2);
+    CHECK(families2 == families && fp2[family].queueFamilyProperties.queueCount == queue_count,
+          "queue family query variants disagree");
+    free(fp2);
     free(fp);
-    float priorities[2] = {1.0f, 1.0f};
+    float* priorities = calloc(queue_count, sizeof(*priorities));
+    for (uint32_t i = 0; i < queue_count; i++) priorities[i] = 1.0f;
     VkDeviceQueueCreateInfo q = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                  .queueFamilyIndex = family,
-                                 .queueCount = 2,
+                                 .queueCount = queue_count,
                                  .pQueuePriorities = priorities};
     VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcr = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES,
@@ -1004,9 +1036,42 @@ int main(int argc, char** argv) {
                              .enabledExtensionCount = 4,
                              .ppEnabledExtensionNames = exts};
     VK(vkCreateDevice(gpu, &di, NULL, &device));
-    vkGetDeviceQueue(device, family, 0, &queue);
-    vkGetDeviceQueue(device, family, 1, &queue2);
+    free(priorities);
+    // Import before the application retrieves any queue. fd -1 carries an
+    // already signaled payload (VkImportSemaphoreFdInfoKHR-fd-01544).
+    PFN_vkImportSemaphoreFdKHR import_fd =
+        (PFN_vkImportSemaphoreFdKHR)vkGetDeviceProcAddr(device, "vkImportSemaphoreFdKHR");
+    CHECK(import_fd, "no sync-fd import entry point");
+    VkSemaphoreCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkSemaphore ready;
+    VK(vkCreateSemaphore(device, &sci, NULL, &ready));
+    VkImportSemaphoreFdInfoKHR ii = {.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+                                     .semaphore = ready,
+                                     .flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
+                                     .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+                                     .fd = -1};
+    VK(import_fd(device, &ii));
+    queues = calloc(queue_count, sizeof(*queues));
+    vkGetDeviceQueue(device, family, 0, &queues[0]);
+    for (uint32_t i = 1; i < queue_count; i++) {
+        VkDeviceQueueInfo2 qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2,
+                                 .queueFamilyIndex = family, .queueIndex = i};
+        vkGetDeviceQueue2(device, &qi, &queues[i]);
+        CHECK(queues[i], "null queue %u", i);
+        for (uint32_t j = 0; j < i; j++)
+            CHECK(queues[i] != queues[j], "queues %u and %u alias", i, j);
+    }
+    queue = queues[0];
+    queue2 = queues[1];
     CHECK(queue && queue2 && queue != queue2, "queues %p %p", (void*)queue, (void*)queue2);
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .waitSemaphoreCount = 1, .pWaitSemaphores = &ready,
+                         .pWaitDstStageMask = &stage};
+    VK(vkQueueSubmit(queue, 1, &wait, VK_NULL_HANDLE));
+    VK(vkQueueWaitIdle(queue));
+    vkDestroySemaphore(device, ready, NULL);
+    printf("ok signaled sync-fd import before retrieving application queues\n");
     VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                   .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                                   .queueFamilyIndex = family};
@@ -1016,6 +1081,8 @@ int main(int argc, char** argv) {
     if (argc > 1 && !strcmp(argv[1], "swapchain")) {
         create_pipeline(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         swapchain();
+    } else if (argc > 1 && !strcmp(argv[1], "sync-fd")) {
+        sync_fd();
     } else {
         create_pipeline(VK_IMAGE_LAYOUT_GENERAL);
         ahb_triangle();
@@ -1028,6 +1095,7 @@ int main(int argc, char** argv) {
     vkDestroyPipelineLayout(device, layout, NULL);
     vkDestroyCommandPool(device, pool, NULL);
     vkDestroyDevice(device, NULL);
+    free(queues);
     vkDestroyInstance(instance, NULL);
     printf("ok done\n");
     return 0;

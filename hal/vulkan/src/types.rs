@@ -32,6 +32,7 @@ pub const VK_ERROR_FORMAT_NOT_SUPPORTED: VkResult = -11;
 pub const VK_ERROR_INVALID_EXTERNAL_HANDLE: VkResult = -1000072003;
 
 pub mod stype {
+    pub const DEVICE_QUEUE_CREATE_INFO: i32 = 2;
     pub const SUBMIT_INFO: i32 = 4;
     pub const SEMAPHORE_CREATE_INFO: i32 = 9;
     pub const DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT: i32 = 1000011000;

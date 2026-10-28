@@ -234,8 +234,8 @@ pub unsafe extern "C" fn vkCreateInstance(
 /// alike general-purpose families instead, while HWUI, like other Vulkan
 /// applications, asks for several queues of its graphics family. When all
 /// of a physical device's families are alike, the driver presents them as
-/// one family of all their queues: its queue `i` is queue `i % per` of the
-/// host's family `i / per`.
+/// one family, reserving the last host family for sync-file submissions.
+/// Its queue `i` is queue `i % per` of the host's family `i / per`.
 ///
 /// That family is index 0, as the host's first family is, so every other
 /// place a family index appears means the same to MoltenVK: command pools,
@@ -252,8 +252,20 @@ struct Merged {
 }
 
 impl Merged {
+    fn new(host: &[VkQueueFamilyProperties]) -> Option<Self> {
+        let first = *host.first()?;
+        (host.len() > 1 && host.iter().all(|f| *f == first)).then_some(Self {
+            families: host.len() as u32,
+            per: first.queueCount,
+        })
+    }
+
     fn queues(self) -> u32 {
-        self.families * self.per
+        (self.families - 1) * self.per
+    }
+
+    fn private_family(self) -> u32 {
+        self.families - 1
     }
 
     /// The host's family and index of queue `index` of the one family.
@@ -269,11 +281,7 @@ fn merged(physical: VkDispatch) -> Option<Merged> {
         VK_SUCCESS
     })
     .ok()?;
-    let first = *host.first()?;
-    (host.len() > 1 && host.iter().all(|f| *f == first)).then_some(Merged {
-        families: host.len() as u32,
-        per: first.queueCount,
-    })
+    Merged::new(&host)
 }
 
 pub unsafe extern "C" fn vkGetPhysicalDeviceQueueFamilyProperties(
@@ -341,6 +349,19 @@ fn host_queues(m: Merged, requested: &[VkDeviceQueueCreateInfo]) -> Vec<VkDevice
             });
         }
     }
+    // A separate, unprotected queue: never inherit the application's
+    // flags, priority extension chain or priorities. Keeping its family
+    // out of the advertised count leaves it available even when the app
+    // requests every exposed queue (VkDeviceQueueCreateInfo-queueCount-00382).
+    static PRIORITY: f32 = 1.0;
+    out.push(VkDeviceQueueCreateInfo {
+        sType: stype::DEVICE_QUEUE_CREATE_INFO,
+        pNext: std::ptr::null(),
+        flags: 0,
+        queueFamilyIndex: m.private_family(),
+        queueCount: 1,
+        pQueuePriorities: &PRIORITY,
+    });
     out
 }
 
@@ -355,8 +376,8 @@ struct Timeline {
 struct Device {
     physical: usize,
     merged: Option<Merged>,
-    /// The first queue the application got, which the driver's own
-    /// submissions use.
+    /// The private host queue. If the host families cannot be merged,
+    /// there is no hidden family; use the first application queue then.
     queue: Option<usize>,
     /// The timelines that connect submissions and sync_files.
     timelines: Vec<Timeline>,
@@ -459,12 +480,29 @@ pub unsafe extern "C" fn vkCreateDevice(
     if r == VK_SUCCESS {
         // SAFETY: set by a successful call.
         let d = unsafe { *device } as usize;
-        state().devices.insert(
+        let mut queue: VkDispatch = std::ptr::null_mut();
+        if let Some(m) = merged {
+            // SAFETY: created above, and never handed to the loader or
+            // application. Fetch it once: MoltenVK resets the loader word.
+            unsafe {
+                host::vkGetDeviceQueue(*device, m.private_family(), 0, (&raw mut queue).cast());
+            }
+            if queue.is_null() {
+                // SAFETY: the new device has no submissions or children.
+                unsafe { host::vkDestroyDevice(*device, std::ptr::null()) };
+                return VK_ERROR_INITIALIZATION_FAILED;
+            }
+        }
+        let mut s = state();
+        if !queue.is_null() {
+            s.queues.insert(queue as usize, (d, Arc::default()));
+        }
+        s.devices.insert(
             d,
             Device {
                 physical: physical_device as usize,
                 merged,
-                queue: None,
+                queue: (!queue.is_null()).then_some(queue as usize),
                 timelines: Vec::new(),
             },
         );
@@ -608,7 +646,7 @@ pub unsafe extern "C" fn vkQueueWaitIdle(queue: VkDispatch) -> VkResult {
 /// semaphore (value 0) or a value of a timeline semaphore.
 pub type Op = (u64, u64);
 
-/// Submit, on `queue` (or the device's first queue), a batch that waits
+/// Submit, on `queue` (or the device's private queue), a batch that waits
 /// for `waits` and signals `signals` and `fence`.
 pub fn submit(
     device: VkDispatch,
@@ -617,9 +655,7 @@ pub fn submit(
     signals: &[Op],
     fence: u64,
 ) -> VkResult {
-    let Some(queue) = queue.or_else(|| first_queue(device)) else {
-        // The application has no queue yet; nothing it submitted can be
-        // pending.
+    let Some(queue) = queue.or_else(|| sync_queue(device)) else {
         return VK_ERROR_INITIALIZATION_FAILED;
     };
     let Some((_, lock)) = queue_lock(queue) else {
@@ -648,11 +684,11 @@ pub fn submit(
         signalSemaphoreCount: signals.len() as u32,
         pSignalSemaphores: signal_semaphores.as_ptr(),
     };
-    // SAFETY: a valid batch on the application's queue.
+    // SAFETY: a valid batch on the selected queue.
     unsafe { host::vkQueueSubmit(queue, 1, (&raw const batch).cast(), fence) }
 }
 
-fn first_queue(device: VkDispatch) -> Option<VkDispatch> {
+fn sync_queue(device: VkDispatch) -> Option<VkDispatch> {
     state()
         .devices
         .get(&(device as usize))
@@ -710,7 +746,7 @@ fn timeline(device: VkDispatch) -> Result<Op, VkResult> {
 }
 
 /// A sync_file fd that signals once `waits` have signaled and, on `queue`
-/// (or the device's first queue), what was submitted before.
+/// (or the device's private queue), what was submitted before.
 pub fn fence_after(
     device: VkDispatch,
     queue: Option<VkDispatch>,
@@ -737,7 +773,7 @@ pub fn fence_after(
     aim_hostcall::guest::vulkan_fence(&mut args).map_err(|_| VK_ERROR_OUT_OF_HOST_MEMORY)
 }
 
-/// Submit, on the device's first queue, a batch that signals `signals` and
+/// Submit, on the device's private queue, a batch that signals `signals` and
 /// `fence` once the sync_file `fd` has signaled. Takes `fd`; -1 is a
 /// signaled sync_file.
 pub fn signal_after(device: VkDispatch, fd: i32, signals: &[Op], fence: u64) -> VkResult {
@@ -778,4 +814,82 @@ fn signal_now(device: VkDispatch, (semaphore, value): Op) {
     };
     // SAFETY: the driver's semaphore.
     unsafe { host::vkSignalSemaphore(device, (&raw const info).cast()) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn family(queues: u32) -> VkQueueFamilyProperties {
+        VkQueueFamilyProperties {
+            queueFlags: 7,
+            queueCount: queues,
+            timestampValidBits: 64,
+            minImageTransferGranularity: VkExtent3D {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn private_family_is_never_an_application_queue() {
+        for families in 2..=4 {
+            for per in 1..=3 {
+                let m = Merged::new(&vec![family(per); families]).unwrap();
+                assert_eq!(m.queues(), (families as u32 - 1) * per);
+                for i in 0..m.queues() {
+                    let (family, index) = m.queue(i);
+                    assert!(family < m.private_family());
+                    assert!(index < per);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reserve_survives_every_exposed_queue_being_requested() {
+        let m = Merged::new(&[family(2); 3]).unwrap();
+        let priorities = [0.1, 0.2, 0.3, 0.4];
+        let chain = 0u64;
+        for count in 1..=m.queues() {
+            let requested = VkDeviceQueueCreateInfo {
+                sType: stype::DEVICE_QUEUE_CREATE_INFO,
+                pNext: (&raw const chain).cast(),
+                flags: 1,
+                queueFamilyIndex: 0,
+                queueCount: count,
+                pQueuePriorities: priorities.as_ptr(),
+            };
+            let host = host_queues(m, &[requested]);
+            let (private, app) = host.split_last().unwrap();
+            let mut offset = 0usize;
+            for (family, q) in app.iter().enumerate() {
+                assert_eq!(q.queueFamilyIndex, family as u32);
+                assert_eq!(q.flags, requested.flags);
+                assert_eq!(q.pNext, requested.pNext);
+                assert_eq!(q.pQueuePriorities, priorities[offset..].as_ptr());
+                assert!(q.queueCount <= m.per);
+                offset += q.queueCount as usize;
+            }
+            assert_eq!(offset, count as usize);
+            assert_eq!(private.queueFamilyIndex, m.private_family());
+            assert_eq!(private.queueCount, 1);
+            assert_eq!(private.flags, 0);
+            assert!(private.pNext.is_null());
+            // SAFETY: the private priority has static storage.
+            assert_eq!(unsafe { *private.pQueuePriorities }, 1.0);
+        }
+    }
+
+    #[test]
+    fn distinct_or_single_families_keep_the_host_layout() {
+        assert!(Merged::new(&[]).is_none());
+        assert!(Merged::new(&[family(1)]).is_none());
+        let mut other = family(1);
+        other.queueFlags = 4;
+        assert!(Merged::new(&[family(1), other]).is_none());
+        assert!(Merged::new(&[family(1), family(2)]).is_none());
+    }
 }

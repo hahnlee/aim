@@ -121,14 +121,14 @@ impl Guest<'_> {
             .arg(self.layout.path_map_file())
             .arg("--cache")
             .arg(&self.cache)
-            .arg("--binder")
-            .arg(&self.binder)
             .arg("--seclabel")
             .arg(seclabel)
             .arg("--vulkan")
-            .arg(aim_paths::moltenvk())
-            .args(argv)
-            .stdin(Stdio::null());
+            .arg(aim_paths::moltenvk());
+        if !self.binder.is_empty() {
+            c.arg("--binder").arg(&self.binder);
+        }
+        c.args(argv).stdin(Stdio::null());
         c
     }
 
@@ -166,30 +166,31 @@ fn log_of(path: &Path) -> String {
     text
 }
 
-#[test]
-fn renders_and_presents_through_the_original_libvulkan() {
-    let Some(clang) = ndk_clang() else {
-        aim_paths::skip("the pinned NDK is not installed");
-        return;
-    };
+fn prepare(name: &str) -> Option<(Layout, Receiver<(String, String)>)> {
     if aim_paths::input(aim_paths::moltenvk().join("libMoltenVK.dylib"), "moltenvk").is_none() {
-        return;
+        return None;
     }
-    let Some(image) = derived_image() else { return };
+    let image = derived_image()?;
+    let driver = aim_paths::input(aim_paths::hal_lib("vulkan.aim.so"), "hal/vulkan")?;
 
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("vulkan-{}", std::process::id()));
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vulkan-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let layout = Layout::new(image.clone(), dir.join("data"), Some(dir.join("run")));
     layout.prepare().unwrap();
-    std::fs::write(layout.path_map_file(), layout.path_map().to_file_text()).unwrap();
+    // Exercise the current driver without changing the derived image.
+    let mut map = layout.path_map().to_file_text();
+    map.push_str(&format!(
+        "ro\t/vendor/lib64/hw/vulkan.aim.so\t{}\n",
+        driver.display()
+    ));
+    std::fs::write(layout.path_map_file(), map).unwrap();
     let changed = start_properties(&image, &layout);
-    let binder = format!("dev.aim.test.vulkan.{}", std::process::id());
-    let _server = Server::start(&binder).expect("binder host");
     let guest = Guest {
         layout: &layout,
         cache: dir.join("cache"),
-        binder,
+        binder: String::new(),
     };
 
     // init's GenerateLinkerConfiguration: the sphal namespace that
@@ -210,6 +211,69 @@ fn renders_and_presents_through_the_original_libvulkan() {
         "linkerconfig: {}",
         String::from_utf8_lossy(&linkerconfig.stderr)
     );
+    Some((layout, changed))
+}
+
+fn build_program(clang: &Path, layout: &Layout) {
+    let program = layout.data.join("data/local/tmp/vulkan_triangle");
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    let built = Command::new(clang)
+        .args(["-O2", "-o"])
+        .arg(&program)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vulkan_triangle.c"))
+        .args(["-lvulkan", "-lnativewindow", "-lmediandk"])
+        .status()
+        .unwrap();
+    assert!(built.success());
+}
+
+#[test]
+fn sync_fd_import_keeps_unrelated_queues_running() {
+    let Some(clang) = ndk_clang() else {
+        aim_paths::skip("the pinned NDK is not installed");
+        return;
+    };
+    let Some((layout, _changed)) = prepare("sync-fd") else {
+        return;
+    };
+    let dir = layout.data.parent().unwrap();
+    build_program(&clang, &layout);
+    // No graphics buffers or binder services: exercise the original
+    // loader and the driver's native queue/sync-file path on their own.
+    let guest = Guest {
+        layout: &layout,
+        cache: dir.join("cache"),
+        binder: String::new(),
+    };
+    let out = guest.run(&["/data/local/tmp/vulkan_triangle", "sync-fd"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    eprintln!("{stdout}");
+    assert!(
+        out.status.success() && stdout.contains("ok done"),
+        "{:?}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn renders_and_presents_through_the_original_libvulkan() {
+    let Some(clang) = ndk_clang() else {
+        aim_paths::skip("the pinned NDK is not installed");
+        return;
+    };
+    let Some((layout, changed)) = prepare("render") else {
+        return;
+    };
+    let dir = layout.data.parent().unwrap();
+    let binder = format!("dev.aim.test.vulkan.{}", std::process::id());
+    let _server = Server::start(&binder).expect("binder host");
+    let guest = Guest {
+        layout: &layout,
+        cache: dir.join("cache"),
+        binder,
+    };
 
     let sm_log = dir.join("servicemanager.log");
     let log = std::fs::File::create(&sm_log).unwrap();
@@ -258,16 +322,7 @@ fn renders_and_presents_through_the_original_libvulkan() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    let program = layout.data.join("data/local/tmp/vulkan_triangle");
-    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
-    let built = Command::new(clang)
-        .args(["-O2", "-o"])
-        .arg(&program)
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vulkan_triangle.c"))
-        .args(["-lvulkan", "-lnativewindow", "-lmediandk"])
-        .status()
-        .unwrap();
-    assert!(built.success());
+    build_program(&clang, &layout);
     for args in [&["info"][..], &[]] {
         let mut argv = vec!["/data/local/tmp/vulkan_triangle"];
         argv.extend(args);
