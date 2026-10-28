@@ -565,6 +565,13 @@ this adds vendor bridge classes only, with no replacement of original classes.
   unserved services and providers still require their owners' internals
   and remain explicit UnsupportedOperation (#1518).
 
+The cold statscompanion UID-map writer and its app, user and shutdown receivers
+are extracted from the original [StatsCompanionService.java](https://android.googlesource.com/platform/packages/modules/StatsD/+/refs/tags/android-16.0.0_r1/service/java/com/android/server/stats/StatsCompanionService.java)
+into `StatsCompanionUidMap` in the existing vendor jar (#1765): the system-UID-only
+bridge starts them after the native handshake, querying the app host's published
+package/user state, with a receiver cohort per statsd generation and pipe/thread
+cleanup on death or failure; the native companion and original statsd stay in place.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

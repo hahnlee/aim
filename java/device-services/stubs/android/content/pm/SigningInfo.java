@@ -6,4 +6,5 @@ public final class SigningInfo {
     public SigningInfo() { throw new RuntimeException("stub"); }
     public SigningDetails getSigningDetails() { throw new RuntimeException("stub"); }
     public void writeToParcel(android.os.Parcel dest, int flags) { throw new RuntimeException("stub"); }
+    public Signature[] getApkContentsSigners() { throw new RuntimeException("stub"); }
 }

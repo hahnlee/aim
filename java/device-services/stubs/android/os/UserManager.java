@@ -21,4 +21,5 @@ public class UserManager {
     public static final int REMOVE_RESULT_DEFERRED = 1;
     public static final int REMOVE_RESULT_ALREADY_BEING_REMOVED = 2;
     public static final int REMOVE_RESULT_ERROR_MAIN_USER_PERMANENT_ADMIN = -5;
+    public java.util.List<UserHandle> getUserHandles(boolean excludeDying) { throw new RuntimeException("stub"); }
 }

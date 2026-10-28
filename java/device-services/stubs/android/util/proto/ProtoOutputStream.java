@@ -10,4 +10,6 @@ public class ProtoOutputStream extends ProtoStream {
     public void write(long field, String value) { throw new RuntimeException("stub"); }
     public void write(long field, byte[] value) { throw new RuntimeException("stub"); }
     public void write(long field, double value) { throw new RuntimeException("stub"); }
+    public ProtoOutputStream(java.io.OutputStream output) { throw new RuntimeException("stub"); }
+    public void flush() { throw new RuntimeException("stub"); }
 }
