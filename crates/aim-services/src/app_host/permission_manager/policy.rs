@@ -55,24 +55,74 @@ impl PackageListObserver for PermissionPolicy {
 }
 
 impl PermissionManager {
-    /// AppIdAppOpPolicy / PackageAppOpPolicy's non-default modes, committed
-    /// through the same access owner as PermissionPolicy's changes.
     pub(in crate::app_host) fn set_cross_profile_mode(
         &self,
         uid: i32,
         package: Option<&str>,
         mode: i32,
     ) -> Result<bool, Exception> {
+        self.set_app_op_mode(
+            uid,
+            package,
+            appops_service::OP_INTERACT_ACROSS_PROFILES,
+            mode,
+        )
+    }
+
+    /// AppOpService / AppIdAppOpPolicy / PackageAppOpPolicy at android-16.0.0_r1:
+    /// commit non-default modes through the access owner, then notify listeners.
+    pub(in crate::app_host) fn set_app_op_mode(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        code: i32,
+        mode: i32,
+    ) -> Result<bool, Exception> {
         if !(0..PER_USER_RANGE).contains(&uid) {
             return Err(self
                 .host
-                .unimplemented_named("appops", "cross-profile modes outside user 0 (#1594)"));
+                .unimplemented_named("appops", "modes outside user 0 (#1594)"));
         }
         self.retained_access()?;
-        let op = &APP_OP_INFOS[appops_service::OP_INTERACT_ACROSS_PROFILES as usize];
-        let default = appops_service::policy_default_mode(&self.host, op.code)?;
+        let op = &APP_OP_INFOS[code as usize];
+        let (state, _) = self.host.packages()?;
+        let enabled = |name: &str| state.system.flags.iter().any(|(n, on)| n == name && *on);
+        if enabled(appops_service::RUNTIME_PERMISSION_APPOPS_MAPPING)
+            && let Some((name, flag)) = op.permission
+            && flag.is_none_or(enabled)
+            && self
+                .system()?
+                .permissions
+                .iter()
+                .any(|p| p.name == name && is_runtime(p))
+        {
+            // The original checking service rejects direct runtime-op writes.
+            eprintln!(
+                "app host: appops: blocked direct runtime permission op mode: uid={uid}, op={code}, mode={mode}"
+            );
+            return Ok(false);
+        }
+        let default = appops_service::policy_default_mode(&self.host, code)?;
         let mut held = self.owner.lock().unwrap();
         let before = held.user0.as_ref().expect("loaded");
+        let modes = match package {
+            Some(package) => before
+                .package_app_ops
+                .iter()
+                .find(|(name, _)| name == package)
+                .map(|(_, ops)| ops),
+            None => before
+                .app_id_app_ops
+                .iter()
+                .find(|(id, _)| *id == uid)
+                .map(|(_, ops)| ops),
+        };
+        let previous = modes
+            .and_then(|ops| ops.iter().find(|(name, _)| name == op.name))
+            .map_or(default, |(_, mode)| *mode);
+        if previous == mode {
+            return Ok(false);
+        }
         let mut after = (**before).clone();
         match package {
             Some(package) => set_mode(
@@ -83,9 +133,6 @@ impl PermissionManager {
                 default,
             ),
             None => set_mode(&mut after.app_id_app_ops, uid, op.name, mode, default),
-        }
-        if after == **before {
-            return Ok(false);
         }
         self.write_user0(&after)?;
         held.user0 = Some(Arc::new(after));
@@ -105,8 +152,35 @@ impl PermissionManager {
                 .map(|ps| ps.name.clone())
                 .collect(),
         };
-        appops_service::permission_modes_changed(&self.host, uid, &[op.code], &packages)?;
+        // setUidMode's legacy previousMode is MODE_DEFAULT for the default.
+        let previous = if package.is_none() && previous == default {
+            appops_service::MODE_DEFAULT
+        } else {
+            previous
+        };
+        appops_service::written_mode_changed(
+            &self.host,
+            uid,
+            code,
+            mode,
+            package.is_some() || previous != mode,
+            &packages,
+        )?;
         Ok(true)
+    }
+
+    /// AppOpsService.updatePermissionRevokedCompat runs before setUidMode,
+    /// including writes the checking service later rejects or finds unchanged.
+    pub(in crate::app_host) fn update_app_op_revoked_compat(
+        &self,
+        uid: i32,
+        code: i32,
+        mode: i32,
+    ) -> Result<(), Exception> {
+        self.mutate(
+            Some(KILL_APP_REASON_PERMISSIONS_REVOKED),
+            |access, after| update_revoked_compat(access, after, uid, code, mode),
+        )
     }
 
     pub(super) fn synchronize_permission_app_ops(
@@ -163,6 +237,67 @@ impl PermissionManager {
         drop(held);
         appops_service::permission_modes_changed(&self.host, app_id, &codes, &packages)
     }
+}
+
+/// AppOpsService.updatePermissionRevokedCompat: only granted runtime
+/// permissions of the switch, and a granted background permission where present.
+fn update_revoked_compat(
+    access: &Access<'_>,
+    after: &mut AccessUser,
+    uid: i32,
+    code: i32,
+    mode: i32,
+) -> Result<Vec<FlagsChanged>, Exception> {
+    let Some(ps) = access.packages_of(uid).first().copied() else {
+        return Ok(Vec::new());
+    };
+    let mut changes = Vec::new();
+    for op in APP_OP_INFOS.iter().filter(|op| op.switch_code == code) {
+        let Some((permission, flag)) = op.permission else {
+            continue;
+        };
+        if flag.is_some_and(|flag| {
+            !access
+                .state
+                .system
+                .flags
+                .iter()
+                .any(|(name, on)| name == flag && *on)
+        }) || access.check_uid_permission(uid, permission)? != GRANTED
+        {
+            continue;
+        }
+        let Some(definition) = access.definition(permission).filter(|p| is_runtime(p)) else {
+            continue;
+        };
+        let Some(info) = access.permission_info(definition) else {
+            continue;
+        };
+        let background = info.background_permission.as_deref();
+        let mut update = |name: &str, revoked: bool| -> Result<(), Exception> {
+            changes.extend(access.update_permission_flags(
+                after,
+                &BTreeSet::new(),
+                SYSTEM_UID,
+                &ps.name,
+                name,
+                (1 << 3, if revoked { 1 << 3 } else { 0 }),
+                false,
+                0,
+            )?);
+            Ok(())
+        };
+        if let Some(background) = background
+            && access.granted(ps, 0, background)
+        {
+            update(background, mode != MODE_ALLOWED)?;
+        }
+        update(
+            permission,
+            mode != MODE_ALLOWED && (background.is_none() || mode != MODE_FOREGROUND),
+        )?;
+    }
+    Ok(changes)
 }
 
 fn set_mode<K: PartialEq>(

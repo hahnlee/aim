@@ -478,3 +478,69 @@ fn permission_manager_grant_revoke_updates_persisted_modes() {
         }
     });
 }
+
+/// AppOpsService.updatePermissionRevokedCompat: foreground keeps the
+/// foreground grant usable but revokes background; fine has its own switch.
+#[test]
+fn mode_writes_update_revoked_compat_for_granted_runtime_permissions() {
+    let mut f = Fixture::new(&[CAMERA, COARSE, FINE, BACKGROUND]);
+    f.state.users.insert(0, Default::default());
+    for permission in [CAMERA, COARSE, FINE, BACKGROUND] {
+        f.user
+            .set_permission_flags(APP, permission, RUNTIME_GRANTED | USER_SET);
+    }
+    for (code, mode, revoked) in [
+        (0, MODE_FOREGROUND, vec![BACKGROUND]),
+        (0, MODE_IGNORED, vec![COARSE, BACKGROUND]),
+        (0, MODE_ALLOWED, vec![]),
+        (1, MODE_IGNORED, vec![FINE, BACKGROUND]),
+        (1, MODE_ALLOWED, vec![]),
+        (26, MODE_IGNORED, vec![CAMERA]),
+        (26, MODE_ALLOWED, vec![]),
+    ] {
+        let filter = AppsFilter::default();
+        let compat = CompatConfig::default();
+        let access = Access {
+            state: &f.state,
+            filter: &filter,
+            defined: &f.defined,
+            groups: &[],
+            user0: &f.user,
+            compat: &compat,
+        };
+        let mut after = f.user.clone();
+        update_revoked_compat(&access, &mut after, APP, code, mode).unwrap();
+        for permission in [CAMERA, COARSE, FINE, BACKGROUND] {
+            let flags = after.permission_flags(APP, permission);
+            assert_eq!(
+                flags & APP_OP_REVOKED != 0,
+                revoked.contains(&permission),
+                "{permission}, code={code}, mode={mode}"
+            );
+            assert_eq!(
+                flags & (RUNTIME_GRANTED | USER_SET),
+                RUNTIME_GRANTED | USER_SET
+            );
+        }
+        f.user = after;
+    }
+    // Denied permissions have no compatibility flags changed.
+    f.user.set_permission_flags(APP, CAMERA, USER_SET);
+    let filter = AppsFilter::default();
+    let compat = CompatConfig::default();
+    let access = Access {
+        state: &f.state,
+        filter: &filter,
+        defined: &f.defined,
+        groups: &[],
+        user0: &f.user,
+        compat: &compat,
+    };
+    let mut after = f.user.clone();
+    assert!(
+        update_revoked_compat(&access, &mut after, APP, 26, MODE_IGNORED)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(after, f.user);
+}
