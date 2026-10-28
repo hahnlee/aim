@@ -580,6 +580,8 @@ pub struct AppHost {
     package_boot: OnceLock<Result<(), Exception>>,
     /// Retained verifier API in the current system process; replaced on attach.
     domain_frontend: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
+    /// Retained cold MediaRouter2 queries, replaced when aim-system attaches.
+    system_route_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -689,6 +691,7 @@ impl AppHost {
             system: OnceLock::new(),
             package_boot: OnceLock::new(),
             domain_frontend: Mutex::new(None),
+            system_route_queries: Mutex::new(None),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),

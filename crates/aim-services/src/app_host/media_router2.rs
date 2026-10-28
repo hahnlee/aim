@@ -1,7 +1,8 @@
 //! `media_router`'s `MediaRouter2` system routes (`MediaRouter2ServiceImpl`
 //! and `SystemMediaRoute2Provider` at `android-16.0.0_r1`): the device
-//! route and the system session a router starts with (`getSystemRoutes`,
-//! `getSystemSessionInfo`). With no Bluetooth adapter, the device route
+//! route and the system session a registered router starts with. Cold route/
+//! session queries use the retained Java owner in `media_router`. With no
+//! Bluetooth adapter, the device route
 //! comes from `LegacyDeviceRouteController`, over the audio service's
 //! routes: the app host's one output is the built-in speaker. Its volume is
 //! the music stream's, read when asked (`updateVolume` on
@@ -257,21 +258,6 @@ impl AppHost {
                 selected,
             },
         ))
-    }
-
-    /// `getSystemSessionInfo(null, null, false)`: the system session for
-    /// a caller with system routing permissions, its default session
-    /// (selecting the default route) else, with no client package.
-    pub(super) fn media_router2_system_session(&self, uid: i32) -> Result<Session, Exception> {
-        let selected = if self.has_system_routing_permissions(uid)? {
-            ROUTE_ID_DEVICE
-        } else {
-            ROUTE_ID_DEFAULT
-        };
-        Ok(Session {
-            client_package: None,
-            selected,
-        })
     }
 }
 

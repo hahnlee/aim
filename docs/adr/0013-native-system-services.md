@@ -449,6 +449,14 @@ The migration's state and conformance results are in
 
 ### The app host, L1 (2026-10-16)
 
+The app host's cold MediaRouter2 system route/session queries (#1663) retain
+MediaRouter2ServiceImpl's scoped Java permission and selection policy in the
+system-UID-only `SystemRouteQueries` bridge, using the image's original
+SystemMediaRoute2Provider and original parcelables; native MediaRouterService
+keeps package ownership and the v1 selected-route lookup. This adds vendor
+classes only. The image lacks SystemMediaRoute2Provider2, so mirroring remains
+explicit UnsupportedOperation under #1663, as do unserved manager operations.
+
 The app host's cold UID health reads (#1928) retain the image's
 `BatteryStatsImpl`, `HealthStatsBatteryStatsWriter`, `HealthStatsWriter` and
 `HealthStatsParceler` in the system process through a system-UID-only vendor
