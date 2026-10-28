@@ -252,6 +252,14 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::ATTACH_PACKAGE_SHELL_READ => {
+                let a = sp::AttachPackageShellRead::read(&mut call.data)?;
+                system().and_then(|()| {
+                    self.host.attach_package_shell_read(a.owner)?;
+                    sp::write_attach_package_shell_read_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_SETTINGS_VALUES => {
                 let a = sp::AttachSettingsValues::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

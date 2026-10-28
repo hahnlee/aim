@@ -143,7 +143,7 @@ pub mod package_resolution_policy;
 pub mod package_service;
 mod package_shell_install_policy;
 pub(crate) mod package_shell_policy;
-mod package_shell_read;
+pub(crate) mod package_shell_read;
 mod package_writes;
 pub mod pending_intents;
 pub mod permission_checker;
@@ -577,6 +577,7 @@ pub struct AppHost {
     package_bootstrap_java: Mutex<Option<Arc<Strong>>>,
     device_policy_defaults: Mutex<Option<Arc<Strong>>>,
     user_switcher_policy: Mutex<Option<Arc<Strong>>>,
+    package_shell_read: Mutex<Option<Arc<Strong>>>,
     tasks: tasks::Tasks,
     /// The server's launches, by package, until the package's task is made.
     pending_launches: Mutex<HashMap<String, String>>,
@@ -707,6 +708,7 @@ impl AppHost {
             package_bootstrap_java: Mutex::new(None),
             device_policy_defaults: Mutex::new(None),
             user_switcher_policy: Mutex::new(None),
+            package_shell_read: Mutex::new(None),
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
             providers: Default::default(),

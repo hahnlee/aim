@@ -21,9 +21,9 @@ const USER_ACCESS: &str = "misc_de/0/apexdata/com.android.permission/access.abx"
 
 // The existing session's context manager still handles its bootstrap protocol;
 // shell clients can also discover the actual native services in this fixture.
-struct ContextManager {
-    host: crate::service_host::ServiceHost,
-    services: Arc<Mutex<BTreeMap<String, Binder>>>,
+pub(super) struct ContextManager {
+    pub(super) host: crate::service_host::ServiceHost,
+    pub(super) services: Arc<Mutex<BTreeMap<String, Binder>>>,
 }
 impl Service for ContextManager {
     fn descriptor(&self) -> &str {
@@ -51,7 +51,7 @@ impl Service for ContextManager {
         }
     }
 }
-struct ResultReceiver(mpsc::Sender<i32>);
+pub(super) struct ResultReceiver(pub(super) mpsc::Sender<i32>);
 impl Service for ResultReceiver {
     fn descriptor(&self) -> &str {
         receiver::DESCRIPTOR

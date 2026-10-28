@@ -2435,6 +2435,13 @@ Native shell now calls the original UserManager.getMaxSupportedUsers through
 its authenticated typed leaf and prints the exact original prefix. Actual Binder
 CLI output/exception/tail tests and complete private Java original linkage/stub
 code checks pass; matched image deployment remains pending and C111 is unchanged.
+Package shell read coverage (#2327) includes package/feature/library/permission/
+permission-group/instrumentation/user lists, activity resolution, all three intent
+queries and path. App-host cold permission resources and ResolveInfo dumps now
+use the original Java leaf in aim-system with scoped caller-bound read queries.
+Host FD/exit-status tests and Java compilation/DEX linkage cover this boundary;
+original execution, matched-image deployment and guest boot remain unverified.
+Dump/dump-package and the other package shell operations remain #2327.
 The same frozen PMHost cohort exposes activity filter priority and public
 restrict-update error mismatches (#1169/#1170). Native activity registration now
 applies the pinned privilege/protected-action/setup-wizard and factory-filter

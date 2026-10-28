@@ -37,6 +37,15 @@ impl System {
             leaf::DUMP_RESOLVE_INFO => {
                 leaf::DumpResolveInfo::read(&mut reader).map_err(shell_read_transport)?;
             }
+            leaf::LIST_PERMISSION_GROUPS => {
+                let args =
+                    leaf::ListPermissionGroups::read(&mut reader).map_err(shell_read_transport)?;
+                if args.calling_uid != calling_uid || args.calling_pid != pid {
+                    return Err(Exception::security(
+                        "permission groups caller differs from authenticated caller",
+                    ));
+                }
+            }
             leaf::LIST_PERMISSIONS => {
                 let args =
                     leaf::ListPermissions::read(&mut reader).map_err(shell_read_transport)?;

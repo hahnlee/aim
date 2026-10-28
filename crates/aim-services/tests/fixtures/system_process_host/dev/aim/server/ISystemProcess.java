@@ -13,6 +13,7 @@ interface ISystemProcess {
     void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys);
     void attachSystemRouteQueries(com.android.server.media.SystemRouteQueries queries);
     void attachProviderQueries(ProviderQueries queries);
+    void attachPackageShellRead(AppHostPackageShellRead owner);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     void attachStorageCrates(StorageCrates crates);
     void attachPackageIntentParser(PackageIntentParser parser);
@@ -30,6 +31,7 @@ interface ISystemProcess {
                 }
                 public void attachWifiBridge(WifiBridge bridge) {}
                 public void attachSettingsValues(SettingsValues values) {}
+                public void attachPackageShellRead(AppHostPackageShellRead owner) { if(owner==null)throw new AssertionError("missing package shell read owner"); }
                 public void attachProviderQueries(ProviderQueries queries) {
                     ProviderQueriesTest.check(queries);
                 }

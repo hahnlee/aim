@@ -2,7 +2,8 @@
 // the members used, checked against the image by the device-services node.
 package android.content.pm;
 
-public class PermissionInfo extends PackageItemInfo {
+public class PermissionInfo extends PackageItemInfo implements android.os.Parcelable {
+    public int describeContents(){throw new RuntimeException("stub");}
     public static final int PROTECTION_DANGEROUS = 1;
     public int descriptionRes;
     public CharSequence nonLocalizedDescription;
@@ -10,6 +11,7 @@ public class PermissionInfo extends PackageItemInfo {
     public static final int PROTECTION_MASK_BASE=15;
     public static String protectionToString(int protection){throw new RuntimeException("stub");}
 
+    public void writeToParcel(android.os.Parcel out,int flags){throw new RuntimeException("stub");}
     public int protectionLevel;
     public PermissionInfo() { throw new RuntimeException("stub"); }
 }
