@@ -510,11 +510,15 @@ mod tests {
         ])
     }
     fn load(code: &[u8]) -> i64 {
+        load_hook(code, SOCK, 0)
+    }
+    fn load_hook(code: &[u8], ty: u32, hook: u32) -> i64 {
         let mut a = [0; 24];
-        a[0] = SOCK;
+        a[0] = ty;
         a[1] = code.len() as u32 / 8;
         a[2] = code.as_ptr() as u64 as u32;
         a[3] = (code.as_ptr() as u64 >> 32) as u32;
+        a[17] = hook;
         call(PROG_LOAD, &a)
     }
     fn close(fd: i64) {
@@ -834,6 +838,55 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_cold_binds_do_not_deadlock_fork_snapshot() {
+        if fdtab::isolated_kernel_test(
+            "sys::bpf::sock_create::tests::concurrent_cold_binds_do_not_deadlock_fork_snapshot",
+        ) {
+            return;
+        }
+        let (_view, _dir, target) = setup();
+        let program = load_hook(&constant(0), 18, 8);
+        assert!(program >= 0);
+        assert_eq!(call(PROG_ATTACH, &[target as u32, program as u32, 8, 0]), 0);
+        let sockets: Vec<_> = (0..8).map(|_| socket(2, 2)).collect();
+        assert!(sockets.iter().all(|&fd| fd >= 0));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(sockets.len() + 1));
+        let workers: Vec<_> = sockets
+            .iter()
+            .map(|&fd| {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..128 {
+                        // Exercise private program opens, rather than only
+                        // the warm interpreter path, while fork saves sockets.
+                        *BIND_PROGRAMS.lock().unwrap() = None;
+                        assert_eq!(bind_socket(fd, &bind_address(2, 0)), -(EPERM as i64));
+                    }
+                })
+            })
+            .collect();
+        start.wait();
+        for _ in 0..128 {
+            // The real fork parent holds this admission lock across fd state
+            // serialization. A bind must not hold socket state while opening
+            // a private program descriptor under the same admission lock.
+            let _fds = fdtab::lifecycle();
+            let mut writer = crate::sys::fork_state::Writer::default();
+            fdtab::fork_save(&mut writer);
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        for fd in sockets {
+            close(fd);
+        }
+        assert_eq!(call(PROG_DETACH, &[target as u32, 0, 8, 0]), 0);
+        close(program);
+        close(target);
+    }
+
+    #[test]
     fn image_bind_programs_pin_reopen_attach_and_enforce_live_blocked_ports() {
         if fdtab::isolated_kernel_test(
             "sys::bpf::sock_create::tests::image_bind_programs_pin_reopen_attach_and_enforce_live_blocked_ports",
@@ -916,6 +969,22 @@ mod tests {
         let map = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
         let kernel = Kernel::of(map as i32).unwrap();
         close(map);
+        for key in 0u32..1024 {
+            assert_eq!(kernel.lookup(&key.to_ne_bytes()), Some(vec![0; 8]));
+        }
+        // inet bind hooks cannot reject the Unix sockets used by zygote and
+        // app startup, even with every bitmap bit set.
+        for key in 0u32..1024 {
+            assert!(kernel.update(&key.to_ne_bytes(), |value| value.fill(0xff)));
+        }
+        let unix = socket(1, 1);
+        let mut address = 1u16.to_ne_bytes().to_vec();
+        address.extend_from_slice(b"\0zygote-bind-scope");
+        assert_eq!(bind_socket(unix, &address), 0);
+        close(unix);
+        for key in 0u32..1024 {
+            assert!(kernel.update(&key.to_ne_bytes(), |value| value.fill(0)));
+        }
         // Neither descriptors nor pins are the attachment's map ownership.
         std::fs::remove_file(dir.join("data/bpf/netd_shared/map_netd_blocked_ports_map")).unwrap();
         port_policy(&kernel, 0x1234, true);

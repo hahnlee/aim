@@ -1236,8 +1236,11 @@ pub fn bind(a: [u64; 6]) -> i64 {
             return -(EINVAL as i64);
         }
         let address = user_try!(super::user_memory::read_exact(a[1], length as usize));
+        // Fork saves socket state under descriptor lifecycle admission. BPF
+        // can take that admission to open a program, so retain only a copy.
+        let groups = o.bpf_groups.lock().unwrap().clone();
         if let Err(error) = super::bpf::socket_bind(
-            &o.bpf_groups.lock().unwrap(),
+            &groups,
             o.domain,
             o.protocol,
             if s.ty == SockType::Stream { 1 } else { 2 },

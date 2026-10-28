@@ -8149,8 +8149,17 @@ memory pressure since #277, see "Memory pressure").
   A bounded cache retains decoded programs by file identity while map lookups
   remain live. Host image-program regressions cover loader pin/reopen/attach,
   both families, TCP/UDP, live bitmap updates, port byte order, error ordering,
-  independent hooks and replacement/detachment. No guest boot was run for
-  this bind change. Skb policy and map writes, other hooks and ring
+  independent hooks and replacement/detachment. Supplied app-host logs from
+  this bind change report 18 failed process attachments and a separate fatal
+  POSIX shutdown with ECHILD. A host regression reproduces a new bind/fork
+  deadlock: bind holds the socket cgroup mutex while a cold program open
+  needs descriptor lifecycle admission; fork holds that admission while
+  serializing the same socket mutex. Bind now copies the retained ancestry
+  before entering BPF, preserving policy without that lock inversion. Eight
+  concurrent cold-bind workers and fork descriptor snapshots complete after
+  the fix; the original code hits the fixture's 20-second timeout. No guest
+  boot was rerun, so app-start recovery and the ECHILD cause remain unverified.
+  Skb policy and map writes, other hooks and ring
   producers remain #2268;
   traffic counters retain the socket layer's existing approximation (#224).
 - A forked child gets the stub islands' executable views back as views of
