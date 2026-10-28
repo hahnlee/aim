@@ -19,6 +19,7 @@ static REGISTRY: LazyLock<Mutex<HashMap<(u64, u64), Weak<Owner>>>> =
     LazyLock::new(Default::default);
 pub struct Owner {
     backing: OwnedFd,
+    reference: Option<CharacterReference>,
     flags: u32,
     server: UnixDatagram,
 }
@@ -28,8 +29,116 @@ pub struct Capability {
 }
 pub struct Adopted {
     pub backing: OwnedFd,
+    pub reference: Option<CharacterReference>,
     pub flags: u32,
     pub proof: Arc<OwnedFd>,
+}
+/// A devfs character inode reached relative to a directory, never by opening
+/// the device. Generation and birth time distinguish reused PTY allocations.
+#[derive(Clone)]
+pub struct CharacterReference {
+    name: std::ffi::CString,
+    pub guest: String,
+    identity: aim_storage::inode_lease::Identity,
+}
+impl CharacterReference {
+    pub fn capture(directory: RawFd, name: &std::ffi::CStr, guest: String) -> io::Result<Self> {
+        if name.to_bytes().is_empty() || name.to_bytes().contains(&b'/') {
+            return Err(error(libc::EINVAL));
+        }
+        let stat = Self::lookup(directory, name)?;
+        Ok(Self {
+            name: name.into(),
+            guest,
+            identity: Self::identity(&stat),
+        })
+    }
+    fn identity(stat: &libc::stat) -> aim_storage::inode_lease::Identity {
+        aim_storage::inode_lease::Identity {
+            dev: stat.st_dev as u32 as u64,
+            ino: stat.st_ino,
+            generation: stat.st_gen,
+            birth_seconds: stat.st_birthtime,
+            birth_nanoseconds: stat.st_birthtime_nsec,
+        }
+    }
+    fn lookup(directory: RawFd, name: &std::ffi::CStr) -> io::Result<libc::stat> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                directory,
+                name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFCHR {
+            return Err(error(libc::ESTALE));
+        }
+        Ok(stat)
+    }
+    pub fn stat(&self, directory: RawFd) -> io::Result<libc::stat> {
+        let stat = Self::lookup(directory, &self.name)?;
+        if Self::identity(&stat) != self.identity {
+            return Err(error(libc::ESTALE));
+        }
+        Ok(stat)
+    }
+    pub fn host(&self, directory: RawFd) -> io::Result<std::ffi::CString> {
+        self.stat(directory)?;
+        let mut path = vec![0u8; libc::PATH_MAX as usize];
+        if unsafe { libc::fcntl(directory, libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        path.truncate(
+            path.iter()
+                .position(|&byte| byte == 0)
+                .ok_or(error(libc::EINVAL))?,
+        );
+        path.push(b'/');
+        path.extend_from_slice(self.name.to_bytes());
+        std::ffi::CString::new(path).map_err(|_| error(libc::EINVAL))
+    }
+    pub fn encode(&self) -> Vec<u8> {
+        let mut writer = crate::wire::Writer::default();
+        writer.bytes(self.name.to_bytes());
+        writer.bytes(self.guest.as_bytes());
+        writer.bytes(&self.identity.to_bytes());
+        writer.0
+    }
+    pub fn decode(bytes: &[u8]) -> io::Result<Self> {
+        let mut reader = crate::wire::Reader::new(bytes);
+        let mut decode = || {
+            let name = reader.bytes()?;
+            if name.is_empty() || name.contains(&b'/') || name.contains(&0) || name.len() > 255 {
+                return Err(crate::wire::EPROTO);
+            }
+            let name = std::ffi::CString::new(name).map_err(|_| crate::wire::EPROTO)?;
+            let guest = std::str::from_utf8(reader.bytes()?)
+                .map_err(|_| crate::wire::EPROTO)?
+                .to_owned();
+            if !guest.starts_with('/')
+                || guest.len() >= libc::PATH_MAX as usize
+                || guest.contains('\0')
+            {
+                return Err(crate::wire::EPROTO);
+            }
+            let identity = aim_storage::inode_lease::Identity::from_bytes(reader.bytes()?)
+                .map_err(|_| crate::wire::EPROTO)?;
+            if reader.remaining() != 0 {
+                return Err(crate::wire::EPROTO);
+            }
+            Ok(Self {
+                name,
+                guest,
+                identity,
+            })
+        };
+        decode().map_err(|_| error(libc::EPROTO))
+    }
 }
 fn error(value: i32) -> io::Error {
     io::Error::from_raw_os_error(value)
@@ -48,10 +157,20 @@ fn actual_path(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 pub fn create(backing: OwnedFd, flags: u32) -> io::Result<Capability> {
-    if !valid_flags(flags) {
+    create_reference(backing, flags, None)
+}
+pub fn create_reference(
+    backing: OwnedFd,
+    flags: u32,
+    reference: Option<CharacterReference>,
+) -> io::Result<Capability> {
+    if !valid_flags(flags) || (reference.is_some() && flags & 0x4000 != 0) {
         return Err(error(libc::EINVAL));
     }
     actual_path(backing.as_raw_fd())?;
+    if let Some(reference) = &reference {
+        reference.stat(backing.as_raw_fd())?;
+    }
     let (client, server) = UnixDatagram::pair()?;
     let identity = socket_identity(client.as_raw_fd())?;
     let peer = socket_identity(server.as_raw_fd())?;
@@ -60,6 +179,7 @@ pub fn create(backing: OwnedFd, flags: u32) -> io::Result<Capability> {
     }
     let owner = Arc::new(Owner {
         backing,
+        reference,
         flags,
         server,
     });
@@ -103,6 +223,9 @@ pub fn create(backing: OwnedFd, flags: u32) -> io::Result<Capability> {
                 let mut response = MAGIC.to_le_bytes().to_vec();
                 response.extend_from_slice(&(if valid { 0 } else { libc::EINVAL }).to_le_bytes());
                 response.extend_from_slice(&live.flags.to_le_bytes());
+                if let Some(reference) = &live.reference {
+                    response.extend_from_slice(&reference.encode());
+                }
                 let result = if valid {
                     send(reply.as_raw_fd(), &response, live.backing.as_raw_fd())
                 } else {
@@ -183,23 +306,30 @@ pub fn unwrap(carrier: BorrowedFd<'_>) -> io::Result<Adopted> {
     let mut request = MAGIC.to_le_bytes().to_vec();
     request.extend_from_slice(&0u32.to_le_bytes());
     send(carrier.as_raw_fd(), &request, reply.as_raw_fd())?;
-    let mut response = [0u8; 12];
+    let mut response = vec![0u8; 2 * libc::PATH_MAX as usize + 128];
     let (n, backing) = receive_flags(receiver.as_raw_fd(), &mut response, 0)?;
-    if n != 12 || u32::from_le_bytes(response[..4].try_into().unwrap()) != MAGIC {
+    if n < 12 || u32::from_le_bytes(response[..4].try_into().unwrap()) != MAGIC {
         return Err(error(libc::EPROTO));
     }
     let status = i32::from_le_bytes(response[4..8].try_into().unwrap());
     if status != 0 {
         return Err(error(status));
     }
-    let flags = u32::from_le_bytes(response[8..].try_into().unwrap());
+    let flags = u32::from_le_bytes(response[8..12].try_into().unwrap());
     if !valid_flags(flags) {
         return Err(error(libc::EPROTO));
     }
     let backing = backing.ok_or_else(|| error(libc::EPROTO))?;
     actual_path(backing.as_raw_fd())?;
+    let reference = (n > 12)
+        .then(|| CharacterReference::decode(&response[12..n]))
+        .transpose()?;
+    if let Some(reference) = &reference {
+        reference.stat(backing.as_raw_fd())?;
+    }
     Ok(Adopted {
         backing,
+        reference,
         flags,
         proof,
     })
@@ -224,6 +354,56 @@ mod tests {
         let fd = unsafe { libc::open(name.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
         assert!(fd >= 0);
         (path, unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+    #[test]
+    fn character_reference_transfer_carries_only_a_directory_and_checks_allocation_identity() {
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        assert!(master >= 0);
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        assert_eq!(unsafe { libc::grantpt(master.as_raw_fd()) }, 0);
+        let mut name = [0u8; 128];
+        assert_eq!(
+            unsafe { libc::ioctl(master.as_raw_fd(), 0x4080_7453u64, name.as_mut_ptr()) },
+            0
+        );
+        let name = std::ffi::CStr::from_bytes_until_nul(&name).unwrap();
+        let name = std::ffi::CString::new(name.to_bytes().strip_prefix(b"/dev/").unwrap()).unwrap();
+        let directory = unsafe {
+            libc::open(
+                c"/dev".as_ptr(),
+                libc::O_EVTONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(directory >= 0);
+        let directory = unsafe { OwnedFd::from_raw_fd(directory) };
+        let reference =
+            CharacterReference::capture(directory.as_raw_fd(), &name, "/dev/pts/0".into()).unwrap();
+        let original = reference.stat(directory.as_raw_fd()).unwrap();
+        let capability = create_reference(directory, O_PATH, Some(reference)).unwrap();
+        let adopted = unwrap(capability.carrier.as_fd()).unwrap();
+        let mut backing: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::fstat(adopted.backing.as_raw_fd(), &mut backing) },
+            0
+        );
+        assert_eq!(backing.st_mode & libc::S_IFMT, libc::S_IFDIR);
+        let mut reference = adopted.reference.unwrap();
+        let stat = reference.stat(adopted.backing.as_raw_fd()).unwrap();
+        assert_eq!(
+            (stat.st_dev, stat.st_ino),
+            (original.st_dev, original.st_ino)
+        );
+        assert_eq!(reference.guest, "/dev/pts/0");
+        reference.identity.generation ^= 1;
+        assert_eq!(
+            reference
+                .stat(adopted.backing.as_raw_fd())
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESTALE)
+        );
+        let bytes = reference.encode();
+        assert!(CharacterReference::decode(&bytes[..bytes.len() - 1]).is_err());
     }
     #[test]
     fn carrier_preserves_real_path_and_arm64_flags_without_classifying_native_watchers() {

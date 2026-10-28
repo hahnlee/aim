@@ -3,6 +3,7 @@
 // controlling terminal, raw mode, the window size).
 #include <dirent.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -337,13 +339,69 @@ static void locked_slave_metadata(void) {
   CHECK(ptsname_r(master, name, sizeof(name)) == 0);
   CHECK(open(name, O_RDWR | O_NOCTTY) == -1 && errno == EIO);
   CHECK(chmod(name, 0600) == 0);
-  struct stat st;
+  struct stat st, path_st;
   CHECK(stat(name, &st) == 0 && (st.st_mode & 07777) == 0600);
   CHECK(chown(name, getuid(), getgid()) == 0);
   CHECK(fchmodat(AT_FDCWD, name, 0620, 0) == 0);
+
+  // O_PATH ignores access/truncate flags and never calls the device's open.
+  int path = open(name, O_PATH | O_RDWR | O_TRUNC);
+  CHECK(path >= 0 && fcntl(path, F_GETFL) == O_PATH);
+  CHECK(fstat(path, &path_st) == 0 && S_ISCHR(path_st.st_mode));
+  CHECK(path_st.st_dev == st.st_dev && path_st.st_ino == st.st_ino);
+  CHECK(path_st.st_uid == getuid() && path_st.st_gid == getgid());
+  CHECK((path_st.st_mode & 07777) == 0620);
+  CHECK(fstatat(path, "", &path_st, AT_EMPTY_PATH) == 0 && S_ISCHR(path_st.st_mode));
+  CHECK(fchownat(path, "", getuid(), getgid(), AT_EMPTY_PATH) == 0);
+  char link[64], target[64];
+  snprintf(link, sizeof(link), "/proc/self/fd/%d", path);
+  ssize_t len = readlink(link, target, sizeof(target));
+  CHECK(len == (ssize_t)strlen(name) && memcmp(target, name, len) == 0);
+  // Original bionic's fchmodat fallback changes an O_PATH inode by its magic link.
+  CHECK(chmod(link, 0640) == 0);
+  int copy = dup(path);
+  CHECK(copy >= 0 && fstat(copy, &path_st) == 0 && (path_st.st_mode & 07777) == 0640);
+  CHECK(chmod(link, 0620) == 0);
+  CHECK(fchdir(path) == -1 && errno == ENOTDIR);
+  CHECK(openat(path, ".", O_PATH) == -1 && errno == ENOTDIR);
+  char byte;
+  CHECK(read(path, &byte, 1) == -1 && errno == EBADF);
+  CHECK(fchmod(path, 0600) == -1 && errno == EBADF);
+  CHECK(fgetxattr(path, "user.test", &byte, 1) == -1 && errno == EBADF);
+  int locked = -1;
+  CHECK(ioctl(master, TIOCGPTLCK, &locked) == 0 && locked == 1);
+  CHECK(open(name, O_RDWR | O_NOCTTY) == -1 && errno == EIO);
+  CHECK(open(link, O_RDWR | O_NOCTTY) == -1 && errno == EIO);
+
+  pid_t pid = fork();
+  CHECK(pid >= 0);
+  if (pid == 0) {
+    alarm(10);
+    if (setgroups(0, NULL) != 0 || setgid(2001) != 0 || setuid(2001) != 0) _exit(1);
+    if (open(name, O_RDWR | O_NOCTTY) != -1 || errno != EACCES) _exit(2);
+    if (chmod(name, 0666) != -1 || errno != EPERM) _exit(3);
+    if (chmod(link, 0666) != -1 || errno != EPERM) _exit(4);
+    if (fchownat(path, "", getuid(), getgid(), AT_EMPTY_PATH) != -1 || errno != EPERM) _exit(5);
+    // The final inode's mode does not restrict O_PATH; directory search does.
+    int foreign = open(name, O_PATH);
+    if (foreign < 0 || fstat(foreign, &path_st) != 0 || path_st.st_uid != st.st_uid) _exit(6);
+    if (close(foreign) != 0) _exit(7);
+    char fd[32];
+    snprintf(fd, sizeof(fd), "%d", copy);
+    execl(executable, executable, "--locked-path", fd, NULL);
+    _exit(8);
+  }
+  int status;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(ioctl(master, TIOCGPTLCK, &locked) == 0 && locked == 1);
+  CHECK(open(name, O_RDWR | O_NOCTTY) == -1 && errno == EIO);
+  CHECK(fstat(path, &path_st) == 0 && (path_st.st_mode & 07777) == 0620);
   CHECK(unlockpt(master) == 0);
+  CHECK(ioctl(master, TIOCGPTLCK, &locked) == 0 && locked == 0);
   int slave = open(name, O_RDWR | O_NOCTTY);
   CHECK(slave >= 0 && fstat(slave, &st) == 0 && (st.st_mode & 07777) == 0620);
+  CHECK(fstat(path, &path_st) == 0 && path_st.st_ino == st.st_ino);
+  CHECK(close(copy) == 0 && close(path) == 0);
   CHECK(close(slave) == 0 && close(master) == 0);
 }
 
@@ -486,6 +544,17 @@ int main(int argc, char** argv) {
     if (write(fd, "ex", 2) != 2 || write(fd, output, sizeof(output)) != sizeof(output)) return 3;
     if (close(fd) != 0) return 4;
     return 0;
+  }
+  if (argc == 3 && strcmp(argv[1], "--locked-path") == 0) {
+    int fd = atoi(argv[2]);
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode) || (st.st_mode & 07777) != 0620) return 1;
+    if (fcntl(fd, F_GETFL) != O_PATH) return 2;
+    char link[64];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    if (chmod(link, 0666) != -1 || errno != EPERM) return 3;
+    if (fchdir(fd) != -1 || errno != ENOTDIR) return 4;
+    return close(fd) == 0 ? 0 : 5;
   }
   if (argc == 2 && strcmp(argv[1], "--allocate-close") == 0) {
     RUN(allocate_and_close);

@@ -75,6 +75,7 @@ fn path_creation_errno(error: std::io::Error) -> Errno {
         Some(libc::EAGAIN) => 11,
         Some(libc::ENOTSOCK) => 88,
         Some(libc::ECONNRESET) => 104,
+        Some(libc::ESTALE) => 116,
         Some(value)
             if matches!(
                 value,
@@ -97,10 +98,19 @@ fn path_creation_errno(error: std::io::Error) -> Errno {
     }
 }
 
-fn create_path_fileport(port: Port, flags: u32) -> Result<(Vec<(Port, u32)>, Vec<u8>), Errno> {
+fn create_path_fileport(
+    port: Port,
+    flags: u32,
+    reference: &[u8],
+) -> Result<(Vec<(Port, u32)>, Vec<u8>), Errno> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let fd = mach::port_to_fd(port).ok_or(errno::EBADF)?;
-    let capability = crate::path_file::create(unsafe { OwnedFd::from_raw_fd(fd) }, flags)
+    let backing = unsafe { OwnedFd::from_raw_fd(fd) };
+    let reference = (!reference.is_empty())
+        .then(|| crate::path_file::CharacterReference::decode(reference))
+        .transpose()
+        .map_err(path_creation_errno)?;
+    let capability = crate::path_file::create_reference(backing, flags, reference)
         .map_err(path_creation_errno)?;
     let port = mach::fd_to_port(capability.carrier.as_raw_fd()).ok_or(errno::EBADF)?;
     let mut out = Writer::default();
@@ -580,12 +590,13 @@ impl Server {
                     Ok((Vec::new(), self.socket_service.endpoint().encode()))
                 }
             } else if req.local == self.service && req.id == wire::CREATE_PATH {
-                if req.ports.len() != 1 || req.data.len() != 4 {
+                if req.ports.len() != 1 || req.data.len() < 4 {
                     Err(wire::EPROTO)
                 } else {
                     create_path_fileport(
                         req.ports[0],
                         u32::from_le_bytes(req.data[..4].try_into().unwrap()),
+                        &req.data[4..],
                     )
                 }
             } else if req.local == self.service && req.id == wire::FILE_CLASS {
@@ -1850,11 +1861,11 @@ mod path_carrier_tests {
         let backing = unsafe { OwnedFd::from_raw_fd(fd) };
         let port = mach::fd_to_port(backing.as_raw_fd()).unwrap();
         assert_eq!(
-            create_path_fileport(port, crate::path_file::O_PATH | 0x10000).unwrap_err(),
+            create_path_fileport(port, crate::path_file::O_PATH | 0x10000, &[]).unwrap_err(),
             errno::EINVAL
         );
         let flags = crate::path_file::O_PATH | 0x4000 | 0x8000;
-        let (ports, metadata) = create_path_fileport(port, flags).unwrap();
+        let (ports, metadata) = create_path_fileport(port, flags, &[]).unwrap();
         mach::release_send(port);
         assert_eq!(ports.len(), 1);
         assert_eq!(metadata, crate::path_file::CLASS.to_le_bytes());

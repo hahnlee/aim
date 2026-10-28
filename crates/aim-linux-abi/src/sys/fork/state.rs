@@ -224,7 +224,7 @@ impl<'a> Reader<'a> {
 
 /// Every module's state, in restore order.
 pub fn save(w: &mut Writer, mounts: &str) {
-    w.u32(0x46444e0f);
+    w.u32(0x46444e10);
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
     crate::patch::fork_save(w);
@@ -256,8 +256,8 @@ pub fn save(w: &mut Writer, mounts: &str) {
 pub fn restore(r: &mut Reader) -> bool {
     r.stage("state-version");
     let version = r.u32();
-    if version != 0x46444e0f {
-        eprintln!("fork state version: received={version:#x} expected=0x46444e0f");
+    if version != 0x46444e10 {
+        eprintln!("fork state version: received={version:#x} expected=0x46444e10");
         r.invalidate();
         return false;
     }

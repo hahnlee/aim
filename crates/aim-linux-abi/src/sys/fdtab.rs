@@ -84,14 +84,68 @@ impl Drop for PathProof {
 
 pub struct PathDescription {
     pub flags: u64,
+    pub reference: Option<aim_binder_host::path_file::CharacterReference>,
     proof: Mutex<Option<Arc<PathProof>>>,
 }
 impl PathDescription {
     pub(super) fn new(flags: u64) -> Arc<Self> {
         Arc::new(Self {
             flags: flags & !super::fs::O_CLOEXEC,
+            reference: None,
             proof: Mutex::new(None),
         })
+    }
+    pub(super) fn open_character(
+        resolved: &crate::vfs::Resolved,
+        flags: u64,
+    ) -> Result<i32, crate::errno::Errno> {
+        use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+        let bytes = resolved.host.as_bytes();
+        let split = bytes
+            .iter()
+            .rposition(|&byte| byte == b'/')
+            .ok_or(crate::errno::EINVAL)?;
+        let parent =
+            std::ffi::CString::new(&bytes[..split.max(1)]).map_err(|_| crate::errno::EINVAL)?;
+        let name = std::ffi::CString::new(&bytes[split + 1..]).map_err(|_| crate::errno::EINVAL)?;
+        let raw = unsafe {
+            libc::open(
+                parent.as_ptr(),
+                libc::O_EVTONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            return Err(crate::errno::last());
+        }
+        let directory = unsafe { OwnedFd::from_raw_fd(raw) };
+        let reference = aim_binder_host::path_file::CharacterReference::capture(
+            directory.as_raw_fd(),
+            &name,
+            resolved.guest.clone(),
+        )
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        if flags & super::fs::O_CLOEXEC == 0 && unsafe { libc::fcntl(raw, libc::F_SETFD, 0) } < 0 {
+            return Err(crate::errno::last());
+        }
+        let fd = directory.into_raw_fd();
+        insert(
+            fd,
+            Kind::Path(Arc::new(Self {
+                flags: flags & !super::fs::O_CLOEXEC,
+                reference: Some(reference),
+                proof: Mutex::new(None),
+            })),
+        );
+        Ok(fd)
+    }
+}
+
+pub(crate) fn character_reference(
+    fd: i32,
+) -> Option<aim_binder_host::path_file::CharacterReference> {
+    match get(fd) {
+        Some(Kind::Path(path)) => path.reference.clone(),
+        _ => None,
     }
 }
 
@@ -123,7 +177,7 @@ pub(super) fn export_pinned(pin: Pinned) -> Result<ExportedFd, crate::errno::Err
     };
     let mut proof = path.proof.lock().unwrap();
     if proof.is_none() {
-        let carrier = super::binder::create_path(fd, path.flags as u32)?;
+        let carrier = super::binder::create_path(fd, path.flags as u32, path.reference.as_ref())?;
         *proof = Some(PathProof::new(carrier));
     }
     let held = proof.as_ref().unwrap().clone();
@@ -185,6 +239,7 @@ pub(super) fn install_path(fd: i32) -> Result<(), crate::errno::Errno> {
         fd,
         Kind::Path(Arc::new(PathDescription {
             flags: adopted.flags as u64,
+            reference: adopted.reference,
             proof: Mutex::new(Some(proof)),
         })),
     );
@@ -1331,6 +1386,17 @@ pub(crate) fn regular_exec_text() -> Result<String, crate::errno::Errno> {
                     .map(|writer| writer.descriptor().as_raw_fd())
                     .unwrap_or(-1)
             )),
+            Kind::Path(description) => {
+                let mut bytes = description.flags.to_le_bytes().to_vec();
+                if let Some(reference) = &description.reference {
+                    bytes.extend_from_slice(&reference.encode());
+                }
+                let hex = bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                records.push(format!("path\t{fd}\t{hex}"));
+            }
             Kind::Pty(description) => records.push(format!(
                 "pty\t{}\t{}",
                 fd,
@@ -1395,6 +1461,46 @@ pub(crate) fn restore_regular_exec(text: &str) -> Result<(), crate::errno::Errno
         let fields = line.split('\t').collect::<Vec<_>>();
         if fields.len() != 3 {
             return Err(crate::errno::EINVAL);
+        }
+        if fields[0] == "path" {
+            let fd = fields[1].parse::<i32>().map_err(|_| crate::errno::EINVAL)?;
+            let hex = fields[2];
+            if !hex.is_ascii() || hex.len() < 16 || hex.len() % 2 != 0 {
+                return Err(crate::errno::EINVAL);
+            }
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|at| {
+                    u8::from_str_radix(&hex[at..at + 2], 16).map_err(|_| crate::errno::EINVAL)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let flags = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+            if flags & super::fs::O_PATH == 0
+                || flags & !(super::fs::O_PATH | 0o40000 | 0o100000) != 0
+            {
+                return Err(crate::errno::EINVAL);
+            }
+            let reference = (bytes.len() > 8)
+                .then(|| aim_binder_host::path_file::CharacterReference::decode(&bytes[8..]))
+                .transpose()
+                .map_err(|error| {
+                    crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))
+                })?;
+            require_guest_visible(fd)?;
+            if let Some(reference) = &reference {
+                reference.stat(fd).map_err(|error| {
+                    crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))
+                })?;
+            }
+            insert(
+                fd,
+                Kind::Path(Arc::new(PathDescription {
+                    flags,
+                    reference,
+                    proof: Mutex::new(None),
+                })),
+            );
+            continue;
         }
         if fields[0] == "pty" {
             let fd = fields[1].parse::<i32>().map_err(|_| crate::errno::EINVAL)?;
@@ -1744,6 +1850,9 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Path(path) => {
                 w.u32(10);
                 w.u64(path.flags);
+                w.opt(path.reference.as_ref(), |w, reference| {
+                    w.bytes(&reference.encode())
+                });
             }
             Kind::Kmsg(open) => {
                 w.u32(14);
@@ -1805,7 +1914,24 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
                 Some(owner) => Kind::Knob(owner),
                 None => return (fd, None),
             },
-            10 => Kind::Path(PathDescription::new(r.u64())),
+            10 => {
+                let flags = r.u64();
+                let reference =
+                    r.opt(|r| aim_binder_host::path_file::CharacterReference::decode(&r.bytes()));
+                let reference = match reference.transpose() {
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        eprintln!("character path fork restore: {error}");
+                        r.invalidate();
+                        return (fd, None);
+                    }
+                };
+                Kind::Path(Arc::new(PathDescription {
+                    flags,
+                    reference,
+                    proof: Mutex::new(None),
+                }))
+            }
             11 => {
                 let flags = r.u64();
                 let writer = r.opt(|r| r.i32());
