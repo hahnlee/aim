@@ -16,6 +16,7 @@ import android.os.UserManager;
 import android.system.Os;
 import android.util.Slog;
 
+import com.android.internal.os.ApplicationSharedMemory;
 import com.android.internal.os.ClassLoaderFactory;
 import com.android.internal.os.RuntimeInit;
 import com.android.server.SystemService;
@@ -101,10 +102,16 @@ public final class SystemProcessHost extends RuntimeInit {
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
             ActivityThread.initializeMainlineModules();
+            // SystemServer initializes mutable nonce storage after the modules and
+            // before services: PlatformCompat invalidates IpcDataCache at construction.
+            // Keep its mutable mapping and fd for the lifetime of this system process.
+            ApplicationSharedMemory.setInstance(ApplicationSharedMemory.create());
             IApplicationThread applicationThread = thread.getApplicationThread();
-            ISystemProcess.Stub.asInterface(ServiceManager.waitForService("aim.system_process"))
-                    .attachSystemProcess(applicationThread.asBinder(),
-                            DeviceServices.foregroundServicePolicy(context));
+            ISystemProcess host = ISystemProcess.Stub.asInterface(
+                    ServiceManager.waitForService("aim.system_process"));
+            host.attachDomainVerification(new AppHostDomainVerification(context, host));
+            host.attachSystemProcess(applicationThread.asBinder(),
+                    DeviceServices.foregroundServicePolicy(context));
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's

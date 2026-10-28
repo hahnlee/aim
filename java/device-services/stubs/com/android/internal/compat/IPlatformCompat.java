@@ -10,6 +10,7 @@ public interface IPlatformCompat extends android.os.IInterface {
             throws android.os.RemoteException;
 
     abstract class Stub extends android.os.Binder implements IPlatformCompat {
+        @Override public android.os.IBinder asBinder() { throw new RuntimeException("stub"); }
         public static IPlatformCompat asInterface(android.os.IBinder obj) { throw new RuntimeException("stub"); }
     }
 }

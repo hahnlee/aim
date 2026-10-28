@@ -496,7 +496,12 @@ The migration's state and conformance results are in
   `RuntimeInit.applicationInit`, as `zygoteInit` does after `commonInit`,
   which `app_process` has run. `Server` plays SystemServer's part: the
   system context (`ActivityThread.systemMain`), `initializeMainlineModules`,
-  and `setSystemProcess`, for which the app host serves
+  then mutable `ApplicationSharedMemory`, before services: the retained domain
+  verifier front end constructs `PlatformCompat`, whose compat configuration
+  invalidates an `IpcDataCache` nonce (#1763). It attaches the original verifier
+  Stub/Enforcer over the native persisted domain owner before the application
+  thread and foreground-service policy's single attach (`setSystemProcess`),
+  for which the app host serves
   `dev.aim.server.ISystemProcess` as `aim.system_process` (the system uid
   only): the process hands it its application thread, and the app host
   makes it the `android` package's process `system`, active and not bound

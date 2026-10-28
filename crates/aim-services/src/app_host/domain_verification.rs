@@ -1,5 +1,5 @@
-//! Domain verification queries over the session's retained NativeDomains and
-//! package code. Writes and verifier requests remain unimplemented (#1763).
+//! Original Java verifier front end over the session's NativeDomains and
+//! durable package owner; other writes and verifier requests remain #1763.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
@@ -12,16 +12,12 @@ use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanage
 
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::apps_filter::should_filter_application;
-use crate::package::domain_verification::{agent, parcels};
+use crate::package::domain_verification::{agent, domain_set::DomainSet, parcels};
 use crate::package::query::Query;
 use crate::package::scan_snapshot::query_state::{Capture, NativeDomains};
+use aim_service_aidl::dev_aim_server_iapphostdomainverification as original;
 
 const SYSTEM_UID: i32 = 1000;
-const DOMAIN_VERIFICATION_AGENT: &str = "android.permission.DOMAIN_VERIFICATION_AGENT";
-const INTENT_FILTER_VERIFICATION_AGENT: &str =
-    "android.permission.INTENT_FILTER_VERIFICATION_AGENT";
-const QUERY_ALL_PACKAGES: &str = "android.permission.QUERY_ALL_PACKAGES";
-const DUMP: &str = "android.permission.DUMP";
 const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
 /// `DomainVerificationManager.INTERNAL_ERROR_NAME_NOT_FOUND`.
 const ERROR_NAME_NOT_FOUND: i32 = 1;
@@ -75,7 +71,11 @@ impl DomainVerification {
 
     /// The proxy's `isCallerVerifier`: `uid` is a verifier package's
     /// (`isCallerPackage`).
-    fn is_caller_verifier(&self, capture: &Capture, uid: i32) -> Result<bool, Exception> {
+    pub(super) fn is_caller_verifier(
+        &self,
+        capture: &Capture,
+        uid: i32,
+    ) -> Result<bool, Exception> {
         let resolution = super::package_resolution(capture, "domain")?;
         let (legacy, modern) = agent::verifiers(capture.state(), &resolution)?;
         for package in agent::proxy_packages(legacy, modern) {
@@ -91,57 +91,6 @@ impl DomainVerification {
         if self.host.check_permission(Some(permission), uid)? != 0 {
             return Err(Exception::security(format!(
                 "{message}: uid {uid} does not have {permission}."
-            )));
-        }
-        Ok(())
-    }
-
-    /// `DomainVerificationEnforcer.assertApprovedQuerent`.
-    fn assert_approved_querent(&self, capture: &Capture, uid: i32) -> Result<(), Exception> {
-        if matches!(uid, 0 | 1000 | 2000) {
-            return Ok(());
-        }
-        if !self.is_caller_verifier(capture, uid)? {
-            return self.enforce(
-                DUMP,
-                uid,
-                &format!("Caller {uid} is not allowed to query domain verification state"),
-            );
-        }
-        self.enforce(
-            QUERY_ALL_PACKAGES,
-            uid,
-            &format!("Caller {uid} does not hold {QUERY_ALL_PACKAGES}"),
-        )
-    }
-
-    /// `DomainVerificationEnforcer.assertApprovedVerifier`.
-    fn assert_approved_verifier(&self, capture: &Capture, uid: i32) -> Result<(), Exception> {
-        if matches!(uid, 0 | 1000 | 2000) {
-            return Ok(());
-        }
-        let held = |permission| {
-            Ok::<_, Exception>(self.host.check_permission(Some(permission), uid)? == 0)
-        };
-        let mut legacy = false;
-        if !held(DOMAIN_VERIFICATION_AGENT)? {
-            legacy = held(INTENT_FILTER_VERIFICATION_AGENT)?;
-            if !legacy {
-                return Err(Exception::security(format!(
-                    "Caller {uid} does not hold {DOMAIN_VERIFICATION_AGENT}"
-                )));
-            }
-        }
-        if !legacy {
-            self.enforce(
-                QUERY_ALL_PACKAGES,
-                uid,
-                &format!("Caller {uid} does not hold {QUERY_ALL_PACKAGES}"),
-            )?;
-        }
-        if !self.is_caller_verifier(capture, uid)? {
-            return Err(Exception::security(format!(
-                "Caller {uid} is not the approved domain verification agent"
             )));
         }
         Ok(())
@@ -219,9 +168,8 @@ impl DomainVerification {
     }
 
     /// `queryValidVerificationPackageNames`.
-    fn valid_verification_package_names(&self, uid: i32) -> Result<Vec<String>, Exception> {
+    fn valid_verification_package_names(&self) -> Result<Vec<String>, Exception> {
         let capture = self.host.package_capture()?;
-        self.assert_approved_verifier(&capture, uid)?;
         Ok(Self::domains(&capture)?
             .owner()
             .valid_verification_package_names())
@@ -232,7 +180,6 @@ impl DomainVerification {
     /// them.
     fn info(&self, uid: i32, name: Option<&str>) -> Result<Option<parcels::Info>, Exception> {
         let capture = self.host.package_capture()?;
-        self.assert_approved_querent(&capture, uid)?;
         let name = name.ok_or_else(name_not_found)?;
         let state = capture.state();
         let resolution = super::package_resolution(&capture, "domain")?;
@@ -262,7 +209,128 @@ impl DomainVerification {
     }
 }
 
+impl DomainVerification {
+    fn forward(&self, call: &mut Call<'_>, uid: i32) -> Reply {
+        let mut request = Parcel::new();
+        let code = match call.code {
+            dv::QUERY_VALID_VERIFICATION_PACKAGE_NAMES => {
+                dv::QueryValidVerificationPackageNames::read(&mut call.data)?;
+                original::QueryValidVerificationPackageNames { uid }.write(&mut request);
+                original::QUERY_VALID_VERIFICATION_PACKAGE_NAMES
+            }
+            dv::GET_DOMAIN_VERIFICATION_INFO => {
+                let a = dv::GetDomainVerificationInfo::read(&mut call.data)?;
+                original::GetDomainVerificationInfo {
+                    uid,
+                    package_name: a.package_name,
+                }
+                .write(&mut request);
+                original::GET_DOMAIN_VERIFICATION_INFO
+            }
+            dv::SET_DOMAIN_VERIFICATION_STATUS => {
+                let a = dv::SetDomainVerificationStatus::<DomainSet>::read(&mut call.data)?;
+                original::SetDomainVerificationStatus {
+                    uid,
+                    id: a.domain_set_id,
+                    domains: a
+                        .domains
+                        .map(|domains| domains.forward(&self.host.process))
+                        .transpose()?,
+                    state: a.state,
+                }
+                .write(&mut request);
+                original::SET_DOMAIN_VERIFICATION_STATUS
+            }
+            _ => unreachable!(),
+        };
+        let frontend = self.host.domain_frontend.lock().unwrap().clone();
+        match frontend {
+            Some(frontend) => frontend
+                .transact_as_owner(code, &request, false)
+                .map(|reply| reply.into_parcel()),
+            None => super::reply(Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "original domain verifier front end unavailable (#1763)",
+            ))),
+        }
+    }
+}
+
+/// State access for the original Java front end. Never accepts app identities.
+pub(super) struct Backend(DomainVerification);
+impl Backend {
+    pub(super) fn new(host: Arc<AppHost>) -> Self {
+        Self(DomainVerification::new(host))
+    }
+}
+impl Service for Backend {
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+    fn descriptor(&self) -> &str {
+        original::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.sender_euid != SYSTEM_UID as u32 {
+            return super::reply(Err(Exception::security(
+                "domain verifier backend requires system UID",
+            )));
+        }
+        let mut reply = Parcel::new();
+        let result = match call.code {
+            original::QUERY_VALID_VERIFICATION_PACKAGE_NAMES => {
+                original::QueryValidVerificationPackageNames::read(&mut call.data)?;
+                self.0.valid_verification_package_names().map(|names| {
+                    dv::write_query_valid_verification_package_names_reply(
+                        &mut reply,
+                        &Some(names.into_iter().map(Some).collect()),
+                    )
+                })
+            }
+            original::GET_DOMAIN_VERIFICATION_INFO => {
+                let a = original::GetDomainVerificationInfo::read(&mut call.data)?;
+                self.0.info(a.uid, a.package_name.as_deref()).map(|info| {
+                    dv::write_get_domain_verification_info_reply(&mut reply, info.as_ref())
+                })
+            }
+            original::SET_DOMAIN_VERIFICATION_STATUS => {
+                let a = original::SetDomainVerificationStatus::<DomainSet>::read(&mut call.data)?;
+                (|| {
+                    let system = self.0.host.system.get().ok_or_else(|| {
+                        Exception::new(EX_ILLEGAL_STATE, "native package owner unavailable")
+                    })?;
+                    let capture = self.0.host.package_capture()?;
+                    let (_, disk) = system.package_persistence_owner(&capture)?;
+                    // The retained Java enforcer checked the explicit caller;
+                    // this private system-UID call only applies the native state.
+                    let driver = crate::package::domain_verification::service::DomainQueries::with_persistence(system, disk);
+                    let status = driver.set_verifier_status(
+                        call.sender_pid as i32,
+                        SYSTEM_UID,
+                        a.id.as_deref(),
+                        a.domains,
+                        a.state,
+                    )?;
+                    dv::write_set_domain_verification_status_reply(&mut reply, status);
+                    Ok(())
+                })()
+            }
+            code => {
+                let name = original::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, name)| *name);
+                Err(self.0.unimplemented(name))
+            }
+        };
+        super::reply(result.map(|()| reply))
+    }
+}
+
 impl Service for DomainVerification {
+    fn accepts_fds(&self) -> bool {
+        true
+    }
     fn descriptor(&self) -> &str {
         dv::DESCRIPTOR
     }
@@ -271,22 +339,9 @@ impl Service for DomainVerification {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result = match call.code {
-            dv::QUERY_VALID_VERIFICATION_PACKAGE_NAMES => {
-                dv::QueryValidVerificationPackageNames::read(&mut call.data)
-                    .map_err(|_| BAD_VALUE)?;
-                self.valid_verification_package_names(uid).map(|names| {
-                    dv::write_query_valid_verification_package_names_reply(
-                        &mut p,
-                        &Some(names.into_iter().map(Some).collect()),
-                    )
-                })
-            }
-            dv::GET_DOMAIN_VERIFICATION_INFO => {
-                let a =
-                    dv::GetDomainVerificationInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.info(uid, a.package_name.as_deref())
-                    .map(|info| dv::write_get_domain_verification_info_reply(&mut p, info.as_ref()))
-            }
+            dv::QUERY_VALID_VERIFICATION_PACKAGE_NAMES
+            | dv::GET_DOMAIN_VERIFICATION_INFO
+            | dv::SET_DOMAIN_VERIFICATION_STATUS => return self.forward(call, uid),
             dv::GET_DOMAIN_VERIFICATION_USER_STATE => {
                 let a = dv::GetDomainVerificationUserState::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -312,3 +367,7 @@ impl Service for DomainVerification {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "domain_verification_tests.rs"]
+mod tests;
