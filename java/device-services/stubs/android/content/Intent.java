@@ -32,6 +32,8 @@ public class Intent implements android.os.Parcelable {
     public static final String EXTRA_CHANGED_COMPONENT_NAME_LIST = "android.intent.extra.changed_component_name_list";
     public static final String EXTRA_PACKAGE_NAME = "android.intent.extra.PACKAGE_NAME";
     public static final String ACTION_MAIN = "android.intent.action.MAIN";
+    public static final String CATEGORY_HOME = "android.intent.category.HOME";
+    public static final int FLAG_DEBUG_TRIAGED_MISSING = 0x00000100;
     public static final String ACTION_DOCK_EVENT = "android.intent.action.DOCK_EVENT";
     public static final String ACTION_BATTERY_CHANGED = "android.intent.action.BATTERY_CHANGED";
     public static final String ACTION_SETTING_RESTORED = "android.os.action.SETTING_RESTORED";

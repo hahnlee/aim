@@ -16,12 +16,18 @@ import java.util.TreeMap;
 /**
  * Aggregation and watermark fields follow AOSP android-16.0.0_r1
  * PendingIntentController/AppProfiler (Apache-2.0).
- * Cold local pull adapter over the app host's process and PendingIntent owners (#2274).
+ * Cold local pull and pinner queries over the app host's process and PendingIntent owners (#2274).
  */
 final class ActivityStats extends ActivityManagerInternal {
     private final IActivityStatsHost host;
 
     ActivityStats(IActivityStatsHost host) { this.host = host; }
+
+    @Override public boolean isUidActive(int uid) {
+        try {
+            return android.app.ActivityManager.getService().isUidActive(uid, "android");
+        } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
 
     static void publish(ISystemProcess system) throws RemoteException {
         IActivityStatsSnapshot snapshot = new IActivityStatsSnapshot.Stub() {
@@ -90,7 +96,7 @@ final class ActivityStats extends ActivityManagerInternal {
     }
 
     private static UnsupportedOperationException unsupported() {
-        return new UnsupportedOperationException("ActivityManagerInternal outside stats pulls (#2274)");
+        return new UnsupportedOperationException("ActivityManagerInternal outside retained system-process queries (#2274)");
     }
     @Override public void killApplicationSync(String name, int appId, int user, String reason, int exitReason) { throw unsupported(); }
     @Override public String getPackageNameByPid(int pid) { throw unsupported(); }

@@ -3,6 +3,7 @@
 package android.app;
 
 public abstract class ActivityManagerInternal {
+    public abstract boolean isUidActive(int uid);
     public abstract java.util.List<ProcessMemoryState> getMemoryStateForProcesses();
     public abstract java.util.List<PendingIntentStats> getPendingIntentStats();
     public abstract Object getCachedAppsHighWatermarkStats(int atomTag, boolean resetAfterPull);
