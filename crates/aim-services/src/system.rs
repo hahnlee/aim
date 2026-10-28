@@ -98,6 +98,8 @@ mod package_web_policy;
 mod permission_mutation;
 #[path = "system_preferred.rs"]
 mod preferred;
+#[path = "system_profile_ids.rs"]
+mod profile_ids;
 #[path = "system_removal_factory.rs"]
 mod removal_factory;
 #[path = "system_staging.rs"]
@@ -269,6 +271,7 @@ pub struct System {
     /// The nonces in system_server's shared memory, from the bridge.
     nonces: Mutex<Option<Arc<NonceSource>>>,
     permissions: Mutex<Permissions>,
+    profiles: Mutex<profile_ids::Profiles>,
     /// Told of each bridge system_server hands over (a handle held for
     /// the call).
     bridge_listeners: Mutex<Vec<BridgeListener>>,
@@ -786,6 +789,7 @@ impl System {
                 collected_ops: Mutex::new(HashMap::new()),
                 nonces: Mutex::new(None),
                 permissions: Mutex::new(Permissions::default()),
+                profiles: Mutex::new(profile_ids::Profiles::default()),
                 bridge_listeners: Mutex::new(Vec::new()),
                 package_bootstrap: Mutex::new(PackageBootstrapState::default()),
                 package_queries: Arc::new(Mutex::new(PackageQueryPublication::default())),
@@ -6985,21 +6989,6 @@ impl System {
             |p| args.write(p),
             um::read_is_user_unlocking_or_unlocked_reply,
         )
-    }
-
-    /// `UserManager.getProfiles(user, true)`, as ids.
-    pub fn profile_ids(self: &Arc<Self>, user_id: i32) -> Result<Vec<i32>> {
-        let args = um::GetProfileIds {
-            user_id,
-            enabled_only: true,
-        };
-        self.call(
-            "user",
-            um::GET_PROFILE_IDS,
-            |p| args.write(p),
-            um::read_get_profile_ids_reply,
-        )
-        .map(Option::unwrap_or_default)
     }
 
     pub fn has_user_restriction(self: &Arc<Self>, key: &str, user_id: i32) -> Result<bool> {
