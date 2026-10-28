@@ -273,6 +273,8 @@ fn shim_of(dir: &Path, package: &str) -> Option<PathBuf> {
 
 fn open(files: &Files, package: &str) -> Result<ExitCode, String> {
     let (state, _) = running(files)?;
+    // A shim can show its splash before the app host can accept its launch.
+    let guest = booted(files)?;
     // In window mode the app's shim hosts its windows under its own Dock
     // icon, and opening it launches the app.
     if state.windows
@@ -287,7 +289,6 @@ fn open(files: &Files, package: &str) -> Result<ExitCode, String> {
     // The app host resolves the launch activity itself, from the packages
     // it loaded (`aim.app_host`'s `startActivity`).
     if state.inputs.app_host_services()?.is_some() {
-        let guest = booted(files)?;
         let (status, out) = guest.output(
             &[
                 "/system/bin/service",
@@ -306,7 +307,6 @@ fn open(files: &Files, package: &str) -> Result<ExitCode, String> {
         .into_iter()
         .find(|i| i.app.package == package)
         .ok_or_else(|| format!("{package}: not a launcher app of the guest (`aimctl apps`)"))?;
-    let guest = booted(files)?;
     let component = format!("{package}/{}", app.app.activity);
     let (status, out) = guest.output(
         &["/system/bin/am", "start", "-W", "-n", &component],
@@ -333,6 +333,59 @@ fn logs(files: &Files, follow: bool, extra: &[String]) -> Result<ExitCode, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_a_window_shim_requires_user_readiness() {
+        let root = std::env::temp_dir().join(format!("aimctl-open-ready-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let files = Files::of(&root.join("data")).unwrap();
+        let contents = files.apps().join("Settings.app/Contents");
+        fs::create_dir_all(&contents).unwrap();
+        fs::write(
+            contents.join("Info.plist"),
+            "<dict>\n<key>AIMPackage</key>\n<string>com.android.settings</string>\n</dict>\n",
+        )
+        .unwrap();
+        assert!(shim_of(&files.apps(), "com.android.settings").is_some());
+        fs::create_dir_all(files.path_map().parent().unwrap()).unwrap();
+        fs::write(files.path_map(), "").unwrap();
+        let services = root.join("system/etc/aim/app-host-services");
+        fs::create_dir_all(services.parent().unwrap()).unwrap();
+        fs::write(services, "").unwrap();
+        let code = aim_service_aidl::android_os_iusermanager::IS_USER_UNLOCKING_OR_UNLOCKED;
+        let probe = root.join("linux-run");
+        fs::write(&probe, format!(
+            "#!/bin/sh\ncase \"$*\" in\n*'/system/bin/service call user {code} i32 0') echo \"Result: Parcel(00000000 00000000   '........')\" ;;\n*) exit 1 ;;\nesac\n"
+        )).unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = State {
+            pid: std::process::id(),
+            guest: Some(std::process::id()),
+            windows: true,
+            started: 0,
+            inputs: inputs::Inputs {
+                image: root.clone(),
+                host_runtime: root.clone(),
+                userdata: root.clone(),
+                binder_trace: None,
+                adb_port: None,
+            },
+        };
+        state.write(&files.state()).unwrap();
+        let _resident = state::lock(&files.lock()).unwrap();
+        assert!(
+            open(&files, "com.android.settings")
+                .unwrap_err()
+                .contains("Android is still booting")
+        );
+    }
 
     #[test]
     fn sizes_and_durations() {
