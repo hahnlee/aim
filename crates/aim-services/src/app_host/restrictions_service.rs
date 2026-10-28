@@ -3,7 +3,7 @@
 //! (`device_policy`): no restrictions provider, so no permission request
 //! or local approval, and no admin's restrictions; an app's own
 //! restrictions as UserManager keeps them. A device with admins or
-//! policies is not implemented (#1737).
+//! policies is not implemented (#2324).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
@@ -31,7 +31,7 @@ impl RestrictionsManager {
         if self.host.device_policies()?.has_admins_or_policies() {
             return Err(self
                 .host
-                .unimplemented_named("restrictions", "a device with admins or policies (#1737)"));
+                .unimplemented_named("restrictions", "a device with admins or policies (#2324)"));
         }
         Ok(())
     }
@@ -94,7 +94,7 @@ impl Service for RestrictionsManager {
                     .map_or("an unknown call", |(_, n)| n);
                 Err(self
                     .host
-                    .unimplemented_named("restrictions", &format!("{name} (#1737)")))
+                    .unimplemented_named("restrictions", &format!("{name} (#2324)")))
             }
         };
         reply(result.map(|()| p))
