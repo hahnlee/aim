@@ -22,4 +22,7 @@ interface ISystemProcess {
      * IInternalServiceRetriever), over the app host's DeviceIdleInternal.
      */
     IBinder getInternalServiceRepository();
+
+    /** Original Java callback registry for the native connectivity owner (#1509). */
+    void attachNetworkActivityBridge(IBinder bridge);
 }

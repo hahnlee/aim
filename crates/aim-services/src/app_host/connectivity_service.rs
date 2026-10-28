@@ -31,6 +31,7 @@ use aim_binder_host::parcel::{
 };
 use aim_service_aidl::android_net_iconnectivitymanager as cm;
 use aim_service_aidl::android_os_imessenger as imessenger;
+use aim_service_aidl::dev_aim_server_inetworkactivitybridge as activity;
 use aim_uplink::Uplink;
 
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
@@ -647,6 +648,9 @@ fn callback_data(
 pub struct ConnectivityService {
     host: Arc<AppHost>,
     shared: Arc<Shared>,
+    /// The cold legacy activity API uses the original Java RemoteCallbackList
+    /// in aim-system, not a second native callback registry.
+    activity: Mutex<Option<Arc<Strong>>>,
     /// netd and DnsResolver, once registered, and the network they were
     /// last given.
     native: Mutex<(
@@ -754,18 +758,59 @@ impl ConnectivityService {
         ConnectivityService {
             host,
             shared,
+            activity: Mutex::new(None),
             native: Mutex::new((None, None)),
         }
     }
 
     /// Follows the Mac's network.
     fn follow(&self) {
+        self.follow_network(mac_network(&self.host));
+    }
+
+    fn follow_network(&self, now: Option<(Uplink, Vec<Ipv4Addr>)>) {
         {
             let mut state = self.shared.state.lock().unwrap();
-            let callbacks = state.follow(mac_network(&self.host));
+            let old = state.network.as_ref().map(|n| n.id);
+            let callbacks = state.follow(now);
             self.deliver(&state, &callbacks);
+            let new = state.network.as_ref().map(|n| n.id);
+            if old != new {
+                if let Some(bridge) = self.activity.lock().unwrap().as_ref() {
+                    if let Err(e) = notify_activity(bridge, new.is_some()) {
+                        eprintln!("app host: connectivity: network activity: {e:?}");
+                    }
+                }
+            }
         }
         self.sync_native();
+    }
+
+    /// Called only by the system-uid attach endpoint. Serialize the initial
+    /// default with follow(), before apps can use this registry.
+    pub(super) fn attach_activity(&self, bridge: Strong) -> Result<(), Exception> {
+        let state = self.shared.state.lock().unwrap();
+        notify_activity(&bridge, state.network.is_some())?;
+        *self.activity.lock().unwrap() = Some(Arc::new(bridge));
+        Ok(())
+    }
+
+    fn activity_call<T>(
+        &self,
+        code: u32,
+        data: &Parcel,
+        read: impl FnOnce(
+            &mut aim_binder_host::parcel::Reader<'_>,
+        ) -> aim_binder_host::parcel::Result<aim_service_aidl::Returned<T>>,
+    ) -> Result<T, Exception> {
+        let bridge = self.activity.lock().unwrap().clone().ok_or_else(|| {
+            self.host.unimplemented_named(
+                "connectivity",
+                "network activity before its system-process bridge attaches (#1509)",
+            )
+        })?;
+        let reply = bridge.transact(code, data, false).map_err(activity_error)?;
+        read(&mut reply.reader()).map_err(activity_error)?
     }
 
     /// Gives netd and DnsResolver the network as ConnectivityService gives
@@ -1771,13 +1816,40 @@ impl Service for ConnectivityService {
                     Ok(())
                 })()
             }
-            // `LegacyNetworkActivityTracker`: the default network, Ethernet,
-            // gets no idle timer (`setupDataActivityTracking` tracks only
-            // cellular and Wi-Fi), so it stays active.
+            // ConnectivityService applies no permission check to these three
+            // calls. The original Java RemoteCallbackList owns the listeners.
+            cm::REGISTER_NETWORK_ACTIVITY_LISTENER => {
+                let a = cm::RegisterNetworkActivityListener::read(&mut call.data).map_err(bad)?;
+                let mut data = Parcel::new();
+                activity::RegisterNetworkActivityListener { listener: a.l }.write(&mut data);
+                self.activity_call(
+                    activity::REGISTER_NETWORK_ACTIVITY_LISTENER,
+                    &data,
+                    activity::read_register_network_activity_listener_reply,
+                )
+                .map(|()| cm::write_register_network_activity_listener_reply(&mut p))
+            }
+            cm::UNREGISTER_NETWORK_ACTIVITY_LISTENER => {
+                let a = cm::UnregisterNetworkActivityListener::read(&mut call.data).map_err(bad)?;
+                let mut data = Parcel::new();
+                activity::UnregisterNetworkActivityListener { listener: a.l }.write(&mut data);
+                self.activity_call(
+                    activity::UNREGISTER_NETWORK_ACTIVITY_LISTENER,
+                    &data,
+                    activity::read_unregister_network_activity_listener_reply,
+                )
+                .map(|()| cm::write_unregister_network_activity_listener_reply(&mut p))
+            }
             cm::IS_DEFAULT_NETWORK_ACTIVE => {
                 cm::IsDefaultNetworkActive::read(&mut call.data).map_err(bad)?;
-                cm::write_is_default_network_active_reply(&mut p, true);
-                Ok(())
+                let mut data = Parcel::new();
+                activity::IsDefaultNetworkActive {}.write(&mut data);
+                self.activity_call(
+                    activity::IS_DEFAULT_NETWORK_ACTIVE,
+                    &data,
+                    activity::read_is_default_network_active_reply,
+                )
+                .map(|active| cm::write_is_default_network_active_reply(&mut p, active))
             }
             // `reportNetworkConnectivity`: a report that agrees with the
             // network's validation only goes to the connectivity diagnostics
@@ -1919,6 +1991,22 @@ impl Service for ConnectivityService {
     }
 }
 
+fn activity_error(status: i32) -> Exception {
+    Exception::new(
+        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+        format!("connectivity network activity bridge: binder status {status} (#1509)"),
+    )
+}
+
+fn notify_activity(bridge: &Strong, available: bool) -> Result<(), Exception> {
+    let mut data = Parcel::new();
+    activity::OnDefaultNetworkChanged { available }.write(&mut data);
+    bridge
+        .transact(activity::ON_DEFAULT_NETWORK_CHANGED, &data, true)
+        .map(|_| ())
+        .map_err(activity_error)
+}
+
 /// A request whose network specifier or transport info the service does
 /// not read.
 fn unreadable(host: &AppHost) -> Exception {
@@ -1931,6 +2019,203 @@ fn unreadable(host: &AppHost) -> Exception {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+    use std::sync::mpsc;
+
+    struct ActivityBridge(mpsc::Sender<(u32, Option<Binder>, bool)>);
+
+    impl Service for ActivityBridge {
+        fn descriptor(&self) -> &str {
+            activity::DESCRIPTOR
+        }
+
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.sender_euid, SYSTEM_UID as u32);
+            let mut p = Parcel::new();
+            match call.code {
+                activity::REGISTER_NETWORK_ACTIVITY_LISTENER => {
+                    let a = activity::RegisterNetworkActivityListener::read(&mut call.data)?;
+                    self.0.send((call.code, a.listener, false)).unwrap();
+                    if a.listener.is_none() {
+                        return reply(Err(Exception::new(EX_NULL_POINTER, "null callback")));
+                    }
+                    activity::write_register_network_activity_listener_reply(&mut p);
+                }
+                activity::UNREGISTER_NETWORK_ACTIVITY_LISTENER => {
+                    let a = activity::UnregisterNetworkActivityListener::read(&mut call.data)?;
+                    self.0.send((call.code, a.listener, false)).unwrap();
+                    activity::write_unregister_network_activity_listener_reply(&mut p);
+                }
+                activity::IS_DEFAULT_NETWORK_ACTIVE => {
+                    activity::IsDefaultNetworkActive::read(&mut call.data)?;
+                    // A controlled answer proves that the front reads the bridge.
+                    activity::write_is_default_network_active_reply(&mut p, false);
+                }
+                activity::ON_DEFAULT_NETWORK_CHANGED => {
+                    let a = activity::OnDefaultNetworkChanged::read(&mut call.data)?;
+                    self.0.send((call.code, None, a.available)).unwrap();
+                }
+                _ => panic!("unexpected activity bridge call"),
+            }
+            Ok(p)
+        }
+    }
+
+    fn service(host: &Arc<AppHost>) -> ConnectivityService {
+        ConnectivityService {
+            host: host.clone(),
+            shared: Arc::new(Shared {
+                state: Mutex::new(State::new(None)),
+                changed: Condvar::new(),
+            }),
+            activity: Mutex::new(None),
+            native: Mutex::new((None, None)),
+        }
+    }
+
+    fn call(service: &dyn Service, uid: u32, code: u32, p: &Parcel) -> Parcel {
+        service
+            .transact(&mut Call {
+                code,
+                flags: 0,
+                sender_pid: 42,
+                sender_euid: uid,
+                data: p.reader(),
+            })
+            .unwrap()
+    }
+
+    /// ConnectivityService's three permission-free entry points delegate to
+    /// LegacyNetworkActivityTracker. Preserve listener identity and Java errors.
+    #[test]
+    fn activity_calls_and_their_pair_reach_java_without_app_permission_checks() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let cs = service(host);
+            let (tx, rx) = mpsc::channel();
+            let bridge = export(Arc::new(ActivityBridge(tx.clone())));
+            cs.attach_activity(bridge).unwrap();
+            assert_eq!(
+                rx.recv().unwrap(),
+                (activity::ON_DEFAULT_NETWORK_CHANGED, None, false)
+            );
+            let listener = export(Arc::new(ActivityBridge(tx)));
+            for (code, write) in [
+                (cm::REGISTER_NETWORK_ACTIVITY_LISTENER, true),
+                (cm::UNREGISTER_NETWORK_ACTIVITY_LISTENER, false),
+            ] {
+                let mut p = Parcel::new();
+                if write {
+                    cm::RegisterNetworkActivityListener {
+                        l: Some(listener.binder()),
+                    }
+                    .write(&mut p);
+                } else {
+                    cm::UnregisterNetworkActivityListener {
+                        l: Some(listener.binder()),
+                    }
+                    .write(&mut p);
+                }
+                call(&cs, 10100, code, &p)
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .unwrap();
+            }
+            let registered = rx.recv().unwrap();
+            let removed = rx.recv().unwrap();
+            assert_eq!(registered.0, activity::REGISTER_NETWORK_ACTIVITY_LISTENER);
+            assert_eq!(removed.0, activity::UNREGISTER_NETWORK_ACTIVITY_LISTENER);
+            assert_eq!(registered.1, removed.1);
+            assert!(registered.1.is_some());
+
+            let mut p = Parcel::new();
+            cm::IsDefaultNetworkActive {}.write(&mut p);
+            assert!(
+                !cm::read_is_default_network_active_reply(
+                    &mut call(&cs, 10100, cm::IS_DEFAULT_NETWORK_ACTIVE, &p).reader()
+                )
+                .unwrap()
+                .unwrap()
+            );
+            let mut p = Parcel::new();
+            cm::RegisterNetworkActivityListener { l: None }.write(&mut p);
+            let result = call(&cs, 10100, cm::REGISTER_NETWORK_ACTIVITY_LISTENER, &p);
+            let error = result.reader().read_exception().unwrap().unwrap_err();
+            assert_eq!(
+                (error.code, error.message.as_str()),
+                (EX_NULL_POINTER, "null callback")
+            );
+        });
+    }
+
+    /// updateDefaultNetworkActivity on V+: a new default reports activity,
+    /// loss stays active without notifying, DNS-only changes do not rematch it.
+    #[test]
+    fn activity_tracks_default_network_changes_and_attach_is_system_only() {
+        use aim_service_aidl::dev_aim_server_isystemprocess as sp;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let cs = Arc::new(service(host));
+            assert!(host.connectivity_service.set(cs.clone()).is_ok());
+            let lease = (up([192, 168, 1, 2], 24, [192, 168, 1, 1], 1500), vec![]);
+            cs.follow_network(Some(lease.clone()));
+            let (tx, rx) = mpsc::channel();
+            let bridge = export(Arc::new(ActivityBridge(tx)));
+            let endpoint = super::super::system_process::SystemProcess::new(host.clone());
+            let mut p = Parcel::new();
+            sp::AttachNetworkActivityBridge {
+                bridge: Some(bridge.binder()),
+            }
+            .write(&mut p);
+            let denied = call(&endpoint, 10100, sp::ATTACH_NETWORK_ACTIVITY_BRIDGE, &p);
+            assert_eq!(
+                denied.reader().read_exception().unwrap().unwrap_err().code,
+                EX_SECURITY
+            );
+            assert!(rx.try_recv().is_err());
+            call(
+                &endpoint,
+                SYSTEM_UID as u32,
+                sp::ATTACH_NETWORK_ACTIVITY_BRIDGE,
+                &p,
+            )
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                rx.recv().unwrap(),
+                (activity::ON_DEFAULT_NETWORK_CHANGED, None, true)
+            );
+            cs.follow_network(Some((lease.0.clone(), vec![Ipv4Addr::new(1, 1, 1, 1)])));
+            cs.follow_network(None);
+            cs.follow_network(Some(lease));
+            assert_eq!(
+                rx.recv().unwrap(),
+                (activity::ON_DEFAULT_NETWORK_CHANGED, None, false)
+            );
+            assert_eq!(
+                rx.recv().unwrap(),
+                (activity::ON_DEFAULT_NETWORK_CHANGED, None, true)
+            );
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn activity_without_java_and_other_missing_calls_name_the_issue() {
+        let cs = service(&AppHost::new(crate::test_process(SYSTEM_UID as u32)));
+        let mut p = Parcel::new();
+        cm::RegisterNetworkActivityListener { l: None }.write(&mut p);
+        for code in [
+            cm::REGISTER_NETWORK_ACTIVITY_LISTENER,
+            cm::PENDING_LISTEN_FOR_NETWORK,
+        ] {
+            let response = call(&cs, 10100, code, &p);
+            let e = response.reader().read_exception().unwrap().unwrap_err();
+            assert_eq!(e.code, EX_UNSUPPORTED_OPERATION);
+            assert!(e.message.contains("#1509"));
+        }
+    }
 
     fn up(addr: [u8; 4], prefix: u8, gateway: [u8; 4], mtu: u32) -> Uplink {
         Uplink {
