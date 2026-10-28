@@ -593,6 +593,9 @@ impl AppHost {
                 data: None,
             })
         });
+        if let Some(app) = self.apps.lock().unwrap().get_mut(&start_seq) {
+            app.add_package(package);
+        }
         let token = self.new_activity(start_seq, uid, package, info, style, task, request);
         let mut activity =
             stack::Activity::new(token, task, start_seq, &real, launch_mode, user, result_to);

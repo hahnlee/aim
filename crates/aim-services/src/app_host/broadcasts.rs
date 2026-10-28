@@ -659,7 +659,14 @@ impl Broadcasts {
             return Ok(None);
         };
         let caller_package = args.caller_package.as_deref().unwrap_or_default();
-        if !is_core(uid) && caller_package != package {
+        if !is_core(uid)
+            && !host
+                .apps
+                .lock()
+                .unwrap()
+                .get(&start_seq)
+                .is_some_and(|app| app.packages.iter().any(|p| p == caller_package))
+        {
             return Err(Exception::security(format!(
                 "Given caller package {caller_package} is not running in process {pid}:{package}/{uid}"
             )));
@@ -2782,6 +2789,11 @@ impl Broadcasts {
         if self.skipped_manifest(host, record, m) {
             return Some(false);
         }
+        host.apps
+            .lock()
+            .unwrap()
+            .get_mut(&start_seq)?
+            .add_package(&manifest_package(m));
         temp_allowlist(host, m.uid as i32, record);
         self.share_identity_access(host, start_seq, record);
         let compat = super::config::CompatibilityInfo::of(

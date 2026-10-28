@@ -1726,12 +1726,11 @@ impl AppHost {
     fn real_start(&self, state: &mut State, token: Binder) {
         let r = state.record(token).unwrap();
         let Some(app) = r.app else { return };
-        let config = self
-            .apps
-            .lock()
-            .unwrap()
-            .get(&app)
-            .and_then(|a| a.config.clone());
+        let config = self.apps.lock().unwrap().get_mut(&app).and_then(|a| {
+            let config = a.config.clone()?;
+            a.add_package(&r.package);
+            Some(config)
+        });
         let Some(config) = config else { return };
         r.restart_time = Some(Instant::now());
         let Ok(inputs) = self.inputs() else { return };

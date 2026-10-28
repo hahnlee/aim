@@ -371,7 +371,7 @@ impl AppHost {
                     // `scheduleInstallProvider` to a running process not
                     // handed it.
                     if let Some(app) = self.apps.lock().unwrap().get_mut(&seq) {
-                        app.providers.push(cpi.clone());
+                        app.add_provider(cpi.clone());
                     }
                     let mut p = Parcel::new();
                     thread::ScheduleInstallProvider {
