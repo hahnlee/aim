@@ -314,6 +314,29 @@ fn pseudo_terminals() {
 }
 
 #[test]
+fn pseudo_terminal_exec_hangup() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let guest = Guest::new(&image, "t_pty_exec");
+    let program = guest.build(&clang, "t_pty");
+    let (ok, output) = guest.run(&["--trace", &program, "--exec-hangup"]);
+    assert!(
+        ok && output.contains("PASS"),
+        "PTY exec hangup failed: {output}"
+    );
+    assert!(
+        output.contains("stage=relaunch.host-exec"),
+        "host exec was not exercised: {output}"
+    );
+    assert!(
+        output.contains("stage=in-place.close-on-exec"),
+        "in-place exec was not exercised: {output}"
+    );
+}
+
+#[test]
 fn sockets() {
     check("t_net", &["/data/local/tmp"]);
 }
