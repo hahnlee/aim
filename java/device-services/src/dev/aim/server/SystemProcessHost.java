@@ -128,6 +128,8 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachWifiBridge(new WifiBridge(new Handler(Looper.getMainLooper())));
             host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
             host.attachSettingsValues(new SettingsValues());
+
+            host.attachProviderQueries(new ProviderQueries(context));
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
             PreBootNotifications.publish(context);
             host.attachSystemProcess(applicationThread.asBinder(),

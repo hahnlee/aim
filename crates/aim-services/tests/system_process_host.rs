@@ -39,6 +39,7 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
     // Only compile dependencies here; the class under test is always production source.
     let mut sources = common::java::sources(&fixtures);
     sources.push(binder);
+    sources.push(production.join("src/dev/aim/server/ProviderQueries.java"));
     let generated = common::java::private_aidl_sources(&data.0);
     sources.extend(generated.into_iter().filter(|p| {
         p.ends_with("IForegroundServicePolicy.java")

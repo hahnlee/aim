@@ -452,6 +452,33 @@ impl Service for PackageBootstrap {
         let mut p = Parcel::new();
         let host = &self.host;
         let result: Result<(), Exception> = match call.code {
+            bridge::CHECK_PROVIDER_AUTHORITY_GRANTS => {
+                let a = bridge::CheckProviderAuthorityGrants::<
+                    super::provider_queries::ProviderAuthority,
+                >::read(&mut call.data)
+                .map_err(|_| BAD_VALUE)?;
+                a.provider_info
+                    .as_ref()
+                    .ok_or_else(|| Exception::new(EX_NULL_POINTER, "providerInfo"))
+                    .and_then(|provider| {
+                        host.provider_authority_granted(
+                            a.calling_uid,
+                            provider.0.as_deref(),
+                            a.user_id,
+                        )
+                    })
+                    .map(|granted| {
+                        bridge::write_check_provider_authority_grants_reply(&mut p, granted)
+                    })
+            }
+            bridge::IS_PROVIDER_CLONE_REDIRECTED => {
+                let a = bridge::IsProviderCloneRedirected::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                host.provider_clone_redirected(a.authority, a.calling_uid, a.user_id)
+                    .map(|redirected| {
+                        bridge::write_is_provider_clone_redirected_reply(&mut p, redirected)
+                    })
+            }
             bridge::COMPLETE_EXISTING_PACKAGE_INSTALL => {
                 let a =
                     bridge::CompleteExistingPackageInstall::<IntentSender>::read(&mut call.data)

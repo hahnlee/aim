@@ -268,6 +268,11 @@ Service lookups select the original profile-dependent allow mode; each user is
 its own profile group on this host. This consolidation is checked without a guest
 boot (#2170).
 
+Package provider queries use the live URI-grants owner and the original Java
+clone-authority policy over UserManager, retaining caller and target-user scope
+and reporting bridge loss (#2181). Host tests and Java linkage are checked;
+no guest boot was run (2026-10-29).
+
 ## Native system services (2026-09-29, ADR 0013)
 
 `image/native-services` lists the system services implemented natively

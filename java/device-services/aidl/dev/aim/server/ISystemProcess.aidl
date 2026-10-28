@@ -55,4 +55,7 @@ interface ISystemProcess {
     IActivityStatsHost getActivityStatsHost(IActivityStatsSnapshot snapshot);
     /** Release a diagnostics listener's shared native request count; system UID only. */
     void releaseConnectivityDiagnosticsRequest(int requestId);
+
+    /** Original clone-provider query policy; system UID only. */
+    void attachProviderQueries(IBinder queries);
 }
