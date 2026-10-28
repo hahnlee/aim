@@ -2,7 +2,7 @@
 //! (`android-16.0.0_r1`). Its scanner impls are made for the chip's client
 //! interfaces (`setupScannerImpls`), and the app host has none: no
 //! wificond or vendor HAL scans, and the Mac's own scans are not read
-//! (#1686). So the three state machines stay in their `DefaultState`, as
+//! (#2261). So the three state machines stay in their `DefaultState`, as
 //! the original's do without a scanner impl: a single or background scan
 //! fails as "not available", a PNO scan too, no scan result is cached and
 //! no channel is available. The checks are the original's
@@ -633,7 +633,7 @@ impl WifiScanner {
         // up (`setEmergencyScanRequestInProgress`).
         Err(self
             .host
-            .unimplemented_named("wifiscanner", "an emergency scan (#1686)"))
+            .unimplemented_named("wifiscanner", "an emergency scan (#2261)"))
     }
 }
 
@@ -967,7 +967,7 @@ impl Service for WifiScanner {
                     .map_or("an unknown call", |(_, n)| n);
                 Err(self
                     .host
-                    .unimplemented_named("wifiscanner", &format!("{name} (#1686)")))
+                    .unimplemented_named("wifiscanner", &format!("{name} (#2261)")))
             }
         };
         reply(result.map(|()| p))
