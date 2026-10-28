@@ -35,6 +35,7 @@ const CAP_SETUID: u32 = 7;
 const CAP_SETPCAP: u32 = 8;
 const CAP_SYS_PTRACE: u32 = 19;
 pub(super) const CAP_SYS_ADMIN: u32 = 21;
+pub(super) const CAP_IPC_LOCK: u32 = 14;
 const CAP_SYS_NICE: u32 = 23;
 const RLIMIT_NICE: usize = 13;
 pub(super) const CAP_DAC_OVERRIDE: u32 = 1;
@@ -1298,9 +1299,9 @@ pub fn own_rlimit(res: u32, new: Option<[u64; 2]>, may_raise: bool) -> Result<[u
         }
         with(|id| id.rlimits[res] = Some((soft, hard)));
         // Enforce what the host allows; the guest sees what it set. The
-        // layer enforces RLIMIT_AS and RLIMIT_DATA itself (`vm_account`):
-        // the host's limits would count the layer's memory too.
-        if !matches!(res, RLIMIT_DATA | RLIMIT_AS) {
+        // The layer enforces memory limits itself: the host would count its
+        // memory too, and has no guest CAP_IPC_LOCK exemption for MEMLOCK.
+        if !matches!(res, RLIMIT_DATA | 8 | RLIMIT_AS) {
             let l = [soft, hard];
             super::process::prlimit(261, [0, res as u64, l.as_ptr() as u64, 0, 0, 0]);
         }

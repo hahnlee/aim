@@ -1,6 +1,7 @@
 // Compile-only original AM Binder interface.
 package android.app;
 public interface IActivityManager extends android.os.IInterface {
+    boolean isUidActive(int uid, String callingPackage) throws android.os.RemoteException;
     int checkPermission(String permission, int pid, int uid) throws android.os.RemoteException;
     void killApplication(String packageName, int appId, int userId, String reason, int exitReason) throws android.os.RemoteException;
     int[] getRunningUserIds() throws android.os.RemoteException;

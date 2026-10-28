@@ -24,6 +24,7 @@ import com.android.server.SystemService;
 import com.android.server.SystemService.TargetUser;
 import com.android.server.adservices.SystemProcessLifecycle;
 import com.android.server.appsearch.AppSearchModule$Lifecycle;
+import com.android.server.pinner.PinnerService;
 import com.android.server.stats.pull.StatsPullAtomService;
 
 import dalvik.system.VMRuntime;
@@ -38,7 +39,7 @@ import java.util.List;
  * module, the Connectivity module's NearbyService, the AdServices module's
  * AdServicesManagerService, DeviceLockService, TelecomLoaderService's
  * part ({@link TelecomLoader}), StatsCompanionService's UID-map/receiver
- * lifecycle ({@link StatsCompanionUidMap}), the original StatsPullAtomService,
+ * lifecycle ({@link StatsCompanionUidMap}), the original PinnerService and StatsPullAtomService,
  * and the components declared in
  * `android:process="system"`, such as Telecom's.
  * This class plays ZygoteInit's part for the system server
@@ -72,7 +73,7 @@ public final class SystemProcessHost extends RuntimeInit {
      * `setSystemProcess` makes it the system process's, which then installs
      * its providers (`installSystemProviders`) and runs its components on
      * this main thread; the services started in SystemServer's order and
-     * given the boot phases from where SystemServer starts each: Nearby,
+     * given the boot phases from where SystemServer starts each: Pinner, then Nearby,
      * which ConnectivityServiceInitializer starts before
      * PHASE_LOCK_SETTINGS_READY (the app host serves the initializer's
      * other services natively), then StatsPullAtomService and
@@ -136,6 +137,10 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSystemRouteQueries(new com.android.server.media.SystemRouteQueries(context));
             host.attachStatsCompanionUidMap(new StatsCompanionUidMap(context));
             host.attachRecoverableKeyStoreKeys(new RecoverableKeyStoreKeys(context));
+            ActivityStats.publish(host);
+            TaskManagerLocal.publish();
+            SystemService pinner = new PinnerService(context);
+            pinner.onStart();
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's
@@ -154,6 +159,7 @@ public final class SystemProcessHost extends RuntimeInit {
             for (int phase : new int[] {SystemService.PHASE_LOCK_SETTINGS_READY,
                     SystemService.PHASE_SYSTEM_SERVICES_READY,
                     SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY}) {
+                pinner.onBootPhase(phase);
                 nearby.onBootPhase(phase);
                 statsPull.onBootPhase(phase);
                 adServices.onBootPhase(phase);
@@ -161,7 +167,7 @@ public final class SystemProcessHost extends RuntimeInit {
             SystemService appSearch = new AppSearchModule$Lifecycle(context);
             appSearch.onStart();
             List<SystemService> services = new ArrayList<>(
-                    List.of(nearby, statsPull, adServices, appSearch));
+                    List.of(pinner, nearby, statsPull, adServices, appSearch));
             if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_DEVICE_LOCK)) {
                 ClassLoader deviceLockLoader = ClassLoaderFactory.createClassLoader(DEVICE_LOCK_JAR,
                         null, null, Server.class.getClassLoader(), Build.VERSION.SDK_INT,
@@ -180,6 +186,7 @@ public final class SystemProcessHost extends RuntimeInit {
             for (SystemService service : services) {
                 service.onUserStarting(user);
             }
+            pinner.onUserSwitching(null, user);
             for (SystemService service : services) {
                 service.onUserUnlocking(user);
             }

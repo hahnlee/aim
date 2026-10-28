@@ -629,9 +629,32 @@ It loads the original `android_servers` JNI library before creating the system
 context. No StatsPullAtomService source is copied or replaced. Host lifecycle,
 original DEX registration-route and native statsmanager forwarding tests are
 separate checks, not a running-original integration result. Original callbacks
-still require ActivityManagerInternal and PinnerService local owners (and
-BatteryStatsInternal when its BPF/feature guards enable that pull); these are
-not installed in aim-system, so runtime pull coverage remains open under #1765.
+use a small Java ActivityManagerInternal local service over the native process
+and PendingIntent owners (#2274). Typed vendor AIDL carries process state and
+parcelled extras sizes; Java aggregates per-UID PendingIntent counts and formats
+the original event shape. The process owner retains the cached-app watermark,
+including all-field reset, with cold Java BinderProxy/MemInfoReader snapshots.
+RSS/swap still come from the original pullers' procfs reads. The same adapter's
+`isUidActive` uses the app host's existing ActivityManager Binder endpoint over
+its live UID owner. A Java ActivityTaskManagerInternal supplies the normal-boot
+HOME intent, as the pinned ActivityTaskManagerService does; the app host has no
+factory-test top-action override. PackageManager's existing `resolveIntent` and
+`queryIntentActivities` retain HOME resolution and preferred-package policy.
+The image's original PinnerService now runs before Nearby and StatsPullAtomService:
+constructor, `onStart` (including its original Binder and LocalServices publication,
+receivers and pin worker), all subsequent boot phases, and the initial user-0
+switch/unlock callbacks. The app host still supports only user 0. No pinner source
+is copied or replaced. Its unconditional stats pull reads the original pinned
+inventories, including HOME's configured 60 MiB budget. Real Darwin wiring is
+used by Linux `mlock`, with Linux alignment, overlap accounting, RLIMIT_MEMLOCK
+and CAP_IPC_LOCK semantics; aim-system receives IPC_LOCK as ZygoteInit gives
+system_server. `MADV_WILLNEED` requests host read-ahead and returns
+range errors. Guest memory-lock limits are kept separate from host limits so a
+guest limit cannot prevent a capable guest from wiring pages.
+The pinned DEX disables CPU-thread-group registration and returns PULL_SKIP from
+that callback, so this image needs no BatteryStatsInternal bridge. Targeted
+host/JVM/DEX and image-linkage checks cover lifecycle, local adapters and the
+original pinner pull route; original pin-worker and statsd execution remain unverified.
 No guest boot was run.
 
 The cold `lock_settings.generateKey` and paired `removeKey` bodies are extracted

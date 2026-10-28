@@ -129,6 +129,40 @@ pub struct PendingIntents {
     records: Mutex<Vec<Record>>,
 }
 
+/// A live record's retained parcelled extras; never copy payloads across Binder.
+pub(super) struct StatsRecord {
+    uid: i32,
+    extras_bytes: i32,
+}
+impl WriteParcelable for StatsRecord {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(12);
+        p.write_i32(self.uid);
+        p.write_i32(self.extras_bytes);
+    }
+}
+impl PendingIntents {
+    pub(super) fn stats(&self) -> aim_binder_host::parcel::Result<Vec<Option<StatsRecord>>> {
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| !r.canceled)
+            .map(|r| {
+                Ok(Some(StatsRecord {
+                    uid: r.uid,
+                    extras_bytes: r
+                        .intents
+                        .last()
+                        .map(|i| i.intent.extras_total_size())
+                        .transpose()?
+                        .unwrap_or(0),
+                }))
+            })
+            .collect()
+    }
+}
+
 /// A record's `IIntentSender` (its binder, once made): `send` (one-way)
 /// sends it as `sendIntentSender` does without a caller.
 struct IntentSender {
@@ -782,4 +816,66 @@ fn perform_receive(receiver: &Strong, intent: &RawIntent, user: i32) {
     }
     .write(&mut p);
     let _ = receiver.transact(intent_receiver::PERFORM_RECEIVE, &p, true);
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+    #[test]
+    fn stats_follow_the_live_requests_updates_and_cancellation() {
+        let process = crate::test_process(1000);
+        let host = AppHost::new(process.clone());
+        let owner = &host.pending_intents;
+        let request = |action| {
+            KeptIntent::new(
+                RawIntent::new(action, 0, &[("payload", crate::bundle::Value::Int(27))]),
+                &process,
+            )
+        };
+        owner.records.lock().unwrap().push(Record {
+            binder: Binder::Local(42),
+            kind: INTENT_SENDER_BROADCAST,
+            package: "p".into(),
+            feature: None,
+            activity: None,
+            result_who: None,
+            request_code: 0,
+            intents: vec![request("first"), request("last")],
+            resolved_types: None,
+            flags: FLAG_IMMUTABLE,
+            user: 0,
+            uid: 10123,
+            canceled: false,
+            cancel_listeners: vec![],
+        });
+        let rows = owner.stats().unwrap();
+        let row = rows[0].as_ref().unwrap();
+        assert_eq!(row.uid, 10123);
+        assert_eq!(row.extras_bytes, 32);
+        use aim_service_aidl::dev_aim_server_iactivitystatshost as api;
+        let service = super::super::activity_stats::Backend(host.clone());
+        let mut request = Parcel::new();
+        api::GetPendingIntents {}.write(&mut request);
+        let p = service
+            .transact(&mut Call {
+                code: api::GET_PENDING_INTENTS,
+                flags: 0,
+                sender_pid: 1,
+                sender_euid: 1000,
+                data: request.reader(),
+            })
+            .unwrap();
+        let mut r = p.reader();
+        r.read_exception().unwrap().unwrap();
+        let values: Vec<_> = (0..5).map(|_| r.read_i32().unwrap()).collect();
+        assert_eq!(values, [1, 1, 12, 10123, 32]);
+        assert_eq!(r.remaining(), 0);
+        owner.records.lock().unwrap()[0].intents =
+            vec![KeptIntent::new(RawIntent::new("updated", 0, &[]), &process)];
+        let rows = owner.stats().unwrap();
+        let row = rows[0].as_ref().unwrap();
+        assert_eq!(row.extras_bytes, 0);
+        owner.records.lock().unwrap().clear();
+        assert!(owner.stats().unwrap().is_empty());
+    }
 }
