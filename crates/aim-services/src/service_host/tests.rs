@@ -1126,6 +1126,63 @@ type ScanOracle<'a> = dyn Fn(
         &SystemConfig,
         &Arc<Mutex<crate::package::owner::Store>>,
     ) + 'a;
+
+struct SettingsBootData(std::path::PathBuf);
+impl SettingsBootData {
+    fn new() -> Self {
+        // Parallel tests and the leftovers of killed runs must not share a root,
+        // so each one takes a new name and creates it exclusively.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = loop {
+            let root = std::env::temp_dir().join(format!(
+                "aim-settings-entry-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&root) {
+                Ok(()) => break root,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{}: {error}", root.display()),
+            }
+        };
+        Self(root)
+    }
+}
+impl Drop for SettingsBootData {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            let message = format!("settings fixture cleanup {}: {error}", self.0.display());
+            if std::thread::panicking() {
+                eprintln!("{message}");
+            } else {
+                panic!("{message}");
+            }
+        }
+    }
+}
+
+#[test]
+fn settings_boot_cleanup_failure_preserves_the_original_panic() {
+    let data = SettingsBootData::new();
+    let file = data.0.join("not-a-directory");
+    std::fs::write(&file, b"fixture").unwrap();
+    // A cleanup failure must fail an otherwise successful test.
+    let cleanup = std::panic::catch_unwind(|| drop(SettingsBootData(file.clone())));
+    let message = cleanup.unwrap_err().downcast::<String>().unwrap();
+    assert!(message.contains("settings fixture cleanup"));
+    // The same error during unwinding must preserve the first failure,
+    // rather than aborting every test with a double panic (#1701).
+    let original = std::panic::catch_unwind(|| {
+        let _cleanup = SettingsBootData(file.clone());
+        panic!("frontend assertion failed");
+    });
+    assert_eq!(
+        *original.unwrap_err().downcast::<&str>().unwrap(),
+        "frontend assertion failed"
+    );
+    assert_eq!(std::fs::read(file).unwrap(), b"fixture");
+}
+
 fn verify_settings_boot_entry(
     system: &Arc<System>,
     bridge: &Arc<crate::package::bootstrap::Bridge>,
@@ -1135,29 +1192,9 @@ fn verify_settings_boot_entry(
         owner::recovery::{Event, ReadError},
         settings::Settings,
     };
-    // Parallel tests and the leftovers of killed runs must not share a root,
-    // so each one takes a new name and creates it exclusively.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let root = loop {
-        let root = std::env::temp_dir().join(format!(
-            "aim-settings-entry-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        match std::fs::create_dir(&root) {
-            Ok(()) => break root,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => panic!("{}: {error}", root.display()),
-        }
-    };
-    struct Data(std::path::PathBuf);
-    impl Drop for Data {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
+    let data = SettingsBootData::new();
+    let root = &data.0;
     std::fs::create_dir(root.join("system")).unwrap();
-    let _data = Data(root.clone());
     let path = root.join("system/packages.xml");
     let bytes = b"<packages><version sdkVersion='36' databaseVersion='3'/><extension value='keep'/></packages>";
     std::fs::write(&path, bytes).unwrap();
@@ -1238,7 +1275,8 @@ fn verify_settings_boot_entry(
         .err()
         .unwrap();
     assert!(
-        matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "frontend binding owner unavailable")
+        matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "frontend binding owner unavailable"),
+        "unexpected recovery failure: {error:?}"
     );
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     // Use the production record dispatcher with the same retained bridge.
