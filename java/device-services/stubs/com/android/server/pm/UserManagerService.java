@@ -1,6 +1,9 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class UserManagerService extends android.os.IUserManager.Stub {
+    public android.content.pm.UserInfo getUserInfo(int user) { throw new RuntimeException("stub"); }
+    public boolean isUserRunning(int user) { throw new RuntimeException("stub"); }
+    public boolean isUserUnlockingOrUnlocked(int user) { throw new RuntimeException("stub"); }
     public int[] getUserIds(){throw new RuntimeException("stub");}
     UserManagerService(android.content.Context context) { throw new RuntimeException("stub"); }
     UserManagerService(android.content.Context context, PackageManagerService pm,

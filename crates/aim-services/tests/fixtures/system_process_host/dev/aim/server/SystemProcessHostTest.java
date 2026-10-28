@@ -21,7 +21,7 @@ public final class SystemProcessHostTest {
             throw new AssertionError("startup returned");
         } catch (Attached expected) {
             List<String> wanted = new ArrayList<>(List.of("jni", "context", "modules", "memory",
-                    "systemApplication", "network", "roles", "packageJava", "domain", "attachDomain", "foreground",
+                    "systemApplication", "network", "roles", "installer", "installer:start", "packageLocals", "packageJava", "domain", "attachDomain", "foreground",
                     "attachSystem", "companion", "crates", "activityStats", "taskManagerLocal",
                     "PinnerService:construct", "PinnerService:start", "NetworkStatsInitializer:construct",
                     "NetworkStatsInitializer:start", "NearbyServiceInitializer:construct",

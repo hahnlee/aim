@@ -33,6 +33,12 @@ impl Service for Java {
         }
         let mut p = Parcel::new();
         match call.code {
+            bridge::ON_EXISTING_PACKAGE_INSTALLED => {
+                let a = bridge::OnExistingPackageInstalled::read(&mut call.data)?;
+                assert!(a.record.is_some());
+                assert_eq!((a.user_id, a.install_flags), (0, 0x00400000));
+                bridge::write_on_existing_package_installed_reply(&mut p, &Some(vec![3, -1, 99]));
+            }
             bridge::SEND_PREFERRED_ACTIVITY_CHANGED => {
                 let a = bridge::SendPreferredActivityChanged::read(&mut call.data)?;
                 assert_eq!(a.user_id, -1);
@@ -73,7 +79,15 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
         bridge::WaitPackageBackgroundHandler { timeout_millis: -1 }.write(&mut wait);
         let mut timestamp = Parcel::new();
         bridge::FormatPackageTimestamp { millis: -1 }.write(&mut timestamp);
+        let mut installed = Parcel::new();
+        bridge::OnExistingPackageInstalled {
+            record: Some(Binder::Handle(owner.handle)),
+            user_id: 0,
+            install_flags: 0x00400000,
+        }
+        .write(&mut installed);
         let requests = [
+            (bridge::ON_EXISTING_PACKAGE_INSTALLED, installed),
             (bridge::SEND_PREFERRED_ACTIVITY_CHANGED, broadcast),
             (bridge::WAIT_PACKAGE_BACKGROUND_HANDLER, wait),
             (bridge::FORMAT_PACKAGE_TIMESTAMP, timestamp),
@@ -137,6 +151,12 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
                         .unwrap()
                         .unwrap()
                 ),
+                bridge::ON_EXISTING_PACKAGE_INSTALLED => assert_eq!(
+                    bridge::read_on_existing_package_installed_reply(&mut r)
+                        .unwrap()
+                        .unwrap(),
+                    Some(vec![3, -1, 99])
+                ),
                 _ => assert_eq!(
                     bridge::read_format_package_timestamp_reply(&mut r)
                         .unwrap()
@@ -159,7 +179,7 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             );
             mode.store(0, Ordering::SeqCst);
         }
-        assert_eq!(calls.lock().unwrap().len(), 9);
+        assert_eq!(calls.lock().unwrap().len(), 12);
         let mut wait = Parcel::new();
         bridge::WaitPackageBackgroundHandler {
             timeout_millis: i64::MAX,

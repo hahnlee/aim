@@ -20,7 +20,8 @@
 //! background-handler barrier run in aim-system's original Java bridge.
 //! Existing-install completion restores delayed permissions through the
 //! permission owner and delivers its status; backup restore has no owner
-//! (#1925). The install-existing app-data leaf remains unsupported (#2330).
+//! (#1925). The install-existing leaf runs through that Java bridge, with
+//! local adapters over the native permission, user and storage owners.
 //! The bridge's other owners, its other sub-bridges
 //! among them, are not implemented (#2330).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -519,6 +520,12 @@ impl Service for PackageBootstrap {
                     .map(|redirected| {
                         bridge::write_is_provider_clone_redirected_reply(&mut p, redirected)
                     })
+            }
+            bridge::ON_EXISTING_PACKAGE_INSTALLED => {
+                let a = bridge::OnExistingPackageInstalled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
             }
             bridge::SEND_PREFERRED_ACTIVITY_CHANGED => {
                 let a = bridge::SendPreferredActivityChanged::read(&mut call.data)

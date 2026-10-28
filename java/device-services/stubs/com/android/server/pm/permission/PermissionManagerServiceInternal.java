@@ -16,6 +16,7 @@ public interface PermissionManagerServiceInternal extends android.permission.Per
     void readLegacyPermissionStateTEMP();
     void onPackageInstalled(com.android.server.pm.pkg.AndroidPackage pkg,int previousAppId,PackageInstalledParams params,int userId);
     final class PackageInstalledParams {
+        public java.util.List<String> getAllowlistedRestrictedPermissions(){throw new RuntimeException("stub");}
         private PackageInstalledParams(android.util.ArrayMap<String,Integer> states,java.util.List<String> permissions,int mode){throw new RuntimeException("stub");}
         public static final class Builder {
             public Builder(){throw new RuntimeException("stub");}

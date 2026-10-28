@@ -613,6 +613,13 @@ this adds vendor bridge classes only, with no replacement of original classes.
   unserved services and providers still require their owners' internals
   and remain explicit UnsupportedOperation (#1518).
 
+The install-existing leaf (#2330) retains `ExistingInstallEffects` in aim-system,
+with the original non-isolated Installer connected to installd and local adapters
+over the native permission, user and storage owners. Permission mutations stay
+with the access owner and its persistence/publication effects; app-data recovery,
+inode receipts, library links and OBB preparation stay in Java. These are vendor
+class additions, with no new original-class or image replacement.
+
 The cold statscompanion UID-map writer and its app, user and shutdown receivers
 are extracted from the original [StatsCompanionService.java](https://android.googlesource.com/platform/packages/modules/StatsD/+/refs/tags/android-16.0.0_r1/service/java/com/android/server/stats/StatsCompanionService.java)
 into `StatsCompanionUidMap` in the existing vendor jar (#1765): the system-UID-only

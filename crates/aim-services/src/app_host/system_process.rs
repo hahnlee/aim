@@ -62,6 +62,37 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::EXISTING_PACKAGE_PERMISSIONS_INSTALLED => {
+                let a = sp::ExistingPackagePermissionsInstalled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let name = a.package_name.as_deref().ok_or_else(|| {
+                        Exception::illegal_argument("missing existing permission package")
+                    })?;
+                    self.host
+                        .permission_manager
+                        .get()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "permission owner is unavailable",
+                            )
+                        })?
+                        .existing_package_installed(name, a.allowlisted.as_deref(), a.user_id)?;
+                    sp::write_existing_package_permissions_installed_reply(&mut p);
+                    Ok(())
+                })
+            }
+            sp::IS_PACKAGE_CE_STORAGE_PREPARED => {
+                let a =
+                    sp::IsPackageCeStoragePrepared::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().map(|()| {
+                    sp::write_is_package_ce_storage_prepared_reply(
+                        &mut p,
+                        self.host.ce_storage_prepared(a.user_id),
+                    )
+                })
+            }
             sp::ATTACH_PACKAGE_BOOTSTRAP_JAVA => {
                 let a =
                     sp::AttachPackageBootstrapJava::read(&mut call.data).map_err(|_| BAD_VALUE)?;

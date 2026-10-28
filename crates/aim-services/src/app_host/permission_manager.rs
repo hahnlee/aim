@@ -26,6 +26,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 mod boot;
+mod existing;
 mod install;
 mod migration;
 mod policy;

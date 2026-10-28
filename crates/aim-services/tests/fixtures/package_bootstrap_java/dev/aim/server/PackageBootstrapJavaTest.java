@@ -16,6 +16,7 @@ public final class PackageBootstrapJavaTest {
         for (int uid : new int[] {0, 2000, 10100}) {
             Binder.uid = uid;
             for (Runnable action : new Runnable[] {
+                    () -> bridge.onExistingPackageInstalled(null, 0, 0),
                     () -> bridge.formatPackageTimestamp(0),
                     () -> bridge.waitPackageBackgroundHandler(100),
                     () -> bridge.sendPreferredActivityChanged(0)}) {
@@ -24,6 +25,8 @@ public final class PackageBootstrapJavaTest {
             }
         }
         Binder.uid = 1000;
+        ExistingInstallJavaTest.run(args[0]);
+        PackageLocalOwnersTest.run();
         Locale.setDefault(Locale.US);
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
         check(bridge.formatPackageTimestamp(0).equals("1970-01-01 00:00:00"));
