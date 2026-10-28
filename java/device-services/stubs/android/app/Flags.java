@@ -3,6 +3,8 @@
 package android.app;
 
 public final class Flags {
+    public static boolean introduceNewServiceOntimeoutCallback() { throw new RuntimeException("stub"); }
+    public static boolean enableFgsTimeoutCrashBehavior() { throw new RuntimeException("stub"); }
     public Flags() { throw new RuntimeException("stub"); }
     public static boolean enableNightModeBinderCache() { throw new RuntimeException("stub"); }
     public static boolean enableCurrentModeTypeBinderCache() { throw new RuntimeException("stub"); }

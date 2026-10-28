@@ -65,6 +65,7 @@ pub mod dropbox;
 pub mod enhanced_confirmation;
 pub mod event_log;
 pub mod exit_info;
+mod fgs_timeouts;
 pub mod fgs_types;
 pub mod file_integrity;
 pub mod freeform;
@@ -4448,6 +4449,36 @@ impl Service for Activity {
                             p
                         }),
                 )
+            }
+            am::SHOULD_SERVICE_TIME_OUT => {
+                let a = am::ShouldServiceTimeOut::<services::Name>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_should_service_time_out_reply(
+                    &mut p,
+                    self.0.service_timeout_query(
+                        call.sender_euid as i32,
+                        a.class_name,
+                        a.token,
+                        true,
+                    ),
+                );
+                Ok(p)
+            }
+            am::HAS_SERVICE_TIME_LIMIT_EXCEEDED => {
+                let a = am::HasServiceTimeLimitExceeded::<services::Name>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_has_service_time_limit_exceeded_reply(
+                    &mut p,
+                    self.0.service_timeout_query(
+                        call.sender_euid as i32,
+                        a.class_name,
+                        a.token,
+                        false,
+                    ),
+                );
+                Ok(p)
             }
             am::GET_FOREGROUND_SERVICE_TYPE => {
                 let a = am::GetForegroundServiceType::<services::Name>::read(&mut call.data)

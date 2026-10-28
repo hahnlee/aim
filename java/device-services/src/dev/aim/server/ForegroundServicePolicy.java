@@ -13,6 +13,8 @@ import com.android.server.SystemConfig;
 /** Retained framework policy; ActiveServices' small Java adapter (android-16.0.0_r1). */
 final class ForegroundServicePolicy extends IForegroundServicePolicy.Stub {
     private final Context context;
+    private final com.android.server.am.NativeForegroundServiceTimeouts timeouts =
+            new com.android.server.am.NativeForegroundServiceTimeouts();
 
     ForegroundServicePolicy(Context context) {
         this.context = context;
@@ -157,6 +159,44 @@ final class ForegroundServicePolicy extends IForegroundServicePolicy.Stub {
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
+    }
+
+    @Override
+    public long[] getForegroundServiceTimeouts(int types, int uid) {
+        Bridge.enforceSystemUid();
+        return timeouts.policy(types, uid);
+    }
+
+    @Override
+    public long startTimeLimitedForegroundService(int uid, int type, int previousType,
+            boolean top, long lastTop, long uptime, long realtime, long limit) {
+        Bridge.enforceSystemUid();
+        return timeouts.start(uid, type, previousType, top, lastTop, uptime, realtime, limit);
+    }
+
+    @Override
+    public void stopTimeLimitedForegroundService(int uid, int type, long uptime) {
+        Bridge.enforceSystemUid();
+        timeouts.stop(uid, type, uptime);
+    }
+
+    @Override
+    public long timeoutTimeLimitedForegroundService(int uid, int type, boolean top,
+            long lastTop, long uptime, long limit) {
+        Bridge.enforceSystemUid();
+        return timeouts.timeout(uid, type, top, lastTop, uptime, limit);
+    }
+
+    @Override
+    public void removeForegroundServiceUid(int uid) {
+        Bridge.enforceSystemUid();
+        timeouts.removeUid(uid);
+    }
+
+    @Override
+    public String foregroundServiceTypeLabel(int type) {
+        Bridge.enforceSystemUid();
+        return ServiceInfo.foregroundServiceTypeToLabel(type);
     }
 
     private static boolean fact(IForegroundServiceTypeHost host, int kind, int uid, String pkg) {

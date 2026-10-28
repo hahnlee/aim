@@ -11,5 +11,15 @@ interface IForegroundServicePolicy {
             boolean instant, int targetSdk);
     Notification repairForegroundServiceNotification(String packageName, int uid,
             in Notification notification);
+    long[] getForegroundServiceTimeouts(int types, int uid);
+    long startTimeLimitedForegroundService(int uid, int type, int previousType,
+            boolean top, long lastTop, long uptime, long realtime, long limit);
+    void stopTimeLimitedForegroundService(int uid, int type, long uptime);
+    long timeoutTimeLimitedForegroundService(int uid, int type, boolean top,
+            long lastTop, long uptime, long limit);
+    void removeForegroundServiceUid(int uid);
+    String foregroundServiceTypeLabel(int type);
 }
+
+
 

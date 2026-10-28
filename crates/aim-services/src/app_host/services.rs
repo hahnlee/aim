@@ -30,7 +30,8 @@
 //! defers it, and cancelled or unflagged when it stops being foreground.
 //! A service started with `startForegroundService` that does not call
 //! `startForeground` in time is stopped and its app crashed. Short and
-//! time-limited services' timeouts, and the ANRs, are not run (#1551).
+//! time-limited services use native deadlines and original Java accounting;
+//! an ignored short timeout or start-foreground deadline records an ANR.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -49,6 +50,7 @@ use super::activity_start::Component;
 use super::activity_user::AllowMode;
 use super::appops_service::{self as appops, MODE_ALLOWED, MODE_DEFAULT};
 use super::broadcasts::filter_equals;
+use super::fgs_timeouts::{self, Deadline, Event};
 use super::fgs_types;
 use super::kept::{By, KeptIntent, RawIntent};
 use super::notification_service::{Enqueue, Incoming};
@@ -137,7 +139,6 @@ const STOP_FOREGROUND_DETACH: i32 = 2;
 /// its creation a first `startForeground` asks again whether its app may,
 /// how long a foreground service's notification is deferred, and how long
 /// its app's are then not (`mFgsNotificationDeferralExclusionTime`).
-const SERVICE_START_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(30);
 const FGS_START_FOREGROUND_TIMEOUT_MS: i64 = 10_000;
 const FGS_NOTIFICATION_DEFERRAL_INTERVAL: Duration = Duration::from_secs(10);
 const FGS_NOTIFICATION_DEFERRAL_EXCLUSION_TIME: Duration = Duration::from_secs(120);
@@ -153,12 +154,9 @@ pub(super) const ALLOW_WHILE_IDLE_ALLOWLIST_DURATION: Duration = Duration::from_
 /// longer exempting.
 const FGS_BG_START_RESTRICTION_CHANGE_ID: i64 = 170_668_199;
 const FGS_START_EXCEPTION_CHANGE_ID: i64 = 174_041_399;
-const FGS_INTRODUCE_TIME_LIMITS: i64 = 317_799_821;
 const FGS_SAW_RESTRICTIONS: i64 = 319_471_980;
 /// The aconfig flags of the time-limited types' callback and of the
 /// overlay restriction.
-const INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK: &str =
-    "android.app.introduce_new_service_ontimeout_callback";
 const FGS_DISABLE_SAW: &str = "com.android.server.am.fgs_disable_saw";
 /// `PowerExemptionManager.REASON_*`.
 const REASON_DENIED: i32 = -1;
@@ -304,6 +302,11 @@ struct Foreground {
     notification: Option<Incoming>,
     service_type: i32,
     start_count: i32,
+    short: Option<fgs_timeouts::Short>,
+    timeout_generation: u64,
+    limited_type: i32,
+    limited_timeout_uptime: i64,
+    timeout_policy: Option<fgs_timeouts::Policy>,
     /// Why it may be foreground (`mAllowStart_*`) and have while-in-use
     /// permissions (`mAllowWiu_*`), of its starts and of its bindings.
     allow_start: (i32, i32),
@@ -330,6 +333,11 @@ impl Default for Foreground {
             notification: None,
             service_type: fgs_types::TYPE_NONE,
             start_count: 0,
+            short: None,
+            timeout_generation: 0,
+            limited_type: 0,
+            limited_timeout_uptime: 0,
+            timeout_policy: None,
             allow_start: (REASON_DENIED, REASON_DENIED),
             allow_wiu: (REASON_DENIED, REASON_DENIED),
             owner_unknown: false,
@@ -381,9 +389,30 @@ impl Foreground {
             self.notification = None;
         }
         self.is_foreground = false;
+        self.short = None;
+        self.limited_type = 0;
+        self.timeout_policy = None;
         self.service_type = fgs_types::TYPE_NONE;
         self.reset_restriction();
         stopped
+    }
+
+    fn should_trigger_short_timeout(
+        &self,
+        started: bool,
+        alive: bool,
+        generation: u64,
+        event: &Event,
+        now: Instant,
+    ) -> bool {
+        started
+            && alive
+            && self.is_foreground
+            && self.service_type == fgs_types::TYPE_SHORT_SERVICE
+            && self
+                .short
+                .as_ref()
+                .is_some_and(|short| short.due(generation, event, now))
     }
 
     /// `shouldShowFgsNotificationLocked` at `now`, the app's notifications
@@ -515,6 +544,7 @@ pub struct Services {
     state: Mutex<State>,
     policy: Mutex<Option<Arc<Strong>>>,
     type_host: std::sync::OnceLock<Binder>,
+    timers: std::sync::OnceLock<fgs_timeouts::Timers>,
     /// The handler (`mAm.mHandler`) the services' notifications are posted
     /// and cancelled on, in order and outside their lock.
     handler: Mutex<Option<mpsc::Sender<Job>>>,
@@ -688,6 +718,15 @@ impl Record {
     /// delay before it starts again, none when nothing needs it (`auto`:
     /// a connection creates it).
     fn schedule_restart(&mut self, auto: bool, now: Instant) -> Option<Duration> {
+        if self.fg.service_type == fgs_types::TYPE_SHORT_SERVICE {
+            self.start_requested = false;
+            self.call_start = false;
+            self.pending.clear();
+            self.delivered.clear();
+            if !auto {
+                return None;
+            }
+        }
         let mut min = SERVICE_RESTART_DURATION;
         let mut reset = SERVICE_RESET_RUN_DURATION;
         let mut canceled = false;
@@ -1118,6 +1157,9 @@ impl AppHost {
             fg_required &= target_sdk >= O;
         }
         let r = state.record(token).unwrap();
+        if fg_required && !r.fg.is_foreground {
+            r.fg.timeout_policy = Some(self.fgs_timeout_policy(0, app_uid)?);
+        }
         r.start_requested = true;
         r.stop_if_killed = false;
         r.fg.required = fg_required;
@@ -1196,6 +1238,7 @@ impl AppHost {
             return Ok(0);
         }
         r.start_requested = false;
+        self.stop_service_timeout_tracking(r);
         let token = r.token;
         self.bring_down_if_needed(&mut state, token);
         Ok(1)
@@ -1227,6 +1270,7 @@ impl AppHost {
             }
         }
         r.start_requested = false;
+        self.stop_service_timeout_tracking(r);
         let token = r.token;
         self.bring_down_if_needed(&mut state, token);
         true
@@ -1669,12 +1713,8 @@ impl AppHost {
                 // `fg-service-launch`: its app may make it foreground.
                 if r.fg.required {
                     let uid = r.info.info.application_info.uid;
-                    Self::temp_allowlist(
-                        state,
-                        uid,
-                        SERVICE_START_FOREGROUND_TIMEOUT,
-                        REASON_SERVICE_LAUNCH,
-                    );
+                    let timeout = r.fg.timeout_policy.as_ref().unwrap().required;
+                    Self::temp_allowlist(state, uid, timeout, REASON_SERVICE_LAUNCH);
                 }
             }
         }
@@ -1858,13 +1898,13 @@ impl AppHost {
             eprintln!("app host: service {}/{}: start: {e}", r.package, r.class);
         }
         if timeout {
+            let wait = r.fg.timeout_policy.as_ref().unwrap().required;
             state.next_timeout = generation;
-            let me = self.me.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(SERVICE_START_FOREGROUND_TIMEOUT);
-                if let Some(host) = me.upgrade() {
-                    host.service_foreground_timeout(token, generation);
-                }
+            self.timers().schedule(Deadline {
+                token,
+                generation,
+                event: Event::Required,
+                at: Instant::now() + wait,
             });
         }
     }
@@ -1887,7 +1927,8 @@ impl AppHost {
         let Some(at) = state.records.iter().position(|r| r.token == token) else {
             return;
         };
-        let r = state.records.remove(at);
+        let mut r = state.records.remove(at);
+        self.stop_service_timeout_tracking(&mut r);
         // `clearDeliveredStartsLocked`.
         for s in &r.delivered {
             self.release_start_grants(s);
@@ -2038,6 +2079,7 @@ impl AppHost {
             for s in &r.delivered {
                 self.release_start_grants(s);
             }
+            self.stop_service_timeout_tracking(r);
             let delay = if !allow_restart {
                 None
             } else if r.crash_count >= BOUND_SERVICE_MAX_CRASH_RETRY {
@@ -2058,6 +2100,9 @@ impl AppHost {
             for c in state.connections.iter().filter(|c| c.service == token) {
                 connected(&c.conn, &package, &class, None, true);
             }
+            let r = state.record(token).unwrap();
+            r.fg.is_foreground = false;
+            r.fg.service_type = fgs_types::TYPE_NONE;
             // A back-off past what an `Instant` holds (a service that kept
             // crashing) is a restart that never comes.
             match delay.map(|d| (d, now.checked_add(d))) {
@@ -2195,6 +2240,410 @@ impl AppHost {
 }
 
 impl AppHost {
+    fn timers(&self) -> &fgs_timeouts::Timers {
+        self.services
+            .timers
+            .get_or_init(|| fgs_timeouts::Timers::new(self.me.clone()))
+    }
+
+    fn fgs_timeout_policy(&self, types: i32, uid: i32) -> Result<fgs_timeouts::Policy, Exception> {
+        let mut p = Parcel::new();
+        fgs_policy::GetForegroundServiceTimeouts { types, uid }.write(&mut p);
+        let reply = self
+            .foreground_service_policy()?
+            .transact(fgs_policy::GET_FOREGROUND_SERVICE_TIMEOUTS, &p, false)
+            .map_err(policy_error)?;
+        fgs_timeouts::Policy::read(
+            fgs_policy::read_get_foreground_service_timeouts_reply(&mut reply.reader())
+                .map_err(policy_error)??,
+        )
+    }
+
+    fn prepare_service_timeout_tracking(
+        &self,
+        state: &mut State,
+        token: Binder,
+        service_type: i32,
+        policy: &fgs_timeouts::Policy,
+        extend_short: bool,
+    ) -> Result<(Option<fgs_timeouts::Short>, Option<Instant>, u64), Exception> {
+        state.next_timeout = state.next_timeout.wrapping_add(1);
+        let generation = state.next_timeout;
+        let r = state.record(token).unwrap();
+        let now = Instant::now();
+        let short = if service_type == fgs_types::TYPE_SHORT_SERVICE {
+            if !extend_short && r.fg.short.is_some() {
+                let mut short = r.fg.short.clone().unwrap();
+                short.start_id = r.last_start_id;
+                Some(short)
+            } else {
+                Some(fgs_timeouts::Short::new(
+                    generation,
+                    r.last_start_id,
+                    policy,
+                    now,
+                )?)
+            }
+        } else {
+            None
+        };
+        let uid = r.info.info.application_info.uid;
+        let limited = if r.start_requested {
+            policy.limited_type
+        } else {
+            0
+        };
+        let deadline = if limited != 0 {
+            let uptime = super::clock_ms(libc::CLOCK_UPTIME_RAW);
+            let mut p = Parcel::new();
+            fgs_policy::StartTimeLimitedForegroundService {
+                uid,
+                r#type: limited,
+                previous_type: r.fg.limited_type,
+                top: self.uid_running(uid),
+                last_top: i64::MIN,
+                uptime,
+                realtime: super::clock_ms(libc::CLOCK_MONOTONIC_RAW),
+                limit: policy.limit_ms,
+            }
+            .write(&mut p);
+            let reply = self
+                .foreground_service_policy()?
+                .transact(fgs_policy::START_TIME_LIMITED_FOREGROUND_SERVICE, &p, false)
+                .map_err(policy_error)?;
+            let at =
+                fgs_policy::read_start_time_limited_foreground_service_reply(&mut reply.reader())
+                    .map_err(policy_error)??;
+            Some(
+                now.checked_add(Duration::from_millis(
+                    at.saturating_sub(uptime).max(0) as u64
+                ))
+                .ok_or_else(|| {
+                    Exception::new(EX_ILLEGAL_STATE, "FGS deadline exceeds clock range")
+                })?,
+            )
+        } else {
+            self.stop_limited_timeout(
+                uid,
+                r.fg.limited_type,
+                super::clock_ms(libc::CLOCK_UPTIME_RAW),
+            )?;
+            None
+        };
+        Ok((short, deadline, generation))
+    }
+
+    fn stop_limited_timeout(
+        &self,
+        uid: i32,
+        service_type: i32,
+        uptime: i64,
+    ) -> Result<(), Exception> {
+        if service_type == 0 {
+            return Ok(());
+        }
+        let mut p = Parcel::new();
+        fgs_policy::StopTimeLimitedForegroundService {
+            uid,
+            r#type: service_type,
+            uptime,
+        }
+        .write(&mut p);
+        let reply = self
+            .foreground_service_policy()?
+            .transact(fgs_policy::STOP_TIME_LIMITED_FOREGROUND_SERVICE, &p, false)
+            .map_err(policy_error)?;
+        fgs_policy::read_stop_time_limited_foreground_service_reply(&mut reply.reader())
+            .map_err(policy_error)?
+    }
+
+    fn stop_service_timeout_tracking(&self, r: &mut Record) {
+        if let Some(timers) = self.services.timers.get() {
+            timers.cancel(r.token);
+        }
+        if let Err(error) = self.stop_limited_timeout(
+            r.info.info.application_info.uid,
+            r.fg.limited_type,
+            super::clock_ms(libc::CLOCK_UPTIME_RAW),
+        ) {
+            eprintln!(
+                "app host: stopping FGS accounting for {}/{}: {}",
+                r.package, r.class, error.message
+            );
+        }
+        r.fg.short = None;
+        r.fg.limited_type = 0;
+    }
+
+    pub(super) fn foreground_service_uid_removed(&self, uid: i32) -> Result<(), Exception> {
+        // Before aim-system attaches there is no time-limited accounting yet.
+        let Some(policy) = self.services.policy.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        let mut p = Parcel::new();
+        fgs_policy::RemoveForegroundServiceUid { uid }.write(&mut p);
+        let reply = policy
+            .transact(fgs_policy::REMOVE_FOREGROUND_SERVICE_UID, &p, false)
+            .map_err(policy_error)?;
+        fgs_policy::read_remove_foreground_service_uid_reply(&mut reply.reader())
+            .map_err(policy_error)?
+    }
+
+    /// ActivityThread asks again before invoking Service.onTimeout, since the
+    /// service may have stopped or changed types after the callback was sent.
+    pub(super) fn service_timeout_query(
+        &self,
+        uid: i32,
+        name: Option<Name>,
+        token: Option<Binder>,
+        short: bool,
+    ) -> bool {
+        let mut state = self.services.state.lock().unwrap();
+        let Some(r) = token.and_then(|token| state.record(token)) else {
+            return false;
+        };
+        if r.info.info.application_info.uid / PER_USER_RANGE as i32 != uid / PER_USER_RANGE as i32
+            || name.is_none_or(|n| n.package != r.package || n.class != r.class)
+        {
+            return false;
+        }
+        if short {
+            r.app.is_some()
+                && r.start_requested
+                && r.fg.is_foreground
+                && r.fg.service_type == fgs_types::TYPE_SHORT_SERVICE
+                && r.fg
+                    .short
+                    .as_ref()
+                    .is_some_and(|short| Instant::now() >= short.timeout)
+        } else {
+            r.fg.is_foreground
+                && r.fg
+                    .timeout_policy
+                    .as_ref()
+                    .is_some_and(|p| p.limited_type != 0)
+        }
+    }
+
+    pub(super) fn foreground_service_event(&self, deadline: Deadline) {
+        if let Err(error) = self.handle_foreground_service_event(deadline) {
+            eprintln!("app host: foreground service timeout: {}", error.message);
+        }
+    }
+
+    fn handle_foreground_service_event(&self, deadline: Deadline) -> Result<(), Exception> {
+        let Deadline {
+            token,
+            generation,
+            event,
+            ..
+        } = deadline;
+        if event == Event::Required {
+            self.service_foreground_timeout(token, generation);
+            return Ok(());
+        }
+        if let Event::StartAnr { seq, reason } = event {
+            self.foreground_service_anr(seq, &reason);
+            return Ok(());
+        }
+        let mut state = self.services.state.lock().unwrap();
+        let Some(r) = state
+            .record(token)
+            .filter(|r| r.start_requested && r.fg.is_foreground)
+        else {
+            return Ok(());
+        };
+        let Some(seq) = r.app else { return Ok(()) };
+        let uid = r.info.info.application_info.uid;
+        let component = format!("ComponentInfo{{{}/{}}}", r.package, r.class);
+        match event {
+            Event::Short | Event::Demote | Event::ShortAnr => {
+                if !r.fg.should_trigger_short_timeout(
+                    r.start_requested,
+                    true,
+                    generation,
+                    &event,
+                    Instant::now(),
+                ) {
+                    return Ok(());
+                }
+                let short = r.fg.short.as_mut().unwrap();
+                match event {
+                    Event::Short => {
+                        short.notified = true;
+                        let start_id = short.start_id;
+                        let (demote, anr) = (short.demote, short.anr);
+                        // Queue these before notifying the app; a stopSelf in onTimeout
+                        // cancels them, and a queued event still checks its generation.
+                        self.timers().schedule(Deadline {
+                            token,
+                            generation,
+                            event: Event::Demote,
+                            at: demote,
+                        });
+                        self.timers().schedule(Deadline {
+                            token,
+                            generation,
+                            event: Event::ShortAnr,
+                            at: anr,
+                        });
+                        let mut p = Parcel::new();
+                        thread::ScheduleTimeoutService {
+                            token: Some(token),
+                            start_id,
+                        }
+                        .write(&mut p);
+                        if let Err(error) =
+                            self.call_thread(seq, thread::SCHEDULE_TIMEOUT_SERVICE, &p)
+                        {
+                            eprintln!("app host: scheduleTimeoutService {component}: {error}");
+                        }
+                    }
+                    Event::Demote => {
+                        short.demoted = true;
+                        // OomAdjuster drops the short-FGS contribution here. The
+                        // current process owner gives every live app TOP; recompute
+                        // that state rather than demoting a visible/top process.
+                        let mut p = Parcel::new();
+                        thread::SetProcessState {
+                            state: PROCESS_STATE_TOP,
+                        }
+                        .write(&mut p);
+                        self.call_thread(seq, thread::SET_PROCESS_STATE, &p)
+                            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                    }
+                    Event::ShortAnr => {
+                        let reason = format!(
+                            "A foreground service of FOREGROUND_SERVICE_TYPE_SHORT_SERVICE did not stop within a timeout: {component}"
+                        );
+                        drop(state);
+                        self.foreground_service_anr(seq, &reason);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Event::Limited | Event::LimitedCrash => {
+                if r.fg.timeout_generation != generation || r.fg.limited_type == 0 {
+                    return Ok(());
+                }
+                let service_type = r.fg.limited_type;
+                let policy = r.fg.timeout_policy.as_ref().unwrap().clone();
+                let uptime = super::clock_ms(libc::CLOCK_UPTIME_RAW);
+                if event == Event::Limited {
+                    let mut p = Parcel::new();
+                    fgs_policy::TimeoutTimeLimitedForegroundService {
+                        uid,
+                        r#type: service_type,
+                        top: self.uid_running(uid),
+                        last_top: i64::MIN,
+                        uptime,
+                        limit: policy.limit_ms,
+                    }
+                    .write(&mut p);
+                    let reply = self
+                        .foreground_service_policy()?
+                        .transact(
+                            fgs_policy::TIMEOUT_TIME_LIMITED_FOREGROUND_SERVICE,
+                            &p,
+                            false,
+                        )
+                        .map_err(policy_error)?;
+                    let next = fgs_policy::read_timeout_time_limited_foreground_service_reply(
+                        &mut reply.reader(),
+                    )
+                    .map_err(policy_error)??;
+                    if next > 0 {
+                        self.timers().schedule(Deadline {
+                            token,
+                            generation,
+                            event: Event::Limited,
+                            at: Instant::now()
+                                + Duration::from_millis(next.saturating_sub(uptime).max(0) as u64),
+                        });
+                        return Ok(());
+                    }
+                    r.fg.limited_timeout_uptime = uptime;
+                    self.timers().schedule(Deadline {
+                        token,
+                        generation,
+                        event: Event::LimitedCrash,
+                        at: Instant::now() + policy.crash,
+                    });
+                    let mut p = Parcel::new();
+                    thread::ScheduleTimeoutServiceForType {
+                        token: Some(token),
+                        start_id: r.last_start_id,
+                        fgs_type: service_type,
+                    }
+                    .write(&mut p);
+                    if let Err(error) =
+                        self.call_thread(seq, thread::SCHEDULE_TIMEOUT_SERVICE_FOR_TYPE, &p)
+                    {
+                        eprintln!("app host: scheduleTimeoutServiceForType {component}: {error}");
+                    }
+                } else {
+                    self.stop_limited_timeout(uid, service_type, r.fg.limited_timeout_uptime)?;
+                    r.fg.limited_type = 0;
+                    let mut p = Parcel::new();
+                    fgs_policy::ForegroundServiceTypeLabel {
+                        r#type: service_type,
+                    }
+                    .write(&mut p);
+                    let reply = self
+                        .foreground_service_policy()?
+                        .transact(fgs_policy::FOREGROUND_SERVICE_TYPE_LABEL, &p, false)
+                        .map_err(policy_error)?;
+                    let label =
+                        fgs_policy::read_foreground_service_type_label_reply(&mut reply.reader())
+                            .map_err(policy_error)??
+                            .ok_or_else(|| {
+                                Exception::new(EX_ILLEGAL_STATE, "null FGS type label")
+                            })?;
+                    let reason = format!(
+                        "A foreground service of type {label} did not stop within its timeout: {component}"
+                    );
+                    let class = r.class.clone();
+                    drop(state);
+                    if policy.crash_enabled {
+                        self.crash_application(
+                            seq,
+                            &reason,
+                            7,
+                            vec![("serviceclassname".into(), Value::String(Some(class)))],
+                        );
+                    } else {
+                        eprintln!("app host: {reason}");
+                    }
+                }
+            }
+            Event::StartAnr { .. } | Event::Required => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn foreground_service_anr(&self, seq: i64, reason: &str) {
+        // The native owner has no SystemUI ANR dialog. Record the ANR and
+        // terminate that process, through the same owner as other app kills.
+        if self
+            .apps
+            .lock()
+            .unwrap()
+            .get(&seq)
+            .is_none_or(|app| app.thread.is_none())
+        {
+            return;
+        }
+        eprintln!("app host: ANR in start {seq}: {reason}");
+        if let Err(error) = self.kill_process(
+            seq,
+            super::exit_info::REASON_ANR,
+            super::exit_info::SUBREASON_UNKNOWN,
+            reason,
+        ) {
+            eprintln!("app host: FGS ANR process kill: {error}");
+        }
+    }
+
     fn foreground_service_policy(&self) -> Result<Arc<Strong>, Exception> {
         self.services.policy.lock().unwrap().clone().ok_or_else(|| {
             Exception::new(
@@ -2601,25 +3050,31 @@ impl AppHost {
         // foreground while top (`isForegroundServiceAllowedInBackgroundRestricted`),
         // which each process here is.
         let restricted = self.bg_fgs_restricted(uid, calling_uid)?;
+        let old_short = r.fg.is_foreground && r.fg.service_type == fgs_types::TYPE_SHORT_SERVICE;
+        let new_short = service_type == fgs_types::TYPE_SHORT_SERVICE;
+        let mut extend_short = true;
+        let timeout_policy = if ignore {
+            None
+        } else {
+            Some(self.fgs_timeout_policy(service_type, uid)?)
+        };
         if !ignore {
-            if service_type == fgs_types::TYPE_SHORT_SERVICE {
-                return Err(
-                    self.unimplemented_named("activity", "a short foreground service (#1551)")
-                );
+            if service_type == fgs_types::TYPE_SHORT_SERVICE
+                && !state.record(token).unwrap().start_requested
+            {
+                return Err(Exception::illegal_argument(
+                    "startForeground(SHORT_SERVICE) is not allowed for services that are not started",
+                ));
             }
             let r = state.record(token).unwrap();
             let elapsed = super::clock_ms(libc::CLOCK_MONOTONIC_RAW) - r.create_real_time;
             let (start_count, fg_required, start_requested) =
                 (r.fg.start_count, r.fg.required, r.start_requested);
-            let time_limited =
-                service_type & (fgs_types::TYPE_DATA_SYNC | fgs_types::TYPE_MEDIA_PROCESSING) != 0
-                    && self.change_enabled(FGS_INTRODUCE_TIME_LIMITS, uid)?
-                    && self.flag(INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK)?;
-            // Whether its app may still start a foreground service is asked
-            // again: for a time-limited type (whose limits are not run,
-            // #1551), a first start long after its creation, and any later.
+            let time_limited = timeout_policy.as_ref().is_some_and(|p| p.limited_type != 0);
+            // Re-evaluate permission to start when extending a short FGS or
+            // starting a time-limited type, as ActiveServices does.
             let mut recalculated = true;
-            if time_limited {
+            if time_limited || old_short {
                 r.fg.allow_start.0 = REASON_DENIED;
                 r.fg.allow_start.1 = REASON_DENIED;
             } else if start_count == 0 {
@@ -2634,7 +3089,9 @@ impl AppHost {
                 self.set_fgs_restriction(state, token, Some(&package), uid, true)?;
             }
             let r = state.record(token).unwrap();
-            if !r.fg.allowed_start() && restricted {
+            if !r.fg.allowed_start() && restricted && old_short && new_short {
+                extend_short = false;
+            } else if !r.fg.allowed_start() && restricted {
                 if r.fg.owner_unknown {
                     return Err(self.owner_exemption());
                 }
@@ -2671,6 +3128,14 @@ impl AppHost {
         if ignore {
             return Ok(());
         }
+        let timeout_policy = timeout_policy.unwrap();
+        let (short_timeout, limited_deadline, generation) = self.prepare_service_timeout_tracking(
+            state,
+            token,
+            service_type,
+            &timeout_policy,
+            extend_short,
+        )?;
         let r = state.record(token).unwrap();
         if r.fg.id != id
             && let Some(shown) = r.fgs_notification()
@@ -2690,6 +3155,48 @@ impl AppHost {
         if !r.fg.is_foreground {
             r.fg.is_foreground = true;
             r.fg.start_count += 1;
+        }
+        r.fg.short = short_timeout;
+        r.fg.timeout_generation = generation;
+        r.fg.limited_type = if r.start_requested {
+            timeout_policy.limited_type
+        } else {
+            0
+        };
+        r.fg.timeout_policy = Some(timeout_policy);
+        self.timers().cancel(token);
+        if let Some(short) = &r.fg.short {
+            if short.notified {
+                if !short.demoted {
+                    self.timers().schedule(Deadline {
+                        token,
+                        generation: short.generation,
+                        event: Event::Demote,
+                        at: short.demote,
+                    });
+                }
+                self.timers().schedule(Deadline {
+                    token,
+                    generation: short.generation,
+                    event: Event::ShortAnr,
+                    at: short.anr,
+                });
+            } else {
+                self.timers().schedule(Deadline {
+                    token,
+                    generation: short.generation,
+                    event: Event::Short,
+                    at: short.timeout,
+                });
+            }
+        }
+        if let Some(at) = limited_deadline {
+            self.timers().schedule(Deadline {
+                token,
+                generation,
+                event: Event::Limited,
+                at,
+            });
         }
         self.post_foreground_notification(r);
         Ok(())
@@ -2748,17 +3255,9 @@ impl AppHost {
             .write(&mut p);
             let reply = policy
                 .transact(fgs_policy::VALIDATE_FOREGROUND_SERVICE_TYPE, &p, false)
-                .map_err(|e| {
-                    Exception::new(EX_ILLEGAL_STATE, format!("foreground service policy: {e}"))
-                })?;
-            fgs_policy::read_validate_foreground_service_type_reply(&mut reply.reader()).map_err(
-                |e| {
-                    Exception::new(
-                        EX_ILLEGAL_STATE,
-                        format!("foreground service policy reply: {e}"),
-                    )
-                },
-            )??;
+                .map_err(policy_error)?;
+            fgs_policy::read_validate_foreground_service_type_reply(&mut reply.reader())
+                .map_err(policy_error)??;
         }
         Ok(())
     }
@@ -2773,6 +3272,7 @@ impl AppHost {
         }
         let target_sdk = r.info.info.application_info.target_sdk_version;
         // Its notification as it was, which a deferred one is posted as.
+        self.stop_service_timeout_tracking(r);
         let shown = r.fgs_notification();
         let post = r.app.zip(r.fg.notification.clone());
         let stopped = r.fg.stop(flags, target_sdk);
@@ -2986,10 +3486,24 @@ impl AppHost {
             "app host: service foreground-required timeout for {}",
             short_name(&r.package, &r.class)
         );
+        let app = r.app;
+        let anr_delay = r.fg.timeout_policy.as_ref().unwrap().start_anr;
+        let reason = format!(
+            "Context.startForegroundService() did not then call Service.startForeground(): {}",
+            short_name(&r.package, &r.class)
+        );
         r.fg.waiting = None;
         r.start_requested = false;
         self.bring_down_if_needed(&mut state, token);
-        // The ANR that follows is not raised (#1551).
+        drop(state);
+        if let Some(seq) = app {
+            self.timers().schedule(Deadline {
+                token,
+                generation,
+                event: Event::StartAnr { seq, reason },
+                at: Instant::now() + anr_delay,
+            });
+        }
     }
 
     /// `applyForegroundServiceNotificationLocked` of `notification`, posted
@@ -3270,6 +3784,93 @@ mod tests {
             [n("p.B", 0), n("p.C", 0)]
         );
         assert!(pick(&services, -1, 10100, true, true).is_empty());
+    }
+
+    /// ServiceRecord.shouldTriggerShortFgsTimedEvent and
+    /// ActiveServices.onShortFgsTimeout/onShortFgsAnrTimeout, android-16.0.0_r1;
+    /// CTS ShortFgsTest's stopSelf/onTimeout contract, with a controlled clock.
+    #[test]
+    fn messaging_like_short_service_starts_times_out_and_stops() {
+        let policy = fgs_timeouts::Policy::read(Some(vec![
+            180_000, 5_000, 10_000, 0, 0, 10_000, 1, 10_000, 30_000,
+        ]))
+        .unwrap();
+        let now = Instant::now();
+        let mut fg = Foreground {
+            is_foreground: true,
+            service_type: effective_type(
+                fgs_types::TYPE_SHORT_SERVICE,
+                fgs_types::TYPE_SHORT_SERVICE,
+            )
+            .unwrap(),
+            short: Some(fgs_timeouts::Short::new(41, 7, &policy, now).unwrap()),
+            ..Default::default()
+        };
+        let timeout = now + policy.short;
+        assert!(!fg.should_trigger_short_timeout(
+            true,
+            true,
+            41,
+            &Event::Short,
+            timeout - Duration::from_millis(1)
+        ));
+        assert!(fg.should_trigger_short_timeout(true, true, 41, &Event::Short, timeout));
+        assert_eq!(fg.short.as_ref().unwrap().start_id, 7);
+        // The app receives onTimeout(startId), then stops itself. Neither
+        // the already queued demotion nor the ANR may act on that stopped start.
+        fg.short.as_mut().unwrap().notified = true;
+        assert!(!fg.should_trigger_short_timeout(
+            false,
+            true,
+            41,
+            &Event::ShortAnr,
+            timeout + policy.anr
+        ));
+        assert!(!fg.should_trigger_short_timeout(
+            true,
+            false,
+            41,
+            &Event::ShortAnr,
+            timeout + policy.anr
+        ));
+        fg.stop(STOP_FOREGROUND_REMOVE, 35);
+        for event in [Event::Short, Event::Demote, Event::ShortAnr] {
+            assert!(!fg.should_trigger_short_timeout(true, true, 41, &event, timeout + policy.anr));
+        }
+    }
+
+    #[test]
+    fn short_service_extension_rejects_stale_deadlines_and_an_unstopped_service_anrs() {
+        let policy = fgs_timeouts::Policy::read(Some(vec![
+            180_000, 5_000, 10_000, 0, 0, 10_000, 1, 10_000, 30_000,
+        ]))
+        .unwrap();
+        let now = Instant::now();
+        let mut fg = Foreground {
+            is_foreground: true,
+            service_type: fgs_types::TYPE_SHORT_SERVICE,
+            short: Some(fgs_timeouts::Short::new(2, 8, &policy, now).unwrap()),
+            ..Default::default()
+        };
+        assert!(!fg.should_trigger_short_timeout(true, true, 1, &Event::Short, now + policy.short));
+        let short = fg.short.as_mut().unwrap();
+        short.notified = true;
+        let demote = short.demote;
+        let anr = short.anr;
+        assert!(!fg.should_trigger_short_timeout(true, true, 2, &Event::Short, anr));
+        assert!(fg.should_trigger_short_timeout(true, true, 2, &Event::Demote, demote));
+        fg.short.as_mut().unwrap().demoted = true;
+        assert!(!fg.should_trigger_short_timeout(true, true, 2, &Event::Demote, anr));
+        assert!(!fg.should_trigger_short_timeout(
+            true,
+            true,
+            2,
+            &Event::ShortAnr,
+            anr - Duration::from_millis(1)
+        ));
+        assert!(fg.should_trigger_short_timeout(true, true, 2, &Event::ShortAnr, anr));
+        fg.service_type = fgs_types::TYPE_MEDIA_PLAYBACK;
+        assert!(!fg.should_trigger_short_timeout(true, true, 2, &Event::ShortAnr, anr));
     }
 
     /// `setServiceForegroundInnerLocked`'s type: the manifest's for
