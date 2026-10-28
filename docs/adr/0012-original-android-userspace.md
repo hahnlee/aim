@@ -403,10 +403,11 @@ Details in [boot-status.md](../boot-status.md), "Java world".
   original vold_prepare_subdirs, as pinned FsCrypt.cpp does, and propagates its
   failure (#948); this retains original SDK CE/DE root modes, owners and labels.
 - **eBPF scope:** `bpf()` maps live in shared memory and pin into bpffs;
-  BTF and programs load. Attached cgroup socket-create programs run through
+  BTF and programs load. Attached cgroup socket-create and bind programs run through
   a bounded interpreter in the socket layer, including their allow/EPERM
-  result (#2268). The image's program only reads its permission map; it
-  writes no maps. The socket layer also does what
+  result (#2268). The image's programs read permission and blocked-port maps;
+  neither writes maps. Bind uses the socket's creation cgroup and the raw
+  network-order port. The socket layer also does what
   netd's cgroup skb stats programs do for each send and receive
   (`sys/net/traffic.rs`), and fills the per-interface maps as netd's xt_bpf
   programs do, with guest device names registered for their readers (#1720).
@@ -629,10 +630,10 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   sockets.
 
 - **eBPF:** the `bpf()` syscall with maps backed by shared memory. Cgroup
-  socket-create bytecode and referenced map identities survive the loader's
+  socket-create/bind bytecode and referenced map identities survive the loader's
   descriptors; single non-overridable attachments execute at INET/INET6
   creation, using the current real UID/GID. The bounded interpreter supports
-  the image program's instructions and read-only helpers, rejecting other
+  the image programs' instructions and read-only helpers, rejecting other
   instructions at attachment; it is not a full BPF verifier or interpreter.
   Other attachment modes remain unsupported. This keeps policy in the
   loaded program, below unmodified userspace, instead of recognizing its
@@ -640,7 +641,13 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   APEX NetBpfLoad overrides init's `bpfloader` service, loads and pins its
   networking programs, then chains through the remaining loaders before
   `bpf.progs_loaded=1`; replacement netd waits for that completion and
-  attaches the pinned socket-create program to the cgroup2 root. Procfs
+  attaches the pinned socket-create and bind4/bind6 programs to the cgroup2 root.
+  Bind returns EPERM on denial, before address validation or host binding;
+  raw sockets keep their protocol-specific bind path. Socket cgroup ancestry
+  survives task migration, fork state and receipt-based descriptor adoption.
+  Decoded bind programs are cached by immutable file identity while map
+  lookups remain live. Host tests execute the image's real programs; no
+  guest boot was rerun for bind enforcement. Procfs
   preserves the path-map kernel mounts' source/type for its discovery
   (#2268). The
   per-uid counters of netd's `cgroupskb/*/stats` and interface counters of

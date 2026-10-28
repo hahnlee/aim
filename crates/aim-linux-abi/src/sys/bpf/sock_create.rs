@@ -1,5 +1,5 @@
-//! BPF_CGROUP_INET_SOCK_CREATE at inet_create/inet6_create, before publishing
-//! the socket. A bounded interpreter for the image's read-only program; no
+//! Cgroup create and bind hooks in the INET socket owner.
+//! A bounded interpreter for the image's read-only programs; no
 //! program/map names or permission policy live in this owner. Linux sources:
 //! kernel/bpf/cgroup.c and net/ipv4/af_inet.c / net/ipv6/af_inet6.c.
 use super::*;
@@ -72,7 +72,7 @@ struct Program {
 impl Program {
     fn read(file: &PrivateFile) -> Result<Self, Errno> {
         let (h, _) = read_header(file.as_raw_fd()).ok_or(EINVAL)?;
-        if h.kind != KIND_PROG || h.ty != SOCK || h.max_entries > 4096 {
+        if h.kind != KIND_PROG || !matches!(h.ty, SOCK | 18) || h.max_entries > 4096 {
             return Err(EINVAL);
         }
         let mut data = vec![0; h.data_len as usize];
@@ -122,9 +122,10 @@ impl Program {
             let imm = i32::from_ne_bytes(i[4..8].try_into().unwrap());
             match i[0] {
                 0x18 if pc + 1 < count && self.code[(pc + 1) * 8] == 0 => pc += 1,
-                0x07 | 0x57 | 0x67 | 0x77 | 0x97 | 0xb7 | 0xbf | 0x63 | 0x71 | 0x95 => {}
+                0x07 | 0x57 | 0x5f | 0x67 | 0x6f | 0x77 | 0x7f | 0x97 | 0xa7 | 0xb7 | 0xbf
+                | 0x63 | 0x61 | 0x71 | 0x79 | 0x95 => {}
                 0x85 if matches!(imm, 1 | 15) => {}
-                0x15 => {
+                0x05 | 0x15 | 0x25 | 0x55 | 0x65 => {
                     let off = i16::from_ne_bytes(i[2..4].try_into().unwrap());
                     if off < 0 || pc + 1 + off as usize >= count {
                         return Err(EINVAL);
@@ -137,12 +138,15 @@ impl Program {
         Ok(())
     }
 
-    fn run(&self, uid: u32, gid: u32) -> Result<u64, Errno> {
+    fn run(&self, uid: u32, gid: u32, context: &[u8]) -> Result<u64, Errno> {
         // Virtual offsets only: no register can address host/guest memory.
         // Offset 0 is NULL. r10 points one past the 512-byte BPF stack.
-        let mut memory = vec![0u8; 513];
+        let mut memory = Vec::with_capacity(1024);
+        memory.resize(513, 0);
         let mut r = [0u64; 11];
         r[10] = 513;
+        r[1] = 513;
+        memory.extend_from_slice(context);
         let mut pc = 0usize;
         for _ in 0..4096 {
             let i = self.code.get(pc * 8..pc * 8 + 8).ok_or(EINVAL)?;
@@ -161,14 +165,18 @@ impl Program {
                 0xbf => r[dst] = r[src],
                 0x07 => r[dst] = r[dst].wrapping_add(imm),
                 0x57 => r[dst] &= imm,
+                0x5f => r[dst] &= r[src],
                 0x67 => r[dst] <<= imm & 63,
+                0x6f => r[dst] <<= r[src] & 63,
                 0x77 => r[dst] >>= imm & 63,
+                0x7f => r[dst] >>= r[src] & 63,
+                0xa7 => r[dst] ^= imm,
                 0x97 => {
                     if imm != 0 {
                         r[dst] %= imm;
                     }
                 }
-                0x63 | 0x71 => {
+                0x63 | 0x61 | 0x71 | 0x79 => {
                     let at = r[dst_if_load(i[0], dst, src)].wrapping_add_signed(off) as usize;
                     if at == 0 {
                         return Err(EACCES);
@@ -181,11 +189,31 @@ impl Program {
                             .ok_or(EACCES)?
                             .copy_from_slice(&(r[src] as u32).to_ne_bytes());
                     } else {
-                        r[dst] = *memory.get(at).ok_or(EACCES)? as u64;
+                        let size = match i[0] {
+                            0x61 => 4,
+                            0x79 => 8,
+                            _ => 1,
+                        };
+                        let bytes = memory
+                            .get(at..at.checked_add(size).ok_or(EACCES)?)
+                            .ok_or(EACCES)?;
+                        let mut value = [0; 8];
+                        value[..size].copy_from_slice(bytes);
+                        r[dst] = u64::from_ne_bytes(value);
                     }
                 }
-                0x15 if r[dst] == imm => pc += off as usize,
-                0x15 => {}
+                0x05 => pc += off as usize,
+                0x15 | 0x25 | 0x55 | 0x65 => {
+                    let jump = match i[0] {
+                        0x15 => r[dst] == imm,
+                        0x25 => r[dst] > imm,
+                        0x55 => r[dst] != imm,
+                        _ => (r[dst] as i64) > (imm as i64),
+                    };
+                    if jump {
+                        pc += off as usize;
+                    }
+                }
                 0x85 if imm == 15 => r[0] = uid as u64 | (gid as u64) << 32,
                 0x85 if imm == 1 => {
                     let map = self.maps.get(&(r[1] as usize)).ok_or(EINVAL)?;
@@ -214,27 +242,39 @@ impl Program {
     }
 }
 fn dst_if_load(op: u8, dst: usize, src: usize) -> usize {
-    if op == 0x71 { src } else { dst }
+    if op != 0x63 { src } else { dst }
 }
 
-fn attachment(group: &Path, root: &Path) -> Result<PathBuf, Errno> {
+fn identity(group: &Path, root: &Path) -> Result<String, Errno> {
     use std::os::macos::fs::MetadataExt;
     group.strip_prefix(root).map_err(|_| EBADF)?;
     let stat = std::fs::metadata(group).map_err(io)?;
     // Cgroup identity, rather than its reusable pathname. Birth time also
     // distinguishes a removed directory if Darwin reuses its inode.
-    Ok(objects_dir().join("sock-create").join(format!(
+    Ok(format!(
         "{}-{}-{}-{}",
         stat.st_dev(),
         stat.st_ino(),
         stat.st_birthtime(),
         stat.st_birthtime_nsec()
-    )))
+    ))
+}
+
+fn attachment(group: &Path, root: &Path, hook: u32) -> Result<PathBuf, Errno> {
+    Ok(directory(hook).join(identity(group, root)?))
+}
+fn directory(hook: u32) -> PathBuf {
+    objects_dir().join(if hook == ATTACH {
+        "sock-create".into()
+    } else {
+        format!("sock-{hook}")
+    })
 }
 
 /// flags=0 is Linux's single, non-overridable attachment mode. Other modes
 /// are explicitly unsupported; they must not report a successful attachment.
 pub(super) fn attach(a: &[u32], detach: bool) -> Result<(), Errno> {
+    let hook = a[2];
     if a[3] & !7 != 0 {
         return Err(EINVAL);
     }
@@ -251,7 +291,7 @@ pub(super) fn attach(a: &[u32], detach: bool) -> Result<(), Errno> {
     if !group.is_dir() {
         return Err(EBADF);
     }
-    let path = attachment(&group, &root)?;
+    let path = attachment(&group, &root, hook)?;
     // Serialize replacement/hierarchy checks across processes; execution sees
     // either immutable program through the atomic rename.
     let lock = PrivateFile::allocate(|| {
@@ -285,7 +325,11 @@ pub(super) fn attach(a: &[u32], detach: bool) -> Result<(), Errno> {
     let fd = program.descriptor().as_raw_fd();
     let (header, _) = read_header(fd).ok_or(EINVAL)?;
     let expected = u32::from_ne_bytes(header._pad[..4].try_into().unwrap());
-    if header.ty != SOCK || (expected != 0 && expected != ATTACH) {
+    let ty = if hook == ATTACH { SOCK } else { 18 };
+    if header.kind != KIND_PROG
+        || header.ty != ty
+        || (expected != hook && (ty != SOCK || expected != 0))
+    {
         return Err(EINVAL);
     }
     let file = open(Path::new(std::ffi::OsStr::from_bytes(
@@ -297,23 +341,28 @@ pub(super) fn attach(a: &[u32], detach: bool) -> Result<(), Errno> {
         .skip(1)
         .take_while(|p| p.starts_with(&root))
     {
-        if attachment(ancestor, &root)?.try_exists().map_err(io)? {
+        if attachment(ancestor, &root, hook)?
+            .try_exists()
+            .map_err(io)?
+        {
             return Err(EPERM);
         }
     }
-    fn has_program(group: &Path, root: &Path) -> Result<bool, Errno> {
+    fn has_program(group: &Path, root: &Path, hook: u32) -> Result<bool, Errno> {
         for entry in std::fs::read_dir(group).map_err(io)? {
             let entry = entry.map_err(io)?;
             if entry.file_type().map_err(io)?.is_dir()
-                && (attachment(&entry.path(), root)?.try_exists().map_err(io)?
-                    || has_program(&entry.path(), root)?)
+                && (attachment(&entry.path(), root, hook)?
+                    .try_exists()
+                    .map_err(io)?
+                    || has_program(&entry.path(), root, hook)?)
             {
                 return Ok(true);
             }
         }
         Ok(false)
     }
-    if has_program(&group, &root)? {
+    if has_program(&group, &root, hook)? {
         return Err(EPERM);
     }
     let dir = path.parent().unwrap();
@@ -343,13 +392,100 @@ pub(crate) fn check() -> Result<(), Errno> {
     let group = root.join(group.trim_start_matches('/'));
     let (uid, gid) = super::super::attrs::ids(super::super::attrs::REAL);
     for group in group.ancestors().take_while(|p| p.starts_with(&root)) {
-        let path = attachment(group, &root)?;
+        let path = attachment(group, &root, ATTACH)?;
         let file = match open(&path) {
             Ok(file) => file,
             Err(ENOENT) => continue,
             Err(e) => return Err(e),
         };
-        return if Program::read(&file)?.run(uid, gid)? == 1 {
+        return if Program::read(&file)?.run(uid, gid, &[])? == 1 {
+            Ok(())
+        } else {
+            Err(EPERM)
+        };
+    }
+    Ok(())
+}
+
+/// Socket cgroup ancestry is fixed at creation (sock_cgroup_ptr), even if
+/// the task migrates or passes the socket to a different process.
+pub(crate) fn membership() -> Result<Vec<String>, Errno> {
+    let Some(root) = vfs::kernel_fs_root("cgroup2") else {
+        return Ok(Vec::new());
+    };
+    let root = root.canonicalize().map_err(io)?;
+    let membership = super::super::cgroup::proc_cgroup(0, super::super::thread::gettid() as i32);
+    let group = membership
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .ok_or(EINVAL)?;
+    root.join(group.trim_start_matches('/'))
+        .ancestors()
+        .take_while(|p| p.starts_with(&root))
+        .map(|p| identity(p, &root))
+        .collect()
+}
+
+// Immutable program files are replaced atomically. Cache decoded programs by
+// file identity, never the pin's pathname; map contents remain live. A warm
+// bind takes one stat per cgroup, no open/read/validation or map remapping.
+static BIND_PROGRAMS: Mutex<Option<HashMap<(u64, u64), Program>>> = Mutex::new(None);
+
+pub(crate) fn bind(
+    groups: &[String],
+    family: u32,
+    protocol: u32,
+    ty: u32,
+    address: &[u8],
+) -> Result<(), Errno> {
+    use std::os::unix::fs::MetadataExt;
+    let hook = match family {
+        2 => 8,
+        10 => 9,
+        _ => return Err(EINVAL),
+    };
+    // bpf_sock_addr UAPI. user_port is a zero-extended __be16, not ntohs.
+    let mut context = [0; 72];
+    context[..4].copy_from_slice(
+        &(u16::from_ne_bytes(address[..2].try_into().unwrap()) as u32).to_ne_bytes(),
+    );
+    if family == 2 {
+        context[4..8].copy_from_slice(&address[4..8]);
+    } else {
+        context[8..24].copy_from_slice(&address[8..24]);
+    }
+    context[24..28].copy_from_slice(
+        &(u16::from_ne_bytes(address[2..4].try_into().unwrap()) as u32).to_ne_bytes(),
+    );
+    for (offset, value) in [(28, family), (32, ty), (36, protocol)] {
+        context[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+    }
+    let dir = directory(hook);
+    for group in groups {
+        let path = dir.join(group);
+        let stat = match std::fs::metadata(&path) {
+            Ok(stat) => stat,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io(e)),
+        };
+        let mut cache = BIND_PROGRAMS.lock().unwrap();
+        let programs = cache.get_or_insert_with(HashMap::new);
+        let mut key = (stat.dev(), stat.ino());
+        if !programs.contains_key(&key) {
+            let file = open(&path)?;
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(file.as_raw_fd(), &mut stat) } != 0 {
+                return Err(errno::last());
+            }
+            key = (stat.st_dev as u64, stat.st_ino);
+            if programs.len() >= 64 {
+                programs.clear();
+            }
+            programs.insert(key, Program::read(&file)?);
+        }
+        // Linux sock_addr returns EPERM unless bit 0 allows the operation.
+        let (uid, gid) = super::super::attrs::ids(super::super::attrs::REAL);
+        return if programs[&key].run(uid, gid, &context)? & 1 != 0 {
             Ok(())
         } else {
             Err(EPERM)
@@ -628,6 +764,343 @@ mod tests {
         image_sections(root)
             .remove("cgroupsock/inet_create")
             .unwrap()
+    }
+
+    fn load_bind(sections: &HashMap<String, Vec<u8>>, map: i64, section: &str, hook: u32) -> i64 {
+        let mut code = sections[section].clone();
+        let relocations = &sections[&format!(".rel{section}")];
+        assert_eq!(relocations.len(), 16);
+        let offset = u64::from_le_bytes(relocations[..8].try_into().unwrap()) as usize;
+        let info = u64::from_le_bytes(relocations[8..].try_into().unwrap());
+        assert_eq!(info as u32, 1);
+        let symbol = &sections[".symtab"][(info >> 32) as usize * 24..][..24];
+        let name = u32::from_le_bytes(symbol[..4].try_into().unwrap()) as usize;
+        assert!(sections[".strtab"][name..].starts_with(b"blocked_ports_map\0"));
+        let value = u64::from_le_bytes(symbol[8..16].try_into().unwrap()) as usize;
+        let definition: Vec<_> = sections["maps"][value..value + 20]
+            .chunks_exact(4)
+            .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
+            .collect();
+        assert_eq!(definition, [ARRAY, 4, 8, 1024, 0]);
+        code[offset + 1] |= 0x10;
+        code[offset + 4..offset + 8].copy_from_slice(&(map as i32).to_ne_bytes());
+        let mut attr = [0u32; 38];
+        attr[0] = 18; // BPF_PROG_TYPE_CGROUP_SOCK_ADDR
+        attr[1] = code.len() as u32 / 8;
+        attr[2] = code.as_ptr() as u64 as u32;
+        attr[3] = (code.as_ptr() as u64 >> 32) as u32;
+        attr[4] = sections["license"].as_ptr() as u64 as u32;
+        attr[5] = (sections["license"].as_ptr() as u64 >> 32) as u32;
+        attr[17] = hook;
+        let fd = call(PROG_LOAD, &attr);
+        assert!(fd >= 0, "load {section}: {fd}");
+        fd
+    }
+
+    fn port_policy(map: &Kernel, port: u16, blocked: bool) {
+        let raw = port.to_be() as u32;
+        assert!(map.update(&(raw >> 6).to_ne_bytes(), |v| {
+            let mut bits = u64::from_ne_bytes(v.try_into().unwrap());
+            if blocked {
+                bits |= 1 << (raw & 63);
+            } else {
+                bits &= !(1 << (raw & 63));
+            }
+            v.copy_from_slice(&bits.to_ne_bytes());
+        }));
+    }
+
+    fn bind_address(family: u32, port: u16) -> Vec<u8> {
+        let mut address = vec![0; if family == 2 { 16 } else { 28 }];
+        address[..2].copy_from_slice(&(family as u16).to_ne_bytes());
+        address[2..4].copy_from_slice(&port.to_be_bytes());
+        if family == 2 {
+            address[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        } else {
+            address[23] = 1;
+        }
+        address
+    }
+
+    fn bind_socket(fd: i64, address: &[u8]) -> i64 {
+        net::bind([
+            fd as u64,
+            address.as_ptr() as u64,
+            address.len() as u64,
+            0,
+            0,
+            0,
+        ])
+    }
+
+    #[test]
+    fn image_bind_programs_pin_reopen_attach_and_enforce_live_blocked_ports() {
+        if fdtab::isolated_kernel_test(
+            "sys::bpf::sock_create::tests::image_bind_programs_pin_reopen_attach_and_enforce_live_blocked_ports",
+        ) {
+            return;
+        }
+        let Some(image) =
+            aim_paths::original_image_with("apex/com.android.tethering/etc/bpf/netd_shared/netd.o")
+        else {
+            return;
+        };
+        let (_view, dir, target) = setup();
+        std::fs::create_dir_all(dir.join("data/bpf/netd_shared")).unwrap();
+        vfs::add_mount(
+            "/sys/fs/bpf",
+            dir.join("data/bpf"),
+            vfs::Area::Writable,
+            "bpf",
+            "bpf",
+        )
+        .unwrap();
+        let sections = image_sections(&image);
+        let map = call(MAP_CREATE, &[ARRAY, 4, 8, 1024, 0]);
+        assert!(map >= 0);
+        let map_path = c"/sys/fs/bpf/netd_shared/map_netd_blocked_ports_map";
+        let pin = [map_path.as_ptr() as u64, map as u64];
+        assert_eq!(bpf([OBJ_PIN, pin.as_ptr() as u64, 16, 0, 0, 0]), 0);
+        for (section, path, hook) in [
+            (
+                "bind4/inet4_bind",
+                c"/sys/fs/bpf/netd_shared/prog_netd_bind4_inet4_bind",
+                8,
+            ),
+            (
+                "bind6/inet6_bind",
+                c"/sys/fs/bpf/netd_shared/prog_netd_bind6_inet6_bind",
+                9,
+            ),
+        ] {
+            let program = load_bind(&sections, map, section, hook);
+            let pin = [path.as_ptr() as u64, program as u64];
+            assert_eq!(bpf([OBJ_PIN, pin.as_ptr() as u64, 16, 0, 0, 0]), 0);
+            close(program);
+        }
+        close(map);
+        assert!(
+            MAPPED
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(HashMap::is_empty)
+        );
+        let before = socket(2, 2); // sockets created before attachment see it too
+        for (path, hook) in [
+            (c"/sys/fs/bpf/netd_shared/prog_netd_bind4_inet4_bind", 8),
+            (c"/sys/fs/bpf/netd_shared/prog_netd_bind6_inet6_bind", 9),
+        ] {
+            let get = [path.as_ptr() as u64, 8u64 << 32]; // original BpfHandler's BPF_F_RDONLY
+            let program = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
+            assert!(program >= 0);
+            assert_eq!(
+                call(
+                    PROG_ATTACH,
+                    &[
+                        target as u32,
+                        program as u32,
+                        if hook == 8 { 9 } else { 8 },
+                        0
+                    ]
+                ),
+                -(EINVAL as i64)
+            );
+            assert_eq!(
+                call(PROG_ATTACH, &[target as u32, program as u32, hook, 0]),
+                0
+            );
+            close(program);
+        }
+        let get = [map_path.as_ptr() as u64, 0];
+        let map = bpf([OBJ_GET, get.as_ptr() as u64, 16, 0, 0, 0]);
+        let kernel = Kernel::of(map as i32).unwrap();
+        close(map);
+        // Neither descriptors nor pins are the attachment's map ownership.
+        std::fs::remove_file(dir.join("data/bpf/netd_shared/map_netd_blocked_ports_map")).unwrap();
+        port_policy(&kernel, 0x1234, true);
+        assert_eq!(
+            bind_socket(before, &bind_address(2, 0x1234)),
+            -(EPERM as i64)
+        );
+        close(before);
+        for family in [2, 10] {
+            for (ty, protocol) in [(1, 0), (2, 0), (1, 6), (2, 17)] {
+                let fd = net::socket([family as u64, ty, protocol, 0, 0, 0]);
+                assert!(fd >= 0, "socket {family}/{ty}/{protocol}: {fd}");
+                // Warm cache still reads policy on each bind. Denial leaves
+                // the socket unbound; ephemeral binds bypass blocked port 0.
+                for _ in 0..3 {
+                    assert_eq!(
+                        bind_socket(fd, &bind_address(family, 0x1234)),
+                        -(EPERM as i64)
+                    );
+                }
+                port_policy(&kernel, 0, true);
+                assert_eq!(bind_socket(fd, &bind_address(family, 0)), 0);
+                assert_eq!(
+                    bind_socket(fd, &bind_address(family, 0x1234)),
+                    -(EPERM as i64)
+                );
+                close(fd);
+            }
+        }
+        // The actual code recognizes these protocols; unknown protocols pass.
+        let groups = membership().unwrap();
+        let address = bind_address(2, 0x1234);
+        let key = ((0x1234u16.to_be() as u32) >> 6).to_ne_bytes();
+        let saved = kernel.lookup(&key);
+        let start = std::time::Instant::now();
+        for _ in 0..2048 {
+            assert_eq!(bind(&groups, 2, 17, 2, &address), Err(EPERM));
+        }
+        eprintln!("warm bind BPF hook: {:?}/call", start.elapsed() / 2048);
+        assert_eq!(
+            kernel.lookup(&key),
+            saved,
+            "bind bytecode does not write its map"
+        );
+        for family in [2, 10] {
+            for protocol in [6, 17, 33, 132, 136, 262] {
+                assert_eq!(
+                    bind(&groups, family, protocol, 2, &bind_address(family, 0x1234)),
+                    Err(EPERM)
+                );
+            }
+            for protocol in [0, 1, 58, 255, 263] {
+                assert_eq!(
+                    bind(&groups, family, protocol, 2, &bind_address(family, 0x1234)),
+                    Ok(())
+                );
+            }
+        }
+        // Reserve an actual UDP port to verify byte order and error ordering.
+        let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        port_policy(&kernel, port, true);
+        let fd = socket(2, 2);
+        assert_eq!(bind_socket(fd, &bind_address(2, port)), -(EPERM as i64));
+        port_policy(&kernel, port, false);
+        assert_eq!(bind_socket(fd, &bind_address(2, port)), -98);
+        if port != port.swap_bytes() {
+            port_policy(&kernel, port.swap_bytes(), true);
+            assert_eq!(bind_socket(fd, &bind_address(2, port)), -98);
+        }
+        drop(reserved);
+        assert_eq!(bind_socket(fd, &bind_address(2, port)), 0);
+        close(fd);
+        let fd = socket(2, 2);
+        let mut wrong = bind_address(2, 0x1234);
+        wrong[..2].copy_from_slice(&10u16.to_ne_bytes());
+        assert_eq!(bind_socket(fd, &wrong), -(EPERM as i64)); // hook precedes family checks
+        assert_eq!(bind_socket(fd, &wrong[..4]), -(EINVAL as i64));
+        assert_eq!(net::bind([fd as u64, 1, 16, 0, 0, 0]), -(EFAULT as i64));
+        close(fd);
+        // IPv4 detach leaves IPv6 active, and cached IPv4 policy disappears.
+        assert_eq!(call(PROG_DETACH, &[target as u32, 0, 8, 0]), 0);
+        assert_eq!(bind(&groups, 2, 17, 2, &bind_address(2, 0x1234)), Ok(()));
+        assert_eq!(
+            bind(&groups, 10, 17, 2, &bind_address(10, 0x1234)),
+            Err(EPERM)
+        );
+        assert_eq!(call(PROG_DETACH, &[target as u32, 0, 9, 0]), 0);
+        close(target);
+    }
+
+    #[test]
+    fn image_bind_keeps_socket_cgroup_on_migration_fork_and_receipt_adoption() {
+        if fdtab::isolated_kernel_test(
+            "sys::bpf::sock_create::tests::image_bind_keeps_socket_cgroup_on_migration_fork_and_receipt_adoption",
+        ) {
+            return;
+        }
+        let Some(image) =
+            aim_paths::original_image_with("apex/com.android.tethering/etc/bpf/netd_shared/netd.o")
+        else {
+            return;
+        };
+        let (_view, dir, target) = setup();
+        let child = c"/sys/fs/cgroup/child";
+        aim_storage::cgroup_v2::populate(&dir.join("data/cgroup"), true).unwrap();
+        assert_eq!(
+            crate::sys::fsops::mkdirat([(-100i64) as u64, child.as_ptr() as u64, 0o755, 0, 0, 0]),
+            0
+        );
+        let sub = fs::openat([(-100i64) as u64, child.as_ptr() as u64, 0o200000, 0, 0, 0]);
+        assert!(sub >= 0);
+        let migrate = |path: &std::ffi::CStr| {
+            let fd = fs::openat([(-100i64) as u64, path.as_ptr() as u64, 1, 0, 0, 0]);
+            assert!(fd >= 0, "open cgroup.procs: {fd}");
+            assert_eq!(fs::write([fd as u64, c"0".as_ptr() as u64, 1, 0, 0, 0]), 1);
+            close(fd);
+        };
+        migrate(c"/sys/fs/cgroup/child/cgroup.procs");
+        let original_groups = membership().unwrap();
+        let original = socket(2, 2);
+        assert!(original >= 0);
+        let sections = image_sections(&image);
+        let map = call(MAP_CREATE, &[ARRAY, 4, 8, 1024, 0]);
+        let kernel = Kernel::of(map as i32).unwrap();
+        port_policy(&kernel, 0x1234, true);
+        let program = load_bind(&sections, map, "bind4/inet4_bind", 8);
+        assert_eq!(call(PROG_ATTACH, &[sub as u32, program as u32, 8, 0]), 0);
+        assert_eq!(
+            call(PROG_ATTACH, &[target as u32, program as u32, 8, 0]),
+            -(EPERM as i64)
+        );
+        let address = bind_address(2, 0x1234);
+        assert_eq!(bind_socket(original, &address), -(EPERM as i64));
+        migrate(c"/sys/fs/cgroup/cgroup.procs");
+        assert_eq!(bind_socket(original, &address), -(EPERM as i64));
+        let fresh = socket(2, 2);
+        assert_eq!(bind_socket(fresh, &bind_address(2, 0)), 0);
+        close(fresh);
+        // Fork/exec's serialized socket state retains the creating cgroup.
+        let Some(fdtab::Kind::Sock(socket)) = fdtab::get(original as i32) else {
+            panic!();
+        };
+        let mut writer = crate::sys::fork_state::Writer::default();
+        net::save_sock(&socket, &mut writer);
+        let bytes = writer.into_bytes();
+        let restored = net::load_sock(&mut crate::sys::fork_state::Reader::new(&bytes));
+        let alias = fs::dup([original as u64, 0, 0, 0, 0, 0]);
+        fdtab::insert(alias as i32, fdtab::Kind::Sock(restored));
+        assert_eq!(bind_socket(alias, &address), -(EPERM as i64));
+        close(alias);
+        // A transported open description is adopted through its allocation
+        // receipt, as socket_scm::adopt does after resolving SCM_RIGHTS.
+        let export = net::export_socket_pinned(fdtab::pin_guest(original as i32).unwrap()).unwrap();
+        let adopted = unsafe { libc::dup(export.backing_fd) };
+        assert!(adopted >= 0);
+        net::adopt(adopted);
+        net::install_socket_receipt(adopted, export.receipt).unwrap();
+        fdtab::publish_guest(adopted).unwrap();
+        assert_eq!(bind_socket(adopted as i64, &address), -(EPERM as i64));
+        close(adopted as i64);
+        drop(export);
+        // Replacing the program changes a warm cache immediately; its new
+        // map identity must not be confused with the old live blocked map.
+        let empty = call(MAP_CREATE, &[ARRAY, 4, 8, 1024, 0]);
+        let allow = load_bind(&sections, empty, "bind4/inet4_bind", 8);
+        assert_eq!(call(PROG_ATTACH, &[sub as u32, allow as u32, 8, 0]), 0);
+        assert_eq!(bind_socket(original, &bind_address(2, 0)), 0);
+        assert_eq!(call(PROG_ATTACH, &[sub as u32, program as u32, 8, 0]), 0);
+        assert_eq!(bind(&original_groups, 2, 17, 2, &address), Err(EPERM));
+        assert_eq!(bind_socket(original, &address), -(EPERM as i64));
+        assert_eq!(
+            call(PROG_DETACH, &[sub as u32, allow as u32, 8, 0]),
+            -(ENOENT as i64)
+        );
+        assert_eq!(call(PROG_DETACH, &[sub as u32, program as u32, 8, 0]), 0);
+        assert_eq!(call(PROG_DETACH, &[sub as u32, 0, 8, 0]), -(ENOENT as i64));
+        close(original);
+        close(program);
+        close(allow);
+        close(map);
+        close(empty);
+        close(sub);
+        close(target);
+        assert!(dir.join("data/cgroup/child").is_dir());
     }
 
     #[test]

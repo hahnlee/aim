@@ -1,6 +1,6 @@
 //! `netd` of the derived image (ADR 0012 appendix, "Replaced native
 //! daemons"; docs/network.md): INetd (netd_aidl_interface V17) without
-//! iptables or policy routing. It attaches the original socket-create BPF
+//! iptables or policy routing. It attaches the original create and bind BPF
 //! policy after loader readiness; the syscall layer executes it.
 //!
 //! - Guest sockets are host sockets: the host's networking carries them,
@@ -614,8 +614,8 @@ fn control_socket(name: &str) -> Option<i32> {
 fn main() {
     daemon_log::init("netd");
     readiness::wait();
-    if let Err(e) = bpf::attach_socket_create() {
-        log::error!("BPF socket-create attachment: {e}");
+    if let Err(e) = bpf::init_programs() {
+        log::error!("BPF program attachment: {e}");
         std::process::exit(1);
     }
     sysctl::initialize_all();

@@ -1,9 +1,9 @@
-//! `bpf(2)`: shared maps and socket-create program execution (ADR 0012).
+//! `bpf(2)`: shared maps and cgroup socket program execution (ADR 0012).
 //!
 //! Android's network stack keeps its state in eBPF maps that the loader
 //! (NetBpfLoad) creates and pins under `/sys/fs/bpf`, and that netd,
 //! system_server (BpfNetMaps, TrafficStats) and the DnsResolver open and
-//! read. Attached cgroup socket-create programs run in the socket owner;
+//! read. Attached cgroup create/bind programs run in the socket owner;
 //! traffic counters are filled there too. Other hooks remain #2268.
 //!
 //! Every map and program is a file in the boot's runtime directory
@@ -37,6 +37,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 
 mod sock_create;
 pub(crate) use sock_create::check as socket_create;
+pub(crate) use sock_create::{bind as socket_bind, membership as socket_cgroup};
 
 const MAP_CREATE: u64 = 0;
 const MAP_LOOKUP_ELEM: u64 = 1;
@@ -506,7 +507,7 @@ fn prog_load(a: &[u32]) -> i64 {
     for (i, w) in a[12..16].iter().enumerate() {
         name[i * 4..i * 4 + 4].copy_from_slice(&w.to_ne_bytes());
     }
-    let data = if a[0] == 9 {
+    let data = if matches!(a[0], 9 | 18) {
         match sock_create::prepare(a) {
             Ok(data) => data,
             Err(error) => return error,
@@ -538,15 +539,24 @@ fn prog_load(a: &[u32]) -> i64 {
 /// The host path of the object behind `fd`.
 fn object_path(fd: i32) -> Option<CString> {
     use std::os::unix::fs::MetadataExt;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
     let mut buf = [0u8; libc::PATH_MAX as usize];
     // SAFETY: F_GETPATH writes at most PATH_MAX bytes.
     if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == 0 {
         let n = buf.iter().position(|&c| c == 0)?;
-        return CString::new(&buf[..n]).ok();
+        let path = std::ffi::OsStr::from_bytes(&buf[..n]);
+        if let Ok(metadata) = std::fs::metadata(path)
+            && metadata.ino() == stat.st_ino
+            && metadata.dev() == stat.st_dev as u32 as u64
+        {
+            return CString::new(&buf[..n]).ok();
+        }
     }
     // Darwin may cache the last hard-link name on the vnode. Unpin/detach
-    // can remove that name while the original boot-owned object still lives.
-    let (_, stat) = read_header(fd)?;
+    // can remove or replace that name while the boot-owned object still lives.
     for entry in std::fs::read_dir(objects_dir()).ok()? {
         let entry = entry.ok()?;
         let metadata = entry.metadata().ok()?;
@@ -706,7 +716,7 @@ pub fn bpf(a: [u64; 6]) -> i64 {
         BTF_LOAD => btf_load(u64_at(0), u32s[4]),
         OBJ_PIN => obj_pin(u64_at(0), object_fd.unwrap()),
         OBJ_GET => obj_get(u64_at(0)),
-        PROG_ATTACH | PROG_DETACH if u32s[2] == sock_create::ATTACH => {
+        PROG_ATTACH | PROG_DETACH if matches!(u32s[2], sock_create::ATTACH | 8 | 9) => {
             sock_create::attach(&u32s, cmd == PROG_DETACH)
                 .map_or_else(|error| -(error as i64), |()| 0)
         }

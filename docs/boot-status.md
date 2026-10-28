@@ -8118,7 +8118,7 @@ memory pressure since #277, see "Memory pressure").
   shared memory and pins them, and loads programs and BTF. Single,
   non-overridable cgroup socket-create attachments now execute the loaded
   bytecode at INET/INET6 creation and return EPERM on denial (#2268).
-  Replacement netd attaches the pinned create program after BPF readiness;
+  Replacement netd attaches the pinned create and bind4/bind6 programs after BPF readiness;
   attachment failure prevents its service publication, as in the original.
   The image's permission program reads its live map without writing it;
   program and map references survive loader FD closure and map unpinning.
@@ -8141,7 +8141,16 @@ memory pressure since #277, see "Memory pressure").
   Both replacement netd's compact attrs and original BpfHandler's full attrs
   pass. Earlier tests mapped the permission map before attachment and missed
   this fresh-process path. No guest boot was rerun after this correction
-  (#2268, 2026-10-29). Other hooks and ring
+  (#2268, 2026-10-29). Bind4/bind6 now execute the original image's bytecode
+  before INET/INET6 host binding, returning EPERM for blocked ports. The raw
+  network-order port and socket protocol populate bpf_sock_addr; raw sockets
+  retain their protocol-specific bind path. Socket creation cgroup ancestry
+  survives task migration, serialized fork state and receipt-based adoption.
+  A bounded cache retains decoded programs by file identity while map lookups
+  remain live. Host image-program regressions cover loader pin/reopen/attach,
+  both families, TCP/UDP, live bitmap updates, port byte order, error ordering,
+  independent hooks and replacement/detachment. No guest boot was run for
+  this bind change. Skb policy and map writes, other hooks and ring
   producers remain #2268;
   traffic counters retain the socket layer's existing approximation (#224).
 - A forked child gets the stub islands' executable views back as views of

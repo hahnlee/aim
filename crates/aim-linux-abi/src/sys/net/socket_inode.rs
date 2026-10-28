@@ -184,6 +184,19 @@ pub(crate) fn install(fd: i32, receipt: aim_storage::socket_inode::Receipt) -> R
     let (_lock, path) = lock(receipt)?;
     read(&path, receipt)?.ok_or(61)?;
     let socket = owner.ok_or(61)?;
+    if let Family::Inet(options) = &socket.family {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path.with_extension("bpf"))
+            .map_err(io_error)?;
+        let mut file = Private::new(file);
+        let mut groups = String::new();
+        file.file_mut()
+            .read_to_string(&mut groups)
+            .map_err(io_error)?;
+        *options.bpf_groups.lock().unwrap() = groups.lines().map(str::to_owned).collect();
+    }
     let mut previous = socket.inode_allocation.lock().unwrap();
     if previous.is_some_and(|previous| previous != receipt) {
         return Err(EIO);
@@ -207,6 +220,20 @@ pub(super) fn allocated(fd: i32) -> Result<(), Errno> {
             mode: Some(0o777),
         },
     )?;
+    if let Family::Inet(options) = &socket.family {
+        // Allocation receipt identity carries socket cgroup ownership across
+        // SCM_RIGHTS/binder adoption; never reconstruct it from the receiver.
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(path.with_extension("bpf"))
+            .map_err(io_error)?;
+        Private::new(file)
+            .write_all(options.bpf_groups.lock().unwrap().join("\n").as_bytes())
+            .map_err(io_error)?;
+    }
     let mut owner = socket.inode_allocation.lock().unwrap();
     if owner.is_some() {
         return Err(EIO);

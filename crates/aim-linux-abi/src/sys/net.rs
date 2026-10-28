@@ -119,6 +119,9 @@ pub enum Family {
 /// (`reconnect`).
 #[derive(Default)]
 pub struct InetOpts {
+    bpf_groups: Mutex<Vec<String>>,
+    domain: u32,
+    protocol: u32,
     mark: std::sync::atomic::AtomicU32,
     device: Mutex<String>,
     /// IP_MULTICAST_ALL cleared (Linux sets it on a new socket).
@@ -207,6 +210,9 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
         Family::Unix => w.u32(0),
         Family::Inet(o) => {
             w.u32(1);
+            w.u32(o.domain);
+            w.u32(o.protocol);
+            w.bytes(o.bpf_groups.lock().unwrap().join("\n").as_bytes());
             w.u32(o.mark.load(Ordering::Relaxed));
             w.bytes(o.device.lock().unwrap().as_bytes());
             w.bool(o.port_zero.load(Ordering::Relaxed));
@@ -257,7 +263,16 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     let peer = r.opt(|r| r.bytes());
     let family = match r.u32() {
         1 => {
-            let o = InetOpts::default();
+            let o = InetOpts {
+                domain: r.u32(),
+                protocol: r.u32(),
+                ..InetOpts::default()
+            };
+            *o.bpf_groups.lock().unwrap() = String::from_utf8(r.bytes())
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
             o.mark.store(r.u32(), Ordering::Relaxed);
             *o.device.lock().unwrap() = String::from_utf8_lossy(&r.bytes()).into_owned();
             o.port_zero.store(r.bool(), Ordering::Relaxed);
@@ -439,7 +454,17 @@ pub fn adopt(fd: i32) {
             libc::SOCK_RAW => SockType::Raw,
             _ => SockType::Stream,
         };
-        let socket = Sock::of(ty, Family::Inet(InetOpts::default()));
+        let domain = if sa.ss_family as i32 == libc::AF_INET {
+            2
+        } else {
+            10
+        };
+        let options = InetOpts {
+            domain,
+            protocol: host_protocol(fd) as u32,
+            ..InetOpts::default()
+        };
+        let socket = Sock::of(ty, Family::Inet(options));
         fdtab::insert(fd, Kind::Sock(socket));
         return;
     }
@@ -1000,7 +1025,21 @@ pub fn socket(a: [u64; 6]) -> i64 {
                 return -(error as i64);
             }
             set_int(fd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1);
-            let o = InetOpts::default();
+            let groups = match super::bpf::socket_cgroup() {
+                Ok(groups) => groups,
+                Err(error) => {
+                    unsafe {
+                        libc::close(fd);
+                    }
+                    return -(error as i64);
+                }
+            };
+            let o = InetOpts {
+                domain: domain as u32,
+                protocol: host_protocol(fd) as u32,
+                bpf_groups: Mutex::new(groups),
+                ..InetOpts::default()
+            };
             o.icmp4.store(
                 host_ty == libc::SOCK_DGRAM && d == libc::AF_INET && proto == IPPROTO_ICMP,
                 Ordering::Relaxed,
@@ -1187,6 +1226,25 @@ pub fn bind(a: [u64; 6]) -> i64 {
     let fd = input.fd();
     if let Err(e) = is_socket(fd) {
         return e;
+    }
+    if let Some(s) = any_sock(&input)
+        && let Family::Inet(o) = &s.family
+        && s.ty != SockType::Raw
+    {
+        let length = a[2] as u32;
+        if length < if o.domain == 2 { 16 } else { 24 } || length > 128 {
+            return -(EINVAL as i64);
+        }
+        let address = user_try!(super::user_memory::read_exact(a[1], length as usize));
+        if let Err(error) = super::bpf::socket_bind(
+            &o.bpf_groups.lock().unwrap(),
+            o.domain,
+            o.protocol,
+            if s.ty == SockType::Stream { 1 } else { 2 },
+            &address,
+        ) {
+            return -(error as i64);
+        }
     }
     if let Some(s) = any_sock(&input) {
         match &s.family {
@@ -1608,7 +1666,21 @@ pub fn accept4(a: [u64; 6]) -> i64 {
                 return -(error as i64);
             }
         };
-        let socket = Sock::of(SockType::Stream, Family::Inet(InetOpts::default()));
+        let options = InetOpts {
+            domain: if sa.ss_family as i32 == libc::AF_INET {
+                2
+            } else {
+                10
+            },
+            protocol: 6,
+            ..InetOpts::default()
+        };
+        if let Some(listener) = any_sock(&input)
+            && let Family::Inet(original) = &listener.family
+        {
+            *options.bpf_groups.lock().unwrap() = original.bpf_groups.lock().unwrap().clone();
+        }
+        let socket = Sock::of(SockType::Stream, Family::Inet(options));
         *socket.inet_owner.lock().unwrap() = Some(owner);
         fdtab::insert(nfd, Kind::Sock(socket));
     }
