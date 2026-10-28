@@ -7065,19 +7065,17 @@ Original PackageImpl/PackageInfoUtils/SettingBase APIs match 16 factory/permissi
 old-flag/updated-system cases. All 289 aim-services units pass (3.71s); the expanded
 runtime passes (84.77s), including earlier checks, Settings launch and owned cleanup.
 The Java image API linkage build passes (13.8s). This checks the final flag helpers,
-not the whole original scan entry point. New system shared-UID candidates now
-reconcile signing without first membership admission. `scan_new_system` retains
-UID preparation through ABI/page/time/final-flag completion and admits the member
-with its final flags; a late failure preserves prior settings/libraries/signers,
-releases an independent slot with the original cleanup cursor, and retains an
-empty shared group until pruning. Retained members still refresh removal inputs
-without re-ORing cached flags. All eight original-APK scan-input tests pass
-(6.06s), including new/retained factory flags, removal, late code-time failures
-and UID retry behavior. All 289 units pass (3.08s), and the original runtime
-comparison passes (84.48s), including earlier shared-UID flag sequences and final
-flag helpers. This stages metadata ownership, not a complete install transaction:
-filesystem cleanup, integration into actual boot/install commit ordering (#812),
-full result persistence and replica publication remain #702/#810/#798.
+not the whole original scan entry point. System, live-install, retained-setting
+and original-name candidates now reconcile signing without first shared-UID
+membership admission (#812). Final application metadata admits new members with
+their completed flags inside the staged scan owner; later key-set, registration
+or seInfo failures cannot commit membership or UID allocation to the caller's
+base. Retained members still refresh removal inputs without re-ORing cached
+flags. The original-APK scan fixture covers empty and populated live-install
+groups, final factory flags, removal and late key-set failure, alongside the
+existing system allocation/failure cases. These are host scan checks; no guest
+boot or CTS was rerun (2026-10-28). DONT_KILL code retention remains #807;
+complete installation and native conformance acceptance remain #702/#798.
 
 `Store::commit_native_library_metadata` now persists completed scan ABI/path
 metadata for retained active and disabled-system packages through the existing
