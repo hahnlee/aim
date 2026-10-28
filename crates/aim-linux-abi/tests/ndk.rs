@@ -32,8 +32,10 @@ struct Guest {
 
 impl Guest {
     fn new(image: &Path, name: &str) -> Guest {
-        let runtime =
-            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("n{}-{name}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let runtime = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("n{}-{name}-{id}", std::process::id()));
         let _ = aim_linux_abi::cache::remove_tree(&runtime);
         for d in [
             "data/local/tmp",
@@ -633,6 +635,10 @@ fn cgroup_host_policy() {
         .open(&g.map)
         .unwrap();
     writeln!(map, "cgroup:cpu\t/dev/cpuctl\t{}", root.display()).unwrap();
+    let io = g.runtime.join("blkio");
+    std::fs::create_dir_all(&io).unwrap();
+    aim_storage::cgroup_v1::populate(aim_storage::cgroup_v1::Controller::Blkio, &io, None).unwrap();
+    writeln!(map, "cgroup:blkio\t/dev/blkio\t{}", io.display()).unwrap();
     struct Stop(std::process::Child);
     impl Drop for Stop {
         fn drop(&mut self) {
@@ -656,6 +662,16 @@ fn cgroup_host_policy() {
     let mut output = std::io::BufReader::new(child.0.stdout.take().unwrap());
     for (step, one, two, fork) in [
         ("default", 31, 31, None),
+        ("io-utility", 31, 31, None),
+        ("io-nice-utility", 31, 20, None),
+        ("io-nice-background", 31, 4, None),
+        ("io-urgent-audio", 31, 47, None),
+        ("io-normal", 31, 31, None),
+        ("io-idle", 31, 31, None),
+        ("io-realtime", 31, 47, None),
+        ("io-fair", 31, 31, None),
+        ("io-important", 31, 31, None),
+        ("io-restored", 31, 31, None),
         ("background", 4, 4, None),
         ("realtime", 4, 47, None),
         ("fair", 4, 4, None),

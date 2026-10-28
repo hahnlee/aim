@@ -179,6 +179,15 @@ unsafe extern "C" {
     fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
 }
 
+fn apply_host_io(io: i32) -> Result<(), crate::errno::Errno> {
+    // Disk policy is per thread, so a task move cannot throttle siblings.
+    if unsafe { setiopolicy_np(0, 1, io) } < 0 {
+        Err(crate::errno::last())
+    } else {
+        Ok(())
+    }
+}
+
 /// Give the calling thread the host scheduling of its Linux scheduling.
 /// Linux runs a SCHED_FIFO or SCHED_RR thread before every normal one and
 /// weighs normal threads by nice value; Android raises display and audio
@@ -214,15 +223,19 @@ pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errn
             th.sched.cgroup_io.load(SeqCst),
         )
     });
-    // Disk policy is per thread, so a task move cannot throttle siblings.
-    let io_result = unsafe { setiopolicy_np(0, 1, io) };
-    if io_result < 0 {
-        return Err(crate::errno::last());
-    }
-    let raised = matches!(policy, SCHED_FIFO | SCHED_RR)
+    let ceiling = if matches!(policy, SCHED_FIFO | SCHED_RR) {
+        ceiling
+    } else {
+        super::cgroup::clamp_qos(host_qos(nice, policy) as i32, floor, ceiling) as i32
+    };
+    // XNU strips QoS when setting non-default disk policy. Leave QoS via
+    // pthread_setschedparam first, retaining the Linux CPU priority, rather
+    // than trying to re-enter QoS after setiopolicy_np has opted us out.
+    let needs_policy = matches!(policy, SCHED_FIFO | SCHED_RR)
         || nice < 0 && !matches!(policy, SCHED_BATCH | SCHED_IDLE)
-        || floor >= 25;
-    if !raised && !HOST_POLICY.get() {
+        || floor >= 25
+        || io != 0;
+    if !needs_policy && !HOST_POLICY.get() {
         // SAFETY: plain call on the calling thread.
         let result = unsafe {
             libc::pthread_set_qos_class_self_np(
@@ -231,7 +244,7 @@ pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errn
             )
         };
         return if result == 0 {
-            Ok(())
+            apply_host_io(io)
         } else {
             Err(crate::errno::from_darwin(result))
         };
@@ -284,7 +297,7 @@ pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errn
     if result < 0 {
         return Err(crate::errno::last());
     }
-    Ok(())
+    apply_host_io(io)
 }
 
 /// Task suppression changed the base priority: every guest thread applies

@@ -8140,10 +8140,18 @@ through the cgroup controllers, with freezer explicitly unavailable. Cpuset
 masks and uclamp maxima preserve Linux scheduling class: reduced placement
 or frequency hints cannot background foreground/system audio or throttle its
 I/O (#297). The audio profiles' neutral controller defaults and reduced-mask/
-uclamp cases have mapping unit coverage. Cgroup host checks cover process/
-thread moves and inheritance, and remote renicing of leaders/workers under
-background, utility and boosted CPU policies (2026-10-28); no guest boot or
-CoreAudio integration gate was run for this re-application. Kills name their process: another process's
+uclamp cases have mapping unit coverage. Non-default disk policy now leaves
+Darwin QoS before application: applying it first removed QoS, then re-entering
+QoS failed with EPERM on guest syscall returns. This broke logd's background
+profile during startup, leaving the audio integration check without logs.
+Cgroup host checks cover I/O utility/idle/important transitions and restoration,
+normal/negative nice and FIFO priorities, process/thread moves and inheritance,
+and concurrent remote renicing under background, utility and boosted CPU
+policies. The remote-nice tests now use distinct fixture directories, avoiding
+one test removing another's live fork/exec path map (2026-10-28).
+The CoreAudio integration rerun could not reach service launch: the sandbox
+denied the original image's `.use.lock`; no guest boot was run.
+Kills name their process: another process's
 `/proc/<pid>/cmdline` and `comm` come from its record (#238).
 
 **Morning check** (one boot slot, after the throttle is lifted):

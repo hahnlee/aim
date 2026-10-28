@@ -5,6 +5,7 @@
 #include <sched.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -41,6 +42,8 @@ static void* worker(void* arg) {
       struct sched_param p = {.sched_priority = c == 'f' ? 3 : 0};
       if (sched_setscheduler(0, c == 'f' ? SCHED_FIFO : SCHED_OTHER, &p) != 0) _exit(9);
     }
+    if ((c == 'a' || c == 'u' || c == 'b' || c == 'l') &&
+        setpriority(PRIO_PROCESS, 0, c == 'a' ? -19 : c == 'b' ? 10 : c == 'l' ? 19 : 0) != 0) _exit(10);
     if (write(answer[i][1], &c, 1) != 1) _exit(4);
   }
   return NULL;
@@ -71,9 +74,31 @@ int main(void) {
         read(answer[i][0], &tids[i], sizeof tids[i]) != sizeof tids[i]) return 1;
   }
   step("default", 0);
+  if (mkdir("/dev/blkio/value", 0755) != 0) return 1;
+  put("/dev/blkio/value/blkio.prio.class", "restrict-to-be");
+  put("/dev/blkio/value/cgroup.procs", "0");
+  step("io-utility", 0);
+  char ack;
+  if (write(command[1][1], "b", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
+  step("io-nice-utility", 0);
+  if (write(command[1][1], "l", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
+  step("io-nice-background", 0);
+  if (write(command[1][1], "a", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
+  step("io-urgent-audio", 0);
+  if (write(command[1][1], "u", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
+  step("io-normal", 0);
+  put("/dev/blkio/value/blkio.prio.class", "idle");
+  step("io-idle", 0);
+  if (write(command[1][1], "f", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
+  step("io-realtime", 0);
+  if (write(command[1][1], "n", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
+  step("io-fair", 0);
+  put("/dev/blkio/value/blkio.prio.class", "promote-to-rt");
+  step("io-important", 0);
+  put("/dev/blkio/cgroup.procs", "0");
+  step("io-restored", 0);
   put("/dev/cpuctl/value/nested/cgroup.procs", "0");
   step("background", 0);
-  char ack;
   if (write(command[1][1], "f", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
   step("realtime", 0);
   if (write(command[1][1], "n", 1) != 1 || read(answer[1][0], &ack, 1) != 1) return 1;
