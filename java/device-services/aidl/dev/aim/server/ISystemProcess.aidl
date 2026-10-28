@@ -1,5 +1,6 @@
 package dev.aim.server;
 import dev.aim.server.IForegroundServicePolicy;
+import dev.aim.server.IBatteryHealthStats;
 import dev.aim.server.ISafeLabels;
 
 /**
@@ -18,7 +19,7 @@ interface ISystemProcess {
      * (`installSystemProviders`), as it runs an app's in an app's process.
      */
     void attachSystemProcess(IBinder applicationThread, IForegroundServicePolicy foregroundServicePolicy,
-            ISafeLabels safeLabels);
+            ISafeLabels safeLabels, IBatteryHealthStats batteryHealthStats);
 
     /**
      * TelecomLoaderService's `InternalServiceRepository` (an

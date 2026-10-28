@@ -4,6 +4,7 @@ package android.os;
 
 public final class Bundle extends BaseBundle implements Parcelable {
     public void putFloat(String name,float value) { throw new RuntimeException("stub"); }
+    public void putParcelableArray(String key, Parcelable[] value) { throw new RuntimeException("stub"); }
     public void putParcelable(String key, Parcelable value) { throw new RuntimeException("stub"); }
     public static final Parcelable.Creator<Bundle> CREATOR = null;
     @Override public void writeToParcel(Parcel out, int flags) { throw new RuntimeException("stub"); }
