@@ -974,6 +974,14 @@ terminated, so svc exit acceptance remains unproven (#1227). Actual adb reboot
 returns zero, takes adbd offline and removes the original SystemServer; the
 restarted device returns online and completes boot with a new original
 SystemServer and verified native package owner guest PID 1 (#1255).
+Main already retains guest CLOEXEC descriptors and PTY carriers across host
+exec, restores their owners, and closes the exec receipt immediately before
+guest entry (899907955). A dedicated in-place/host-exec PTY regression now
+checks stdio inheritance, an independent action after last-master close with
+SIGHUP blocked, and SIGHUP termination on unblocking; it compiles, but this
+session's Mach bootstrap registration is denied (1100), so execution did not
+reach PTY allocation. Setting's second reboot still needs a new SystemServer
+identity; no guest boot or reboot replay was run (#1255).
 The optional constructor export is independent: its existing output directory
 cannot be reclaimed on automatic reboot. Init now consumes only capture
 option/value positions recorded by the initial parser, preserving the first
