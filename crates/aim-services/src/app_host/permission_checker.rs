@@ -7,7 +7,7 @@
 //! `permissionmgr` answers `checkUidPermission`, without a renounced one);
 //! a runtime permission's op must be allowed and an app op permission's op
 //! decides, falling back to the permission at its default mode. The op is
-//! checked for a preflight (evaluated, not raw: #1595), noted for data
+//! checked raw for a preflight, noted for data
 //! delivery and started for `startDataDelivery` by the app host's `appops`
 //! as the caller asks it, not collected for the app (#1592): a
 //! proxy op where a link proxies for the next or where the caller may not
@@ -355,8 +355,15 @@ trait System {
     fn holds(&self, uid: i32, permission: &str) -> Result<bool, Exception>;
     /// `getPackagesForUid`.
     fn packages_for_uid(&self, uid: i32) -> Result<Vec<String>, Exception>;
-    /// `checkOpNoThrow`, also for `unsafeCheckOpRawNoThrow` (#1595).
+    /// `checkOpNoThrow` (evaluated).
     fn check_op(&self, op: i32, uid: i32, package: &str) -> Result<i32, Exception>;
+    /// `unsafeCheckOpRawNoThrow` with the source's attribution tag/device.
+    fn check_op_raw(
+        &self,
+        op: i32,
+        source: &AttributionSourceState,
+        package: &str,
+    ) -> Result<i32, Exception>;
     /// `noteOpNoThrow` of a source.
     fn note_op(&self, op: i32, source: &AttributionSourceState) -> Result<i32, Exception>;
     /// `noteProxyOpNoThrow` of a source and its next.
@@ -813,7 +820,7 @@ impl<S: System> Checks<'_, S> {
             let mode = if skip_proxy_operation && !single_receiver_from_datasource {
                 MODE_ALLOWED
             } else {
-                self.0.check_op(op, source[accessor].uid, &package)?
+                self.0.check_op_raw(op, source[accessor], &package)?
             };
             let Some(next) = source
                 .get(accessor + 1)
@@ -825,7 +832,7 @@ impl<S: System> Checks<'_, S> {
                 return Ok(MODE_ERRORED);
             };
             self.default_device(next)?;
-            return self.0.check_op(op, next.uid, &next_package);
+            return self.0.check_op_raw(op, next, &next_package);
         }
         let resolved = AttributionSourceState {
             package: Some(package),
@@ -973,6 +980,15 @@ impl System for Host<'_> {
 
     fn check_op(&self, op: i32, uid: i32, package: &str) -> Result<i32, Exception> {
         appops_service::check_from(self.host, self.caller, op, uid, Some(package))
+    }
+
+    fn check_op_raw(
+        &self,
+        op: i32,
+        source: &AttributionSourceState,
+        package: &str,
+    ) -> Result<i32, Exception> {
+        appops_service::check_raw_from(self.host, self.caller, op, source, package)
     }
 
     fn note_op(&self, op: i32, source: &AttributionSourceState) -> Result<i32, Exception> {
@@ -1410,6 +1426,7 @@ mod tests {
         grants: HashMap<i32, Vec<&'static str>>,
         modes: HashMap<(i32, i32), i32>,
         blamed: HashSet<i32>,
+        raw_checks: RefCell<Vec<(i32, i32, String, Option<String>)>>,
         asked: RefCell<Vec<Asked>>,
     }
 
@@ -1466,7 +1483,22 @@ mod tests {
         }
 
         fn check_op(&self, op: i32, uid: i32, _: &str) -> Result<i32, Exception> {
-            Ok(self.mode(op, uid))
+            Ok(match self.mode(op, uid) {
+                4 => MODE_IGNORED,
+                mode => mode,
+            })
+        }
+
+        fn check_op_raw(
+            &self,
+            op: i32,
+            source: &AttributionSourceState,
+            package: &str,
+        ) -> Result<i32, Exception> {
+            self.raw_checks
+                .borrow_mut()
+                .push((op, source.uid, package.into(), source.tag.clone()));
+            Ok(self.mode(op, source.uid))
         }
 
         fn note_op(&self, op: i32, source: &AttributionSourceState) -> Result<i32, Exception> {
@@ -1950,6 +1982,86 @@ mod tests {
         assert_eq!(checks(&system, OP_CAMERA, &app), SOFT_DENIED);
         system.modes.insert((OP_CAMERA, APP), MODE_ERRORED);
         assert_eq!(checks(&system, OP_CAMERA, &app), HARD_DENIED);
+    }
+
+    /// PermissionCheckerService.performOpTransaction: a raw FOREGROUND
+    /// preflight neither denies nor checks the next link. Data delivery's
+    /// attributed permission op still uses the evaluated check.
+    #[test]
+    fn foreground_preflight_is_raw_and_keeps_the_source_tag() {
+        let mut system = fake();
+        let mut app = tokened(APP, "app");
+        app.tag = Some("camera".into());
+        system.modes.insert((OP_CAMERA, APP), 4);
+        assert_eq!(
+            Checks(&system)
+                .check_op(OP_CAMERA, &[&app], false, false)
+                .unwrap(),
+            GRANTED
+        );
+        assert_eq!(
+            *system.raw_checks.borrow(),
+            [(OP_CAMERA, APP, "app".into(), Some("camera".into()))]
+        );
+        let proxy = from_provider(app);
+        system.modes.insert((OP_CAMERA, PROVIDER), 4);
+        system.modes.insert((OP_CAMERA, APP), MODE_ERRORED);
+        system.raw_checks.borrow_mut().clear();
+        assert_eq!(
+            Checks(&system)
+                .perform_op_transaction(
+                    None,
+                    OP_CAMERA,
+                    &chain(&proxy).unwrap(),
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    OP_NONE,
+                    &Attribution::NONE
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(system.raw_checks.borrow().len(), 1);
+        system.modes.remove(&(OP_CAMERA, PROVIDER));
+        assert_eq!(
+            Checks(&system)
+                .perform_op_transaction(
+                    None,
+                    OP_CAMERA,
+                    &chain(&proxy).unwrap(),
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    OP_NONE,
+                    &Attribution::NONE
+                )
+                .unwrap(),
+            MODE_ERRORED
+        );
+        system.raw_checks.borrow_mut().clear();
+        let app = source(APP, "app");
+        system.modes.insert((OP_CAMERA, APP), 4);
+        let mode = Checks(&system)
+            .perform_op_transaction(
+                None,
+                OP_CAMERA,
+                &[&app],
+                true,
+                false,
+                false,
+                true,
+                false,
+                OP_RECORD_AUDIO,
+                &Attribution::NONE,
+            )
+            .unwrap();
+        assert_eq!(mode, MODE_IGNORED);
+        assert!(system.raw_checks.borrow().is_empty());
     }
 
     /// `startDataDelivery` of one source starts its op, unattributed, and
