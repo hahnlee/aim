@@ -6,6 +6,7 @@ import static android.system.OsConstants.S_IRWXO;
 import android.app.ActivityThread;
 import android.app.IApplicationThread;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Looper;
 import android.os.RemoteException;
@@ -24,12 +25,15 @@ import com.android.server.appsearch.AppSearchModule$Lifecycle;
 
 import dalvik.system.VMRuntime;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * The app host's system process (docs/app-host.md, ADR 0013): a process of
  * the system uid, started by init with `app_process`, which runs what only
  * system_server runs as system_server runs it: the original AppSearch
  * module, the Connectivity module's NearbyService, the AdServices module's
- * AdServicesManagerService, TelecomLoaderService's
+ * AdServicesManagerService, DeviceLockService, TelecomLoaderService's
  * part ({@link TelecomLoader}) and the components declared in
  * `android:process="system"`, such as Telecom's.
  * This class plays ZygoteInit's part for the system server
@@ -69,9 +73,10 @@ public final class SystemProcessHost extends RuntimeInit {
      * other services natively), and AdServicesManagerService's Lifecycle
      * after it ({@link SystemProcessLifecycle}), then AppSearch's Lifecycle
      * (after PHASE_DEVICE_SPECIFIC_SERVICES_READY), with user 0 started and
-     * unlocked; then TelecomLoaderService at PHASE_ACTIVITY_MANAGER_READY.
+     * unlocked; DeviceLockService after AppSearch when FEATURE_DEVICE_LOCK
+     * is declared; then TelecomLoaderService at PHASE_ACTIVITY_MANAGER_READY.
      * Nearby publishes `nearby`, AdServices `adservices_manager`, AppSearch
-     * `app_search`, Telecom `telecom`.
+     * `app_search`, DeviceLock `device_lock`, Telecom `telecom`.
      */
     public static final class Server {
         private static final String TAG = "AimSystemProcess";
@@ -82,6 +87,11 @@ public final class SystemProcessHost extends RuntimeInit {
         private static final String NEARBY_JAR = "/system/framework/aim-nearby.jar";
         private static final String NEARBY_INITIALIZER =
                 "dev.aim.server.nearby.NearbyServiceInitializer";
+        /** SystemServer's FEATURE_DEVICE_LOCK branch (android-16.0.0_r1). */
+        private static final String DEVICE_LOCK_JAR =
+                "/apex/com.android.devicelock/javalib/service-devicelock.jar";
+        private static final String DEVICE_LOCK_SERVICE =
+                "com.android.server.devicelock.DeviceLockService";
 
         private Server() {}
 
@@ -114,7 +124,13 @@ public final class SystemProcessHost extends RuntimeInit {
             }
             SystemService appSearch = new AppSearchModule$Lifecycle(context);
             appSearch.onStart();
-            SystemService[] services = {nearby, adServices, appSearch};
+            List<SystemService> services = new ArrayList<>(List.of(nearby, adServices, appSearch));
+            if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_DEVICE_LOCK)) {
+                ClassLoader deviceLockLoader = ClassLoaderFactory.createClassLoader(DEVICE_LOCK_JAR,
+                        null, null, Server.class.getClassLoader(), Build.VERSION.SDK_INT,
+                        true /* isNamespaceShared */, null /* classLoaderName */);
+                services.add(startService(DEVICE_LOCK_SERVICE, deviceLockLoader, context));
+            }
             for (int phase : new int[] {SystemService.PHASE_ACTIVITY_MANAGER_READY,
                     SystemService.PHASE_THIRD_PARTY_APPS_CAN_START}) {
                 for (SystemService service : services) {
@@ -136,7 +152,7 @@ public final class SystemProcessHost extends RuntimeInit {
             for (SystemService service : services) {
                 service.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
             }
-            Slog.i(TAG, "Nearby, AdServices and AppSearch started");
+            Slog.i(TAG, "System process services started");
             new TelecomLoader(context).onActivityManagerReady();
             Looper.loop();
         }
