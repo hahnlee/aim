@@ -4,7 +4,7 @@
 //! (`checkPhoneNumberAccess`), with appops noted as the original notes
 //! them. On a device with no device or profile owner, no package has a
 //! device policy's identifier access; one with admins or policies is not
-//! implemented (#1737). The default grants it makes for carrier, IMS, data
+//! implemented (#2324). The default grants it makes for carrier, IMS, data
 //! and LUI apps are not implemented (#1520).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -111,7 +111,7 @@ impl AppHost {
         if self.device_policies()?.has_admins_or_policies() {
             return Err(self.unimplemented_named(
                 "legacy_permission",
-                "device identifier access with device admins or policies (#1737)",
+                "device identifier access with device admins or policies (#2324)",
             ));
         }
         Ok(false)
