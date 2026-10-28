@@ -176,6 +176,9 @@ keys, Control Center's buttons), and an answer to the sheet: both need
 clicks the check sessions could not make. The CTS modules
 (CtsMediaProjectionTestCases, SDK33, SDK34; pinned in
 `upstream/cts.lock`) click SystemUI's dialog with UiAutomator and wait for
-it, so they fail or hang (#632).
+it. Their UI-dependent methods are explicitly not applicable to the Mac
+sheet (#632; [system-services.md](system-services.md#media-projection-consent-632)).
+Non-UI API checks and checks using the platform's `PROJECT_MEDIA` pre-grant
+remain the conformance path; this classification adds no CTS run.
 
 Open: the single-app option (#589), a localized sheet (#590).

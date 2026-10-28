@@ -16,6 +16,87 @@ every step: replace superseded facts instead of appending a log.
 | `uimode` (IUiModeManager) | native, `crates/aim-services`: night mode follows the Mac's appearance, managed by the system | CtsAppTestCases `UiModeManagerTest`: each test as the original (49 pass, 7 skip without visible background users) | M2, 2026-10-01 |
 | every other service | the original, in SystemServer or its daemon | | |
 
+## CTS checks that require Android shell UI
+
+These are explicit conformance exclusions for the Mac shell, not passing
+results or exclusions of whole modules. The tests are from
+[android-16.0.0_r1](https://android.googlesource.com/platform/cts/+/android-16.0.0_r1/tests/tests/media/projection/);
+method names also match the CTS 16_r1 APKs pinned by `upstream/cts.lock`.
+
+### Media projection consent (#632)
+
+The decision on [#632](https://github.com/hahnlee/aim/issues/632#issuecomment-5917694098)
+is to classify the following unmodified UI-driven tests as not applicable.
+Consent is a Mac sheet (`docs/media.md`), outside UiAutomator's guest view
+hierarchy. They cannot answer or inspect that sheet through SystemUI's
+`android:id/button1`, Cancel button or screen-share options.
+
+| Module | Test | Reason not applicable |
+| --- | --- | --- |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionManagerTest#testGetMediaProjection` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionManagerTest#testGetMediaProjectionSecondaryProcessFgs` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionManagerTest#testGetMediaProjectionWithOtherFgs` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionManagerTest#testGetMediaProjectionWithOtherFgsAlter` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionManagerTest#testGetMediaProjectionMultipleProjections` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionManagerTest#testGetMediaProjection_displayConfig` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionManagerTest#testGetMediaProjection_usersChoiceConfig` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionTest#testOverlayAllowedDuringScreenCapture` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionTest#testCreateVirtualDisplay` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionTest#testUnregisterCallback` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionTest#testCallbackOnStop` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionTest#testCallbackOnCapturedContentResize` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionTest#testCallbackOnCapturedContentVisibilityChanged` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionMirroringTest#testDisplayCapture` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionMirroringTest#testDisplayCapture_rotation` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionMirroringTest#testSingleAppCapture` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionStoppingTest#testMediaProjectionStopsOnKeyguard` | Starts projection through SystemUI consent before checking Android keyguard behavior; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionStoppingTest#testMediaProjectionWithoutDisplayDoesNotStopOnKeyguard` | Starts projection through SystemUI consent before checking Android keyguard behavior; the Mac sheet has no guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionCompatChangeTest#testMediaProjectionPermissionDialog_overrideDefaultDisplayConfig` | Inspects SystemUI's screen-share spinner and clicks its Cancel button; the Mac sheet has neither guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionCompatChangeTest#testMediaProjectionPermissionDialog_overrideUserChoiceConfig` | Inspects SystemUI's screen-share spinner and clicks its Cancel button; the Mac sheet has neither guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionCompatChangeTest#testMediaProjectionPermissionDialog_defaultDisplayConfig` | Inspects SystemUI's screen-share spinner and clicks its Cancel button; the Mac sheet has neither guest view. |
+| `CtsMediaProjectionTestCases` | `android.media.projection.cts.MediaProjectionCompatChangeTest#testMediaProjectionPermissionDialog_userChoiceConfig` | Inspects SystemUI's screen-share spinner and clicks its Cancel button; the Mac sheet has neither guest view. |
+| `CtsMediaProjectionSDK33TestCases` | `android.media.projection.MediaProjectionSDK33Test#testCreateVirtualDisplay_reusedResultData_reshowsPermissionDialog` | Clicks SystemUI consent again after reusing a projection or result; the Mac sheet has no guest view. |
+| `CtsMediaProjectionSDK33TestCases` | `android.media.projection.MediaProjectionSDK33Test#testCreateVirtualDisplay_reusedMediaProjection_reshowPermissionDialog` | Clicks SystemUI consent again after reusing a projection or result; the Mac sheet has no guest view. |
+| `CtsMediaProjectionSDK34TestCases` | `android.media.projection.MediaProjectionSDK34Test#testCreateVirtualDisplay_withoutCallback_throwsException` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionSDK34TestCases` | `android.media.projection.MediaProjectionSDK34Test#testCreateVirtualDisplay_reusedResultData_throwsException` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+| `CtsMediaProjectionSDK34TestCases` | `android.media.projection.MediaProjectionSDK34Test#testCreateVirtualDisplay_reusedMediaProjection_throwsException` | Starts projection through the rule that clicks SystemUI consent; the Mac sheet has no guest view. |
+
+`MediaProjectionManagerTest#testCreateScreenCaptureIntent` and
+`MediaProjectionConfigTest` remain applicable, subject to the original
+feature-flag assumptions. Non-UI projection API assertions remain part of
+conformance: a test recorder can use the platform's own pre-grant path,
+`appops set <recorder-package> PROJECT_MEDIA allow`, then request projection
+through the normal consent activity. `media/consent.rs` asks the original
+`MediaProjectionManagerService.hasProjectionPermission` before granting
+without a question. Restore the app op after the check. This does not make
+an unmodified CTS helper that insists on clicking SystemUI usable; those
+UI steps still have the exclusions above. No Mac Accessibility automation
+or package-specific consent rule is required. Pre-grant, capture results
+and interactive Mac-sheet checks must be reported separately; this
+classification adds no executed CTS results.
+
+### Lock-screen wallpaper visibility (#650)
+
+The decision on [#650](https://github.com/hahnlee/aim/issues/650#issuecomment-5923989503)
+keeps `android.software.secure_lock_screen` declared. Android's optional
+credential (verified through the Mac sheet), credential APIs, device
+policy and authentication-bound keystore keys still need that feature.
+The lightweight shell has no Android keyguard or lock-screen wallpaper
+surface; the Mac's session lock does not provide one to guest windows.
+Only these two `CtsWallpaperTestCases` UI tests are not applicable:
+
+| Test | Reason not applicable |
+| --- | --- |
+| `android.app.cts.wallpapers.WallpaperManagerTest#testSystemAndLockWallpaperVisibility_onLockScreen` | `LockScreenSession.gotoKeyguard()` expects system and lock wallpapers on an Android lock-screen surface, which the Mac shell has none of. |
+| `android.app.cts.wallpapers.WallpaperManagerTest#testIndependentWallpaperVisibilityBehindActivity_onLockScreen` | Expects the lock wallpaper behind an activity on an Android keyguard, which the Mac shell has none of. |
+
+The names match the CTS 16_r1 wallpaper APK pinned by `upstream/cts.lock`.
+This is no exclusion of credential, `KeyguardManager`, device-policy or
+keystore API tests, or of other wallpaper tests. Reassess these two
+exclusions if a Mac-side lock surface is added. The historical wallpaper
+CTS counts remain observations of that run; no CTS module was rerun for
+this classification.
+
 ## How a service is replaced
 
 1. **Its AIDL, generated.** `crates/aim-services/sources.lock` pins the
