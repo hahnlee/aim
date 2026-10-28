@@ -608,6 +608,7 @@ pub struct AppHost {
     strict_mode_callbacks: strict_mode::Callbacks,
     /// `mStrictModeBalCallbacks`.
     bal_strict_mode_callbacks: strict_mode::BalCallbacks,
+    wifi_service: OnceLock<Arc<wifi_service::WifiService>>,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     hint_manager: OnceLock<Arc<hint_manager::HintManager>>,
@@ -709,6 +710,7 @@ impl AppHost {
             battery_stats: OnceLock::new(),
             strict_mode_callbacks: Default::default(),
             bal_strict_mode_callbacks: Default::default(),
+            wifi_service: OnceLock::new(),
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
             hint_manager: OnceLock::new(),
@@ -957,7 +959,9 @@ impl AppHost {
             ("sensorservice", Arc::new(sensor_service::SensorService)),
             (
                 "wifi",
-                Arc::new(wifi_service::WifiService::new(self.clone())),
+                self.wifi_service
+                    .get_or_init(|| wifi_service::WifiService::new(self.clone()))
+                    .clone(),
             ),
             ("wifiscanner", wifi_scanner::WifiScanner::new(self.clone())),
             (

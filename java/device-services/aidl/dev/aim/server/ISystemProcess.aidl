@@ -39,4 +39,6 @@ interface ISystemProcess {
     IBinder getDomainVerificationBackend();
     void attachDomainVerification(IBinder frontend);
     boolean isDomainVerifier(int uid);
+    /** ActiveModeWarden's cold listener registry and empty Passpoint query (#2261). */
+    void attachWifiBridge(IBinder bridge);
 }

@@ -9,7 +9,7 @@
 //! DHCP are modelled; enterprise, WEP, Passpoint, DPP, static IP and proxy
 //! settings, encrypted credentials, linked subscriptions, BSSID allow lists,
 //! vendor data, merged duplicates and networks without a persisted
-//! randomized MAC address are not implemented (#1686).
+//! randomized MAC address are not implemented (#2261).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use aim_android_xml::{Element, Node, TEXT};

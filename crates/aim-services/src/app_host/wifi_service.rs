@@ -12,12 +12,12 @@
 //! `WifiMulticastLockManager` holds them; the Mac's network stack does not
 //! filter the multicast packets the guest's sockets receive, so there is no
 //! filter to stop while one is held, and the app host keeps no battery
-//! stats to report them to (#1513). The rest is not implemented (#1686).
+//! stats to report them to (#1513). The rest is not implemented (#2261).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
@@ -26,6 +26,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_location_ilocationmanager as lm;
 use aim_service_aidl::android_net_wifi_iwifimanager as wm;
+use aim_service_aidl::dev_aim_server_iwifibridge as bridge;
 
 use super::appops_service::MODE_ALLOWED;
 use super::settings::Table;
@@ -221,16 +222,148 @@ pub struct WifiService {
     resources: OnceLock<WifiResources>,
     /// `WifiConfigManager`'s networks once loaded from the stores.
     networks: OnceLock<Vec<WifiConfiguration>>,
+    /// The retained Java owner and last radio state sent to it.
+    bridge: Mutex<Option<(i32, Arc<Strong>)>>,
 }
 
 impl WifiService {
-    pub fn new(host: Arc<AppHost>) -> Self {
-        WifiService {
+    pub fn new(host: Arc<AppHost>) -> Arc<Self> {
+        let service = Arc::new(WifiService {
             host,
             multicast: Arc::default(),
             resources: OnceLock::new(),
             networks: OnceLock::new(),
+            bridge: Mutex::new(None),
+        });
+        let weak = Arc::downgrade(&service);
+        std::thread::Builder::new()
+            .name("wifi-state".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(250));
+                    let Some(service) = weak.upgrade() else {
+                        return;
+                    };
+                    service.follow_state(service.wifi_state());
+                }
+            })
+            .expect("wifi state observer");
+        service
+    }
+
+    pub(super) fn attach_bridge(self: &Arc<Self>, binder: Option<Binder>) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = binder else {
+            return Err(Exception::illegal_argument("no wifi bridge"));
+        };
+        let owner = Arc::new(self.host.process.strong(handle));
+        let weak = Arc::downgrade(self);
+        self.host.process.link_to_death(
+            &owner,
+            Box::new(move || {
+                if let Some(service) = weak.upgrade() {
+                    let mut current = service.bridge.lock().unwrap();
+                    if current.as_ref().is_some_and(|(_, b)| b.handle == handle) {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        let mut current = self.bridge.lock().unwrap();
+        let state = self.wifi_state();
+        notify_state(&owner, state)?;
+        *current = Some((state, owner));
+        Ok(())
+    }
+
+    fn follow_state(&self, state: i32) {
+        let mut current = self.bridge.lock().unwrap();
+        if let Some((old, owner)) = current.as_mut() {
+            if *old != state {
+                match notify_state(owner, state) {
+                    Ok(()) => *old = state,
+                    Err(e) => eprintln!("app host: wifi state: {e:?}"),
+                }
+            }
         }
+    }
+
+    fn bridge_call<T>(
+        &self,
+        code: u32,
+        data: &Parcel,
+        read: impl FnOnce(
+            &mut aim_binder_host::parcel::Reader<'_>,
+        ) -> aim_binder_host::parcel::Result<aim_service_aidl::Returned<T>>,
+    ) -> Result<T, Exception> {
+        let owner = self
+            .bridge
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, b)| b.clone())
+            .ok_or_else(|| {
+                self.host
+                    .unimplemented_named("wifi", "system-process bridge is not attached (#2261)")
+            })?;
+        let result = owner.transact(code, data, false).map_err(bridge_error)?;
+        read(&mut result.reader()).map_err(bridge_error)?
+    }
+
+    /// WifiServiceImpl enforces access before checking null, then posts to
+    /// ActiveModeWarden's original RemoteCallbackList in the system process.
+    fn state_listener(
+        &self,
+        uid: i32,
+        listener: Option<Binder>,
+        add: bool,
+    ) -> Result<(), Exception> {
+        self.enforce_access(uid)?;
+        if listener.is_none() {
+            return Err(Exception::illegal_argument("listener must not be null"));
+        }
+        let mut data = Parcel::new();
+        if add {
+            bridge::AddWifiStateChangedListener { listener }.write(&mut data);
+            self.bridge_call(
+                bridge::ADD_WIFI_STATE_CHANGED_LISTENER,
+                &data,
+                bridge::read_add_wifi_state_changed_listener_reply,
+            )
+        } else {
+            bridge::RemoveWifiStateChangedListener { listener }.write(&mut data);
+            self.bridge_call(
+                bridge::REMOVE_WIFI_STATE_CHANGED_LISTENER,
+                &data,
+                bridge::read_remove_wifi_state_changed_listener_reply,
+            )
+        }
+    }
+
+    /// WifiServiceImpl.getPasspointConfigurations: checkPackage, then
+    /// privilege filtering over the empty provider set (no access permission).
+    fn passpoint_configurations(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<Vec<u8>, Exception> {
+        let package = package.ok_or_else(|| {
+            Exception::security(format!("Checking UID {uid} but Package Name is Null"))
+        })?;
+        if !self.host.app_ops_owns_package(uid, package)? {
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
+        }
+        let _privileged =
+            self.held(NETWORK_SETTINGS, uid)? || self.held(NETWORK_SETUP_WIZARD, uid)?;
+        let mut data = Parcel::new();
+        bridge::GetPasspointConfigurations {}.write(&mut data);
+        self.bridge_call(
+            bridge::GET_PASSPOINT_CONFIGURATIONS,
+            &data,
+            bridge::read_get_passpoint_configurations_reply,
+        )?
+        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "null wifi Passpoint parcel (#2261)"))
     }
 
     /// `enforceMulticastChangePermission`.
@@ -361,7 +494,7 @@ impl WifiService {
         }
         Err(self
             .host
-            .unimplemented_named("wifi", "the Mac's Wi-Fi connection (#1686)"))
+            .unimplemented_named("wifi", "the Mac's Wi-Fi connection (#2261)"))
     }
 
     fn held(&self, permission: &str, uid: i32) -> Result<bool, Exception> {
@@ -469,7 +602,7 @@ impl WifiService {
         if self.wifi_state() == WIFI_STATE_ENABLED {
             return Err(self
                 .host
-                .unimplemented_named("wifi", "the Mac's scan results (#1686)"));
+                .unimplemented_named("wifi", "the Mac's scan results (#2261)"));
         }
         Ok(Some(Slice::new(
             self.host.process.clone(),
@@ -549,7 +682,7 @@ impl WifiService {
         }
         let unmodelled = |what: &str| {
             self.host
-                .unimplemented_named("wifi", &format!("{what} (#1686)"))
+                .unimplemented_named("wifi", &format!("{what} (#2261)"))
         };
         let (state, resolution) = self.host.packages()?;
         let query = Query {
@@ -626,7 +759,7 @@ impl WifiService {
         if package.is_some() && self.host.device_policies()?.owned() {
             return Err(self
                 .host
-                .unimplemented_named("wifi", "a device or profile owner (#1686)"));
+                .unimplemented_named("wifi", "a device or profile owner (#2261)"));
         }
         Ok(false)
     }
@@ -776,6 +909,22 @@ impl WifiService {
     }
 }
 
+fn bridge_error(status: i32) -> Exception {
+    Exception::new(
+        EX_ILLEGAL_STATE,
+        format!("wifi bridge: binder status {status} (#2261)"),
+    )
+}
+
+fn notify_state(owner: &Strong, state: i32) -> Result<(), Exception> {
+    let mut data = Parcel::new();
+    bridge::OnWifiStateChanged { state }.write(&mut data);
+    owner
+        .transact(bridge::ON_WIFI_STATE_CHANGED, &data, true)
+        .map(|_| ())
+        .map_err(bridge_error)
+}
+
 /// `WifiPermissionsUtil.isLocationModeEnabled`: the location service's
 /// answer for the current user, else its `LOCATION_MODE` setting.
 pub(super) fn location_mode_enabled(host: &AppHost) -> Result<bool, Exception> {
@@ -823,6 +972,27 @@ impl Service for WifiService {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result = match call.code {
+            wm::ADD_WIFI_STATE_CHANGED_LISTENER => {
+                let a =
+                    wm::AddWifiStateChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.state_listener(uid, a.listener, true)
+                    .map(|()| wm::write_add_wifi_state_changed_listener_reply(&mut p))
+            }
+            wm::REMOVE_WIFI_STATE_CHANGED_LISTENER => {
+                let a = wm::RemoveWifiStateChangedListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.state_listener(uid, a.listener, false)
+                    .map(|()| wm::write_remove_wifi_state_changed_listener_reply(&mut p))
+            }
+            wm::GET_PASSPOINT_CONFIGURATIONS => {
+                let a =
+                    wm::GetPasspointConfigurations::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.passpoint_configurations(uid, a.package_name.as_deref())
+                    .map(|bytes| {
+                        p.write_no_exception();
+                        p.write_raw(&bytes, &[]);
+                    })
+            }
             wm::ACQUIRE_MULTICAST_LOCK => {
                 let a = wm::AcquireMulticastLock::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.acquire_multicast_lock(uid, a.binder, a.lock_tag)
@@ -879,7 +1049,7 @@ impl Service for WifiService {
                     .map_or("an unknown call", |(_, n)| n);
                 Err(self
                     .host
-                    .unimplemented_named("wifi", &format!("{name} (#1686)")))
+                    .unimplemented_named("wifi", &format!("{name} (#2261)")))
             }
         };
         reply(result.map(|()| p))
@@ -943,3 +1113,7 @@ mod tests {
         assert!(store_bool(&root, "absent", true).unwrap());
     }
 }
+
+#[cfg(test)]
+#[path = "wifi_service_tests.rs"]
+mod owner_tests;

@@ -54,6 +54,20 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::ATTACH_WIFI_BRIDGE => {
+                let a = sp::AttachWifiBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host
+                        .wifi_service
+                        .get()
+                        .ok_or_else(|| {
+                            self.host
+                                .unimplemented_named("wifi", "not published (#2261)")
+                        })?
+                        .attach_bridge(a.bridge)
+                        .map(|()| sp::write_attach_wifi_bridge_reply(&mut p))
+                })
+            }
             sp::ATTACH_SYSTEM_PROCESS => {
                 let a = sp::AttachSystemProcess::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
