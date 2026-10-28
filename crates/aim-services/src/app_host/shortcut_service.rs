@@ -72,6 +72,35 @@ const DEFAULT_MAX_ICON_DIMENSION_LOWRAM_DP: i64 = 48;
 /// `ShortcutParser.METADATA_KEY`.
 const SHORTCUTS_METADATA: &str = "android.app.shortcuts";
 
+/// `ShortcutServiceInternal.hasShortcutHostPermission`: ACCESS_SHORTCUTS
+/// bypasses the unlocked-user check; otherwise only the HOME role holder.
+/// The app host has no registered nonpersistent shortcut host packages.
+pub(super) fn has_host_permission(
+    host: &AppHost,
+    uid: i32,
+    package: &str,
+    user: i32,
+) -> Result<bool, Exception> {
+    if host.check_permission(Some("android.permission.ACCESS_SHORTCUTS"), uid)? == 0 {
+        return Ok(true);
+    }
+    if !host.user_unlocking_or_unlocked(user)? {
+        return Err(Exception::new(
+            EX_ILLEGAL_STATE,
+            format!("User (with userId={user}) is locked or not running"),
+        ));
+    }
+    Ok(default_launcher(host)?.as_deref() == Some(package))
+}
+
+fn default_launcher(host: &AppHost) -> Result<Option<String>, Exception> {
+    host.role_service
+        .get()
+        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "shortcut: no role service"))?
+        .holders_of(ROLE_HOME)
+        .map(|holders| holders.into_iter().next())
+}
+
 fn not_modelled(what: &str) -> Exception {
     Exception::new(
         EX_UNSUPPORTED_OPERATION,
@@ -1388,12 +1417,7 @@ impl ShortcutManager {
         if user != 0 {
             return Err(not_modelled("a pin request of another user"));
         }
-        let roles = self
-            .host
-            .role_service
-            .get()
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "shortcut: no role service"))?;
-        let Some(launcher) = roles.holders_of(ROLE_HOME)?.into_iter().next() else {
+        let Some(launcher) = default_launcher(&self.host)? else {
             eprintln!("app host: shortcut: Default launcher not found. userId={user}");
             return Ok(None);
         };

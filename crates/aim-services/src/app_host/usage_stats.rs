@@ -312,6 +312,10 @@ impl AppHost {
 /// A parcel written ahead, written as is, with its binders and files.
 struct Written(Parcel);
 
+#[cfg(test)]
+#[path = "usage_stats_tests.rs"]
+mod tests;
+
 impl WriteParcelable for Written {
     fn write_to(&self, p: &mut Parcel) {
         p.write_raw_files(self.0.data(), self.0.objects(), self.0.files());
@@ -475,26 +479,27 @@ impl UsageStats {
 
     /// `UserUsageStatsService.queryEvents` with `queryEventsHelper`'s
     /// flags: shortcut invocations hidden from a caller without shortcut
-    /// host permission (not implemented, #1870), locus events from one
+    /// host permission, locus events from one
     /// without ACCESS_LOCUS_ID_USAGE_STATS, notification events' channels
     /// obfuscated for one without MANAGE_NOTIFICATIONS, instant apps for
     /// one that may not see them.
-    fn query_events(&self, uid: i32, begin: i64, end: i64) -> Result<Option<Written>, Exception> {
+    fn query_events(
+        &self,
+        uid: i32,
+        package: &str,
+        begin: i64,
+        end: i64,
+    ) -> Result<Option<Written>, Exception> {
         let Some(events) = self.events_in_range(begin, end, |_| true)? else {
             return Ok(None);
         };
         let permitted = |permission: &str| -> Result<bool, Exception> {
             Ok(uid == SYSTEM_UID || self.host.check_permission(Some(permission), uid)? == 0)
         };
-        if events
+        let hide_shortcuts = events
             .iter()
             .any(|e| e.event_type == usage_events::SHORTCUT_INVOCATION)
-        {
-            return Err(self.host.unimplemented_named(
-                "usagestats",
-                "shortcut invocation events for a caller (#1870)",
-            ));
-        }
+            && !super::shortcut_service::has_host_permission(&self.host, uid, package, 0)?;
         let hide_locus = events
             .iter()
             .any(|e| e.event_type == usage_events::LOCUS_ID_SET)
@@ -507,6 +512,7 @@ impl UsageStats {
             && !self.can_access_instant_apps(uid)?;
         let events: Vec<Event> = events
             .into_iter()
+            .filter(|e| !(hide_shortcuts && e.event_type == usage_events::SHORTCUT_INVOCATION))
             .filter(|e| !(hide_locus && e.event_type == usage_events::LOCUS_ID_SET))
             .map(|e| match obfuscate_notifications && e.is_notification() {
                 true => e.obfuscated_notification_event(),
@@ -766,7 +772,7 @@ impl Service for UsageStats {
                 let a = us::QueryEvents::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let package = a.calling_package.as_deref().unwrap_or_default();
                 let events = match self.has_query_permission(uid, package) {
-                    Ok(true) => self.query_events(uid, a.begin_time, a.end_time),
+                    Ok(true) => self.query_events(uid, package, a.begin_time, a.end_time),
                     Ok(false) => Ok(None),
                     Err(e) => Err(e),
                 };
@@ -784,7 +790,7 @@ impl Service for UsageStats {
                     Ok(true) => {
                         self.enforce_other_user(uid, a.user_id)
                             .and_then(|()| match a.user_id {
-                                0 => self.query_events(uid, a.begin_time, a.end_time),
+                                0 => self.query_events(uid, package, a.begin_time, a.end_time),
                                 _ => Ok(None),
                             })
                     }
