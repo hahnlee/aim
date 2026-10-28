@@ -219,16 +219,14 @@ it until the notification arrives, as for every other client of these
 listeners. Other users' lock state is asked each time; virtual devices
 are never locked (`TrustManagerService`).
 
-A clipboard write still asks `IUserManager.getProfileIds`, the one call
-on its common path (the restrictions are asked only for a user with
-profiles). Nothing that tells of a change in a user's profiles reaches
-the service host: `IUserManager`'s one listener reports restrictions,
-the user broadcasts need a receiver in a process ActivityManager knows
-(`registerReceiverWithFeature` returns null for any other caller), and
-`UserManager`'s own cache invalidation, which would be the signal, keeps
-its nonce in `ApplicationSharedMemory` in this image
-(`application_shared_memory_enabled`, `pic_uses_shared_memory`), not in
-a system property (#460, #430).
+A clipboard write keeps `IUserManager.getProfileIds(user, true)` by
+`UserManager.getEnabledProfileIds`'s `user_manager_users_enabled` nonce
+in the bridge's `ApplicationSharedMemory` (#432, #460). The original
+invalidates it for user-list and `FLAG_DISABLED` changes. Each user's
+answer is retained only for that nonce and mapped owner; absent or
+reserved nonces bypass the cache, errors are not cached, and an old
+owner's in-flight reply cannot fill a replacement owner's cache.
+Restrictions are still asked only for a user with profiles.
 
 The binder host's nodes accept file descriptors, as libbinder's do: the
 task stack listener's snapshots carry a buffer's. They are closed after
@@ -245,7 +243,7 @@ tag):
 | Input | The original's source | What it takes |
 | --- | --- | --- |
 | a setting without a generation, another provider's changes | `IContentService.registerContentObserver` | a known process: `checkContentProviderAccess` looks the caller's pid up in `mPidsSelfLocked` ("Failed to find PID") |
-| a user's profiles (#460) | user broadcasts (`registerReceiverWithFeature`), or `UserManager`'s cache nonce | a known process; the nonce is in `ApplicationSharedMemory` |
+| a user's profiles (#460) | `UserManager.getEnabledProfileIds`'s nonce | served through the bridge's `ApplicationSharedMemory` |
 | every change of a permission check's answer (#497) | the `package_info_cache` nonce | `ApplicationSharedMemory`, whose read-only fd only `IApplicationThread.bindApplication` hands out |
 | URI grants to a clip's readers (#429) | `UriGrantsManagerInternal.newUriPermissionOwner`, `revokeUriPermissionFromOwner` | code in system_server: no binder interface hands out an owner; `IActivityManager.grantUriPermission` grants as the caller's uid, and a grant by the system uid is refused (`checkGrantUriPermissionUnlocked`) |
 | focus (the notification shade, an overlay) | `WindowManagerInternal.isUidFocused`, `registerWindowFocusChangeListener` | code in system_server |
@@ -411,9 +409,9 @@ ActivityManager knows the service host without a bridge, and the shared
 memory is its own. With SystemServer gone, the bridge is gone.
 
 **Order.** Done: the build of the jar and the overlay, shared with #470
-(#520), and the permission nonce (#497). Next: the user nonce (#460);
-URI grants (#429); focus, content capture, autofill and virtual devices
-(#430).
+(#520), the permission nonce (#497), the enabled-profile nonce (#460)
+and clipboard URI grants (#429). Next: focus, content capture, autofill
+and virtual devices (#430).
 
 ## Inventory: what apps use
 
@@ -934,8 +932,10 @@ The mirror took the service host's calls into system_server over the
 run from 2,582 (1,106 app ops, 593 permissions, 369 trust, 285 input
 method, 146 focus) to 972 (273 app ops, nearly all background notes; 356
 input method and 213 permissions, from reads without focus; 43 focus);
-asking a target's modes brings the app ops back to 463 (196 checks). A write still asks `IUserManager` for the profiles
-(#460).
+asking a target's modes brings the app ops back to 463 (196 checks).
+Since 2026-10-28 writes cache enabled profile ids by the original's nonce
+(#432, #460); the measurements above predate that change. Host cache
+regressions pass; guest CTS and latency were not rerun.
 
 ## The vibrator
 

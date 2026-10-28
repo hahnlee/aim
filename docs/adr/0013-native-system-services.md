@@ -209,9 +209,9 @@ The migration's state and conformance results are in
 - `vibrator_manager` and `external_vibrator_service` are native: the
   original without a vibrator, which the Mac and the derived image do
   not have. CtsVibratorTestCases ends each test as the original does;
-  what is not served yet is #479 and #480. Clipboard writes still ask
-  for the user's profiles: no change notification reaches the service
-  host (#460, #430).
+  what is not served yet is #479 and #480. Clipboard writes cache the
+  user's enabled profiles by the original UserManager nonce through the
+  shared-memory bridge (#460, #432).
 
 ### M2: location (2026-09-30)
 

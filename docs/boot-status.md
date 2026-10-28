@@ -171,6 +171,7 @@ runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).
 The app host's system process starts the original DeviceLock APEX service when `android.software.device_lock` is declared, as in the pinned image; linkage is checked, with no guest boot run (#2234).
+The app host's Wi-Fi owner serves state listener registration/removal through the original Java callback registry in `aim-system`, follows the Mac's radio state, and returns permission-checked empty Passpoint configurations; host tests and pinned-image linkage are checked without a guest boot, and other missing Wi-Fi calls name #2261.
 Manifest receivers of process `system` and uid 1000, including framework-res's BootReceiver and CertPinInstallReceiver, now route to `aim-system`'s original ActivityThread with the system-server class loader; host delivery/finish tests and linkage are checked without a guest boot, while unserved framework services and providers remain explicit UnsupportedOperation (#1518).
 The verification agent's domain verification calls run through the original DomainVerificationService front end in the system process and persist in the native owner. Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun).
 Telecom is loaded in the system process: TelecomLoaderService's part
@@ -203,6 +204,11 @@ Boots with it reach `sys.boot_completed` as before (four boots of a
 reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
+
+Clipboard writes cache enabled profile ids using the original UserManager
+nonce supplied by the shared-memory bridge (#432, #460). Host regressions
+cover invalidation, reserved nonces, query failure and owner replacement;
+guest CTS and latency were not rerun (2026-10-28).
 
 Native Binder reference and reply cleanup survives host-thread TLS teardown
 (2026-10-28, #2189). If `Strong` or `Received` drops after the thread's Binder
