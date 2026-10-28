@@ -18,9 +18,9 @@
 //! preparation and the native services' PackageList observer registry.
 //! Existing-install completion restores delayed permissions through the
 //! permission owner and delivers its status; backup restore has no owner
-//! (#1925). The install-existing app-data leaf remains unsupported (#2022).
+//! (#1925). The install-existing app-data leaf remains unsupported (#2330).
 //! The bridge's other owners, its other sub-bridges
-//! among them, are not implemented (#2022).
+//! among them, are not implemented (#2330).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1367,7 +1367,7 @@ impl Service for PackageBootstrap {
                     .iter()
                     .find(|(c, _)| *c == code)
                     .map_or("an unknown call", |(_, n)| n);
-                Err(host.unimplemented_named("package bootstrap", &format!("{name} (#2022)")))
+                Err(host.unimplemented_named("package bootstrap", &format!("{name} (#2330)")))
             }
         };
         reply(result.map(|()| p))
@@ -1707,7 +1707,7 @@ mod tests {
         );
         let reply = call(bridge::GET_PACKAGE_SHUTDOWN_BRIDGE);
         let e = reply.reader().read_exception().unwrap().unwrap_err();
-        assert!(e.message.contains("#2022"), "{}", e.message);
+        assert!(e.message.contains("#2330"), "{}", e.message);
         std::fs::remove_dir_all(&data).unwrap();
     }
 
