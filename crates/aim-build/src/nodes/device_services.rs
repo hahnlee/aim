@@ -151,7 +151,9 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         "systemserverclasspath.pb",
         SYSTEMSERVERCLASSPATH,
     )?);
-    java::check_linkage(&image, &jars, Some(&stubs_dex), &dex)?;
+    let mut policy_jars = jars.clone();
+    policy_jars.push("/apex/com.android.permission/javalib/service-permission.jar".into());
+    java::check_linkage(&image, &policy_jars, Some(&stubs_dex), &dex)?;
     service_aidl::check_own_stubs(&dex)?;
     tools.jar(log, &dex, &staged.join("aim-services.jar"))?;
 

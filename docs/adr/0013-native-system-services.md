@@ -543,7 +543,8 @@ this adds vendor bridge classes only, with no replacement of original classes.
   (`handleSystemServerProcess`): the umask, the class loader of
   `SYSTEMSERVERCLASSPATH` with its linker namespace (`ClassLoaderFactory`,
   as `createPathClassLoader` makes it; AppSearch's JNI library loads
-  through it) and the start of its `Server` in that loader by
+  through it), plus the original Permission service jar for cold role-definition
+  queries (#1657; no role controller started), and the start of its `Server` in that loader by
   `RuntimeInit.applicationInit`, as `zygoteInit` does after `commonInit`,
   which `app_process` has run. `Server` plays SystemServer's part: the
   system context (`ActivityThread.systemMain`), `initializeMainlineModules`,

@@ -13,4 +13,9 @@ final class DevicePolicyDefaults extends IDevicePolicyDefaults.Stub {
         Bridge.enforceSystemUid();
         return defaults.getContentProtectionPolicy(userId);
     }
+
+    @Override public boolean isUsbDataSignalingEnabled(byte[] policies) {
+        Bridge.enforceSystemUid();
+        return com.android.server.devicepolicy.UsbDataSignalingPolicy.isEnabled(policies);
+    }
 }

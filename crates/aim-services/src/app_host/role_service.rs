@@ -15,6 +15,7 @@ use aim_android_xml::Element;
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::android_app_role_irolemanager as rm;
+use aim_service_aidl::dev_aim_server_irolequeries as queries;
 
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::info::array_order;
@@ -47,11 +48,12 @@ const DEFAULT_APPLICATION_ROLES: [&str; 5] = [
 struct Roles {
     roles: Vec<(String, Vec<String>)>,
     fallback_enabled: Vec<String>,
+    active_users: HashMap<String, i32>,
 }
 
 impl Roles {
     /// `RolesPersistenceImpl.parseXml` of a document: its `<roles>`.
-    fn parse(root: &Element) -> Result<Roles, String> {
+    fn parse(root: &Element, cross_user: bool) -> Result<Roles, String> {
         let roles = if root.name == "roles" {
             root
         } else {
@@ -69,6 +71,13 @@ impl Roles {
                 .string("name")
                 .map(|s| s.into_owned())
                 .unwrap_or_default();
+            if cross_user && let Some(user) = role.string("activeUserId") {
+                state.active_users.insert(
+                    name.clone(),
+                    user.parse()
+                        .map_err(|_| "Invalid activeUserId in roles.xml")?,
+                );
+            }
             if role
                 .string("fallbackEnabled")
                 .is_some_and(|f| f.eq_ignore_ascii_case("true"))
@@ -143,10 +152,16 @@ impl RoleManager {
             .data()?
             .join("misc_de/0/apexdata/com.android.permission");
         let file = dir.join("roles.xml");
+        let (state, _) = self.host.packages()?;
+        let cross_user = state
+            .system
+            .flags
+            .iter()
+            .any(|(n, on)| n == CROSS_USER_ROLE_ENABLED && *on);
         let read = |path: &std::path::Path| -> Result<Option<Roles>, String> {
             match super::device_policy::read_atomic_bytes(path)? {
                 Some(bytes) => aim_android_xml::read(&bytes)
-                    .and_then(|r| Roles::parse(&r))
+                    .and_then(|r| Roles::parse(&r, cross_user))
                     .map(Some),
                 None => Ok(None),
             }
@@ -321,6 +336,56 @@ impl RoleManager {
             self.host.process.clear_death(&strong, cookie);
         }
     }
+
+    fn active_user(&self, uid: i32, role: Option<String>, user: i32) -> Result<i32, Exception> {
+        // RoleService's original flag and role definitions precede caller checks.
+        let owner = super::display::check_service(&self.host.process, "aim.role_queries")
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let mut data = Parcel::new();
+        queries::EnforceProfileGroupExclusiveRole {
+            role_name: role.clone(),
+        }
+        .write(&mut data);
+        let result = owner
+            .transact(queries::ENFORCE_PROFILE_GROUP_EXCLUSIVE_ROLE, &data, false)
+            .map_err(|e| {
+                Exception::new(EX_ILLEGAL_STATE, format!("role queries: binder status {e}"))
+            })?;
+        queries::read_enforce_profile_group_exclusive_role_reply(&mut result.reader())
+            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "invalid role queries reply"))??;
+        let role = Self::not_empty(role, "roleName cannot be null or empty")?;
+        self.active_user_for_valid_role(uid, &role, user)
+    }
+
+    fn active_user_for_valid_role(
+        &self,
+        uid: i32,
+        role: &str,
+        user: i32,
+    ) -> Result<i32, Exception> {
+        self.cross_user(uid, user, false, "getActiveUserForRole")?;
+        if !Self::exists(user) {
+            return Ok(-10000); // UserHandle.USER_NULL
+        }
+        let permissions = [
+            "android.permission.MANAGE_DEFAULT_APPLICATIONS",
+            "android.permission.MANAGE_ROLE_HOLDERS",
+        ];
+        if self.host.check_permission(Some(permissions[0]), uid)? != 0
+            && self.host.check_permission(Some(permissions[1]), uid)? != 0
+        {
+            return Err(Exception::security(format!(
+                "getActiveUserForRole: Neither user {uid} nor current process has at least one of[{}].",
+                permissions.join(", ")
+            )));
+        }
+        Ok(self
+            .roles()?
+            .active_users
+            .get(role)
+            .copied()
+            .unwrap_or(-10000))
+    }
 }
 
 impl Service for RoleManager {
@@ -332,6 +397,12 @@ impl Service for RoleManager {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result: Result<(), Exception> = match call.code {
+            rm::GET_ACTIVE_USER_FOR_ROLE_AS_USER => {
+                let a =
+                    rm::GetActiveUserForRoleAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.active_user(uid, a.role_name, a.user_id)
+                    .map(|user| rm::write_get_active_user_for_role_as_user_reply(&mut p, user))
+            }
             rm::IS_ROLE_AVAILABLE_AS_USER => {
                 let a = rm::IsRoleAvailableAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
@@ -611,6 +682,87 @@ impl Service for RoleManager {
 mod tests {
     use super::*;
 
+    #[test]
+    fn active_role_user_reads_persisted_state_after_caller_permissions() {
+        use crate::package::permissions::{AccessSystem, Permission};
+        const MANAGE: &str = "android.permission.MANAGE_ROLE_HOLDERS";
+        const DEFAULTS: &str = "android.permission.MANAGE_DEFAULT_APPLICATIONS";
+        const ACROSS: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
+        for granted in [None, Some(MANAGE), Some(DEFAULTS), Some(ACROSS)] {
+            crate::system::with_discovery_session_flags(
+                &[(CROSS_USER_ROLE_ENABLED, true)],
+                |host| {
+                    let dir = host
+                        .data()
+                        .unwrap()
+                        .join("misc_de/0/apexdata/com.android.permission");
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::write(dir.join("roles.xml"), format!(
+                    "<roles version='1'><role name='{ROLE_BROWSER}' activeUserId='0'/></roles>"
+                )).unwrap();
+                    std::fs::write(dir.join("access.abx"), format!(
+                    "<access><app-id-permissions><app-id id='10100'>{}</app-id></app-id-permissions></access>",
+                    granted.map(|p| format!("<permission name='{p}' flags='4'/>")).unwrap_or_default()
+                )).unwrap();
+                    let manager = super::super::permission_manager::PermissionManager::with_system(
+                        host.clone(),
+                        AccessSystem {
+                            permissions: [MANAGE, DEFAULTS, ACROSS]
+                                .into_iter()
+                                .map(|p| Permission {
+                                    name: p.into(),
+                                    package: "android".into(),
+                                    protection_level: 2,
+                                    dynamic: None,
+                                })
+                                .collect(),
+                            ..Default::default()
+                        },
+                    );
+                    assert!(host.permission_manager.set(Arc::new(manager)).is_ok());
+                    let service = RoleManager::new(host.clone());
+                    let result = service.active_user_for_valid_role(10100, ROLE_BROWSER, 0);
+                    if matches!(granted, Some(MANAGE | DEFAULTS)) {
+                        assert_eq!(result.unwrap(), 0);
+                        assert_eq!(
+                            service
+                                .active_user_for_valid_role(10100, ROLE_SMS, 0)
+                                .unwrap(),
+                            -10000
+                        );
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().message,
+                            "getActiveUserForRole: Neither user 10100 nor current process has at least one of[android.permission.MANAGE_DEFAULT_APPLICATIONS, android.permission.MANAGE_ROLE_HOLDERS]."
+                        );
+                    }
+                    let other = service.active_user_for_valid_role(10100, ROLE_BROWSER, 10);
+                    if granted == Some(ACROSS) {
+                        assert_eq!(other.unwrap(), -10000);
+                    } else {
+                        assert_eq!(
+                            other.unwrap_err().code,
+                            aim_binder_host::parcel::EX_SECURITY
+                        );
+                    }
+                    assert_eq!(
+                        service
+                            .active_user_for_valid_role(10100, ROLE_BROWSER, -1)
+                            .unwrap_err()
+                            .code,
+                        aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+                    );
+                },
+            );
+        }
+        let root = aim_android_xml::read(
+            b"<roles version='1'><role name='r' activeUserId='bad'/></roles>",
+        )
+        .unwrap();
+        assert!(Roles::parse(&root, false).unwrap().active_users.is_empty());
+        assert!(Roles::parse(&root, true).is_err());
+    }
+
     /// Roles, holders and fallback read as `RolesPersistenceImpl` reads
     /// them.
     #[test]
@@ -621,7 +773,7 @@ mod tests {
   <role name="android.app.role.RETAIL_DEMO" fallbackEnabled="false" />
   <role name="android.app.role.BROWSER"><holder name="b" /><holder name="a" /><holder name="b" /></role>
 </roles>"#;
-        let roles = Roles::parse(&aim_android_xml::read(xml).unwrap()).unwrap();
+        let roles = Roles::parse(&aim_android_xml::read(xml).unwrap(), true).unwrap();
         assert_eq!(
             roles.holders("android.app.role.SYSTEM_GALLERY"),
             Some(&["com.google.android.apps.photos".to_string()][..])
@@ -634,6 +786,6 @@ mod tests {
             Some(&["a".to_string(), "b".to_string()][..])
         );
         assert_eq!(roles.fallback_enabled, ["android.app.role.SYSTEM_GALLERY"]);
-        assert!(Roles::parse(&aim_android_xml::read(b"<other />").unwrap()).is_err());
+        assert!(Roles::parse(&aim_android_xml::read(b"<other />").unwrap(), true).is_err());
     }
 }

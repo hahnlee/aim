@@ -62,6 +62,13 @@ fn defaults_use_original_helpers_only_after_the_system_uid_check() {
             .arg(format!("-o{}", aidl.display()))
             .arg(production.join("aidl/dev/aim/server/IDevicePolicyDefaults.aidl")),
     );
+    run(
+        Command::new(aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"))
+            .args(["--lang=java", "--min_sdk_version", "36"])
+            .arg(format!("-I{}", production.join("aidl").display()))
+            .arg(format!("-o{}", aidl.display()))
+            .arg(production.join("aidl/dev/aim/server/IRoleQueries.aidl")),
+    );
     let api = aidl.join("dev/aim/server/IDevicePolicyDefaults.java");
     let fixtures = aim_paths::root().join("crates/aim-services/tests/fixtures");
     run(Command::new(jdk.join("bin/javac"))
@@ -71,6 +78,9 @@ fn defaults_use_original_helpers_only_after_the_system_uid_check() {
         .arg(&stubs)
         .arg(api)
         .arg(production.join("src/dev/aim/server/DevicePolicyDefaults.java"))
+        .arg(production.join("src/dev/aim/server/RoleQueries.java"))
+        .arg(production.join("src/com/android/server/devicepolicy/UsbDataSignalingPolicy.java"))
+        .arg(aidl.join("dev/aim/server/IRoleQueries.java"))
         .arg(production.join("src/dev/aim/server/Bridge.java")));
     // Compile the production Binder subclass against the complete API first;
     // the runtime doubles observe only helper calls and caller identity.
@@ -80,9 +90,14 @@ fn defaults_use_original_helpers_only_after_the_system_uid_check() {
         .arg("-cp")
         .arg(format!("{}:{}", classes.display(), stubs.display()))
         .arg(fixtures.join("safe_labels/Binder.java"))
-        .args(sources(&fixtures.join("device_policy_defaults"))));
+        .args(sources(&fixtures.join("device_policy_defaults")))
+        .args(sources(&fixtures.join("start_time_reads"))));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
         .arg(format!("{}:{}", classes.display(), stubs.display()))
         .arg("dev.aim.server.DevicePolicyDefaultsTest"));
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(format!("{}:{}", classes.display(), stubs.display()))
+        .arg("dev.aim.server.StartTimeReadsTest"));
 }
