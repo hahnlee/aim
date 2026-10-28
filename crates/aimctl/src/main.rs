@@ -11,6 +11,7 @@ mod guest;
 mod inputs;
 mod output;
 mod resident;
+mod shell_child;
 mod state;
 
 use std::fs;
@@ -176,7 +177,7 @@ fn shell(files: &Files, command: &[String]) -> Result<ExitCode, String> {
     if let (true, Some(term)) = (argv.len() == 1, std::env::var_os("TERM")) {
         command.env("TERM", term);
     }
-    let status = command.status().map_err(|e| format!("linux-run: {e}"))?;
+    let status = shell_child::run(&mut command, &mut std::io::stderr())?;
     Ok(exit_code(status))
 }
 
