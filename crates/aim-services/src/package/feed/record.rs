@@ -51,7 +51,7 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
     // isPageSizeAppCompatEnabled, isPendingRestore, isPersistent,
     // isPrivileged, isProduct, isRequiredForSystemUser,
     // isScannedAsStoppedSystemApp, isSystem, isSystemExt,
-    // isUpdateAvailable, isUpdatedSystemApp, isVendor.
+    // isUpdateAvailable, isUpdatedSystemApp, isVendor, isLoading.
     s.is = StateFlags {
         apex: bit(1),
         apk_in_updated_apex: bit(2),
@@ -71,8 +71,7 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
         update_available: bit(21),
         updated_system_app: bit(22),
         vendor: bit(23),
-        // Only PackageStateInternal has isLoading (#716).
-        loading: false,
+        loading: bit(24),
     };
     s.mime_groups = mime_groups(r)?;
     for _ in 0..count(r)? {
@@ -203,6 +202,25 @@ fn user_state(r: &mut Reader<'_>) -> Result<PackageUserState> {
     if r.read_bool()? {
         let allowed = r.read_bool()?;
         u.domain_selection = Some((allowed, host_states(r)?));
+    }
+    let overrides = r.read_i32()?;
+    if overrides < 0 {
+        return Err(aim_binder_host::parcel::BAD_VALUE);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for _ in 0..overrides {
+        let component = string(r)?.ok_or(aim_binder_host::parcel::BAD_VALUE)?;
+        if component.is_empty() || !names.insert(component.clone()) {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let label = string(r)?;
+        let icon = if r.read_bool()? {
+            Some(r.read_i32()?)
+        } else {
+            None
+        };
+        u.component_label_icon_overrides
+            .push((component, label, icon));
     }
     Ok(u)
 }

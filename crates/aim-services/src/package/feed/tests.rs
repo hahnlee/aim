@@ -97,6 +97,26 @@ fn package_record_with_files(
     category: i32,
     files: &[Option<&str>],
 ) -> Vec<u8> {
+    package_record_with_presentation(
+        name,
+        shared_user_app_id,
+        groups,
+        version,
+        category,
+        files,
+        (false, &[]),
+    )
+}
+
+fn package_record_with_presentation(
+    name: &str,
+    shared_user_app_id: Option<i32>,
+    groups: &[(Option<String>, Vec<Option<String>>)],
+    version: i64,
+    category: i32,
+    files: &[Option<&str>],
+    (loading, overrides): (bool, &[(Option<&str>, Option<&str>, Option<i32>)]),
+) -> Vec<u8> {
     let mut p = Parcel::new();
     p.write_string16(Some(name));
     p.write_i32(10_100);
@@ -117,7 +137,7 @@ fn package_record_with_files(
     write_byte_array(&mut p, None);
     // hasSharedUser, isDebuggable, isPrivileged, isSystem.
     let shared = u32::from(shared_user_app_id.is_some());
-    p.write_i32((shared | 1 << 3 | 1 << 15 | 1 << 19) as i32);
+    p.write_i32((shared | 1 << 3 | 1 << 15 | 1 << 19 | u32::from(loading) << 24) as i32);
     p.write_i32(groups.len() as i32);
     for (name, types) in groups {
         p.write_string16(name.as_deref());
@@ -178,6 +198,16 @@ fn package_record_with_files(
     p.write_bool(true);
     p.write_bool(false);
     p.write_i32(0);
+    // Component label/icon overrides.
+    p.write_i32(overrides.len() as i32);
+    for (component, label, icon) in overrides {
+        p.write_string16(*component);
+        p.write_string16(*label);
+        p.write_bool(icon.is_some());
+        if let Some(icon) = icon {
+            p.write_i32(*icon);
+        }
+    }
     // URI relative filter groups: example.com, one blocking group.
     p.write_i32(1);
     p.write_string16(Some("example.com"));
@@ -193,6 +223,83 @@ fn package_record_with_files(
     p.write_string16(Some("com.example.app.Sync"));
     p.write_string16(Some("a;b"));
     p.data().to_vec()
+}
+
+#[test]
+fn presentation_records_publish_changes_and_reject_malformed_overrides() {
+    let overrides = [
+        (Some("p.Main"), Some(""), None),
+        (Some("p.Service"), None, Some(0)),
+        (Some("p.Provider"), Some("Provider"), Some(123)),
+    ];
+    let make = |loading, overrides: &[_]| {
+        package_record_with_presentation("p", None, &[], 42, -1, &[], (loading, overrides))
+    };
+    let mut inner = Inner::default();
+    let mut publish = |bytes: &[u8]| {
+        put(&mut inner, PACKAGE, "p", bytes);
+        put(&mut inner, DISABLED_SYSTEM_PACKAGE, "p", bytes);
+        inner.end(&records_digest(&inner.records), 0)
+    };
+    let original = publish(&make(false, &[])).unwrap();
+    let changed = publish(&make(true, &overrides)).unwrap();
+    for package in [
+        &changed.packages["p"],
+        &changed.disabled_system_packages["p"],
+    ] {
+        assert!(package.is.loading);
+        assert_eq!(
+            package.users[&0].component_label_icon_overrides,
+            [
+                ("p.Main".into(), Some("".into()), None),
+                ("p.Service".into(), None, Some(0)),
+                ("p.Provider".into(), Some("Provider".into()), Some(123)),
+            ]
+        );
+        let system = crate::package::model::System::default();
+        let parsed = crate::package::pkg::AndroidPackage::default();
+        let target = crate::package::info::Target {
+            sys: &system,
+            pkg: &parsed,
+            ps: package,
+            state: &package.users[&0],
+            user: 0,
+        };
+        for (name, label, icon) in [("p.Main", "", 9), ("p.Service", "Manifest", 0)] {
+            let mut service = crate::package::pkg::Service::default();
+            service.main.component.name = name.into();
+            service.main.component.non_localized_label = Some("Manifest".into());
+            service.main.component.icon = 9;
+            let info =
+                crate::package::info::generate_service_info(&target, &service, 0, None).unwrap();
+            assert_eq!(info.info.item.non_localized_label.as_deref(), Some(label));
+            assert_eq!(info.info.item.icon, icon);
+        }
+    }
+    assert!(!original.packages["p"].is.loading);
+    assert!(
+        original.packages["p"].users[&0]
+            .component_label_icon_overrides
+            .is_empty()
+    );
+    for invalid in [
+        vec![(None, None, None)],
+        vec![(Some(""), None, None)],
+        vec![overrides[0], overrides[0]],
+    ] {
+        assert!(matches!(
+            publish(&make(true, &invalid)),
+            Err(Failed::Unreadable(_))
+        ));
+    }
+    let cleared = publish(&make(false, &[])).unwrap();
+    assert!(!cleared.packages["p"].is.loading);
+    assert!(
+        cleared.packages["p"].users[&0]
+            .component_label_icon_overrides
+            .is_empty()
+    );
+    assert!(changed.packages["p"].is.loading);
 }
 
 fn shared_user_record(name: &str, app_id: i32, packages: &[&str]) -> Vec<u8> {

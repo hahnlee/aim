@@ -1672,7 +1672,11 @@ First-boot Settings/restriction publication precedes protected preferred/browser
 reads. These controlled C startup fixes are not yet CTS/app acceptance. Adding an adb bootconfig
 key now preserves the default `hardware=aim`; without it the wrong init/fstab
 prevented zygote startup. These fixes are under controlled boot verification;
-C now parses original system APKs with actual display density. The current
+C now parses original system APKs with actual display density and the captured
+resource locale in both initial-scan and runtime APK owners (#721), alongside
+the native SystemConfig features. The host-only pinned framework APK regression
+passes Korean/English resource selection, changed density and rejection of
+missing locale/density; no guest boot was rerun (2026-10-28). The current
 C44 passes RoleController/window startup, but GMS provider startup still hits
 another prepared-mutation race. All common prepare callers now serialize native
 capture/prepare under the same gate where owner side effects permit it; installation
@@ -5940,8 +5944,13 @@ linkage passes (4.19s, including the shared-process producer dependency fix
 window boot reaches sys.boot_completed at 6.729s and generation 74 contains
 290 user scopes, zero factory aliases, 16 shared-process aggregates and 290
 runtime owners, with no feed errors or remaining owned processes/probe mounts.
-This source feed does not export full raw user values or component label maps
-(#862), and native daemon bootstrap remains unwired. Legacy domain migration
+The query feed captures the original Java loading getter and declared
+components' per-user label/icon overrides (#716). Sixteen focused feed tests
+cover publication, clearing, null/zero values and malformed override rejection;
+device-services builds with original-image API linkage (2026-10-28). No guest
+boot or CTS was run for this change. Full raw user values and component-map
+allocation remain outside this query feed (#862), and native daemon bootstrap
+remains unwired. Legacy domain migration
 inputs now stay in the restrictions reader separately from PackageUserState
 values (#876); the resolver reads that separate inventory. They no longer
 participate in user alias equality/copying or user-state snapshot transport.
