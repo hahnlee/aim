@@ -6210,7 +6210,10 @@ framework booleans resolve through the image's static overlays and reject missin
 or non-boolean resources. SystemConfig now reads initial-package-state exemptions
 with the original partition-independent and Boolean.parseBoolean semantics;
 initial stopped state requires an enabled/exported launcher-category activity
-and excludes the platform and static overlays (#813). User/clock/domain inputs
+and excludes the platform, APEX containers and static overlays (#813). The APEX
+exclusion now applies even when a container declares a launcher activity;
+the focused host predicate test passes (2026-10-28; no guest boot rerun).
+APKs within APEXes retain ordinary APK stopped-state policy. User/clock/domain inputs
 remain supplied by their owners, not guessed from a package feed.
 A disposable original-PMS comparison (2026-10-03) matches the boot-classpath
 policy, image stopped-state boolean and complete initial exception set. With no
