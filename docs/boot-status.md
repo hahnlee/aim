@@ -362,7 +362,7 @@ STATE_ON (media sessions serve its AVRCP target and media browser).
 The app host's system process starts the original DeviceLock APEX service when `android.software.device_lock` is declared, as in the pinned image; linkage is checked, with no guest boot run (#2234).
 The app host's Wi-Fi owner serves state listener registration/removal through the original Java callback registry in `aim-system`, follows the Mac's radio state, and returns permission-checked empty Passpoint configurations; host tests and pinned-image linkage are checked without a guest boot, and other missing Wi-Fi calls name #2261.
 Manifest receivers of process `system` and uid 1000, including framework-res's BootReceiver and CertPinInstallReceiver, now route to `aim-system`'s original ActivityThread with the system-server class loader; host delivery/finish tests and linkage are checked without a guest boot, while unserved framework services and providers remain explicit UnsupportedOperation (#1518).
-The app host's domain-verification front end keeps verifier-status persistence native and handles URI group set/get with original Java permission, Bundle, validation and conversion helpers over runtime-only native state; paired host tests, pinned-image linkage and a fresh-data app-host boot pass (#1763). Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun). Its `pm` and `cmd domain_verification` shell routes now also serve `set-app-links` and `reset-app-links`, retaining the original internal permission checks and parsing over the durable native writer. Host tests cover filtering, selection revocation, immutable-policy reset, user scope, stale-capture retry and failure propagation; pinned Java mutation methods and exact shell output are checked without a guest boot. `verify-app-links` remains #2187.
+The app host's domain-verification front end keeps verifier-status persistence native and handles URI group set/get with original Java permission, Bundle, validation and conversion helpers over runtime-only native state; paired host tests, pinned-image linkage and a fresh-data app-host boot pass (#1763). Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun). Its `pm` and `cmd domain_verification` shell routes now serve all DomainVerificationShell verbs (#2187), retaining the original internal permission checks and parser. `set-app-links` and `reset-app-links` use the durable native writer; `verify-app-links` selects default/re-verify eligibility from native attached state and sends through the existing domain owner's selected original verifier proxy. The original modern proxy builds the domain-verification request broadcast; the original unavailable proxy handles an absent verifier. Host tests cover eligibility, filtering, state writes and delivery errors; pinned Java methods, exact shell output and the original modern proxy/request path over recorded JVM boundaries pass without a guest boot. Android 16's verification package argument is positional; `--package` retains the original unknown-option error.
 Telecom is loaded in the system process: TelecomLoaderService's part
 there binds its TelecomService and creates and publishes `telecom` on that
 process's main thread, also with Bluetooth on and after the process is
@@ -2456,8 +2456,16 @@ cover FD, caller, error and result transport. `set-app-links-user-selection`
 and `set-app-links-allowed` retain original internal authorization and persist
 through the native domain write owner; host checks cover filtering, all-user/
 all-package handling, retained captures, disk reopen and failure replies.
-`set-app-links`, `reset-app-links` and `verify-app-links` remain unserved (#2187).
-No guest execution or CTS rerun was performed for this shell change.
+`set-app-links` and `reset-app-links` also persist through that writer, with
+internal state overrides, original selection revocation and verifier/user reset
+rules. `verify-app-links` uses native attached-state eligibility and the existing
+domain owner's selected original proxy, including its unavailable-agent behavior.
+The pinned JVM oracle executes the original modern proxy and request class with
+the production delivery bridge, selector and connection; it records the explicit
+component, request extras, foreground flag, user and temporary allowlist, and
+checks permission filtering, bridge authorization and delivery failures. These
+are host/JVM checks; no live native-to-ART delivery, guest execution or CTS rerun
+was performed for this shell change.
 The same frozen PMHost cohort exposes activity filter priority and public
 restrict-update error mismatches (#1169/#1170). Native activity registration now
 applies the pinned privilege/protected-action/setup-wizard and factory-filter

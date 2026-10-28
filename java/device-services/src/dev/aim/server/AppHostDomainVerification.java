@@ -135,6 +135,7 @@ final class AppHostDomainVerification extends IAppHostDomainVerification.Stub {
     @Override public void setShellLinkHandling(String name, int user, boolean allowed) { throw unsupported(); }
     @Override public void setShellStatus(String name, int state, List<String> domains) { throw unsupported(); }
     @Override public void resetShellState(List<String> names, int user, boolean userOnly) { throw unsupported(); }
+    @Override public void verifyShellPackages(List<String> names, boolean reVerify) { throw unsupported(); }
     @Override public byte[] readShellState(int kind, String name, List<String> domains,
             int user, boolean hasUser) { throw unsupported(); }
     @Override public String getDomainVerificationPackageId(String name) { throw unsupported(); }

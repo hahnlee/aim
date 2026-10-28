@@ -782,6 +782,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public void sendDomainVerificationRequest(java.util.List<String> packageNames) {
+        enforceSystemUid();
+        com.android.server.pm.NativeDomainVerificationConnection.sendBroadcastForPackages(domains, packageNames);
+    }
+
+    @Override
     public void invalidatePackageInfoCache() {
         enforceSystemUid();
         android.content.pm.PackageManager.invalidatePackageInfoCache();

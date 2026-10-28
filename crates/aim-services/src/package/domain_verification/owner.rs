@@ -222,6 +222,33 @@ impl Owner {
     pub fn attached_names(&self) -> impl Iterator<Item = &str> {
         self.attached.iter().map(|package| package.name.as_str())
     }
+    /// DVS.verifyPackages / shouldReBroadcastPackage, android-16.0.0_r1.
+    pub fn verification_packages(
+        &self,
+        names: Option<&[Option<String>]>,
+        re_verify: bool,
+    ) -> Vec<String> {
+        let eligible = |p: &Package| {
+            p.has_auto_verify_domains
+                && (re_verify || p.domains.iter().all(|(_, s)| matches!(s, 0 | 4 | 5)))
+        };
+        let mut result = Vec::new();
+        if let Some(names) = names {
+            for name in names.iter().flatten() {
+                if self.package(name).is_some_and(eligible) && !result.contains(name) {
+                    result.push(name.clone());
+                }
+            }
+        } else {
+            result.extend(
+                self.attached
+                    .iter()
+                    .filter(|p| eligible(p))
+                    .map(|p| p.name.clone()),
+            );
+        }
+        result
+    }
     pub fn owners<'a>(
         &self,
         host: &str,
@@ -1629,6 +1656,63 @@ mod tests {
         assert!(p.domains.is_empty());
         assert!(p.users.is_empty());
     }
+    #[test]
+    fn shell_verification_eligibility_matches_android16() {
+        let mut owner = Owner::new(State::default(), BTreeMap::new());
+        owner
+            .add(input(&code(&["a.test"])), &SystemConfig::default())
+            .unwrap();
+        for auto in [false, true] {
+            for state in [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 1023, 1024, 2048] {
+                for re_verify in [false, true] {
+                    let mut p = owner.remove("fixture").unwrap();
+                    p.has_auto_verify_domains = auto;
+                    p.domains = vec![(Some("undeclared.test".into()), state)];
+                    owner.put(p);
+                    let before = owner.persisted();
+                    let names = vec![
+                        Some("missing".into()),
+                        Some("fixture".into()),
+                        Some("fixture".into()),
+                        None,
+                    ];
+                    let expected = if auto && (re_verify || matches!(state, 0 | 4 | 5)) {
+                        vec!["fixture"]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(
+                        owner.verification_packages(Some(&names), re_verify),
+                        expected
+                    );
+                    assert_eq!(owner.verification_packages(None, re_verify), expected);
+                    assert_eq!(owner.persisted(), before);
+                }
+            }
+        }
+        let mut p = owner.remove("fixture").unwrap();
+        p.domains.clear();
+        owner.put(p);
+        assert_eq!(owner.verification_packages(None, false), ["fixture"]);
+        let mut p = owner.remove("fixture").unwrap();
+        p.domains = vec![(Some("a.test".into()), 4), (Some("b.test".into()), 1)];
+        owner.put(p);
+        assert!(owner.verification_packages(None, false).is_empty());
+        assert!(owner.verification_packages(Some(&[]), true).is_empty());
+        let mut other_code = code(&["other.test"]);
+        other_code.package_name = "other".into();
+        let mut args = input(&other_code);
+        args.name = "other";
+        args.id = OLD;
+        owner.add(args, &SystemConfig::default()).unwrap();
+        assert_eq!(owner.verification_packages(None, false), ["other"]);
+        assert_eq!(owner.verification_packages(None, true).len(), 2);
+        let mut p = owner.remove("other").unwrap();
+        p.has_auto_verify_domains = false;
+        owner.put(p);
+        assert_eq!(owner.verification_packages(None, true), ["fixture"]);
+    }
+
     #[test]
     fn shell_status_override_revocation_and_reset_match_android16() {
         let code = code(&["a.test", "b.test"]);

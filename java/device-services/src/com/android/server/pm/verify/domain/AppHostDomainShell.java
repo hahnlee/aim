@@ -112,9 +112,6 @@ public final class AppHostDomainShell implements DomainVerificationShell.Callbac
         try { owners(writer, 2, null, domains, user); }
         catch (NameNotFoundException failure) { throw new IllegalStateException(failure); }
     }
-    private static UnsupportedOperationException pending() {
-        return new UnsupportedOperationException("domain shell writes are not served (#2187)");
-    }
     @Override public void setDomainVerificationStatusInternal(String name, int state,
             ArraySet<String> domains) throws NameNotFoundException {
         enforcer.assertInternal(Binder.getCallingUid());
@@ -134,7 +131,9 @@ public final class AppHostDomainShell implements DomainVerificationShell.Callbac
             throw new NameNotFoundException(name);
         } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
     }
-    @Override public DomainVerificationUserState getDomainVerificationUserState(String name, int user) { throw pending(); }
+    @Override public DomainVerificationUserState getDomainVerificationUserState(String name, int user) {
+        throw new UnsupportedOperationException("unused domain shell user-state callback");
+    }
     @Override public void setDomainVerificationLinkHandlingAllowedInternal(String name,
             boolean allowed, int user) throws NameNotFoundException {
         enforcer.assertInternal(Binder.getCallingUid());
@@ -151,5 +150,9 @@ public final class AppHostDomainShell implements DomainVerificationShell.Callbac
     }
     @Override public void clearDomainVerificationState(List<String> names) { reset(names, 0, false); }
     @Override public void clearUserStates(List<String> names, int user) { reset(names, user, true); }
-    @Override public void verifyPackages(List<String> names, boolean reVerify) { throw pending(); }
+    @Override public void verifyPackages(List<String> names, boolean reVerify) {
+        enforcer.assertInternal(Binder.getCallingUid());
+        try { backend.verifyShellPackages(names, reVerify); }
+        catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+    }
 }

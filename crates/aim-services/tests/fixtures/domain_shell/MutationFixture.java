@@ -33,6 +33,8 @@ class MutationFixture {
         void removeHost(String host){hosts.remove(host);}
     }
     static final class DomainVerificationPkgState {
+        boolean auto=true;
+        boolean isHasAutoVerifyDomains(){return auto;}
         final String name; final ArrayMap<String,Integer> states=new ArrayMap<>();
         final SparseArray<DomainVerificationInternalUserState> users=new SparseArray<>();
         DomainVerificationPkgState(String name){this.name=name;}
@@ -42,6 +44,10 @@ class MutationFixture {
         void removeAllUsers(){users.clear();}
         void removeUser(int user){users.remove(user);}
     }
+    boolean mCanSendBroadcasts=true;
+    final List<Set<String>> requests=new ArrayList<>();
+    interface Proxy {void sendBroadcastForPackages(Set<String> names);}
+    final Proxy mProxy=requests::add;
     final Object mLock=new Object();
     final Connection mConnection=new Connection();
     final Collector mCollector=new Collector();
@@ -62,6 +68,18 @@ class MutationFixture {
     }
     static void require(boolean value){if(!value)throw new AssertionError();}
     public static void main(String[] ignored)throws Exception {
+        for(boolean auto:new boolean[]{false,true})for(int state:new int[]{-1,0,1,2,3,4,5,6,7,8,1023,1024,2048})for(boolean reVerify:new boolean[]{false,true}){
+            var v=fixture();var p=v.mAttachedPkgStates.get("p");p.auto=auto;p.states.clear();p.states.put("a.test",state);
+            // Eligibility reads attached state, including stale/undeclared stored hosts, not package code.
+            v.mConnection.snapshot.packages.clear();
+            v.verifyPackages(Arrays.asList("missing","p","p",null),reVerify);
+            require(v.requests.equals(auto&&(reVerify||state==0||state==4||state==5)?List.of(Set.of("p")):List.of()));
+            require(v.mConnection.writes==0);
+        }
+        var v=fixture();v.mAttachedPkgStates.get("p").states.clear();
+        v.verifyPackages(null,false);require(v.requests.equals(List.of(Set.of("p"))));
+        v.requests.clear();v.verifyPackages(null,true);require(v.requests.equals(List.of(Set.of("p","q"))));
+        v.requests.clear();v.mCanSendBroadcasts=false;v.verifyPackages(null,true);require(v.requests.isEmpty());
         for(int state=0;state<=3;state++)for(boolean named:new boolean[]{false,true}){
             var s=fixture();
             s.setDomainVerificationStatusInternal(named?"p":null,state,new ArraySet<>(List.of("a.test","b.test","invalid.test")));

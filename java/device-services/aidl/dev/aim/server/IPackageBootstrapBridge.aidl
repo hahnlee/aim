@@ -170,4 +170,6 @@ interface IPackageBootstrapBridge {
     byte[] transactBatch(in byte[] calls);
     /** Synchronous original default grant policy, before app-host process readiness. */
     void grantDefaultPermissions(dev.aim.server.IPackageDefaultGrantQueries queries, int userId);
+    /** Eligibility is selected from the native domain owner; delivery uses its original proxy. */
+    void sendDomainVerificationRequest(in List<String> packageNames);
 }

@@ -59,10 +59,12 @@ struct Bridge(
         Arc<LocalProcess>,
         Mutex<Option<aim_binder_host::local::Strong>>,
     ),
+    std::sync::atomic::AtomicI32,
 );
 // Fixture-only export of a service in the original process to the native host.
 const EXPORT_TEST_BINDER: u32 = 0xffff_fffe;
 const SET_TEST_SHELL_READ: u32 = 0xffff_fffd;
+const SET_TEST_DOMAIN_DELIVERY: u32 = 0xffff_fffc;
 impl Service for Bridge {
     fn descriptor(&self) -> &str {
         bootstrap::DESCRIPTOR
@@ -70,6 +72,30 @@ impl Service for Bridge {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut reply = Parcel::new();
         match call.code {
+            SET_TEST_DOMAIN_DELIVERY => {
+                self.7.store(call.data.read_i32()?, Ordering::SeqCst);
+                reply.write_no_exception();
+            }
+            bootstrap::SEND_DOMAIN_VERIFICATION_REQUEST => {
+                assert_eq!(call.sender_euid, 1000);
+                let a = bootstrap::SendDomainVerificationRequest::read(&mut call.data)?;
+                assert_eq!(call.data.remaining(), 0);
+                // A failing delivery owner lets callers observe the exact selected request.
+                match self.7.load(Ordering::SeqCst) {
+                    0 => reply.write_exception(&Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("fixture delivery: {:?}", a.package_names),
+                    )),
+                    1 => bootstrap::write_send_domain_verification_request_reply(&mut reply),
+                    2 => {} // malformed reply
+                    3 => {
+                        reply.write_no_exception();
+                        reply.write_i32(42);
+                    }
+                    4 => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
+                    _ => panic!("unknown delivery fixture mode"),
+                }
+            }
             SET_TEST_SHELL_READ => {
                 let Some(Binder::Handle(handle)) = call.data.read_binder()? else {
                     panic!("read leaf")
@@ -466,6 +492,7 @@ fn session_with_fixture(mut fixture: Fixture) -> Session {
                 host_leaf,
             ))),
             (original.clone(), Mutex::new(None)),
+            std::sync::atomic::AtomicI32::new(0),
         ))
     });
     let old = publish_code(&fixture, &bridge);

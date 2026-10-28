@@ -555,3 +555,33 @@ pub(super) fn reset(host: &Arc<AppHost>, args: api::ResetShellState) -> Result<(
         Ok(())
     })
 }
+
+pub(super) fn verify(host: &Arc<AppHost>, args: api::VerifyShellPackages) -> Result<(), Exception> {
+    use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
+    let system = host.package_system()?;
+    let owner = system.package_bootstrap()?;
+    let capture = system.capture_package_queries_for(&owner)?;
+    let names = DomainVerification::domains(&capture)?
+        .owner()
+        .verification_packages(args.package_names.as_deref(), args.re_verify);
+    if names.is_empty() {
+        return Ok(());
+    }
+    system.check_package_bootstrap(&owner)?;
+    let mut request = Parcel::new();
+    bridge::SendDomainVerificationRequest {
+        package_names: Some(names.into_iter().map(Some).collect()),
+    }
+    .write(&mut request);
+    let reply = owner
+        .owner
+        .transact_as_owner(bridge::SEND_DOMAIN_VERIFICATION_REQUEST, &request, false)
+        .map_err(|e| failure(format!("domain verifier delivery transport: {e}")))?;
+    let mut reader = reply.reader();
+    bridge::read_send_domain_verification_request_reply(&mut reader)
+        .map_err(|e| failure(format!("domain verifier delivery reply: {e}")))??;
+    if reader.remaining() != 0 {
+        return Err(failure("trailing domain verifier delivery reply"));
+    }
+    Ok(())
+}

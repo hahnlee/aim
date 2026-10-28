@@ -43,6 +43,10 @@ public class DomainShellTest {
             if(failure!=null)throw failure;
             writes.add("reset:"+names+":"+user+":"+userOnly);
         }
+        public void verifyShellPackages(List<String> names,boolean reVerify){
+            if(failure!=null)throw failure;
+            writes.add("verify:"+names+":"+reVerify);
+        }
         public byte[] readShellState(int kind,String name,List<String> domains,int user,boolean hasUser){return capture(kind,name,domains,user,hasUser);}
         public void setShellUserSelection(String name,int user,boolean enabled,List<String> domains){
             if(name.equals("missing"))throw new ServiceSpecificException(1);
@@ -123,6 +127,28 @@ public class DomainShellTest {
             try {shell.setDomainVerificationStatusInternal("p",1,null);throw new AssertionError("swallowed status error");}
             catch(ServiceSpecificException expected){if(expected.errorCode!=7)throw expected;}
             try {shell.clearDomainVerificationState(null);throw new AssertionError("swallowed reset error");}
+            catch(ServiceSpecificException expected){if(expected.errorCode!=7)throw expected;}
+            backend.failure=null;
+            backend.writes.clear();
+            check(pm,"","verify-app-links");
+            check(pm,"","verify-app-links","--re-verify");
+            check(pm,"","verify-app-links","p");
+            check(pm,"","verify-app-links","--re-verify","missing");
+            var expectedVerify=List.of("verify:null:false","verify:null:true","verify:[p]:false","verify:[missing]:true");
+            if(!backend.writes.equals(expectedVerify))throw new AssertionError(backend.writes);
+            for(int uid:new int[]{0,1000,2000}){
+                Binder.uid=uid;check(pm,"","verify-app-links","--re-verify","p");
+            }
+            backend.writes.subList(expectedVerify.size(),backend.writes.size()).clear();
+            checkResult(pm,1,"","Error: unknown option: --invalid\n","verify-app-links","--invalid");
+            checkResult(pm,1,"","Error: unknown option: --package\n","verify-app-links","--package","p");
+            Binder.uid=10100;
+            try{shell.verifyPackages(null,true);throw new AssertionError("permission bypass");}
+            catch(SecurityException expected){if(!expected.getMessage().equals("Caller 10100 is not allowed to change internal state"))throw expected;}
+            Binder.uid=2000;
+            if(!backend.writes.equals(expectedVerify))throw new AssertionError("denied verification reached backend");
+            backend.failure=new ServiceSpecificException(7);
+            try{shell.verifyPackages(null,true);throw new AssertionError("swallowed verification error");}
             catch(ServiceSpecificException expected){if(expected.errorCode!=7)throw expected;}
             backend.failure=null;
             check(pm,links(false),"get-app-links","p");

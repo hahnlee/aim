@@ -1007,7 +1007,67 @@ fn shell_user_writes_filter_hosts_preserve_captures_and_reopen_disk() {
                 &mut disk.lock().unwrap(),
             )
             .unwrap();
+        let current = host.package_capture().unwrap();
         let backend = Backend::new(host.clone());
+        let verify = |uid, names: Option<Vec<&str>>, re_verify| {
+            let mut p = Parcel::new();
+            original::VerifyShellPackages {
+                package_names: names.map(|v| v.into_iter().map(|s| Some(s.into())).collect()),
+                re_verify,
+            }
+            .write(&mut p);
+            invoke(&backend, uid, original::VERIFY_SHELL_PACKAGES, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let before_verify = current.domains().unwrap().owner().persisted();
+        let bytes_before_verify =
+            std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap();
+        assert_eq!(verify(2000, None, true).unwrap_err().code, EX_SECURITY);
+        assert!(verify(1000, Some(vec!["missing"]), true).is_ok());
+        assert!(verify(1000, Some(vec![]), true).is_ok());
+        for re_verify in [false, true] {
+            let error = verify(1000, Some(vec!["p", "missing", "p"]), re_verify).unwrap_err();
+            assert_eq!(error.code, EX_ILLEGAL_STATE);
+            assert_eq!(error.message, "fixture delivery: Some([Some(\"p\")])");
+        }
+        assert_eq!(
+            host.package_capture()
+                .unwrap()
+                .domains()
+                .unwrap()
+                .owner()
+                .persisted(),
+            before_verify
+        );
+        let delivery_mode = |mode| {
+            let mut request = Parcel::new();
+            request.write_i32(mode);
+            bridge
+                .owner
+                .transact_as_owner(0xffff_fffc, &request, false)
+                .unwrap();
+        };
+        delivery_mode(1);
+        verify(1000, None, false).unwrap();
+        verify(1000, None, true).unwrap();
+        for (mode, message) in [
+            (2, "domain verifier delivery reply:"),
+            (3, "trailing domain verifier delivery reply"),
+            (4, "domain verifier delivery transport:"),
+        ] {
+            delivery_mode(mode);
+            let error = verify(1000, Some(vec!["p"]), true).unwrap_err();
+            assert_eq!(error.code, EX_ILLEGAL_STATE);
+            assert!(error.message.starts_with(message), "{error:?}");
+        }
+        delivery_mode(0);
+        assert!(Arc::ptr_eq(&current, &host.package_capture().unwrap()));
+        assert_eq!(
+            std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap(),
+            bytes_before_verify
+        );
         let selection = |name: &str, user, enabled, hosts: Option<Vec<&str>>| {
             let mut p = Parcel::new();
             original::SetShellUserSelection {
@@ -1148,6 +1208,12 @@ fn shell_user_writes_filter_hosts_preserve_captures_and_reopen_disk() {
             reopened.state().settings.domain_verification,
             current.domains().unwrap().owner().persisted()
         );
+        // A recorded non-default domain suppresses the default request, not re-verification.
+        assert!(verify(1000, Some(vec!["p"]), false).is_ok());
+        assert_eq!(
+            verify(1000, Some(vec!["p"]), true).unwrap_err().message,
+            "fixture delivery: Some([Some(\"p\")])"
+        );
         // Both internal-state branches filter independently against auto-verify hosts.
         status(None, 3, Some(vec!["a.test", "c.test", "invalid.test"])).unwrap();
         let denied = host.package_capture().unwrap();
@@ -1253,6 +1319,7 @@ fn shell_user_writes_filter_hosts_preserve_captures_and_reopen_disk() {
             original::SET_SHELL_LINK_HANDLING,
             original::SET_SHELL_STATUS,
             original::RESET_SHELL_STATE,
+            original::VERIFY_SHELL_PACKAGES,
         ] {
             assert_eq!(
                 invoke(&backend, 2000, code, &Parcel::new())

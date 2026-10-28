@@ -23,4 +23,5 @@ interface IAppHostDomainVerification {
     void setShellLinkHandling(String packageName, int user, boolean allowed);
     void setShellStatus(String packageName, int state, in List<String> domains);
     void resetShellState(in List<String> packageNames, int user, boolean userOnly);
+    void verifyShellPackages(in List<String> packageNames, boolean reVerify);
 }

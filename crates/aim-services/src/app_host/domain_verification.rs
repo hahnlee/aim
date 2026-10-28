@@ -1,5 +1,5 @@
 //! Original Java verifier front end over the session's NativeDomains and
-//! durable package owner; other writes and verifier requests remain #1763.
+//! durable package owner.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
@@ -384,6 +384,11 @@ impl Service for Backend {
         }
         let mut reply = Parcel::new();
         let result = match call.code {
+            original::VERIFY_SHELL_PACKAGES => {
+                let a = original::VerifyShellPackages::read(&mut call.data)?;
+                super::domain_shell::verify(&self.0.host, a)
+                    .map(|()| original::write_verify_shell_packages_reply(&mut reply))
+            }
             original::SET_SHELL_STATUS => {
                 let a = original::SetShellStatus::read(&mut call.data)?;
                 super::domain_shell::write_status(&self.0.host, a)

@@ -56,6 +56,15 @@ public final class NativeDomainVerificationConnection implements DomainVerificat
         }
         return best==null?null:best.getComponentInfo().getComponentName();
     }
+    /** Native DVS eligibility, original selected proxy and its unavailable-agent behavior. */
+    public static void sendBroadcastForPackages(DomainVerificationManagerInternal domains,
+            java.util.List<String> packageNames) {
+        if(domains==null)throw new IllegalStateException("domain owner is unavailable");
+        var proxy=domains.getProxy();
+        if(proxy==null)throw new IllegalStateException("domain proxy is unavailable");
+        var names=new android.util.ArraySet<String>();names.addAll(packageNames);
+        proxy.sendBroadcastForPackages(names);
+    }
     @Override public void schedule(int code,Object object) {
         if(!handler.post(()->domains.runMessage(code,object)))throw new IllegalStateException("domain verifier Handler stopped");
     }
