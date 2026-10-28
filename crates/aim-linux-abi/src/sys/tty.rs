@@ -800,6 +800,28 @@ mod tests {
             (stat.st_uid, stat.st_gid, stat.st_mode & 0o777),
             (2000, 2000, 0o600)
         );
+        let path_fd = fs::openat_as(
+            [
+                crate::vfs::LINUX_AT_FDCWD as u64,
+                path.as_ptr() as u64,
+                fs::O_PATH,
+                0,
+                0,
+                0,
+            ],
+            &shell,
+        ) as i32;
+        assert!(path_fd >= 0);
+        // The only host descriptor of the O_PATH description is a directory;
+        // even Darwin O_EVTONLY on the slave would invoke its device open.
+        let mut backing: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(path_fd, &mut backing) }, 0);
+        assert_eq!(backing.st_mode & libc::S_IFMT, libc::S_IFDIR);
+        let reference = super::super::fdtab::character_reference(path_fd).unwrap();
+        assert_eq!(reference.stat(path_fd).unwrap().st_ino, stat.st_ino);
+        assert_eq!(fs::stat_fd_kernel(path_fd).unwrap().st_uid, 2000);
+        assert_eq!(open(&path, &foreign), -(crate::errno::EACCES as i64));
+        assert_eq!(open(&path, &shell), -(crate::errno::EIO as i64));
         unlock(&master);
         assert_eq!(
             fsops::fchmodat([
@@ -855,6 +877,9 @@ mod tests {
         unlock(&master);
         let fresh = attrs::path_stat(path.to_str().unwrap()).unwrap();
         assert_ne!((fresh.st_dev, fresh.st_ino), (stat.st_dev, stat.st_ino));
+        assert!(reference.stat(path_fd).is_err());
+        assert!(fs::stat_fd_kernel(path_fd).is_err());
+        assert_eq!(fs::close([path_fd as u64, 0, 0, 0, 0, 0]), 0);
         assert_eq!(
             (fresh.st_uid, fresh.st_gid, fresh.st_mode & 0o777),
             (2001, 2001, 0o600)

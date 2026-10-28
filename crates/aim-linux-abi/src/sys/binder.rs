@@ -37,12 +37,16 @@ pub fn file_class(fd: i32) -> Result<u32, i32> {
     }
 }
 
-pub(super) fn create_path(fd: i32, flags: u32) -> Result<std::os::fd::OwnedFd, i32> {
+pub(super) fn create_path(
+    fd: i32,
+    flags: u32,
+    reference: Option<&aim_binder_host::path_file::CharacterReference>,
+) -> Result<std::os::fd::OwnedFd, i32> {
     let client = CLIENT.lock().unwrap();
     client
         .as_ref()
         .ok_or(crate::errno::ENODEV)?
-        .create_path(fd, flags)
+        .create_path(fd, flags, reference)
 }
 
 /// The files whose pages the daemon's process shares (`sharedfile`); none

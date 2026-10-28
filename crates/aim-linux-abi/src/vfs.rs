@@ -2655,6 +2655,9 @@ fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
         }
         return Ok(file.guest.clone());
     }
+    if crate::sys::fdtab::character_reference(fd).is_some() {
+        return Err(errno::ENOTDIR);
+    }
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut stat) } < 0 {
         return Err(errno::last());

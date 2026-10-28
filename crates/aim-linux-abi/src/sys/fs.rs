@@ -362,6 +362,14 @@ fn openat_host(r: &vfs::Resolved, flags: u64, mode: u64, id: &super::cred::Ident
             .map(|fd| fd as i64)
             .unwrap_or_else(|error| -(error as i64));
     }
+    if pts.is_some() && flags & O_PATH != 0 {
+        if flags & O_DIRECTORY != 0 {
+            return -(errno::ENOTDIR as i64);
+        }
+        return fdtab::PathDescription::open_character(&r, flags)
+            .map(|fd| fd as i64)
+            .unwrap_or_else(|error| -(error as i64));
+    }
     // A file the guest creates keeps its owner's access on the host, as
     // mkdirat's does (fsops::host_mode), so its recorded metadata stays
     // readable; the guest's mode is recorded when the host's differs.
@@ -1595,6 +1603,19 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     stat_fd_kernel(pin.descriptor().as_raw_fd())
 }
 pub(super) fn stat_fd_kernel(fd: i32) -> Result<libc::stat, i64> {
+    if let Some(reference) = fdtab::character_reference(fd) {
+        let failure = |error: std::io::Error| {
+            -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64)
+        };
+        let host = reference.host(fd).map_err(failure)?;
+        let mut stat = reference.stat(fd).map_err(failure)?;
+        attrs::apply(
+            attrs::Host::Path(&host),
+            || reference.guest.clone(),
+            &mut stat,
+        );
+        return Ok(stat);
+    }
     if let Some(Kind::ProcMem(open)) = fdtab::get(fd) {
         return Ok(open.stat());
     }
@@ -2166,10 +2187,10 @@ pub fn fchdir(a: [u64; 6]) -> i64 {
     };
     use std::os::fd::AsRawFd;
     let fd = pin.descriptor().as_raw_fd();
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } < 0 {
-        return -(errno::last() as i64);
-    }
+    let stat = match stat_fd_kernel(fd) {
+        Ok(stat) => stat,
+        Err(error) => return error,
+    };
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
         return -(errno::ENOTDIR as i64);
     }
