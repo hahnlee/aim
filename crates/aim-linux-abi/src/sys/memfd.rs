@@ -1455,6 +1455,11 @@ mod tests {
 
     #[test]
     fn returned_descriptor_and_syscall_pin_keep_converted_contents() {
+        if fdtab::isolated_kernel_test(
+            "sys::memfd::tests::returned_descriptor_and_syscall_pin_keep_converted_contents",
+        ) {
+            return;
+        }
         let _view = crate::vfs::test_view();
         let fd = create("returned-jit", 0);
         assert!(fd >= 0);
@@ -1471,6 +1476,11 @@ mod tests {
         unsafe { (view as *mut u8).write(91) };
         adopt(foreign);
         assert!(!with(|m| m[&k].orphaned));
+        // A received descriptor is adopted and published by its owner. A raw
+        // host dup must not depend on visibility left by another test's fd.
+        assert!(unsafe { libc::fcntl(foreign, libc::F_GETFD) } >= 0);
+        assert_eq!(fdtab::require_guest_visible(foreign), Err(errno::EBADF));
+        fdtab::publish_guest(foreign).unwrap();
         let pin = fdtab::pin_guest(foreign).unwrap();
         close(foreign);
         unmap(view as u64, PAGE);
