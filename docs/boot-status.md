@@ -1532,6 +1532,12 @@ body includes72 path cases,48 library policies, GSF scan/copy rollback,
 16 final flags and Settings launch. This qualifies the controller fix and
 these comparisons against the pinned historical Role6bd image, not a current
 rebuilt native image or full CTS/app acceptance.
+The Archive oracle retains bounded per-case stderr progress and separate outer
+child wait/EOF observations. The shell controller now also records its inner
+linux-run child's kernel birth and raw wait status on failure (#1311).
+Host checks distinguish explicit exit137 from SIGKILL and retain the receipt
+with an output writer still open (2026-10-28). The original Archive invocation
+has not been replayed; its historical exit137 remains unexplained.
 The CTS campaign now requires identical runtime, wrapper and selected
 JDK/adb/aapt2/helper provenance across both peers. Its Rust process owner
 uses actual birth-checked positive PIDs and foreground adb; six lifecycle

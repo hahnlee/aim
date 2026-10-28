@@ -108,6 +108,11 @@ shell they inherit init's global environment (`DATA.run/environ`:
 as `uiautomator` and `am instrument` run; an interactive shell also gets
 the terminal's `TERM`.
 
+If a shell child fails, aimctl reports its host PID, captured kernel birth,
+raw wait status, exit code and signal on stderr before mapping the status to
+the CLI exit code. This distinguishes a child's explicit exit 137 from SIGKILL
+(#1311); the wait does not depend on inherited output writers closing.
+
 - **install** copies the APKs (APFS clones) into the guest's
   `/data/local/tmp`, runs `pm install -r` on them (several APKs are one
   app with its splits) and removes the copies; the APKs themselves are
