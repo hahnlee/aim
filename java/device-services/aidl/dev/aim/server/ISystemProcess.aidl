@@ -48,4 +48,6 @@ interface ISystemProcess {
     void attachRecoverableKeyStoreKeys(IRecoverableKeyStoreKeys keys);
     /** Retained MediaRouter2 system route/session queries; system UID only. */
     void attachSystemRouteQueries(IBinder queries);
+    /** Original ContentValues scalar string conversion; system UID only. */
+    void attachSettingsValues(IBinder bridge);
 }

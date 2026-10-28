@@ -98,6 +98,7 @@ statsd receives the retained Java UID map, receivers and live statsd_java update
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.
+Settings provider inserts and updates convert Float, Double and byte-array values through the original Java scalar `toString` in aim-system, over a system-UID-only bridge (#1583; host storage/JVM tests and pinned-image linkage, no guest boot).
 URI grants publish indirect package visibility of their provider to the target, including basic grants needing no permission record and restored persisted grants. Persistable grants retain visibility across package updates (#1569; focused host tests, no guest boot).
 The app host prepares user 0's CE storage before starting vold's user and mounting the emulated volume at unlocking, and logs external storage failures without aborting boot completion (#2227; host tests only, no guest boot rerun).
 The app host treats an absent `/data/system/overlays.xml` as empty overlay settings and reports guest paths at the data-file error sources used by its native settings and package readers (#2233; host tests only, no guest boot rerun).

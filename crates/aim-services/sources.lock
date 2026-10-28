@@ -497,6 +497,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IWifiBridge|java/device-services/aidl/dev/aim/server/IWifiBridge.aidl|*"
   "dev.aim.server.INetworkActivityBridge|java/device-services/aidl/dev/aim/server/INetworkActivityBridge.aidl|*"
   "dev.aim.server.ISafeLabels|java/device-services/aidl/dev/aim/server/ISafeLabels.aidl|*"
+  "dev.aim.server.ISettingsValues|java/device-services/aidl/dev/aim/server/ISettingsValues.aidl|*"
   "dev.aim.server.IDevicePolicyDefaults|java/device-services/aidl/dev/aim/server/IDevicePolicyDefaults.aidl|*"
   "dev.aim.server.IPackageFeed|java/device-services/aidl/dev/aim/server/IPackageFeed.aidl|*"
   "dev.aim.server.IPackageFeedHost|java/device-services/aidl/dev/aim/server/IPackageFeedHost.aidl|*"

@@ -37,6 +37,7 @@ use aim_binder_host::parcel::{
 };
 use aim_service_aidl::android_content_icontentprovider as cp;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
+use aim_service_aidl::dev_aim_server_isettingsvalues as settings_values;
 
 use super::activity_user::AllowMode;
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
@@ -272,6 +273,7 @@ pub struct SettingsProvider {
     sync_disabled_until_reboot: AtomicBool,
     /// `mConfigMonitorCallback`.
     monitor: Mutex<Option<Arc<Strong>>>,
+    values_bridge: Mutex<Option<Arc<Strong>>>,
 }
 
 /// `SettingsProvider.scheduleWriteFallbackFilesJob`: once daily while
@@ -441,12 +443,12 @@ fn validate_authority(uri: &Uri) -> Result<(), Thrown> {
 /// `AssetFileDescriptor` its whole extent and no extras.
 struct Opened(crate::package::app_metadata::Descriptor);
 
-/// A `ContentValues` value: a string, or the class of one whose
-/// `toString` the app host does not reproduce.
+/// A `ContentValues` value: simple text, or a scalar whose original Java
+/// `toString` runs in the system process.
 #[derive(Debug, PartialEq)]
 enum Content {
     Text(Option<String>),
-    Other(&'static str),
+    Original(Vec<u8>),
 }
 
 /// `ContentValues.CREATOR.createFromParcel`: its map
@@ -457,25 +459,27 @@ fn read_content_values(r: &mut Reader<'_>) -> Result<HashMap<String, Content>, i
     let mut values = HashMap::new();
     for _ in 0..n.max(0) {
         let key = r.read_string16()?.unwrap_or_default();
-        let value = match r.read_i32()? {
+        let start = r.position();
+        let kind = r.read_i32()?;
+        let value = match kind {
             -1 => Content::Text(None),
             0 => Content::Text(r.read_string16()?),
             // `Integer`, `Short`, `Byte` and `Long`, `Boolean`.
             1 | 5 | 20 => Content::Text(Some(r.read_i32()?.to_string())),
             6 => Content::Text(Some(r.read_i64()?.to_string())),
             9 => Content::Text(Some((r.read_i32()? != 0).to_string())),
-            7 => {
-                r.read_i32()?;
-                Content::Other("java.lang.Float")
-            }
-            8 => {
-                r.read_i64()?;
-                Content::Other("java.lang.Double")
-            }
-            13 => {
-                let len = r.read_i32()?;
-                r.skip((len.max(0) as usize).div_ceil(4) * 4)?;
-                Content::Other("byte[]")
+            7 | 8 | 13 => {
+                let len = match kind {
+                    7 => 4,
+                    8 => 8,
+                    _ => (r.read_i32()?.max(0) as usize).div_ceil(4) * 4,
+                };
+                r.skip(len)?;
+                let (bytes, objects) = r.since(start);
+                if !objects.is_empty() {
+                    return Err(BAD_VALUE);
+                }
+                Content::Original(bytes.to_vec())
             }
             _ => return Err(BAD_VALUE),
         };
@@ -485,6 +489,27 @@ fn read_content_values(r: &mut Reader<'_>) -> Result<HashMap<String, Content>, i
 }
 
 impl SettingsProvider {
+    pub(super) fn attach_values(self: &Arc<Self>, binder: Option<Binder>) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = binder else {
+            return Err(Exception::illegal_argument("no settings values bridge"));
+        };
+        let owner = Arc::new(self.host.process.strong(handle));
+        let weak = Arc::downgrade(self);
+        self.host.process.link_to_death(
+            &owner,
+            Box::new(move || {
+                if let Some(provider) = weak.upgrade() {
+                    let mut current = provider.values_bridge.lock().unwrap();
+                    if current.as_ref().is_some_and(|p| p.handle == handle) {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        *self.values_bridge.lock().unwrap() = Some(owner);
+        Ok(())
+    }
+
     /// `ContentValues.getAsString(key)`.
     fn content_string(
         &self,
@@ -494,10 +519,27 @@ impl SettingsProvider {
         match values.get(key) {
             None | Some(Content::Text(None)) => Ok(None),
             Some(Content::Text(Some(s))) => Ok(Some(s.clone())),
-            Some(Content::Other(class)) => Err(self.host.unimplemented_named(
-                "settings provider",
-                &format!("a {class} setting value (#1583)"),
-            )),
+            Some(Content::Original(value)) => {
+                let owner = self.values_bridge.lock().unwrap().clone().ok_or_else(|| {
+                    Exception::new(EX_ILLEGAL_STATE, "settings values bridge is not attached")
+                })?;
+                let mut data = Parcel::new();
+                settings_values::GetAsString {
+                    value: Some(value.clone()),
+                }
+                .write(&mut data);
+                let transport = |status| {
+                    Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("settings values: binder status {status}"),
+                    )
+                };
+                let result = owner
+                    .transact(settings_values::GET_AS_STRING, &data, false)
+                    .map_err(transport)?;
+                settings_values::read_get_as_string_reply(&mut result.reader())
+                    .map_err(transport)?
+            }
         }
     }
 
@@ -1561,6 +1603,7 @@ impl SettingsProvider {
             declared: OnceLock::new(),
             sync_disabled_until_reboot: AtomicBool::new(false),
             monitor: Mutex::new(None),
+            values_bridge: Mutex::new(None),
         }
     }
 
@@ -2710,6 +2753,127 @@ impl SettingsProvider {
 
 #[cfg(test)]
 mod tests {
+    struct ValuesBridge(Mutex<(Vec<Vec<u8>>, Result<Option<String>, Exception>)>);
+    impl Service for ValuesBridge {
+        fn descriptor(&self) -> &str {
+            settings_values::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.sender_euid, SYSTEM_UID as u32);
+            assert_eq!(call.code, settings_values::GET_AS_STRING);
+            let args = settings_values::GetAsString::read(&mut call.data)?;
+            assert_eq!(call.data.remaining(), 0);
+            let mut state = self.0.lock().unwrap();
+            state.0.push(args.value.unwrap());
+            reply(state.1.clone().map(|text| {
+                let mut p = Parcel::new();
+                settings_values::write_get_as_string_reply(&mut p, &text);
+                p
+            }))
+        }
+    }
+
+    #[test]
+    fn scalar_values_preserve_wire_bits_store_java_strings_and_propagate_failures() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let permissions = super::super::permission_manager::PermissionManager::with_system(
+                host.clone(),
+                Default::default(),
+            );
+            assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+            assert!(host.user_restrictions.set(Default::default()).is_ok());
+            let provider = Arc::new(SettingsProvider::new(host.clone()));
+            assert!(provider.generations.set(GenerationRegistry::new(1)).is_ok());
+            assert!(
+                provider
+                    .declared
+                    .set(Declared {
+                        system: HashSet::new(),
+                        secure: HashSet::new(),
+                        global: HashSet::new(),
+                    })
+                    .is_ok()
+            );
+            let original = Arc::new(ValuesBridge(Mutex::new((Vec::new(), Ok(None)))));
+            let owner = export(original.clone());
+            for invalid in [None, Some(Binder::Local(1))] {
+                assert!(provider.attach_values(invalid).is_err());
+            }
+            let caller = Caller {
+                uid: ROOT_UID,
+                package: Some("root".into()),
+            };
+            for (kind, bits, expected) in [
+                (7, 1.5f32.to_bits() as i64, "1.5"),
+                (8, 1.25f64.to_bits() as i64, "1.25"),
+                (13, 0, "[B@abc"),
+            ] {
+                let name = if kind == 13 {
+                    "byte_setting"
+                } else {
+                    "font_scale"
+                };
+                let mut p = Parcel::new();
+                p.write_i32(2);
+                p.write_i32(2);
+                p.write_string16(Some(NAME));
+                p.write_i32(0);
+                p.write_string16(Some(name));
+                p.write_string16(Some(VALUE));
+                let start = p.position();
+                p.write_i32(kind);
+                if kind == 8 {
+                    p.write_i64(bits);
+                } else {
+                    p.write_i32(bits as i32);
+                }
+                let values = read_content_values(&mut p.reader()).unwrap();
+                if kind == 7 {
+                    assert!(provider.content_string(&values, VALUE).is_err());
+                    provider
+                        .attach_values(Some(Binder::Handle(owner.handle)))
+                        .unwrap();
+                }
+                original.0.lock().unwrap().1 = Ok(Some(expected.into()));
+                let uri = Uri::parse("content://settings/system");
+                let result = if kind == 8 {
+                    provider
+                        .update(&caller, &uri.with_appended_path(name), &values, None, None)
+                        .map(|count| count == 1)
+                } else {
+                    provider
+                        .insert(&caller, &uri, &values)
+                        .map(|uri| uri.is_some())
+                };
+                assert!(
+                    result
+                        .map_err(|e| match e {
+                            Thrown::Binder(e) => e.message,
+                            _ => "provider exception".into(),
+                        })
+                        .unwrap()
+                );
+                assert_eq!(
+                    host.platform()
+                        .unwrap()
+                        .settings
+                        .get(Table::System, name)
+                        .as_deref(),
+                    Some(expected)
+                );
+                assert_eq!(
+                    original.0.lock().unwrap().0.last().unwrap(),
+                    &p.data()[start..]
+                );
+                original.0.lock().unwrap().1 = Err(Exception::security("original failure"));
+                assert_eq!(
+                    provider.content_string(&values, VALUE).unwrap_err(),
+                    Exception::security("original failure")
+                );
+            }
+        });
+    }
+
     /// PMS.getSetupWizardPackageNameImpl deliberately includes disabled
     /// components and applications in the system-only setup-wizard query.
     #[test]
@@ -3251,6 +3415,9 @@ mod tests {
         assert_eq!(values["name"], Content::Text(Some("font_scale".into())));
         assert_eq!(values["value"], Content::Text(Some("2".into())));
         assert_eq!(values["flag"], Content::Text(Some("true".into())));
-        assert_eq!(values["ratio"], Content::Other("java.lang.Float"));
+        let mut ratio = Parcel::new();
+        ratio.write_i32(7);
+        ratio.write_f32(1.5);
+        assert_eq!(values["ratio"], Content::Original(ratio.data().to_vec()));
     }
 }
