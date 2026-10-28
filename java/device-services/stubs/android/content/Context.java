@@ -50,4 +50,8 @@ public abstract class Context {
  public String getOpPackageName(){throw new RuntimeException("stub");}
  public void sendOrderedBroadcastAsUser(Intent intent,android.os.UserHandle user,String permission,int appOp,android.os.Bundle options,BroadcastReceiver receiver,android.os.Handler scheduler,int initialCode,String initialData,android.os.Bundle initialExtras){throw new RuntimeException("stub");}
  public String getPackageName(){throw new RuntimeException("stub");}
+    public static final String USER_SERVICE = "user";
+    public Object getSystemService(String name) { throw new RuntimeException("stub"); }
+    public Intent registerReceiverForAllUsers(BroadcastReceiver receiver, IntentFilter filter,
+            String permission, Handler handler) { throw new RuntimeException("stub"); }
 }

@@ -28,4 +28,5 @@ public class ParcelFileDescriptor implements Parcelable, java.io.Closeable {
     public void writeToParcel(Parcel out, int flags) { throw new RuntimeException("stub"); }
     @Override
     public int describeContents() { throw new RuntimeException("stub"); }
+    public static ParcelFileDescriptor[] createPipe() throws java.io.IOException { throw new RuntimeException("stub"); }
 }

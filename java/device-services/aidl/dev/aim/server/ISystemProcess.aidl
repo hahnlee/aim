@@ -2,6 +2,7 @@ package dev.aim.server;
 import dev.aim.server.IForegroundServicePolicy;
 import dev.aim.server.IBatteryHealthStats;
 import dev.aim.server.ISafeLabels;
+import dev.aim.server.IStatsCompanionUidMap;
 
 /**
  * The app host's part of system_server for its system process
@@ -29,4 +30,9 @@ interface ISystemProcess {
 
     /** Original Java callback registry for the native connectivity owner (#1509). */
     void attachNetworkActivityBridge(IBinder bridge);
+    /**
+     * Attach the retained cold StatsCompanionService UID-map/receiver owner.
+     * Replays the current statsd after a system-process restart; system UID only.
+     */
+    void attachStatsCompanionUidMap(IStatsCompanionUidMap uidMap);
 }

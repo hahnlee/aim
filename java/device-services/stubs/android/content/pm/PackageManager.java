@@ -69,4 +69,13 @@ public abstract class PackageManager {
 
  public ApplicationInfo getApplicationInfoAsUser(String name,int flags,int user)throws NameNotFoundException{throw new RuntimeException("stub");}
  public CharSequence getApplicationLabel(ApplicationInfo info){throw new RuntimeException("stub");}
+    public static final int GET_SIGNING_CERTIFICATES = 0x08000000;
+    public static final int MATCH_UNINSTALLED_PACKAGES = 0x00002000;
+    public static final int MATCH_ANY_USER = 0x00400000;
+    public static final int MATCH_STATIC_SHARED_AND_SDK_LIBRARIES = 0x04000000;
+    public static final int MATCH_APEX = 0x40000000;
+    public java.util.List<PackageInfo> getInstalledPackagesAsUser(int flags, int user) { throw new RuntimeException("stub"); }
+    public java.util.List<PackageInfo> getInstalledPackages(int flags) { throw new RuntimeException("stub"); }
+    public PackageInfo getPackageInfo(String name, int flags) throws NameNotFoundException { throw new RuntimeException("stub"); }
+    public InstallSourceInfo getInstallSourceInfo(String name) throws NameNotFoundException { throw new RuntimeException("stub"); }
 }

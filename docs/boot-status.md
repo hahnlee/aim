@@ -40,6 +40,7 @@ User 0's unlock time is recorded and returned; device_policy answers ManagedProv
 Legacy network activity listeners register through the original RemoteCallbackList and hear the default network's activity.
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
+statsd receives the UID map from the original StatsCompanionService code and its package, user and shutdown updates.
 The app host serves `background_install_control` natively, persisting its per-user set in `/data/system/bic/states`.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
 A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.

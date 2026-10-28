@@ -71,6 +71,23 @@ impl Service for SystemProcess {
                         .map(|()| sp::write_attach_system_process_reply(&mut p))
                 })
             }
+            sp::ATTACH_STATS_COMPANION_UID_MAP => {
+                let a =
+                    sp::AttachStatsCompanionUidMap::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    self.host
+                        .stats
+                        .get()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "statscompanion is not published",
+                            )
+                        })?
+                        .attach_uid_map(a.uid_map)
+                        .map(|()| sp::write_attach_stats_companion_uid_map_reply(&mut p))
+                })
+            }
             sp::GET_INTERNAL_SERVICE_REPOSITORY => {
                 sp::GetInternalServiceRepository::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().map(|()| {
@@ -192,5 +209,38 @@ impl Service for IdleAdapter {
             }
         };
         reply(result.map(|()| p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uid_map_attachment_requires_the_system_uid_and_a_remote_bridge() {
+        let host = AppHost::new(crate::test_process(SYSTEM_UID));
+        let stats = super::super::stats_manager::Stats::new(host.clone());
+        assert!(host.stats.set(stats).is_ok());
+        let service = SystemProcess::new(host);
+        let mut request = Parcel::new();
+        sp::AttachStatsCompanionUidMap { uid_map: None }.write(&mut request);
+        for (uid, expected) in [
+            (10123, aim_binder_host::parcel::EX_SECURITY),
+            (SYSTEM_UID, aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT),
+        ] {
+            let response = service
+                .transact(&mut Call {
+                    code: sp::ATTACH_STATS_COMPANION_UID_MAP,
+                    flags: 0,
+                    sender_pid: 1,
+                    sender_euid: uid,
+                    data: request.reader(),
+                })
+                .unwrap();
+            let error = sp::read_attach_stats_companion_uid_map_reply(&mut response.reader())
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(error.code, expected);
+        }
     }
 }

@@ -9,4 +9,5 @@ public class Process {
     public static final int SHELL_UID = 2000;
     public static final int SYSTEM_UID = 1000;
  public static boolean isIsolatedUid(int uid){throw new RuntimeException("stub");}
+    public static final int THREAD_PRIORITY_BACKGROUND = 10;
 }

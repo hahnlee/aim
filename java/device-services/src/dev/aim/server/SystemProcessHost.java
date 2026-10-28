@@ -35,7 +35,8 @@ import java.util.List;
  * system_server runs as system_server runs it: the original AppSearch
  * module, the Connectivity module's NearbyService, the AdServices module's
  * AdServicesManagerService, DeviceLockService, TelecomLoaderService's
- * part ({@link TelecomLoader}) and the components declared in
+ * part ({@link TelecomLoader}), StatsCompanionService's UID-map/receiver
+ * lifecycle ({@link StatsCompanionUidMap}) and the components declared in
  * `android:process="system"`, such as Telecom's.
  * This class plays ZygoteInit's part for the system server
  * (`handleSystemServerProcess`): its umask, its class loader of
@@ -116,6 +117,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSystemProcess(applicationThread.asBinder(),
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));
+            host.attachStatsCompanionUidMap(new StatsCompanionUidMap(context));
             // ZygoteInit's class loader of the standalone jar
             // (`prefetchStandaloneSystemServerJars`, as
             // SystemServerClassLoaderFactory makes it), and the stand-in's

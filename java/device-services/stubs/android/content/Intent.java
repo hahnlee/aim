@@ -110,4 +110,8 @@ public class Intent implements android.os.Parcelable {
  public String resolveTypeIfNeeded(ContentResolver resolver){throw new RuntimeException("stub");}
  public static final String ACTION_VIEW="android.intent.action.VIEW",ACTION_EDIT="android.intent.action.EDIT",ACTION_SEND="android.intent.action.SEND",ACTION_SENDTO="android.intent.action.SENDTO",ACTION_SEND_MULTIPLE="android.intent.action.SEND_MULTIPLE",ACTION_OVERLAY_CHANGED="android.intent.action.OVERLAY_CHANGED",ACTION_UNINSTALL_PACKAGE="android.intent.action.UNINSTALL_PACKAGE",ACTION_UNARCHIVE_PACKAGE="android.intent.action.UNARCHIVE_PACKAGE",ACTION_PACKAGE_FULLY_REMOVED="android.intent.action.PACKAGE_FULLY_REMOVED",ACTION_UID_REMOVED="android.intent.action.UID_REMOVED",EXTRA_INTENT="android.intent.extra.INTENT";
  public static final String EXTRA_REPLACING="android.intent.extra.REPLACING";
+    public static final String ACTION_USER_INITIALIZE = "android.intent.action.USER_INITIALIZE";
+    public static final String ACTION_USER_REMOVED = "android.intent.action.USER_REMOVED";
+    public static final String ACTION_REBOOT = "android.intent.action.REBOOT";
+public android.os.Bundle getExtras() { throw new RuntimeException("stub"); }
 }
