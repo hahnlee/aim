@@ -449,6 +449,15 @@ The migration's state and conformance results are in
 
 ### The app host, L1 (2026-10-16)
 
+Permission boot's update scan (#2282) extracts Android 16 r1's restricted and
+role reconciliation into `PermissionBootPolicy` in the existing vendor jar.
+The original PMS evaluator is private and owns a different Java state graph;
+the app host persists modern access flags. A typed system-UID-only bridge
+receives that snapshot before `systemMain` can wait for package publication.
+It preserves the three exemption sources and existing role grants; role holder
+selection and subsequent grants remain with RoleManager/PermissionController.
+No original class or image replacement is added.
+
 The app host's cold MediaRouter2 system route/session queries (#1663) retain
 MediaRouter2ServiceImpl's scoped Java permission and selection policy in the
 system-UID-only `SystemRouteQueries` bridge, using the image's original

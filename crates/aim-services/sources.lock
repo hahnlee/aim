@@ -494,6 +494,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IAppHostDomainVerification|java/device-services/aidl/dev/aim/server/IAppHostDomainVerification.aidl|*"
   "dev.aim.server.ISystemRouteQueries|java/device-services/aidl/dev/aim/server/ISystemRouteQueries.aidl|*"
   "dev.aim.server.ISystemProcess|java/device-services/aidl/dev/aim/server/ISystemProcess.aidl|*"
+  "dev.aim.server.IPermissionBootPolicy|java/device-services/aidl/dev/aim/server/IPermissionBootPolicy.aidl|*"
   "dev.aim.server.IWifiBridge|java/device-services/aidl/dev/aim/server/IWifiBridge.aidl|*"
   "dev.aim.server.INetworkActivityBridge|java/device-services/aidl/dev/aim/server/INetworkActivityBridge.aidl|*"
   "dev.aim.server.ISafeLabels|java/device-services/aidl/dev/aim/server/ISafeLabels.aidl|*"
