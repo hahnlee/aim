@@ -353,7 +353,7 @@ INTERFACES=(
   "android.os.INetworkManagementService|system/framework/framework.jar|setUidCleartextNetworkPolicy,isBandwidthControlEnabled"
   "android.content.pm.IShortcutService|system/framework/framework.jar|setDynamicShortcuts,addDynamicShortcuts,removeDynamicShortcuts,removeAllDynamicShortcuts,getMaxShortcutCountPerActivity,getShortcuts,getIconMaxDimensions,getRemainingCallCount,getRateLimitResetTime,isRequestPinItemSupported,disableShortcuts,enableShortcuts,updateShortcuts"
   "android.app.role.IRoleManager|apex/com.android.permission/javalib/framework-permission-s.jar|isRoleAvailableAsUser,isRoleHeldAsUser,getRoleHoldersAsUser,getDefaultApplicationAsUser,addOnRoleHoldersChangedListenerAsUser,removeOnRoleHoldersChangedListenerAsUser,isRoleFallbackEnabledAsUser,getHeldRolesFromControllerAsUser,isBypassingRoleQualification,getBrowserRoleHolder,getSmsRoleHolder,getEmergencyRoleHolder,isRoleVisibleForTestAsUser"
-  "android.net.INetworkStatsService|apex/com.android.tethering/javalib/framework-connectivity-t.jar|getRateLimitCacheConfig,getUidStats"
+  "android.net.INetworkStatsService|apex/com.android.tethering/javalib/framework-connectivity-t.jar|getRateLimitCacheConfig,getUidStats,openSessionForUsageStats,incrementOperationCount"
   "android.os.IDeviceIdentifiersPolicyService|system/framework/framework.jar|getSerial,getSerialForPackage"
   "android.permission.ILegacyPermissionManager|system/framework/framework.jar|checkDeviceIdentifierAccess,checkPhoneNumberAccess"
   "android.content.IRestrictionsManager|system/framework/framework.jar|getApplicationRestrictions,getApplicationRestrictionsPerAdminForUser,hasRestrictionsProvider,requestPermission,notifyPermissionResponse,createLocalApprovalIntent"
@@ -419,6 +419,7 @@ CONSTANTS=(
 # IPackageInternalHost historical sessions use typed PackageInstaller.SessionInfo[];
 # its Binder/FD capabilities must stay in the native transaction object table.
 OWN_INTERFACES=(
+  "dev.aim.server.INetworkStatsBridge|java/device-services/aidl/dev/aim/server/INetworkStatsBridge.aidl|*"
   "dev.aim.server.IPackageShellReadLeaf|java/device-services/aidl/dev/aim/server/IPackageShellReadLeaf.aidl|*"
   "dev.aim.server.IPackageShellPolicyBridge|java/device-services/aidl/dev/aim/server/IPackageShellPolicyBridge.aidl|*"
   "dev.aim.server.IPackageShellInstallPolicy|java/device-services/aidl/dev/aim/server/IPackageShellInstallPolicy.aidl|*"

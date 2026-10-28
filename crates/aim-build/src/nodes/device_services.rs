@@ -5,8 +5,8 @@
 //!   Java of its AIDL, compiled against the stubs of the image's classes in
 //!   `java/device-services/stubs` and checked against the image
 //!   ([`java::check_linkage`]);
-//! - `aim-nearby.jar`, the app host system process's stand-in for
-//!   ConnectivityServiceInitializer's part for Nearby
+//! - `aim-nearby.jar`, the app host system process's Connectivity initializers
+//!   for Nearby and the cold netstats query/counter owners
 //!   (`java/nearby-initializer`), checked against the image with the
 //!   Connectivity module's standalone jar;
 //! - `systemserverclasspath.pb`, the platform's classpath fragment with the
@@ -155,7 +155,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     service_aidl::check_own_stubs(&dex)?;
     tools.jar(log, &dex, &staged.join("aim-services.jar"))?;
 
-    // The Nearby stand-in links against the system server class path and
+    // The Connectivity initializers link against the system server class path and
     // the standalone jar its class loader's parent loads.
     let nearby = repo(NEARBY);
     let nearby_stubs = work.join("nearby-stubs");
@@ -166,10 +166,17 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         &nearby_stubs,
         false,
     )?;
+    let nearby_generated = work.join("nearby-aidl");
+    fs::create_dir_all(&nearby_generated).map_err(|e| e.to_string())?;
+    fs::copy(
+        generated.join("dev/aim/server/INetworkStatsBridge.java"),
+        nearby_generated.join("INetworkStatsBridge.java"),
+    )
+    .map_err(|e| e.to_string())?;
     let nearby_classes = work.join("nearby-classes");
     tools.javac(
         log,
-        &[nearby.join("src")],
+        &[nearby.join("src"), nearby_generated],
         std::slice::from_ref(&nearby_stubs),
         &nearby_classes,
         true,
