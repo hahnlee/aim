@@ -57,13 +57,29 @@ impl Client {
         }))
     }
     fn call(&self, frame: Frame, proof: Option<BorrowedFd<'_>>) -> Result<Frame, Errno> {
-        Self::reply(
-            self.control
-                .begin(frame, proof)
-                .map_err(io)?
-                .wait_authenticated(Duration::from_secs(5), self.controller)
-                .map_err(io)?,
-        )
+        let pending = self.control.begin(frame, proof).map_err(io)?;
+        loop {
+            match pending.wait_authenticated(Duration::from_millis(25), self.controller) {
+                Ok(reply) => return Self::reply(reply),
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::ETIMEDOUT) | Some(libc::EINTR)
+                    ) =>
+                {
+                    #[cfg(test)]
+                    if frame.operation == Operation::Close
+                        && error.raw_os_error() == Some(libc::EINTR)
+                    {
+                        CLOSE_INTERRUPTED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if !self.controller.is_live() {
+                        return Err(errno::ESRCH);
+                    }
+                }
+                Err(error) => return Err(io(error)),
+            }
+        }
     }
     fn request(&self) -> Result<u64, Errno> {
         self.next
@@ -78,8 +94,13 @@ impl Client {
         }
         Ok(reply)
     }
-    fn ticket(&self, fd: BorrowedFd<'_>, key: Identity, access: i32) -> Result<u64, Errno> {
-        let mut tickets = self.tickets.lock().unwrap();
+    fn ticket(
+        &self,
+        tickets: &mut HashMap<([u8; 36], i32), u64>,
+        fd: BorrowedFd<'_>,
+        key: Identity,
+        access: i32,
+    ) -> Result<u64, Errno> {
         if let Some(ticket) = tickets.get(&(key.to_bytes(), access)) {
             return Ok(*ticket);
         }
@@ -100,25 +121,7 @@ impl Client {
         }
         let mut frame = Frame::new(Operation::Close, self.request()?);
         frame.key = key.to_bytes();
-        let pending = self.control.begin(frame, None).map_err(io)?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(errno::from_darwin(libc::ETIMEDOUT));
-            }
-            match pending.wait_authenticated(remaining, self.controller) {
-                Ok(response) => {
-                    Self::reply(response)?;
-                    break;
-                }
-                Err(error) if error.raw_os_error() == Some(libc::EINTR) => {
-                    #[cfg(test)]
-                    CLOSE_INTERRUPTED.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(error) => return Err(io(error)),
-            }
-        }
+        self.call(frame, None)?;
         tickets.retain(|(identity, _), _| *identity != frame.key);
         Ok(())
     }
@@ -174,7 +177,10 @@ impl Client {
             return Err(errno::EBADF);
         }
         let key = Identity::from_fd(fd).map_err(io)?;
-        let ticket = self.ticket(fd, key, access)?;
+        // A close must not retire this ticket between lookup and dispatch. Do
+        // not hold admission while waiting: another thread may unlock or close.
+        let mut tickets = self.tickets.lock().unwrap();
+        let ticket = self.ticket(&mut tickets, fd, key, access)?;
         let mut frame = Frame::new(
             match cmd {
                 5 => Operation::Get,
@@ -186,6 +192,7 @@ impl Client {
         frame.ticket = ticket;
         frame.range = range;
         let pending = self.control.begin(frame, None).map_err(io)?;
+        drop(tickets);
         let mut cancelled = false;
         let reply = loop {
             match pending.wait_authenticated(Duration::from_millis(25), self.controller) {
@@ -196,10 +203,18 @@ impl Client {
                         Some(libc::ETIMEDOUT) | Some(libc::EINTR)
                     ) =>
                 {
-                    if interrupted() && !cancelled {
+                    if !self.controller.is_live() {
+                        return Err(errno::ESRCH);
+                    }
+                    if cmd == 7 && range.kind != 2 && interrupted() && !cancelled {
                         let mut cancel = Frame::new(Operation::Cancel, self.request()?);
                         cancel.ticket = frame.request;
-                        self.call(cancel, None)?;
+                        // Completion can win the race with cancellation. Its
+                        // original reply remains authoritative in that case.
+                        match self.call(cancel, None) {
+                            Ok(_) | Err(errno::ENOENT) => {}
+                            Err(error) => return Err(error),
+                        }
                         cancelled = true;
                     }
                 }

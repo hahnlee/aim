@@ -340,7 +340,9 @@ fn send(
     once: bool,
 ) -> io::Result<()> {
     let (mut buffer, size) = message(dest, reply, frame, proof, once);
-    let result = unsafe { mach_msg(buffer.as_mut_ptr().cast(), 1 | 16, size, 0, 0, 1000, 0) };
+    // Queue pressure is not a file-lock error. Let Mach wait for queue space
+    // rather than turning a timed-out send into guest EIO.
+    let result = unsafe { mach_msg(buffer.as_mut_ptr().cast(), 1, size, 0, 0, 0, 0) };
     if result != 0 {
         eprintln!(
             "[posix-owner] stage=send pid={} mach={result:#x} operation={:?} request={} destination={dest} reply={reply}",
@@ -586,6 +588,7 @@ struct Active {
     thread: Option<usize>,
     cancelled: bool,
     key: [u8; 36],
+    operation: Operation,
 }
 #[derive(Default)]
 struct State {
@@ -659,6 +662,7 @@ impl Worker {
                 thread: None,
                 cancelled: false,
                 key: file.key,
+                operation: frame.operation,
             },
         );
         Ok(file)
@@ -776,11 +780,20 @@ impl Worker {
                 .values_mut()
                 .filter(|active| keys.contains(&active.key))
             {
+                // Linux close removes held ranges; it does not interrupt a
+                // concurrent fcntl on another descriptor for this inode. Drain
+                // nonblocking operations before unlocking, and leave sleepers
+                // alive. Only process teardown cancels those sleepers.
+                if key.is_some() && active.operation == Operation::Wait {
+                    continue;
+                }
                 waiting = true;
-                active.cancelled = true;
-                if let Some(thread) = active.thread {
-                    unsafe {
-                        libc::pthread_kill(thread as libc::pthread_t, libc::SIGUSR1);
+                if key.is_none() {
+                    active.cancelled = true;
+                    if let Some(thread) = active.thread {
+                        unsafe {
+                            libc::pthread_kill(thread as libc::pthread_t, libc::SIGUSR1);
+                        }
                     }
                 }
             }
@@ -808,7 +821,17 @@ impl Worker {
                 }
             }
         }
-        state.files.retain(|_, file| !keys.contains(&file.key));
+        // A sleeping lock still owns its backing fd. Retain its registration
+        // so a later Register reuses it: closing a duplicate or dropping the
+        // last backing after that sleeper acquires would revoke its new lock.
+        let active_keys = state
+            .active
+            .values()
+            .map(|active| active.key)
+            .collect::<Vec<_>>();
+        state
+            .files
+            .retain(|_, file| !keys.contains(&file.key) || active_keys.contains(&file.key));
         for key in keys {
             state.closing.remove(&key);
         }
@@ -928,6 +951,139 @@ pub fn serve(name: &str, controller: ProcessIdentity) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn queue_pressure_waits_instead_of_returning_io_error() {
+        let receive = Receive::new().unwrap();
+        assert_eq!(
+            unsafe { mach_port_insert_right(task(), receive.0, receive.0, 20) },
+            0
+        );
+        let right = SendRight::adopt(receive.0).unwrap();
+        let client = Client::from_right(right.try_clone().unwrap());
+        let endpoint = Endpoint {
+            receive,
+            _send: right,
+        };
+        let producer = std::thread::spawn(move || -> io::Result<()> {
+            let mut pending = Vec::new();
+            for request in 1..=32 {
+                pending.push(client.begin(Frame::new(Operation::Get, request), None)?);
+            }
+            for request in pending {
+                assert_eq!(request.wait(Duration::from_secs(5))?.errno, 0);
+            }
+            Ok(())
+        });
+        // Exceed the old one-second send deadline with a full native queue.
+        std::thread::sleep(Duration::from_millis(1200));
+        let received = (|| -> io::Result<()> {
+            for _ in 0..32 {
+                let request = endpoint.receive(Duration::from_secs(2))?;
+                request.reply.send(request.frame)?;
+            }
+            Ok(())
+        })();
+        producer.join().unwrap().unwrap();
+        received.unwrap();
+    }
+    #[test]
+    fn close_does_not_interrupt_a_nonblocking_lock() {
+        use std::os::fd::AsFd;
+        let directory = crate::scratch_dir("aim-close-lock");
+        let path = directory.join("file");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let key = Identity::from_fd(file.as_fd()).unwrap().to_bytes();
+        let worker = Arc::new(Worker {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+        });
+        worker.state.lock().unwrap().files.insert(
+            1,
+            Arc::new(Backing {
+                fd: file.into(),
+                key,
+                access: 2,
+            }),
+        );
+        let mut frame = Frame::new(Operation::Set, 1);
+        frame.ticket = 1;
+        frame.range = Range {
+            kind: 0,
+            start: 0x40000002,
+            len: 510,
+        };
+        let file = worker.reserve(frame).unwrap();
+        let closing = worker.clone();
+        let close = std::thread::spawn(move || closing.close(Some(key)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !worker.state.lock().unwrap().closing.contains(&key) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let reply = worker.run(frame, file);
+        close.join().unwrap().unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+        assert_eq!(
+            reply.errno, 0,
+            "F_SETLK read shared range must not return host errno {}",
+            reply.errno
+        );
+    }
+    #[test]
+    fn close_keeps_a_sleeping_lock_and_its_backing() {
+        use std::os::fd::AsFd;
+        let directory = crate::scratch_dir("aim-close-wait");
+        let path = directory.join("file");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let key = Identity::from_fd(file.as_fd()).unwrap().to_bytes();
+        let worker = Worker {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+        };
+        let mut register = Frame::new(Operation::Register, 1);
+        register.key = key;
+        register.access = 2;
+        let ticket = worker
+            .register(register, Some(SendRight::from_fd(file.as_fd()).unwrap()))
+            .unwrap();
+        let mut frame = Frame::new(Operation::Wait, 2);
+        frame.ticket = ticket;
+        frame.range = Range {
+            kind: 1,
+            start: 0x40000002,
+            len: 510,
+        };
+        let backing = worker.reserve(frame).unwrap();
+        worker.close(Some(key)).unwrap();
+        assert!(!worker.state.lock().unwrap().active[&frame.request].cancelled);
+        assert_eq!(
+            worker
+                .register(register, Some(SendRight::from_fd(file.as_fd()).unwrap()))
+                .unwrap(),
+            ticket
+        );
+        assert_eq!(
+            worker.run(frame, backing).errno,
+            0,
+            "close must not manufacture EINTR for F_SETLKW"
+        );
+        assert!(worker.state.lock().unwrap().files.contains_key(&ticket));
+        worker.close(Some(key)).unwrap();
+        assert!(worker.state.lock().unwrap().files.is_empty());
+        drop(file);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn linux_negative_ranges_and_protocol_are_checked() {
         assert_eq!(
