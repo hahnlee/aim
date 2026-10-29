@@ -7,6 +7,9 @@ use std::sync::atomic::Ordering::SeqCst;
 use super::thread::{self, Thread};
 use crate::errno::{self, EINVAL, EPERM, ESRCH};
 
+#[cfg(test)]
+mod sched_tests;
+
 struct Exe {
     guest: String,
     host: String,
@@ -203,6 +206,31 @@ fn retry_pthread(mut call: impl FnMut() -> i32) -> i32 {
     }
 }
 
+fn apply_host_qos(qos: libc::qos_class_t) -> Result<(), errno::Errno> {
+    let mut current = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+    let mut relative = 0;
+    // libpthread reads the calling pthread's requested QoS from its TSD.
+    // Compare both fields, not an effective QoS elevated by an override.
+    // This also observes policy changes made by native code on this thread.
+    let result = retry_pthread(|| unsafe {
+        libc::pthread_get_qos_class_np(libc::pthread_self(), &mut current, &mut relative)
+    });
+    if result != 0 {
+        return Err(errno::from_darwin(result));
+    }
+    if current as i32 == qos as i32 && relative == 0 {
+        return Ok(());
+    }
+    // The public self setter updates both the kernel policy and libpthread's
+    // TSD; a raw Mach policy call would leave the latter inconsistent.
+    let result = retry_pthread(|| unsafe { libc::pthread_set_qos_class_self_np(qos, 0) });
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(errno::from_darwin(result))
+    }
+}
+
 /// Give the calling thread the host scheduling of its Linux scheduling.
 /// Linux runs a SCHED_FIFO or SCHED_RR thread before every normal one and
 /// weighs normal threads by nice value; Android raises display and audio
@@ -251,18 +279,12 @@ pub fn apply_host_sched(nice: i32, policy: i32) -> Result<(), crate::errno::Errn
         || floor >= 25
         || io != 0;
     if !needs_policy && !HOST_POLICY.get() {
-        // SAFETY: plain call on the calling thread.
-        let result = retry_pthread(|| unsafe {
-            libc::pthread_set_qos_class_self_np(
-                super::cgroup::clamp_qos(host_qos(nice, policy) as i32, floor, ceiling),
-                0,
-            )
-        });
-        return if result == 0 {
-            apply_host_io(io)
-        } else {
-            Err(crate::errno::from_darwin(result))
-        };
+        apply_host_qos(super::cgroup::clamp_qos(
+            host_qos(nice, policy) as i32,
+            floor,
+            ceiling,
+        ))?;
+        return apply_host_io(io);
     }
     let (policy, priority) = match policy {
         SCHED_FIFO => (libc::SCHED_FIFO, 47),
