@@ -1699,6 +1699,11 @@ impl AppHost {
             return Err(self
                 .unimplemented_named("activity", "a service of system_server's own code (#1518)"));
         }
+        // ProcessList holds early starts for AMS.systemReady. A bind must
+        // not wait under the service lock or receive PMS's boot failure.
+        if !matches!(self.processes_ready.get(), Some(Ok(()))) {
+            return Ok(());
+        }
         let process = super::providers::process_name(&r.info.info);
         // `getProcessNameForService`: an isolated service runs alone in a
         // new isolated process named after it.
@@ -1744,6 +1749,23 @@ impl AppHost {
                     Self::temp_allowlist(state, uid, timeout, REASON_SERVICE_LAUNCH);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Resume services held for process readiness, on the boot worker.
+    pub(super) fn start_pending_services(&self) -> Result<(), Exception> {
+        let mut state = self.services.state.lock().unwrap();
+        let pending: Vec<_> = state
+            .records
+            .iter()
+            .filter(|r| {
+                !r.created && r.app.is_none() && (r.start_requested || state.auto_created(r.token))
+            })
+            .map(|r| r.token)
+            .collect();
+        for token in pending {
+            self.bring_up(&mut state, token)?;
         }
         Ok(())
     }
@@ -3664,6 +3686,77 @@ fn next_id(last: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_bindings_are_held_without_waiting_for_or_returning_boot_errors() {
+        use crate::package::info::{ApplicationInfo, ComponentInfo, PackageItemInfo};
+        struct Connection;
+        impl HostConnection for Connection {
+            fn connected(&self, _: Option<Binder>, _: bool) {
+                panic!("the service process has not attached");
+            }
+        }
+        for fail in [false, true] {
+            let host = super::super::tests::host_with_start(7, Arc::new(|| {}));
+            {
+                let mut apps = host.apps.lock().unwrap();
+                let app = apps.get_mut(&7).unwrap();
+                app.process = "p".into();
+                app.uid = 10123;
+            }
+            let info = ServiceInfo {
+                info: ComponentInfo {
+                    item: PackageItemInfo {
+                        name: Some("Service".into()),
+                        package_name: Some("p".into()),
+                        ..Default::default()
+                    },
+                    application_info: Arc::new(ApplicationInfo {
+                        uid: 10123,
+                        ..Default::default()
+                    }),
+                    process_name: Some("p".into()),
+                    split_name: None,
+                    attribution_tags: None,
+                    description_res: 0,
+                    enabled: true,
+                    exported: true,
+                    direct_boot_aware: true,
+                },
+                permission: None,
+                flags: 0,
+                foreground_service_type: 0,
+            };
+            let bind = || {
+                host.bind_found(
+                    RawIntent::of(None, 0, &[]).with_component("p", "Service"),
+                    info.clone(),
+                    None,
+                    Conn::Host(Arc::new(Connection)),
+                    None,
+                    None,
+                    BIND_AUTO_CREATE,
+                    0,
+                )
+                .unwrap();
+            };
+            bind();
+            assert!(host.services.state.lock().unwrap().records[0].app.is_none());
+            if fail {
+                let error = Exception::new(EX_ILLEGAL_STATE, "default grants failed");
+                host.processes_ready.set(Err(error)).unwrap();
+                bind();
+                assert!(host.services.state.lock().unwrap().records[0].app.is_none());
+            } else {
+                host.processes_ready.set(Ok(())).unwrap();
+                host.start_pending_services().unwrap();
+                assert_eq!(host.services.state.lock().unwrap().records[0].app, Some(7));
+                host.start_pending_services().unwrap();
+                assert_eq!(host.services.state.lock().unwrap().records.len(), 1);
+            }
+            host.process.shutdown().unwrap();
+        }
+    }
 
     #[test]
     fn service_user_mode_requires_an_explicit_own_package_component() {

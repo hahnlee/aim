@@ -129,8 +129,9 @@ public class NativePackageManagerInternal extends android.content.pm.PackageMana
     /** Stable identity retained by original permission constructors before scan capture. */
     public NativePackageManagerInternal() {}
     /** The four cold local reads used by the original default grant policy in aim-system. */
-    private IPackageDefaultGrantQueries defaultGrantQueries;
-    public NativePackageManagerInternal(IPackageDefaultGrantQueries queries) {
+    private volatile IPackageDefaultGrantQueries defaultGrantQueries;
+    synchronized void bindDefaultGrantQueries(IPackageDefaultGrantQueries queries) {
+        if (defaultGrantQueries != null) throw new IllegalStateException("default grant queries already bound");
         defaultGrantQueries = java.util.Objects.requireNonNull(queries);
     }
 

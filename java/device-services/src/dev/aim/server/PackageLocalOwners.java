@@ -9,22 +9,37 @@ import com.android.server.pm.UserManagerInternal;
 import com.android.server.pm.permission.PermissionManagerServiceInternal;
 
 /** aim-system's local views of the app host's existing owners (#2330). */
-final class PackageLocalOwners {
+public final class PackageLocalOwners {
+    /** Both startup paths publish the same facade before the original policy retains it. */
+    static synchronized Packages packages() {
+        var current = LocalServices.getService(android.content.pm.PackageManagerInternal.class);
+        if (current != null) {
+            if (current instanceof Packages packages) return packages;
+            throw new IllegalStateException("foreign package local owner already installed");
+        }
+        var owner = android.content.pm.IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
+        var packages = new Packages(java.util.Objects.requireNonNull(owner), () -> {
+            var service = IServiceHost.Stub.asInterface(java.util.Objects.requireNonNull(
+                    ServiceManager.getService("aim.service_host"), "package snapshot owner absent"));
+            return service.capturePackageScan();
+        });
+        LocalServices.addService(android.content.pm.PackageManagerInternal.class, packages);
+        return packages;
+    }
+
+    public static void prepareDefaultGrants(IPackageDefaultGrantQueries queries) {
+        packages().bindDefaultGrantQueries(queries);
+    }
+
     static IPackageShutdownBridge publish(ISystemProcess host, android.content.Context context,
             com.android.server.pm.Installer installer) {
         var users = android.os.IUserManager.Stub.asInterface(ServiceManager.getService("user"));
         LocalServices.addService(UserManagerInternal.class, new Users(java.util.Objects.requireNonNull(users)));
         LocalServices.addService(PermissionManagerServiceInternal.class, new Permissions(host));
         LocalServices.addService(StorageManagerInternal.class, new Storage(host));
-        var packages = android.content.pm.IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
+        var localPackages = packages();
         var dynamic = new com.android.server.pm.dex.DynamicCodeLogger(installer);
-        var localPackages = new Packages(java.util.Objects.requireNonNull(packages), () -> {
-            var service = IServiceHost.Stub.asInterface(java.util.Objects.requireNonNull(
-                    ServiceManager.getService("aim.service_host"), "package snapshot owner absent"));
-            return service.capturePackageScan();
-        });
         localPackages.dynamic = dynamic;
-        LocalServices.addService(android.content.pm.PackageManagerInternal.class, localPackages);
         var optimizer = new com.android.server.pm.PackageDexOptimizer(installer,
                 new com.android.server.pm.PackageManagerTracedLock(), context, "*dexopt*");
         var dex = new com.android.server.pm.dex.DexManager(context, optimizer, dynamic);
@@ -94,7 +109,7 @@ final class PackageLocalOwners {
     /** Read slice needed by the original role helper and ProcessLoggingHandler. */
     static final class Packages extends NativePackageManagerInternal {
         private final android.content.pm.IPackageManager owner;
-        private com.android.server.pm.dex.DynamicCodeLogger dynamic;
+        private volatile com.android.server.pm.dex.DynamicCodeLogger dynamic;
         @Override public com.android.server.pm.dex.DynamicCodeLogger getDynamicCodeLogger() {
             return java.util.Objects.requireNonNull(dynamic, "dynamic code owner unavailable");
         }

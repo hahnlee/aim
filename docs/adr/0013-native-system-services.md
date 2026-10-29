@@ -631,17 +631,25 @@ this adds vendor bridge classes only, with no replacement of original classes.
   unserved services and providers still require their owners' internals
   and remain explicit UnsupportedOperation (#1518).
 
-The app host now runs the pinned original `DefaultPermissionGrantPolicy` in
+The app host runs the pinned original `DefaultPermissionGrantPolicy` in
 `aim-system` at package readiness, before opening AMS process startup (#2361).
-A vendor wrapper supplies its four `PackageManagerInternal` reads from the
-native package owners; its synchronous permission Binder mutations still commit
-through the native access owner. The owner persists the default-grant fingerprint
-only after the policy returns and republishes its committed state before releasing
-pending application starts. An error keeps startup closed. This adds vendor classes
-and a compile-only API stub, with no original-class or image replacement. The host
-regression forces the early uid-1002 contacts denial and checks the shared-UID
-grants and failed-readiness path; original policy execution is linkage-checked,
-not guest-boot validated.
+`PackageLocalOwners` publishes that process's single `PackageManagerInternal`
+facade, whether default grants or the other local adapters initialize first
+(#2410). The grant wrapper binds its four native package reads to that same
+facade before the original policy constructor retains it; it never replaces
+another global owner. `NativePackageBootstrap` owns the internal in the separate
+native-PMS system_server path. Synchronous permission Binder mutations still
+commit through the native access owner. That owner persists the default-grant
+fingerprint only after the policy returns and republishes its committed state
+before releasing pending application starts. An error keeps startup closed and
+is reported by the boot worker. Early service starts and auto-create bindings
+retain their records until readiness succeeds, rather than waiting under the
+service lock and returning the grant exception to a bind caller.
+These are vendor classes with no original-class or image replacement. Host
+regressions cover both local-owner orders, retained query and diagnostic owners,
+early bindings and failed readiness, including the uid-1002 shared-UID contacts
+check. The original policy also completes in a disposable app-host boot with a
+forced late grant; aim-system starts once (#2410, 2026-10-29).
 
 The install-existing leaf (#2330) retains `ExistingInstallEffects` in aim-system,
 with the original non-isolated Installer connected to installd and local adapters

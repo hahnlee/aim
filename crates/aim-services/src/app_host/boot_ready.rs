@@ -20,7 +20,8 @@ impl AppHost {
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission owner unavailable"))
             .and_then(|owner| owner.system_ready());
         let _ = self.processes_ready.set(result.clone());
-        result
+        result?;
+        self.start_pending_services()
     }
 }
 
