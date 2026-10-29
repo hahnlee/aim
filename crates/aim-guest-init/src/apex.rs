@@ -13,6 +13,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
 use aim_android_init::ImageRoot;
@@ -34,6 +35,7 @@ pub struct ApexEntry {
     pub module_path: String,
     pub version_code: i64,
     pub version_name: String,
+    pub last_update_millis: Option<i64>,
     pub partition: String,
     /// apexd activates it in bootstrap mode, before init's early-init
     /// `perform_apex_config --bootstrap`.
@@ -186,11 +188,20 @@ pub fn scan(image: &ImageRoot) -> Vec<ApexEntry> {
             Some((path, partition)) => (path.clone(), partition.to_string()),
             None => (format!("/apex/{dir}"), "SYSTEM".to_string()),
         };
+        // apexd's `CollectApexInfoList` stores `st_mtime`, in seconds.
+        let last_update_millis = match fs::metadata(image.host_path(&module_path)) {
+            Ok(metadata) => Some(metadata.mtime()),
+            Err(error) => {
+                eprintln!("guest-init: Failed to stat {module_path}: {error}");
+                None
+            }
+        };
         out.push(ApexEntry {
             module_name,
             module_path,
             version_code: manifest.version,
             version_name: manifest.version_name,
+            last_update_millis,
             partition,
             vendor_bootstrap: manifest.vendor_bootstrap,
         });
@@ -210,14 +221,22 @@ fn escape(value: &str) -> String {
 pub fn apex_info_list_xml(entries: &[ApexEntry]) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<apex-info-list>\n");
     for entry in entries {
-        let _ = writeln!(
+        let _ = write!(
             out,
-            "    <apex-info moduleName=\"{}\" modulePath=\"{}\" preinstalledModulePath=\"{}\" versionCode=\"{}\" versionName=\"{}\" isFactory=\"true\" isActive=\"true\" provideSharedApexLibs=\"false\" partition=\"{}\"/>",
+            "    <apex-info moduleName=\"{}\" modulePath=\"{}\" preinstalledModulePath=\"{}\" versionCode=\"{}\" versionName=\"{}\" isFactory=\"true\" isActive=\"true\"",
             escape(&entry.module_name),
             escape(&entry.module_path),
             escape(&entry.module_path),
             entry.version_code,
-            escape(&entry.version_name),
+            escape(&entry.version_name)
+        );
+        // ApexInfoList.xsd / generated ApexInfo::write (android-16.0.0_r1).
+        if let Some(millis) = entry.last_update_millis {
+            let _ = write!(out, " lastUpdateMillis=\"{millis}\"");
+        }
+        let _ = writeln!(
+            out,
+            " provideSharedApexLibs=\"false\" partition=\"{}\"/>",
             entry.partition
         );
     }
@@ -297,6 +316,7 @@ mod tests {
             module_path: "/vendor/apex/com.android.hardware.power.apex".into(),
             version_code: 1,
             version_name: String::new(),
+            last_update_millis: None,
             partition: "VENDOR".into(),
             vendor_bootstrap: false,
         }]);
@@ -304,6 +324,29 @@ mod tests {
         assert_eq!(parsed[0].module_name, "com.android.hardware.power");
         assert_eq!(parsed[0].partition, "VENDOR");
         assert!(parsed[0].is_active);
+    }
+
+    #[test]
+    fn xml_includes_optional_last_update_millis_in_schema_order() {
+        let mut entry = ApexEntry {
+            module_name: "com.android.art".into(),
+            module_path: "/system/apex/art.apex".into(),
+            version_code: 1,
+            version_name: String::new(),
+            last_update_millis: Some(1_700_000_000_987),
+            partition: "SYSTEM".into(),
+            vendor_bootstrap: false,
+        };
+        let xml = apex_info_list_xml(std::slice::from_ref(&entry));
+        assert!(xml.contains(
+            "isActive=\"true\" lastUpdateMillis=\"1700000000987\" provideSharedApexLibs=\"false\""
+        ));
+        entry.last_update_millis = Some(0);
+        assert!(
+            apex_info_list_xml(std::slice::from_ref(&entry)).contains("lastUpdateMillis=\"0\"")
+        );
+        entry.last_update_millis = None;
+        assert!(!apex_info_list_xml(&[entry]).contains("lastUpdateMillis"));
     }
 
     /// A zip of `entries` (name, data, deflated), as an APEX package is.
@@ -428,12 +471,46 @@ mod tests {
     }
 
     #[test]
+    fn scan_reads_selected_package_mtime_through_image_root() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!("gi-apex-mtime-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("apex/com.android.art")).unwrap();
+        fs::create_dir_all(root.join("system/apex")).unwrap();
+        fs::create_dir_all(root.join("system/system_ext/apex")).unwrap();
+        std::os::unix::fs::symlink("/system/system_ext", root.join("system_ext")).unwrap();
+        let art = manifest("com.android.art", 2);
+        fs::write(root.join("apex/com.android.art/apex_manifest.pb"), &art).unwrap();
+        fs::write(
+            root.join("system/apex/old.apex"),
+            zip(&[("apex_manifest.pb", &manifest("com.android.art", 1), false)]),
+        )
+        .unwrap();
+        let package = root.join("system/system_ext/apex/art.capex");
+        fs::write(&package, zip(&[("apex_manifest.pb", &art, false)])).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&package)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::new(1_700_000_000, 987_654_321))
+            .unwrap();
+
+        let entries = scan(&ImageRoot::new(&root));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].module_path, "/system_ext/apex/art.capex");
+        assert_eq!(entries[0].last_update_millis, Some(1_700_000_000));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn bootstrap_lists_and_links_vendor_bootstrap_apexes() {
         let entry = |name: &str, vendor_bootstrap| ApexEntry {
             module_name: name.into(),
             module_path: format!("/vendor/apex/{name}.apex"),
             version_code: 1,
             version_name: String::new(),
+            last_update_millis: None,
             partition: "VENDOR".into(),
             vendor_bootstrap,
         };
