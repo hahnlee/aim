@@ -154,6 +154,14 @@ time through the window hosts' existing sample wait, about 0.8–1.0 ms during
 Settings scrolling; this is buffer-read acknowledgement, not physical presentation
 or GPU execution time. No rendering-speed improvement is established.
 
+The GLES driver queues the release fence of a dequeued window buffer, and a
+native EGL server wait, as a Metal shared-event dependency, instead of polling
+the fence on the app's RenderThread. A traced first-launch Maps stall spent
+about 32 ms inside eglSwapBuffers on that poll. Settled Maps panning already ran
+at a 16.667 ms median interval, so no steady-state frame-rate gain is claimed.
+Host ordering tests and the original-libEGL guest graphics test cover it,
+including 240 three-buffer handoffs with every pixel checked (2026-10-29).
+
 The app host applies supported finishDrawing transactions to SurfaceFlinger,
 preserving buffers/fences, barriers, display/input state, cache operations and
 callbacks with the host's ordered apply token (#1431). It requests no BLAST

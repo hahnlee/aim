@@ -14,12 +14,13 @@
 //! the handles over ([`fork_state`]) and loads ANGLE again when the guest
 //! first calls it.
 //!
-//! Four functions are not plain forwards: [`FN_INIT`] loads ANGLE,
+//! Platform functions are not plain forwards: [`FN_INIT`] loads ANGLE,
 //! [`FN_IMPORT_BUFFER`] turns a mapped graphics buffer into an `EGLImage`
 //! over a linear Metal texture ([`metal`]), [`FN_PRESENT`] copies a window
 //! surface's pbuffer into the buffer being queued ([`present`]), and
 //! [`FN_FENCE`] makes a native fence (a sync_file) for the current
-//! context's commands ([`fence`]).
+//! context's commands, and [`FN_WAIT`] imports a sync_file as a GPU
+//! dependency ([`fence`]).
 
 mod display;
 mod fence;
@@ -35,8 +36,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use aim_hostcall::gpu::{
-    FN_FENCE, FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, FN_TABLE_BASE, Fence, ImportBuffer, Init,
-    Present, VERSION,
+    FN_FENCE, FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, FN_TABLE_BASE, FN_WAIT, Fence, ImportBuffer,
+    Init, Present, VERSION, Wait,
 };
 use aim_hostcall::{HostModule, args_mut, errno, module};
 
@@ -336,6 +337,17 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                 )
             }
             Err(e) => e,
+        },
+        FN_WAIT => match unsafe { args_mut::<Wait>(args, len) } {
+            Ok(a) if a.fd >= 0 => {
+                let pool = metal::pool_push();
+                // SAFETY: borrowed for this call; wait validates the fd.
+                let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(a.fd) };
+                let r = fence::wait(display::host(a.display as usize), fd);
+                metal::pool_pop(pool);
+                r.map_or_else(|e| e, |()| 0)
+            }
+            _ => EINVAL,
         },
         _ => ENOSYS,
     }

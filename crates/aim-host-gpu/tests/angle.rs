@@ -9,7 +9,8 @@ use aim_host_gpu::{MODULE, function, set_library_dir, table_identity};
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use aim_hostcall::gpu::{
-    FN_FENCE, FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, Fence, ImportBuffer, Init, Present,
+    FN_FENCE, FN_IMPORT_BUFFER, FN_INIT, FN_PRESENT, FN_WAIT, Fence, ImportBuffer, Init, Present,
+    Wait,
 };
 use aim_sync_file::State;
 
@@ -176,6 +177,63 @@ fn renders_into_a_shared_memory_buffer() {
     assert!(aim_sync_file::wait(fence.as_fd(), 5000));
     assert_eq!((px(0), px(h - 1)), (0xff00_00ff, 0xff00_00ff), "red");
     assert_eq!(x(c"glGetError", &[]), 0);
+
+    // A dequeued buffer's release fence is a GPU dependency, not a CPU
+    // stall. Later commands cannot complete until it signals, even after
+    // the import call and the caller's fd have gone away.
+    let (input, writer) = aim_sync_file::pair().unwrap();
+    let (signal, ready) = std::sync::mpsc::channel();
+    let signaled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let marked = signaled.clone();
+    let notifier = std::thread::spawn(move || {
+        // Also release the GPU if the call incorrectly blocks or an
+        // assertion unwinds, so a regression cannot strand this test.
+        let _ = ready.recv_timeout(std::time::Duration::from_secs(2));
+        marked.store(true, std::sync::atomic::Ordering::SeqCst);
+        writer.signal(1);
+    });
+    assert_eq!(
+        block(
+            FN_WAIT,
+            &mut Wait {
+                display: dpy,
+                fd: std::os::fd::AsRawFd::as_raw_fd(&input),
+                _reserved: 0,
+            }
+        ),
+        0
+    );
+    drop(input);
+    x(c"glClear", &[0x4000]);
+    let fd = block(FN_FENCE, &mut Fence { display: dpy });
+    assert!(fd >= 0);
+    // SAFETY: the new completion fence, owned by this test.
+    let output = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    assert!(
+        !signaled.load(std::sync::atomic::Ordering::SeqCst),
+        "CPU wait blocked"
+    );
+    assert!(
+        !aim_sync_file::wait(output.as_fd(), 20),
+        "GPU passed an unsignaled dependency"
+    );
+    signal.send(()).unwrap();
+    notifier.join().unwrap();
+    assert!(aim_sync_file::wait(output.as_fd(), 5000));
+
+    let (socket, _) = std::os::unix::net::UnixStream::pair().unwrap();
+    assert_eq!(
+        block(
+            FN_WAIT,
+            &mut Wait {
+                display: dpy,
+                fd: std::os::fd::AsRawFd::as_raw_fd(&socket),
+                _reserved: 0,
+            }
+        ),
+        -22,
+        "only sync_files may be imported"
+    );
 
     // A fence for later commands: each signals once its commands are done.
     let mut fences = Vec::new();

@@ -386,8 +386,8 @@ static void import_fence(EGLDisplay dpy, int fd) {
     EGLSyncKHR sync = eglCreateSyncKHR(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
     CHECK(sync != EGL_NO_SYNC_KHR, "import handoff fence %x", eglGetError());
     CHECK(eglWaitSyncKHR(dpy, sync, 0), "wait for handoff fence %x", eglGetError());
-    CHECK(eglClientWaitSyncKHR(dpy, sync, 0, 0) == EGL_CONDITION_SATISFIED_KHR,
-          "handoff fence signaled after server wait");
+    // Server waits order GPU commands; they need not signal the fence on
+    // the CPU. The consumer readback below checks the ordered pixels.
     CHECK(eglDestroySyncKHR(dpy, sync), "destroy imported sync %x", eglGetError());
     CHECK(fcntl(fd, F_GETFD) == -1 && errno == EBADF, "imported fd closed by EGL");
 }

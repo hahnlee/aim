@@ -528,25 +528,6 @@ pub unsafe extern "C" fn eglGetCurrentSurface(which: EGLint) -> EGLSurface {
     (if which == EGL_DRAW { draw } else { read }) as EGLSurface
 }
 
-/// Wait for and close a fence fd.
-fn wait(fence: c_int) {
-    if fence < 0 {
-        return;
-    }
-    let mut p = libc::pollfd {
-        fd: fence,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one pollfd; the fence is ours to close.
-    unsafe {
-        while libc::poll(&mut p, 1, -1) < 0
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
-        {}
-        libc::close(fence);
-    }
-}
-
 /// Present a window surface: its pbuffer into the next buffer of the window.
 fn swap(surface: EGLSurface, w: &mut Window) -> EGLBoolean {
     if CURRENT.get().0 != surface as usize {
@@ -557,7 +538,18 @@ fn swap(surface: EGLSurface, w: &mut Window) -> EGLBoolean {
     if unsafe { ANativeWindow_dequeueBuffer(w.window, &mut buffer, &mut fence) } != 0 {
         return fail(EGL_BAD_NATIVE_WINDOW, EGL_FALSE);
     }
-    wait(fence);
+    if fence >= 0 {
+        let waited = crate::sync::server_wait(w.display, fence);
+        // SAFETY: the host wait has retained the dependency on success;
+        // on failure the untouched buffer goes back with its fence.
+        unsafe {
+            if waited == EGL_FALSE {
+                ANativeWindow_cancelBuffer(w.window, buffer, fence);
+                return EGL_FALSE;
+            }
+            libc::close(fence);
+        }
+    }
     // SAFETY: a buffer the window just gave us.
     let b = unsafe { &*buffer };
     // SAFETY: the buffer's handle.
