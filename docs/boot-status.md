@@ -416,13 +416,22 @@ the system process starts from its standalone jar and publishes as
 published as `adservices_manager`, so AdServices' AdServicesCommonService
 finds it at its start (2026-10-22, #1965; `sdk_sandbox` is #1982).
 
-The Bluetooth startup ordering now includes PMS's synchronous default grants
-before AMS releases application starts (#2361). The original grant policy runs
-in `aim-system` over the native access owner, whose committed grants and default
-grant fingerprint precede readiness. The uid-1002 shared-UID contacts observer
-regression forces the early denial, then verifies startup after grant commitment;
-failed policy execution keeps startup closed. Host tests and pinned-image Java
-linkage cover the change; no guest boot was run (2026-10-29).
+PMS's synchronous default grants precede AMS application startup (#2361).
+The original policy runs in `aim-system` over the native access owner, whose
+committed grants and default-grant fingerprint precede readiness. Its retained
+`PackageManagerInternal` is now the same facade that `PackageLocalOwners`
+publishes, in either initialization order (#2410). Early service binds retain
+pending records and return without waiting on grants under the service lock;
+the boot worker resumes them only after successful readiness. Grant failures
+remain boot failures and do not cross back through unrelated service bindings.
+The forced late-grant baseline restarted uid-1000 RuntimeInit seven times in
+40 s without boot completion. With the fix and the same three-second forcing
+delay, the original grant policy completes, boot finishes in 11.965 s and
+uid-1000 RuntimeInit starts once. Host/JVM regressions cover both owner orders,
+all four policy reads, dead query owners, early bindings, failed readiness and
+the shared-UID contacts grant. Normal boots take 10.263 s from a fresh
+template clone and 6.863 s on its second boot, with one uid-1000 RuntimeInit
+start each. The forcing code is removed (2026-10-29).
 The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
