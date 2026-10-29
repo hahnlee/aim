@@ -570,6 +570,8 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
     // process-lifetime pair; construction must not replace either descriptor.
     let app_host = crate::app_host::AppHost::new(native.clone());
     app_host.set_system(system.clone());
+    // Isolate registration/epoch behavior from the app host's boot admission.
+    app_host.package_booted_for_test();
     let early_public = native.add_service(Arc::new(
         crate::app_host::package_service::PackageService::new(app_host.clone()),
     ));
@@ -687,6 +689,7 @@ fn original_names_stay_same_binder_across_two_epochs_private_reference_retires()
     // this session without loading its old joined package model.
     let app_host = crate::app_host::AppHost::new(native.clone());
     app_host.set_system(system.clone());
+    app_host.package_booted_for_test();
     let adapter = crate::app_host::package_service::PackageService::new(app_host);
     let mut request = Parcel::new();
     pm::GetSetupWizardPackageName {}.write(&mut request);

@@ -47,6 +47,11 @@ impl Service for PackageService {
             Ok(system) => system,
             Err(error) => return super::reply(Err(error)),
         };
+        // Init can start aim-system before PMS construction finishes. Its first
+        // package query precedes attachSystemProcess, so admission must wait here.
+        if let Err(error) = self.host.package_boot.wait() {
+            return super::reply(Err(error.clone()));
+        }
         let (public, native) = crate::package::service::PackageQueries::from_system(system);
         if self.native {
             native.transact(call)

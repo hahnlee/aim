@@ -1272,6 +1272,40 @@ fn host_user_unlocking_publishes_and_survives_enabled_and_permission_updates() {
     drop(workers);
 }
 
+/// A native query publication withheld until the startup regression releases it.
+pub(crate) fn with_late_package_boot(test: impl FnOnce(&Arc<AppHost>, &mut dyn FnMut())) {
+    let mut fixture = Fixture::new();
+    let host = AppHost::new(fixture.native.clone());
+    host.set_system(fixture.system.clone());
+    let bridge = fixture.attach();
+    let image = fixture.root.join("image");
+    std::fs::create_dir_all(image.join("system/framework")).unwrap();
+    std::fs::write(image.join("system/build.prop"), "ro.build.version.sdk=36\n").unwrap();
+    std::fs::write(
+        image.join("system/framework/framework-res.apk"),
+        include_bytes!("../tests/fixtures/discovery/framework.apk"),
+    )
+    .unwrap();
+    crate::app_host::configure_boot_test_host(
+        &host,
+        &image,
+        &fixture.root.join("data"),
+        &fixture.root.join("bpf"),
+        Box::new(|name| match name {
+            "ro.build.version.sdk" => Some("36".into()),
+            "ro.build.version.codename" => Some("REL".into()),
+            "persist.sys.locale" => Some("en-US".into()),
+            "ro.sf.lcd_density" => Some("160".into()),
+            _ => None,
+        }),
+    );
+    assert!(fixture.system.capture_package_queries().is_err());
+    test(&host, &mut || {
+        publish_restart_capture(&fixture, &bridge);
+        host.package_booted_for_test();
+    });
+}
+
 /// A real session and disposable Settings owner for service-discovery regressions.
 pub(crate) fn with_discovery_session(
     test: impl FnOnce(

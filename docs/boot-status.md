@@ -455,9 +455,16 @@ PackageManager remains original in the default image. Controlled slice C images
 redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance. On the
-app host image (2026-10-26) the native package boot runs its scans,
-construction and publication, the system process attaches once after it, and
-the guest reaches BOOT_COMPLETED. Ordinary package reads retain the last
+app host image (2026-10-26) the native package boot ran its scans,
+construction and publication, the system process attached once after it, and
+the guest reached BOOT_COMPLETED. Faster startup exposed aim-system querying
+packages before that publication (#2392): init starts it independently of the
+agent-triggered native package boot. The public package Binder fronts now wait
+for the same package-boot result as host consumers before dispatch, covering
+the ApplicationInfo query that precedes attachSystemProcess. Host regressions
+with delayed publication check one successful attach and no query exception;
+failed construction releases waiting calls with its error. No guest boot was
+run (2026-10-29). Ordinary package reads retain the last
 committed capture across bootstrap bridge death/replacement only while its
 canonical package metadata is unchanged (usage-only advances are allowed);
 scoped owners remain fenced until republication (#2276; host regressions,
