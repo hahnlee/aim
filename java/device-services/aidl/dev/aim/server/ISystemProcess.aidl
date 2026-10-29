@@ -7,6 +7,7 @@ import dev.aim.server.IRecoverableKeyStoreKeys;
 import dev.aim.server.IActivityStatsSnapshot;
 import dev.aim.server.IActivityStatsHost;
 import dev.aim.server.IStorageCrates;
+import dev.aim.server.IAppHostPackageShellRead;
 
 /**
  * The app host's part of system_server for its system process
@@ -82,4 +83,5 @@ interface ISystemProcess {
     void attachUserSwitcherPolicy(IBinder policy);
     /** Original Intent command parser; system UID only. */
     void attachPackageIntentParser(IBinder parser);
+    void attachPackageShellRead(IAppHostPackageShellRead owner);
 }

@@ -732,6 +732,12 @@ StorageStatsService's metadata conversion is extracted into that bridge; native
 package and permission owners check the caller before forwarding. This adds
 vendor classes only, with no original class or image replacement.
 
+The package shell's cold permission/resource and ResolveInfo presentation (#2327)
+runs in aim-system using the existing original Java leaf. Native package and
+permission owners supply scoped read-only Binder capabilities bound to the
+original authenticated caller; they retire on return. This adds vendor bridge
+classes and AIDL only, with no original class or image replacement.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

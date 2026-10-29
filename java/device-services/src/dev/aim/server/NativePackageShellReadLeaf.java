@@ -18,13 +18,37 @@ public final class NativePackageShellReadLeaf extends IPackageShellReadLeaf.Stub
         this.context=Objects.requireNonNull(context);this.packages=Objects.requireNonNull(packages);
     }
     private static void enforce(){if(Binder.getCallingUid()!=1000)throw new SecurityException("Native shell owner required");}
+    @Override public int runReadCommand(String[] args, ParcelFileDescriptor input,
+            ParcelFileDescriptor output, ParcelFileDescriptor error) {
+        if (Binder.getCallingUid() != 0 && Binder.getCallingUid() != 2000)
+            throw new SecurityException("Shell commands are only callable by ADB");
+        try (var capture = packages.computer()) {
+            return com.android.server.pm.NativePackageReadCommand.run(context,
+                    capture.readQueries(), null, args, input, output, error);
+        }
+    }
     private static String[] lines(String text){return text.split("\\n",-1).length==1&&text.isEmpty()?new String[0]:text.substring(0,text.endsWith("\n")?text.length()-1:text.length()).split("\\n",-1);}
+    @Override public String[] listPermissionGroups(int uid,int pid)throws RemoteException{
+        enforce();
+        try(var capture=packages.computer()){
+            var pm=capture.readQueries(uid,pid);var visible=new ArrayList<PermissionGroupInfo>();
+            for(var info:Objects.requireNonNull(context.getSystemService(PermissionManager.class)).getAllPermissionGroups(0))
+                if(pm.getPermissionGroupInfo(info.name,0)!=null)visible.add(info);
+            return permissionGroups(visible);
+        }
+    }
+    static String[] permissionGroups(List<PermissionGroupInfo> groups){
+        return groups.stream().map(info -> "permission group:" + info.name).toArray(String[]::new);
+    }
     @Override public int getMaxSupportedUsers(){enforce();return UserManager.getMaxSupportedUsers();}
     @Override public byte[] parseIntent(String[] arguments) {
         enforce();return PackageIntentParser.parse(arguments);
     }
     @Override public String[] dumpResolveInfo(byte[] record,String prefix){
-        enforce();Parcel in=Parcel.obtain();try{in.unmarshall(record,0,record.length);in.setDataPosition(0);ResolveInfo info=ResolveInfo.CREATOR.createFromParcel(in);if(in.dataAvail()!=0)throw new IllegalArgumentException("ResolveInfo tail");StringWriter text=new StringWriter();info.dump(new android.util.PrintWriterPrinter(new PrintWriter(text)),prefix);return lines(text.toString());}finally{in.recycle();}
+        enforce();return dump(record,prefix);
+    }
+    static String[] dump(byte[] record,String prefix){
+        Parcel in=Parcel.obtain();try{in.unmarshall(record,0,record.length);in.setDataPosition(0);ResolveInfo info=ResolveInfo.CREATOR.createFromParcel(in);if(in.dataAvail()!=0)throw new IllegalArgumentException("ResolveInfo tail");StringWriter text=new StringWriter();info.dump(new android.util.PrintWriterPrinter(new PrintWriter(text)),prefix);return lines(text.toString());}finally{in.recycle();}
     }
     @Override public String[] listInstrumentation(boolean showSourceDir, String targetPackage, int uid, int pid) throws RemoteException {
         enforce();
@@ -45,22 +69,38 @@ public final class NativePackageShellReadLeaf extends IPackageShellReadLeaf.Stub
     @Override public String[] listPermissions(boolean groups,boolean labels,boolean summary,int minimum,int maximum,String group,int uid,int pid)throws RemoteException{
         enforce();PermissionManager manager=Objects.requireNonNull(context.getSystemService(PermissionManager.class));
         var captured=packages.computer();
-        IPackageManager pm=captured.readQueries(uid,pid);
+        try {
+            IPackageManager pm=captured.readQueries(uid,pid);
+            return permissions(groups,labels,summary,minimum,maximum,group,pm,new PermissionQueries(){
+                public List<PermissionGroupInfo> groups() {return manager.getAllPermissionGroups(0);}
+                public PermissionGroupInfo group(String name)throws RemoteException{return pm.getPermissionGroupInfo(name,0);}
+                public List<PermissionInfo> permissions(String name){return manager.queryPermissionsByGroup(name,0);}
+            });
+        }finally{captured.close();}
+    }
+    interface PermissionQueries {
+        List<PermissionGroupInfo> groups() throws RemoteException;
+        PermissionGroupInfo group(String name) throws RemoteException;
+        List<PermissionInfo> permissions(String name) throws RemoteException;
+    }
+    // PackageManagerShellCommand.doListPermissions, android-16.0.0_r1 (Apache-2.0).
+    static String[] permissions(boolean groups,boolean labels,boolean summary,int minimum,int maximum,
+            String group,IPackageManager pm,PermissionQueries manager)throws RemoteException{
         StringWriter text=new StringWriter();PrintWriter out=new PrintWriter(text);List<String> names=new ArrayList<>();
-        if(groups){for(PermissionGroupInfo info:manager.getAllPermissionGroups(0))names.add(info.name);names.add(null);}else names.add(group);
+        if(groups){for(PermissionGroupInfo info:manager.groups())names.add(info.name);names.add(null);}else names.add(group);
         Map<String,Resources> resources=new HashMap<>();
         try{
             for(int i=0;i<names.size();i++){
                 String name=names.get(i),prefix="";
                 if(groups){
                     if(i>0)out.println();
-                    if(name!=null){PermissionGroupInfo info=pm.getPermissionGroupInfo(name,0);
+                    if(name!=null){PermissionGroupInfo info=manager.group(name);
                         if(summary){Resources res=resources(pm,info,resources);out.print((res!=null?load(info,info.labelRes,info.nonLocalizedLabel,res):info.name)+": ");}
                         else{out.println((labels?"+ ":"")+"group:"+info.name);if(labels){out.println("  package:"+info.packageName);Resources res=resources(pm,info,resources);if(res!=null){out.println("  label:"+load(info,info.labelRes,info.nonLocalizedLabel,res));out.println("  description:"+load(info,info.descriptionRes,info.nonLocalizedDescription,res));}}}
                     }else out.println((labels&&!summary?"+ ":"")+"ungrouped:");
                     prefix="  ";
                 }
-                List<PermissionInfo> permissions=manager.queryPermissionsByGroup(name,0);boolean first=true;
+                List<PermissionInfo> permissions=manager.permissions(name);boolean first=true;
                 if(permissions!=null)for(PermissionInfo info:permissions){if(groups&&name==null&&info.group!=null)continue;int base=info.protectionLevel&PermissionInfo.PROTECTION_MASK_BASE;if(base<minimum||base>maximum)continue;
                     if(summary){if(!first)out.print(", ");first=false;Resources res=resources(pm,info,resources);out.print(res!=null?load(info,info.labelRes,info.nonLocalizedLabel,res):info.name);}
                     else{out.println(prefix+(labels?"+ ":"")+"permission:"+info.name);if(labels){out.println(prefix+"  package:"+info.packageName);Resources res=resources(pm,info,resources);if(res!=null){out.println(prefix+"  label:"+load(info,info.labelRes,info.nonLocalizedLabel,res));out.println(prefix+"  description:"+load(info,info.descriptionRes,info.nonLocalizedDescription,res));}out.println(prefix+"  protectionLevel:"+PermissionInfo.protectionToString(info.protectionLevel));}}
@@ -68,7 +108,7 @@ public final class NativePackageShellReadLeaf extends IPackageShellReadLeaf.Stub
                 if(summary)out.println();
             }
             return lines(text.toString());
-        }catch(RemoteException error){throw error.rethrowFromSystemServer();}finally{captured.close();}
+        }catch(RemoteException error){throw error.rethrowFromSystemServer();}
     }
     private static String load(PackageItemInfo info,int id,CharSequence literal,Resources resources){if(literal!=null)return literal.toString();if(id!=0)try{return resources.getString(id);}catch(Resources.NotFoundException missing){}return null;}
     private static Resources resources(IPackageManager pm,PackageItemInfo info,Map<String,Resources> cache)throws RemoteException{

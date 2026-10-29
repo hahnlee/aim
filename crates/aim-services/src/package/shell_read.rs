@@ -40,10 +40,13 @@ fn incoming(ctx: &Context<'_>, user: i32, operation: &str, full: bool) -> Result
     )
 }
 fn required(args: &[String], at: &mut usize) -> Result<String, Exception> {
-    let value = args
-        .get(*at)
-        .cloned()
-        .ok_or_else(|| bad("Argument expected"))?;
+    let value = args.get(*at).cloned().ok_or_else(|| {
+        bad(format!(
+            "Argument expected after \"{}\"",
+            args.get(at.saturating_sub(1))
+                .map_or("path", String::as_str)
+        ))
+    })?;
     *at += 1;
     Ok(value)
 }
@@ -72,6 +75,17 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         return Ok(None);
     };
     let result = match command {
+        "get-app-links"
+        | "get-app-link-owners"
+        | "set-app-links-user-selection"
+        | "set-app-links-allowed"
+        | "dump"
+        | "dump-package"
+        | "get-privapp-permissions"
+        | "get-privapp-deny-permissions"
+        | "get-oem-permissions"
+        | "get-signature-permission-allowlist"
+        | "get-shared-uid-allowlist" => cold_command(ctx)?,
         "get-max-users" => {
             let mut request = Parcel::new();
             leaf::GetMaxSupportedUsers {}.write(&mut request);
@@ -87,6 +101,8 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
             Some("features") => features(ctx)?,
             Some("libraries") => libraries(ctx, &args[2..])?,
             Some("permissions") => permissions(ctx, &args[2..])?,
+            Some("permission-groups") => permission_groups(ctx)?,
+            Some("staged-sessions") => super::shell_install::list_staged(ctx, &args[2..])?,
             _ => return Ok(None),
         },
         "-l" => packages(ctx, &args[1..], false)?,
@@ -142,6 +158,21 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         _ => return Ok(None),
     };
     Ok(Some(result))
+}
+fn cold_command(ctx: &mut Context<'_>) -> Result<i32, Exception> {
+    let missing = || bad("missing read shell descriptor");
+    let clone = |fd: Option<&mut aim_binder_host::server::RetainedFd>| {
+        fd.ok_or_else(missing)?.try_clone().map_err(|error| {
+            Exception::new(EX_ILLEGAL_STATE, format!("read shell descriptor: {error}"))
+        })
+    };
+    let descriptors = [
+        clone(ctx.command.input())?,
+        clone(ctx.command.output())?,
+        clone(ctx.command.error())?,
+    ];
+    ctx.system()?
+        .shell_read_command(ctx.uid, ctx.pid, ctx.command.args.clone(), descriptors)
 }
 fn max_users(
     command: &mut crate::shell::ShellCommand,
@@ -230,6 +261,18 @@ fn path(ctx: &mut Context<'_>, args: &[String]) -> Result<i32, Exception> {
     }
     Ok(0)
 }
+fn package_number(args: &[String], at: &mut usize, is_user: bool) -> Result<i32, String> {
+    let argument =
+        |error: Exception| format!("java.lang.IllegalArgumentException: {}", error.message);
+    let value = required(args, at).map_err(argument)?;
+    if is_user {
+        user(&value).map_err(argument)
+    } else {
+        value
+            .parse()
+            .map_err(|_| format!("java.lang.NumberFormatException: For input string: \"{value}\""))
+    }
+}
 fn packages(ctx: &mut Context<'_>, args: &[String], mut source: bool) -> Result<i32, Exception> {
     let (
         mut disabled,
@@ -266,12 +309,20 @@ fn packages(ctx: &mut Context<'_>, args: &[String], mut source: bool) -> Result<
                 flags |= MATCH_APEX
             }
             "--factory-only" => flags |= MATCH_FACTORY_ONLY,
-            "--user" => requested = user(&required(args, &mut at)?)?,
-            "--uid" => {
-                uid = true;
-                only_uid = required(args, &mut at)?
-                    .parse()
-                    .map_err(|_| bad("illegal uid"))?
+            "--user" | "--uid" => {
+                let value = match package_number(args, &mut at, option == "--user") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        ctx.command.println(&format!("Error: {error}"));
+                        return Ok(-1);
+                    }
+                };
+                if option == "--user" {
+                    requested = value;
+                } else {
+                    uid = true;
+                    only_uid = value;
+                }
             }
             "--match-libraries" => flags |= MATCH_STATIC_SHARED_AND_SDK_LIBRARIES,
             "--show-stopped" => stopped = true,
@@ -468,6 +519,23 @@ fn libraries(ctx: &mut Context<'_>, args: &[String]) -> Result<i32, Exception> {
     }
     Ok(0)
 }
+fn permission_groups(ctx: &mut Context<'_>) -> Result<i32, Exception> {
+    let mut request = Parcel::new();
+    leaf::ListPermissionGroups {
+        calling_uid: ctx.uid as i32,
+        calling_pid: ctx.pid,
+    }
+    .write(&mut request);
+    let reply = ctx.read_leaf(leaf::LIST_PERMISSION_GROUPS, request)?;
+    let lines = leaf::read_list_permission_groups_reply(&mut reply.reader())
+        .map_err(decode)??
+        .ok_or_else(|| bad("permission groups output null"))?;
+    for line in lines {
+        ctx.command.println(java(line.as_deref()));
+    }
+    Ok(0)
+}
+
 fn permissions(ctx: &mut Context<'_>, args: &[String]) -> Result<i32, Exception> {
     let (mut labels, mut groups, mut summary, mut dangerous, mut user_only, mut at) =
         (false, false, false, false, false, 0usize);
@@ -546,7 +614,24 @@ fn intents(ctx: &mut Context<'_>, command: &str, args: &[String]) -> Result<i32,
     if reader.remaining() != 0 {
         return Err(bad("intent syntax tail"));
     }
-    let user = incoming(ctx, requested, "package intent query", false)?;
+    use aim_service_aidl::android_app_iactivitymanager as am;
+    let user = ctx.system()?.call(
+        "activity",
+        am::HANDLE_INCOMING_USER,
+        |p| {
+            am::HandleIncomingUser {
+                calling_pid: ctx.pid,
+                calling_uid: ctx.uid as i32,
+                user_id: requested,
+                allow_all: false,
+                require_full: false,
+                name: None,
+                caller_package: None,
+            }
+            .write(p)
+        },
+        am::read_handle_incoming_user_reply,
+    )?;
     let capture = ctx.capture()?;
     let resolution = Resolution::new(
         capture.state().clone(),

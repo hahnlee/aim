@@ -362,7 +362,7 @@ STATE_ON (media sessions serve its AVRCP target and media browser).
 The app host's system process starts the original DeviceLock APEX service when `android.software.device_lock` is declared, as in the pinned image; linkage is checked, with no guest boot run (#2234).
 The app host's Wi-Fi owner serves state listener registration/removal through the original Java callback registry in `aim-system`, follows the Mac's radio state, and returns permission-checked empty Passpoint configurations; host tests and pinned-image linkage are checked without a guest boot, and other missing Wi-Fi calls name #2261.
 Manifest receivers of process `system` and uid 1000, including framework-res's BootReceiver and CertPinInstallReceiver, now route to `aim-system`'s original ActivityThread with the system-server class loader; host delivery/finish tests and linkage are checked without a guest boot, while unserved framework services and providers remain explicit UnsupportedOperation (#1518).
-The app host's domain-verification front end keeps verifier-status persistence native and handles URI group set/get with original Java permission, Bundle, validation and conversion helpers over runtime-only native state; paired host tests, pinned-image linkage and a fresh-data app-host boot pass (#1763). Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun).
+The app host's domain-verification front end keeps verifier-status persistence native and handles URI group set/get with original Java permission, Bundle, validation and conversion helpers over runtime-only native state; paired host tests, pinned-image linkage and a fresh-data app-host boot pass (#1763). Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun). Its `pm` and `cmd domain_verification` shell routes now serve all DomainVerificationShell verbs (#2187), retaining the original internal permission checks and parser. `set-app-links` and `reset-app-links` use the durable native writer; `verify-app-links` selects default/re-verify eligibility from native attached state and sends through the existing domain owner's selected original verifier proxy. The original modern proxy builds the domain-verification request broadcast; the original unavailable proxy handles an absent verifier. Host tests cover eligibility, filtering, state writes and delivery errors; pinned Java methods, exact shell output and the original modern proxy/request path over recorded JVM boundaries pass without a guest boot. Android 16's verification package argument is positional; `--package` retains the original unknown-option error.
 Telecom is loaded in the system process: TelecomLoaderService's part
 there binds its TelecomService and creates and publishes `telecom` on that
 process's main thread, also with Bluetooth on and after the process is
@@ -2439,6 +2439,51 @@ Native shell now calls the original UserManager.getMaxSupportedUsers through
 its authenticated typed leaf and prints the exact original prefix. Actual Binder
 CLI output/exception/tail tests and complete private Java original linkage/stub
 code checks pass; matched image deployment remains pending and C111 is unchanged.
+Package shell read coverage (#2327) includes package/feature/library/permission/
+permission-group/instrumentation/user lists, activity resolution, all three intent
+queries and path. App-host cold permission resources and ResolveInfo dumps now
+use the original Java leaf in aim-system with scoped caller-bound read queries.
+Host FD/exit-status tests cover this boundary. Explicit-component activity
+resolution and activity/receiver queries attach the parser over Binder and run
+production PackageIntentParser with the hash-pinned original Java syntax on the
+host JVM, retaining status/stdout/stderr assertions. Android value/parcel
+boundaries and ResolveInfo presentation remain doubled. Java compilation/DEX
+linkage covers the cold leaf; its original resource/dump execution, matched-image
+deployment and guest boot remain unverified.
+The read bridge also transfers stdin/stdout/stderr and authenticated shell identity
+for dump/dump-package and the original privapp/OEM/signature/shared-UID allowlist
+commands. Dump aggregation uses caller-bound capabilities for each real service;
+the package dump still has its reduced native format, so full ComputerEngine/
+Settings dump parity remains #2327. `list staged-sessions` enters the same native
+installer as `get-stagedsessions`. No new guest execution is claimed.
+Domain shell wiring (#2187) carries both `cmd domain_verification` and `pm`
+through the original Java DomainVerificationShell/DomainVerificationDebug over
+native captured state. The pinned JVM oracle asserts exact successful output
+for verified, unverified and selected domains and both Java entry paths; its
+outer PM route and Android runtime boundaries are doubled. Native Binder tests
+cover FD, caller, error and result transport. `set-app-links-user-selection`
+and `set-app-links-allowed` retain original internal authorization and persist
+through the native domain write owner; host checks cover filtering, all-user/
+all-package handling, retained captures, disk reopen and failure replies.
+`set-app-links` and `reset-app-links` also persist through that writer, with
+internal state overrides, original selection revocation and verifier/user reset
+rules. `verify-app-links` uses native attached-state eligibility and the existing
+domain owner's selected original proxy, including its unavailable-agent behavior.
+The device-services stubs now match the shipped image's domain API, including
+its nine-method shell callback without the AOSP tag's unused user-state getter
+(#2187, 2026-10-29). All 104 prior stub members were audited against services.jar;
+debug/helper and package-shell access modifiers match the image too. The package
+shell's three-argument constructor and both debug printState overloads already
+have the correct descriptors. Device-services compilation and pinned-image
+linkage pass. The JVM oracle checks the image callback's complete method set and
+removes only the absent declaration from its hash-pinned AOSP source, preserving
+the parser, formatter and behavior assertions.
+The pinned JVM oracle executes the original modern proxy and request class with
+the production delivery bridge, selector and connection; it records the explicit
+component, request extras, foreground flag, user and temporary allowlist, and
+checks permission filtering, bridge authorization and delivery failures. These
+are host/JVM checks; no live native-to-ART delivery, guest execution or CTS rerun
+was performed for this shell change.
 The same frozen PMHost cohort exposes activity filter priority and public
 restrict-update error mismatches (#1169/#1170). Native activity registration now
 applies the pinned privilege/protected-action/setup-wizard and factory-filter

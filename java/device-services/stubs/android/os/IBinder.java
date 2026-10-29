@@ -3,6 +3,7 @@
 package android.os;
 
 public interface IBinder {
+    void dump(java.io.FileDescriptor fd, String[] args) throws RemoteException;
     int FIRST_CALL_TRANSACTION = 0x00000001;
     int LAST_CALL_TRANSACTION = 0x00ffffff;
     int INTERFACE_TRANSACTION = ('_' << 24) | ('N' << 16) | ('T' << 8) | 'F';

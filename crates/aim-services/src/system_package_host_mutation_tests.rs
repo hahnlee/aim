@@ -15,6 +15,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 #[path = "system_package_shell_permission_tests.rs"]
 mod shell_permission_tests;
+#[path = "system_package_shell_read_tests.rs"]
+mod shell_read_tests;
 
 struct NoIdentities;
 impl IdentityProvider for NoIdentities {
@@ -52,9 +54,17 @@ struct Bridge(
     Binder,
     Binder,
     Binder,
+    Binder,
+    (
+        Arc<LocalProcess>,
+        Mutex<Option<aim_binder_host::local::Strong>>,
+    ),
+    std::sync::atomic::AtomicI32,
 );
 // Fixture-only export of a service in the original process to the native host.
 const EXPORT_TEST_BINDER: u32 = 0xffff_fffe;
+const SET_TEST_SHELL_READ: u32 = 0xffff_fffd;
+const SET_TEST_DOMAIN_DELIVERY: u32 = 0xffff_fffc;
 impl Service for Bridge {
     fn descriptor(&self) -> &str {
         bootstrap::DESCRIPTOR
@@ -62,6 +72,37 @@ impl Service for Bridge {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut reply = Parcel::new();
         match call.code {
+            SET_TEST_DOMAIN_DELIVERY => {
+                self.7.store(call.data.read_i32()?, Ordering::SeqCst);
+                reply.write_no_exception();
+            }
+            bootstrap::SEND_DOMAIN_VERIFICATION_REQUEST => {
+                assert_eq!(call.sender_euid, 1000);
+                let a = bootstrap::SendDomainVerificationRequest::read(&mut call.data)?;
+                assert_eq!(call.data.remaining(), 0);
+                // A failing delivery owner lets callers observe the exact selected request.
+                match self.7.load(Ordering::SeqCst) {
+                    0 => reply.write_exception(&Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("fixture delivery: {:?}", a.package_names),
+                    )),
+                    1 => bootstrap::write_send_domain_verification_request_reply(&mut reply),
+                    2 => {} // malformed reply
+                    3 => {
+                        reply.write_no_exception();
+                        reply.write_i32(42);
+                    }
+                    4 => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
+                    _ => panic!("unknown delivery fixture mode"),
+                }
+            }
+            SET_TEST_SHELL_READ => {
+                let Some(Binder::Handle(handle)) = call.data.read_binder()? else {
+                    panic!("read leaf")
+                };
+                *self.6.1.lock().unwrap() = Some(self.6.0.strong(handle));
+                reply.write_no_exception();
+            }
             EXPORT_TEST_BINDER => {
                 reply.write_binder(Some(Binder::Local(call.data.read_i64()? as u64)));
             }
@@ -72,6 +113,14 @@ impl Service for Bridge {
             bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE => {
                 bootstrap::GetPackageShellPolicyBridge::read(&mut call.data)?;
                 bootstrap::write_get_package_shell_policy_bridge_reply(&mut reply, Some(self.4));
+            }
+            bootstrap::GET_PACKAGE_SHELL_READ_LEAF => {
+                bootstrap::GetPackageShellReadLeaf::read(&mut call.data)?;
+                let retained = self.6.1.lock().unwrap();
+                let binder = retained
+                    .as_ref()
+                    .map_or(self.5, |owner| Binder::Handle(owner.handle));
+                bootstrap::write_get_package_shell_read_leaf_reply(&mut reply, Some(binder));
             }
             bootstrap::GET_PACKAGE_MUTATION_BRIDGE => {
                 bootstrap::GetPackageMutationBridge::read(&mut call.data)?;
@@ -98,6 +147,12 @@ impl Service for Bridge {
                 bootstrap::GetPackageInstalledPermissions::read(&mut call.data)?;
                 bootstrap::write_get_package_installed_permissions_reply(&mut reply, &Some(vec![]));
             }
+            bootstrap::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED => {
+                let a = bootstrap::IsDomainVerificationSettingsV2Enabled::read(&mut call.data)?;
+                assert!(matches!(a.package_name.as_deref(), Some("p" | "q")));
+                assert!(a.target_sdk >= 0);
+                bootstrap::write_is_domain_verification_settings_v2enabled_reply(&mut reply, true);
+            }
             bootstrap::IS_APPLICATION_QUERY_FILTERING_ENABLED => {
                 bootstrap::IsApplicationQueryFilteringEnabled::read(&mut call.data)?;
                 bootstrap::write_is_application_query_filtering_enabled_reply(&mut reply, false);
@@ -123,6 +178,33 @@ impl Service for Bridge {
                     vec![]
                 };
                 bootstrap::write_get_package_granted_permissions_reply(&mut reply, &Some(grants));
+            }
+            bootstrap::FORMAT_PACKAGE_TIMESTAMP => {
+                let a = bootstrap::FormatPackageTimestamp::read(&mut call.data)?;
+                bootstrap::write_format_package_timestamp_reply(
+                    &mut reply,
+                    &Some(format!("fixture-date-{}", a.millis)),
+                );
+            }
+            bootstrap::GET_LEGACY_PERMISSION_STATE => {
+                let a = bootstrap::GetLegacyPermissionState::read(&mut call.data)?;
+                let mut p = Parcel::new();
+                p.write_i32(a.app_id);
+                let users = a.user_ids.unwrap();
+                p.write_i32(users.len() as i32);
+                for user in users {
+                    p.write_i32(user);
+                    p.write_bool(false);
+                    p.write_i32(1);
+                    p.write_string16(Some("fixture.permission"));
+                    p.write_bool(true);
+                    p.write_bool(true);
+                    p.write_i32(1);
+                }
+                bootstrap::write_get_legacy_permission_state_reply(
+                    &mut reply,
+                    &Some(p.data().to_vec()),
+                );
             }
             bootstrap::GET_PERMISSION_GIDS_FOR_UID => {
                 let a = bootstrap::GetPermissionGidsForUid::read(&mut call.data)?;
@@ -404,8 +486,13 @@ fn session_with_fixture(mut fixture: Fixture) -> Session {
                 host_leaf.clone(),
             ))),
             original.add_service(Arc::new(
-                crate::app_host::package_shell_policy::ShellPolicy(host_leaf),
+                crate::app_host::package_shell_policy::ShellPolicy(host_leaf.clone()),
             )),
+            original.add_service(Arc::new(crate::app_host::package_shell_read::ShellRead(
+                host_leaf,
+            ))),
+            (original.clone(), Mutex::new(None)),
+            std::sync::atomic::AtomicI32::new(0),
         ))
     });
     let old = publish_code(&fixture, &bridge);

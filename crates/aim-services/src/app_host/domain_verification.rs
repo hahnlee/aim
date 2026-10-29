@@ -1,5 +1,5 @@
 //! Original Java verifier front end over the session's NativeDomains and
-//! durable package owner; other writes and verifier requests remain #1763.
+//! durable package owner.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
@@ -37,7 +37,7 @@ fn name_not_found() -> Exception {
 }
 
 pub struct DomainVerification {
-    host: Arc<AppHost>,
+    pub(super) host: Arc<AppHost>,
 }
 
 impl DomainVerification {
@@ -50,7 +50,7 @@ impl DomainVerification {
             .unimplemented_named("domain_verification", &format!("{what} (#1763)"))
     }
 
-    fn domains(capture: &Capture) -> Result<&NativeDomains, Exception> {
+    pub(super) fn domains(capture: &Capture) -> Result<&NativeDomains, Exception> {
         capture
             .domains()
             .map(Arc::as_ref)
@@ -384,6 +384,51 @@ impl Service for Backend {
         }
         let mut reply = Parcel::new();
         let result = match call.code {
+            original::VERIFY_SHELL_PACKAGES => {
+                let a = original::VerifyShellPackages::read(&mut call.data)?;
+                super::domain_shell::verify(&self.0.host, a)
+                    .map(|()| original::write_verify_shell_packages_reply(&mut reply))
+            }
+            original::SET_SHELL_STATUS => {
+                let a = original::SetShellStatus::read(&mut call.data)?;
+                super::domain_shell::write_status(&self.0.host, a)
+                    .map(|()| original::write_set_shell_status_reply(&mut reply))
+            }
+            original::RESET_SHELL_STATE => {
+                let a = original::ResetShellState::read(&mut call.data)?;
+                super::domain_shell::reset(&self.0.host, a)
+                    .map(|()| original::write_reset_shell_state_reply(&mut reply))
+            }
+            original::SET_SHELL_USER_SELECTION => {
+                let a = original::SetShellUserSelection::read(&mut call.data)?;
+                super::domain_shell::write_user(
+                    &self.0.host,
+                    a.package_name.as_deref(),
+                    a.user,
+                    a.enabled,
+                    a.domains,
+                    true,
+                )
+                .map(|()| original::write_set_shell_user_selection_reply(&mut reply))
+            }
+            original::SET_SHELL_LINK_HANDLING => {
+                let a = original::SetShellLinkHandling::read(&mut call.data)?;
+                super::domain_shell::write_user(
+                    &self.0.host,
+                    a.package_name.as_deref(),
+                    a.user,
+                    a.allowed,
+                    None,
+                    false,
+                )
+                .map(|()| original::write_set_shell_link_handling_reply(&mut reply))
+            }
+            original::READ_SHELL_STATE => {
+                let a = original::ReadShellState::read(&mut call.data)?;
+                super::domain_shell::read(&self.0.host, a).map(|bytes| {
+                    original::write_read_shell_state_reply(&mut reply, &Some(bytes));
+                })
+            }
             original::QUERY_VALID_VERIFICATION_PACKAGE_NAMES => {
                 original::QueryValidVerificationPackageNames::read(&mut call.data)?;
                 self.0.valid_verification_package_names().map(|names| {
@@ -468,6 +513,9 @@ impl Service for DomainVerification {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == crate::shell::SHELL_COMMAND_TRANSACTION {
+            return self.shell(call);
+        }
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result = match call.code {

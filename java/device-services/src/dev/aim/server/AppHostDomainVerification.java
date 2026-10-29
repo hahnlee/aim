@@ -29,8 +29,11 @@ import java.util.UUID;
 final class AppHostDomainVerification extends IAppHostDomainVerification.Stub {
     private final ThreadLocal<Integer> caller = new ThreadLocal<>();
     private final DomainVerificationManagerStub entry;
+    private final com.android.server.pm.verify.domain.AppHostDomainShell shell;
+    private final Context context;
 
     AppHostDomainVerification(Context context, ISystemProcess host) throws RemoteException {
+        this.context = context;
         IAppHostDomainVerification backend = IAppHostDomainVerification.Stub.asInterface(
                 host.getDomainVerificationBackend());
         DomainVerificationEnforcer enforcer = new DomainVerificationEnforcer(context);
@@ -81,6 +84,7 @@ final class AppHostDomainVerification extends IAppHostDomainVerification.Stub {
             @Override public boolean filterAppAccess(String name, int uid, int user) { throw unsupported(); }
         });
         entry = new DomainVerificationManagerStub(service);
+        shell = new com.android.server.pm.verify.domain.AppHostDomainShell(backend, enforcer, proxy);
     }
 
     private static UnsupportedOperationException unsupported() {
@@ -117,6 +121,23 @@ final class AppHostDomainVerification extends IAppHostDomainVerification.Stub {
         try { return entry.getUriRelativeFilterGroups(name, domains); }
         finally { caller.remove(); }
     }
+    @Override public int runShellCommand(boolean packageShell, String[] args,
+            android.os.ParcelFileDescriptor input, android.os.ParcelFileDescriptor output,
+            android.os.ParcelFileDescriptor error) {
+        if (android.os.Binder.getCallingUid() != 0 && android.os.Binder.getCallingUid() != 2000)
+            throw new SecurityException("Shell commands are only callable by ADB");
+        try (input; output; error) {
+            return shell.run(context, packageShell, args, input, output, error);
+        } catch (java.io.IOException failure) { throw new IllegalStateException(failure); }
+    }
+    @Override public void setShellUserSelection(String name, int user, boolean enabled,
+            List<String> domains) { throw unsupported(); }
+    @Override public void setShellLinkHandling(String name, int user, boolean allowed) { throw unsupported(); }
+    @Override public void setShellStatus(String name, int state, List<String> domains) { throw unsupported(); }
+    @Override public void resetShellState(List<String> names, int user, boolean userOnly) { throw unsupported(); }
+    @Override public void verifyShellPackages(List<String> names, boolean reVerify) { throw unsupported(); }
+    @Override public byte[] readShellState(int kind, String name, List<String> domains,
+            int user, boolean hasUser) { throw unsupported(); }
     @Override public String getDomainVerificationPackageId(String name) { throw unsupported(); }
     @Override public void setUriRelativeFilterGroup(String name, String id, String domain,
             List<UriRelativeFilterGroupParcel> groups) { throw unsupported(); }

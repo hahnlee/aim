@@ -362,6 +362,53 @@ fn verifier_status_retries_package_write_and_persists_without_mutating_retained_
             .id
             .clone();
         let backend = Backend::new(host.clone());
+        let mut request = Parcel::new();
+        original::ReadShellState {
+            kind: 0,
+            package_name: Some("p".into()),
+            domains: None,
+            user: 0,
+            has_user: true,
+        }
+        .write(&mut request);
+        let denied = invoke(&backend, 2000, original::READ_SHELL_STATE, &request);
+        assert_eq!(
+            denied.reader().read_exception().unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+        let response = invoke(&backend, 1000, original::READ_SHELL_STATE, &request);
+        let bytes = original::read_read_shell_state_reply(&mut response.reader())
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut record = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        assert_eq!(record.read_i32().unwrap(), 1);
+        assert_eq!(record.read_string16().unwrap().as_deref(), Some("p"));
+        assert_eq!(record.read_string16().unwrap(), Some(id.clone()));
+        let cache = aim_service_aidl::read_byte_array(&mut record)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::package::pkg::AndroidPackage::read_cache_entry(&cache)
+                .unwrap()
+                .package_name,
+            "p"
+        );
+        for expected in [
+            vec![Some("example.org".into())],
+            vec![],
+            vec![Some("example.org".into())],
+        ] {
+            assert_eq!(
+                aim_service_aidl::read_string_list(&mut record)
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(record.read_i32().unwrap(), 0); // no verifier response
+        assert_eq!(record.read_i32().unwrap(), 0); // no user selection
+        assert_eq!(record.remaining(), 0);
         let mut names = Parcel::new();
         original::QueryValidVerificationPackageNames { uid: 10100 }.write(&mut names);
         let response = invoke(
@@ -880,4 +927,409 @@ fn backend_set_request(id: &str, hosts: &[Option<&str>], state: i32) -> Parcel {
     }
     .write(&mut p);
     p
+}
+
+#[test]
+fn shell_user_writes_filter_hosts_preserve_captures_and_reopen_disk() {
+    crate::system::with_discovery_session(|host, publish, enabled| {
+        publish(&mut |package| {
+            for (domain, auto_verify) in [("a.test", true), ("b.test", true), ("c.test", false)] {
+                let mut filter = crate::package::intent_filter::IntentFilter {
+                    auto_verify,
+                    ..Default::default()
+                };
+                filter.add_action("android.intent.action.VIEW");
+                filter.add_category("android.intent.category.BROWSABLE");
+                filter.add_category("android.intent.category.DEFAULT");
+                filter.add_data_scheme("https");
+                filter.add_data_authority(domain, None);
+                package.activities[0].main.component.intents.push(
+                    crate::package::intent_filter::ParsedIntentInfo {
+                        filter,
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+        let system = host.package_system().unwrap();
+        let base = host.package_capture().unwrap();
+        let scan = base.scan().owner();
+        let config = crate::package::system_config::SystemConfig::default();
+        let policies = scan
+            .settings
+            .packages
+            .iter()
+            .map(|p| (p.name.clone(), true))
+            .collect();
+        let mut domains = owner::Owner::new(State::default(), Default::default());
+        for setting in &scan.settings.packages {
+            domains
+                .add(
+                    owner::Input {
+                        id: setting.domain_set_id.as_deref().unwrap(),
+                        name: &setting.name,
+                        code: Some(scan.loaded_packages()[&setting.name].runtime_package()),
+                        signatures: &[],
+                        system: false,
+                        restrict_domains: true,
+                        pre_verified: None,
+                    },
+                    &config,
+                )
+                .unwrap();
+        }
+        let domains = owner::Boot {
+            owner: domains,
+            changes: vec![],
+        };
+        let mut context = (**base.context())
+            .clone()
+            .attach_boot_domains(scan, domains, &config, &policies)
+            .unwrap();
+        context.scan_version += 1;
+        let bridge = system.package_bootstrap().unwrap();
+        let current = system
+            .publish_package_scan_with_queries(
+                &bridge,
+                Some(base.scan()),
+                scan.clone(),
+                base.scan().usage().clone(),
+                context,
+            )
+            .unwrap();
+        let (_, disk) = system.package_persistence_owner(&current).unwrap();
+        system
+            .commit_package_domains(
+                &bridge,
+                current
+                    .prepare_domain_update(current.domains().unwrap().owner().clone())
+                    .unwrap(),
+                &mut disk.lock().unwrap(),
+            )
+            .unwrap();
+        let current = host.package_capture().unwrap();
+        let backend = Backend::new(host.clone());
+        let verify = |uid, names: Option<Vec<&str>>, re_verify| {
+            let mut p = Parcel::new();
+            original::VerifyShellPackages {
+                package_names: names.map(|v| v.into_iter().map(|s| Some(s.into())).collect()),
+                re_verify,
+            }
+            .write(&mut p);
+            invoke(&backend, uid, original::VERIFY_SHELL_PACKAGES, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let before_verify = current.domains().unwrap().owner().persisted();
+        let bytes_before_verify =
+            std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap();
+        assert_eq!(verify(2000, None, true).unwrap_err().code, EX_SECURITY);
+        assert!(verify(1000, Some(vec!["missing"]), true).is_ok());
+        assert!(verify(1000, Some(vec![]), true).is_ok());
+        for re_verify in [false, true] {
+            let error = verify(1000, Some(vec!["p", "missing", "p"]), re_verify).unwrap_err();
+            assert_eq!(error.code, EX_ILLEGAL_STATE);
+            assert_eq!(error.message, "fixture delivery: Some([Some(\"p\")])");
+        }
+        assert_eq!(
+            host.package_capture()
+                .unwrap()
+                .domains()
+                .unwrap()
+                .owner()
+                .persisted(),
+            before_verify
+        );
+        let delivery_mode = |mode| {
+            let mut request = Parcel::new();
+            request.write_i32(mode);
+            bridge
+                .owner
+                .transact_as_owner(0xffff_fffc, &request, false)
+                .unwrap();
+        };
+        delivery_mode(1);
+        verify(1000, None, false).unwrap();
+        verify(1000, None, true).unwrap();
+        for (mode, message) in [
+            (2, "domain verifier delivery reply:"),
+            (3, "trailing domain verifier delivery reply"),
+            (4, "domain verifier delivery transport:"),
+        ] {
+            delivery_mode(mode);
+            let error = verify(1000, Some(vec!["p"]), true).unwrap_err();
+            assert_eq!(error.code, EX_ILLEGAL_STATE);
+            assert!(error.message.starts_with(message), "{error:?}");
+        }
+        delivery_mode(0);
+        assert!(Arc::ptr_eq(&current, &host.package_capture().unwrap()));
+        assert_eq!(
+            std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap(),
+            bytes_before_verify
+        );
+        let selection = |name: &str, user, enabled, hosts: Option<Vec<&str>>| {
+            let mut p = Parcel::new();
+            original::SetShellUserSelection {
+                package_name: Some(name.into()),
+                user,
+                enabled,
+                domains: hosts.map(|v| v.into_iter().map(|s| Some(s.into())).collect()),
+            }
+            .write(&mut p);
+            invoke(&backend, 1000, original::SET_SHELL_USER_SELECTION, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let allowed = |name: Option<&str>, user, allowed| {
+            let mut p = Parcel::new();
+            original::SetShellLinkHandling {
+                package_name: name.map(str::to_owned),
+                user,
+                allowed,
+            }
+            .write(&mut p);
+            invoke(&backend, 1000, original::SET_SHELL_LINK_HANDLING, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let status = |name: Option<&str>, state, hosts: Option<Vec<&str>>| {
+            let mut p = Parcel::new();
+            original::SetShellStatus {
+                package_name: name.map(str::to_owned),
+                state,
+                domains: hosts.map(|v| v.into_iter().map(|s| Some(s.into())).collect()),
+            }
+            .write(&mut p);
+            invoke(&backend, 1000, original::SET_SHELL_STATUS, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let reset = |names: Option<Vec<&str>>, user, user_only| {
+            let mut p = Parcel::new();
+            original::ResetShellState {
+                package_names: names.map(|v| v.into_iter().map(|s| Some(s.into())).collect()),
+                user,
+                user_only,
+            }
+            .write(&mut p);
+            invoke(&backend, 1000, original::RESET_SHELL_STATE, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let users = |capture: &Arc<Capture>| {
+            capture
+                .domains()
+                .unwrap()
+                .owner()
+                .package("p")
+                .unwrap()
+                .users
+                .clone()
+        };
+        let before = host.package_capture().unwrap();
+        selection("p", 0, true, Some(vec!["c.test", "undeclared.test"])).unwrap();
+        let selected = host.package_capture().unwrap();
+        assert!(users(&before).is_empty());
+        assert_eq!(users(&selected)[0].enabled_hosts, ["c.test"]);
+        let id = selected
+            .domains()
+            .unwrap()
+            .owner()
+            .package("p")
+            .unwrap()
+            .id
+            .clone();
+        let verified = invoke(
+            &backend,
+            1000,
+            original::SET_DOMAIN_VERIFICATION_STATUS,
+            &backend_set_request(&id, &[Some("a.test")], 1),
+        );
+        assert_eq!(
+            dv::read_set_domain_verification_status_reply(&mut verified.reader())
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        let mixed = host.package_capture().unwrap();
+        let code = mixed.state().packages["p"].pkg.clone().unwrap();
+        assert_eq!(
+            mixed
+                .domains()
+                .unwrap()
+                .user_state("p", &code, 0)
+                .unwrap()
+                .unwrap()
+                .2,
+            [
+                ("a.test".into(), 2),
+                ("b.test".into(), 0),
+                ("c.test".into(), 1)
+            ]
+        );
+        // A competing package write must be retained by the next shell write.
+        enabled(Some("p.Main"), 2);
+        allowed(Some("p"), 0, false).unwrap();
+        let disabled = host.package_capture().unwrap();
+        assert!(!users(&disabled)[0].allow_link_handling);
+        assert!(users(&selected)[0].allow_link_handling);
+        assert_eq!(
+            disabled.state().packages["p"].users[&0].disabled_components,
+            ["p.Main"]
+        );
+        selection("p", -1, true, None).unwrap();
+        allowed(None, -1, true).unwrap();
+        let current = host.package_capture().unwrap();
+        let package = current.domains().unwrap().owner().package("p").unwrap();
+        for user in current.state().users.keys() {
+            let row = package.users.iter().find(|u| u.id == *user).unwrap();
+            assert!(row.allow_link_handling);
+            assert_eq!(row.enabled_hosts, ["a.test", "b.test", "c.test"]);
+        }
+        selection("p", 0, false, Some(vec!["a.test", "b.test"])).unwrap();
+        let current = host.package_capture().unwrap();
+        assert_eq!(
+            users(&current)
+                .iter()
+                .find(|u| u.id == 0)
+                .unwrap()
+                .enabled_hosts,
+            ["c.test"]
+        );
+        let reopened = crate::package::owner::Store::open(host.data().unwrap(), &[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened.state().settings.domain_verification,
+            current.domains().unwrap().owner().persisted()
+        );
+        // A recorded non-default domain suppresses the default request, not re-verification.
+        assert!(verify(1000, Some(vec!["p"]), false).is_ok());
+        assert_eq!(
+            verify(1000, Some(vec!["p"]), true).unwrap_err().message,
+            "fixture delivery: Some([Some(\"p\")])"
+        );
+        // Both internal-state branches filter independently against auto-verify hosts.
+        status(None, 3, Some(vec!["a.test", "c.test", "invalid.test"])).unwrap();
+        let denied = host.package_capture().unwrap();
+        assert_eq!(
+            denied
+                .domains()
+                .unwrap()
+                .owner()
+                .package("p")
+                .unwrap()
+                .domains,
+            [(Some("a.test".into()), 3)]
+        );
+        assert_eq!(users(&denied), users(&current));
+        status(Some("p"), 2, Some(vec!["b.test", "c.test"])).unwrap();
+        reset(Some(vec!["p"]), 0, true).unwrap();
+        assert!(users(&host.package_capture().unwrap()).is_empty());
+        status(Some("p"), 1, None).unwrap();
+        reset(None, 0, false).unwrap();
+        assert!(
+            host.package_capture()
+                .unwrap()
+                .domains()
+                .unwrap()
+                .owner()
+                .package("p")
+                .unwrap()
+                .domains
+                .is_empty()
+        );
+        // Force a competing publication during mutation: retry the entire operation.
+        let mut attempts = 0;
+        super::super::domain_shell::write(host, |_, owner, _| {
+            attempts += 1;
+            owner.set_status_internal("p", &["a.test".into()], 1, true);
+            if attempts == 1 {
+                enabled(Some("p.Main"), 1);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        let current = host.package_capture().unwrap();
+        assert!(
+            current.state().packages["p"].users[&0]
+                .disabled_components
+                .is_empty()
+        );
+        let reopened = crate::package::owner::Store::open(host.data().unwrap(), &[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened.state().settings.domain_verification,
+            current.domains().unwrap().owner().persisted()
+        );
+        let bytes = std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap();
+        for failure in [
+            selection("missing", 0, true, None),
+            allowed(Some("missing"), 0, true),
+            status(Some("missing"), 1, None),
+        ] {
+            assert_eq!(failure.unwrap_err().service_specific, 1);
+        }
+        assert!(Arc::ptr_eq(&current, &host.package_capture().unwrap()));
+        assert_eq!(
+            std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            status(Some("p"), 4, None).unwrap_err().message,
+            "State must be one of NO_RESPONSE, SUCCESS, APPROVED, or DENIED"
+        );
+        reset(Some(vec!["missing"]), 0, false).unwrap(); // no code: original skips it
+        selection("p", 0, true, None).unwrap();
+        let before = host.package_capture().unwrap();
+        let disk_bytes = std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap();
+        assert_eq!(
+            reset(Some(vec!["p", "missing"]), -1, true)
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_NULL_POINTER
+        );
+        assert!(!users(&before).is_empty());
+        assert!(users(&host.package_capture().unwrap()).is_empty());
+        assert_eq!(
+            std::fs::read(host.data().unwrap().join("system/packages.xml")).unwrap(),
+            disk_bytes
+        );
+        // An external writer is a hard failure, with no state publication.
+        let before = host.package_capture().unwrap();
+        std::fs::write(
+            host.data().unwrap().join("system/packages.xml"),
+            b"<packages future='external'/>",
+        )
+        .unwrap();
+        let error = status(Some("p"), 0, None).unwrap_err();
+        assert!(error.message.contains("committed=false"), "{error:?}");
+        let error = reset(None, 0, false).unwrap_err();
+        assert!(error.message.contains("committed=false"), "{error:?}");
+        assert!(Arc::ptr_eq(&before, &host.package_capture().unwrap()));
+        for code in [
+            original::SET_SHELL_USER_SELECTION,
+            original::SET_SHELL_LINK_HANDLING,
+            original::SET_SHELL_STATUS,
+            original::RESET_SHELL_STATE,
+            original::VERIFY_SHELL_PACKAGES,
+        ] {
+            assert_eq!(
+                invoke(&backend, 2000, code, &Parcel::new())
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                EX_SECURITY
+            );
+        }
+    });
 }

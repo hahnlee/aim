@@ -1,0 +1,1 @@
+package com.android.server.pm.verify.domain;public class DomainVerificationUtils {public static android.content.pm.PackageManager.NameNotFoundException throwPackageUnavailable(String n){return new android.content.pm.PackageManager.NameNotFoundException(n);}}

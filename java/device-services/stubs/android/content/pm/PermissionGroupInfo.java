@@ -2,7 +2,8 @@
 // the members used, checked against the image by the device-services node.
 package android.content.pm;
 
-public class PermissionGroupInfo extends PackageItemInfo {
+public class PermissionGroupInfo extends PackageItemInfo implements android.os.Parcelable {
+    public int describeContents(){throw new RuntimeException("stub");}
     public int descriptionRes;
     public CharSequence nonLocalizedDescription;
 
