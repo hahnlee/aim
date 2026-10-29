@@ -128,7 +128,9 @@ impl AppHost {
             }
             permitted = false;
         }
-        let (state, resolution) = self.packages()?;
+        let capture = self.package_capture()?;
+        let state = capture.state();
+        let resolution = super::package_resolution(&capture, "package")?;
         let query = Query {
             state: &state,
             filter: &resolution.apps_filter,

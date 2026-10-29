@@ -72,7 +72,7 @@ impl ShellRead {
         &self,
         a: leaf::ListInstrumentation,
     ) -> Result<Vec<Option<String>>, Exception> {
-        let capture = self.0.package_capture()?;
+        let capture = self.0.package_scan_capture()?;
         let resolution = super::package_resolution(&capture, "instrumentation")?;
         let query = crate::package::query::Query {
             state: capture.state(),

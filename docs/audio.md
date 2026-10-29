@@ -45,11 +45,15 @@ waits for that answer, which comes within 3 seconds.
 In the app host, AudioPolicyService then registers its UID observer with
 `activity` and its sensor-privacy listener with `sensor_privacy`. The UID
 observer's AppOps/permission checks read the native package query state.
-That state is available after package construction publishes its owners;
-it no longer waits for deferred preparation of every app's data directory
-(#2399). The boot thread still waits for that preparation before its later
-boot steps and application readiness. Host concurrency tests cover the
-ordering and errors; no guest boot has measured the latency after this change.
+Those reads now wait for the complete initial scan publication, including roles
+and reconciled permissions, ahead of runtime construction and deferred preparation
+of every app's data directory (#2405, continuing #2399). Runtime-owner operations
+and aim-system's pre-attach ApplicationInfo query still wait for construction;
+storage startup and application readiness retain their later barriers. Stage
+concurrency and failure tests cover the ordering. Over three boots each on a
+disposable data directory (2026-10-29), AudioPolicy's `loadTimeMs` went from
+3.3–3.8 s to 2.6–2.8 s; `sys.boot_completed` on a second boot stayed at about
+7 s, so the boot's critical path lies elsewhere.
 The empty effect factory's processing list still makes libaudiohal return
 null processings and AudioPolicyEffects check the two legacy `.conf` paths.
 Neither file exists in the pinned original image, and this fallback has no

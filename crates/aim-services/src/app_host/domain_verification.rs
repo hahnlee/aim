@@ -144,7 +144,7 @@ impl DomainVerification {
         name: Option<&str>,
         user: i32,
     ) -> Result<Option<parcels::UserState>, Exception> {
-        let capture = self.host.package_capture()?;
+        let capture = self.host.package_scan_capture()?;
         let name = name.ok_or_else(name_not_found)?;
         if !self.assert_approved_user_state_querent(&capture, uid, name, user)? {
             return Err(name_not_found());
@@ -171,7 +171,7 @@ impl DomainVerification {
 
     /// `queryValidVerificationPackageNames`.
     fn valid_verification_package_names(&self) -> Result<Vec<String>, Exception> {
-        let capture = self.host.package_capture()?;
+        let capture = self.host.package_scan_capture()?;
         Ok(Self::domains(&capture)?
             .owner()
             .valid_verification_package_names())
@@ -181,7 +181,7 @@ impl DomainVerification {
     /// auto-verify domains, none for a package not attached or without
     /// them.
     fn info(&self, uid: i32, name: Option<&str>) -> Result<Option<parcels::Info>, Exception> {
-        let capture = self.host.package_capture()?;
+        let capture = self.host.package_scan_capture()?;
         let name = name.ok_or_else(name_not_found)?;
         let state = capture.state();
         let resolution = super::package_resolution(&capture, "domain")?;
@@ -456,7 +456,7 @@ impl Service for Backend {
             original::GET_DOMAIN_VERIFICATION_PACKAGE_ID => {
                 let a = original::GetDomainVerificationPackageId::read(&mut call.data)?;
                 (|| {
-                    let capture = self.0.host.package_capture()?;
+                    let capture = self.0.host.package_scan_capture()?;
                     let domains = DomainVerification::domains(&capture)?;
                     let id = a
                         .package_name
@@ -481,7 +481,7 @@ impl Service for Backend {
             original::GET_URI_RELATIVE_FILTER_GROUPS => {
                 let a = original::GetUriRelativeFilterGroups::read(&mut call.data)?;
                 (|| {
-                    let capture = self.0.host.package_capture()?;
+                    let capture = self.0.host.package_scan_capture()?;
                     let groups = DomainVerification::domains(&capture)?
                         .owner()
                         .uri_groups_query(a.package_name.as_deref(), a.domains.as_deref())

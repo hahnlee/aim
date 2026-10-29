@@ -626,7 +626,7 @@ impl Service for WebViewUpdate {
                     if call.code == wv::GET_ALL_WEB_VIEW_PACKAGES {
                         return Ok(all);
                     }
-                    let capture = self.host.package_capture()?;
+                    let capture = self.host.package_scan_capture()?;
                     let capture = capture.as_ref();
                     let mut valid = Vec::new();
                     for provider in all {

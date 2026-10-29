@@ -431,7 +431,7 @@ impl Service for SystemProcess {
             sp::IS_DOMAIN_VERIFIER => {
                 let a = sp::IsDomainVerifier::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
-                    let capture = self.host.package_capture()?;
+                    let capture = self.host.package_scan_capture()?;
                     let allowed =
                         super::domain_verification::DomainVerification::new(self.host.clone())
                             .is_caller_verifier(&capture, a.uid)?;

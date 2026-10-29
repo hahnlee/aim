@@ -1,8 +1,8 @@
 //! The native package boot, run by the app host as system_server's
 //! `NativePackageBootstrap` runs it (`begin`, then `Construction.finish`):
 //! the app host's own bootstrap bridge attached as this process's node,
-//! the boot session begun, its scans finished and its construction
-//! finished.
+//! the boot session begun, its scans and construction finished, then its
+//! deferred app-data preparation joined. Each stage publishes its result.
 
 use std::sync::{Arc, OnceLock};
 
@@ -13,16 +13,46 @@ use super::AppHost;
 use super::package_bootstrap::PackageBootstrap;
 use crate::system::{ServiceOwner, System};
 
-/// PMS publishes its constructed query owners before waiting for deferred
-/// app-data preparation. Native metadata consumers (including audioserver's
-/// UID observer) need those owners, not every application's data directory.
-pub(super) fn prepare(
-    constructed: &OnceLock<Result<(), Exception>>,
-    construction: impl FnOnce() -> Result<(), Exception>,
+/// Each result releases only consumers of the state that stage publishes.
+#[derive(Default)]
+pub(super) struct Readiness {
+    pub scan: OnceLock<Result<(), Exception>>,
+    pub runtime: OnceLock<Result<(), Exception>>,
+    pub storage: OnceLock<Result<(), Exception>>,
+}
+
+impl Readiness {
+    pub fn wait_scan(&self) -> Result<(), Exception> {
+        self.scan.wait().clone()?;
+        // A later failed construction revokes the publication. Do not admit
+        // new scan readers after its failure is known.
+        if let Some(result) = self.runtime.get() {
+            result.clone()?;
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn prepare<T>(
+    ready: &Readiness,
+    scan: impl FnOnce() -> Result<T, Exception>,
+    construction: impl FnOnce(T) -> Result<(), Exception>,
     app_data: impl FnOnce() -> Result<(), Exception>,
 ) -> Result<(), Exception> {
-    constructed.get_or_init(construction).clone()?;
-    app_data()
+    let runtime = ready.runtime.get_or_init(|| {
+        let scanned = scan();
+        let _ = ready
+            .scan
+            .set(scanned.as_ref().map(|_| ()).map_err(Clone::clone));
+        construction(scanned?)
+    });
+    ready
+        .storage
+        .get_or_init(|| {
+            runtime.clone()?;
+            app_data()
+        })
+        .clone()
 }
 
 /// A call to the session, which is this process's node.
@@ -42,7 +72,26 @@ fn call<T>(
 }
 
 /// `NativePackageBootstrap.begin`, and `finish` through its construction.
-pub(super) fn run(host: &Arc<AppHost>, system: &Arc<System>) -> Result<(), Exception> {
+pub(super) fn run(host: &Arc<AppHost>) -> Result<(), Exception> {
+    prepare(
+        &host.package_boot,
+        || scan(host, host.package_system()?),
+        |boot| {
+            call(
+                &boot,
+                session::FINISH_CONSTRUCTION,
+                |p| session::FinishConstruction {}.write(p),
+                session::read_finish_construction_reply,
+            )
+        },
+        || host.package_system()?.wait_native_package_app_data(),
+    )
+}
+
+fn scan(
+    host: &Arc<AppHost>,
+    system: &Arc<System>,
+) -> Result<aim_binder_host::local::LocalService, Exception> {
     let Binder::Local(ptr) = host
         .process
         .add_service(Arc::new(PackageBootstrap::new(host.clone())))
@@ -74,69 +123,198 @@ pub(super) fn run(host: &Arc<AppHost>, system: &Arc<System>) -> Result<(), Excep
         |p| session::FinishInitialScan {}.write(p),
         session::read_finish_initial_scan_reply,
     )?;
-    call(
-        &boot,
-        session::FINISH_CONSTRUCTION,
-        |p| session::FinishConstruction {}.write(p),
-        session::read_finish_construction_reply,
-    )
+    Ok(boot)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aim_binder_host::local::{Call, Service};
+    use aim_service_aidl::android_content_pm_ipackagemanager as pm;
     use std::sync::mpsc;
     use std::time::Duration;
 
+    fn feature_query(host: &Arc<AppHost>) -> Result<bool, Exception> {
+        let service = super::super::package_service::PackageService::new(host.clone());
+        let mut request = Parcel::new();
+        pm::HasSystemFeature {
+            name: Some("android.hardware.audio.output".into()),
+            version: 0,
+        }
+        .write(&mut request);
+        let response = service
+            .transact(&mut Call {
+                code: pm::HAS_SYSTEM_FEATURE,
+                flags: 0,
+                sender_pid: 42,
+                sender_euid: 1000,
+                data: request.reader(),
+            })
+            .unwrap();
+        pm::read_has_system_feature_reply(&mut response.reader()).unwrap()
+    }
+
+    fn application_info_query(host: &Arc<AppHost>) -> Result<(), Exception> {
+        let service = super::super::package_service::PackageService::new(host.clone());
+        let mut request = Parcel::new();
+        pm::GetApplicationInfo {
+            package_name: Some("android".into()),
+            flags: 0,
+            user_id: 0,
+        }
+        .write(&mut request);
+        let response = service
+            .transact(&mut Call {
+                code: pm::GET_APPLICATION_INFO,
+                flags: 0,
+                sender_pid: 42,
+                sender_euid: 1000,
+                data: request.reader(),
+            })
+            .unwrap();
+        response.reader().read_exception().unwrap()
+    }
+
     #[test]
-    fn metadata_queries_finish_while_deferred_app_data_is_pending() {
-        crate::system::with_late_package_construction(|host, construct| {
-            let (sent, received) = mpsc::channel();
+    fn scan_queries_finish_while_runtime_and_storage_are_pending() {
+        crate::system::with_late_package_construction(|host, publish| {
+            let (started, arrival) = mpsc::channel();
+            let (scan_sent, scan_received) = mpsc::channel();
+            let (runtime_sent, runtime_received) = mpsc::channel();
+            let (storage_sent, storage_received) = mpsc::channel();
             std::thread::scope(|scope| {
                 scope.spawn(|| {
-                    // AppOps' first flag read in registerUidObserver uses this
-                    // retained query owner, even for audioserver's non-app UID.
+                    started.send(()).unwrap();
                     let result = host.packages().map(|(state, _)| state.packages.len());
-                    sent.send(result).unwrap();
+                    scan_sent.send((result, feature_query(host))).unwrap();
                 });
-                assert_eq!(
-                    received.recv_timeout(Duration::from_millis(50)),
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                );
+                scope.spawn(|| {
+                    started.send(()).unwrap();
+                    runtime_sent.send(application_info_query(host)).unwrap();
+                });
+                scope.spawn(|| {
+                    started.send(()).unwrap();
+                    storage_sent
+                        .send(host.package_boot.storage.wait().clone())
+                        .unwrap();
+                });
+                for _ in 0..3 {
+                    arrival.recv().unwrap();
+                }
+                let before_scan = scan_received.recv_timeout(Duration::from_millis(50));
+                let mut during_construction = None;
+                let mut during_storage = None;
                 let error = Exception::new(EX_ILLEGAL_STATE, "deferred app-data failure");
-                let mut metadata = None;
                 let result = prepare(
                     &host.package_boot,
                     || {
-                        construct();
+                        publish();
+                        Ok(())
+                    },
+                    |()| {
+                        // A real AppOps-style read and public package transaction
+                        // must complete before this stage is released.
+                        during_construction = Some((
+                            scan_received.recv_timeout(Duration::from_secs(5)),
+                            runtime_received.recv_timeout(Duration::from_millis(50)),
+                        ));
                         Ok(())
                     },
                     || {
-                        // Keep the data-preparation barrier held until the real
-                        // metadata consumer has completed. Do not lose its error.
-                        metadata = Some(received.recv_timeout(Duration::from_secs(5)));
+                        during_storage = Some((
+                            runtime_received.recv_timeout(Duration::from_secs(5)),
+                            storage_received.recv_timeout(Duration::from_millis(50)),
+                        ));
                         assert!(host.processes_ready.get().is_none());
                         Err(error.clone())
                     },
                 );
-                // Release the reader even if a regression put the app-data
-                // wait back inside the construction gate.
-                let _ = host.package_boot.set(Err(error.clone()));
-                assert!(metadata.unwrap().unwrap().unwrap() > 0);
-                assert_eq!(result, Err(error));
-                assert_eq!(host.package_boot.get(), Some(&Ok(())));
+                // Assertions follow publication so regressions cannot strand readers.
+                assert!(matches!(before_scan, Err(mpsc::RecvTimeoutError::Timeout)));
+                let (scan, runtime) = during_construction.unwrap();
+                let (packages, feature) = scan.unwrap();
+                assert!(packages.unwrap() > 0);
+                assert!(feature.is_ok());
+                assert_eq!(runtime, Err(mpsc::RecvTimeoutError::Timeout));
+                let (runtime, storage) = during_storage.unwrap();
+                assert!(runtime.unwrap().is_ok());
+                assert_eq!(storage, Err(mpsc::RecvTimeoutError::Timeout));
+                assert_eq!(result, Err(error.clone()));
+                assert_eq!(
+                    storage_received
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap(),
+                    Err(error)
+                );
+                assert_eq!(host.package_boot.scan.get(), Some(&Ok(())));
+                assert_eq!(host.package_boot.runtime.get(), Some(&Ok(())));
             });
         });
     }
 
     #[test]
-    fn construction_failure_releases_queries_without_preparing_data() {
-        let constructed = OnceLock::new();
-        let error = Exception::new(EX_ILLEGAL_STATE, "construction failure");
-        assert_eq!(
-            prepare(&constructed, || Err(error.clone()), || panic!("app data")),
-            Err(error.clone())
-        );
-        assert_eq!(constructed.get(), Some(&Err(error)));
+    fn published_scan_does_not_hide_a_known_construction_failure() {
+        crate::system::with_late_package_construction(|host, publish| {
+            let error = Exception::new(EX_ILLEGAL_STATE, "construction failure");
+            assert_eq!(
+                prepare(
+                    &host.package_boot,
+                    || {
+                        publish();
+                        Ok(())
+                    },
+                    |()| Err(error.clone()),
+                    || panic!("app data after construction failure"),
+                ),
+                Err(error.clone())
+            );
+            assert_eq!(feature_query(host), Err(error.clone()));
+            assert_eq!(application_info_query(host), Err(error.clone()));
+            assert_eq!(host.packages().err(), Some(error));
+            assert!(host.processes_ready.get().is_none());
+        });
+    }
+
+    #[test]
+    fn failures_release_every_dependent_stage_without_running_later_work() {
+        for scan_fails in [true, false] {
+            let ready = Readiness::default();
+            let error = Exception::new(EX_ILLEGAL_STATE, "package boot failure");
+            assert_eq!(
+                prepare(
+                    &ready,
+                    || if scan_fails {
+                        Err(error.clone())
+                    } else {
+                        Ok(())
+                    },
+                    |()| {
+                        assert!(!scan_fails);
+                        Err(error.clone())
+                    },
+                    || panic!("app data after failure"),
+                ),
+                Err(error.clone())
+            );
+            assert_eq!(
+                ready.scan.get(),
+                Some(&if scan_fails {
+                    Err(error.clone())
+                } else {
+                    Ok(())
+                })
+            );
+            assert_eq!(ready.runtime.get(), Some(&Err(error.clone())));
+            assert_eq!(ready.storage.get(), Some(&Err(error.clone())));
+            assert_eq!(
+                prepare(
+                    &ready,
+                    || -> Result<(), Exception> { panic!("repeat scan") },
+                    |()| panic!("repeat construction"),
+                    || panic!("repeat app data"),
+                ),
+                Err(error)
+            );
+        }
     }
 }

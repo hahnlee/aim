@@ -207,7 +207,7 @@ impl AppHost {
     /// `ActivityTaskManagerService.Lifecycle.onUserUnlocked` →
     /// `ActivityTaskSupervisor.onUserUnlocked`: load the user's launch params.
     pub(super) fn activity_task_user_unlocked(&self, user: i32) -> Result<(), Exception> {
-        let capture = self.package_capture()?;
+        let capture = self.package_scan_capture()?;
         self.tasks
             .launch_params(self.data()?)?
             .unlock_user(user, capture.state().packages.keys().cloned().collect())

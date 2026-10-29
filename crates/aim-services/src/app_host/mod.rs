@@ -591,8 +591,8 @@ pub struct AppHost {
     background_install_control: OnceLock<Arc<background_install_control::BackgroundInstallControl>>,
     /// The native services' system, whose package boot the app host runs.
     system: OnceLock<Arc<crate::system::System>>,
-    /// `startBootstrapServices` constructs PMS before `setSystemProcess`.
-    package_boot: OnceLock<Result<(), Exception>>,
+    /// Published scan, constructed owners, then reconciled app storage.
+    package_boot: package_boot::Readiness,
     /// AMS.mProcessesReady: default grants committed before application forks.
     processes_ready: OnceLock<Result<(), Exception>>,
     /// Retained verifier API in the current system process; replaced on attach.
@@ -719,7 +719,7 @@ impl AppHost {
             uri_grants: Default::default(),
             permission_manager: OnceLock::new(),
             system: OnceLock::new(),
-            package_boot: OnceLock::new(),
+            package_boot: Default::default(),
             processes_ready: OnceLock::new(),
             domain_frontend: Mutex::new(None),
             system_route_queries: Mutex::new(None),
@@ -810,7 +810,17 @@ impl AppHost {
         let system = self.package_system()?;
         // PMS construction precedes its consumers in SystemServer. Construction
         // itself uses System's captures and the bootstrap leaves, never this gate.
-        self.package_boot.wait().clone()?;
+        self.package_boot.runtime.wait().clone()?;
+        system.capture_package_queries()
+    }
+
+    /// The complete initial query publication, including roles and permissions,
+    /// precedes installer/runtime construction and deferred app-data preparation.
+    pub(super) fn package_scan_capture(
+        &self,
+    ) -> Result<Arc<package::scan_snapshot::query_state::Capture>, Exception> {
+        let system = self.package_system()?;
+        self.package_boot.wait_scan()?;
         system.capture_package_queries()
     }
 
@@ -1454,32 +1464,34 @@ impl AppHost {
             process_class: zygote::ACTIVITY_THREAD.into(),
             extra_args: vec![zygote::start_seq_arg(start_seq)],
         };
+        // `newProcessRecordLocked` records the isolated uid before the start,
+        // so the child can attach as soon as it runs.
+        let system = self.package_system()?;
+        system.internal_add_isolated_uid(uid as i32, SYSTEM_UID as i32, SYSTEM_UID as i32, 0)?;
         let started = Instant::now();
-        let pid = {
+        let pid = (|| {
             let mut zygote = self.zygote.lock().unwrap();
             if zygote.is_none() {
                 let stream = (configured.connect)()
                     .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("zygote relay: {e}")))?;
                 *zygote = Some(zygote::Session::new(stream));
             }
-            match zygote.as_mut().unwrap().start(&start) {
-                Ok(pid) => pid,
-                Err(e) => {
-                    *zygote = None;
-                    return Err(Exception::new(EX_ILLEGAL_STATE, format!("zygote: {e}")));
-                }
+            zygote.as_mut().unwrap().start(&start).map_err(|e| {
+                *zygote = None;
+                Exception::new(EX_ILLEGAL_STATE, format!("zygote: {e}"))
+            })
+        })();
+        let pid = match pid {
+            Ok(pid) => pid,
+            Err(e) => {
+                system.internal_remove_isolated_uid(uid as i32, SYSTEM_UID as i32, 0)?;
+                return Err(e);
             }
         };
         eprintln!(
             "app host: Start proc {pid}:{process}/{uid} for {entry} in {:?}",
             started.elapsed()
         );
-        self.package_system()?.internal_add_isolated_uid(
-            uid as i32,
-            SYSTEM_UID as i32,
-            SYSTEM_UID as i32,
-            0,
-        )?;
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
@@ -1722,7 +1734,7 @@ impl AppHost {
 
     /// Retain the session generation used by this process start.
     pub(crate) fn launch_inputs(&self, name: &str) -> Result<launch_inputs::Inputs, Exception> {
-        launch_inputs::Inputs::capture(self.package_capture()?, name)
+        launch_inputs::Inputs::capture(self.package_scan_capture()?, name)
     }
 
     /// The rest of `startProcessLocked` for the process `process` of
@@ -2131,7 +2143,7 @@ impl AppHost {
                 "the system process is attached",
             ));
         }
-        self.package_boot.wait().clone()?;
+        self.package_boot.runtime.wait().clone()?;
         let config = self.global_configuration()?;
         let providers = self.process_providers(SYSTEM_PROCESS, SYSTEM_UID)?;
         let strong = self.process.strong(handle);
@@ -3532,7 +3544,7 @@ impl AppHost {
         ),
         Exception,
     > {
-        let capture = self.package_capture()?;
+        let capture = self.package_scan_capture()?;
         let resolution = package_resolution(&capture, "package")?;
         Ok((capture.state().clone(), resolution))
     }
@@ -5537,17 +5549,7 @@ impl Service for Control {
             let host = self.0.clone();
             std::thread::spawn(move || {
                 let _ready = boot_ready::BootReady(&host);
-                match package_boot::prepare(
-                    &host.package_boot,
-                    || {
-                        host.package_system()
-                            .and_then(|system| package_boot::run(&host, system))
-                    },
-                    || {
-                        host.package_system()
-                            .and_then(|system| system.wait_native_package_app_data())
-                    },
-                ) {
+                match package_boot::run(&host) {
                     Ok(()) => eprintln!("app host: package boot: through its construction"),
                     Err(e) => return eprintln!("app host: package boot: {e:?}"),
                 }
@@ -5696,7 +5698,9 @@ pub(crate) fn test_activity_service(host: &Arc<AppHost>) -> Arc<dyn Service> {
 #[cfg(test)]
 impl AppHost {
     pub(crate) fn package_booted_for_test(&self) {
-        self.package_boot.set(Ok(())).unwrap();
+        self.package_boot.scan.set(Ok(())).unwrap();
+        self.package_boot.runtime.set(Ok(())).unwrap();
+        self.package_boot.storage.set(Ok(())).unwrap();
     }
 }
 

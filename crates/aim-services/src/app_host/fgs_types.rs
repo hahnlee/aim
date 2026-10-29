@@ -106,7 +106,8 @@ impl AppHost {
             // every running app, including apps marked persistent.
             facts::PERSISTENT => Ok(false),
             facts::SYSTEM_MODULE => {
-                let (state, _) = self.packages()?;
+                let capture = self.package_capture()?;
+                let state = capture.state();
                 let modules = state.system.module_metadata.as_ref().ok_or_else(|| {
                     Exception::new(
                         aim_binder_host::parcel::EX_ILLEGAL_STATE,

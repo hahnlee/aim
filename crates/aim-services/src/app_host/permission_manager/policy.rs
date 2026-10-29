@@ -192,12 +192,14 @@ impl PermissionManager {
         if app_id >= PER_USER_RANGE || app_id < 0 {
             return Err(Exception::illegal_argument("permission policy app ID"));
         }
+        self.host.platform()?;
+        let capture = self.host.package_scan_capture()?;
         self.retained_access()?;
         let mut held = self.owner.lock().unwrap();
         let before = held.user0.clone().expect("loaded");
         let system = held.system.clone().expect("loaded");
         let mut after = (*before).clone();
-        let (codes, packages) = self.access_with(&system, &before, |access| {
+        let (codes, packages) = self.access_with(&system, &before, &capture, |access| {
             let op = |name: &str| {
                 APP_OP_INFOS.iter().find(|op| {
                     op.permission.is_some_and(|(permission, flag)| {

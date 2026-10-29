@@ -217,8 +217,10 @@ impl AppHost {
     /// later (`unlock_user_storage`), as `finishUserBoot` unlocks it.
     pub(super) fn start_storage(&self) -> Result<StartedUser, String> {
         let installd = self.installd()?;
-        self.package_system()
-            .and_then(|system| system.wait_native_package_app_data())
+        self.package_boot
+            .storage
+            .wait()
+            .clone()
             .map_err(|e| e.message)?;
         let deadline = Instant::now() + VOLD_PATIENCE;
         let vold = loop {
@@ -304,8 +306,10 @@ impl AppHost {
     /// (`prepareUserData`, `reconcileAppsData`).
     fn prepare_user_storage(&self, user: &StartedUser, flags: i32) -> Result<(), String> {
         let system = self.package_system().map_err(|e| e.message)?;
-        system
-            .wait_native_package_app_data()
+        self.package_boot
+            .storage
+            .wait()
+            .clone()
             .map_err(|e| e.message)?;
         self.prepare_user_data(&user.vold, &user.installd, USER, flags)?;
         *self

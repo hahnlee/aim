@@ -107,7 +107,8 @@ fn public_package_fronts_release_waiting_calls_with_the_boot_failure() {
                 arrival.recv().unwrap();
             }
             let blocked = result.recv_timeout(Duration::from_millis(50));
-            host.package_boot.set(Err(error.clone())).unwrap();
+            host.package_boot.scan.set(Err(error.clone())).unwrap();
+            host.package_boot.runtime.set(Err(error.clone())).unwrap();
             assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
             for _ in 0..2 {
                 assert_eq!(
@@ -152,7 +153,7 @@ fn package_consumers_wait_for_boot_even_after_queries_are_published() {
                     arrival.recv().unwrap();
                 }
                 let blocked = result.recv_timeout(Duration::from_millis(50));
-                host.package_boot.set(outcome).unwrap();
+                host.package_boot.runtime.set(outcome).unwrap();
                 assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
                 for _ in 0..3 {
                     assert_eq!(result.recv().unwrap(), expected);
@@ -192,7 +193,7 @@ fn system_process_attach_waits_for_package_boot_outcome() {
             });
             arrival.recv().unwrap();
             let blocked = result.recv_timeout(Duration::from_millis(50));
-            host.package_boot.set(outcome).unwrap();
+            host.package_boot.runtime.set(outcome).unwrap();
             assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
             assert_eq!(result.recv().unwrap(), expected);
         });
