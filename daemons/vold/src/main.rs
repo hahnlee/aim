@@ -13,6 +13,7 @@
 //!   report nothing, as vold does on a device without the feature.
 
 mod fuse;
+mod keystore;
 mod storage;
 
 use std::{
@@ -665,9 +666,13 @@ impl IVold::IVold for Vold {
         Ok(())
     }
     fn earlyBootEnded(&self) -> binder::Result<()> {
-        // It tells keystore's metadata encryption and the checkpoint, which
-        // this device has neither of.
-        Ok(())
+        if !matches!(binder::ThreadState::get_calling_uid(), 0 | 1000) {
+            return Err(Status::new_exception_str(
+                ExceptionCode::SECURITY,
+                Some("earlyBootEnded requires system or root"),
+            ));
+        }
+        keystore::early_boot_ended()
     }
     fn createStubVolume(
         &self,

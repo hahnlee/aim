@@ -283,8 +283,23 @@ The app host prepares user 0's CE storage before starting vold's user and mounti
 Storage crate queries use the original Java Installer, installd and CrateInfo conversion in aim-system, after native caller permission and package visibility checks (#1826; focused host tests, JVM lifecycle and pinned-image Java linkage, no guest boot, 2026-10-29).
 The app host treats an absent `/data/system/overlays.xml` as empty overlay settings and reports guest paths at the data-file error sources used by its native settings and package readers (#2233; host tests only, no guest boot rerun).
 
+The app host's selected services now include the original software gatekeeper
+(`vendor.gatekeeper_nonsecure`), whose declared `ISharedSecret/gatekeeper` must
+participate in keystore's negotiation alongside KeyMint. Vold's `earlyBootEnded`
+now forwards to the original `android.security.maintenance` service with the
+pinned generated transaction code, system/root admission and propagated errors;
+keystore initializes its boot-level key cache there even without metadata
+encryption (#200). The original init/odsign ordering and both odsign completion
+waits remain. Over three boots (2026-10-30), keystore's shared secret negotiation
+concludes and `earlyBootEnded` reaches TRUSTED_ENVIRONMENT KeyMint; odsign
+initializes its keystore key. The second boot's `boot_completed` stays at about
+7 s (7.3-7.9 s, against 6.7-7.4 s without the change): the SharedSecret retries
+had run in a background thread. odsign's `odrefresh --check` then aborts on
+`apex-info-list.xml` without `lastUpdateMillis` (#2418).
+
 The app host image ([app-host.md](app-host.md)) boots without
-system_server: with `--only` its 33 services and one-shots, zygote accepts
+system_server. In the original measurement, `--only` selected 33 services and
+one-shots (the current selection has 44 entries), and zygote accepted
 commands 4.2-4.3 s after guest-init starts (odsign is done at 2.36 s,
 zygote's preload takes 1.0 s); without `--only`, 7.2-8.0 s. apexd, keystore2 and
 odsign cannot be left out: init waits for properties they set
@@ -8203,7 +8218,7 @@ keeps exiting and init restarts it every 5 s.
 | system_aconfigd_mainline_init | exit 1 | "aconfigd_mainline is enabled, skipping mainline init" |
 | derive_sdk, derive_classpath, art_boot, logd-reinit, update_verifier | exit 0 | |
 | usbd | exit 0 | no USB HAL |
-| odsign | stops itself | keystore refuses the boot-level key (`Boot stage key absent`, `LOCKED`; #200) |
+| odsign | exits after odrefresh aborts | its keystore key initializes (#200); `odrefresh --check` aborts on the missing `lastUpdateMillis` (#2418) |
 | misctrl | exit 1 | no `/misc` partition |
 | exec `recovery-refresh` | exit 254 | no pstore |
 | exec `chattr +F /data/media` | exit 1 | `FS_IOC_GETFLAGS` is ENOTTY |

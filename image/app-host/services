@@ -22,6 +22,9 @@ apexd
 keystore2
 odsign
 vendor.keymint-default
+# The declared ISharedSecret/gatekeeper participates in keystore's
+# negotiation alongside KeyMint, even without a lock-screen UI.
+vendor.gatekeeper_nonsecure
 prng_seeder
 logd
 tombstoned
