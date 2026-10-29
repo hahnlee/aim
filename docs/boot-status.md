@@ -256,8 +256,21 @@ The app host prepares user 0's CE storage before starting vold's user and mounti
 Storage crate queries use the original Java Installer, installd and CrateInfo conversion in aim-system, after native caller permission and package visibility checks (#1826; focused host tests, JVM lifecycle and pinned-image Java linkage, no guest boot, 2026-10-29).
 The app host treats an absent `/data/system/overlays.xml` as empty overlay settings and reports guest paths at the data-file error sources used by its native settings and package readers (#2233; host tests only, no guest boot rerun).
 
+The app host's selected services now include the original software gatekeeper
+(`vendor.gatekeeper_nonsecure`), whose declared `ISharedSecret/gatekeeper` must
+participate in keystore's negotiation alongside KeyMint. Vold's `earlyBootEnded`
+now forwards to the original `android.security.maintenance` service with the
+pinned generated transaction code, system/root admission and propagated errors;
+keystore initializes its boot-level key cache there even without metadata
+encryption (#200). The original init/odsign ordering and both odsign completion
+waits remain. Read-only pinned-image init-contract tests and Android vold linking
+pass (2026-10-29); no guest boot or boot-time saving has been measured for this
+change. The prior logs' SharedSecret retries ran in a background thread, and
+their odsign failure took 19 ms, so neither establishes a multi-second saving.
+
 The app host image ([app-host.md](app-host.md)) boots without
-system_server: with `--only` its 33 services and one-shots, zygote accepts
+system_server. In the original measurement, `--only` selected 33 services and
+one-shots (the current selection has 44 entries), and zygote accepted
 commands 4.2-4.3 s after guest-init starts (odsign is done at 2.36 s,
 zygote's preload takes 1.0 s); without `--only`, 7.2-8.0 s. apexd, keystore2 and
 odsign cannot be left out: init waits for properties they set
@@ -8122,7 +8135,7 @@ keeps exiting and init restarts it every 5 s.
 | system_aconfigd_mainline_init | exit 1 | "aconfigd_mainline is enabled, skipping mainline init" |
 | derive_sdk, derive_classpath, art_boot, logd-reinit, update_verifier | exit 0 | |
 | usbd | exit 0 | no USB HAL |
-| odsign | stops itself | keystore refuses the boot-level key (`Boot stage key absent`, `LOCKED`; #200) |
+| odsign | historical run: stops itself | keystore refused the boot-level key (`Boot stage key absent`, `LOCKED`; #200); vold now forwards the missing earlyBootEnded notification, without a guest rerun |
 | misctrl | exit 1 | no `/misc` partition |
 | exec `recovery-refresh` | exit 254 | no pstore |
 | exec `chattr +F /data/media` | exit 1 | `FS_IOC_GETFLAGS` is ENOTTY |

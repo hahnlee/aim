@@ -230,6 +230,74 @@ fn load_scripts(
 }
 
 #[test]
+fn app_host_retains_the_original_early_boot_security_chain() {
+    let Some(root) = aim_paths::original_image_with(
+        "apex/com.android.hardware.gatekeeper/etc/android.hardware.gatekeeper-service.nonsecure.rc",
+    ) else {
+        return;
+    };
+    let image = ImageRoot::new(root);
+    let props = BTreeMap::from([
+        ("ro.hardware".into(), "ranchu".into()),
+        ("ro.zygote".into(), "zygote64".into()),
+    ]);
+    let ids = IdResolver::from_image(&image, &props);
+    let scripts = ScriptLoader {
+        image: &image,
+        properties: &props,
+        ids: &ids,
+        vendor_api_level: 36,
+        vendor_apexes: Some(vec!["com.android.hardware.gatekeeper".into()]),
+        bootstrap_apexes: vec!["com.android.hardware.gatekeeper".into()],
+    }
+    .load();
+    let allowed = include_str!("../../../image/app-host/services");
+    for name in [
+        "keystore2",
+        "vendor.keymint-default",
+        "vendor.gatekeeper_nonsecure",
+    ] {
+        let service = scripts
+            .bootstrap_apex
+            .services
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} missing: {:?}", scripts.bootstrap_apex.diagnostics));
+        assert!(service.classnames.contains("early_hal"));
+        assert!(!service.disabled);
+        assert!(allowed.lines().any(|line| line == name), "{name} excluded");
+    }
+    let commands: Vec<_> = scripts
+        .boot
+        .actions
+        .iter()
+        .filter(|a| a.event_trigger == "post-fs-data" && a.property_triggers.is_empty())
+        .flat_map(|a| &a.commands)
+        .map(|c| c.command_string())
+        .collect();
+    let position = |command: &str| commands.iter().position(|c| c == command).unwrap();
+    assert!(
+        position("setprop keystore.boot_level 30")
+            < position("exec - system system -- /system/bin/vdc keymaster earlyBootEnded")
+    );
+    assert!(
+        position("exec - system system -- /system/bin/vdc keymaster earlyBootEnded")
+            < position("start odsign")
+    );
+    assert!(position("start odsign") < position("wait_for_prop odsign.key.done 1"));
+    assert!(
+        position("wait_for_prop odsign.key.done 1")
+            < position("setprop keystore.boot_level 1000000000")
+    );
+    assert!(scripts.boot.actions.iter().any(|a| {
+        a.event_trigger == "zygote-start"
+            && a.commands
+                .iter()
+                .any(|c| c.command_string() == "wait_for_prop odsign.verification.done 1")
+    }));
+}
+
+#[test]
 fn image_netbpfload_override_and_exec_completion_precede_netd() {
     use aim_android_init::engine::{Command, CommandExecutor, CommandFlow, Invocation};
     use aim_android_init::rc::{ParseEnv, Parser, SectionKind};
