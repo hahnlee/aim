@@ -315,87 +315,161 @@ fn fuse_reply_timeouts_notifications_and_lookup_references() {
     assert_eq!(server.join().unwrap(), (1, 2, 0));
 }
 
-// A host daemon on the same device/broker path as the app-host agent. No guest
-// image or boot is involved; the daemon retains its real zero cache timeouts.
+mod benchmark;
+
 #[test]
-#[ignore = "host timing benchmark; run explicitly with --ignored --nocapture"]
-fn fuse_host_metadata_benchmark() {
+fn fuse_namei_walk_is_linear_and_rechecks_zero_timeout_entries() {
+    use std::sync::{Arc, Mutex};
     let (_guard, root) = crate::vfs::test_view();
-    fs::create_dir_all(root.join("root/mnt")).unwrap();
     let connection = Connection::new();
-    initialize(&connection);
-    let lower = connection.key.transport().parent().unwrap().join("lower");
-    let relative = "0/Android/data/bench/files";
-    fs::create_dir_all(lower.join(relative)).unwrap();
-    let mount = "/mnt/fuse-bench";
+    let lower = root.join("linear-fuse-lower");
+    fs::create_dir_all(lower.join("0/a/b")).unwrap();
+    fs::write(lower.join("0/a/file"), b"").unwrap();
+    let mount = "/mnt/linear-fuse";
+    std::os::unix::fs::symlink("b", lower.join("0/a/rel")).unwrap();
+    std::os::unix::fs::symlink(format!("{mount}/0/a/b"), lower.join("0/abs")).unwrap();
     let options =
         crate::sys::fuse_mount::parse(b"fd=17,rootmode=40000,user_id=0,group_id=0,allow_other")
             .unwrap();
-    let anchor = root.join("benchmark-anchor");
-    fs::create_dir(&anchor).unwrap();
     crate::vfs::add_fuse_mount(
         mount,
         connection.key.transport().to_owned(),
-        anchor,
+        lower.clone(),
         "fuse",
         &options,
         false,
     )
     .unwrap();
+    let counts = Arc::new(Mutex::new(std::collections::BTreeMap::<u32, usize>::new()));
+    let recorded = counts.clone();
     let device = connection.fd;
-    let daemon = aim_emulated_storage::Daemon::new(lower);
-    let server = std::thread::spawn(move || {
-        let mut counts = std::collections::BTreeMap::<u32, usize>::new();
+    let daemon_lower = lower.clone();
+    let daemon = std::thread::spawn(move || {
+        let daemon = aim_emulated_storage::Daemon::new(daemon_lower);
         loop {
             let packet = next(device);
             let op = u32::from_le_bytes(packet[4..8].try_into().unwrap());
-            *counts.entry(op).or_default() += 1;
-            if op == 38 {
-                respond(device, &packet, 0, &[]);
-                return counts;
-            }
+            *recorded.lock().unwrap().entry(op).or_default() += 1;
             if let Some(reply) = daemon.handle(&packet) {
                 write_device(device, &reply).unwrap();
             }
+            if op == 38 {
+                break;
+            }
         }
     });
-    let path = std::ffi::CString::new(format!("{mount}/{relative}")).unwrap();
-    let at = crate::vfs::LINUX_AT_FDCWD as u64;
-    let mut buffer = [0u64; 32];
-    for operation in ["access", "stat", "mkdir", "statfs"] {
-        let mut samples = Vec::new();
-        for _ in 0..30 {
-            let start = std::time::Instant::now();
-            let pointer = path.as_ptr() as u64;
-            let output = buffer.as_mut_ptr() as u64;
-            let result = match operation {
-                "access" => crate::sys::fs::faccessat(at, pointer, 0, 0),
-                "stat" => crate::sys::fs::newfstatat([at, pointer, output, 0, 0, 0]),
-                "mkdir" => crate::sys::fsops::mkdirat([at, pointer, 0o755, 0, 0, 0]),
-                _ => crate::sys::fs::statfs([pointer, output, 0, 0, 0, 0]),
-            };
-            assert_eq!(
-                result,
-                if operation == "mkdir" {
-                    -(crate::errno::EEXIST as i64)
-                } else {
-                    0
-                }
-            );
-            samples.push(start.elapsed().as_secs_f64() * 1000.0);
-        }
-        samples.sort_by(f64::total_cmp);
-        eprintln!(
-            "FUSE_BENCH {operation}: mean={:.3} median={:.3} p95={:.3} ms n=30",
-            samples.iter().sum::<f64>() / samples.len() as f64,
-            samples[15],
-            samples[28]
-        );
+    let client = Client::new(&connection.key);
+    client.mount().unwrap();
+    let resolve = |suffix: &str| {
+        crate::vfs::resolve(
+            crate::vfs::LINUX_AT_FDCWD,
+            format!("{mount}/{suffix}").as_bytes(),
+            true,
+        )
+    };
+    // A STATFS barrier drains FORGETs before each count snapshot. Its own
+    // reply remains per-call, including after a failed path walk.
+    for expected in [3, 6] {
+        assert!(resolve("0/a/b").is_ok());
+        client.request(17, 1, &[], 0, 0, 1).unwrap();
+        let counts = counts.lock().unwrap();
+        assert_eq!(counts[&1], expected);
+        assert_eq!(counts[&FORGET], expected);
+        assert_eq!(counts[&3], expected / 3); // only the mount root needs GETATTR
     }
-    Client::from_key(&connection.key)
-        .unwrap()
-        .request(38, 1, &[], 0, 0, 1)
-        .unwrap();
-    eprintln!("FUSE_BENCH requests={:?}", server.join().unwrap());
+    for suffix in ["0/a/rel", "0/abs", "0/a/b/../b", "0/a/missing"] {
+        assert!(resolve(suffix).is_ok(), "{suffix}");
+    }
+    assert_eq!(
+        resolve("0/a/missing/child").err(),
+        Some(crate::errno::ENOENT)
+    );
+    assert_eq!(resolve("0/a/file/child").err(), Some(crate::errno::ENOTDIR));
+    // default_permissions must still check the current parent mode; an
+    // incremental walk must not turn LOOKUP's type into an access grant.
+    let permission_mount = "/mnt/linear-fuse-permissions";
+    let permission_options = crate::sys::fuse_mount::parse(
+        b"fd=17,rootmode=40000,user_id=0,group_id=0,allow_other,default_permissions",
+    )
+    .unwrap();
+    crate::vfs::add_fuse_mount(
+        permission_mount,
+        connection.key.transport().to_owned(),
+        lower.clone(),
+        "fuse",
+        &permission_options,
+        false,
+    )
+    .unwrap();
+    struct Identity(crate::sys::cred::Identity);
+    impl Drop for Identity {
+        fn drop(&mut self) {
+            crate::sys::cred::init(self.0.clone(), None);
+        }
+    }
+    let saved = Identity(crate::sys::cred::current());
+    let mut app = saved.0.clone();
+    app.uid = [10001; 4];
+    app.gid = [10001; 4];
+    app.groups.clear();
+    crate::sys::cred::init(app, None);
+    let path = format!("{permission_mount}/0/a/b");
+    assert!(crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD, path.as_bytes(), true).is_ok());
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(lower.join("0/a"), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD, path.as_bytes(), true).err(),
+        Some(crate::errno::EACCES)
+    );
+    drop(saved);
+    assert!(crate::vfs::remove_mount(permission_mount).unwrap());
+    client.request(38, 1, &[], 0, 0, 1).unwrap();
+    daemon.join().unwrap();
     assert!(crate::vfs::remove_mount(mount).unwrap());
+}
+
+#[test]
+fn broker_workers_keep_blocked_requests_and_errors_independent() {
+    let connection = Connection::new();
+    initialize(&connection);
+    let device = connection.fd;
+    let daemon = std::thread::spawn(move || {
+        for _ in 0..160 {
+            let packet = next(device);
+            let node = u64::from_le_bytes(packet[16..24].try_into().unwrap());
+            if node % 7 == 0 {
+                respond(device, &packet, -crate::errno::EACCES, &[]);
+            } else {
+                let mut attr = vec![0; 104];
+                attr[16..24].copy_from_slice(&node.to_le_bytes());
+                respond(device, &packet, 0, &attr);
+            }
+        }
+    });
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let clients: Vec<_> = (0..8)
+        .map(|worker| {
+            let client = Client::new(&connection.key);
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for iteration in 0..20 {
+                    let node = worker * 100 + iteration + 2;
+                    let result = client.request(3, node, &[0; 16], 0, 0, 1);
+                    if node % 7 == 0 {
+                        assert_eq!(result.err(), Some(crate::errno::EACCES));
+                    } else {
+                        assert_eq!(
+                            u64::from_le_bytes(result.unwrap().body[16..24].try_into().unwrap()),
+                            node
+                        );
+                    }
+                }
+            })
+        })
+        .collect();
+    for client in clients {
+        client.join().unwrap();
+    }
+    daemon.join().unwrap();
 }

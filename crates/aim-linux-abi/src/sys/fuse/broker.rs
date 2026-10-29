@@ -1319,6 +1319,37 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
         let _ = reply(stream.as_raw_fd(), Err(error));
     }
 }
+/// Reuse idle RPC workers. Blocking device reads, pending requests and open
+/// capabilities must never consume a bounded pool needed to deliver replies.
+#[derive(Default)]
+struct Workers(Arc<Mutex<Vec<mpsc::Sender<UnixStream>>>>);
+impl Workers {
+    fn dispatch(&self, owner: Arc<Owner>, mut stream: UnixStream) {
+        while let Some(idle) = self.0.lock().unwrap().pop() {
+            match idle.send(stream) {
+                Ok(()) => return,
+                Err(error) => stream = error.0,
+            }
+        }
+        let idle = Arc::downgrade(&self.0);
+        std::thread::spawn(move || {
+            loop {
+                handle(owner.clone(), stream);
+                let Some(idle) = idle.upgrade() else {
+                    break;
+                };
+                let (send, receive) = mpsc::channel();
+                idle.lock().unwrap().push(send);
+                drop(idle);
+                match receive.recv_timeout(Duration::from_secs(1)) {
+                    Ok(next) => stream = next,
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+}
+
 pub fn serve(path: &Path) -> Result<(), Errno> {
     let (listener, _transport) = super::transport::listen(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
@@ -1348,13 +1379,13 @@ pub fn serve(path: &Path) -> Result<(), Errno> {
         ready: Condvar::new(),
     });
     let started = std::time::Instant::now();
+    let workers = Workers::default();
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(false).map_err(io_error)?;
-                let owner = owner.clone();
                 no_sigpipe(stream.as_raw_fd());
-                std::thread::spawn(move || handle(owner, stream));
+                workers.dispatch(owner.clone(), stream);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(io_error(error)),

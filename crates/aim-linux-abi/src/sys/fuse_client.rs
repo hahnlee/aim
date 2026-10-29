@@ -61,6 +61,75 @@ pub fn forget(route: &FuseRoute, node: u64, count: u64) -> Result<(), Errno> {
         super::process::getpid() as u32,
     )
 }
+fn search(route: &FuseRoute, node: u64) -> Result<(), Errno> {
+    if route.default_permissions {
+        let attributes = getattr(route, node, None)?;
+        let mode = u32_at(&attributes, 60)?;
+        let identity = super::cred::current();
+        if mode & 0o170000 != 0o040000 {
+            return Err(crate::errno::ENOTDIR);
+        }
+        let uid = u32_at(&attributes, 68)?;
+        let gid = u32_at(&attributes, 72)?;
+        let shift = if identity.uid[3] == uid {
+            6
+        } else if identity.gid[3] == gid || identity.groups.contains(&gid) {
+            3
+        } else {
+            0
+        };
+        if identity.uid[3] != 0 && (mode >> shift) & 1 == 0 {
+            return Err(crate::errno::EACCES);
+        }
+    }
+    Ok(())
+}
+
+/// A namei walk holds its current parent instead of looking up every prefix
+/// from the root again. LOOKUP supplies the child's type even at timeout zero;
+/// those attributes are used only by this step, never cached locally.
+pub(crate) struct Walk {
+    lookup: LookupGuard,
+    pub mode: u32,
+}
+impl Walk {
+    pub fn node(&self) -> u64 {
+        self.lookup.node
+    }
+    pub fn advance(route: &FuseRoute, previous: Option<&Self>) -> Result<Self, Errno> {
+        let (parent, name) = route
+            .relative
+            .rsplit_once('/')
+            .unwrap_or(("", &route.relative));
+        let mut parent_route = route.clone();
+        parent_route.relative = parent.into();
+        if let Some(previous) =
+            previous.filter(|p| !name.is_empty() && p.lookup.route == parent_route)
+        {
+            search(route, previous.node())?;
+            let mut name = name.as_bytes().to_vec();
+            name.push(0);
+            let reply = request(route, 1, previous.node(), &name)?;
+            let node = u64_at(&reply, 0)?;
+            if node == 0 {
+                return Err(crate::errno::ENOENT);
+            }
+            let lookup = LookupGuard::transient(route, node);
+            return Ok(Self {
+                lookup,
+                mode: u32_at(&reply, 100)?,
+            });
+        }
+        let node = lookup(route)?;
+        let lookup = LookupGuard::transient(route, node);
+        let attr = getattr(route, node, None)?;
+        Ok(Self {
+            lookup,
+            mode: u32_at(&attr, 60)?,
+        })
+    }
+}
+
 pub fn lookup(route: &FuseRoute) -> Result<u64, Errno> {
     lookup_entry(route).map(|(node, _)| node)
 }
@@ -71,26 +140,7 @@ fn lookup_entry(route: &FuseRoute) -> Result<(u64, u64), Errno> {
         if component == "." || component == ".." || component.as_bytes().contains(&0) {
             return Err(EINVAL);
         }
-        if route.default_permissions {
-            let attributes = getattr(route, node, None)?;
-            let mode = u32_at(&attributes, 60)?;
-            let identity = super::cred::current();
-            if mode & 0o170000 != 0o040000 {
-                return Err(crate::errno::ENOTDIR);
-            }
-            let uid = u32_at(&attributes, 68)?;
-            let gid = u32_at(&attributes, 72)?;
-            let shift = if identity.uid[3] == uid {
-                6
-            } else if identity.gid[3] == gid || identity.groups.contains(&gid) {
-                3
-            } else {
-                0
-            };
-            if identity.uid[3] != 0 && (mode >> shift) & 1 == 0 {
-                return Err(crate::errno::EACCES);
-            }
-        }
+        search(route, node)?;
         let mut name = component.as_bytes().to_vec();
         name.push(0);
         let reply = match request(route, 1, node, &name) {
