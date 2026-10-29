@@ -28,4 +28,5 @@ public class Resources {
         public NotFoundException() { throw new RuntimeException("stub"); }
         public NotFoundException(String message) { super(message); throw new RuntimeException("stub"); }
     }
+    public static int selectDefaultTheme(int theme, int targetSdkVersion) { throw new RuntimeException("stub"); }
 }

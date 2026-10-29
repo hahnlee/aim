@@ -505,6 +505,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IProviderQueries|java/device-services/aidl/dev/aim/server/IProviderQueries.aidl|*"
   "dev.aim.server.IWifiBridge|java/device-services/aidl/dev/aim/server/IWifiBridge.aidl|*"
   "dev.aim.server.INetworkActivityBridge|java/device-services/aidl/dev/aim/server/INetworkActivityBridge.aidl|*"
+  "dev.aim.server.IActivityAnimations|java/device-services/aidl/dev/aim/server/IActivityAnimations.aidl|*"
   "dev.aim.server.ISafeLabels|java/device-services/aidl/dev/aim/server/ISafeLabels.aidl|*"
   "dev.aim.server.IAudioPolicyQueries|java/device-services/aidl/dev/aim/server/IAudioPolicyQueries.aidl|*"
   "dev.aim.server.ISyncAdapterQueries|java/device-services/aidl/dev/aim/server/ISyncAdapterQueries.aidl|*"

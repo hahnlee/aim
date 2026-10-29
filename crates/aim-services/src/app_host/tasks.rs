@@ -59,7 +59,7 @@ impl Task {
 #[derive(Default)]
 pub struct Tasks {
     /// Whether the display server shows a window per task, once it said.
-    windows: OnceLock<bool>,
+    pub(super) windows: OnceLock<bool>,
     bridge: Mutex<Option<UnixStream>>,
     tasks: Mutex<Vec<Task>>,
     next: Mutex<i32>,
@@ -218,6 +218,7 @@ impl AppHost {
     /// thread of its own; in window mode it keeps the connection and
     /// takes the server's requests.
     pub fn connect_display(self: &Arc<Self>, socket: &Path) {
+        self.windows.transitions.lock().unwrap().socket = Some(socket.to_path_buf());
         let host = self.clone();
         let socket = socket.to_path_buf();
         std::thread::spawn(move || match bridge(&socket) {

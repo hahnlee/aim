@@ -73,6 +73,8 @@ pub struct Composer {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Change {
     pub position: Option<(f32, f32)>,
+    pub matrix: Option<[f32; 4]>,
+    pub alpha: Option<f32>,
     pub z: Option<i32>,
     /// Left, top, right, bottom, in the layer's space.
     pub crop: Option<[f32; 4]>,
@@ -274,6 +276,12 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
     if change.remove {
         what |= REPARENT;
     }
+    if change.matrix.is_some() {
+        what |= 0x10;
+    }
+    if change.alpha.is_some() {
+        what |= 0x8;
+    }
     p.write_binder(Some(handle));
     p.write_i32(id);
     p.write_i64(what as i64);
@@ -283,13 +291,19 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
     p.write_i32(0); // layer stack
     p.write_i32(0); // flags
     p.write_i32(0); // mask
-    [1.0, 0.0, 1.0, 0.0].iter().for_each(|v| p.write_f32(*v)); // matrix: dsdx, dtdx, dtdy, dsdy
+    change
+        .matrix
+        .unwrap_or([1.0, 0.0, 1.0, 0.0])
+        .iter()
+        .for_each(|v| p.write_f32(*v));
     [top, left, bottom, right]
         .iter()
         .for_each(|v| p.write_f32(*v));
     p.write_bool(false); // no relative layer
     p.write_bool(false); // no parent for a child
-    (0..4).for_each(|_| p.write_f32(0.0)); // color
+    [0., 0., 0., change.alpha.unwrap_or(0.)]
+        .iter()
+        .for_each(|v| p.write_f32(*v)); // color
     p.write_i32(0); // no window info
     write_empty_region(p); // transparent region
     p.write_i32(0); // buffer transform
@@ -444,6 +458,8 @@ mod tests {
             z: Some(3),
             crop: Some([0.0, 0.0, 640.0, 480.0]),
             remove: false,
+            matrix: Some([0.5, 0., 0.5, 0.]),
+            alpha: Some(0.25),
         };
         let p = transaction(5, Binder::Local(1), &[(Binder::Handle(9), 7, change)]);
         let data = p.data();
@@ -460,7 +476,7 @@ mod tests {
         assert_eq!(i32::from_le_bytes(word(0)), 7);
         assert_eq!(
             u64::from_le_bytes(fields[4..12].try_into().unwrap()),
-            POSITION_CHANGED | LAYER_CHANGED | CROP_CHANGED
+            POSITION_CHANGED | LAYER_CHANGED | CROP_CHANGED | 0x10 | 0x8
         );
         assert_eq!(
             (
@@ -470,6 +486,8 @@ mod tests {
             ),
             (100.0, 50.0, 3)
         );
+        assert_eq!(f32::from_le_bytes(word(9)), 0.5);
+        assert_eq!(f32::from_le_bytes(word(22)), 0.25);
         // The crop: top, left, bottom, right.
         let crop: Vec<f32> = (13..17).map(|i| f32::from_le_bytes(word(i))).collect();
         assert_eq!(crop, [0.0, 0.0, 480.0, 640.0]);

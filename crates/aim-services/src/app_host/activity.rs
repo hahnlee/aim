@@ -1124,12 +1124,19 @@ impl Service for ActivityClientController {
                 acc::SetRecentsScreenshotEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 Ok(Parcel::new())
             }
-            // `overridePendingTransition` gives the transition being
-            // collected its animation (`TransitionController
-            // .setOverrideAnimation`); the app host collects none (#1725), so
-            // nothing follows, as on the original when none is collecting.
             acc::OVERRIDE_PENDING_TRANSITION => {
-                acc::OverridePendingTransition::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    acc::OverridePendingTransition::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.0.override_transition(
+                    call.sender_euid,
+                    a.token,
+                    a.package_name,
+                    a.enter_anim,
+                    a.exit_anim,
+                    a.background_color,
+                ) {
+                    return reply(Err(e));
+                }
                 let mut p = Parcel::new();
                 acc::write_override_pending_transition_reply(&mut p);
                 Ok(p)

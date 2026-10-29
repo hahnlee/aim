@@ -363,6 +363,9 @@ impl AppHost {
     pub(super) fn run(self: &Arc<Self>, commands: Vec<Command>) {
         self.update_window_focus();
         for command in commands {
+            if self.hold_transition(&command) {
+                continue;
+            }
             if let Err(e) = self.run_one(command) {
                 eprintln!("app host: activity: {e}");
             }
@@ -598,6 +601,7 @@ impl AppHost {
             app.add_package(package);
         }
         let token = self.new_activity(start_seq, uid, package, info, style, task, request);
+        self.collect_open(existing, token);
         let mut activity =
             stack::Activity::new(token, task, start_seq, &real, launch_mode, user, result_to);
         (
@@ -889,7 +893,10 @@ impl AppHost {
                 self.run(commands);
                 return Ok(code);
             }
-            Outcome::New(task) => task,
+            Outcome::New(task) => {
+                self.collect_open(task, 0);
+                task
+            }
         };
         let request = StartRequest {
             class,
@@ -1000,6 +1007,11 @@ impl AppHost {
                 },
             );
         }
+        if finish_task != FINISH_TASK_WITH_ACTIVITY
+            && !(finish_task == FINISH_TASK_WITH_ROOT_ACTIVITY && root)
+        {
+            self.collect_close(token);
+        }
         let (finished, mut commands) = self.activities.stack.lock().unwrap().finish(token);
         // `finishActivityResults`: the grants are the asker's.
         if finished && let Some(to) = result_to {
@@ -1091,6 +1103,7 @@ impl AppHost {
             return;
         };
         let destroyed = matches!(report, Report::Destroyed);
+        let idle = matches!(report, Report::Idle);
         let commands = {
             let mut stack = self.activities.stack.lock().unwrap();
             match report {
@@ -1113,6 +1126,9 @@ impl AppHost {
             self.activity_connections_gone(token);
         }
         self.run(commands);
+        if idle {
+            self.transition_ready(token);
+        }
     }
 
     /// Whether `token` is the root of a task the launcher started

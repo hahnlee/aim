@@ -127,6 +127,7 @@ public final class SystemProcessHost extends RuntimeInit {
                     ServiceManager.waitForService("aim.system_process"));
             host.attachNetworkActivityBridge(new NetworkActivityBridge(
                     context, new Handler(Looper.getMainLooper()), host));
+            host.attachActivityAnimations(new ActivityAnimations(context));
             host.attachWifiBridge(new WifiBridge(new Handler(Looper.getMainLooper())));
             host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
             ServiceManager.addService("aim.role_queries", new RoleQueries(context));

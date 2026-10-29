@@ -45,6 +45,7 @@ pub struct LayoutParams {
     pub y: i32,
     pub kind: i32,
     pub flags: i32,
+    pub window_animations: i32,
     pub gravity: i32,
     pub horizontal_margin: f32,
     pub vertical_margin: f32,
@@ -71,9 +72,10 @@ impl LayoutParams {
         let gravity = r.read_i32()?;
         let horizontal_margin = r.read_f32()?;
         let vertical_margin = r.read_f32()?;
-        // format, window animations, alpha, dim amount, screen and button
-        // brightness, rotation animation
-        for _ in 0..7 {
+        r.read_i32()?; // format
+        let window_animations = r.read_i32()?;
+        // alpha, dim amount, screen and button brightness, rotation animation
+        for _ in 0..5 {
             r.read_i32()?;
         }
         let token = r.read_binder()?;
@@ -98,6 +100,7 @@ impl LayoutParams {
             y,
             kind,
             flags,
+            window_animations,
             gravity,
             horizontal_margin,
             vertical_margin,

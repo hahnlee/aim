@@ -428,6 +428,12 @@ impl Display {
                     // A new composer names its layers afresh.
                     self.owners.lock().unwrap().reset();
                 }
+                wire::OP_VSYNC_OBSERVER if r.id == wire::VERSION => {
+                    if wire::send(sock.as_fd(), wire::bytes(&self.info), None).is_err() {
+                        break;
+                    }
+                    self.clients.lock().unwrap().push(client.clone());
+                }
                 wire::OP_IMPORT => {
                     let Some(fd) = fds.pop() else { break };
                     match self.renderer.import(fd, &r.import) {

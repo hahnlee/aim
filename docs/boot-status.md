@@ -5,6 +5,12 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+The app host now collects same-task activity opens and closes/back, retains the
+outgoing window through playback, and accepts collecting `overridePendingTransition`
+resource IDs (#1725). Java evaluates the original theme animation XML; native
+playback submits matrix/alpha/clip transactions on display vsync. This first slice
+has host checks only; no guest boot or live visual verification (2026-10-29).
+
 Slice pins retain the native default-home lookup's exception code and cause
 instead of replacing them with a generic UnsupportedOperationException (#2362).
 Host Binder tests cover a non-home caller with zero, one and two HOME activities,

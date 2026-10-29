@@ -82,6 +82,8 @@ pub const OP_LAYERS: u32 = 12;
 /// server answers with its mode (a `u32`), then both ends exchange
 /// frames.
 pub const OP_TEXT_INPUT: u32 = 13;
+/// Vsync-only client; same reply as HELLO, without composer state changes.
+pub const OP_VSYNC_OBSERVER: u32 = 14;
 
 /// [`Host::op`] values.
 pub mod host {
