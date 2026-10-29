@@ -400,7 +400,6 @@ mod tests {
                 module_path: format!("/system/apex/{name}.apex"),
                 version_code: 1,
                 version_name: "one".into(),
-                last_update_millis: None,
                 partition: "SYSTEM".into(),
                 vendor_bootstrap: name == "example.vendor",
             }
