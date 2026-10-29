@@ -114,6 +114,12 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// ShortcutService.getInstalledPackages uses PACKAGE_MATCH_FLAGS without
+/// MATCH_APEX. Native package inventory also contains the APEX containers.
+fn installed_shortcut_package(ps: &crate::package::model::PackageState) -> bool {
+    !ps.is.apex && ps.users.get(&0).is_none_or(|u| u.installed)
+}
+
 /// `PersistableBundle.restoreFromXml` of `e`'s children: its entries in
 /// their `ArrayMap` order.
 fn persistable(e: &Element) -> Result<Vec<(String, Value)>, String> {
@@ -2166,7 +2172,7 @@ impl ShortcutManager {
         // `ShortcutUser.loadFromXml`: a scan time in the future is none.
         let scanned = if scanned < now { scanned } else { 0 };
         let updated = state.packages.values().any(|ps| {
-            ps.users.get(&0).is_none_or(|u| u.installed)
+            installed_shortcut_package(ps)
                 && ((after_ota && ps.is.system) || ps.last_update_time >= scanned)
         });
         if updated {
@@ -2577,6 +2583,20 @@ impl Service for ShortcutManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_inventory_excludes_apex_containers_but_keeps_their_apks() {
+        let mut package = crate::package::model::PackageState::default();
+        package.last_update_time = now_ms();
+        package.is.system = true;
+        package.is.apex = true;
+        assert!(!installed_shortcut_package(&package));
+        package.is.apex = false;
+        package.is.apk_in_updated_apex = true;
+        assert!(installed_shortcut_package(&package));
+        package.users.entry(0).or_default().installed = false;
+        assert!(!installed_shortcut_package(&package));
+    }
 
     /// A manifest shortcut and its intent's extras, read as
     /// `parseShortcut` reads them.
