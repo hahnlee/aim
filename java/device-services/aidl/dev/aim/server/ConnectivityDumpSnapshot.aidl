@@ -14,4 +14,18 @@ parcelable ConnectivityDumpSnapshot {
     int[] blockedReasons;
     @nullable int[] legacyTypes;
     @nullable String legacyError;
+    int providerId;
+    String providerName;
+    @nullable NetworkCapabilities offerCapabilities;
+    long offerScorePolicies;
+    int offerKeepConnectedReason;
+    int[] offerNeeded;
+    long creationTime;
+    long createdTime;
+    long connectedTime;
+    long firstValidationTime;
+    long lastValidationTime;
+    long scorePolicies;
+    int keepConnectedReason;
+    int factorySerialNumber = -1;
 }

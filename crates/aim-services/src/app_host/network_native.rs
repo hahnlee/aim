@@ -183,7 +183,7 @@ impl Native {
 
     /// `createNativeNetwork`, `updateLinkProperties`' interfaces, routes
     /// and DNS, then `makeDefault`.
-    pub(super) fn create(&self, n: &NativeNetwork) -> Result<(), String> {
+    pub(super) fn create(&self, n: &NativeNetwork, created: impl FnOnce()) -> Result<(), String> {
         self.netd(INTERFACE_ADD_ADDRESS, "interfaceAddAddress", |p| {
             p.write_string16(Some(&n.interface));
             p.write_string16(Some(&n.address.0.to_string()));
@@ -201,6 +201,7 @@ impl Native {
                 p.write_bool(false); // local routes kept
             })
         })?;
+        created();
         self.resolver(CREATE_NETWORK_CACHE, "createNetworkCache", |p| {
             p.write_i32(n.net_id)
         })?;
@@ -311,6 +312,77 @@ fn write_resolver_params(p: &mut Parcel, n: &NativeNetwork, servers: &[String]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NetworkAgentInfo.setCreated belongs after networkCreate, even if later
+    /// resolver setup fails. A rejected networkCreate must never set it.
+    #[test]
+    fn creation_event_follows_only_successful_netd_creation() {
+        use aim_binder_host::local::{Call, Reply, Service};
+        use aim_binder_host::parcel::Exception;
+        use std::sync::{Arc, Mutex};
+        struct Daemon {
+            descriptor: &'static str,
+            fail: u32,
+            events: Arc<Mutex<Vec<u32>>>,
+        }
+        impl Service for Daemon {
+            fn descriptor(&self) -> &str {
+                self.descriptor
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                call.data.enforce_interface(self.descriptor)?;
+                self.events.lock().unwrap().push(call.code);
+                let mut p = Parcel::new();
+                if call.code == self.fail {
+                    p.write_exception(&Exception::illegal_argument("creation test failure"));
+                } else {
+                    p.write_no_exception();
+                }
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders(|_, _, _, export| {
+            for (netd_fail, resolver_fail, expected_created) in [
+                (NETWORK_CREATE, 0, false),
+                (0, CREATE_NETWORK_CACHE, true),
+                (0, 0, true),
+            ] {
+                let events = Arc::new(Mutex::new(Vec::new()));
+                let native = Native {
+                    netd: export(Arc::new(Daemon {
+                        descriptor: NETD_DESCRIPTOR,
+                        fail: netd_fail,
+                        events: events.clone(),
+                    })),
+                    resolver: export(Arc::new(Daemon {
+                        descriptor: RESOLVER_DESCRIPTOR,
+                        fail: resolver_fail,
+                        events: events.clone(),
+                    })),
+                };
+                let n = NativeNetwork {
+                    net_id: 100,
+                    interface: "eth0".into(),
+                    address: (Ipv4Addr::new(192, 0, 2, 2), 24),
+                    routes: Vec::new(),
+                    dns: vec![Ipv4Addr::new(192, 0, 2, 1)],
+                    private_dns: None,
+                    transports: vec![3],
+                    settings: ResolverSettings::read(|_| None),
+                };
+                let mut created = false;
+                let result = native.create(&n, || {
+                    assert_eq!(
+                        *events.lock().unwrap(),
+                        vec![INTERFACE_ADD_ADDRESS, NETWORK_CREATE]
+                    );
+                    created = true;
+                });
+                assert_eq!(created, expected_created);
+                assert_eq!(result.is_ok(), netd_fail == 0 && resolver_fail == 0);
+            }
+        });
+    }
 
     #[test]
     fn resolver_settings_out_of_range_take_their_defaults() {

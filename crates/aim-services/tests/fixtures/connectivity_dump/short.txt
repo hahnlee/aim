@@ -1,5 +1,5 @@
 NetworkProviders for:
-  Error: NetworkProvider registry owner unavailable in app host (#2333)
+  1: EthernetNetworkFactory
 
 Active default network: 100
 
@@ -7,8 +7,7 @@ Current network preferences:
   Error: profile/OEM/default network preferences owner unavailable in app host (#2333)
 
 Current Networks:
-  NetworkAgentInfo{network{100}  handle{432902426637}  ni{Ethernet CONNECTED extra: 02:61:69:6d:00:02}  lp{{InterfaceName: eth0 LinkAddresses: [ 192.0.2.2/24 ] DnsAddresses: [ /192.0.2.1 ] MTU: 1500}}  nc{[ Transports: ETHERNET Capabilities: INTERNET&VALIDATED&FOREGROUND ]}}
-    Error: NetworkAgentInfo score/lifecycle/factory serial owner unavailable in app host (#2333)
+  NetworkAgentInfo{network{100}  handle{432902426637}  ni{Ethernet CONNECTED extra: 02:61:69:6d:00:02} created=2025-10-09T08:53:20.123Z Score(Policies : EVER_EVALUATED&IS_UNMETERED&EVER_VALIDATED&IS_VALIDATED ; KeepConnected : 0)  created 1200 firstValidated 1150 lastValidated 1250  lp{{InterfaceName: eth0 LinkAddresses: [ 192.0.2.2/24 ] DnsAddresses: [ /192.0.2.1 ] MTU: 1500}}  nc{[ Transports: ETHERNET Capabilities: INTERNET&VALIDATED&FOREGROUND ]}  factorySerialNumber=1}
     Nat464Xlat:
       Error: Nat464Xlat owner unavailable in app host (#2333)
     Requests: REQUEST:1 LISTEN:0 BACKGROUND_REQUEST:0 total:1
@@ -24,7 +23,7 @@ Network Requests:
   uid/pid:10100/42 activeRequest: 7 callbackRequest: 7 [NetworkRequest [ REQUEST id=7, [ Capabilities: INTERNET ] ]] callback flags: 0 order: 2147483647 isUidTracked: true declaredMethods: ALL
 
 Network Offers:
-  Error: NetworkOffer registry owner unavailable in app host (#2333)
+  NetworkOffer [ Provider Id (1) Score(Policies : EVER_EVALUATED&IS_UNMETERED&EVER_VALIDATED&IS_VALIDATED ; KeepConnected : 0) Caps [ Transports: ETHERNET Capabilities: INTERNET ] Needed by [7]]
 
 mLegacyTypeTracker:
   Supported types: 9 17

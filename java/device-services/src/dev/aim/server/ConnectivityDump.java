@@ -44,7 +44,8 @@ final class ConnectivityDump {
                 || options.contains("clatIngress6RawBpfMap")) {
             error(p, "", "Nat464Xlat BPF maps");
         } else {
-            section(p, "NetworkProviders for:", "NetworkProvider registry");
+            p.println("NetworkProviders for:");
+            p.println("  " + s.providerId + ": " + s.providerName);
             p.println();
             p.println("Active default network: " + (s.netId < 0 ? "none" : s.netId));
             p.println();
@@ -63,7 +64,13 @@ final class ConnectivityDump {
             p.println("Network Requests:");
             requests(p, s, "  ");
             p.println();
-            section(p, "Network Offers:", "NetworkOffer registry");
+            p.println("Network Offers:");
+            if (s.offerCapabilities != null) {
+                // NetworkOffer.toString, from the native provider's current offer.
+                p.println("  NetworkOffer [ Provider Id (" + s.providerId + ") "
+                        + score(s.offerScorePolicies, s.offerKeepConnectedReason) + " Caps "
+                        + s.offerCapabilities + " Needed by " + Arrays.toString(s.offerNeeded) + "]");
+            }
             p.println();
             p.println("mLegacyTypeTracker:");
             if (s.legacyTypes == null) {
@@ -117,14 +124,19 @@ final class ConnectivityDump {
 
     private static void networks(PrintWriter p, ConnectivityDumpSnapshot s, String indent) {
         if (s.netId < 0) return;
-        // NetworkAgentInfo's known fields, in original order. There is no native
-        // score/lifecycle owner; do not invent its timestamps, FullScore or serial.
+        // NetworkAgentInfo.toString: creation is wall time, lifecycle events are
+        // elapsed realtime. Connected time is carried but the original omits it.
         long handle = ((long) s.netId << 32) | 0xcafed00dL;
         p.println(indent + "NetworkAgentInfo{network{" + s.netId + "}  handle{" + handle
                 + "}  ni{" + s.info.toShortString() + "} "
-                + " lp{" + s.links + "}  nc{" + s.capabilities + "}}");
+                + "created=" + java.time.Instant.ofEpochMilli(s.creationTime) + " "
+                + score(s.scorePolicies, s.keepConnectedReason) + " "
+                + (s.createdTime != 0 ? " created " + s.createdTime : "")
+                + (s.firstValidationTime != 0 ? " firstValidated " + s.firstValidationTime : "")
+                + (s.lastValidationTime != 0 ? " lastValidated " + s.lastValidationTime : "")
+                + "  lp{" + s.links + "}  nc{" + s.capabilities + "}"
+                + "  factorySerialNumber=" + s.factorySerialNumber + "}");
         String sub = indent + "  ";
-        error(p, sub, "NetworkAgentInfo score/lifecycle/factory serial");
         p.println(sub + "Nat464Xlat:");
         error(p, sub + "  ", "Nat464Xlat");
         int foreground = 0, listen = 0, background = 0;
@@ -141,6 +153,23 @@ final class ConnectivityDump {
         }
         p.println(sub + "Inactivity Timers:");
         error(p, sub + "  ", "NetworkAgentInfo inactivity timers");
+    }
+
+    /** FullScore.toString's policy order and names at android-16.0.0_r1. */
+    private static String score(long policies, int keepConnected) {
+        var out = new java.util.StringJoiner("&", "Score(Policies : ",
+                " ; KeepConnected : " + keepConnected + ")");
+        String[] agent = {"YIELD_TO_BAD_WIFI", "TRANSPORT_PRIMARY", "EXITING"};
+        String[] service = {"IS_DESTROYED", "EVER_EVALUATED", "IS_INVINCIBLE", "IS_UNMETERED",
+                "AVOIDED_WHEN_UNVALIDATED", "ACCEPT_UNVALIDATED", "EVER_USER_SELECTED",
+                "IS_VPN", "EVER_VALIDATED", "IS_VALIDATED"};
+        for (int i = 0; i < agent.length; i++) {
+            if ((policies & (1L << (i + 1))) != 0) out.add(agent[i]);
+        }
+        for (int i = 0; i < service.length; i++) {
+            if ((policies & (1L << (i + 54))) != 0) out.add(service[i]);
+        }
+        return out.toString();
     }
 
     private static void requests(PrintWriter p, ConnectivityDumpSnapshot s, String indent) {

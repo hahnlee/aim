@@ -220,6 +220,15 @@ fn diagnostics_network_reports_follow_acceptance_and_reporter_permission_checks(
             vec![],
         );
         cs.follow_network(Some(lease.clone()));
+        let lifecycle = cs
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .network
+            .as_ref()
+            .unwrap()
+            .lifecycle;
         assert_eq!(
             rx.recv().unwrap(),
             (activity::ON_DIAGNOSTICS_NETWORK_CHANGED, MIN_NET_ID)
@@ -250,6 +259,13 @@ fn diagnostics_network_reports_follow_acceptance_and_reporter_permission_checks(
                     rx.recv().unwrap(),
                     (activity::ON_DIAGNOSTICS_NETWORK_CHANGED, MIN_NET_ID)
                 );
+            }
+            let state = cs.shared.state.lock().unwrap();
+            let net = state.network.as_ref().unwrap();
+            assert_eq!(net.lifecycle, lifecycle);
+            assert!(net.accepted_at >= lifecycle.first_validation);
+            if connected {
+                assert_eq!(net.accepted_at, lifecycle.first_validation);
             }
         }
         cs.follow_network(None);

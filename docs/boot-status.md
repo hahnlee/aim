@@ -209,10 +209,15 @@ The app host serves `background_install_control` natively, persisting its per-us
 snapshot to the system-UID NetworkActivityBridge for Android 16 section order
 and original parcelable formatting (#2333). It supports `--short`, `-a`,
 `networks`, `requests`, diagnostics/priority and trafficcontroller selection.
-Unavailable owners (including NetworkAgentInfo score/lifecycle, provider/offer
-registries, BPF and histories) produce named errors; full original dump fidelity
-remains incomplete. Host snapshot, exact-output formatting and denial checks
-cover this cold path; no guest boot was run.
+The native Ethernet provider retains its ID across link loss, registers its
+offer while carrier is present and tracks the requests needing it. The snapshot
+includes its prospective score and the agent's FullScore policies, keep-connected
+reason, factory serial and observed lifecycle times; netd creation is recorded
+only after networkCreate succeeds. Revalidation preserves the first validation
+time. Unavailable owners (including BPF, inactivity timers and histories) still
+produce named errors; full original dump fidelity remains incomplete. Host
+snapshot/lifecycle, exact-output formatting and denial checks cover this cold
+path; no guest boot was run.
 Staged APEX inventory queries now reach the retained `NativeStagingBridge` in
 `aim-system`, using the image's original `ApexManager.getStagedApexInfos` for
 apexd inputs and failure handling (#2158). System-UID-only attachment and queries

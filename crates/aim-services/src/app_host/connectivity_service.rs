@@ -16,7 +16,7 @@
 //! declares. The app host's apps are all top, so no firewall chain and
 //! no data saver blocks them; an app without INTERNET is blocked as the
 //! original blocks it. PendingIntent requests, reservations, agents,
-//! providers and offers, VPNs, keepalives, tethering and the
+//! externally registered providers and offers, VPNs, keepalives, tethering and the
 //! rest are not implemented (#1509).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -125,6 +125,9 @@ const HW_ADDRESS: &str = "02:61:69:6d:00:02";
 const NETWORK_TYPE: &str = "Ethernet";
 /// `EthernetTracker.DEFAULT_CAPABILITIES`' link bandwidths.
 const ETHERNET_KBPS: i32 = 100 * 1000;
+/// `NetworkProvider.FIRST_PROVIDER_ID`; EthernetNetworkFactory's provider name.
+const FIRST_PROVIDER_ID: i32 = 1;
+const PROVIDER_NAME: &str = "EthernetNetworkFactory";
 /// The MTUs `DhcpPacket` takes from a lease (`MIN_MTU`, `MAX_MTU`).
 const DHCP_MTUS: std::ops::RangeInclusive<u32> = 1280..=1500;
 /// `IFA_F_PERMANENT`, the flag netif gives `eth0`'s address.
@@ -159,6 +162,64 @@ struct Net {
     uplink: Uplink,
     dns: Vec<Ipv4Addr>,
     accepted_at: i64,
+    lifecycle: Lifecycle,
+    factory_serial: i32,
+}
+
+/// NetworkAgentInfo's wall-clock registration and sticky elapsed-realtime events.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Lifecycle {
+    creation: i64,
+    created: i64,
+    connected: i64,
+    first_validation: i64,
+}
+
+/// EthernetNetworkFactory uses NetworkScore.Builder's defaults for agent and offer.
+#[derive(Clone, Copy)]
+struct Score {
+    policies: u64,
+    keep_connected: i32,
+}
+impl Score {
+    /// FullScore.fromNetworkScore / makeProspectiveScore, for this Ethernet owner.
+    fn ethernet(caps: &NetworkCapabilities, evaluated: bool, ever_validated: bool) -> Self {
+        Self {
+            policies: (u64::from(evaluated) << 55)
+                | (u64::from(caps.has(NOT_METERED)) << 57)
+                | (u64::from(ever_validated) << 62)
+                | (u64::from(caps.has(VALIDATED)) << 63),
+            keep_connected: 0, // NetworkScore.KEEP_CONNECTED_NONE
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EthernetProvider {
+    id: i32,
+    name: &'static str,
+    offer: Option<EthernetOffer>,
+}
+#[derive(Clone)]
+struct EthernetOffer {
+    caps: NetworkCapabilities,
+    score: Score,
+    needed: BTreeSet<i32>,
+}
+impl EthernetOffer {
+    fn new() -> Self {
+        let caps = ethernet_capabilities();
+        // Prospective Internet offers may validate, are unmetered and evaluated;
+        // the default legacy score is not invincible (FullScore.makeProspectiveScore).
+        let mut prospective = caps.clone();
+        prospective.add(VALIDATED);
+        prospective.add(NOT_METERED);
+        Self {
+            score: Score::ethernet(&prospective, true, caps.has(INTERNET)),
+            caps,
+            needed: BTreeSet::new(),
+        }
+    }
 }
 
 /// The network's capabilities: `EthernetTracker.DEFAULT_CAPABILITIES`
@@ -166,6 +227,14 @@ struct Net {
 /// validated and in the foreground, as ConnectivityService marks its
 /// default network.
 fn network_capabilities() -> NetworkCapabilities {
+    let mut nc = ethernet_capabilities();
+    nc.add(VALIDATED);
+    nc.add(FOREGROUND);
+    nc
+}
+
+/// EthernetNetworkFactory's offer and agent capabilities, before CS adds policies.
+fn ethernet_capabilities() -> NetworkCapabilities {
     let mut nc = NetworkCapabilities::default();
     for c in [
         INTERNET,
@@ -178,8 +247,6 @@ fn network_capabilities() -> NetworkCapabilities {
     ] {
         nc.add(c);
     }
-    nc.add(VALIDATED);
-    nc.add(FOREGROUND);
     nc.transports = 1 << TRANSPORT_ETHERNET;
     nc.link_up_kbps = ETHERNET_KBPS;
     nc.link_down_kbps = ETHERNET_KBPS;
@@ -439,6 +506,7 @@ type Callback = (usize, i32, i32);
 
 struct State {
     network: Option<Net>,
+    provider: EthernetProvider,
     /// Interfaces of each published transport, retained after network loss.
     ifaces_since_boot: BTreeMap<u32, BTreeSet<String>>,
     next_net_id: i32,
@@ -454,6 +522,11 @@ impl State {
     fn new(now: Option<(Uplink, Vec<Ipv4Addr>)>) -> State {
         let mut state = State {
             network: None,
+            provider: EthernetProvider {
+                id: FIRST_PROVIDER_ID,
+                name: PROVIDER_NAME,
+                offer: None,
+            },
             ifaces_since_boot: BTreeMap::new(),
             next_net_id: MIN_NET_ID,
             next_request_id: FIRST_REQUEST_ID,
@@ -507,6 +580,8 @@ impl State {
                 }
             }
         }
+        // EthernetNetworkFactory.updateLinkState retracts only the offer on loss.
+        self.provider.offer = now.as_ref().map(|_| EthernetOffer::new());
         if let Some((uplink, dns)) = now {
             let caps = network_capabilities();
             for transport in 0..u64::BITS {
@@ -517,11 +592,21 @@ impl State {
                         .insert(INTERFACE.into());
                 }
             }
+            let creation = super::clock_ms(libc::CLOCK_REALTIME);
+            let connected = super::clock_ms(libc::CLOCK_MONOTONIC_RAW);
+            let accepted_at = super::clock_ms(libc::CLOCK_MONOTONIC_RAW);
             self.network = Some(Net {
                 id: self.next_net_id,
                 uplink,
                 dns,
-                accepted_at: super::clock_ms(libc::CLOCK_MONOTONIC_RAW),
+                accepted_at,
+                lifecycle: Lifecycle {
+                    creation,
+                    connected,
+                    first_validation: accepted_at,
+                    created: 0, // Set only after netd's networkCreate succeeds.
+                },
+                factory_serial: self.provider.id,
             });
             self.next_net_id += 1;
             out.extend(self.satisfy());
@@ -543,6 +628,21 @@ impl State {
                 n.timeout = None;
                 out.push((i, CALLBACK_AVAILABLE, id));
             }
+        }
+        if let Some(offer) = &mut self.provider.offer {
+            // informOffer: only real requests, including background requests, are
+            // sent to offers. This provider is the only possible satisfier.
+            offer.needed = self
+                .requests
+                .iter()
+                .filter(|n| {
+                    matches!(
+                        n.request.kind,
+                        RequestType::Request | RequestType::BackgroundRequest
+                    ) && n.request.caps.satisfied_by(&offer.caps)
+                })
+                .map(|n| n.request.request_id)
+                .collect();
         }
         out
     }
@@ -579,6 +679,9 @@ impl State {
     /// `handleRemoveNetworkRequest` of the request at `at`.
     fn remove(&mut self, at: usize) -> Nri {
         let nri = self.requests.remove(at);
+        if let Some(offer) = &mut self.provider.offer {
+            offer.needed.remove(&nri.request.request_id);
+        }
         if let Some(count) = self.counts.get_mut(&(nri.system, nri.uid)) {
             *count -= 1;
         }
@@ -668,10 +771,38 @@ fn callback_data(
 /// Wire pair of the private Java ConnectivityDumpSnapshot. Network objects keep
 /// their pinned original parcel formats and toString implementations.
 struct DumpSnapshot {
-    network: Option<(i32, LinkProperties, NetworkCapabilities)>,
+    network: Option<DumpNetwork>,
+    provider: EthernetProvider,
     requests: Vec<DumpRequest>,
     blocked: Vec<(i32, i32)>,
     legacy_types: Result<Vec<i32>, Exception>,
+}
+struct DumpNetwork {
+    id: i32,
+    links: LinkProperties,
+    caps: NetworkCapabilities,
+    lifecycle: Lifecycle,
+    last_validation: i64,
+    score: Score,
+    factory_serial: i32,
+}
+impl DumpNetwork {
+    fn new(net: &Net, links: LinkProperties) -> Self {
+        let caps = network_capabilities();
+        Self {
+            id: net.id,
+            links,
+            score: Score::ethernet(
+                &caps,
+                net.accepted_at != 0,
+                net.lifecycle.first_validation != 0,
+            ),
+            caps,
+            lifecycle: net.lifecycle,
+            last_validation: net.accepted_at,
+            factory_serial: net.factory_serial,
+        }
+    }
 }
 struct DumpRequest {
     request: NetworkRequest,
@@ -687,9 +818,9 @@ impl WriteParcelable for DumpSnapshot {
     fn write_to(&self, p: &mut Parcel) {
         let start = p.position();
         p.write_i32(0); // Structured AIDL parcelable size, including this word.
-        p.write_i32(self.network.as_ref().map_or(-1, |n| n.0));
-        if let Some((_, lp, nc)) = &self.network {
-            for value in [&network_info() as &dyn WriteParcelable, lp, nc] {
+        p.write_i32(self.network.as_ref().map_or(-1, |n| n.id));
+        if let Some(n) = &self.network {
+            for value in [&network_info() as &dyn WriteParcelable, &n.links, &n.caps] {
                 p.write_i32(1);
                 value.write_to(p);
             }
@@ -740,6 +871,33 @@ impl WriteParcelable for DumpSnapshot {
                 p.write_string16(Some(&e.message));
             }
         }
+        p.write_i32(self.provider.id);
+        p.write_string16(Some(self.provider.name));
+        p.write_i32(i32::from(self.provider.offer.is_some()));
+        if let Some(offer) = &self.provider.offer {
+            offer.caps.write_to(p);
+        }
+        let score = self.provider.offer.as_ref().map(|o| o.score);
+        p.write_i64(score.map_or(0, |s| s.policies as i64));
+        p.write_i32(score.map_or(0, |s| s.keep_connected));
+        let needed = self.provider.offer.as_ref().map(|o| &o.needed);
+        p.write_i32(needed.map_or(0, |ids| ids.len() as i32));
+        for id in needed.into_iter().flatten() {
+            p.write_i32(*id);
+        }
+        let n = self.network.as_ref();
+        for time in [
+            n.map_or(0, |n| n.lifecycle.creation),
+            n.map_or(0, |n| n.lifecycle.created),
+            n.map_or(0, |n| n.lifecycle.connected),
+            n.map_or(0, |n| n.lifecycle.first_validation),
+            n.map_or(0, |n| n.last_validation),
+            n.map_or(0, |n| n.score.policies as i64),
+        ] {
+            p.write_i64(time);
+        }
+        p.write_i32(n.map_or(0, |n| n.score.keep_connected));
+        p.write_i32(n.map_or(-1, |n| n.factory_serial));
         p.set_i32_at(start, (p.position() - start) as i32);
     }
 }
@@ -839,8 +997,12 @@ impl ConnectivityService {
         let network = state
             .network
             .as_ref()
-            .map(|net| Ok((net.id, self.link_properties(net)?, network_capabilities())))
+            .map(|net| {
+                self.link_properties(net)
+                    .map(|lp| DumpNetwork::new(net, lp))
+            })
             .transpose()?;
+        let provider = state.provider.clone();
         let mut requests: Vec<_> = state
             .requests
             .iter()
@@ -873,6 +1035,7 @@ impl ConnectivityService {
             .collect();
         Ok(DumpSnapshot {
             network,
+            provider,
             requests,
             blocked,
             legacy_types,
@@ -1186,7 +1349,20 @@ impl ConnectivityService {
             (Some(old), Some(new)) if old.net_id == new.net_id => services.configure_dns(new),
             (old, new) => old
                 .map_or(Ok(()), |old| services.destroy(old))
-                .and_then(|()| new.map_or(Ok(()), |new| services.create(new))),
+                .and_then(|()| {
+                    new.map_or(Ok(()), |new| {
+                        services.create(new, || {
+                            let mut state = self.shared.state.lock().unwrap();
+                            if let Some(net) = state.network.as_mut().filter(|n| n.id == new.net_id)
+                            {
+                                if net.lifecycle.created == 0 {
+                                    net.lifecycle.created =
+                                        super::clock_ms(libc::CLOCK_MONOTONIC_RAW);
+                                }
+                            }
+                        })
+                    })
+                }),
         };
         match result {
             Ok(()) => {
@@ -2434,11 +2610,11 @@ mod tests {
         register(&mut state, nri(caps, RequestType::Request, 7)).unwrap();
         let n = &state.requests[0];
         let snapshot = DumpSnapshot {
-            network: Some((
-                state.network.as_ref().unwrap().id,
+            network: Some(DumpNetwork::new(
+                state.network.as_ref().unwrap(),
                 link_properties(&up, &[up.gateway], None),
-                network_capabilities(),
             )),
+            provider: state.provider.clone(),
             requests: vec![DumpRequest {
                 request: n.request.clone(),
                 uid: n.uid,
@@ -2465,7 +2641,7 @@ mod tests {
         );
         r.skip(info.data().len()).unwrap();
         assert_eq!(r.read_i32().unwrap(), 1);
-        let lp = &snapshot.network.as_ref().unwrap().1;
+        let lp = &snapshot.network.as_ref().unwrap().links;
         assert_eq!((lp.interface.as_str(), lp.mtu), ("eth0", 1500));
         assert_eq!(lp.addresses[0].addr, up.addr);
         let mut links = Parcel::new();
@@ -2494,7 +2670,104 @@ mod tests {
             assert_eq!(r.read_i32().unwrap(), value);
         }
         assert_eq!(r.read_string16().unwrap(), None);
+        assert_eq!(r.read_i32().unwrap(), FIRST_PROVIDER_ID);
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(r.read_i32().unwrap(), 1);
+        let caps = NetworkCapabilities::read_from(&mut r).unwrap();
+        assert_eq!(caps, ethernet_capabilities());
+        assert!(!caps.has(VALIDATED) && !caps.has(FOREGROUND));
+        let policies = (1u64 << 55) | (1u64 << 57) | (1u64 << 62) | (1u64 << 63);
+        assert_eq!(r.read_i64().unwrap() as u64, policies);
+        assert_eq!(r.read_i32().unwrap(), 0);
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (1, 7));
+        let net = state.network.as_ref().unwrap();
+        for time in [
+            net.lifecycle.creation,
+            0,
+            net.lifecycle.connected,
+            net.lifecycle.first_validation,
+            net.accepted_at,
+        ] {
+            assert_eq!(r.read_i64().unwrap(), time);
+        }
+        assert_eq!(r.read_i64().unwrap() as u64, policies);
+        assert_eq!(
+            (r.read_i32().unwrap(), r.read_i32().unwrap()),
+            (0, FIRST_PROVIDER_ID)
+        );
         assert_eq!(r.remaining(), 0);
+    }
+
+    /// EthernetNetworkFactory.updateLinkState and ConnectivityService.informOffer.
+    #[test]
+    fn ethernet_offer_tracks_requests_and_carrier_but_provider_survives_loss() {
+        let up = up([192, 0, 2, 2], 24, [192, 0, 2, 1], 1500);
+        let mut state = State::new(None);
+        assert_eq!(state.provider.id, FIRST_PROVIDER_ID);
+        assert!(state.provider.offer.is_none());
+        let mut caps = NetworkCapabilities::default();
+        caps.add(INTERNET);
+        for (id, kind) in [
+            (7, RequestType::Request),
+            (8, RequestType::BackgroundRequest),
+            (9, RequestType::Listen),
+            (10, RequestType::TrackDefault),
+        ] {
+            register(&mut state, nri(caps.clone(), kind, id)).unwrap();
+        }
+        let mut wifi = caps.clone();
+        wifi.transports = 1 << TRANSPORT_WIFI;
+        register(&mut state, nri(wifi, RequestType::Request, 11)).unwrap();
+        state.follow(Some((up.clone(), vec![up.gateway])));
+        let offer = state.provider.offer.as_ref().unwrap();
+        assert_eq!(offer.needed, BTreeSet::from([7, 8]));
+        assert!(!offer.caps.has(VALIDATED) && !offer.caps.has(FOREGROUND));
+        let first = state.network.as_ref().unwrap();
+        let lifecycle = first.lifecycle;
+        assert!(lifecycle.creation > 0 && lifecycle.connected > 0);
+        assert!(lifecycle.first_validation >= lifecycle.connected);
+        assert_eq!(lifecycle.created, 0); // No netd call has taken place.
+        assert_eq!(first.factory_serial, state.provider.id);
+        let score = DumpNetwork::new(first, link_properties(&up, &[], None)).score;
+        assert_eq!(score.policies, offer.score.policies);
+        assert_eq!(score.keep_connected, 0);
+        state.follow(Some((up.clone(), vec![Ipv4Addr::new(192, 0, 2, 53)])));
+        assert_eq!(state.network.as_ref().unwrap().lifecycle, lifecycle);
+        assert_eq!(
+            state.provider.offer.as_ref().unwrap().needed,
+            BTreeSet::from([7, 8])
+        );
+        let request = state.requests[0].request.clone();
+        state.release(&request, SYSTEM_UID).unwrap();
+        assert_eq!(
+            state.provider.offer.as_ref().unwrap().needed,
+            BTreeSet::from([8])
+        );
+        state.follow(None);
+        assert!(state.provider.offer.is_none());
+        assert_eq!(state.provider.id, FIRST_PROVIDER_ID);
+        state.follow(Some((up.clone(), vec![up.gateway])));
+        let next = state.network.as_ref().unwrap();
+        assert_eq!((next.id, next.factory_serial), (101, FIRST_PROVIDER_ID));
+        assert_eq!(next.lifecycle.created, 0);
+        assert!(next.lifecycle.connected >= lifecycle.connected);
+        assert_eq!(
+            state.provider.offer.as_ref().unwrap().needed,
+            BTreeSet::from([8])
+        );
+    }
+
+    #[test]
+    fn full_score_uses_capabilities_and_observed_validation() {
+        let mut caps = ethernet_capabilities();
+        assert_eq!(Score::ethernet(&caps, false, false).policies, 1 << 57);
+        caps.remove(NOT_METERED);
+        assert_eq!(Score::ethernet(&caps, false, true).policies, 1 << 62);
+        caps.add(VALIDATED);
+        assert_eq!(
+            Score::ethernet(&caps, true, true).policies,
+            (1 << 55) | (1 << 62) | (1 << 63)
+        );
     }
 
     /// Dumps carry an output FD, without an interface token (Binder.onTransact).
