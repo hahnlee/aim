@@ -451,6 +451,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "read_int_array(r)?",
             "write_int_array(p, {v}.as_deref());",
         ),
+        ("float", true) => Kind::Plain(
+            "Option<Vec<f32>>",
+            "read_value_array(r, 4, |r| r.read_f32())?",
+            "write_value_array(p, {v}.as_deref(), |p, v| p.write_f32(*v));",
+        ),
         ("long", true) => Kind::Plain(
             "Option<Vec<i64>>",
             "read_long_array(r)?",

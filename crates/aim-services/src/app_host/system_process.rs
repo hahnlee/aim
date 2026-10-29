@@ -54,6 +54,19 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::ATTACH_ACTIVITY_ANIMATIONS => {
+                let a =
+                    sp::AttachActivityAnimations::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let Some(Binder::Handle(handle)) = a.animations else {
+                        return Err(Exception::illegal_argument("no activity animations owner"));
+                    };
+                    self.host.windows.transitions.lock().unwrap().owner =
+                        Some(Arc::new(self.host.process.strong(handle)));
+                    sp::write_attach_activity_animations_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::WRITE_PACKAGE_COMPILER_STATS => {
                 sp::WritePackageCompilerStats::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

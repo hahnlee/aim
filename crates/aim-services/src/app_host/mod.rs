@@ -16,6 +16,7 @@ pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
 mod activity_stats;
+mod activity_transitions;
 mod activity_user;
 pub mod alarm_service;
 pub mod apex_manager;

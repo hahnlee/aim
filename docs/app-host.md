@@ -142,6 +142,14 @@ landscape it relaunches into its landscape layout, with the advanced
 panel), and closing the window ends its process; opened again, it is
 idle 0.33 s after its process's start.
 
+Same-task activity opens and closes/back collect their two window surfaces
+(#1725). The system Java process evaluates the theme
+`activityOpenEnter/Exit` and `activityCloseEnter/Exit` XML, or a collecting
+`overridePendingTransition`; native playback submits the sampled transforms
+on display vsync through SurfaceFlinger to the host compositor. Outgoing
+hide/stop/destroy commands wait until playback ends. Task window open/close
+uses the Mac animation. This slice has no live visual verification.
+
 `IWindowSession.finishDrawing` reads the pinned Java/native Transaction
 framing and submits its state through the host's SurfaceFlinger composer.
 The host transaction keeps its apply token and id, records the merged id,

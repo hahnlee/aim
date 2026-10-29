@@ -84,4 +84,5 @@ interface ISystemProcess {
     /** Original Intent command parser; system UID only. */
     void attachPackageIntentParser(IBinder parser);
     void attachPackageShellRead(IAppHostPackageShellRead owner);
+    void attachActivityAnimations(IBinder animations);
 }

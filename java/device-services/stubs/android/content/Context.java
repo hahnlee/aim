@@ -57,4 +57,5 @@ public abstract class Context {
     public Object getSystemService(String name) { throw new RuntimeException("stub"); }
     public Intent registerReceiverForAllUsers(BroadcastReceiver receiver, IntentFilter filter,
             String permission, Handler handler) { throw new RuntimeException("stub"); }
+    public final android.content.res.TypedArray obtainStyledAttributes(int style, int[] attrs) { throw new RuntimeException("stub"); }
 }

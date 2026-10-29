@@ -9,4 +9,5 @@ public class TypedArray {
     public int getColor(int index, int defValue) { throw new RuntimeException("stub"); }
     public Drawable getDrawable(int index) { throw new RuntimeException("stub"); }
     public void recycle() { throw new RuntimeException("stub"); }
+    public int getResourceId(int index, int defValue) { throw new RuntimeException("stub"); }
 }

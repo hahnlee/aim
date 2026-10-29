@@ -89,6 +89,7 @@ struct Window {
 /// The app host's windows, by their `IWindow`.
 #[derive(Default)]
 pub struct Windows {
+    pub(super) transitions: Mutex<super::activity_transitions::Transitions>,
     windows: Mutex<HashMap<u32, Window>>,
     next: Mutex<u32>,
     focus: Mutex<WindowFocus>,
@@ -490,6 +491,11 @@ impl Session {
                 .apply_draw(&draw)
                 .map_err(|e| format!("finishDrawing seqId={seq_id}: {e}"))?;
         }
+        let activity = w.activity;
+        drop(windows);
+        if let Some(token) = activity {
+            self.host.transition_ready(token);
+        }
         Ok(())
     }
 
@@ -744,6 +750,7 @@ impl Session {
                         &container,
                         surface::Change {
                             z: Some(w.id as i32),
+                            alpha: self.host.transition_entering(w.activity).then_some(0.),
                             ..Default::default()
                         },
                     )])
@@ -1154,6 +1161,11 @@ impl super::AppHost {
                 layer,
                 surface::Change {
                     position: Some(position),
+                    alpha: Some(if self.transition_entering(w.activity) {
+                        0.
+                    } else {
+                        1.
+                    }),
                     ..Default::default()
                 },
             )])?;
@@ -1163,6 +1175,58 @@ impl super::AppHost {
             &Input::of(&w.attrs, frame, bounds, (w.uid, w.pid)),
         )
         .map_err(|e| format!("{e:?}"))
+    }
+
+    pub(super) fn activity_animation_style(&self, token: u64) -> i32 {
+        self.windows
+            .windows
+            .lock()
+            .unwrap()
+            .values()
+            .find(|w| w.activity == Some(token) && w.attrs.kind == 1)
+            .map_or(0, |w| w.attrs.window_animations)
+    }
+
+    pub(super) fn animate_activities(
+        &self,
+        to: u64,
+        enter: [f32; 11],
+        from: u64,
+        exit: [f32; 11],
+    ) -> Result<(), String> {
+        let windows = self.windows.windows.lock().unwrap();
+        let changes: Vec<_> = windows
+            .values()
+            .filter_map(|w| {
+                let f = if w.activity == Some(to) {
+                    enter
+                } else if w.activity == Some(from) {
+                    exit
+                } else {
+                    return None;
+                };
+                let layer = w.container.as_ref()?;
+                let bounds = w.task.and_then(|t| self.tasks.bounds(t))?;
+                Some((
+                    layer,
+                    surface::Change {
+                        position: Some((
+                            (w.frames.frame.left - bounds.left - w.attrs.surface_insets[0]) as f32
+                                + f[4],
+                            (w.frames.frame.top - bounds.top - w.attrs.surface_insets[1]) as f32
+                                + f[5],
+                        )),
+                        matrix: Some(f[..4].try_into().unwrap()),
+                        alpha: Some(f[6]),
+                        crop: Some(f[7..].try_into().unwrap()),
+                        ..Default::default()
+                    },
+                ))
+            })
+            .collect();
+        self.composer()
+            .map_err(|e| format!("{e:?}"))?
+            .apply(&changes)
     }
 
     /// The windows of the activity `token`, earlier first: each one's

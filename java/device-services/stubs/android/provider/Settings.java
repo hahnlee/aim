@@ -13,6 +13,7 @@ public final class Settings {
     }
 
     public static final class Global extends NameValueTable {
+        public static float getFloat(android.content.ContentResolver resolver, String name, float def) { throw new RuntimeException("stub"); }
  public static final String COMPATIBILITY_MODE="compatibility_mode",FSTRIM_MANDATORY_INTERVAL="fstrim_mandatory_interval";
  public static long getLong(ContentResolver resolver,String name,long value){throw new RuntimeException("stub");}
         private Global() { throw new RuntimeException("stub"); }

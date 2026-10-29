@@ -14,6 +14,7 @@
 //! The guest's task bridge (`docs/windows.md`) gets a connection of its own
 //! ([`FN_WINDOWS`]) and exchanges window records on it directly.
 
+pub mod animation;
 pub mod density;
 pub mod input;
 pub mod layers;
