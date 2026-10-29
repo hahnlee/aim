@@ -1708,6 +1708,7 @@ mod tests {
                 insets_seq: FIRST_SEQ,
                 requested_visible_types: 0,
                 window_id: None,
+                focus_callbacks: Arc::default(),
             },
         );
         let session = Session {
