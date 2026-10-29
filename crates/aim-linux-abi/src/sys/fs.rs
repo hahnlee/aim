@@ -2386,7 +2386,7 @@ struct LinuxFlock {
 }
 
 fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
-    if matches!(cmd, F_GETLK | F_SETLK | F_SETLKW) && super::posix_locks::configured() {
+    if matches!(cmd, F_GETLK | F_SETLK | F_SETLKW) {
         let mut bytes = match super::fsverity_ioctl::read::<32>(arg) {
             Ok(bytes) => bytes,
             Err(error) => return -(error as i64),
@@ -2435,9 +2435,6 @@ fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
         l_whence: l.l_whence,
     };
     let hcmd = match cmd {
-        F_GETLK => libc::F_GETLK,
-        F_SETLK => libc::F_SETLK,
-        F_SETLKW => libc::F_SETLKW,
         F_OFD_GETLK => DARWIN_F_OFD_GETLK,
         F_OFD_SETLK => DARWIN_F_OFD_SETLK,
         _ => DARWIN_F_OFD_SETLKW,
@@ -2446,7 +2443,7 @@ fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
     if unsafe { libc::fcntl(fd, hcmd, &mut h) } < 0 {
         return -(errno::last() as i64);
     }
-    if matches!(cmd, F_GETLK | F_OFD_GETLK) {
+    if cmd == F_OFD_GETLK {
         l.l_type = match h.l_type as i32 {
             t if t == libc::F_RDLCK as i32 => 0,
             t if t == libc::F_WRLCK as i32 => 1,
@@ -2455,7 +2452,7 @@ fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
         l.l_start = h.l_start;
         l.l_len = h.l_len;
         l.l_whence = h.l_whence;
-        l.l_pid = if cmd == F_OFD_GETLK { -1 } else { h.l_pid };
+        l.l_pid = -1;
         // SAFETY: guest struct flock.
         return put_user_struct(&l, arg);
     }

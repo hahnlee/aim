@@ -158,7 +158,11 @@ change. It is the environment adbd's shell inherits: `aimctl shell` and
 ## 4. `--identity FILE`: credentials
 
 Darwin runs every service as the host user. The Linux credentials init would
-set before `execv` are in a per-process file:
+set before `execv` are in a per-process file.
+
+`FILE` and its sibling `by-pid` table are host paths, outside the guest's
+mounts. `--identity` exposes no guest file path; guests read credentials
+through the syscalls and `/proc` entries below. The file format is:
 
 ```
 # aim-guest-init identity v1

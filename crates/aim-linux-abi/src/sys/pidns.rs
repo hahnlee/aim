@@ -161,16 +161,34 @@ pub fn watch(init: ProcessIdentity) -> io::Result<()> {
     }
     let dir = std::env::temp_dir().join(format!("{PRIVATE}{}", init.host_pid));
     watch_table(&dir, init, || {
+        let process = ProcessIdentity::running(me())?;
+        let controller =
+            aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config {
+                endpoint: format!(
+                    "dev.aim.posix.{}.{}.{}",
+                    process.host_pid, process.start_seconds, process.start_microseconds
+                ),
+                holder: std::fs::canonicalize(
+                    std::env::current_exe()?.with_file_name("aim-lock-holder"),
+                )?,
+                startup_timeout: Duration::from_secs(5),
+            })?;
+        controller.bind_standalone(&dir, init)?;
+        controller
+            .owner_config()?
+            .write(&dir.join("posix-control-owner"))?;
         // Close the readiness pipe before waiting.
         let mut ready = unsafe { std::fs::File::from_raw_fd(1) };
-        ready.write_all(&[1])
+        ready.write_all(&[1])?;
+        drop(ready);
+        Ok(controller)
     })
 }
 
-fn watch_table(
+fn watch_table<T>(
     dir: &Path,
     init: ProcessIdentity,
-    ready: impl FnOnce() -> io::Result<()>,
+    ready: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<()> {
     // Register before creating the table: even death during startup leaves
     // either no table or a watcher. NOTE_EXIT survives exec and PID reuse.
@@ -200,7 +218,8 @@ fn watch_table(
     if !init.is_live() {
         return Err(io::Error::from_raw_os_error(libc::ESRCH));
     }
-    std::fs::create_dir(dir)?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)?;
     // Retain the directory so its inode cannot be recycled under this watcher.
     let directory = std::fs::File::open(dir)?;
     let original = directory.metadata()?;
@@ -215,7 +234,7 @@ fn watch_table(
             if unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
                 return Err(io::Error::last_os_error());
             }
-            ready()?;
+            let _owner = ready()?;
             loop {
                 match unsafe {
                     libc::kevent(
@@ -702,6 +721,14 @@ mod registration_tests {
     }
     #[test]
     fn watcher_tears_down_only_its_namespace_after_sigkill() {
+        struct Owner(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let retired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner = Owner(retired.clone());
         let mut init = sleeper();
         let mut member = sleeper();
         let mut outside = sleeper();
@@ -712,14 +739,16 @@ mod registration_tests {
         let watcher = std::thread::spawn(move || {
             watch_table(&watched, identity, || {
                 tx.send(()).unwrap();
-                Ok(())
+                Ok(owner)
             })
         });
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!retired.load(std::sync::atomic::Ordering::SeqCst));
         std::fs::write(table.join(member.0.id().to_string()), "member").unwrap();
         init.0.kill().unwrap();
         init.0.wait().unwrap();
         watcher.join().unwrap().unwrap();
+        assert!(retired.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!table.exists());
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(member.0.wait().unwrap().signal(), Some(libc::SIGKILL));
@@ -731,7 +760,7 @@ mod registration_tests {
         let mut identity = ProcessIdentity::running(init.0.id() as i32).unwrap();
         let table = test_table(identity);
         identity.start_seconds -= 1;
-        let error = watch_table(&table, identity, || panic!("not ready")).unwrap_err();
+        let error = watch_table::<()>(&table, identity, || panic!("not ready")).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
         assert!(!table.exists());
     }
@@ -765,7 +794,7 @@ mod registration_tests {
         let init = sleeper();
         let identity = ProcessIdentity::running(init.0.id() as i32).unwrap();
         let table = test_table(identity);
-        let error = watch_table(&table, identity, || {
+        let error = watch_table::<()>(&table, identity, || {
             Err(io::Error::from_raw_os_error(libc::EPIPE))
         })
         .unwrap_err();

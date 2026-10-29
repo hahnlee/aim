@@ -2702,12 +2702,34 @@ let read-only ENABLE callers share write denial while competing for the distinct
 ENABLE slot; eight primitive tests pass with writer/alias/SCM lifetime checks.
 Native ENABLE dispatch is implemented and its real issuer checks pass. The
 complete image/CTS gate remains pending.
-Native POSIX lock startup now has an explicit `host/aim-lock-holder` dependency
-under `host/guest-init`; isolated template inputs require and hash that same
-helper beside the frozen linux-run/guest-init binaries. The actual build graph
+Native POSIX lock startup has an explicit `host/aim-lock-holder` dependency
+under both `host/guest-init` and `host/linux-run`; isolated template inputs
+require and hash that same helper beside the frozen linux-run/guest-init
+binaries. The actual build graph
 loads both nodes and compile-checks successfully; the explicit helper build
 completes in 3.0 seconds with no failures. The Source release helper exists,
 and the actual frozen common runtime now includes that helper with verified hashes (#1193).
+Standalone linux-run now uses its detached PID-namespace watcher as the native
+POSIX controller, admitting the launch incarnation and its descendants and
+retaining holders across exec (#1189). The Darwin process-lock fallback is
+removed. Fork admission authenticates process birth and the admitted XNU
+parent without requiring matching parent/child mount namespaces. Both native
+receipts remain birth-bound; their reader also rejects empty or malformed
+namespace names. Native admission checks pass for inherited and new mount
+namespaces, foreign actors, forged births, stale and malformed receipts
+(2026-10-29). The two process tests using `--identity` now supply a real native
+controller and private receipt table, including launcher admission before an
+orphaned guest is released; guest-visible admission evidence remains rejected.
+Identity files have no guest path: the process fixture now checks the live
+child's private identity file and its removal natively, with an inherited-fd
+barrier, while the guest checks the child's credentials through `/proc`.
+The NDK regression reproduces lost locks on origin/main. The current release
+NDK suite (57 tests) and the full debug process rerun (41 tests, with the debug
+lock holder built) stop before guest execution: Mach registration reports
+EADDRINUSE, with Binder check-in reporting bootstrap status 1100
+(BOOTSTRAP_NOT_PRIVILEGED). The process fixture and NDK program compile, but
+none of their guest assertions or the native identity-file content/removal
+assertions ran. No guest integration pass or guest boot is claimed.
 The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional

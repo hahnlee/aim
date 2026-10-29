@@ -395,6 +395,9 @@ pub fn mount_namespace_of(table: &Path, process: ProcessIdentity) -> io::Result<
     {
         return Err(io::Error::from_raw_os_error(libc::ESRCH));
     }
+    if fields[4].is_empty() || fields[4].contains(['/', '\0', '\n']) {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
     Ok(fields[4].into())
 }
 
@@ -472,6 +475,44 @@ mod tests {
             }
             let _ = self.0.wait();
         }
+    }
+    #[test]
+    fn mount_receipts_require_live_birth_and_valid_namespace() {
+        let table = crate::scratch_dir("aim-mount-receipt");
+        let process = ProcessIdentity::running_strict(std::process::id() as i32).unwrap();
+        let receipt = table.join(format!("{}.mount-namespace", process.host_pid));
+        register_mount_namespace(&table, process, "child-new-mount").unwrap();
+        assert_eq!(
+            mount_namespace_of(&table, process).unwrap(),
+            "child-new-mount"
+        );
+        let stale = ProcessIdentity {
+            start_seconds: process.start_seconds + 1,
+            ..process
+        };
+        assert_eq!(
+            mount_namespace_of(&table, stale)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        for namespace in ["", "../foreign", "bad\0namespace", "bad\nnamespace"] {
+            fs::write(
+                &receipt,
+                format!(
+                    "AIMPROCNS1\t{}\t{}\t{}\t{namespace}\n",
+                    process.host_pid, process.start_seconds, process.start_microseconds
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                mount_namespace_of(&table, process)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::EPROTO)
+            );
+        }
+        fs::remove_dir_all(table).unwrap();
     }
     #[test]
     fn mount_retirement_preserves_foreign_symlinks_and_is_idempotent() {

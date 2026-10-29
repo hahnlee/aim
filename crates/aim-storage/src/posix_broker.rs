@@ -200,13 +200,29 @@ impl OwnerConfig {
         file.sync_all()
     }
     pub fn read(path: &std::path::Path, init: ProcessIdentity) -> io::Result<Self> {
-        use std::{io::Read, os::unix::fs::OpenOptionsExt};
+        let config = Self::read_standalone(path)?;
+        if config.process != init {
+            return Err(error(libc::EPERM));
+        }
+        Ok(config)
+    }
+    /// A standalone launch retains its native watcher's private locator.
+    /// Every reply must still authenticate that exact controller incarnation.
+    pub fn read_standalone(path: &std::path::Path) -> io::Result<Self> {
+        use std::{
+            io::Read,
+            os::unix::fs::{MetadataExt, OpenOptionsExt},
+        };
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)?;
-        if !file.metadata()?.is_file() {
-            return Err(error(libc::EINVAL));
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err(error(libc::EPERM));
         }
         let mut text = String::new();
         file.by_ref().take(1025).read_to_string(&mut text)?;
@@ -222,7 +238,7 @@ impl OwnerConfig {
             start_seconds: fields[2].parse().map_err(|_| error(libc::EPROTO))?,
             start_microseconds: fields[3].parse().map_err(|_| error(libc::EPROTO))?,
         };
-        if process != init || !init.is_live() {
+        if !process.is_live() {
             return Err(error(libc::EPERM));
         }
         Ok(Self {
@@ -545,6 +561,7 @@ struct Forwarded {
 struct Namespace {
     table: PathBuf,
     init: crate::process_namespace::InitRegistration,
+    standalone: bool,
 }
 /// Owner exits, as the kernel reports them, so a request retires the dead
 /// without probing every live owner.
@@ -680,6 +697,23 @@ impl State {
             .unwrap()
             .clone()
             .ok_or_else(|| failed("fork-bound-namespace", error(libc::EPERM)))?;
+        // This root was supplied by the native watcher launcher, never by a
+        // request payload. Descendants still need a live admitted XNU parent.
+        if namespace.standalone && actor == namespace.init.process {
+            crate::process_namespace::mount_namespace_of(&namespace.table, actor)?;
+            let holder = Holder::new(
+                &self.config,
+                Owner {
+                    process: actor,
+                    guest_pid: actor.host_pid,
+                },
+                self.controller,
+            );
+            let mut owners = self.owners.lock().unwrap();
+            let holder = owners.entry(key(actor)).or_insert(holder).clone();
+            self.exits.watch(actor);
+            return Ok(holder);
+        }
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of_val(&info) as i32;
         if unsafe {
@@ -695,8 +729,15 @@ impl State {
             return Err(failed("fork-actor-metadata", error(libc::ESRCH)));
         }
         let parent=self.owners.lock().unwrap().values().find(|holder|holder.owner.process.host_pid==info.pbi_ppid as i32&&holder.owner.process.is_live()).cloned().ok_or_else(||{admission_diagnostic(format_args!("[posix-owner] stage=fork-parent-lookup controller={:?} actor={actor:?} parent_host_pid={}",self.controller,info.pbi_ppid));failed("fork-parent-lookup",error(libc::EPERM))})?;
-        let init = crate::process_namespace::InitRegistration::read(&namespace.table)
-            .map_err(|failure| failed("fork-init-record", failure))?;
+        let init = if namespace.standalone {
+            if !namespace.init.process.is_live() {
+                return Err(error(libc::ESRCH));
+            }
+            namespace.init.clone()
+        } else {
+            crate::process_namespace::InitRegistration::read(&namespace.table)
+                .map_err(|failure| failed("fork-init-record", failure))?
+        };
         let parent_namespace =
             crate::process_namespace::mount_namespace_of(&namespace.table, parent.owner.process)
                 .map_err(|failure| failed("fork-parent-namespace", failure))?;
@@ -711,9 +752,11 @@ impl State {
                     },
                 )
             })?;
+        // CLONE_NEWNS/unshare may change the child's filesystem view. Both
+        // native receipts must still attest their exact live process births;
+        // neither a namespace name from a request nor ppid alone admits it.
         if init.process != namespace.init.process
             || init.mount_namespace != namespace.init.mount_namespace
-            || child_namespace != parent_namespace
         {
             return Err(failed("fork-namespace-match", error(libc::EPERM)));
         }
@@ -722,7 +765,7 @@ impl State {
         }
         let owner = Owner {
             process: actor,
-            guest_pid: if actor == namespace.init.process {
+            guest_pid: if !namespace.standalone && actor == namespace.init.process {
                 1
             } else {
                 actor.host_pid
@@ -766,6 +809,9 @@ impl State {
             .unwrap()
             .clone()
             .ok_or_else(|| error(libc::EPERM))?;
+        if namespace.standalone {
+            return Err(error(libc::EPERM));
+        }
         let init = crate::process_namespace::InitRegistration::read(&namespace.table)?;
         if init.process != self.controller
             || init.process != namespace.init.process
@@ -1149,6 +1195,31 @@ impl Controller {
         *namespace = Some(Namespace {
             table,
             init: init.clone(),
+            standalone: false,
+        });
+        Ok(())
+    }
+    /// The detached private-PID-namespace watcher admits its initial guest by
+    /// the launcher's actual incarnation; no Android init/PID-1 is invented.
+    pub fn bind_standalone(
+        &self,
+        table: &std::path::Path,
+        root: ProcessIdentity,
+    ) -> io::Result<()> {
+        if !root.is_live() {
+            return Err(error(libc::ESRCH));
+        }
+        let mut namespace = self.state.namespace.lock().unwrap();
+        if namespace.is_some() {
+            return Err(error(libc::EBUSY));
+        }
+        *namespace = Some(Namespace {
+            table: std::fs::canonicalize(table)?,
+            init: crate::process_namespace::InitRegistration {
+                process: root,
+                mount_namespace: String::new(),
+            },
+            standalone: true,
         });
         Ok(())
     }
@@ -1219,7 +1290,14 @@ impl Controller {
         if let Some(holder) = holder {
             holder.stop()?;
         }
-        if let Some(namespace) = self.state.namespace.lock().unwrap().clone() {
+        if let Some(namespace) = self
+            .state
+            .namespace
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|namespace| !namespace.standalone)
+        {
             crate::process_namespace::InitNamespaceEntry::retire_dead(
                 &namespace.table,
                 self.process,
@@ -1433,5 +1511,172 @@ mod diagnostics_tests {
         drop(file);
         std::fs::remove_dir_all(root).unwrap();
         println!("NATIVE_SPAWN_DIAGNOSTICS_EXECUTED");
+    }
+}
+
+#[cfg(test)]
+mod standalone_tests {
+    use super::*;
+    use crate::process_namespace::register_mount_namespace;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Fixture(PathBuf, Child);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if self.1.try_wait().unwrap().is_none() {
+                self.1.kill().unwrap();
+            }
+            self.1.wait().unwrap();
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    #[test]
+    fn standalone_admits_only_root_and_authenticated_descendants_across_mount_namespaces() {
+        for child_namespace in ["parent", "other"] {
+            standalone_fork_admission(child_namespace);
+        }
+    }
+    fn standalone_fork_admission(child_namespace: &str) {
+        let root = ProcessIdentity::running(std::process::id() as i32).unwrap();
+        let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let actor = ProcessIdentity::running(child.id() as i32).unwrap();
+        let table = std::env::temp_dir().join(format!("aim-posix-admit-{}", actor.host_pid));
+        std::fs::create_dir(&table).unwrap();
+        let fixture = Fixture(table.clone(), child);
+        register_mount_namespace(&table, root, "parent").unwrap();
+        register_mount_namespace(&table, actor, "parent").unwrap();
+        let controller = Controller {
+            config: Config {
+                endpoint: "unused-admission".into(),
+                holder: PathBuf::new(),
+                startup_timeout: Duration::from_secs(1),
+            },
+            process: root,
+            state: Arc::new(State {
+                config: Config {
+                    endpoint: "unused-admission".into(),
+                    holder: PathBuf::new(),
+                    startup_timeout: Duration::from_secs(1),
+                },
+                controller: root,
+                namespace: Mutex::new(None),
+                owners: Mutex::new(BTreeMap::new()),
+                exits: Exits::new().unwrap(),
+                failures: Mutex::new(Vec::new()),
+            }),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: Mutex::new(None),
+        };
+        controller.bind_standalone(&table, root).unwrap();
+        assert_eq!(
+            controller
+                .state
+                .external_namespace(actor)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
+        assert_eq!(
+            controller
+                .state
+                .admit_fork(actor)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
+        let initial = controller.state.admit_fork(root).unwrap();
+        assert_eq!(initial.owner.guest_pid, root.host_pid);
+        assert!(initial.started().is_none());
+        let foreign = ProcessIdentity::running(unsafe { libc::getppid() }).unwrap();
+        register_mount_namespace(&table, foreign, "parent").unwrap();
+        assert_eq!(
+            controller
+                .state
+                .admit_fork(foreign)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
+        let forged = ProcessIdentity {
+            start_seconds: actor.start_seconds + 1,
+            ..actor
+        };
+        assert_eq!(
+            controller
+                .state
+                .admit_fork(forged)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        let receipt = table.join(format!("{}.mount-namespace", actor.host_pid));
+        std::fs::write(
+            receipt,
+            format!(
+                "AIMPROCNS1\t{}\t{}\t{}\tother\n",
+                forged.host_pid, forged.start_seconds, forged.start_microseconds
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            controller
+                .state
+                .admit_fork(actor)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(controller.state.owners.lock().unwrap().len(), 1);
+        for invalid in ["", "../foreign", "bad\0namespace", "bad\nnamespace"] {
+            std::fs::write(
+                table.join(format!("{}.mount-namespace", actor.host_pid)),
+                format!(
+                    "AIMPROCNS1\t{}\t{}\t{}\t{invalid}\n",
+                    actor.host_pid, actor.start_seconds, actor.start_microseconds
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                controller
+                    .state
+                    .admit_fork(actor)
+                    .err()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(libc::EPROTO)
+            );
+        }
+        assert_eq!(controller.state.owners.lock().unwrap().len(), 1);
+        register_mount_namespace(&table, actor, child_namespace).unwrap();
+        let admitted = controller.state.admit_fork(actor).unwrap();
+        assert_eq!(
+            admitted.owner,
+            Owner {
+                process: actor,
+                guest_pid: actor.host_pid
+            }
+        );
+        assert!(!Arc::ptr_eq(&initial, &admitted));
+        assert!(admitted.started().is_none());
+        assert!(!table.join("namespace-init").exists());
+        let locator = table.join("posix-control-owner");
+        controller.owner_config().unwrap().write(&locator).unwrap();
+        assert_eq!(
+            OwnerConfig::read_standalone(&locator).unwrap().process,
+            root
+        );
+        std::fs::set_permissions(&locator, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            OwnerConfig::read_standalone(&locator)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
+        controller.shutdown().unwrap();
+        drop(fixture);
     }
 }

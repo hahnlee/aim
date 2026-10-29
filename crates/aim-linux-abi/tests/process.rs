@@ -72,7 +72,7 @@ fn root() -> Option<&'static Path> {
         ] {
             mirror(&root, g);
         }
-        std::fs::create_dir_all(root.join("data/local/tmp/id/by-pid")).unwrap();
+        std::fs::create_dir_all(root.join("data/local/tmp")).unwrap();
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/process.c");
         let out = Command::new(clang)
             .args(["-O1", "-Wall", "-Werror", "-o"])
@@ -142,6 +142,73 @@ fn check(name: &str) {
         "{name}: {:?}\nstdout:\n{so}\nstderr:\n{se}",
         out.status
     );
+}
+
+/// `--identity` joins a native-managed table. Keep its admission evidence
+/// outside the guest root, with a real controller admitting our children.
+struct NativeNamespace {
+    directory: PathBuf,
+    controller: Option<aim_storage::posix_broker::Controller>,
+}
+impl NativeNamespace {
+    fn new(name: &str) -> Self {
+        use aim_storage::{posix_broker, posix_control::Owner, process_namespace};
+        use std::os::unix::fs::DirBuilderExt;
+        let directory =
+            std::env::temp_dir().join(format!("aim-process-{name}-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let mut namespace = Self {
+            directory,
+            controller: None,
+        };
+        let process =
+            process_namespace::ProcessIdentity::running(std::process::id() as i32).unwrap();
+        let table = namespace.directory.join("by-pid");
+        let init = process_namespace::InitRegistration::register(&table, process, name).unwrap();
+        process_namespace::register_mount_namespace(&table, process, name).unwrap();
+        let controller = posix_broker::Controller::start(posix_broker::Config {
+            endpoint: format!("dev.aim.process.{name}.{}", process.host_pid),
+            holder: aim_paths::host_bin("aim-lock-holder"),
+            startup_timeout: Duration::from_secs(5),
+        })
+        .unwrap();
+        controller.bind_namespace(&table, &init).unwrap();
+        controller
+            .register_guest(Owner {
+                process,
+                guest_pid: 1,
+            })
+            .unwrap();
+        controller
+            .owner_config()
+            .unwrap()
+            .write(&namespace.directory.join("posix-control-owner"))
+            .unwrap();
+        namespace.controller = Some(controller);
+        namespace
+    }
+    fn admit(&self, pid: i32) {
+        let process = aim_storage::process_namespace::ProcessIdentity::running(pid).unwrap();
+        self.controller
+            .as_ref()
+            .unwrap()
+            .register_guest(aim_storage::posix_control::Owner {
+                process,
+                guest_pid: pid,
+            })
+            .unwrap();
+    }
+}
+impl Drop for NativeNamespace {
+    fn drop(&mut self) {
+        if let Some(controller) = &self.controller {
+            controller.shutdown().unwrap();
+        }
+        std::fs::remove_dir_all(&self.directory).unwrap();
+    }
 }
 
 #[test]
@@ -384,8 +451,14 @@ fn credential_changes_are_seen_whole() {
 
 #[test]
 fn identity_files_inherited_env_and_fds_reach_the_guest() {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
     let Some(root) = root() else { return };
-    let id = root.join("data/local/tmp/id/svc");
+    let namespace = NativeNamespace::new("identity");
+    let id = namespace.directory.join("svc");
+    let locator = namespace.directory.join("posix-control-owner");
     std::fs::write(
         &id,
         "# aim-guest-init identity v1\nservice\tsvc\nuid\t1000\ngid\t1001\ngroups\t3003 1065\n\
@@ -394,26 +467,41 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
          oom_score_adj\t-1000\nrlimit\t13\t40\t40\n",
     )
     .unwrap();
-    let mut fds = [0; 2];
-    // SAFETY: a pipe whose read end the guest inherits as fd 3.
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // Identity files have no guest path in guest-init's path map. Read the
+    // live child's entry natively while the guest holds it at a barrier.
+    let (mut observer, inherited) = UnixStream::pair().unwrap();
+    observer
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let table = namespace.directory.join("by-pid");
+    let observation = std::thread::spawn(move || -> std::io::Result<_> {
+        let mut pid = [0; 4];
+        observer.read_exact(&mut pid)?;
+        let entry = table.join(i32::from_ne_bytes(pid).to_string());
+        let text = std::fs::read_to_string(&entry);
+        // Release even if reading failed, so the guest can reap its child.
+        observer.write_all(b"g")?;
+        Ok((entry, text))
+    });
     let id_arg = id.to_str().unwrap().to_string();
     let out = linux_run(
         root,
         &[
             "--identity",
             &id_arg,
+            "--posix-control",
+            locator.to_str().unwrap(),
             "--inherit-env",
             PROGRAM,
             "identity_file",
         ],
         |c| {
             c.env_clear().env("ANDROID_SOCKET_test", "3");
-            let fd = fds[0];
+            let fd = inherited.as_raw_fd();
             // SAFETY: only async-signal-safe calls between fork and exec.
             unsafe {
                 c.pre_exec(move || {
-                    if libc::dup2(fd, 3) < 0 {
+                    if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -421,11 +509,8 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
             };
         },
     );
-    // SAFETY: closing our pipe.
-    unsafe {
-        libc::close(fds[0]);
-        libc::close(fds[1]);
-    }
+    drop(inherited);
+    let observed = observation.join().unwrap();
     let (so, se) = (
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
@@ -434,6 +519,18 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
         out.status.success() && so.contains("ok identity_file\n"),
         "{:?}\nstdout:\n{so}\nstderr:\n{se}",
         out.status
+    );
+    let (entry, text) = observed.unwrap();
+    let text = text.unwrap();
+    assert!(
+        text.contains("\nuid\t10057\n") && text.contains("\ngroups\t3003 1065\n"),
+        "entry {text:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(&entry).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound,
+        "entry removed at exit: {}",
+        entry.display()
     );
 }
 
@@ -444,17 +541,22 @@ fn identity_files_inherited_env_and_fds_reach_the_guest() {
 #[test]
 fn a_guest_cannot_reach_host_processes() {
     let Some(root) = root() else { return };
-    // Its own table, so no other test's processes are in it.
-    let dir = root.join("data/local/tmp/pidns");
-    std::fs::create_dir_all(dir.join("by-pid")).unwrap();
-    let id = dir.join("guest");
+    let namespace = NativeNamespace::new("pidns");
+    let id = namespace.directory.join("guest");
+    let locator = namespace.directory.join("posix-control-owner");
     std::fs::write(
         &id,
         "# aim-guest-init identity v1\nservice\tguest\nuid\t10050\ngid\t10050\n",
     )
     .unwrap();
-    host_process_unreachable(root, &["--identity", id.to_str().unwrap()], false);
-    host_process_unreachable(root, &["--identity", id.to_str().unwrap()], true);
+    let args = [
+        "--identity",
+        id.to_str().unwrap(),
+        "--posix-control",
+        locator.to_str().unwrap(),
+    ];
+    host_process_unreachable(root, &args, false, Some(&namespace));
+    host_process_unreachable(root, &args, true, Some(&namespace));
 }
 
 /// A guest started without a table (a test, a debugging shell) is alone in
@@ -463,8 +565,8 @@ fn a_guest_cannot_reach_host_processes() {
 #[test]
 fn a_standalone_guest_has_a_private_namespace() {
     let Some(root) = root() else { return };
-    host_process_unreachable(root, &[], false);
-    host_process_unreachable(root, &[], true);
+    host_process_unreachable(root, &[], false, None);
+    host_process_unreachable(root, &[], true, None);
 
     // Its init, as a namespace's: signals from inside it that it has no
     // handler for are dropped.
@@ -602,7 +704,12 @@ fn sigkilled_standalone_init_leaves_no_table_or_descendants() {
 /// `pid_namespace` of `tests/guest/process.c` with a host process's pid.
 /// With `leader_gone`, the guest starts in a session and process group
 /// whose leader has exited, as under a shell that went away.
-fn host_process_unreachable(root: &Path, args: &[&str], leader_gone: bool) {
+fn host_process_unreachable(
+    root: &Path,
+    args: &[&str],
+    leader_gone: bool,
+    namespace: Option<&NativeNamespace>,
+) {
     let mut host = Command::new("/bin/sleep")
         .arg("60")
         .process_group(0)
@@ -613,7 +720,13 @@ fn host_process_unreachable(root: &Path, args: &[&str], leader_gone: bool) {
     argv.extend([PROGRAM, "pid_namespace", &host_pid]);
     // An orphaned guest's status is not ours to see; its output says.
     let (status, so, se) = if leader_gone {
-        let (so, se) = orphaned_linux_run(root, &argv);
+        let (so, se) = orphaned_linux_run(root, &argv, |pid| {
+            // The launcher attests the exact child before releasing it. Its
+            // native parent is gone, so fork admission must not guess lineage.
+            if let Some(namespace) = namespace {
+                namespace.admit(pid);
+            }
+        });
         (None, so, se)
     } else {
         let out = linux_run(root, &argv, |_| {});
@@ -633,7 +746,7 @@ fn host_process_unreachable(root: &Path, args: &[&str], leader_gone: bool) {
 /// `linux_run` in a new session and process group whose leader, a host
 /// shell, has exited and been reaped before the guest starts: its stdout
 /// and stderr.
-fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
+fn orphaned_linux_run(root: &Path, args: &[&str], admit: impl FnOnce(i32)) -> (Vec<u8>, Vec<u8>) {
     let mut sh = Command::new("/bin/sh");
     // The background job waits for a line on the shell's stdin, so it
     // runs only once the leader is gone; `$!` names it.
@@ -673,6 +786,7 @@ fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
     let mut line = [0u8; 16];
     let n = so.read(&mut line).unwrap();
     let pid: i32 = String::from_utf8_lossy(&line[..n]).trim().parse().unwrap();
+    admit(pid);
     let (out, err) = (read(Box::new(so)), read(Box::new(se)));
     std::io::Write::write_all(&mut go, b"go\n").unwrap();
     drop(go);

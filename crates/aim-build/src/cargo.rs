@@ -224,6 +224,7 @@ impl Workspace {
                     }
                     if target.name == "linux-run" {
                         deps.push(Dep::order_only("host/aim-pty-holder"));
+                        deps.push(Dep::order_only("host/aim-lock-holder"));
                     }
                     nodes.push(Node {
                         name: format!("host/{}", target.name),

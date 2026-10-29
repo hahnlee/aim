@@ -429,6 +429,15 @@ fn controller_owns_two_guest_incarnations_and_real_lock_lifetimes() {
 
 #[test]
 fn fork_attach_requires_native_parent_and_birth_bound_namespace_receipt() {
+    fork_attach_in_namespace("child-new-mount");
+}
+
+#[test]
+fn fork_attach_inherited_mount_namespace_preserves_independent_locks() {
+    fork_attach_in_namespace("parent-current-mount");
+}
+
+fn fork_attach_in_namespace(child_namespace: &str) {
     let directory = std::env::temp_dir().join(format!(
         "aim-posix-fork-{}-{}",
         std::process::id(),
@@ -490,17 +499,43 @@ fn fork_attach_requires_native_parent_and_birth_bound_namespace_receipt() {
         libc::EPERM,
         "no receipt cannot be guessed from ppid"
     );
-    aim_storage::process_namespace::register_mount_namespace(
-        &table,
-        actor.process,
-        "foreign-mount",
+    let receipt = table.join(format!("{}.mount-namespace", actor.process.host_pid));
+    std::fs::write(
+        &receipt,
+        format!(
+            "AIMPROCNS1\t{}\t{}\t{}\tchild-new-mount\n",
+            actor.process.host_pid,
+            actor.process.start_seconds + 1,
+            actor.process.start_microseconds
+        ),
     )
     .unwrap();
-    assert_eq!(child.call("attach")[0] as i32, libc::EPERM);
+    assert_eq!(
+        child.call("attach")[0] as i32,
+        libc::ESRCH,
+        "a new mount namespace still needs the child's exact birth"
+    );
+    for namespace in ["", "../foreign", "bad\0namespace", "bad\nnamespace"] {
+        std::fs::write(
+            &receipt,
+            format!(
+                "AIMPROCNS1\t{}\t{}\t{}\t{namespace}\n",
+                actor.process.host_pid,
+                actor.process.start_seconds,
+                actor.process.start_microseconds
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            child.call("attach")[0] as i32,
+            libc::EPROTO,
+            "a birth alone is not a valid mount namespace receipt"
+        );
+    }
     aim_storage::process_namespace::register_mount_namespace(
         &table,
         actor.process,
-        "parent-current-mount",
+        child_namespace,
     )
     .unwrap();
     // Dropping the producer's file proof must not break a later fork admission.
@@ -529,6 +564,7 @@ fn fork_attach_requires_native_parent_and_birth_bound_namespace_receipt() {
     drop(file);
     let attached = child.call("attach");
     assert_eq!(attached[0], 0);
+    // clone(CLONE_NEWNS) keeps native lineage but gets a new filesystem view.
     assert_eq!(
         attached[2], actor.process.host_pid as i64,
         "authoritative namespace mapping, no payload PID"

@@ -234,11 +234,6 @@ pub fn install(client: Arc<Client>) -> Result<(), Errno> {
     *CURRENT.lock().unwrap() = Some(client);
     Ok(())
 }
-/// Whether this process's POSIX locks live in a lock holder: a run without
-/// a lock controller (no guest-init) keeps them in the host's fcntl locks.
-pub fn configured() -> bool {
-    CURRENT.lock().unwrap().is_some()
-}
 pub fn current() -> Result<Arc<Client>, Errno> {
     let client = CURRENT.lock().unwrap().clone().ok_or(37)?;
     if ProcessIdentity::running(unsafe { libc::getpid() }).map_err(io)? != client.owner.process {
@@ -304,17 +299,20 @@ fn attach(locator: Option<&std::path::Path>, operation: Operation) -> Result<(),
         );
         linux
     };
-    let Some(locator) = locator else {
-        return Ok(());
-    };
     let table = super::cred::by_pid_dir().ok_or_else(|| failure("identity-table", errno::ESRCH))?;
-    let init = aim_storage::process_namespace::InitRegistration::read(table)
-        .map_err(|error| owner_io("init-record", error))?;
-    let config = aim_storage::posix_broker::OwnerConfig::read(locator, init.process)
-        .map_err(|error| owner_io("owner-config", error))?;
-    if config.process != init.process {
-        return Err(failure("config-identity", errno::EPERM));
-    }
+    let config = if let Some(locator) = locator {
+        let init = aim_storage::process_namespace::InitRegistration::read(table)
+            .map_err(|error| owner_io("init-record", error))?;
+        aim_storage::posix_broker::OwnerConfig::read(locator, init.process)
+            .map_err(|error| owner_io("owner-config", error))?
+    } else {
+        let locator = table.join("posix-control-owner");
+        if crate::vfs::guest_path_of_host(&locator).is_some() {
+            return Err(failure("standalone-locator-visible", errno::EPERM));
+        }
+        aim_storage::posix_broker::OwnerConfig::read_standalone(&locator)
+            .map_err(|error| owner_io("standalone-owner", error))?
+    };
     let process = ProcessIdentity::running(unsafe { libc::getpid() })
         .map_err(|error| owner_io("actor-birth", error))?;
     let control = posix_control::Client::lookup(&config.endpoint)
