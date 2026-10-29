@@ -8115,8 +8115,53 @@ memory pressure since #277, see "Memory pressure").
   and the layer logs to a hidden descriptor (zygote refused its
   non-allowlisted stdout).
 - cgroup v2 and bpffs are areas of the path map; `bpf()` creates maps in
-  shared memory and pins them, and loads programs and BTF without running
-  them (#224), so NetBpfLoad and uprobestats load everything.
+  shared memory and pins them, and loads programs and BTF. Single,
+  non-overridable cgroup socket-create attachments now execute the loaded
+  bytecode at INET/INET6 creation and return EPERM on denial (#2268).
+  Replacement netd attaches the pinned create and bind4/bind6 programs after BPF readiness;
+  attachment failure prevents its service publication, as in the original.
+  The image's permission program reads its live map without writing it;
+  program and map references survive loader FD closure and map unpinning.
+  Host regressions cover actual image bytecode, UID/profile permissions,
+  attachment replacement/detachment, family scope and exec'd consumers.
+  Retained app-host boot artifacts show NetBpfLoad (logged to kmsg), its
+  pinned create program and permission map, and cgroup2 in both mount
+  namespaces. Their procfs inventory lost the source of
+  path-map cgroup2/bpffs mounts and reported ordinary filesystems instead;
+  netd could not discover its cgroup2 target and returned ENOENT. The inventory
+  now retains the kernel mount source/type. The supplied fresh boot gets past
+  discovery but fails BPF_PROG_ATTACH with EINVAL: reading the loaded program's
+  uncached map opened its backing file read-only, so the shared writable
+  mapping needed for its header lock failed with EACCES, hidden as EINVAL.
+  The syscall owner now opens that private map reference read/write and
+  preserves mapping errors. A host regression loads the real netd.o create
+  section with NetBpfLoad's attributes and ELF map relocation, closes the
+  loader descriptors, reopens the pin and attaches to a cgroup2 directory
+  with no preexisting map mapping, then checks live socket permission changes.
+  Both replacement netd's compact attrs and original BpfHandler's full attrs
+  pass. Earlier tests mapped the permission map before attachment and missed
+  this fresh-process path. No guest boot was rerun after this correction
+  (#2268, 2026-10-29). Bind4/bind6 now execute the original image's bytecode
+  before INET/INET6 host binding, returning EPERM for blocked ports. The raw
+  network-order port and socket protocol populate bpf_sock_addr; raw sockets
+  retain their protocol-specific bind path. Socket creation cgroup ancestry
+  survives task migration, serialized fork state and receipt-based adoption.
+  A bounded cache retains decoded programs by file identity while map lookups
+  remain live. Host image-program regressions cover loader pin/reopen/attach,
+  both families, TCP/UDP, live bitmap updates, port byte order, error ordering,
+  independent hooks and replacement/detachment. Supplied app-host logs from
+  this bind change report 18 failed process attachments and a separate fatal
+  POSIX shutdown with ECHILD. A host regression reproduces a new bind/fork
+  deadlock: bind holds the socket cgroup mutex while a cold program open
+  needs descriptor lifecycle admission; fork holds that admission while
+  serializing the same socket mutex. Bind now copies the retained ancestry
+  before entering BPF, preserving policy without that lock inversion. Eight
+  concurrent cold-bind workers and fork descriptor snapshots complete after
+  the fix; the original code hits the fixture's 20-second timeout. No guest
+  boot was rerun, so app-start recovery and the ECHILD cause remain unverified.
+  Skb policy and map writes, other hooks and ring
+  producers remain #2268;
+  traffic counters retain the socket layer's existing approximation (#224).
 - A forked child gets the stub islands' executable views back as views of
   writable memory (SIGILL in system_server's first JNI call).
 - xattrs, with `security.selinux` from the original image (re-extract with

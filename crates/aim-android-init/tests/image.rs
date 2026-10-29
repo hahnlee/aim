@@ -230,6 +230,140 @@ fn load_scripts(
 }
 
 #[test]
+fn image_netbpfload_override_and_exec_completion_precede_netd() {
+    use aim_android_init::engine::{Command, CommandExecutor, CommandFlow, Invocation};
+    use aim_android_init::rc::{ParseEnv, Parser, SectionKind};
+
+    let Some(root) =
+        aim_paths::original_image_with("apex/com.android.tethering/etc/netbpfload.35rc")
+    else {
+        return;
+    };
+    let image = ImageRoot::new(root);
+    let mut props: BTreeMap<String, String> = aim_android_init::props::load::read_prop_file(
+        &String::from_utf8(image.read("/system/build.prop").unwrap()).unwrap(),
+    )
+    .into_iter()
+    .collect();
+    let mut scripts = load_scripts(&image, &props, 36, Some(Vec::new()));
+    let original = scripts
+        .boot
+        .services
+        .iter()
+        .find(|s| s.name == "bpfloader")
+        .unwrap();
+    assert!(original.updatable);
+    assert_eq!(original.args, ["/system/bin/false"]);
+    let apex = scripts
+        .apex
+        .services
+        .iter()
+        .find(|s| s.name == "bpfloader")
+        .unwrap();
+    assert!(apex.is_override && apex.oneshot);
+    assert_eq!(apex.args, ["/apex/com.android.tethering/bin/netbpfload"]);
+    assert!(
+        scripts
+            .apex
+            .files
+            .iter()
+            .any(|f| f.ends_with("/netbpfload.35rc"))
+    );
+    let allowed = include_str!("../../../image/app-host/services");
+    for name in ["bpfloader", "netd"] {
+        assert!(allowed.lines().any(|line| line == name));
+    }
+    let late_init = scripts
+        .boot
+        .actions
+        .iter()
+        .find(|a| a.event_trigger == "late-init")
+        .unwrap();
+    let triggers: Vec<_> = late_init
+        .commands
+        .iter()
+        .map(|c| c.command_string())
+        .collect();
+    let positions: Vec<_> = ["load-bpf-programs", "bpf-progs-loaded", "zygote-start"]
+        .map(|name| {
+            triggers
+                .iter()
+                .position(|c| c == &format!("trigger {name}"))
+                .unwrap()
+        })
+        .into();
+    assert!(positions.windows(2).all(|p| p[0] < p[1]));
+
+    // Exercise the real APEX merge and the original two BPF actions without
+    // starting any guest processes. The loader's exit is injected below.
+    scripts.boot.actions.retain(|a| {
+        matches!(
+            a.event_trigger.as_str(),
+            "load-bpf-programs" | "bpf-progs-loaded"
+        )
+    });
+    let ids = IdResolver::builtin();
+    let mut parser = Parser::continue_from(
+        ParseEnv {
+            properties: &props,
+            vendor_api_level: 36,
+            ids: &ids,
+        },
+        SectionKind::Boot,
+        scripts.boot,
+    );
+    parser.parse_data(
+        "/system/etc/init/test.rc",
+        b"on activate-apex\n    perform_apex_config\n",
+    );
+    scripts.boot = parser.finish();
+    let mut manager = ActionManager::new(scripts, 36);
+    struct Loader {
+        calls: Vec<String>,
+        completed: bool,
+    }
+    impl CommandExecutor for Loader {
+        fn execute(&mut self, invocation: &Invocation<'_>) -> Result<CommandFlow, String> {
+            match invocation.command {
+                Command::ExecStart { service } => {
+                    assert_eq!(service, "bpfloader");
+                    let def = invocation
+                        .services
+                        .iter()
+                        .find(|s| s.name == *service)
+                        .unwrap();
+                    assert_eq!(def.args, ["/apex/com.android.tethering/bin/netbpfload"]);
+                    self.calls.push(service.clone());
+                    return Ok(CommandFlow::ExecServiceRunning);
+                }
+                Command::Start { service } => {
+                    assert_eq!(service, "netd");
+                    assert!(self.completed, "netd started before loader completion");
+                    self.calls.push(service.clone());
+                }
+                _ => {}
+            }
+            Ok(CommandFlow::Done)
+        }
+    }
+    let mut loader = Loader {
+        calls: Vec::new(),
+        completed: false,
+    };
+    for event in ["activate-apex", "load-bpf-programs", "bpf-progs-loaded"] {
+        manager.queue_event_trigger(event);
+    }
+    let (_, step) = manager.run_until_blocked(&mut props, &mut loader, 100);
+    assert_eq!(step, Step::WaitingForExec);
+    assert_eq!(loader.calls, ["bpfloader"]);
+    loader.completed = true;
+    manager.exec_finished();
+    let (_, step) = manager.run_until_blocked(&mut props, &mut loader, 100);
+    assert_eq!(step, Step::Idle);
+    assert_eq!(loader.calls, ["bpfloader", "netd"]);
+}
+
+#[test]
 fn upstream_init_rc_parses_and_boots() {
     let image = fixture_image();
     let service = boot_properties(&image);
