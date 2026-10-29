@@ -816,3 +816,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
 
 #[cfg(test)]
 mod startup_test;
+
+#[cfg(test)]
+#[path = "startup_bench.rs"]
+mod startup_bench;

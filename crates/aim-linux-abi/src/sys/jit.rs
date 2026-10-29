@@ -129,7 +129,9 @@ fn replace(lo: u64, n: u64, prot: i32, keep: bool) -> Result<(), i64> {
 /// The caller keeps other placements out (a fork child has no others yet).
 pub fn map_at(lo: u64, n: u64, src: Option<*const u8>) -> Result<(), i64> {
     // SAFETY (all blocks): our own guest range.
-    unsafe { libc::munmap(lo as *mut _, n as usize) };
+    if unsafe { libc::munmap(lo as *mut _, n as usize) } == 0 {
+        super::memfd::unmapped(lo, n);
+    }
     let p = unsafe {
         libc::mmap(
             lo as *mut _,

@@ -7890,10 +7890,15 @@ the file's ctime shows nobody changed it (an UNPIN+PIN pair: 32-39 to
 19-21 µs, #504). Neither is measured in a boot yet.
 
 Executable memfd backing is reclaimed when this process has no descriptor
-(including syscall pins) or view left (#552). Returned descriptors preserve
-live converted contents; mapping replacement and deferred thread-exit unmaps
-also retry reclamation. Focused host tests cover repeated 64 MiB allocations,
-partial unmaps, returned descriptors, pins and deferred cleanup.
+(including syscall pins) or view left (#552, #2390). Successful VM mutations
+maintain the live shared ranges and file offsets through conversion, partial
+unmaps, replacement, remap aliases, deferred cleanup and fork state. Only the
+last close or last unmap triggers reclamation; reclaim no longer queries Darwin
+process information. Host lifetime and concurrent close/unmap checks pass
+(2026-10-29). A 16-thread host benchmark with 2,048 resident VMAs and frequent
+setpriority calls takes a median 11.6 ms for 2,048 mmap/munmap pairs, against
+2,098.7 ms before. Maps startup has not been remeasured and no guest boot was run. The original-bionic syscall fixtures stop at PID-namespace
+watcher startup with `Address already in use`, before executing guest code.
 
 The large file mappings were ART's JIT cache: its memfd's first
 executable view looked for the memfd's other views by walking the whole
