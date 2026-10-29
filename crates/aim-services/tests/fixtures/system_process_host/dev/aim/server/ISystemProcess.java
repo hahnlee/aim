@@ -16,6 +16,7 @@ interface ISystemProcess {
     void attachPackageShellRead(AppHostPackageShellRead owner);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     void attachStorageCrates(StorageCrates crates);
+    void attachActivityAnimations(ActivityAnimations animations);
     void attachPackageIntentParser(PackageIntentParser parser);
     void attachUserSwitcherPolicy(UserSwitcherPolicy policy);
     void initializeCameraPrivacyAllowlist(java.util.List<String> packages);
@@ -45,6 +46,9 @@ interface ISystemProcess {
                     SystemProcessHostTest.events.add("staging");
                 }
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
+                public void attachActivityAnimations(ActivityAnimations animations) {
+                    if (animations == null) throw new AssertionError("missing activity animation owner");
+                }
                 public void attachPackageIntentParser(PackageIntentParser parser) {
                     if (parser == null) throw new AssertionError("missing package Intent parser");
                 }
