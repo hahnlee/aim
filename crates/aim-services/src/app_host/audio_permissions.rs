@@ -143,7 +143,7 @@ impl AppHost {
     /// holders (`getUidsHoldingPerm`, as `checkComponentPermission`
     /// answers).
     pub(super) fn populate_audio_permissions(&self, controller: &Strong) -> Result<(), String> {
-        let capture = self.package_capture().map_err(|e| e.message)?;
+        let capture = self.package_scan_capture().map_err(|e| e.message)?;
         let packages = package_mappings(
             capture
                 .state()

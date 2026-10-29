@@ -86,7 +86,7 @@ impl PackageEffects {
         &self,
         a: bridge::CapturePostInstallVisibility,
     ) -> Result<Vec<i32>, Exception> {
-        let capture = self.host.package_capture()?;
+        let capture = self.host.package_scan_capture()?;
         let name = required(a.name.as_deref(), "name")?;
         let previous = capture
             .state()

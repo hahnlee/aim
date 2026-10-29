@@ -121,7 +121,7 @@ pub(super) fn run(
 /// Private Parcel record consumed only by AppHostDomainShell. All fields in one
 /// reply come from one immutable capture; no paths, FDs or mutable Java replica.
 pub(super) fn read(host: &Arc<AppHost>, a: api::ReadShellState) -> Result<Vec<u8>, Exception> {
-    let capture = host.package_capture()?;
+    let capture = host.package_scan_capture()?;
     let native = DomainVerification::domains(&capture)?;
     let state = capture.state();
     let requested = a.package_name.as_deref();

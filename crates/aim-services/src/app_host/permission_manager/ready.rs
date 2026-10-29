@@ -72,7 +72,7 @@ impl Service for DefaultGrantQueries {
             )));
         }
         let result = (|| {
-            let capture = self.0.package_capture()?;
+            let capture = self.0.package_scan_capture()?;
             let state = capture.state();
             let mut reply = Parcel::new();
             match call.code {

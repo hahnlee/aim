@@ -1671,7 +1671,7 @@ impl PermissionManager {
         app_id: i32,
         user: i32,
     ) -> Result<Vec<String>, Exception> {
-        let capture = self.host.package_capture()?;
+        let capture = self.host.package_scan_capture()?;
         let view = self.retained_access()?;
         self.access_with_capture(&view.system, &view.user0, &capture, "package", |access| {
             access.granted_permissions(package, app_id, user)
@@ -1720,8 +1720,10 @@ impl PermissionManager {
         &self,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
+        self.host.platform()?;
+        let capture = self.host.package_scan_capture()?;
         let view = self.retained_access()?;
-        self.access_with(&view.system, &view.user0, f)
+        self.access_with(&view.system, &view.user0, &capture, f)
     }
 
     /// `getPermissionGroupInfo` from `caller`.
@@ -1738,11 +1740,10 @@ impl PermissionManager {
         &self,
         system: &AccessSystem,
         user0: &AccessUser,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
-        self.host.platform()?;
-        let capture = self.host.package_capture()?;
-        self.access_with_capture(system, user0, &capture, "package", f)
+        self.access_with_capture(system, user0, capture, "package", f)
     }
 
     fn access_with_capture<T>(
@@ -1790,12 +1791,16 @@ impl PermissionManager {
         kill: Option<&str>,
         change: impl FnOnce(&Access<'_>, &mut AccessUser) -> Result<Vec<FlagsChanged>, Exception>,
     ) -> Result<(), Exception> {
+        self.host.platform()?;
+        let capture = self.host.package_scan_capture()?;
         self.retained_access()?;
         let mut held = self.owner.lock().unwrap();
         let before = held.user0.clone().expect("loaded");
         let system = held.system.clone().expect("loaded");
         let mut after = (*before).clone();
-        let changes = self.access_with(&system, &before, |access| change(access, &mut after))?;
+        let changes = self.access_with(&system, &before, &capture, |access| {
+            change(access, &mut after)
+        })?;
         if changes.is_empty() {
             return Ok(());
         }
@@ -1876,7 +1881,7 @@ impl PermissionManager {
             }
             Ok(())
         })?;
-        let capture = self.host.package_capture()?;
+        let capture = self.host.package_scan_capture()?;
         for &user in capture.state().users.keys() {
             for ps in capture.state().packages.values() {
                 if ps.pkg.as_ref().is_some_and(|pkg| pkg.uid != -1) {

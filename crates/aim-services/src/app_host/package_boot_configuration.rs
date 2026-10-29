@@ -500,7 +500,7 @@ mod tests {
                 )))
                 .is_ok()
         );
-        assert!(host.package_boot.get().is_none());
+        assert!(host.package_boot.runtime.get().is_none());
         let missing = host
             .package_system()
             .unwrap()
@@ -544,7 +544,7 @@ mod tests {
                 .capture_package_queries()
                 .is_err()
         );
-        assert!(host.package_boot.get().is_none());
+        assert!(host.package_boot.runtime.get().is_none());
     }
     #[test]
     fn locale_codes_pack_as_res_table_config() {

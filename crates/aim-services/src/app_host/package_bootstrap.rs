@@ -752,7 +752,7 @@ impl Service for PackageBootstrap {
                     if a.uid < 0 {
                         return Err(Exception::illegal_argument("invalid domain verifier UID"));
                     }
-                    let capture = host.package_capture()?;
+                    let capture = host.package_scan_capture()?;
                     super::domain_verification::DomainVerification::new(host.clone())
                         .is_caller_verifier(&capture, a.uid)
                 })()

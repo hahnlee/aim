@@ -294,11 +294,18 @@ frame, so `vendor.power-default` stays too. audioserver (with its HAL)
 starts beside them: it takes wake locks of `system_suspend` and registers
 listeners with the app host's `activity` and `sensor_privacy`, and aborts unless the app host's
 `audio` gives it `getNativeInterface`; the app host then initializes the
-stream volumes in it. The native package gate now releases their metadata
-queries after construction, before the boot thread waits for deferred app-data
-preparation (#2399). Host concurrency tests cover this ordering and failure
-propagation; no guest boot or post-change audioserver timing was run
-(2026-10-29). The media services (mediaserver, mediaextractor,
+stream volumes in it. Native package readiness now separates the complete initial
+scan publication (including roles and reconciled permissions), runtime-owner
+construction, and deferred app-data reconciliation (#2405, continuing #2399).
+AppOps/permission metadata reads and scan-only package queries wait only for the
+first stage. Runtime-owner calls and aim-system's pre-attach ApplicationInfo
+query retain the construction result barrier (#2392); storage startup waits for
+reconciliation and application forks still wait for default grants. The
+WebView relro creator's isolated uid is recorded before its zygote start, as
+`newProcessRecordLocked` does, so the child no longer attaches before the app
+host knows it; registering every pending start before the zygote start is
+#2416. AudioPolicy's load time fell from 3.3–3.8 s to 2.6–2.8 s; the second
+boot's `boot_completed` stays at about 7 s (three boots each, 2026-10-29). The media services (mediaserver, mediaextractor,
 mediametrics, media.swcodec) start too: Codec2's software decoders take
 their buffers from `/dev/dma_heap/system`, which the syscall layer serves. The health HAL
 (`vendor.health-aim`) starts for the app host's battery service, which
