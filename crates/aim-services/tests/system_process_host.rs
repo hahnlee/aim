@@ -40,12 +40,18 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
     let mut sources = common::java::sources(&fixtures);
     sources.push(binder);
     sources.push(production.join("src/dev/aim/server/ProviderQueries.java"));
+    sources.push(aim_paths::root().join("crates/aim-services/tests/fixtures/dex_use/com/android/server/art/ArtModuleServiceInitializer.java"));
     let generated = common::java::private_aidl_sources(&data.0);
     sources.extend(generated.into_iter().filter(|p| {
         p.ends_with("IForegroundServicePolicy.java")
             || p.ends_with("IForegroundServiceTypeHost.java")
     }));
-    for (missing_memory, device_lock) in [(false, true), (false, false), (true, true)] {
+    for (missing_memory, missing_art, device_lock) in [
+        (false, false, true),
+        (false, false, false),
+        (true, false, true),
+        (false, true, true),
+    ] {
         let server = data.0.join("SystemProcessHost.java");
         let mut source =
             fs::read_to_string(production.join("src/dev/aim/server/SystemProcessHost.java"))
@@ -58,6 +64,12 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
         if missing_memory {
             source = source.replace(
                 "ApplicationSharedMemory.setInstance(ApplicationSharedMemory.create());",
+                "",
+            );
+        }
+        if missing_art {
+            source = source.replace(
+                "com.android.server.art.ArtModuleServiceInitializer.setArtModuleServiceManager(\n                    new android.os.ArtModuleServiceManager());",
                 "",
             );
         }
@@ -76,7 +88,13 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
             .arg(device_lock.to_string())
             .output()
             .unwrap();
-        if missing_memory {
+        if missing_art {
+            assert!(
+                !output.status.success(),
+                "control accepted missing ART initialization"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("ArtModuleServiceManager"));
+        } else if missing_memory {
             assert!(
                 !output.status.success(),
                 "control accepted missing nonce setup"

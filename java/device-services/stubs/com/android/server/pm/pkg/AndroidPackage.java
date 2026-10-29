@@ -3,6 +3,7 @@
 package com.android.server.pm.pkg;
 
 public interface AndroidPackage {
+    java.util.List<AndroidPackageSplit> getSplits();
     int getOverlayPriority();
     String getOverlayTarget();
     boolean isOverlayIsStatic();

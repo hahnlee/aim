@@ -49,11 +49,11 @@ impl Captures {
         }
     }
     pub fn snapshot(&self) -> Result<Binder, Exception> {
+        let capture = self.current()?;
         let system = self
             .system
             .upgrade()
             .ok_or_else(|| error("boot capture system stopped"))?;
-        let capture = system.capture_package_queries_for(&self.bridge)?;
         Ok(system
             .binder_process()
             .add_service(Arc::new(Endpoint::with_computer(
@@ -61,6 +61,12 @@ impl Captures {
                 capture,
                 &system.binder_process(),
             ))))
+    }
+    pub fn current(&self) -> Result<Arc<Capture>, Exception> {
+        self.system
+            .upgrade()
+            .ok_or_else(|| error("boot capture system stopped"))?
+            .capture_package_queries_for(&self.bridge)
     }
     pub fn capture(&self, version: i64) -> Result<Arc<Capture>, Exception> {
         let system = self

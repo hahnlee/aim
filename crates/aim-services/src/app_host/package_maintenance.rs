@@ -2,7 +2,8 @@
 //! owner's permission checks, cache policy and wall time, answered as
 //! system_server's `NativePackageMaintenanceBridge` answers them
 //! (`android-16.0.0_r1`), to the system uid only. Its ART methods are ART
-//! Service's (#2063); its storage and cache owners are not ported
+//! Service's (#2063), except dex-use recording in aim-system's original
+//! DexUseManagerLocal; its storage and cache owners are not ported
 //! (#2156).
 
 use std::sync::Arc;
@@ -11,6 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagemaintenancebridge as bridge;
+use aim_service_aidl::{
+    dev_aim_server_idexusebridge as dex, dev_aim_server_idexusepackages as packages,
+};
 
 use super::{AppHost, reply, system_boolean};
 
@@ -74,6 +78,45 @@ impl Service for PackageMaintenance {
         let host = &self.host;
         let mut p = Parcel::new();
         let result = match call.code {
+            bridge::NOTIFY_DEX_LOAD => {
+                let a = bridge::NotifyDexLoad::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let owner = host.dex_use_bridge.lock().unwrap().clone();
+                (|| {
+                    let owner = owner.ok_or_else(|| {
+                        Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            "ART dex-use owner has not attached",
+                        )
+                    })?;
+                    let mut request = Parcel::new();
+                    dex::NotifyDexLoad {
+                        package_name: a.loading_package_name,
+                        paths: a.dex_paths,
+                        contexts: a.class_loader_contexts,
+                        loader_isa: a.loader_isa,
+                        calling_uid: a.calling_uid,
+                    }
+                    .write(&mut request);
+                    let response = owner
+                        .transact_as_owner(dex::NOTIFY_DEX_LOAD, &request, false)
+                        .map_err(|status| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                format!("ART dex-use transport: {status}"),
+                            )
+                        })?;
+                    dex::read_notify_dex_load_reply(&mut response.reader()).map_err(
+                        |status| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                format!("ART dex-use reply: {status}"),
+                            )
+                        },
+                    )??;
+                    bridge::write_notify_dex_load_reply(&mut p);
+                    Ok(())
+                })()
+            }
             bridge::CHECK_PERMISSION => {
                 let a = bridge::CheckPermission::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.check(a.permission.as_deref(), a.calling_uid)
@@ -129,7 +172,6 @@ impl Service for PackageMaintenance {
                 let issue = match code {
                     bridge::GET_ART_MANAGER_BINDER
                     | bridge::DEXOPT_PACKAGE
-                    | bridge::NOTIFY_DEX_LOAD
                     | bridge::CLEAR_APP_PROFILES => "#2063",
                     _ => "#2156",
                 };
@@ -140,9 +182,163 @@ impl Service for PackageMaintenance {
     }
 }
 
+/// The same lease-bound native visibility owner used by the Java package facade.
+pub(super) struct DexUsePackages(pub crate::package::boot_captures::Captures);
+
+impl Service for DexUsePackages {
+    fn descriptor(&self) -> &str {
+        packages::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.sender_euid != SYSTEM_UID {
+            return reply(Err(Exception::security(
+                "Native dex-use packages require system UID",
+            )));
+        }
+        let mut p = Parcel::new();
+        let result = match call.code {
+            packages::GET_SNAPSHOT => {
+                packages::GetSnapshot::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0
+                    .snapshot()
+                    .map(|snapshot| packages::write_get_snapshot_reply(&mut p, Some(snapshot)))
+            }
+            packages::FILTER_PACKAGE_NAME => {
+                let a = packages::FilterPackageName::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0
+                    .filter_package_name(
+                        a.version,
+                        a.name.as_deref().unwrap_or_default(),
+                        a.uid,
+                        a.user_id,
+                    )
+                    .map(|name| packages::write_filter_package_name_reply(&mut p, &name))
+            }
+            packages::SHOULD_FILTER => {
+                let a = packages::ShouldFilter::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0
+                    .should_filter(
+                        a.version,
+                        a.name.as_deref().unwrap_or_default(),
+                        a.uid,
+                        a.user_id,
+                    )
+                    .map(|filtered| packages::write_should_filter_reply(&mut p, filtered))
+            }
+            packages::CROSS_USER_SUSPENSIONS => {
+                packages::CrossUserSuspensions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.current().map(|capture| {
+                    packages::write_cross_user_suspensions_reply(
+                        &mut p,
+                        capture.context().cross_user_suspensions,
+                    )
+                })
+            }
+            _ => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
+        };
+        reply(result.map(|()| p))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dex_use_requires_the_owner_and_preserves_the_report_and_original_failure() {
+        use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, EX_SECURITY};
+        use aim_service_aidl::dev_aim_server_isystemprocess as sp;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Dex(Arc<AtomicUsize>);
+        impl Service for Dex {
+            fn descriptor(&self) -> &str {
+                dex::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, SYSTEM_UID);
+                assert_eq!(call.code, dex::NOTIFY_DEX_LOAD);
+                let a = dex::NotifyDexLoad::read(&mut call.data)?;
+                assert_eq!(a.calling_uid, 99_001);
+                assert_eq!(a.package_name.as_deref(), Some("a.b"));
+                assert_eq!(
+                    a.paths,
+                    Some(vec![Some("/data/user/0/a.b/code.dex".into())])
+                );
+                assert_eq!(a.contexts, Some(vec![Some("PCL[]".into())]));
+                assert_eq!(a.loader_isa.as_deref(), Some("arm64"));
+                self.0.fetch_add(1, Ordering::SeqCst);
+                reply(Err(Exception::illegal_argument("original ART validation")))
+            }
+        }
+        let process = crate::test_process(SYSTEM_UID);
+        let host = AppHost::new(process.clone());
+        let leaf = PackageMaintenance::new(host.clone());
+        let call = |service: &dyn Service, uid, code, parcel: &Parcel| {
+            service
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 77,
+                    sender_euid: uid,
+                    data: parcel.reader(),
+                })
+                .unwrap()
+        };
+        let mut request = Parcel::new();
+        bridge::NotifyDexLoad {
+            loading_package_name: Some("a.b".into()),
+            dex_paths: Some(vec![Some("/data/user/0/a.b/code.dex".into())]),
+            class_loader_contexts: Some(vec![Some("PCL[]".into())]),
+            loader_isa: Some("arm64".into()),
+            calling_uid: 99_001,
+            calling_pid: 42,
+        }
+        .write(&mut request);
+        let result = call(&leaf, 10_100, bridge::NOTIFY_DEX_LOAD, &request);
+        assert_eq!(
+            bridge::read_notify_dex_load_reply(&mut result.reader())
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_SECURITY
+        );
+        let result = call(&leaf, SYSTEM_UID, bridge::NOTIFY_DEX_LOAD, &request);
+        assert_eq!(
+            bridge::read_notify_dex_load_reply(&mut result.reader())
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_ILLEGAL_STATE
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let binder = process.add_service(Arc::new(Dex(calls.clone())));
+        assert!(matches!(binder, Binder::Local(_)));
+        let system = super::super::system_process::SystemProcess::new(host.clone());
+        let mut attach = Parcel::new();
+        sp::AttachDexUseBridge {
+            bridge: Some(binder),
+        }
+        .write(&mut attach);
+        let result = call(&system, 10_100, sp::ATTACH_DEX_USE_BRIDGE, &attach);
+        assert_eq!(
+            sp::read_attach_dex_use_bridge_reply(&mut result.reader())
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_SECURITY
+        );
+        assert!(host.dex_use_bridge.lock().unwrap().is_none());
+        let result = call(&system, SYSTEM_UID, sp::ATTACH_DEX_USE_BRIDGE, &attach);
+        sp::read_attach_dex_use_bridge_reply(&mut result.reader())
+            .unwrap()
+            .unwrap();
+        let result = call(&leaf, SYSTEM_UID, bridge::NOTIFY_DEX_LOAD, &request);
+        let failure = bridge::read_notify_dex_load_reply(&mut result.reader())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(failure.message, "original ART validation");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     /// The descriptor the installer's permission owner checks, the cache
     /// policy's defaults, a null permission refused, and the owners not

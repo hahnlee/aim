@@ -194,6 +194,40 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::GET_DEX_USE_PACKAGES => {
+                sp::GetDexUsePackages::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let owner = self.host.package_system()?;
+                    let captures = crate::package::boot_captures::Captures::new(
+                        owner,
+                        owner.package_bootstrap()?,
+                    );
+                    let backend = self.host.process.add_service(Arc::new(
+                        super::package_maintenance::DexUsePackages(captures),
+                    ));
+                    sp::write_get_dex_use_packages_reply(&mut p, Some(backend));
+                    Ok(())
+                })
+            }
+            sp::ATTACH_DEX_USE_BRIDGE => {
+                let a = sp::AttachDexUseBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let owner = match a.bridge {
+                        Some(Binder::Handle(handle)) => crate::system::ServiceOwner::Remote(
+                            Arc::new(self.host.process.strong(handle)),
+                        ),
+                        Some(Binder::Local(ptr)) => crate::system::ServiceOwner::Local(
+                            self.host.process.local_service(ptr).ok_or_else(|| {
+                                Exception::new(EX_NULL_POINTER, "dex-use bridge gone")
+                            })?,
+                        ),
+                        None => return Err(Exception::new(EX_NULL_POINTER, "dex-use bridge")),
+                    };
+                    *self.host.dex_use_bridge.lock().unwrap() = Some(Arc::new(owner));
+                    sp::write_attach_dex_use_bridge_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_WIFI_BRIDGE => {
                 let a = sp::AttachWifiBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

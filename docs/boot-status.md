@@ -520,6 +520,28 @@ registered setting's signer and upgrade keys while retaining their own internal
 identity and UID; invalid static declarations reject before allocation (#806).
 Focused host admission and pinned-image policy checks cover these gates;
 guest boot and CTS were not rerun for this change (2026-10-28).
+App-host `notifyDexLoad` now reaches the image's original DexUseManagerLocal
+in aim-system through a typed system-UID-only bridge (#1425). Native leased
+snapshots supply package visibility; an Injector preserves the authenticated
+calling UID and user for isolated-loader records and secondary dex ownership.
+SystemProcessHost now installs ArtModuleServiceManager through the original
+ArtModuleServiceInitializer before constructing that owner, as SystemServer does
+separately from ActivityThread.initializeMainlineModules. Omitting this made the
+original Injector throw before bridge/application-thread attachment (#1425).
+The JVM lifecycle harness covers both DeviceLock feature states and rejects a
+missing initializer. An isolated ART test executes the image's original owner,
+ART JNI path validation on a persisted secondary path, primary load recording,
+atomic protobuf save and a separate-process reload over existing state; empty
+protobuf state is also covered. Native package/identity routing tests pass.
+These checks use disposable paths and an accelerated debounce clock; they do not
+establish aim-system boot reliability. After merging current main, the startup
+JVM test passes when compiled directly against local dependencies, preserving
+main's service order and checking settings/pre-boot publication as well as ART
+registration. Cargo library/startup checks are blocked by stale generated AIDL;
+regeneration is denied at the shared original-image lease. The device-services
+build stops at an upstream incremental `linux-translate` link failure, so current
+image linkage is unverified. No guest boot was run (2026-10-29).
+ArtManagerLocal and its cleanup/dexopt lifecycle remain #2063.
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions

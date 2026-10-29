@@ -748,6 +748,26 @@ permission owners supply scoped read-only Binder capabilities bound to the
 original authenticated caller; they retire on return. This adds vendor bridge
 classes and AIDL only, with no original class or image replacement.
 
+The app host's dex-load recording (#1425) retains the image's original
+[DexUseManagerLocal](https://android.googlesource.com/platform/art/+/android-16.0.0_r1/libartservice/service/java/com/android/server/art/DexUseManagerLocal.java)
+in aim-system, without constructing ArtManagerLocal. Before constructing the
+owner, SystemProcessHost performs SystemServer's explicit
+ArtModuleServiceInitializer registration of ArtModuleServiceManager; this is
+not part of ActivityThread.initializeMainlineModules, and the original Injector
+requires it even when no dex-use file exists. A typed system-UID-only
+bridge carries the native endpoint's authenticated caller identity. Its Injector
+supplies that UID/user and PackageManagerLocal over the existing native replica
+and lease-bound visibility owner. The original owns ART JNI input validation,
+primary/secondary dex discovery, loader/ABI records, protobuf load and debounced
+atomic saves. Only PackageManagerService's ISA check is adapted in the vendor
+bridge. ART systemReady, shutdown cleanup and dexopt remain #2063; no original
+class or image replacement is added. JVM lifecycle checks cover initialization
+order and a missing-initializer control. An isolated ART process executes the
+original constructor over empty and populated protobuf state, JNI path validation,
+load recording, atomic save and separate-process reload, with package snapshots
+and the debounce clock supplied by the test. These checks do not establish
+whole-process boot reliability or CTS acceptance.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the
