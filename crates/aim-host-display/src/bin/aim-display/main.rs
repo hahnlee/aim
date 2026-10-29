@@ -257,7 +257,9 @@ impl Display {
         if let Some(frame) = self.renderer.present(Some(t), &targets, fence.as_ref()) {
             self.stats.present(frame);
         }
-        hosts.wait();
+        if let Some(ns) = hosts.wait() {
+            self.stats.host_wait(ns);
+        }
         *last = Some(Shown::Buffer(t.clone()));
         if let Some(f) = fence {
             f.done();
@@ -307,7 +309,9 @@ impl Display {
         if let Some(frame) = self.renderer.compose(f, &targets, fence) {
             self.stats.present(frame);
         }
-        hosts.wait();
+        if let Some(ns) = hosts.wait() {
+            self.stats.host_wait(ns);
+        }
     }
 
     /// Give `f`'s layers their owners; when a layer waits for a task, the

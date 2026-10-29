@@ -44,6 +44,7 @@ struct Window {
     start: Series,
     present_cpu: Series,
     present_gpu: Series,
+    host_wait: Series,
 }
 
 pub struct Stats {
@@ -77,13 +78,17 @@ impl Stats {
         w.present_gpu.add(f.gpu_ns as f64 / 1e3);
     }
 
+    pub fn host_wait(&self, ns: u64) {
+        self.w.lock().unwrap().host_wait.add(ns as f64 / 1e3);
+    }
+
     /// The summary since the last call, if anything happened.
     pub fn take(&self) -> Option<String> {
         let mut w = self.w.lock().unwrap();
         let mut since = self.since.lock().unwrap();
         let secs = since.elapsed().as_secs_f64();
         *since = Instant::now();
-        if w.latency.n == 0 && w.present_cpu.n == 0 {
+        if w.latency.n == 0 && w.present_cpu.n == 0 && w.host_wait.n == 0 {
             return None;
         }
         let mut parts = Vec::new();
@@ -115,6 +120,15 @@ impl Stats {
                 w.present_cpu.mean(),
                 w.present_cpu.max,
                 w.present_gpu.mean(),
+            ));
+        }
+        if w.host_wait.n > 0 {
+            parts.push(format!(
+                "present hosts {} ({:.1}/s), {:.0} us through sample wait (max {:.0})",
+                w.host_wait.n,
+                w.host_wait.n as f64 / secs,
+                w.host_wait.mean(),
+                w.host_wait.max,
             ));
         }
         let last = w.last_vsync;
