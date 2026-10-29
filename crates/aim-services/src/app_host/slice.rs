@@ -33,6 +33,7 @@ use super::{AppHost, PER_USER_RANGE, reply, usage_events, usage_stats};
 const USER_ALL: i32 = -1;
 use crate::bundle::Value;
 use crate::package::info::java_hash;
+use crate::package::preferred::registry::ActionError;
 use crate::package::uri::{self, Uri};
 
 /// `SlicePermissionManager.SLICE_DIR`, under the system directory.
@@ -1142,8 +1143,13 @@ impl SliceManager {
             filter: &resolution.apps_filter,
             calling_uid: SYSTEM_UID,
         };
-        let plan = crate::package::query::preferred::home_plan(&query, user)
-            .map_err(|e| not_modelled(e.0))?;
+        let plan =
+            crate::package::query::preferred::home_plan(&query, user).map_err(
+                |error| match error {
+                    ActionError::Exception(error) => error,
+                    ActionError::Unavailable(error) => not_modelled(error.0),
+                },
+            )?;
         if let Some(chosen) = plan.chosen {
             return Ok(Some(chosen.package));
         }
@@ -1628,6 +1634,10 @@ impl Service for SliceManager {
         reply(result.map(|()| p))
     }
 }
+
+#[cfg(test)]
+#[path = "slice_home_tests.rs"]
+mod home_tests;
 
 #[cfg(test)]
 mod tests {
