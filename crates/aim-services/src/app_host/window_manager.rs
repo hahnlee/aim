@@ -9,12 +9,13 @@
 //! the window takes them in.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::android_view_iwindowfocusobserver as observer;
 use aim_service_aidl::android_view_iwindowid as wid;
 use aim_service_aidl::android_view_iwindowmanager as wm;
 use aim_service_aidl::android_view_iwindowsession as ws;
@@ -82,6 +83,7 @@ struct Window {
     requested_visible_types: i32,
     /// Its `IWindowId`, made at the first `getWindowId`.
     window_id: Option<Binder>,
+    focus_callbacks: Arc<FocusCallbacks>,
 }
 
 /// The app host's windows, by their `IWindow`.
@@ -89,11 +91,21 @@ struct Window {
 pub struct Windows {
     windows: Mutex<HashMap<u32, Window>>,
     next: Mutex<u32>,
+    focus: Mutex<WindowFocus>,
     /// The display's touch mode, once changed (`DisplayContent.mInTouchMode`).
     in_touch_mode: Mutex<Option<bool>>,
     /// `DisplayFoldController.mOverrideFoldedArea`: left, top, right,
     /// bottom; empty for none.
     pub(super) folded_area_override: Mutex<[i32; 4]>,
+}
+
+/// WMS's focus owner and serialized reports. Binder delivery holds none
+/// of the owner's locks, including when a callback reenters the host.
+#[derive(Default)]
+struct WindowFocus {
+    current: Option<(u32, Arc<FocusCallbacks>)>,
+    reports: VecDeque<(Arc<FocusCallbacks>, bool)>,
+    reporting: bool,
 }
 
 /// A window context's registration (`WindowContextListenerController`):
@@ -642,8 +654,10 @@ impl Session {
                 insets_seq: FIRST_SEQ,
                 requested_visible_types: 0,
                 window_id: None,
+                focus_callbacks: Arc::default(),
             },
         );
+        self.host.update_window_focus();
         eprintln!("app host: window {channel_name} added");
         Ok(p)
     }
@@ -908,6 +922,64 @@ impl Item for WindowStateResizeItem {
 }
 
 impl super::AppHost {
+    /// `DisplayContent.updateFocusedWindowLocked`: the latest window of
+    /// the focused task's top resumed activity. Mac activation reaches
+    /// this through `focus_task`, the activity stack and `run`.
+    pub(super) fn update_window_focus(&self) {
+        let mut focus = self.windows.focus.lock().unwrap();
+        let new = {
+            let stack = self.activities.stack.lock().unwrap();
+            let activity = stack
+                .focused_top()
+                .filter(|a| a.state == super::activity_stack::State::Resumed)
+                .map(|a| a.token);
+            self.windows
+                .windows
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|w| activity.is_some() && w.activity == activity)
+                .max_by_key(|w| w.id)
+                .map(|w| (w.id, w.focus_callbacks.clone()))
+        };
+        if focus.current.as_ref().map(|(id, _)| *id) == new.as_ref().map(|(id, _)| *id) {
+            return;
+        }
+        let old = std::mem::replace(&mut focus.current, new.clone());
+        // WMS.reportFocusChanged reports the gain before the loss.
+        if let Some((_, callbacks)) = new {
+            focus.reports.push_back((callbacks, true));
+        }
+        if let Some((_, callbacks)) = old {
+            focus.reports.push_back((callbacks, false));
+        }
+        if focus.reporting {
+            return;
+        }
+        focus.reporting = true;
+        drop(focus);
+        loop {
+            let report = {
+                let mut focus = self.windows.focus.lock().unwrap();
+                let report = focus.reports.pop_front();
+                if report.is_none() {
+                    focus.reporting = false;
+                }
+                report
+            };
+            let Some((callbacks, gained)) = report else {
+                break;
+            };
+            callbacks.report(gained);
+        }
+    }
+
+    fn remove_window(&self, window: u32) -> Option<Window> {
+        let removed = self.windows.windows.lock().unwrap().remove(&window);
+        self.update_window_focus();
+        removed
+    }
+
     /// `config_defaultInTouchMode`, the display's first touch mode.
     fn default_in_touch_mode(&self) -> Result<bool, Exception> {
         Ok(self
@@ -1116,6 +1188,7 @@ impl super::AppHost {
             }
             w.pid != pid
         });
+        self.update_window_focus();
         self.remove_layers(gone);
         self.update_holds_screen();
     }
@@ -1171,35 +1244,117 @@ impl Session {
             .get_mut(&window)
             .ok_or_else(|| Exception::illegal_argument("getWindowId of an unknown window"))?;
         Ok(*w.window_id.get_or_insert_with(|| {
-            self.host.process.add_service(Arc::new(WindowId {
+            let token = self.host.process.add_service(Arc::new(WindowId {
                 host: self.host.clone(),
-                window,
-                observers: Mutex::new(Vec::new()),
-            }))
+                window: w.id,
+                callbacks: w.focus_callbacks.clone(),
+            }));
+            w.focus_callbacks.token.set(token).unwrap();
+            token
         }))
     }
 }
 
-/// A window's `IWindowId`. Focus moves only when an activity of the
-/// window's app pauses, which no observer is told of yet (#1422).
+/// A window's `IWindowId`, sharing its serialized focus reports (#2320).
 struct WindowId {
     host: Arc<AppHost>,
     window: u32,
-    observers: Mutex<Vec<Binder>>,
+    callbacks: Arc<FocusCallbacks>,
 }
 
 impl WindowId {
-    /// `WindowState.isFocused`: the latest window of the focused app.
+    /// `WindowState.isFocused`: the same owner the observers hear about.
     fn focused(&self) -> bool {
-        let windows = self.host.windows.windows.lock().unwrap();
-        let Some(w) = windows.get(&self.window) else {
-            return false;
+        self.host
+            .windows
+            .focus
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .is_some_and(|(id, _)| *id == self.window)
+    }
+}
+
+/// `WindowState.mFocusCallbacks`: a RemoteCallbackList, kept through the
+/// final loss when its window is removed.
+#[derive(Default)]
+struct FocusCallbacks {
+    token: OnceLock<Binder>,
+    observers: Mutex<Vec<Arc<FocusObserver>>>,
+}
+
+struct FocusObserver {
+    process: Arc<aim_binder_host::local::LocalProcess>,
+    remote: aim_binder_host::local::Strong,
+    death: u64,
+}
+
+impl Drop for FocusObserver {
+    fn drop(&mut self) {
+        self.process.clear_death(&self.remote, self.death);
+    }
+}
+
+impl FocusCallbacks {
+    fn register(self: &Arc<Self>, host: &AppHost, binder: Option<Binder>) {
+        let Some(Binder::Handle(handle)) = binder else {
+            return;
         };
-        self.host.activities.uid_focused(w.uid)
-            && windows
-                .values()
-                .filter(|o| o.uid == w.uid)
-                .all(|o| o.id <= w.id)
+        let mut observers = self.observers.lock().unwrap();
+        if observers.iter().any(|o| o.remote.handle == handle) {
+            return;
+        }
+        let remote = host.process.strong(handle);
+        let callbacks = Arc::downgrade(self);
+        let death = host.process.link_to_death(
+            &remote,
+            Box::new(move || {
+                if let Some(callbacks) = callbacks.upgrade() {
+                    callbacks.unregister(Some(Binder::Handle(handle)));
+                }
+            }),
+        );
+        observers.push(Arc::new(FocusObserver {
+            process: host.process.clone(),
+            remote,
+            death,
+        }));
+    }
+
+    fn unregister(&self, binder: Option<Binder>) {
+        self.observers
+            .lock()
+            .unwrap()
+            .retain(|o| Some(o.remote.binder()) != binder);
+    }
+
+    /// `WindowState.reportFocusChangedSerialized`, with its IWindowId
+    /// token, not its IWindow or activity token.
+    fn report(&self, gained: bool) {
+        let Some(token) = self.token.get() else {
+            return;
+        };
+        let observers = self.observers.lock().unwrap().clone();
+        let mut p = Parcel::new();
+        let code = if gained {
+            observer::FocusGained {
+                input_token: Some(*token),
+            }
+            .write(&mut p);
+            observer::FOCUS_GAINED
+        } else {
+            observer::FocusLost {
+                input_token: Some(*token),
+            }
+            .write(&mut p);
+            observer::FOCUS_LOST
+        };
+        for observer in observers {
+            if let Err(status) = observer.remote.transact(code, &p, true) {
+                eprintln!("app host: window focus observer: {status}");
+            }
+        }
     }
 }
 
@@ -1214,16 +1369,13 @@ impl Service for WindowId {
             wid::REGISTER_FOCUS_OBSERVER => {
                 let args =
                     wid::RegisterFocusObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.observers.lock().unwrap().extend(args.observer);
+                self.callbacks.register(&self.host, args.observer);
                 wid::write_register_focus_observer_reply(&mut p);
             }
             wid::UNREGISTER_FOCUS_OBSERVER => {
                 let args =
                     wid::UnregisterFocusObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.observers
-                    .lock()
-                    .unwrap()
-                    .retain(|o| Some(*o) != args.observer);
+                self.callbacks.unregister(args.observer);
                 wid::write_unregister_focus_observer_reply(&mut p);
             }
             wid::IS_FOCUSED => {
@@ -1307,7 +1459,7 @@ impl Service for Session {
             // its input channel.
             ws::REMOVE => {
                 let (window, _) = Self::window_and_tail(call, 0)?;
-                let removed = self.host.windows.windows.lock().unwrap().remove(&window);
+                let removed = self.host.remove_window(window);
                 self.host
                     .remove_layers(removed.and_then(|w| w.container).into_iter().collect());
                 self.host.update_holds_screen();
@@ -1384,6 +1536,10 @@ impl Service for Session {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "window_manager_focus_tests.rs"]
+mod focus_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1552,6 +1708,7 @@ mod tests {
                 insets_seq: FIRST_SEQ,
                 requested_visible_types: 0,
                 window_id: None,
+                focus_callbacks: Arc::default(),
             },
         );
         let session = Session {

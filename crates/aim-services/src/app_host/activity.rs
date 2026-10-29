@@ -1074,6 +1074,7 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_RESUMED => {
                 let token = Self::token(call)?;
                 self.report(token, "resumed", |r| r.resumed = true);
+                self.0.update_window_focus();
                 if let Some(start_seq) = self.0.activities.with(token, |r| r.start_seq) {
                     self.0.activity_changed(start_seq);
                 }
