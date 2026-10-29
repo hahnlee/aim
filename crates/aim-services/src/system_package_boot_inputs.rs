@@ -40,6 +40,7 @@ impl ImageScanInputs {
     // PackageParser.PARSE_APEX at the pinned Android version is 1 << 10.
     pub fn policy(&self) -> ScanPolicy<'_> {
         ScanPolicy {
+            parser_cache: self.cli.parser_cache.as_deref(),
             certificates: self.certificates,
             seinfo: &self.seinfo,
             apex_parse_flags: 1 << 10,
@@ -409,8 +410,12 @@ impl System {
             begin.data.clone(),
             inputs.cli.parser_cache.clone(),
         );
-        let candidates = crate::package::scan::DataImage::parse(apks, additional_data_volumes)
-            .map_err(|error| failed(format!("native data inventory: {error:?}")))?;
+        let candidates = crate::package::scan::DataImage::parse_cached(
+            apks,
+            additional_data_volumes,
+            inputs.cli.parser_cache.as_deref(),
+        )
+        .map_err(|error| failed(format!("native data inventory: {error:?}")))?;
         let mut roots = BTreeMap::new();
         let mut incremental = BTreeSet::new();
         for candidate in &candidates.packages {
