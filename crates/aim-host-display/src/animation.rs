@@ -10,7 +10,7 @@ use aim_hostcall::display::{Connect, Event, event};
 
 /// Matrix (dsdx, dtdx, dtdy, dsdy), translation, alpha, clip (LTRB).
 pub const STRIDE: usize = 11;
-pub const IDENTITY: [f32; STRIDE] = [1., 0., 1., 0., 0., 0., 1., 0., 0., -1., -1.];
+pub const IDENTITY: [f32; STRIDE] = [1., 0., 0., 1., 0., 0., 1., 0., 0., -1., -1.];
 
 pub struct Animation(pub Vec<f32>);
 impl Animation {
@@ -83,6 +83,21 @@ pub fn next_vsync(stream: &UnixStream) -> io::Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn identity_preserves_both_coordinate_axes() {
+        let (frame, running) = Animation::new(Vec::new()).unwrap().at(0);
+        assert!(!running);
+        for (x, y) in [(1., 0.), (0., 1.), (824., 1464.)] {
+            assert_eq!(
+                (
+                    frame[0] * x + frame[2] * y + frame[4],
+                    frame[1] * x + frame[3] * y + frame[5]
+                ),
+                (x, y)
+            );
+        }
+    }
+
     #[test]
     fn compositor_transforms_advance_on_vsync_and_reach_the_endpoint() {
         let mut samples = Vec::new();
