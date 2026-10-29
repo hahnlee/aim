@@ -17,7 +17,7 @@ fn request(route: &FuseRoute, opcode: u32, node: u64, data: &[u8]) -> Result<Vec
     {
         return Err(crate::errno::EROFS);
     }
-    Client::from_key(&SessionKey::from_transport(route.session.clone()))?
+    Client::new(&SessionKey::from_transport(route.session.clone()))
         .request(
             opcode,
             node,
@@ -52,7 +52,7 @@ pub fn forget(route: &FuseRoute, node: u64, count: u64) -> Result<(), Errno> {
         return Ok(());
     }
     let identity = super::cred::current();
-    Client::from_key(&SessionKey::from_transport(route.session.clone()))?.request_no_reply(
+    Client::new(&SessionKey::from_transport(route.session.clone())).request_no_reply(
         2,
         node,
         &count.to_le_bytes(),
@@ -115,6 +115,7 @@ fn lookup_entry(route: &FuseRoute) -> Result<(u64, u64), Errno> {
         };
         let next = u64_at(&reply, 0)?;
         if next == 0 {
+            forget(route, node, 1)?;
             return Err(crate::errno::ENOENT);
         }
         if node != 1 {
@@ -616,10 +617,14 @@ pub fn stat(route: &FuseRoute, node: Option<u64>, fh: Option<u64>) -> Result<lib
         Some(node) => node,
         None => lookup(route)?,
     };
-    let attr = getattr(route, node, fh)?;
-    if own_lookup {
-        forget(route, node, 1)?;
-    }
+    let attr = getattr(route, node, fh);
+    let release = if own_lookup {
+        forget(route, node, 1)
+    } else {
+        Ok(())
+    };
+    let attr = attr?;
+    release?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     stat.st_dev = 0x00f5;
     stat.st_ino = u64_at(&attr, 0)?;
@@ -702,12 +707,28 @@ fn parent(route: &FuseRoute) -> Result<(u64, Vec<u8>), Errno> {
     Ok((lookup(&parent)?, name))
 }
 pub fn mkdir(route: &FuseRoute, mode: u32) -> Result<(), Errno> {
+    // Linux namei checks the existing dentry before calling fuse_mkdir,
+    // including a mount root, which has no parent/name inside this session.
+    if route.relative.trim_matches('/').is_empty() {
+        return Err(crate::errno::EEXIST);
+    }
     let (node, name) = parent(route)?;
     let _parent = LookupGuard {
         route: route.clone(),
         node,
         keep: false,
     };
+    match request(route, 1, node, &name) {
+        Ok(reply) => {
+            let existing = u64_at(&reply, 0)?;
+            if existing != 0 {
+                forget(route, existing, 1)?;
+                return Err(crate::errno::EEXIST);
+            }
+        }
+        Err(crate::errno::ENOENT) => {}
+        Err(error) => return Err(error),
+    }
     let mut data = Vec::new();
     put32(&mut data, mode);
     put32(&mut data, current_umask());
