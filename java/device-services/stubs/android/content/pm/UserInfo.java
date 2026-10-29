@@ -2,7 +2,11 @@
 // the members used, checked against the image by the device-services node.
 package android.content.pm;
 
-public class UserInfo {
+public class UserInfo implements android.os.Parcelable {
+    public void writeToParcel(android.os.Parcel out, int flags) { throw new RuntimeException("stub"); }
+    public int describeContents() { throw new RuntimeException("stub"); }
+    public static final android.os.Parcelable.Creator<UserInfo> CREATOR = null;
+    public boolean supportsSwitchToByUser() { throw new RuntimeException("stub"); }
     public boolean isManagedProfile() { throw new RuntimeException("stub"); }
     public int id;
     public int flags;

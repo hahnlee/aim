@@ -107,6 +107,7 @@ pub struct KeyboardInfo {
     pub keyboard_type: i32,
     pub is_external: bool,
     pub key_character_map: String,
+    pub supported_keys: Option<Vec<i32>>,
 }
 
 /// The built-in keyboard: what it is, and its device and key map.
@@ -613,12 +614,13 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
                 continue;
             }
         };
-        let classes = Keyboard {
+        let keyboard = Keyboard {
             map: &map,
             has_key: &has_key,
             has_msc_scan,
-        }
-        .classes();
+        };
+        let classes = keyboard.classes();
+        let supported_keys = keyboard.supported_key_codes();
         if !keyboard::eligible_built_in(&identifier, &config, &map) {
             log::info!(
                 "{}: a keyboard other than the built-in one is not read (#1434)",
@@ -655,6 +657,7 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
                 keyboard_type: classes.keyboard_type(),
                 is_external,
                 key_character_map,
+                supported_keys,
             },
             device,
             map,

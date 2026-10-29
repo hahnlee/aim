@@ -143,6 +143,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSyncAdapterQueries(new SyncAdapterQueries(context, host));
             host.initializeCameraPrivacyAllowlist(new ArrayList<>(
                     com.android.server.SystemConfig.getInstance().getCameraPrivacyAllowlist()));
+            host.attachUserSwitcherPolicy(new UserSwitcherPolicy(context));
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
             PreBootNotifications.publish(context);
             host.attachSystemProcess(applicationThread.asBinder(),

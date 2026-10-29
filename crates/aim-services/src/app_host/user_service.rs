@@ -12,9 +12,10 @@ use std::sync::Arc;
 use aim_android_xml::{Element, Node, TEXT, Value as XmlValue};
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_iusermanager as um;
+use aim_service_aidl::dev_aim_server_iuserswitcherpolicy as switcher;
 
 use super::user_types::{self, UserType};
 use super::{AppHost, PER_USER_RANGE, reply};
@@ -888,6 +889,43 @@ impl UserManager {
         })
     }
 
+    fn switcher_enabled(&self, uid: i32, show: bool, user: i32) -> Result<bool, Exception> {
+        let policy = self
+            .host
+            .user_switcher_policy
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "user switcher policy not attached"))?;
+        let restrictions = if user == SYSTEM_USER {
+            self.user_data()?.1
+        } else {
+            BTreeSet::new()
+        };
+        let users = self
+            .users()?
+            .into_iter()
+            .filter(|u| !u.partial && !u.pre_created)
+            .map(Some)
+            .collect();
+        let mut data = Parcel::new();
+        switcher::IsEnabled {
+            show_even_if_not_actionable: show,
+            switch_restricted: restrictions.contains("no_user_switch"),
+            add_restricted: restrictions.contains("no_add_user"),
+            can_read_restrictions: uid / PER_USER_RANGE as i32 == user
+                || same_profile_group(&self.host, uid / PER_USER_RANGE as i32, user)?
+                || self.manage_or(uid, Some(INTERACT_ACROSS_USERS))?,
+            can_query_users: self.manage_or(uid, Some(CREATE_USERS))?,
+            users: Some(users),
+        }
+        .write(&mut data);
+        let result = policy
+            .transact(switcher::IS_ENABLED, &data, false)
+            .map_err(switcher_error)?;
+        switcher::read_is_enabled_reply(&mut result.reader()).map_err(switcher_error)?
+    }
+
     /// `mUsers`: the system user.
     fn users(&self) -> Result<Vec<UserInfo>, Exception> {
         Ok(vec![self.user_data()?.0])
@@ -1570,6 +1608,20 @@ impl Service for UserManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            um::IS_USER_SWITCHER_ENABLED => {
+                let a = um::IsUserSwitcherEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply(
+                    self.switcher_enabled(
+                        call.sender_euid as i32,
+                        a.show_even_if_not_actionable,
+                        a.m_user_id,
+                    )
+                    .map(|enabled| {
+                        um::write_is_user_switcher_enabled_reply(&mut p, enabled);
+                        p
+                    }),
+                );
+            }
             um::GET_USER_UNLOCK_REALTIME => {
                 um::GetUserUnlockRealtime::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // UserManagerService.getUserUnlockRealtime, android-16.0.0_r1:
@@ -1841,6 +1893,39 @@ pub(super) fn application_restrictions(
     Ok(super::bind::Bundle(Vec::new()))
 }
 
+fn switcher_error(status: i32) -> Exception {
+    Exception::new(
+        EX_ILLEGAL_STATE,
+        format!("user switcher policy: binder status {status}"),
+    )
+}
+
+impl AppHost {
+    pub(super) fn attach_user_switcher_policy(
+        self: &Arc<Self>,
+        binder: Option<Binder>,
+    ) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = binder else {
+            return Err(Exception::illegal_argument("no user switcher policy"));
+        };
+        let owner = Arc::new(self.process.strong(handle));
+        let weak = Arc::downgrade(self);
+        self.process.link_to_death(
+            &owner,
+            Box::new(move || {
+                if let Some(host) = weak.upgrade() {
+                    let mut current = host.user_switcher_policy.lock().unwrap();
+                    if current.as_ref().is_some_and(|p| p.handle == handle) {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        *self.user_switcher_policy.lock().unwrap() = Some(owner);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1926,6 +2011,121 @@ mod tests {
             assert_eq!(read(100_000 + 10100), 0);
             host.user_unlocking(0).unwrap();
             assert_eq!(read(10100), unlocked);
+        });
+    }
+
+    #[test]
+    fn switcher_supplies_native_restrictions_users_and_conditional_access() {
+        struct Policy;
+        impl Service for Policy {
+            fn descriptor(&self) -> &str {
+                switcher::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                call.data.enforce_interface(switcher::DESCRIPTOR)?;
+                let show = call.data.read_bool()?;
+                assert!(call.data.read_bool()?); // no_user_switch from the user file
+                assert!(call.data.read_bool()?); // no_add_user
+                let read = call.data.read_bool()?;
+                let query = call.data.read_bool()?;
+                assert_eq!(call.data.read_i32()?, 1); // one alive user
+                assert_eq!(call.data.read_i32()?, 1); // typed UserInfo
+                assert_eq!(call.data.read_i32()?, SYSTEM_USER);
+                let mut p = Parcel::new();
+                if !read {
+                    p.write_exception(&Exception::security("restrictions denied"));
+                } else {
+                    switcher::write_is_enabled_reply(&mut p, show && query);
+                }
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            use aim_service_aidl::dev_aim_server_isystemprocess as sp;
+            let permissions = Arc::new(super::super::permission_manager::PermissionManager::new(
+                host.clone(),
+            ));
+            host.permission_manager
+                .set(permissions.clone())
+                .ok()
+                .unwrap();
+            host.package_system()
+                .unwrap()
+                .set_native_permissions(&permissions);
+            let data = host.data().unwrap().join("system/users");
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::write(data.join("userlist.xml"), b"<users><user id='0'/></users>").unwrap();
+            std::fs::write(
+                data.join("0.xml"),
+                b"<user id='0'><restrictions no_user_switch='true' no_add_user='true'/></user>",
+            )
+            .unwrap();
+            let service = UserManager::new(host.clone());
+            assert_eq!(
+                service.switcher_enabled(1000, true, 0).unwrap_err().code,
+                EX_ILLEGAL_STATE
+            );
+            let owner = export(Arc::new(Policy));
+            let mut attach = Parcel::new();
+            sp::AttachUserSwitcherPolicy {
+                policy: Some(Binder::Handle(owner.handle)),
+            }
+            .write(&mut attach);
+            let system = super::super::system_process::SystemProcess::new(host.clone());
+            for uid in [10100, 1000] {
+                let p = system
+                    .transact(&mut Call {
+                        code: sp::ATTACH_USER_SWITCHER_POLICY,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: uid,
+                        data: attach.reader(),
+                    })
+                    .unwrap();
+                let result = sp::read_attach_user_switcher_policy_reply(&mut p.reader()).unwrap();
+                if uid == 1000 {
+                    result.unwrap();
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        aim_binder_host::parcel::EX_SECURITY
+                    );
+                }
+            }
+            for (uid, show, expected) in [
+                (1000, true, true),
+                (1000, false, false),
+                (10100, true, false),
+            ] {
+                let mut data = Parcel::new();
+                um::IsUserSwitcherEnabled {
+                    show_even_if_not_actionable: show,
+                    m_user_id: 0,
+                }
+                .write(&mut data);
+                let p = service
+                    .transact(&mut Call {
+                        code: um::IS_USER_SWITCHER_ENABLED,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: uid,
+                        data: data.reader(),
+                    })
+                    .unwrap();
+                assert_eq!(
+                    um::read_is_user_switcher_enabled_reply(&mut p.reader())
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+            // Other-user restriction access is sent to Java as a decision, so
+            // Java preserves the original policy's short-circuit ordering.
+            assert_eq!(
+                service.switcher_enabled(110100, true, 0).unwrap_err(),
+                Exception::security("restrictions denied")
+            );
         });
     }
 

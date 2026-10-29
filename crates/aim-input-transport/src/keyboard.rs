@@ -507,6 +507,23 @@ impl Keyboard<'_> {
             })
     }
 
+    /// EventHub.markSupportedKeyCodes: layout keycodes backed by EV_KEY or
+    /// MSC_SCAN, including the key character map's remapping.
+    pub fn supported_key_codes(&self) -> Option<Vec<i32>> {
+        self.map.layout.as_ref().map(|layout| {
+            let codes: std::collections::BTreeSet<_> = layout
+                .keys_by_scan_code
+                .values()
+                .chain(layout.keys_by_usage_code.values())
+                .map(|k| k.key_code)
+                .collect();
+            codes
+                .into_iter()
+                .filter(|&code| self.has_key_code(code))
+                .collect()
+        })
+    }
+
     /// The classes `openDeviceLocked` gives it.
     pub fn classes(&self) -> Classes {
         if !has_keys(self.has_key) {
@@ -841,6 +858,39 @@ mod tests {
             has_msc_scan: false,
         };
         assert!(!k.classes().dpad);
+    }
+
+    #[test]
+    fn supported_key_codes_require_device_capabilities_and_the_active_layout() {
+        let mut map = map();
+        map.layout.as_mut().unwrap().keys_by_usage_code.insert(
+            0x70028,
+            crate::keylayout::Key {
+                key_code: 66,
+                flags: 0,
+            },
+        );
+        for (msc, expected) in [(false, vec![29]), (true, vec![29, 66])] {
+            let keyboard = Keyboard {
+                map: &map,
+                has_key: &|scan| scan == 30,
+                has_msc_scan: msc,
+            };
+            assert_eq!(keyboard.supported_key_codes(), Some(expected));
+        }
+        let virtual_keyboard = Keyboard {
+            map: &map,
+            has_key: &|_| false,
+            has_msc_scan: false,
+        };
+        assert_eq!(virtual_keyboard.supported_key_codes(), Some(vec![]));
+        map.layout = None;
+        let keyboard = Keyboard {
+            map: &map,
+            has_key: &|_| true,
+            has_msc_scan: true,
+        };
+        assert_eq!(keyboard.supported_key_codes(), None);
     }
 
     #[test]
