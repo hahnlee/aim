@@ -30,6 +30,7 @@ mod existing;
 mod install;
 mod migration;
 mod policy;
+mod ready;
 mod removal;
 mod reset;
 
@@ -1906,6 +1907,12 @@ impl PermissionManager {
         let root = permissions::with_app_id_permissions(root, &state.app_id_permissions)
             .and_then(|root| permissions::with_package_versions(root, &state.package_versions))
             .and_then(|root| permissions::with_app_ops(root, state))
+            .and_then(|root| {
+                permissions::with_default_grant_fingerprint(
+                    root,
+                    state.default_permission_grant_fingerprint.as_deref(),
+                )
+            })
             .map_err(fail)?;
         let bytes = aim_android_xml::abx::write(&root).map_err(fail)?;
         self.write_access(relative, &bytes)

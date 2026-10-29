@@ -168,4 +168,6 @@ interface IPackageBootstrapBridge {
         code and marshalled data; the reply holds the count answered, at least one, then each
         answered call's marshalled reply as a byte[], in order. */
     byte[] transactBatch(in byte[] calls);
+    /** Synchronous original default grant policy, before app-host process readiness. */
+    void grantDefaultPermissions(dev.aim.server.IPackageDefaultGrantQueries queries, int userId);
 }

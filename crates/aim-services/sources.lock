@@ -466,6 +466,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IPackageMutationBridge|java/device-services/aidl/dev/aim/server/IPackageMutationBridge.aidl|*"
   "dev.aim.server.IPackageComputer|java/device-services/aidl/dev/aim/server/IPackageComputer.aidl|*"
   "dev.aim.server.IPackageScanSnapshot|java/device-services/aidl/dev/aim/server/IPackageScanSnapshot.aidl|*"
+  "dev.aim.server.IPackageDefaultGrantQueries|java/device-services/aidl/dev/aim/server/IPackageDefaultGrantQueries.aidl|*"
   "dev.aim.server.IPackageBootstrapBridge|java/device-services/aidl/dev/aim/server/IPackageBootstrapBridge.aidl|*"
   "dev.aim.server.IPackageDomainSettings|java/device-services/aidl/dev/aim/server/IPackageDomainSettings.aidl|*"
   "dev.aim.server.IPackageDomainSettingsChanged|java/device-services/aidl/dev/aim/server/IPackageDomainSettingsChanged.aidl|*"

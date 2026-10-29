@@ -336,7 +336,16 @@ AppSearch is the original module, run by the app host's system process
 the system process starts from its standalone jar and publishes as
 `nearby` (2026-10-22), and the AdServices module's AdServicesManagerService,
 published as `adservices_manager`, so AdServices' AdServicesCommonService
-finds it at its start (2026-10-22, #1965; `sdk_sandbox` is #1982). The original Bluetooth app
+finds it at its start (2026-10-22, #1965; `sdk_sandbox` is #1982).
+
+The Bluetooth startup ordering now includes PMS's synchronous default grants
+before AMS releases application starts (#2361). The original grant policy runs
+in `aim-system` over the native access owner, whose committed grants and default
+grant fingerprint precede readiness. The uid-1002 shared-UID contacts observer
+regression forces the early denial, then verifies startup after grant commitment;
+failed policy execution keeps startup closed. Host tests and pinned-image Java
+linkage cover the change; no guest boot was run (2026-10-29).
+The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).

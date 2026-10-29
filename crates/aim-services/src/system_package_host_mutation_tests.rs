@@ -106,7 +106,16 @@ impl Service for Bridge {
                 let a = bootstrap::GetPackageGrantedPermissions::read(&mut call.data)?;
                 assert!(matches!(
                     (a.package_name.as_deref(), a.app_id, a.user_id),
-                    (Some("p"), 10100, 0) | (Some("q"), 10101, 0)
+                    (Some("p"), 10100, 0)
+                        | (Some("q"), 10101, 0)
+                        | (
+                            Some("com.google.android.bluetooth" | "com.android.bluetooth"),
+                            1002,
+                            0
+                        )
+                        | (Some("contacts"), 10100, 0)
+                        | (Some("ungranted"), 10123, 0)
+                        | (Some("android"), 1000, 0)
                 ));
                 let grants = if self.1.load(Ordering::SeqCst) {
                     vec![Some("android.permission.CAMERA".into())]
@@ -117,7 +126,7 @@ impl Service for Bridge {
             }
             bootstrap::GET_PERMISSION_GIDS_FOR_UID => {
                 let a = bootstrap::GetPermissionGidsForUid::read(&mut call.data)?;
-                assert!(matches!(a.uid, 10100 | 10101));
+                assert!(matches!(a.uid, 1000 | 1002 | 10100 | 10101 | 10123));
                 let gids = if self.1.load(Ordering::SeqCst) {
                     vec![3003]
                 } else {
@@ -1195,14 +1204,25 @@ pub(crate) fn with_discovery_binders(
         &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
     ),
 ) {
-    with_discovery_binders_flags(&[], test);
+    with_discovery_binders_flags(&[], true, test);
+}
+
+pub(crate) fn with_boot_discovery_binders(
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
+        &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+    ),
+) {
+    with_discovery_binders_flags(&[], false, test);
 }
 
 pub(crate) fn with_discovery_session_flags(
     flags: &[(&str, bool)],
     test: impl FnOnce(&Arc<AppHost>),
 ) {
-    with_discovery_binders_flags(flags, |host, _, _, export| {
+    with_discovery_binders_flags(flags, true, |host, _, _, export| {
         let activity = export(crate::app_host::test_activity_service(host));
         host.package_system()
             .unwrap()
@@ -1216,6 +1236,7 @@ pub(crate) fn with_discovery_session_flags(
 
 fn with_discovery_binders_flags(
     flags: &[(&str, bool)],
+    ready: bool,
     test: impl FnOnce(
         &Arc<AppHost>,
         &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
@@ -1245,7 +1266,12 @@ fn with_discovery_binders_flags(
         include_bytes!("../tests/fixtures/discovery/providers.apk"),
     )
     .unwrap();
-    crate::app_host::configure_test_host(
+    let configure = if ready {
+        crate::app_host::configure_test_host
+    } else {
+        crate::app_host::configure_boot_test_host
+    };
+    configure(
         &host,
         &fixture.root.join("image"),
         &fixture.root.join("data"),

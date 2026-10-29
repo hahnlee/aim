@@ -600,3 +600,22 @@ pub fn with_package_versions(mut root: Element, versions: &Named) -> Result<Elem
     }
     Ok(root)
 }
+
+/// AccessPolicy.serializeUserState's default grant fingerprint.
+pub fn with_default_grant_fingerprint(
+    mut root: Element,
+    fingerprint: Option<&str>,
+) -> Result<Element, String> {
+    use aim_android_xml::{Node, Value};
+    access(&root)?;
+    root.content
+        .retain(|n| !matches!(n, Node::Element(e) if e.name == "default-permission-grant"));
+    if let Some(fingerprint) = fingerprint {
+        root.content.push(Node::Element(Element {
+            name: "default-permission-grant".into(),
+            attrs: vec![("fingerprint".into(), Value::Interned(fingerprint.into()))],
+            content: Vec::new(),
+        }));
+    }
+    Ok(root)
+}

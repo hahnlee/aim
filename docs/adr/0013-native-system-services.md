@@ -612,14 +612,26 @@ this adds vendor bridge classes only, with no replacement of original classes.
   thread with the `InternalServiceRepository` the app host serves (its
   DeviceIdleInternal is the app host's) and the publishing of `telecom`;
   its default app providers and role and carrier config listeners feed
-  only the default permission grant policy, which the app host does not
-  run. What they ask of system_server's internals that this process has
-  not shows as the original reacts to it: StorageStatsService's
+  only the default permission grant policy; their later role/carrier
+  callbacks remain outside the app host's boot grant pass. What they ask of
+  system_server's internals that this process has not shows as the original reacts to it: StorageStatsService's
   `StorageStatsManagerLocal` (#1520), on which AppSearch's `onStart` stops
   after publishing its binder and registering its receivers, and its
   maintenance `JobService`, a component of the `android` package, whose
   unserved services and providers still require their owners' internals
   and remain explicit UnsupportedOperation (#1518).
+
+The app host now runs the pinned original `DefaultPermissionGrantPolicy` in
+`aim-system` at package readiness, before opening AMS process startup (#2361).
+A vendor wrapper supplies its four `PackageManagerInternal` reads from the
+native package owners; its synchronous permission Binder mutations still commit
+through the native access owner. The owner persists the default-grant fingerprint
+only after the policy returns and republishes its committed state before releasing
+pending application starts. An error keeps startup closed. This adds vendor classes
+and a compile-only API stub, with no original-class or image replacement. The host
+regression forces the early uid-1002 contacts denial and checks the shared-UID
+grants and failed-readiness path; original policy execution is linkage-checked,
+not guest-boot validated.
 
 The install-existing leaf (#2330) retains `ExistingInstallEffects` in aim-system,
 with the original non-isolated Installer connected to installd and local adapters
