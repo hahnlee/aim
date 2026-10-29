@@ -8569,6 +8569,12 @@ kills on the Mac's memory pressure, which the host-call module `memory`
 reports (ADR 0012's lmkd row, [host-call.md](host-call.md)). A thread's
 Linux scheduling sets its host QoS: a nice value of 10 or more or
 SCHED_BATCH runs at utility, 19 or SCHED_IDLE at background.
+QoS application compares the pthread's live requested class and relative
+priority before entering Darwin's setter (#2391); Linux nice values and
+permission checks remain synchronous. Host scheduling regressions pass;
+the original-bionic scheduling checks fail before their assertions on both
+the starting and changed code (namespace watcher startup and spawn permission
+failures in the restricted runner). No guest boot was run (2026-10-29).
 Cross-process `setpriority` and `sched_setparam`/`sched_setscheduler` record
 each thread's state through its agent (opcodes 22 and 24), with caller
 credentials checked at the owner; getters read that state back. The target
