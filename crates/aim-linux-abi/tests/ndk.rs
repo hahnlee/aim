@@ -217,6 +217,11 @@ fn posix_record_locks() {
 }
 
 #[test]
+fn posix_record_lock_stress() {
+    check("t_posix_lock_stress", &[]);
+}
+
+#[test]
 fn sqlite_concurrent_create() {
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
         aim_paths::skip("the pinned NDK or the extracted image is missing");

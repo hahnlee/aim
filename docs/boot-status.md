@@ -2788,13 +2788,22 @@ orphaned guest is released; guest-visible admission evidence remains rejected.
 Identity files have no guest path: the process fixture now checks the live
 child's private identity file and its removal natively, with an inherited-fd
 barrier, while the guest checks the child's credentials through `/proc`.
-The NDK regression reproduces lost locks on origin/main. The current release
-NDK suite (57 tests) and the full debug process rerun (41 tests, with the debug
-lock holder built) stop before guest execution: Mach registration reports
-EADDRINUSE, with Binder check-in reporting bootstrap status 1100
-(BOOTSTRAP_NOT_PRIVILEGED). The process fixture and NDK program compile, but
-none of their guest assertions or the native identity-file content/removal
-assertions ran. No guest integration pass or guest boot is claimed.
+Concurrent close mediation drains nonblocking record-lock operations instead
+of cancelling them with EINTR, and preserves sleeping F_SETLKW operations and
+their backing registrations (#2394). Ticket admission covers dispatch; reply
+waits and native queue backpressure have no guest-visible deadline, and the
+controller no longer rejects requests at an arbitrary concurrency cutoff.
+A deterministic shared-range F_SETLK/close schedule reproduced host EINTR;
+the close, retained-waiter and queue-pressure regressions pass. The six-process
+shared/pending/reserved/exclusive stress program compiles with the pinned NDK
+and passes 50 native macOS runs with four CPU-load workers. Four SQLite launches,
+including two with four CPU-load workers, and both NDK lock tests stop before
+guest execution:
+Mach registration reports EADDRINUSE, and a direct native registration check
+returns bootstrap status 1100 (BOOTSTRAP_NOT_PRIVILEGED). Native broker and
+linux-abi close integration checks stop at the same registration boundary.
+SQLite's reported disk I/O error has not been reproduced or verified fixed
+here; no guest integration pass or guest boot is claimed (2026-10-29).
 The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional

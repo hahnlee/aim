@@ -1108,21 +1108,23 @@ impl Controller {
                         }
                         match endpoint.receive(Duration::from_millis(50)) {
                             Ok(request) => {
-                                if requests.len() >= 256 {
-                                    let mut response = request.frame;
-                                    response.errno = libc::EAGAIN;
-                                    request.reply.send(response)?;
-                                } else {
-                                    match serving.begin(request) {
-                                        Ok(Some(forwarded)) => {
+                                match serving.begin(request) {
+                                    Ok(Some(forwarded)) => {
+                                        // Only F_SETLKW can sleep on a lock conflict.
+                                        // Drain the other replies here instead of
+                                        // imposing a timing-dependent EAGAIN limit
+                                        // on unrelated operations and sleepers.
+                                        if forwarded.frame.operation == Operation::Wait {
                                             let state = serving.clone();
                                             requests.push(thread::spawn(move || {
                                                 state.handle(forwarded)
                                             }));
+                                        } else if let Err(failure) = serving.handle(forwarded) {
+                                            serving.record(failure);
                                         }
-                                        Ok(None) => {}
-                                        Err(failure) => serving.record(failure),
                                     }
+                                    Ok(None) => {}
+                                    Err(failure) => serving.record(failure),
                                 }
                             }
                             Err(failure)
