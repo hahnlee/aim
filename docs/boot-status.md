@@ -294,8 +294,10 @@ waits remain. Over three boots (2026-10-30), keystore's shared secret negotiatio
 concludes and `earlyBootEnded` reaches TRUSTED_ENVIRONMENT KeyMint; odsign
 initializes its keystore key. The second boot's `boot_completed` stays at about
 7 s (7.3-7.9 s, against 6.7-7.4 s without the change): the SharedSecret retries
-had run in a background thread. odsign's `odrefresh --check` then aborts on
-`apex-info-list.xml` without `lastUpdateMillis` (#2418).
+had run in a background thread. On a data directory's first boot odrefresh
+compiles the system server artifacts and odsign signs them, which init waits
+for (first boot about 18 s instead of 10 s); later boots verify them and keep
+the second boot at about 7.4 s (#2418, #2424; three boots, 2026-10-30).
 
 The app host image ([app-host.md](app-host.md)) boots without
 system_server. In the original measurement, `--only` selected 33 services and
@@ -8218,7 +8220,7 @@ keeps exiting and init restarts it every 5 s.
 | system_aconfigd_mainline_init | exit 1 | "aconfigd_mainline is enabled, skipping mainline init" |
 | derive_sdk, derive_classpath, art_boot, logd-reinit, update_verifier | exit 0 | |
 | usbd | exit 0 | no USB HAL |
-| odsign | exits after odrefresh aborts | its keystore key initializes (#200); `odrefresh --check` aborts on the missing `lastUpdateMillis` (#2418) |
+| odsign | exits 0 | its keystore key initializes (#200); the first boot compiles and signs the odrefresh artifacts, later boots find them valid (#2418) |
 | misctrl | exit 1 | no `/misc` partition |
 | exec `recovery-refresh` | exit 254 | no pstore |
 | exec `chattr +F /data/media` | exit 1 | `FS_IOC_GETFLAGS` is ENOTTY |
@@ -8267,7 +8269,9 @@ the tombstone to `/data/tombstones/tombstone_NN` (an `O_TMPFILE` it names with
   `vendorBootstrap` APEXes), a lazy `aidl/apexservice` start no longer
   resets `apexd.status`, and `perform_apex_config --bootstrap` loads the
   scripts of `vendorBootstrap` APEXes (the gatekeeper HAL, class
-  `early_hal`).
+  `early_hal`). Its info-list writer includes `lastUpdateMillis`, which
+  apexd fills with the APEX file's `st_mtime` in seconds despite the name;
+  odrefresh asserts it for the ART APEX (#2418).
 - guest-init resolves symlinks in the image relative to the guest root, as
   a GSI's `/system_ext -> /system/system_ext` needs.
 - guest-init's shutdown stops services without running `onrestart`.
