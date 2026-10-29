@@ -139,8 +139,16 @@ bound an unclosed writer to five seconds. `aim-system` also publishes the
 image's original `android.graphics.GraphicsStatsService` before application
 attachment opens, retaining its shared buffers and text/proto dump owner.
 Host Binder/fd and JVM startup tests, full Java compilation and pinned-image
-linkage cover this slice; no guest boot or live frame measurement was run
-(2026-10-29).
+linkage cover this slice. Disposable app-host window-mode boots now verify
+plain dumps, reset and framestats against Settings' original HWUI: two settled
+six-swipe trials each render 263/267 frames with zero jank and 5 ms histogram
+percentiles (2026-10-29). A later trial loses its activity to the existing
+`wifi.getPrivilegedConfiguredNetworks` UnsupportedOperation (#2261), so it is
+not a passing scroll trial. Chrome and Maps reach first-run terms; content
+scrolling remains unmeasured. Window-mode display statistics now include the
+time through the window hosts' existing sample wait, about 0.8–1.0 ms during
+Settings scrolling; this is buffer-read acknowledgement, not physical presentation
+or GPU execution time. No rendering-speed improvement is established.
 
 The app host applies supported finishDrawing transactions to SurfaceFlinger,
 preserving buffers/fences, barriers, display/input state, cache operations and

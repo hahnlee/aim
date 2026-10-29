@@ -198,6 +198,7 @@ pub struct Waiter {
     hosts: Vec<Arc<Host>>,
     seq: u32,
     fence: Option<Fence>,
+    started: Instant,
 }
 
 impl Host {
@@ -257,6 +258,7 @@ pub fn present_layers(f: &LayerFrame, fence: Option<&Fence>) -> Waiter {
 /// Present `seq` to every host `send` reaches; the waiter collects their
 /// answers.
 fn ask(fence: Option<&Fence>, send: impl Fn(&Host, u32) -> bool) -> Waiter {
+    let started = Instant::now();
     let hosts = HOSTS.lock().unwrap().clone();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     let mut asked = Vec::new();
@@ -272,13 +274,15 @@ fn ask(fence: Option<&Fence>, send: impl Fn(&Host, u32) -> bool) -> Waiter {
         hosts: asked,
         seq,
         fence: fence.cloned(),
+        started,
     }
 }
 
 impl Waiter {
     /// Wait until each host read the buffer (or gave up), and count it
-    /// shown for the fence.
-    pub fn wait(self) {
+    /// shown for the fence. Return the time since sending when hosts exist,
+    /// including timeout/death waits; this is not a presentation timestamp.
+    pub fn wait(self) -> Option<u64> {
         let deadline = Instant::now() + Duration::from_millis(SAMPLE_MS);
         for h in &self.hosts {
             let mut s = h.sampled.lock().unwrap();
@@ -295,6 +299,7 @@ impl Waiter {
                 f.shown(at);
             }
         }
+        (!self.hosts.is_empty()).then(|| self.started.elapsed().as_nanos() as u64)
     }
 }
 
