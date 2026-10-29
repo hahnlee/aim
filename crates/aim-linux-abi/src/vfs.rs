@@ -2834,11 +2834,13 @@ fn resolve_inner(
             .collect();
     }
     let mut links = 0;
+    let mut fuse_walk = None;
     while let Some(c) = pending.pop() {
         check(&join_guest(&done))?;
         match c.as_slice() {
             b"." => continue,
             b".." => {
+                fuse_walk = None;
                 done.pop();
                 continue;
             }
@@ -2854,22 +2856,28 @@ fn resolve_inner(
         }
         let current = join_guest(&done);
         if let Some(route) = fuse_route(&current) {
-            let node = match crate::sys::fuse_client::lookup(&route) {
-                Ok(node) => node,
-                Err(errno::ENOENT) if is_last => continue,
+            let next = match crate::sys::fuse_client::Walk::advance(&route, fuse_walk.as_ref()) {
+                Ok(next) => next,
+                Err(errno::ENOENT) if is_last => {
+                    fuse_walk = None;
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
-            let _lookup = crate::sys::fuse_client::LookupGuard::transient(&route, node);
-            let stat = crate::sys::fuse_client::stat(&route, Some(node), None)?;
-            if stat.st_mode & libc::S_IFMT != libc::S_IFLNK {
+            if next.mode & libc::S_IFMT as u32 != libc::S_IFLNK as u32 {
+                if !is_last && next.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 {
+                    return Err(errno::ENOTDIR);
+                }
+                fuse_walk = Some(next);
                 continue;
             }
+            fuse_walk = None;
             links += 1;
             if links > MAX_SYMLINKS {
                 return Err(errno::ELOOP);
             }
             done.pop();
-            let target = crate::sys::fuse_client::readlink_node(&route, node)?;
+            let target = crate::sys::fuse_client::readlink_node(&route, next.node())?;
             if target.first() == Some(&b'/') {
                 done.clear();
             }
@@ -2880,6 +2888,7 @@ fn resolve_inner(
             }
             continue;
         }
+        fuse_walk = None;
         let (host, area) = lookup(&current);
         let Some(target) = link_target(host, area) else {
             continue;

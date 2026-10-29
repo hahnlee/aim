@@ -68,9 +68,16 @@ timeouts, invalidates metadata on mutations and notifications, and retains
 cached lookup references through eviction (#2242). Its accept loop waits for
 socket readiness rather than sleeping after every RPC; filesystem requests no
 longer send a separate IDENTIFY. Existing dentries, including the FUSE mount
-root, return EEXIST from mkdir before the daemon's MKDIR. Host syscall and
-protocol checks pass; Maps startup has not been remeasured and no guest boot
-was run (2026-10-29).
+root, return EEXIST from mkdir before the daemon's MKDIR. Namei now retains
+its current FUSE parent and uses LOOKUP's type for the current step rather
+than resolving every prefix again; the broker reuses idle RPC workers without
+bounding blocked requests behind daemon replies. Zero timeouts, mount permission
+policy and invalidation remain unchanged. The host daemon/broker benchmark's
+external-directory probe median falls from 22.58 to 7.62 ms for a missing leaf
+and from 14.26 to 4.42 ms when it exists (#2242). All 32 focused FUSE and five
+daemon checks pass; the broader VFS cohort has one namespace admission failure
+(AddrInUse), reproduced on the starting main. Maps startup has not been
+remeasured and no guest boot was run (2026-10-29).
 
 The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2287).
 Its parent now stops and reaps the owned boot before detaching the exact DATA

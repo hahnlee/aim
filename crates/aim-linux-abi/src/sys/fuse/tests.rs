@@ -983,7 +983,10 @@ fn vfs_path_walk_releases_lookup_references_on_success_and_errors() {
                     let name = &packet[40..];
                     let inode = match name {
                         b"file\0" => 10,
-                        b"denied\0" => 11,
+                        b"denied\0" => {
+                            respond(device, &packet, -crate::errno::EACCES, &[]);
+                            continue;
+                        }
                         b"link\0" => 12,
                         _ => panic!("unexpected lookup {name:?}"),
                     };
@@ -991,13 +994,11 @@ fn vfs_path_walk_releases_lookup_references_on_success_and_errors() {
                     lookups += 1;
                     let mut entry = vec![0; 128];
                     entry[..8].copy_from_slice(&inode.to_le_bytes());
+                    let mode: u32 = if inode == 12 { 0o120777 } else { 0o100644 };
+                    entry[100..104].copy_from_slice(&mode.to_le_bytes());
                     respond(device, &packet, 0, &entry);
                 }
                 3 => {
-                    if node == 11 {
-                        respond(device, &packet, -crate::errno::EACCES, &[]);
-                        continue;
-                    }
                     let mut attr = vec![0; 104];
                     attr[16..24].copy_from_slice(&node.to_le_bytes());
                     let mode: u32 = if node == 1 {
@@ -1028,8 +1029,8 @@ fn vfs_path_walk_releases_lookup_references_on_success_and_errors() {
                 _ => panic!("unexpected FUSE opcode {opcode}"),
             }
         }
-        assert_eq!(lookups, 3);
-        assert_eq!(forgets, 3);
+        assert_eq!(lookups, 2);
+        assert_eq!(forgets, 2);
         assert!(refs.values().all(|count| *count == 0));
     });
     assert!(
