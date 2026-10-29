@@ -42,6 +42,19 @@ whole boot (#217). The module asks the host for the devices on a thread of
 its own right after start; the first binder call that needs the ports
 waits for that answer, which comes within 3 seconds.
 
+In the app host, AudioPolicyService then registers its UID observer with
+`activity` and its sensor-privacy listener with `sensor_privacy`. The UID
+observer's AppOps/permission checks read the native package query state.
+That state is available after package construction publishes its owners;
+it no longer waits for deferred preparation of every app's data directory
+(#2399). The boot thread still waits for that preparation before its later
+boot steps and application readiness. Host concurrency tests cover the
+ordering and errors; no guest boot has measured the latency after this change.
+The empty effect factory's processing list still makes libaudiohal return
+null processings and AudioPolicyEffects check the two legacy `.conf` paths.
+Neither file exists in the pinned original image, and this fallback has no
+service lookup or timed wait.
+
 ## The primary module
 
 Built from the Mac's default devices (`FN_DEVICES`), in the

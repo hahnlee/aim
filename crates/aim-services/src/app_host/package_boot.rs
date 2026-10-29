@@ -4,7 +4,7 @@
 //! the boot session begun, its scans finished and its construction
 //! finished.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagebootsession as session;
@@ -12,6 +12,18 @@ use aim_service_aidl::dev_aim_server_ipackagebootsession as session;
 use super::AppHost;
 use super::package_bootstrap::PackageBootstrap;
 use crate::system::{ServiceOwner, System};
+
+/// PMS publishes its constructed query owners before waiting for deferred
+/// app-data preparation. Native metadata consumers (including audioserver's
+/// UID observer) need those owners, not every application's data directory.
+pub(super) fn prepare(
+    constructed: &OnceLock<Result<(), Exception>>,
+    construction: impl FnOnce() -> Result<(), Exception>,
+    app_data: impl FnOnce() -> Result<(), Exception>,
+) -> Result<(), Exception> {
+    constructed.get_or_init(construction).clone()?;
+    app_data()
+}
 
 /// A call to the session, which is this process's node.
 fn call<T>(
@@ -68,4 +80,63 @@ pub(super) fn run(host: &Arc<AppHost>, system: &Arc<System>) -> Result<(), Excep
         |p| session::FinishConstruction {}.write(p),
         session::read_finish_construction_reply,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn metadata_queries_finish_while_deferred_app_data_is_pending() {
+        crate::system::with_late_package_construction(|host, construct| {
+            let (sent, received) = mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    // AppOps' first flag read in registerUidObserver uses this
+                    // retained query owner, even for audioserver's non-app UID.
+                    let result = host.packages().map(|(state, _)| state.packages.len());
+                    sent.send(result).unwrap();
+                });
+                assert_eq!(
+                    received.recv_timeout(Duration::from_millis(50)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                );
+                let error = Exception::new(EX_ILLEGAL_STATE, "deferred app-data failure");
+                let mut metadata = None;
+                let result = prepare(
+                    &host.package_boot,
+                    || {
+                        construct();
+                        Ok(())
+                    },
+                    || {
+                        // Keep the data-preparation barrier held until the real
+                        // metadata consumer has completed. Do not lose its error.
+                        metadata = Some(received.recv_timeout(Duration::from_secs(5)));
+                        assert!(host.processes_ready.get().is_none());
+                        Err(error.clone())
+                    },
+                );
+                // Release the reader even if a regression put the app-data
+                // wait back inside the construction gate.
+                let _ = host.package_boot.set(Err(error.clone()));
+                assert!(metadata.unwrap().unwrap().unwrap() > 0);
+                assert_eq!(result, Err(error));
+                assert_eq!(host.package_boot.get(), Some(&Ok(())));
+            });
+        });
+    }
+
+    #[test]
+    fn construction_failure_releases_queries_without_preparing_data() {
+        let constructed = OnceLock::new();
+        let error = Exception::new(EX_ILLEGAL_STATE, "construction failure");
+        assert_eq!(
+            prepare(&constructed, || Err(error.clone()), || panic!("app data")),
+            Err(error.clone())
+        );
+        assert_eq!(constructed.get(), Some(&Err(error)));
+    }
 }
