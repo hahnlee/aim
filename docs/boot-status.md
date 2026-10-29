@@ -1983,7 +1983,11 @@ inventory and `<extension-sdk>` support. The run is interrupted after an image
 rebuild force-detaches the live derived mount; its partial results are not a
 module pass. The experimental image now includes main's adb init configuration,
 Active-image rebuild refusal now has a live guest lease check: exclusive image
-mutation is refused while guest-init retains its reader. C55 reaches boot completion
+mutation is refused while guest-init retains its reader. Readers now wait for an
+in-progress builder's exclusive lease, with read-specific lock errors (#2358).
+Two-process host tests cover waiting, fail-fast rebuild refusal and releasing
+leases before changing modes; no guest boot was run (2026-10-29).
+C55 reaches boot completion
 and original MediaProvider reports emulated;0 mounted, with real installer/FUSE
 Android data paths. Settings starts cold (26.448 s under load). adb/Tradefed now
 runs the parsing module; extension-sdk parsing reaches commit and two official

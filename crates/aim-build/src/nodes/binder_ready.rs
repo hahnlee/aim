@@ -52,11 +52,20 @@ pub(super) fn poll(
         Err(0x10004003 | 0x10000004) if init.is_live() => return Ok(false),
         Err(error) => return Err(format!("template Binder startup exchange: {error:#x}")),
     };
+    check_reply(&table, init, &registration, response)
+}
+
+fn check_reply(
+    table: &Path,
+    init: ProcessIdentity,
+    registration: &InitRegistration,
+    response: mach::Received,
+) -> Result<bool, String> {
     let checked = (|| {
         if response.pid != init.host_pid || !init.is_live() {
             return Err("template Binder readiness reply has another process birth".into());
         }
-        let current = InitRegistration::read(&table)
+        let current = InitRegistration::read(table)
             .map_err(|error| format!("template init registration after Binder reply: {error}"))?;
         if current.process != init || current.mount_namespace != registration.mount_namespace {
             return Err("template init registration changed during Binder readiness".into());
@@ -120,6 +129,46 @@ mod tests {
             fs::remove_dir_all(&self.root).unwrap();
         }
     }
+    // Queue, serve and receive one request in order. The reply's audit
+    // identity comes from the kernel, without a server scheduling deadline.
+    fn kernel_reply(before_reply: impl FnOnce()) -> mach::Received {
+        let service = mach::new_port(true).unwrap();
+        let reply = mach::new_port(false).unwrap();
+        let mut buffer = mach::Buffer::default();
+        assert!(matches!(
+            mach::call_bounded(
+                &mut buffer,
+                service,
+                reply,
+                &mach::Msg {
+                    id: wire::FILES,
+                    ports: vec![],
+                    data: 0u32.to_le_bytes().to_vec(),
+                },
+                0,
+            ),
+            Err(0x10004003)
+        ));
+        let request = mach::receive(&mut buffer, service).unwrap();
+        assert_eq!(request.id, wire::FILES);
+        assert_eq!(request.data, 0u32.to_le_bytes());
+        assert!(request.ports.is_empty());
+        before_reply();
+        mach::reply(
+            &mut buffer,
+            request.reply,
+            &mach::Msg {
+                id: wire::REPLY,
+                ports: vec![],
+                data: vec![0; 8],
+            },
+        );
+        let result = mach::receive(&mut buffer, reply);
+        mach::destroy_receive(reply);
+        mach::release_send(service);
+        mach::destroy_receive(service);
+        result.unwrap()
+    }
     #[test]
     fn actual_kernel_reply_is_required_and_init_birth_is_checked() {
         let mut fixture = Fixture::new();
@@ -133,22 +182,34 @@ mod tests {
         assert!(!poll(&fixture.root, child, &name, 20).unwrap());
         InitRegistration::register(&fixture.root.join("identity/by-pid"), child, "initial")
             .unwrap();
-        assert!(!poll(&fixture.root, child, &name, 20).unwrap());
-        let server = aim_binder_host::server::Server::start(&name).unwrap();
+        let registration = InitRegistration::read(&fixture.root.join("identity/by-pid")).unwrap();
         assert!(
-            poll(&fixture.root, child, &name, 20)
-                .unwrap_err()
-                .contains("another process birth")
+            check_reply(
+                &fixture.root.join("identity/by-pid"),
+                child,
+                &registration,
+                kernel_reply(|| {}),
+            )
+            .unwrap_err()
+            .contains("another process birth")
         );
         let actual = ProcessIdentity::running(std::process::id() as i32).unwrap();
         let registration =
             InitRegistration::register(&fixture.root.join("identity/by-pid"), actual, "initial")
                 .unwrap();
-        assert!(poll(&fixture.root, actual, &name, 20).unwrap());
+        assert!(
+            check_reply(
+                &fixture.root.join("identity/by-pid"),
+                actual,
+                &registration,
+                kernel_reply(|| {}),
+            )
+            .unwrap()
+        );
         registration
             .remove(&fixture.root.join("identity/by-pid"))
             .unwrap();
-        // The same live native driver must not admit a boot that is retiring.
+        // A boot that is retiring must not be admitted.
         assert!(!poll(&fixture.root, actual, &name, 20).unwrap());
         InitRegistration::register(&fixture.root.join("identity/by-pid"), child, "initial")
             .unwrap();
@@ -164,7 +225,32 @@ mod tests {
                 .unwrap_err()
                 .contains("exited")
         );
-        drop(server);
+    }
+    #[test]
+    fn registration_is_rechecked_after_the_kernel_reply() {
+        let fixture = Fixture::new();
+        let actual = ProcessIdentity::running(std::process::id() as i32).unwrap();
+        let table = fixture.root.join("identity/by-pid");
+        let registration = InitRegistration::register(&table, actual, "initial").unwrap();
+        let response = kernel_reply(|| {
+            InitRegistration::register(&table, actual, "replacement").unwrap();
+        });
+        assert!(
+            check_reply(&table, actual, &registration, response)
+                .unwrap_err()
+                .contains("changed during Binder readiness")
+        );
+        let response = kernel_reply(|| {
+            InitRegistration::read(&table)
+                .unwrap()
+                .remove(&table)
+                .unwrap();
+        });
+        assert!(
+            check_reply(&table, actual, &registration, response)
+                .unwrap_err()
+                .contains("registration after Binder reply")
+        );
     }
     #[test]
     fn checked_in_port_without_serving_is_not_ready() {
@@ -177,6 +263,7 @@ mod tests {
             std::process::id(),
             fixture.child.id()
         );
+        assert!(!poll(&fixture.root, actual, &name, 20).unwrap());
         let port = mach::check_in(&name).unwrap();
         let start = std::time::Instant::now();
         assert!(!poll(&fixture.root, actual, &name, 20).unwrap());
