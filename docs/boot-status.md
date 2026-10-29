@@ -2439,8 +2439,13 @@ Package shell read coverage (#2327) includes package/feature/library/permission/
 permission-group/instrumentation/user lists, activity resolution, all three intent
 queries and path. App-host cold permission resources and ResolveInfo dumps now
 use the original Java leaf in aim-system with scoped caller-bound read queries.
-Host FD/exit-status tests and Java compilation/DEX linkage cover this boundary;
-original execution, matched-image deployment and guest boot remain unverified.
+Host FD/exit-status tests cover this boundary. Explicit-component activity
+resolution and activity/receiver queries attach the parser over Binder and run
+production PackageIntentParser with the hash-pinned original Java syntax on the
+host JVM, retaining status/stdout/stderr assertions. Android value/parcel
+boundaries and ResolveInfo presentation remain doubled. Java compilation/DEX
+linkage covers the cold leaf; its original resource/dump execution, matched-image
+deployment and guest boot remain unverified.
 The read bridge also transfers stdin/stdout/stderr and authenticated shell identity
 for dump/dump-package and the original privapp/OEM/signature/shared-UID allowlist
 commands. Dump aggregation uses caller-bound capabilities for each real service;

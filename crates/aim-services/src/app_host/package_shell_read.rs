@@ -180,11 +180,12 @@ impl Service for ScopedQueries {
         })
     }
 }
-struct Scoped(Arc<ScopedQueries>, Arc<ScopedQueries>);
+struct Scoped(Vec<Arc<ScopedQueries>>);
 impl Drop for Scoped {
     fn drop(&mut self) {
-        self.0.owner.lock().unwrap().take();
-        self.1.owner.lock().unwrap().take();
+        for scope in &self.0 {
+            scope.owner.lock().unwrap().take();
+        }
     }
 }
 impl ShellRead {
@@ -247,15 +248,7 @@ impl ShellRead {
             ],
             descriptor: pm::DESCRIPTOR,
         });
-        struct Retire(Vec<Arc<ScopedQueries>>);
-        impl Drop for Retire {
-            fn drop(&mut self) {
-                for scope in &self.0 {
-                    scope.owner.lock().unwrap().take();
-                }
-            }
-        }
-        let mut retire = Retire(vec![scoped.clone()]);
+        let mut retire = Scoped(vec![scoped.clone()]);
         let [activity, meminfo, procstats, usagestats, batterystats] = if args
             .arguments
             .as_ref()
@@ -352,7 +345,7 @@ impl ShellRead {
             self.0.permission_manager.get().cloned().ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable")
             })?;
-        let scoped = Scoped(
+        let scoped = Scoped(vec![
             Arc::new(ScopedQueries {
                 owner: Mutex::new(Some(packages)),
                 uid,
@@ -371,9 +364,9 @@ impl ShellRead {
                 ],
                 descriptor: permission::DESCRIPTOR,
             }),
-        );
+        ]);
         let mut request = Parcel::new();
-        let permission_binder = Some(self.0.process.add_callback(scoped.1.clone()));
+        let permission_binder = Some(self.0.process.add_callback(scoped.0[1].clone()));
         let Some(a) = a else {
             cold::ListPermissionGroups {
                 permissions: permission_binder,
@@ -389,7 +382,7 @@ impl ShellRead {
             minimum: a.minimum,
             maximum: a.maximum,
             group: a.group,
-            packages: Some(self.0.process.add_callback(scoped.0.clone())),
+            packages: Some(self.0.process.add_callback(scoped.0[0].clone())),
             permissions: permission_binder,
         }
         .write(&mut request);

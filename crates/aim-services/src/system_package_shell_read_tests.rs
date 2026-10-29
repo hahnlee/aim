@@ -13,6 +13,9 @@ use std::{
     os::fd::AsFd,
 };
 
+#[path = "system_package_shell_intent_tests.rs"]
+mod intent_parser;
+
 fn lookup(process: &Arc<LocalProcess>, name: &str) -> Strong {
     let mut p = Parcel::new();
     sm::CheckService {
@@ -250,6 +253,26 @@ struct Shell {
     retained: Arc<Mutex<Option<Arc<Strong>>>>,
 }
 impl Shell {
+    fn with_intent_parser() -> Self {
+        let shell = Self::new();
+        let original = &shell.session.fixture.original[0];
+        let parser = original.add_service(Arc::new(intent_parser::JavaParser::new(
+            &shell.session.fixture.root,
+        )));
+        let mut p = Parcel::new();
+        sp::AttachPackageIntentParser {
+            parser: Some(parser),
+        }
+        .write(&mut p);
+        lookup(original, "aim.system_process")
+            .transact(sp::ATTACH_PACKAGE_INTENT_PARSER, &p, false)
+            .unwrap()
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        shell
+    }
     fn new() -> Self {
         let services = Arc::new(Mutex::new(BTreeMap::new()));
         let names = services.clone();
@@ -545,7 +568,7 @@ fn list_users() {
 }
 #[test]
 fn resolve_activity() {
-    let s = Shell::new();
+    let s = Shell::with_intent_parser();
     s.check(
         &["resolve-activity", "--components", "-n", "p/.Main"],
         0,
@@ -559,7 +582,7 @@ fn resolve_activity() {
 }
 #[test]
 fn query_activities() {
-    Shell::new().check(
+    Shell::with_intent_parser().check(
         &["query-activities", "--components", "-n", "p/.Main"],
         0,
         "p/.Main\n",
@@ -567,7 +590,7 @@ fn query_activities() {
 }
 #[test]
 fn query_receivers() {
-    Shell::new().check(
+    Shell::with_intent_parser().check(
         &["query-receivers", "--components", "-n", "p/.Main"],
         0,
         "p/.Main\n",
