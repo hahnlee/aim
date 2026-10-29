@@ -5534,12 +5534,17 @@ impl Service for Control {
             let host = self.0.clone();
             std::thread::spawn(move || {
                 let _ready = boot_ready::BootReady(&host);
-                match host.package_boot.get_or_init(|| {
-                    host.package_system().and_then(|system| {
-                        package_boot::run(&host, system)?;
-                        system.wait_native_package_app_data()
-                    })
-                }) {
+                match package_boot::prepare(
+                    &host.package_boot,
+                    || {
+                        host.package_system()
+                            .and_then(|system| package_boot::run(&host, system))
+                    },
+                    || {
+                        host.package_system()
+                            .and_then(|system| system.wait_native_package_app_data())
+                    },
+                ) {
                     Ok(()) => eprintln!("app host: package boot: through its construction"),
                     Err(e) => return eprintln!("app host: package boot: {e:?}"),
                 }

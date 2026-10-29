@@ -1274,6 +1274,15 @@ fn host_user_unlocking_publishes_and_survives_enabled_and_permission_updates() {
 
 /// A native query publication withheld until the startup regression releases it.
 pub(crate) fn with_late_package_boot(test: impl FnOnce(&Arc<AppHost>, &mut dyn FnMut())) {
+    with_late_package_construction(|host, construct| {
+        test(host, &mut || {
+            construct();
+            host.package_booted_for_test();
+        });
+    });
+}
+
+pub(crate) fn with_late_package_construction(test: impl FnOnce(&Arc<AppHost>, &mut dyn FnMut())) {
     let mut fixture = Fixture::new();
     let host = AppHost::new(fixture.native.clone());
     host.set_system(fixture.system.clone());
@@ -1302,7 +1311,6 @@ pub(crate) fn with_late_package_boot(test: impl FnOnce(&Arc<AppHost>, &mut dyn F
     assert!(fixture.system.capture_package_queries().is_err());
     test(&host, &mut || {
         publish_restart_capture(&fixture, &bridge);
-        host.package_booted_for_test();
     });
 }
 
