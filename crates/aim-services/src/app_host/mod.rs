@@ -2312,6 +2312,7 @@ impl AppHost {
         self.providers_process_died(start_seq);
         let (gone, commands) = self.activities.remove_start(start_seq);
         for token in gone {
+            self.cancel_activity_transition(token);
             self.release_uri_grants(uri_grants::Owner::Activity(token));
         }
         self.windows_died(pid);

@@ -5,11 +5,15 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
-The app host now collects same-task activity opens and closes/back, retains the
-outgoing window through playback, and accepts collecting `overridePendingTransition`
-resource IDs (#1725). Java evaluates the original theme animation XML; native
-playback submits matrix/alpha/clip transactions on display vsync. This first slice
-has host checks only; no guest boot or live visual verification (2026-10-29).
+The app host collects same-task activity opens and closes/back, retains the
+outgoing window, and accepts collecting `overridePendingTransition`, persistent
+per-activity open/close overrides and ActivityOptions custom animation resource
+IDs (#1725). Replacement ends the previous playback; window removal and process
+death cancel it without stale frames or completion affecting the next transition.
+Java samples the original animations and delivers options callbacks; native
+playback submits matrix/alpha/clip transactions on display vsync. Host Binder and
+compositor checks pass; cold readiness timeout and nonzero animation background
+colors remain under #1725. No guest boot or live visual verification (2026-10-29).
 
 Slice pins retain the native default-home lookup's exception code and cause
 instead of replacing them with a generic UnsupportedOperationException (#2362).

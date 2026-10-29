@@ -983,6 +983,9 @@ impl super::AppHost {
 
     fn remove_window(&self, window: u32) -> Option<Window> {
         let removed = self.windows.windows.lock().unwrap().remove(&window);
+        if let Some(token) = removed.as_ref().and_then(|w| w.activity) {
+            self.cancel_activity_transition(token);
+        }
         self.update_window_focus();
         removed
     }
@@ -1245,14 +1248,19 @@ impl super::AppHost {
     /// The windows of the process `pid` are gone with it, and their
     /// layers (`WindowState.removeImmediately`).
     pub(super) fn windows_died(&self, pid: i32) {
+        let mut tokens = Vec::new();
         let mut gone = Vec::new();
         self.windows.windows.lock().unwrap().retain(|_, w| {
             if w.pid == pid {
+                tokens.extend(w.activity);
                 gone.extend(w.container.take());
             }
             w.pid != pid
         });
         self.update_window_focus();
+        for token in tokens {
+            self.cancel_activity_transition(token);
+        }
         self.remove_layers(gone);
         self.update_holds_screen();
     }
@@ -1863,5 +1871,56 @@ mod tests {
         assert!(receive.try_recv().is_err());
         process.shutdown().unwrap();
         remote.shutdown().unwrap();
+    }
+}
+
+#[cfg(test)]
+impl AppHost {
+    pub(super) fn animation_test_window(
+        &self,
+        client: aim_binder_host::local::Strong,
+        token: u64,
+        task: i32,
+        id: u32,
+    ) {
+        let frame = self.tasks.bounds(task).unwrap();
+        self.windows.windows.lock().unwrap().insert(
+            id,
+            Window {
+                container: Some(surface::Layer::animation_test_layer(
+                    self.process.strong(client.handle),
+                    id as i32,
+                )),
+                _client: client,
+                id,
+                name: "animation".into(),
+                uid: 10100,
+                pid: id as i32,
+                task: Some(task),
+                activity: Some(token),
+                parent: None,
+                attrs: LayoutParams {
+                    kind: 1,
+                    ..Default::default()
+                },
+                requested: (frame.width(), frame.height()),
+                frames: Frames {
+                    frame,
+                    display: frame,
+                    parent: frame,
+                    attached: None,
+                },
+                channel: 0,
+                layer: None,
+                frames_seq: FIRST_SEQ,
+                insets_seq: FIRST_SEQ,
+                requested_visible_types: 0,
+                window_id: None,
+                focus_callbacks: Arc::default(),
+            },
+        );
+    }
+    pub(super) fn remove_animation_test_window(&self, id: u32) {
+        self.remove_window(id);
     }
 }

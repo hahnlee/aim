@@ -860,3 +860,22 @@ mod tests {
         assert_eq!(minimal_dimensions(previous, previous, (440, 440)), previous);
     }
 }
+
+#[cfg(test)]
+impl Tasks {
+    pub(super) fn animation_test_task(&self, id: i32, bounds: Rect) {
+        self.tasks.lock().unwrap().push(Task {
+            id,
+            uid: 10100,
+            package: "p".into(),
+            component: "p/p.Main".into(),
+            real_activity: "p/p.Main".into(),
+            bounds,
+            min_size: (-1, -1),
+            layer: None,
+            launch: None,
+            window_layout_affinity: None,
+            has_been_visible: true,
+        });
+    }
+}

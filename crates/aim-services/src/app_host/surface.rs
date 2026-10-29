@@ -517,3 +517,16 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+impl Layer {
+    pub(super) fn animation_test_layer(held: Strong, id: i32) -> Self {
+        Self {
+            handle: held.binder(),
+            id,
+            name: "animation".into(),
+            transform_hint: 0,
+            _held: held,
+        }
+    }
+}

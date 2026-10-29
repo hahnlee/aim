@@ -18,6 +18,18 @@ public final class ActivityAnimations extends IActivityAnimations.Stub {
     public ActivityAnimations(Context context) { this.context = context; }
 
     @Override
+    public void notifyAnimation(android.os.Bundle bundle, boolean started) {
+        Bridge.enforceSystemUid();
+        android.app.ActivityOptions options = android.app.ActivityOptions.fromBundle(bundle);
+        android.os.IRemoteCallback callback = started ? options.getAnimationStartedListener()
+                : options.getAnimationFinishedListener();
+        if (callback != null) {
+            try { callback.sendResult(null); }
+            catch (android.os.RemoteException e) { android.util.Slog.w("ActivityAnimations", e); }
+        }
+    }
+
+    @Override
     public float[] sample(String packageName, int userId, int theme, int style, int attribute,
             int custom, int width, int height) {
         Bridge.enforceSystemUid();

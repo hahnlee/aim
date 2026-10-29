@@ -117,6 +117,7 @@ pub struct ActivityRecord {
     pub result_to: Option<u64>,
     pub result_who: Option<String>,
     pub request_code: i32,
+    pub(super) transition_overrides: [Option<(String, i32, i32)>; 2],
 }
 
 /// `Build.VERSION_CODES.HONEYCOMB_MR2`.
@@ -804,6 +805,7 @@ impl Service for ActivityTaskManager {
                     result_to: a.result_to,
                     result_who: a.result_who,
                     request_code: a.request_code,
+                    options: a.options,
                 };
                 reply(self.0.start_activity(call, args).map(|code| {
                     let mut p = Parcel::new();
@@ -839,6 +841,7 @@ impl Service for ActivityTaskManager {
                         request_code: a.request_code,
                         flags_mask: a.flags_mask,
                         flags_values: a.flags_values,
+                        options: a.options,
                     };
                     let code = self.0.send_record(
                         a.caller,
@@ -1123,6 +1126,29 @@ impl Service for ActivityClientController {
             acc::SET_RECENTS_SCREENSHOT_ENABLED => {
                 acc::SetRecentsScreenshotEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 Ok(Parcel::new())
+            }
+            acc::OVERRIDE_ACTIVITY_TRANSITION => {
+                let a =
+                    acc::OverrideActivityTransition::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .override_activity_transition(
+                            call.sender_euid,
+                            a.token,
+                            a.open,
+                            Some((a.enter_anim, a.exit_anim, a.background_color)),
+                        )
+                        .map(|_| Parcel::new()),
+                )
+            }
+            acc::CLEAR_OVERRIDE_ACTIVITY_TRANSITION => {
+                let a = acc::ClearOverrideActivityTransition::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .override_activity_transition(call.sender_euid, a.token, a.open, None)
+                        .map(|_| Parcel::new()),
+                )
             }
             acc::OVERRIDE_PENDING_TRANSITION => {
                 let a =

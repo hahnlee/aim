@@ -38,6 +38,7 @@ pub(super) struct Sent {
     pub request_code: i32,
     pub flags_mask: i32,
     pub flags_values: i32,
+    pub options: Option<RawBundle>,
 }
 
 /// `Intent.IMMUTABLE_FLAGS`: the grant flags.
@@ -616,7 +617,10 @@ impl AppHost {
                 resolved_type,
                 finished,
                 required_permission,
-                Sent::default(),
+                Sent {
+                    options,
+                    ..Default::default()
+                },
             );
         }
         // Another implementation of IIntentSender: sent on, its result
@@ -713,6 +717,7 @@ impl AppHost {
                     result_to: sent.result_to,
                     result_who: sent.result_who,
                     request_code: sent.request_code,
+                    options: sent.options,
                 };
                 res = match self.start_activity_in_package(uid, package.clone(), 0, args) {
                     Ok(r) => r,
