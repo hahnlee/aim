@@ -15,6 +15,7 @@ interface ISystemProcess {
     void attachProviderQueries(ProviderQueries queries);
     void attachStatsCompanionUidMap(StatsCompanionUidMap companion);
     void attachStorageCrates(StorageCrates crates);
+    void attachUserSwitcherPolicy(UserSwitcherPolicy policy);
     void initializeCameraPrivacyAllowlist(java.util.List<String> packages);
     void attachAudioPolicyQueries(AudioPolicyQueries queries);
     void attachSyncAdapterQueries(SyncAdapterQueries queries);
@@ -41,6 +42,9 @@ interface ISystemProcess {
                     SystemProcessHostTest.events.add("staging");
                 }
                 public void attachRecoverableKeyStoreKeys(RecoverableKeyStoreKeys keys) {}
+                public void attachUserSwitcherPolicy(UserSwitcherPolicy policy) {
+                    if (policy == null) throw new AssertionError("missing user switcher owner");
+                }
                 public void initializeCameraPrivacyAllowlist(java.util.List<String> packages) {
                     if (packages == null) throw new AssertionError("missing camera privacy allowlist");
                 }
