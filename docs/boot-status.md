@@ -118,6 +118,17 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The app host publishes AMS's plain `gfxinfo` Binder (#2388), checks DUMP and
+usage-stats access, selects live processes by pid/process name and sends the
+unchanged arguments (including `reset` and `framestats`) to their original
+ApplicationThread/HWUI. Per-process pipes preserve header/body ordering and
+bound an unclosed writer to five seconds. `aim-system` also publishes the
+image's original `android.graphics.GraphicsStatsService` before application
+attachment opens, retaining its shared buffers and text/proto dump owner.
+Host Binder/fd and JVM startup tests, full Java compilation and pinned-image
+linkage cover this slice; no guest boot or live frame measurement was run
+(2026-10-29).
+
 The app host applies supported finishDrawing transactions to SurfaceFlinger,
 preserving buffers/fences, barriers, display/input state, cache operations and
 callbacks with the host's ordered apply token (#1431). It requests no BLAST

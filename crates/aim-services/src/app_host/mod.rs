@@ -74,6 +74,7 @@ pub mod file_integrity;
 pub mod freeform;
 pub mod game_service;
 pub mod generations;
+mod gfxinfo;
 pub mod grammatical_inflection;
 pub mod hint_manager;
 pub mod input_manager;
@@ -879,6 +880,7 @@ impl AppHost {
                 "activity",
                 Arc::new(Activity(self.clone())) as Arc<dyn Service>,
             ),
+            ("gfxinfo", Arc::new(gfxinfo::GraphicsBinder(self.clone()))),
             (
                 "aim.system_process",
                 Arc::new(system_process::SystemProcess::new(self.clone())),

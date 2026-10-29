@@ -457,6 +457,16 @@ The migration's state and conformance results are in
 
 ### The app host, L1 (2026-10-16)
 
+The app host's `gfxinfo` endpoint (#2388) retains AMS GraphicsBinder's native
+permission/selection/header path and calls the app's original ApplicationThread
+to dump HWUI through a per-process pipe. The system process publishes the
+image's original boot-classpath `android.graphics.GraphicsStatsService`, as
+SystemServer does, before opening application attachment; it keeps buffer
+allocation, rotation, persistence and dump policy with that original owner.
+Only compile-time ABI stubs are added; no original class or image replacement
+is introduced. Host Binder/fd and JVM startup checks and original-image linkage
+cover this slice; no guest boot was run.
+
 Permission boot's update scan (#2282) evaluates restricted exemptions and
 retains role grants in the native access owner before package publication.
 Deferral to the system process was rejected: pinned Android 16 r1

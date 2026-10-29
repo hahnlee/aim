@@ -148,6 +148,9 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachPackageShellRead(new AppHostPackageShellRead(context));
             host.attachDomainVerification(new AppHostDomainVerification(context, host));
             PreBootNotifications.publish(context);
+            // Publish the original HWUI buffer owner before apps can attach.
+            ServiceManager.addService(android.graphics.GraphicsStatsService.GRAPHICS_STATS_SERVICE,
+                    new android.graphics.GraphicsStatsService(context));
             host.attachSystemProcess(applicationThread.asBinder(),
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));
