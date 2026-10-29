@@ -52,6 +52,18 @@ fresh pages after FORGET, and READ/WRITE/RELEASE/FORGET ordering; the focused
 FUSE cohort passes. No guest boot was run (2026-10-28).
 
 The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2287).
+Its parent now stops and reaps the owned boot before detaching the exact DATA
+backing on success, error, timeout and panic unwinding (#2232). Stale work cleanup
+holds the data lock while detaching that backing before removing the work tree;
+foreign mounts and live owners are refused. The data lock explicitly unlocks
+when its owner drops, so an unrelated spawn's pre-exec descriptor cannot keep a
+failed attach or a stopped owner busy. The deterministic inherited-descriptor
+regression and live-owner/handoff checks pass; the plain-directory regression
+passes in 20 parallel-binary runs after failing in 14 of 20 on the branch head
+(0 of 20 on main). The real ASIF lifecycle regressions compile but fail before
+attaching because this execution environment denies DiskManagement/DiskArbitration
+access; mounted-volume cleanup remains unverified here. No guest boot was run
+(2026-10-29).
 The original-PMS shadow feed captures per-package, per-user state/data protection
 through the original PackageManagerInternal (#754). The enabled-setting write
 model uses the captured pre-call state, including provisioning and DevicePolicy

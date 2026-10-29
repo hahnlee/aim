@@ -75,6 +75,74 @@ impl Drop for DisplaySocketDir {
     }
 }
 
+/// guest-init hands DATA detach to its process owner. Keep that ownership
+/// across every return and unwind, including failures before init starts.
+struct TemplateBoot {
+    dir: PathBuf,
+    session: Option<Session>,
+    display: Option<std::process::Child>,
+    socket_dir: Option<DisplaySocketDir>,
+    finished: bool,
+}
+
+impl TemplateBoot {
+    fn run<T>(dir: &Path, boot: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        let mut owner = Self {
+            dir: data::mount_point(dir)?,
+            session: None,
+            display: None,
+            socket_dir: None,
+            finished: false,
+        };
+        let result = boot(&mut owner);
+        let cleanup = owner.cleanup();
+        owner.finished = true;
+        match (result, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(format!("{error}; cleanup failed: {cleanup}")),
+        }
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        // Session stops and reaps init and display before their DATA mappings
+        // can be detached. A display without init belongs to a failed spawn.
+        drop(self.session.take());
+        let display = if let Some(mut display) = self.display.take() {
+            let _ = display.kill();
+            display
+                .wait()
+                .map(|_| ())
+                .map_err(|e| format!("aim-display: {e}"))
+        } else {
+            Ok(())
+        };
+        let detach = data::detach_existing(&self.dir);
+        self.socket_dir.take();
+        match (display, detach) {
+            (Err(display), Err(detach)) => Err(format!("{display}; {detach}")),
+            (display, detach) => display.and(detach),
+        }
+    }
+}
+
+impl Drop for TemplateBoot {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Err(error) = self.cleanup()
+        {
+            eprintln!("userdata/template cleanup: {error}");
+        }
+    }
+}
+
+fn prepare_work(work: &Path) -> Result<(), String> {
+    for name in ["boot", "template"] {
+        data::remove(&work.join(name))?;
+    }
+    force_remove(work).map_err(|e| format!("{}: {e}", work.display()))
+}
+
 /// PackageManagerService's parser cache, named after the image's
 /// fingerprint: not shipped, as its entries hold resource values resolved
 /// for the build boot's locale (`<meta-data>` strings), which the original
@@ -182,10 +250,7 @@ pub fn run_template(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let work = aim_paths::out().join("userdata-template.work");
     let (boot, settings) = (work.join("boot"), work.join("settings"));
     let permissions = work.join("permissions");
-    for dir in [&boot, &work.join("template")] {
-        data::remove(dir)?;
-    }
-    let _ = force_remove(&work);
+    prepare_work(&work)?;
     fs::create_dir_all(&settings).map_err(|e| format!("{}: {e}", settings.display()))?;
     // The previous templates are of another derived image.
     if let Ok(entries) = fs::read_dir(&out) {
@@ -468,6 +533,21 @@ fn first_boot(
     log: &mut Log,
     isolated: Option<&IsolatedTemplate>,
 ) -> Result<(Option<String>, stubs::Admission), String> {
+    TemplateBoot::run(dir, |owner| {
+        first_boot_owned(ctx, work, dir, settings, permissions, log, isolated, owner)
+    })
+}
+
+fn first_boot_owned(
+    ctx: &Ctx,
+    work: &Path,
+    dir: &Path,
+    settings: &Path,
+    permissions: &Path,
+    log: &mut Log,
+    isolated: Option<&IsolatedTemplate>,
+    owner: &mut TemplateBoot,
+) -> Result<(Option<String>, stubs::Admission), String> {
     let boot_patience = isolated.map_or(DEFAULT_BOOT_TIMEOUT, |config| config.boot_timeout);
     let template = isolated.map_or_else(
         || aim_paths::userdata().join(EMPTY_TEMPLATE),
@@ -496,15 +576,16 @@ fn first_boot(
         return Err("constructor capture output already exists".into());
     }
     let output = fs::File::create(work.join("guest-init.log")).map_err(|e| e.to_string())?;
-    let display_dir = DisplaySocketDir::new()?;
-    let display = match isolated {
+    owner.socket_dir = Some(DisplaySocketDir::new()?);
+    let display_dir = owner.socket_dir.as_ref().unwrap();
+    owner.display = Some(match isolated {
         Some(config) => boot::start_display_binary(&config.display, &display_dir.0, "headless")?,
         None => boot::start_display_binary(
             &ctx.workspace.host_bin("aim-display"),
             &display_dir.0,
             "headless",
         )?,
-    };
+    });
     let mut command = match isolated {
         Some(config) => {
             let mut command = std::process::Command::new(config.host_runtime.join("guest-init"));
@@ -537,17 +618,13 @@ fn first_boot(
         .arg("--quiet")
         .stdout(output.try_clone().map_err(|e| e.to_string())?)
         .stderr(output)
-        .spawn();
-    // Dropping it stops the boot.
-    let mut session = match init {
-        Ok(init) => Session { display, init },
-        Err(e) => {
-            let mut display = display;
-            let _ = display.kill();
-            let _ = display.wait();
-            return Err(format!("guest-init: {e}"));
-        }
-    };
+        .spawn()
+        .map_err(|e| format!("guest-init: {e}"))?;
+    owner.session = Some(Session {
+        display: owner.display.take().unwrap(),
+        init,
+    });
+    let session = owner.session.as_mut().unwrap();
     let init_identity =
         aim_storage::process_namespace::ProcessIdentity::running(session.init.id() as i32)
             .map_err(|error| format!("template init identity: {error}"))?;
@@ -581,13 +658,7 @@ fn first_boot(
     let mut constructor_controller_version = None;
     let (mut written, mut granted, mut completed, mut asked) = (None, None, None, start);
     while written.is_none() || granted.is_none() || completed.is_none() {
-        session.check()?;
-        if start.elapsed() > boot_patience {
-            return Err(format!(
-                "after {boot_patience:?}: settings {written:?}, permissions {granted:?}, \
-                 sys.boot_completed {completed:?}"
-            ));
-        }
+        check_boot(session, start, boot_patience, written, granted, completed)?;
         if written.is_none() && native_package {
             if let Some(capture) = aim_storage::constructor_capture::read(&capture_output)? {
                 let paths: Vec<_> = aim_storage::constructor_capture::FILES
@@ -668,8 +739,25 @@ fn first_boot(
             session.display.id()
         ));
     }
-    drop(session);
     Ok((sku, admission))
+}
+
+fn check_boot(
+    session: &mut Session,
+    start: Instant,
+    patience: Duration,
+    written: Option<Duration>,
+    granted: Option<Duration>,
+    completed: Option<Duration>,
+) -> Result<(), String> {
+    session.check()?;
+    if start.elapsed() > patience {
+        return Err(format!(
+            "after {patience:?}: settings {written:?}, permissions {granted:?}, \
+             sys.boot_completed {completed:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// Copies `files` from the data volume at `dir` into `dest` once every
@@ -1207,3 +1295,7 @@ mod completion_tests {
 
 #[path = "userdata/stubs.rs"]
 mod stubs;
+
+#[cfg(test)]
+#[path = "userdata/attachment_tests.rs"]
+mod attachment_tests;
