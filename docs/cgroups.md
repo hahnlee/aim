@@ -33,7 +33,13 @@ bounds; cgroup policy uses the separate opcode 23. Task suppression changes
 mark every guest thread for reapplication against the task's new base priority.
 Returning to unrestricted groups clears the cgroup policy;
 the thread's own Linux scheduling remains. New threads and spawned fork
-children derive host policy from their inherited memberships.
+children derive host policy from their inherited memberships. Thread births
+record explicit inherited memberships in per-process fragments under shared
+policy/base locks; migrations and controller writes fold the live fragments
+into the base membership under exclusive locks. Readers merge them under the
+same base/fragment locks, without caching memberships or controller values.
+Thread-start policy derivation and application hold the shared policy lock so
+a concurrent migration cannot be overwritten by an older derived policy (#2389).
 
 Non-default disk policies require explicit Darwin thread scheduling: XNU
 removes QoS when they are set, and a subsequent QoS request fails with

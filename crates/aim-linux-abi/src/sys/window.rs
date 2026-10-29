@@ -125,10 +125,16 @@ fn deallocate(lo: u64, hi: u64) -> i64 {
     {
         // SAFETY: the allocation just made.
         unsafe { mach_vm_deallocate(task(), lo, hi - lo) };
+        super::memfd::unmapped(lo, hi - lo);
         return 0;
     }
     // SAFETY: guest-requested unmap of guest memory.
-    crate::errno::check(unsafe { libc::munmap(lo as *mut _, (hi - lo) as usize) } as i64)
+    let result =
+        crate::errno::check(unsafe { libc::munmap(lo as *mut _, (hi - lo) as usize) } as i64);
+    if result == 0 {
+        super::memfd::unmapped(lo, hi - lo);
+    }
+    result
 }
 
 /// Unmap `[addr, addr+len)` for the guest: the part inside the window is
@@ -145,6 +151,7 @@ pub fn unmap(addr: u64, len: u64) -> i64 {
     }
     debug_assert!(wlo % PAGE == 0 && whi % PAGE == 0);
     if reserve(wlo, whi, true) {
+        super::memfd::unmapped(wlo, whi - wlo);
         0
     } else {
         -(libc::ENOMEM as i64)

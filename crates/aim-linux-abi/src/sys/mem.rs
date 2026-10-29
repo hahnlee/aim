@@ -64,6 +64,9 @@ fn host_mmap(addr: u64, len: u64, prot: i32, flags: i32, fd: i32, off: i64) -> R
     if p == libc::MAP_FAILED {
         Err(-(errno::last() as i64))
     } else {
+        if flags & libc::MAP_FIXED != 0 {
+            super::memfd::unmapped(p as u64, len);
+        }
         Ok(p as u64)
     }
 }
@@ -237,13 +240,13 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         let lo = result as u64;
         vm_account::with(|s| s.map(lo, lo + len, kind));
         super::vma_names::forget(lo, lo + len);
-        super::memfd::reclaim();
     }
     result
 }
 fn mmap_guest(mut a: [u64; 6]) -> i64 {
     if a[3] & MAP_ANONYMOUS != 0 {
         let _epoch = super::verity_pager::mutation();
+        let _mapping = super::memfd::mapping_change();
         let result = mmap_owned(a);
         if result >= 0
             && let Err(error) = super::verity_pager::reconcile_memberships()
@@ -288,6 +291,7 @@ fn mmap_guest(mut a: [u64; 6]) -> i64 {
     if a[3] & MAP_FIXED != 0 {
         super::verity_pager::wait_pending(a[0], page_up(a[1]));
     }
+    let _mapping = super::memfd::mapping_change();
     a[4] = held.descriptor().as_raw_fd() as u64;
     let result = mmap_pinned(a, &held);
     if let Some(admission) = admission {
@@ -476,6 +480,9 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
         && fd >= 0
         && let Some(r) = super::binder::mmap(addr, len, prot, flags, fd)
     {
+        if r >= 0 {
+            super::memfd::unmapped(r as u64, page_up(len));
+        }
         return r;
     }
     if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
@@ -540,7 +547,10 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
         && let Some(r) = super::sharedfile::map(fd, addr, len, prot as i32, fixed, off)
     {
         match r {
-            Ok(b) => (b, Finish::Nothing),
+            Ok(b) => {
+                super::memfd::unmapped(b, len);
+                (b, Finish::Nothing)
+            }
             Err(e) => return e,
         }
     } else if shared {
@@ -697,6 +707,7 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
 /// with what is recorded about it; the heap window is reserved again.
 pub fn exec_reset() {
     let _epoch = super::verity_pager::mutation();
+    let _mapping = super::memfd::mapping_change();
     super::vma_names::exec_reset();
     if let Err(error) = super::verity_pager::clear() {
         crate::diag!("verity mapping retirement before exec failed: {error}");
@@ -710,6 +721,8 @@ pub fn exec_reset() {
     super::fuse_cache::forget(arena::LO, arena::HI - arena::LO);
     // SAFETY: nothing of the old image is used from here on.
     unsafe { mach_vm_deallocate(task(), arena::LO, arena::HI - arena::LO) };
+    // Executable memfds force a fresh process at exec; only file views remain.
+    super::memfd::unmapped(arena::LO, arena::HI - arena::LO);
     window::init();
     copies::forget(arena::LO, arena::HI);
     DEFERRED_UNMAPS.with(|d| d.borrow_mut().clear());
@@ -746,6 +759,7 @@ thread_local! {
 /// covers that frame is deferred to thread exit (ADR 0012, "Platform probes").
 pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
     let _epoch = super::verity_pager::mutation();
+    let _mapping = super::memfd::mapping_change();
     let (addr, len) = (a[0], page_up(a[1]));
     super::verity_pager::wait_pending(addr, len);
     if addr & (PAGE - 1) != 0 {
@@ -770,7 +784,6 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
         vm_account::with(|s| s.unmap(addr, addr + len));
         super::vma_names::forget(addr, addr + len);
         super::fuse_cache::forget(addr, len);
-        super::memfd::reclaim();
         if let Err(error) = super::verity_pager::reconcile_memberships() {
             return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
         }
@@ -782,6 +795,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
 /// thread exits.
 pub fn run_deferred_unmaps() -> usize {
     let _epoch = super::verity_pager::mutation();
+    let _mapping = super::memfd::mapping_change();
     DEFERRED_UNMAPS.with(|d| {
         let v = std::mem::take(&mut *d.borrow_mut());
         for &(addr, len) in &v {
@@ -794,12 +808,13 @@ pub fn run_deferred_unmaps() -> usize {
             }
             super::fuse_cache::forget(addr, len);
             // SAFETY: the guest asked for this unmap; its thread is exiting.
-            unsafe { libc::munmap(addr as *mut _, len as usize) };
+            if unsafe { libc::munmap(addr as *mut _, len as usize) } == 0 {
+                super::memfd::unmapped(addr, len);
+            }
         }
         if let Err(error) = super::verity_pager::reconcile_memberships() {
             crate::diag!("verity deferred membership retirement failed: {error}");
         }
-        super::memfd::reclaim();
         v.len()
     })
 }
@@ -1280,6 +1295,7 @@ pub(super) fn remap_verified_page(
             "Mach verified remap: kr {result:#x}"
         )));
     }
+    super::memfd::unmapped(dst, len);
     if jit.is_some() {
         if unsafe { libc::mprotect(dst as *mut _, len as usize, protection) } != 0 {
             let failure = std::io::Error::last_os_error();
@@ -1410,6 +1426,7 @@ pub fn madvise(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     let _epoch = super::verity_pager::mutation();
+    let _mapping = super::memfd::mapping_change();
     if super::verity_pager::failed_range(a[0], len) {
         return -(errno::EIO as i64);
     }
@@ -1479,6 +1496,7 @@ fn extend_at(addr: u64, len: u64, like: u64, replace: bool) -> Result<(), i64> {
     if unsafe { mach_vm_allocate(task(), &mut at, len, flags) } != 0 {
         return Err(-(ENOMEM as i64));
     }
+    super::memfd::unmapped(addr, len);
     let Some(r) = vmmap::region_at(like).filter(|r| r.start <= like) else {
         return Ok(());
     };
@@ -1564,6 +1582,7 @@ fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Re
 
 pub fn mremap(a: [u64; 6]) -> i64 {
     let _epoch = super::verity_pager::mutation();
+    let _mapping = super::memfd::mapping_change();
     let (old, old_len, new_len, flags) = (a[0], page_up(a[1]), page_up(a[2]), a[3]);
     let kind = vm_account::with(|s| s.kind_at(old));
     // `vma_to_resize`: growth is counted against the limits.
@@ -1584,7 +1603,6 @@ pub fn mremap(a: [u64; 6]) -> i64 {
             new_len,
             flags & MREMAP_DONTUNMAP != 0,
         );
-        super::memfd::reclaim();
     }
     if result >= 0
         && let Some(kind) = kind

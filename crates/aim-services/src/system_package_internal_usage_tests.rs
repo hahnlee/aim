@@ -334,6 +334,8 @@ fn restart_application_info(system: &Arc<System>, name: &str) -> crate::shadow::
     // new aim-system before any of its bridge owners have republished state.
     let host = crate::app_host::AppHost::new(system.binder_process().clone());
     host.set_system(system.clone());
+    // Construction completed before this bootstrap epoch was retired.
+    host.package_booted_for_test();
     let service = crate::app_host::package_service::PackageService::new(host);
     let mut request = Parcel::new();
     pm::GetApplicationInfo {

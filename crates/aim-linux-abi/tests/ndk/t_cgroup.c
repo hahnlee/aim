@@ -139,6 +139,66 @@ static void moves(void) {
   CHECK(access("/dev/cpuset/bg", F_OK) < 0 && errno == ENOENT);
 }
 
+// cgroups(7): tasks moves one task; children inherit that task's group,
+// independently of later moves. cgroup.procs then moves the entire group.
+struct inheritance {
+  pthread_barrier_t sync;
+  char seen[64];
+};
+
+static void* cpu_report(void* arg) {
+  char task[64];
+  snprintf(task, sizeof task, "self/task/%ld", (long)syscall(SYS_gettid));
+  if (group_of(task, "cpu", arg, 64) != 0) strcpy(arg, "?");
+  return NULL;
+}
+
+static void* inherited_worker(void* arg) {
+  struct inheritance* state = arg;
+  cpu_report(state->seen);
+  pthread_barrier_wait(&state->sync);
+  pthread_barrier_wait(&state->sync);
+  // The creator has moved out; this child and its child must stay put.
+  pthread_t child;
+  if (pthread_create(&child, NULL, cpu_report, state->seen) != 0)
+    strcpy(state->seen, "?");
+  else
+    pthread_join(child, NULL);
+  pthread_barrier_wait(&state->sync);
+  pthread_barrier_wait(&state->sync);
+  cpu_report(state->seen);
+  pthread_barrier_wait(&state->sync);
+  pthread_barrier_wait(&state->sync);
+  return NULL;
+}
+
+static void moved_task_inheritance(void) {
+  CHECK(mkdir("/dev/cpuctl/inherit_a", 0755) == 0);
+  CHECK(mkdir("/dev/cpuctl/inherit_b", 0755) == 0);
+  CHECK(put("/dev/cpuctl/inherit_a/tasks", "0") == 0);
+  struct inheritance state;
+  CHECK(pthread_barrier_init(&state.sync, NULL, 2) == 0);
+  pthread_t child;
+  CHECK(pthread_create(&child, NULL, inherited_worker, &state) == 0);
+  pthread_barrier_wait(&state.sync);
+  int born_in_a = strcmp(state.seen, "/inherit_a") == 0;
+  int moved_main = put("/dev/cpuctl/tasks", "0") == 0;
+  pthread_barrier_wait(&state.sync);
+  pthread_barrier_wait(&state.sync);
+  int grandchild_in_a = strcmp(state.seen, "/inherit_a") == 0;
+  int moved_group = put("/dev/cpuctl/inherit_b/cgroup.procs", "0") == 0;
+  pthread_barrier_wait(&state.sync);
+  pthread_barrier_wait(&state.sync);
+  int child_in_b = strcmp(state.seen, "/inherit_b") == 0;
+  pthread_barrier_wait(&state.sync);
+  CHECK(pthread_join(child, NULL) == 0);
+  CHECK(pthread_barrier_destroy(&state.sync) == 0);
+  CHECK(put("/dev/cpuctl/cgroup.procs", "0") == 0);
+  CHECK(rmdir("/dev/cpuctl/inherit_a") == 0);
+  CHECK(rmdir("/dev/cpuctl/inherit_b") == 0);
+  CHECK(born_in_a && moved_main && grandchild_in_a && moved_group && child_in_b);
+}
+
 static void values(void) {
   char value[64];
   CHECK(mkdir("/dev/cpuctl/g", 0755) == 0);
@@ -330,6 +390,7 @@ int main(int argc, char** argv) {
   program = argv[0];
   RUN(mounts);
   RUN(moves);
+  RUN(moved_task_inheritance);
   RUN(values);
   RUN(unified);
   RUN(exec_drops_threads);

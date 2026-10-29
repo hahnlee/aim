@@ -55,7 +55,7 @@ use std::ffi::{CStr, CString};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::cred::{self, CAP_DAC_OVERRIDE, CAP_SYS_ADMIN};
@@ -106,8 +106,8 @@ struct Memfd {
     /// Anonymous memory holding the contents once mapped executable:
     /// (base, size).
     anon: Option<(u64, u64)>,
-    /// Where this process mapped the file (start, length, file offset),
-    /// until it is converted: a mapping may since have gone.
+    /// Live shared views (start, length, file offset), before and after
+    /// conversion. VM mutations update these under the mapping-change lock.
     views: Vec<(u64, u64, u64)>,
     /// The file's path once this process put its [`VIEW_ATTR`] on it (a
     /// fork child puts its own there by it).
@@ -130,7 +130,14 @@ impl Memfd {
 static MEMFDS: Mutex<Option<HashMap<Key, Memfd>>> = Mutex::new(None);
 // Conversion temporarily replaces the file views before publishing anon.
 static RECLAIM: Mutex<()> = Mutex::new(());
-static ORPHANS: AtomicBool = AtomicBool::new(false);
+// Hold from the host VM mutation through publication of its owned views.
+// Like Linux's mmap_lock, this orders overlapping syscalls with their records.
+// Callers take the VM epoch first; mprotect already holds it exclusively.
+static MAPPING_CHANGE: Mutex<()> = Mutex::new(());
+
+pub(super) fn mapping_change() -> std::sync::MutexGuard<'static, ()> {
+    MAPPING_CHANGE.lock().unwrap()
+}
 
 fn with<T>(f: impl FnOnce(&mut HashMap<Key, Memfd>) -> T) -> T {
     f(MEMFDS.lock().unwrap().get_or_insert_with(HashMap::new))
@@ -148,28 +155,24 @@ pub(super) fn install<T>(fd: i32, k: Key, publish: impl FnOnce() -> T) -> T {
 }
 
 pub(super) fn closed(k: Key) {
-    with(|m| {
-        if let Some(f) = m.get_mut(&k) {
-            f.orphaned =
-                fdtab::fds_where(|kind| matches!(kind, Kind::Memfd(key) if *key == k)).is_empty();
-            if f.orphaned {
-                ORPHANS.store(true, Ordering::Relaxed);
-            }
-        }
+    let last = with(|m| {
+        let Some(f) = m.get_mut(&k) else { return false };
+        f.orphaned =
+            fdtab::fds_where(|kind| matches!(kind, Kind::Memfd(key) if *key == k)).is_empty();
+        f.orphaned && f.views.is_empty()
     });
-    reclaim();
+    if last {
+        reclaim();
+    }
 }
 
 /// Retry only objects with no descriptors, including private syscall pins.
 /// Keep the converted contents while a view could receive its fd again.
-pub(super) fn reclaim() {
-    if !ORPHANS.load(Ordering::Relaxed) {
-        return;
-    }
+fn reclaim() {
     let _guard = RECLAIM.lock().unwrap();
     with(|m| {
-        m.retain(|&k, f| {
-            if !f.orphaned || has_views(k, f) {
+        m.retain(|_, f| {
+            if !f.orphaned || !f.views.is_empty() {
                 return true;
             }
             if let Some((base, size)) = f.anon {
@@ -194,64 +197,7 @@ pub(super) fn reclaim() {
             }
             false
         });
-        ORPHANS.store(m.values().any(|f| f.orphaned), Ordering::Relaxed);
     });
-}
-
-fn has_views(k: Key, f: &Memfd) -> bool {
-    let Some((base, len)) = f.anon else {
-        return f.views.iter().any(|&(start, len, _)| {
-            vmmap::regions(start, start + len)
-                .any(|r| r.file.as_ref().is_some_and(|file| (file.1, file.2) == k))
-        });
-    };
-    let size = std::mem::size_of::<RegionWithPath>() as i32;
-    let mut backing: RegionWithPath = unsafe { std::mem::zeroed() };
-    if unsafe {
-        libc::proc_pidinfo(
-            libc::getpid(),
-            PROC_PIDREGIONPATHINFO,
-            base,
-            (&raw mut backing).cast(),
-            size,
-        )
-    } != size
-        || backing.info.address != base
-        || backing.info.size != len
-    {
-        return true;
-    }
-    if backing.info.ref_count == 1 {
-        return false;
-    }
-    // Fork children also hold VM references. Inspect this process's views
-    // rather than retaining two orphaned masters forever after a fork.
-    let mut at = super::arena::LO;
-    while at < super::arena::HI {
-        let mut r: RegionWithPath = unsafe { std::mem::zeroed() };
-        let n = unsafe {
-            libc::proc_pidinfo(
-                libc::getpid(),
-                PROC_PIDREGIONPATHINFO,
-                at,
-                (&raw mut r).cast(),
-                size,
-            )
-        };
-        if n != size {
-            return errno::last() != EINVAL;
-        }
-        if r.info.address >= super::arena::HI {
-            break;
-        }
-        if r.info.obj_id == backing.info.obj_id
-            && !(r.info.address >= base && r.info.address + r.info.size <= base + len)
-        {
-            return true;
-        }
-        at = r.info.address + r.info.size.max(1);
-    }
-    false
 }
 
 fn stat_fd(fd: i32) -> Option<libc::stat> {
@@ -1155,55 +1101,80 @@ fn convert(k: Key, fd: Option<i32>, min_size: u64) -> Result<(u64, u64), i64> {
     with(|m| {
         if let Some(f) = m.get_mut(&k) {
             f.anon = Some((base, size));
-            f.views = Vec::new();
         }
     });
     Ok((base, size))
 }
 
-/// Views of memfds past this many are checked, and those gone forgotten.
-const VIEWS_CHECKED_PAST: usize = 8;
-
-/// This process mapped memfd `k` shared at `[start, start+len)` from `off`.
-pub fn note_view(k: Key, start: u64, len: u64, off: u64) {
-    let views = with(|m| {
-        let f = m.get_mut(&k)?;
-        f.views.retain(|v| v.0 + v.1 <= start || start + len <= v.0);
-        f.views.push((start, len, off));
-        (f.views.len() > VIEWS_CHECKED_PAST).then(|| f.views.clone())
-    });
-    if let Some(views) = views {
-        let live: Vec<_> = views
-            .into_iter()
-            .filter(|&(start, len, off)| {
-                vmmap::regions(start, start + len).any(|r| {
-                    r.file.as_ref().is_some_and(|f| (f.1, f.2) == k)
-                        && r.offset == off + (r.start - start)
-                })
-            })
-            .collect();
-        with(|m| {
-            if let Some(f) = m.get_mut(&k) {
-                f.views = live;
+/// Remove just the replaced pieces, retaining both sides and their offsets.
+fn remove_views(m: &mut HashMap<Key, Memfd>, lo: u64, hi: u64) -> bool {
+    if lo >= hi {
+        return false;
+    }
+    let mut last = false;
+    for f in m.values_mut() {
+        if !f.views.iter().any(|&(b, n, _)| b < hi && lo < b + n) {
+            continue;
+        }
+        for (b, n, off) in std::mem::take(&mut f.views) {
+            let end = b + n;
+            if end <= lo || hi <= b {
+                f.views.push((b, n, off));
+            } else {
+                if b < lo {
+                    f.views.push((b, lo - b, off));
+                }
+                if hi < end {
+                    f.views.push((hi, end - hi, off + hi - b));
+                }
             }
-        });
+        }
+        last |= f.orphaned && f.views.is_empty();
+    }
+    last
+}
+
+/// A successful host unmap or replacement, including partial VM mutations.
+/// Reclaim only at a last unmap; unrelated memory needs no VM query.
+pub(super) fn unmapped(start: u64, len: u64) {
+    if with(|m| remove_views(m, start, start + len)) {
+        reclaim();
     }
 }
 
-/// mremap made `[to, to+len)` another view of `[from, from+len)`: the
-/// memfd views there have one more.
+/// This process mapped memfd `k` shared at `[start, start+len)` from `off`.
+pub fn note_view(k: Key, start: u64, len: u64, off: u64) {
+    let replaced = with(|m| {
+        let replaced = remove_views(m, start, start + len);
+        if let Some(f) = m.get_mut(&k) {
+            f.views.push((start, len, off));
+        }
+        replaced
+    });
+    if replaced {
+        reclaim();
+    }
+}
+
+/// mremap made `[to, to+len)` another view of `[from, from+len)`.
 pub fn note_alias(from: u64, to: u64, len: u64) {
-    let aliases: Vec<(Key, u64, u64, u64)> = with(|m| {
-        m.iter()
+    let replaced = with(|m| {
+        let aliases: Vec<(Key, u64, u64, u64)> = m
+            .iter()
             .flat_map(|(&k, f)| f.views.iter().map(move |&v| (k, v)))
             .filter_map(|(k, (start, vlen, off))| {
                 let (lo, hi) = (start.max(from), (start + vlen).min(from + len));
                 (lo < hi).then(|| (k, to + (lo - from), hi - lo, off + (lo - start)))
             })
-            .collect()
+            .collect();
+        let replaced = remove_views(m, to, to + len);
+        for (k, start, len, off) in aliases {
+            m.get_mut(&k).unwrap().views.push((start, len, off));
+        }
+        replaced
     });
-    for (k, start, len, off) in aliases {
-        note_view(k, start, len, off);
+    if replaced {
+        reclaim();
     }
 }
 
@@ -1268,6 +1239,7 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
     if let Err(e) = super::mem::remap_shared(target, base + off, len) {
         return Shared::Done(e);
     }
+    note_view(k, target, len, off);
     // SAFETY: the view we just created.
     if unsafe { libc::mprotect(target as *mut _, len as usize, prot) } < 0 {
         return Shared::Done(-(errno::last() as i64));
@@ -1389,7 +1361,6 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     }
     with(|m| {
         m.extend(v);
-        ORPHANS.store(m.values().any(|f| f.orphaned), Ordering::Relaxed);
     });
 }
 
@@ -1411,6 +1382,139 @@ mod tests {
     fn unmap(start: u64, len: u64) {
         let ctx = unsafe { std::mem::zeroed() };
         assert_eq!(super::super::mem::munmap(&ctx, [start, len, 0, 0, 0, 0]), 0);
+    }
+
+    /// mmap(2): MAP_FIXED replaces only its pages; failed requests replace none.
+    #[test]
+    fn partial_replacement_keeps_offsets_and_can_convert_without_an_fd() {
+        let _view = crate::vfs::test_view();
+        let fd = create("pieces", 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, (6 * PAGE) as i64) }, 0);
+        let k = key(fd).unwrap();
+        let at = super::super::mem::mmap([0, 4 * PAGE, 3, 1, fd as u64, PAGE]);
+        assert!(at > 0);
+        let at = at as u64;
+        unsafe {
+            (at as *mut u8).write(41);
+            ((at + 3 * PAGE) as *mut u8).write(97);
+        }
+        close(fd);
+        assert_eq!(
+            super::super::mem::mmap([at, PAGE, 3, 0x100022, u64::MAX, 0]),
+            -(errno::EEXIST as i64)
+        );
+        assert_eq!(
+            super::super::mem::mmap([at + 1, PAGE, 3, 0x32, u64::MAX, 0]),
+            -(EINVAL as i64)
+        );
+        assert_eq!(with(|m| m[&k].views.clone()), [(at, 4 * PAGE, PAGE)]);
+        assert_eq!(
+            super::super::mem::mmap([at + PAGE, 2 * PAGE, 3, 0x32, u64::MAX, 0]),
+            (at + PAGE) as i64
+        );
+        assert_eq!(
+            with(|m| m[&k].views.clone()),
+            [(at, PAGE, PAGE), (at + 3 * PAGE, PAGE, 4 * PAGE)]
+        );
+        assert_eq!(super::super::mem::mprotect([at, PAGE, 5, 0, 0, 0]), 0);
+        assert!(with(|m| m[&k].anon.is_some()));
+        assert_eq!(unsafe { (at as *const u8).read() }, 41);
+        assert_eq!(unsafe { ((at + 3 * PAGE) as *const u8).read() }, 97);
+        unmap(at, PAGE);
+        assert!(with(|m| m.contains_key(&k)));
+        unmap(at + PAGE, 3 * PAGE);
+        assert!(!with(|m| m.contains_key(&k)));
+    }
+
+    /// mremap(2): moving/shrinking and old_size=0 retain shared references,
+    /// while MREMAP_FIXED drops the destination's previous reference.
+    #[test]
+    fn remap_transfers_file_and_converted_view_lifetimes() {
+        let _view = crate::vfs::test_view();
+        for prot in [3, 5] {
+            let fd = create("remap-source", 0);
+            assert_eq!(unsafe { libc::ftruncate(fd, (3 * PAGE) as i64) }, 0);
+            assert_eq!(
+                unsafe { libc::pwrite(fd, c"Q".as_ptr().cast(), 1, PAGE as i64) },
+                1
+            );
+            let k = key(fd).unwrap();
+            let at = super::super::mem::mmap([0, 2 * PAGE, prot, 1, fd as u64, PAGE]);
+            assert!(at > 0);
+            close(fd);
+            let victim = create("remap-destination", 0);
+            assert_eq!(unsafe { libc::ftruncate(victim, PAGE as i64) }, 0);
+            let vk = key(victim).unwrap();
+            let dst = super::super::mem::mmap([0, PAGE, 5, 1, victim as u64, 0]);
+            assert!(dst > 0);
+            close(victim);
+            assert_eq!(
+                super::super::mem::mremap([at as u64, 2 * PAGE, PAGE, 3, dst as u64, 0]),
+                dst
+            );
+            assert!(!with(|m| m.contains_key(&vk)));
+            assert_eq!(with(|m| m[&k].views.clone()), [(dst as u64, PAGE, PAGE)]);
+            let alias = super::super::mem::mremap([dst as u64, 0, PAGE, 1, 0, 0]);
+            assert!(alias > 0);
+            assert_eq!(unsafe { (alias as *const u8).read() }, b'Q');
+            unmap(dst as u64, PAGE);
+            assert!(with(|m| m.contains_key(&k)));
+            unmap(alias as u64, PAGE);
+            assert!(!with(|m| m.contains_key(&k)));
+        }
+    }
+
+    #[test]
+    fn fork_snapshot_keeps_converted_ranges_and_partial_offsets() {
+        let _view = crate::vfs::test_view();
+        let fd = create("inherited-jit", 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, (4 * PAGE) as i64) }, 0);
+        let k = key(fd).unwrap();
+        let at = super::super::mem::mmap([0, 3 * PAGE, 5, 1, fd as u64, PAGE]);
+        assert!(at > 0);
+        unmap(at as u64 + PAGE, PAGE);
+        let expected = with(|m| m[&k].views.clone());
+        assert_eq!(expected.len(), 2);
+        let mut writer = super::super::fork_state::Writer::default();
+        fork_save(&mut writer);
+        let bytes = writer.into_bytes();
+        let mut reader = super::super::fork_state::Reader::new(&bytes);
+        fork_restore(&mut reader);
+        assert!(reader.ok());
+        assert_eq!(with(|m| m[&k].views.clone()), expected);
+        // fdtab restore adopts each inherited descriptor after memfd restore.
+        adopt(fd);
+        close(fd);
+        unmap(at as u64, PAGE);
+        assert!(with(|m| m.contains_key(&k)));
+        unmap(at as u64 + 2 * PAGE, PAGE);
+        assert!(!with(|m| m.contains_key(&k)));
+    }
+
+    #[test]
+    fn concurrent_close_and_last_partial_unmaps_retire_once() {
+        let _view = crate::vfs::test_view();
+        for _ in 0..32 {
+            let fd = create("parallel-jit", 0);
+            assert_eq!(unsafe { libc::ftruncate(fd, (2 * PAGE) as i64) }, 0);
+            let k = key(fd).unwrap();
+            let at = super::super::mem::mmap([0, 2 * PAGE, 5, 1, fd as u64, 0]);
+            assert!(at > 0);
+            let barrier = std::sync::Barrier::new(3);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    close(fd);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    unmap(at as u64, PAGE);
+                });
+                barrier.wait();
+                unmap(at as u64 + PAGE, PAGE);
+            });
+            assert!(!with(|m| m.contains_key(&k)));
+        }
     }
 
     /// Linux memfd_create(2): pages go with the last reference, regardless
@@ -1608,10 +1712,12 @@ mod tests {
             assert!(v[4..(4 << 20) + 7].iter().all(|&b| b == 0));
             std::ptr::copy_nonoverlapping(b"code".as_ptr(), rw.add(64), 4);
             assert_eq!(&v[64..68], b"code");
-            libc::munmap(view as *mut _, size as usize);
-            libc::munmap(rw.cast(), size as usize);
         }
+        unmap(view as u64, size as u64);
+        unmap(rw as u64, size as u64);
+        let k = key(fd).unwrap();
         close(fd);
+        assert!(!with(|m| m.contains_key(&k)));
     }
 
     #[test]

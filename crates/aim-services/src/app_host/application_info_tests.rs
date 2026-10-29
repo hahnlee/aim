@@ -5,6 +5,121 @@ fn host() -> Arc<AppHost> {
     AppHost::new(crate::test_process(SYSTEM_UID))
 }
 
+/// SystemProcessHost queries android's ApplicationInfo before attachSystemProcess.
+#[test]
+fn system_process_start_waits_for_late_package_publication_and_attaches_once() {
+    use aim_service_aidl::android_content_pm_ipackagemanager as pm;
+    crate::system::with_late_package_boot(|host, publish| {
+        assert!(
+            host.display
+                .set(Arc::new((
+                    display::Display::phone_for_test(),
+                    display_service::Resources {
+                        name: "Display".into(),
+                        density_dpi: 320,
+                        brightness: (0, 255, 128),
+                        brightness_dim: 0.05,
+                    },
+                )))
+                .is_ok()
+        );
+        let (started, arrival) = std::sync::mpsc::channel();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let service = package_service::PackageService::new(host.clone());
+                let mut request = Parcel::new();
+                pm::GetApplicationInfo {
+                    package_name: Some("android".into()),
+                    flags: info::flags::GET_SHARED_LIBRARY_FILES | info::flags::MATCH_SYSTEM_ONLY,
+                    user_id: 0,
+                }
+                .write(&mut request);
+                let mut call = Call {
+                    code: pm::GET_APPLICATION_INFO,
+                    flags: 0,
+                    sender_pid: 42,
+                    sender_euid: SYSTEM_UID,
+                    data: request.reader(),
+                };
+                started.send(()).unwrap();
+                let response = service.transact(&mut call).unwrap();
+                response.reader().read_exception().unwrap().unwrap();
+                let info = crate::package::reply::decode(
+                    pm::DESCRIPTOR,
+                    pm::GET_APPLICATION_INFO,
+                    &mut response.reader(),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(matches!(info, crate::shadow::Value::Fields(_)), "{info:?}");
+                host.attach_system_process(&call, Some(Binder::Handle(1)))
+                    .unwrap();
+                done.send(()).unwrap();
+            });
+            arrival.recv().unwrap();
+            let blocked = result.recv_timeout(Duration::from_millis(50));
+            publish();
+            assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+            result.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+        let apps = host.apps.lock().unwrap();
+        assert_eq!(apps.len(), 1);
+        let app = apps.values().next().unwrap();
+        assert_eq!(
+            (app.process.as_str(), app.uid, app.pid),
+            (SYSTEM_PROCESS, SYSTEM_UID, 42)
+        );
+        assert!(app.thread.is_some());
+    });
+}
+
+#[test]
+fn public_package_fronts_release_waiting_calls_with_the_boot_failure() {
+    crate::system::with_late_package_boot(|host, _| {
+        let error = Exception::new(EX_ILLEGAL_STATE, "package construction failed");
+        let (started, arrival) = std::sync::mpsc::channel();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for service in [
+                package_service::PackageService::new(host.clone()),
+                package_service::PackageService::native(host.clone()),
+            ] {
+                let started = started.clone();
+                let done = done.clone();
+                scope.spawn(move || {
+                    let request = Parcel::new();
+                    started.send(()).unwrap();
+                    let response = service
+                        .transact(&mut Call {
+                            code: 1,
+                            flags: 0,
+                            sender_pid: 42,
+                            sender_euid: SYSTEM_UID,
+                            data: request.reader(),
+                        })
+                        .unwrap();
+                    done.send(response.reader().read_exception().unwrap())
+                        .unwrap();
+                });
+            }
+            for _ in 0..2 {
+                arrival.recv().unwrap();
+            }
+            let blocked = result.recv_timeout(Duration::from_millis(50));
+            host.package_boot.set(Err(error.clone())).unwrap();
+            assert_eq!(blocked, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+            for _ in 0..2 {
+                assert_eq!(
+                    result.recv_timeout(Duration::from_secs(10)).unwrap(),
+                    Err(error.clone())
+                );
+            }
+        });
+        assert!(host.apps.lock().unwrap().is_empty());
+    });
+}
+
 #[test]
 fn package_consumers_wait_for_boot_even_after_queries_are_published() {
     crate::system::with_discovery_session(|ready, _, _| {

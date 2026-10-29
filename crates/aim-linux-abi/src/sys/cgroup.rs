@@ -6,7 +6,9 @@
 //!
 //! Which group each task is in is kernel state shared by the processes of a
 //! boot: a text file next to the hierarchy ([`cgroup_v1::state_path`]),
-//! read and changed under `flock`, naming the groups of processes that left
+//! read and changed under `flock`, with per-process thread-inheritance fragments
+//! (`state`) so births in different processes can proceed concurrently,
+//! naming the groups of processes that left
 //! the root and of threads moved alone. A thread is in its process's group
 //! unless it was moved alone; a new thread is in its creator's, a fork
 //! child in its forking thread's. Entries name the process by its start
@@ -17,10 +19,11 @@
 //! docs/cgroups.md for the vendor mapping and host limitations.
 
 mod host;
+mod state;
 pub(super) use host::qos as clamp_qos;
 pub(crate) use host::{Policy, apply as apply_policy};
 
-use std::io::{Read as _, Seek as _, Write as _};
+use std::io::Read as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
@@ -160,29 +163,11 @@ fn snapshot(root: &Path) -> Membership {
 
 /// [`snapshot`] by a caller that keeps forks out already.
 fn read_state(root: &Path) -> Membership {
-    let Ok(mut file) = std::fs::File::open(cgroup_v1::state_path(root)) else {
-        return Membership::default();
-    };
-    // SAFETY: locking our open file; released when it closes.
-    if crate::errno::retry_host(|| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) }).is_err()
-    {
-        return Membership::default();
-    }
-    let mut text = String::new();
-    let _ = file.read_to_string(&mut text);
-    Membership::parse(&text)
+    checked_state(root).unwrap_or_default()
 }
 
 fn checked_state(root: &Path) -> Result<Membership, Errno> {
-    let mut file = match std::fs::File::open(cgroup_v1::state_path(root)) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Membership::default()),
-        Err(e) => return Err(io_error(e)),
-    };
-    crate::errno::retry_host(|| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) })?;
-    let mut text = String::new();
-    file.read_to_string(&mut text).map_err(io_error)?;
-    Ok(Membership::parse(&text))
+    state::read(root)
 }
 
 /// Runs `f` on the membership of the hierarchy at `root` under its lock,
@@ -192,46 +177,21 @@ fn transact<R>(
     f: impl FnOnce(&mut Membership) -> Result<R, Errno>,
 ) -> Result<R, Errno> {
     let _own = super::fork::spawn::own_fds();
-    let lock_root = vfs::cgroup_v1_hierarchies()
-        .first()
-        .map(|(_, p)| p.clone())
-        .unwrap_or_else(|| root.to_path_buf());
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_root.with_extension("policy-lock"))
-        .map_err(io_error)?;
-    crate::errno::retry_host(|| unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) })?;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(cgroup_v1::state_path(root))
-        .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
-    // SAFETY: locking our open file; released when it closes.
-    crate::errno::retry_host(|| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) })?;
+    let _policy = state::policy_lock(root, libc::LOCK_EX)?;
+    let mut file = state::lock_file(&cgroup_v1::state_path(root), libc::LOCK_EX)?;
     let mut text = String::new();
     file.read_to_string(&mut text).map_err(io_error)?;
     let mut m = Membership::parse(&text);
+    let fragments = state::fragments(root, &mut m)?;
     prune(&mut m);
     let old = m.clone();
     let r = f(&mut m)?;
     let new = m.text();
     if new != text {
         host::update(root, &old, &m, None)?;
-        if let Err(error) = (|| {
-            crate::errno::retry_io(|| file.set_len(0))?;
-            crate::errno::retry_io(|| file.rewind())?;
-            file.write_all(new.as_bytes())
-        })() {
-            crate::errno::retry_io(|| file.rewind()).map_err(io_error)?;
-            file.write_all(text.as_bytes()).map_err(io_error)?;
-            crate::errno::retry_io(|| file.set_len(text.len() as u64)).map_err(io_error)?;
+        if let Err(error) = state::commit(&mut file, &text, &new, &fragments) {
             host::update(root, &m, &old, None)?;
-            return Err(io_error(error));
+            return Err(error);
         }
     }
     Ok(r)
@@ -683,21 +643,17 @@ pub fn proc_cgroup(_pid: i32, tid: i32) -> String {
 }
 
 /// A new thread `tid` is in its creator's group (`cgroup_post_fork`).
-pub fn thread_created(creator: i32, tid: i32) {
-    for (_, root) in hierarchies() {
-        let m = snapshot(&root);
-        let Some((.., group)) = m.threads.iter().find(|(t, ..)| *t == creator).cloned() else {
-            continue;
-        };
-        let Some(start) = own_start() else {
-            return;
-        };
-        let _ = transact(&root, |m| {
-            m.threads.retain(|(t, ..)| *t != tid);
-            m.threads.push((tid, start, group));
-            Ok(())
-        });
+pub fn thread_created(creator: i32, tid: i32) -> Result<(), Errno> {
+    let _own = super::fork::spawn::own_fds();
+    let roots = hierarchies();
+    if roots.is_empty() {
+        return Ok(());
     }
+    let start = own_start().ok_or(ESRCH)?;
+    for (_, root) in roots {
+        state::inherit(&root, creator, tid, start)?;
+    }
+    Ok(())
 }
 
 /// Thread `tid` exited: its tid may be given to a new thread of this
@@ -775,6 +731,7 @@ pub fn refresh_own() -> Result<(), Errno> {
         return Ok(());
     };
     let _own = super::fork::spawn::own_fds();
+    let _policy = state::policy_lock(&root, libc::LOCK_SH)?;
     let state = checked_state(&root)?;
     host::apply(&host::policies(&root, &state, me())?).map(|_| ())
 }

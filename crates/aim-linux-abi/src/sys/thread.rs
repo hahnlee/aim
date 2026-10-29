@@ -549,7 +549,17 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         }
     };
     let tid = th.tid;
-    super::cgroup::thread_created(parent.tid, tid);
+    if let Err(error) = super::cgroup::thread_created(parent.tid, tid) {
+        with_table_mut(|t| {
+            super::procrec::gone(tid);
+            t.remove(&tid);
+            super::cred::forget_nice(tid);
+        });
+        super::cgroup::thread_gone(tid);
+        // SAFETY: the child context has not been handed to a pthread.
+        drop(unsafe { Box::from_raw(child_ctx) });
+        return -(error as i64);
+    }
     if let Some(e) = &traced {
         super::ptrace::born_traced(tid, e.tracer, e.options);
     }
@@ -803,3 +813,10 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     }
     th.sched.host_stale.store(true, SeqCst);
 }
+
+#[cfg(test)]
+mod startup_test;
+
+#[cfg(test)]
+#[path = "startup_bench.rs"]
+mod startup_bench;

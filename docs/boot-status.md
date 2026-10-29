@@ -455,9 +455,16 @@ PackageManager remains original in the default image. Controlled slice C images
 redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance. On the
-app host image (2026-10-26) the native package boot runs its scans,
-construction and publication, the system process attaches once after it, and
-the guest reaches BOOT_COMPLETED. Ordinary package reads retain the last
+app host image (2026-10-26) the native package boot ran its scans,
+construction and publication, the system process attached once after it, and
+the guest reached BOOT_COMPLETED. Faster startup exposed aim-system querying
+packages before that publication (#2392): init starts it independently of the
+agent-triggered native package boot. The public package Binder fronts now wait
+for the same package-boot result as host consumers before dispatch, covering
+the ApplicationInfo query that precedes attachSystemProcess. Host regressions
+with delayed publication check one successful attach and no query exception;
+failed construction releases waiting calls with its error. No guest boot was
+run (2026-10-29). Ordinary package reads retain the last
 committed capture across bootstrap bridge death/replacement only while its
 canonical package metadata is unchanged (usage-only advances are allowed);
 scoped owners remain fenced until republication (#2276; host regressions,
@@ -7890,10 +7897,15 @@ the file's ctime shows nobody changed it (an UNPIN+PIN pair: 32-39 to
 19-21 µs, #504). Neither is measured in a boot yet.
 
 Executable memfd backing is reclaimed when this process has no descriptor
-(including syscall pins) or view left (#552). Returned descriptors preserve
-live converted contents; mapping replacement and deferred thread-exit unmaps
-also retry reclamation. Focused host tests cover repeated 64 MiB allocations,
-partial unmaps, returned descriptors, pins and deferred cleanup.
+(including syscall pins) or view left (#552, #2390). Successful VM mutations
+maintain the live shared ranges and file offsets through conversion, partial
+unmaps, replacement, remap aliases, deferred cleanup and fork state. Only the
+last close or last unmap triggers reclamation; reclaim no longer queries Darwin
+process information. Host lifetime and concurrent close/unmap checks pass
+(2026-10-29). A 16-thread host benchmark with 2,048 resident VMAs and frequent
+setpriority calls takes a median 11.6 ms for 2,048 mmap/munmap pairs, against
+2,098.7 ms before. Maps startup has not been remeasured and no guest boot was run. The original-bionic syscall fixtures stop at PID-namespace
+watcher startup with `Address already in use`, before executing guest code.
 
 The large file mappings were ART's JIT cache: its memfd's first
 executable view looked for the memfd's other views by walking the whole
@@ -8625,7 +8637,15 @@ Measured on a loaded host (load average 90, other agents' boots running),
   level every 250 ms instead.
 
 ActivityManager's process groups constrain Darwin CPU/QoS and disk policy
-through the cgroup controllers, with freezer explicitly unavailable. Cpuset
+through the cgroup controllers, with freezer explicitly unavailable. Thread
+inheritance now records per-process membership fragments under shared locks;
+migrations and controller writes merge them under the existing exclusive
+transaction (#2389). Host checks cover concurrent births/reads/migrations,
+independent descendant membership, process-incarnation reuse and rollback.
+The parallel host startup workload improves; measurements are host-only, not
+app launch times. Original-bionic cgroup/priority tests stop at PID-namespace
+watcher initialization (Address already in use) on both the baseline and this
+change, before exercising cgroups. No guest boot was run (2026-10-29). Cpuset
 masks and uclamp maxima preserve Linux scheduling class: reduced placement
 or frequency hints cannot background foreground/system audio or throttle its
 I/O (#297). The audio profiles' neutral controller defaults and reduced-mask/
