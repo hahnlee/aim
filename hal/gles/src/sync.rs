@@ -4,9 +4,8 @@
 //! - `EGL_ANDROID_native_fence_sync`: a native fence sync is a sync_file.
 //!   One made without an fd is the host's fence for the commands the current
 //!   context has issued (`FN_FENCE`, which flushes them); one made from an
-//!   fd takes it over. Waiting polls the fd; a server wait
-//!   (`eglWaitSync`) waits on the CPU, which orders later commands after
-//!   the fence as the GPU wait would.
+//!   fd takes it over. A client wait polls the fd; a server wait
+//!   (`eglWaitSync`) imports it as an ANGLE Metal shared-event dependency.
 //! - Client waits on the host's syncs without a current context, which
 //!   ANGLE's Metal backend refuses.
 //!
@@ -16,7 +15,7 @@ use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use aim_hostcall::gpu::Fence;
+use aim_hostcall::gpu::{Fence, Wait};
 
 use crate::egl::fail;
 use crate::thunks::host;
@@ -26,6 +25,7 @@ const EGL_FALSE: EGLBoolean = 0;
 const EGL_TRUE: EGLBoolean = 1;
 const EGL_NONE: EGLint = 0x3038;
 const EGL_BAD_ATTRIBUTE: EGLint = 0x3004;
+const EGL_BAD_ALLOC: EGLint = 0x3003;
 const EGL_BAD_MATCH: EGLint = 0x3009;
 const EGL_BAD_PARAMETER: EGLint = 0x300c;
 const EGL_SYNC_STATUS: EGLint = 0x30f1;
@@ -81,6 +81,22 @@ fn poll(fd: i32, timeout: u64) -> bool {
         if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             return false;
         }
+    }
+}
+
+/// Queue a GPU wait without taking ownership of the sync_file.
+pub(crate) fn server_wait(dpy: EGLDisplay, fd: i32) -> EGLBoolean {
+    // SAFETY: a query of this thread's current context.
+    if unsafe { host::eglGetCurrentContext() }.is_null() {
+        return fail(EGL_BAD_MATCH, EGL_FALSE);
+    }
+    match aim_hostcall::guest::gpu_wait(&mut Wait {
+        display: dpy as u64,
+        fd,
+        _reserved: 0,
+    }) {
+        Ok(()) => EGL_TRUE,
+        Err(_) => fail(EGL_BAD_ALLOC, EGL_FALSE),
     }
 }
 
@@ -254,7 +270,7 @@ pub unsafe extern "C" fn eglWaitSyncKHR(
 ) -> EGLint {
     match native(sync) {
         Some(_) if flags != 0 => fail(EGL_BAD_PARAMETER, EGL_FALSE as EGLint),
-        Some(fd) => poll(fd, FOREVER) as EGLint,
+        Some(fd) => server_wait(dpy, fd) as EGLint,
         // SAFETY: forwarded.
         None => unsafe { host::eglWaitSyncKHR(dpy, sync, flags) },
     }
@@ -266,7 +282,7 @@ pub unsafe extern "C" fn eglWaitSyncKHR(
 pub unsafe extern "C" fn eglWaitSync(dpy: EGLDisplay, sync: EGLSync, flags: EGLint) -> EGLBoolean {
     match native(sync) {
         Some(_) if flags != 0 => fail(EGL_BAD_PARAMETER, EGL_FALSE),
-        Some(fd) => poll(fd, FOREVER) as EGLBoolean,
+        Some(fd) => server_wait(dpy, fd),
         // SAFETY: forwarded.
         None => unsafe { host::eglWaitSync(dpy, sync, flags) },
     }

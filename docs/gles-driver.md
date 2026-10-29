@@ -226,11 +226,14 @@ sync_file ([graphics-buffers.md](graphics-buffers.md), "Fences").
   fd is a host fence for the commands issued so far; one made with
   `EGL_SYNC_NATIVE_FENCE_FD_ANDROID` takes the fd over.
   `eglDupNativeFenceFDANDROID` duplicates the fd, status queries and
-  `eglClientWaitSync` poll it, and `eglWaitSync` (a server wait) waits on
-  the CPU, which orders later commands after the fence as a GPU wait
-  would. SurfaceFlinger's RenderEngine now returns a fence for its
-  composition (Skia's submit no longer syncs the CPU), and HWUI waits for
-  dequeued buffers' release fences through it.
+  `eglClientWaitSync` poll it. `eglWaitSync` and the window swap's dequeued
+  buffer acquire import pending sync_files as Metal shared events through
+  `FN_WAIT`; ANGLE queues a GPU wait without signaling the imported event
+  itself. The sync-file waiter retains the event and fd until completion,
+  so destroying the EGLSync or closing the caller's fd does not remove
+  the dependency. Already signaled fences need no GPU wait. RenderEngine
+  returns a fence for its composition, and the swap's blit fence covers
+  its acquire dependency too. Present fences still signal at presentation.
 
 `eglClientWaitSync(KHR)` on a thread without a current context polls the
 sync's `EGL_SYNC_STATUS` every 100 µs up to the timeout. EGL allows such a

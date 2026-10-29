@@ -166,7 +166,7 @@ pub mod health {
 /// Module [`module::GPU`]: EGL and OpenGL ES over the host's ANGLE on
 /// Metal, for the guest GLES driver (`docs/gles-driver.md`).
 pub mod gpu {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
     /// Load ANGLE and resolve the forwarded entry points ([`Init`]).
     /// Returns 0, `-ENODEV` when the host has no GPU libraries, or
@@ -184,6 +184,9 @@ pub mod gpu {
     /// Returns the new sync_file's guest fd, or `-EINVAL` without a current
     /// context.
     pub const FN_FENCE: u32 = 4;
+    /// Order the current context's subsequent commands after a sync_file
+    /// without blocking the CPU ([`Wait`]). Returns 0 or `-EINVAL`.
+    pub const FN_WAIT: u32 = 5;
     /// Forwarded entry point `i` of the generated table
     /// (`tools/gen-gpu-thunks.py`) is function `FN_TABLE_BASE + i`. Its
     /// argument block is the callee's register image, 8 bytes per value:
@@ -247,6 +250,16 @@ pub mod gpu {
         pub display: u64,
     }
 
+    /// Argument block of [`FN_WAIT`]. The fd is borrowed for this call.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Wait {
+        pub display: u64,
+        pub fd: i32,
+        pub _reserved: u32,
+    }
+
+    const _: () = assert!(core::mem::size_of::<Wait>() == 16);
     const _: () = assert!(core::mem::size_of::<Init>() == 32);
     const _: () = assert!(core::mem::size_of::<ImportBuffer>() == 48);
     const _: () = assert!(core::mem::size_of::<Present>() == 32);
@@ -1426,6 +1439,11 @@ pub mod guest {
     /// A native fence for the current context's commands; returns its fd.
     pub fn gpu_fence(args: &mut gpu::Fence) -> Result<i32, Errno> {
         call_with(module::GPU, gpu::FN_FENCE, args).map(|fd| fd as i32)
+    }
+
+    /// Order subsequent GPU commands after a borrowed sync_file.
+    pub fn gpu_wait(args: &mut gpu::Wait) -> Result<(), Errno> {
+        call_with(module::GPU, gpu::FN_WAIT, args).map(drop)
     }
 
     /// Connect to the display server; returns the event fd.
