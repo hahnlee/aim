@@ -8625,7 +8625,15 @@ Measured on a loaded host (load average 90, other agents' boots running),
   level every 250 ms instead.
 
 ActivityManager's process groups constrain Darwin CPU/QoS and disk policy
-through the cgroup controllers, with freezer explicitly unavailable. Cpuset
+through the cgroup controllers, with freezer explicitly unavailable. Thread
+inheritance now records per-process membership fragments under shared locks;
+migrations and controller writes merge them under the existing exclusive
+transaction (#2389). Host checks cover concurrent births/reads/migrations,
+independent descendant membership, process-incarnation reuse and rollback.
+The parallel host startup workload improves; measurements are host-only, not
+app launch times. Original-bionic cgroup/priority tests stop at PID-namespace
+watcher initialization (Address already in use) on both the baseline and this
+change, before exercising cgroups. No guest boot was run (2026-10-29). Cpuset
 masks and uclamp maxima preserve Linux scheduling class: reduced placement
 or frequency hints cannot background foreground/system audio or throttle its
 I/O (#297). The audio profiles' neutral controller defaults and reduced-mask/
