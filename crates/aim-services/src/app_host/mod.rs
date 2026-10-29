@@ -599,6 +599,7 @@ pub struct AppHost {
     native_staging_bridge: Mutex<Option<Arc<Strong>>>,
     audio_policy_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     sync_adapter_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
+    package_intent_parser: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -719,6 +720,7 @@ impl AppHost {
             native_staging_bridge: Mutex::new(None),
             audio_policy_queries: Mutex::new(None),
             sync_adapter_queries: Mutex::new(None),
+            package_intent_parser: Mutex::new(None),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),

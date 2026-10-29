@@ -80,4 +80,6 @@ interface ISystemProcess {
     void initializeCameraPrivacyAllowlist(in List<String> packages);
     /** Original UserManagerService user-switcher policy; system UID only. */
     void attachUserSwitcherPolicy(IBinder policy);
+    /** Original Intent command parser; system UID only. */
+    void attachPackageIntentParser(IBinder parser);
 }

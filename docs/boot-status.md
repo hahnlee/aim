@@ -442,8 +442,11 @@ completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions
 and trees from `packages.xml` and runtime user grants, flags and package versions
 from Settings, persists migrated state, and leaves a user with no legacy runtime
-file empty and unwritten. Archiving (#1757), internal-event broadcasts (#2167),
-remaining bootstrap owners (#2330) and Intent shell options (#2331) are open.
+file empty and unwritten. Archiving (#1757), internal-event broadcasts (#2167) and the
+remaining bootstrap owners (#2330) are open. Package-shell Intent syntax now
+uses the original Android 16 parser through a system-UID-only bridge in aim-system
+(#2331), including selectors, URI/component and array/list extras. Focused host
+checks and Java image linkage cover the bridge; no guest boot was run.
 
 On a fingerprint change, native permission boot evaluates restricted exemptions,
 split-permission inheritance and internal protection flags, preserving user and
