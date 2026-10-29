@@ -1,5 +1,5 @@
-//! APK inputs for the native boot scan (#707). Reads persisted active and
-//! disabled-system code without the original parser cache or package feed.
+//! APK inputs for the native boot scan (#707). Reads active and disabled-system
+//! code through native parsing and the optional boot-owned cache, without a package feed.
 //! Active records pass normal saved package/shared-UID signature gates.
 //! Reconciliation, new/removed image packages, APEX state and publication
 //! are separate phases; these records are not a query snapshot.

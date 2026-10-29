@@ -11,7 +11,7 @@ use crate::package::{
     sign,
     write::{ApkSigningError, Apks, CertificateCollection},
 };
-use std::fs;
+use std::{fs, path::Path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Partition {
@@ -123,7 +123,7 @@ impl Image {
     /// Native parsing and full signature verification. No package feed,
     /// parser cache, settings, UID allocation or filesystem writes.
     pub fn load(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?, &|parsed, _| {
+        Self::load_directories(apks, directories(apexes)?, None, &|parsed, _| {
             apks.checked_signing_details(parsed)
                 .map_err(|error| ("signatures", error))
         })
@@ -140,7 +140,7 @@ impl Image {
             &Location,
         ) -> Result<CertificateCollection<'a>, String>,
     ) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?, &|parsed, location| {
+        Self::load_directories(apks, directories(apexes)?, None, &|parsed, location| {
             collect(apks, parsed, location, collection)
         })
         .map(|(image, _)| image)
@@ -149,6 +149,7 @@ impl Image {
     fn load_directories<S>(
         apks: &Apks,
         directories: Vec<Location>,
+        cache_dir: Option<&Path>,
         signing: &dyn Fn(&AndroidPackage, &Location) -> Result<S, (&'static str, ApkSigningError)>,
     ) -> Result<(Image<S>, Vec<String>), Error> {
         let mut image = Image {
@@ -156,7 +157,7 @@ impl Image {
             rejected: Vec::new(),
         };
         let mut scan_paths = Vec::new();
-        let cache = super::parse_cache::Cache::open(apks);
+        let cache = super::parse_cache::Cache::open(apks, cache_dir);
         for directory in directories {
             let fail = |path: &str, phase, message| Error {
                 package: String::new(),
@@ -217,10 +218,12 @@ impl Image {
                 let entry = cache
                     .as_ref()
                     .and_then(|cache| cache.entry(host, &path, flags));
-                if let Some(cached) = entry.as_ref().and_then(|entry| fs::read(entry).ok()) {
-                    if let Ok(parsed) = AndroidPackage::read_cache_entry(&cached) {
-                        return Ok(Ok(parsed));
-                    }
+                if let Some(parsed) = cache
+                    .as_ref()
+                    .zip(entry.as_ref())
+                    .and_then(|(cache, entry)| cache.read(entry, &path))
+                {
+                    return Ok(Ok(parsed));
                 }
                 parse::parse(host, &path, flags, &apks.platform).map(|parsed| {
                     let bytes = parsed.to_cache_entry().bytes;
@@ -338,7 +341,13 @@ pub(crate) fn parse_all<T: Sync, R: Send>(items: &[T], parse: impl Fn(&T) -> R +
 impl Image<()> {
     /// Physical system inventory before the sequential owner collects signing.
     pub fn parse(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
-        Image::load_directories(apks, directories(apexes)?, &|_, _| Ok(())).map(|(image, _)| image)
+        Self::parse_cached(apks, apexes, None)
+    }
+
+    /// The boot owner's fingerprint directory; `None` disables caching.
+    pub fn parse_cached(apks: &Apks, apexes: &[Apex], cache: Option<&Path>) -> Result<Self, Error> {
+        Image::load_directories(apks, directories(apexes)?, cache, &|_, _| Ok(()))
+            .map(|(image, _)| image)
     }
 }
 
@@ -361,7 +370,7 @@ impl DataImage {
     /// Scan /data/app, then explicitly supplied mounted private volumes.
     /// Does not allocate UIDs, mutate settings or remove rejected candidates.
     pub fn load(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, &|parsed, _| {
+        Self::load_directories(apks, volumes, None, &|parsed, _| {
             apks.checked_signing_details(parsed)
                 .map_err(|error| ("signatures", error))
         })
@@ -375,7 +384,7 @@ impl DataImage {
             &Location,
         ) -> Result<CertificateCollection<'a>, String>,
     ) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, &|parsed, location| {
+        Self::load_directories(apks, volumes, None, &|parsed, location| {
             collect(apks, parsed, location, collection)
         })
     }
@@ -385,7 +394,15 @@ impl DataImage<()> {
     /// Parse data candidates without opening their signing sources. Collection
     /// follows current-setting selection in the sequential data scan owner.
     pub fn parse(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, &|_, _| Ok(()))
+        Self::parse_cached(apks, volumes, None)
+    }
+
+    pub fn parse_cached(
+        apks: &Apks,
+        volumes: &[String],
+        cache: Option<&Path>,
+    ) -> Result<Self, Error> {
+        Self::load_directories(apks, volumes, cache, &|_, _| Ok(()))
     }
 }
 
@@ -393,6 +410,7 @@ impl<S> DataImage<S> {
     fn load_directories(
         apks: &Apks,
         volumes: &[String],
+        cache: Option<&Path>,
         signing: &dyn Fn(&AndroidPackage, &Location) -> Result<S, (&'static str, ApkSigningError)>,
     ) -> Result<Self, Error> {
         let mut roots = vec!["/data/app".to_owned()];
@@ -430,6 +448,7 @@ impl<S> DataImage<S> {
                     apex: None,
                 })
                 .collect(),
+            cache,
             signing,
         )?;
         Ok(Self {

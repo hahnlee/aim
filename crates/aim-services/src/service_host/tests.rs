@@ -3069,6 +3069,7 @@ fn verify_boot_scan(
         force_multi_arch_match: false,
     };
     let policy = || ScanPolicy {
+        parser_cache: None,
         certificates: Default::default(),
         seinfo: &seinfo,
         apex_parse_flags: crate::package::parse::PARSE_IS_SYSTEM_DIR,

@@ -473,6 +473,17 @@ committed capture across bootstrap bridge death/replacement only while its
 canonical package metadata is unchanged (usage-only advances are allowed);
 scoped owners remain fenced until republication (#2276; host regressions,
 2026-10-28, no guest boot).
+Native package parsing uses the boot owner's fingerprint directory under
+`/data/system/package_cache` (#2400), with PackageCacher's filename/flags/path
+keys and native image/parser/configuration/APK-stamp receipts. Unchanged code
+reuses parsed parcels before normal reconciliation; certificate collection keeps
+Android 16's saved path/time/database-version and upgrade gates. Host checks
+compare all 246 pinned-original packages' cached/cold parcels and signing,
+changed APK copies, image/configuration invalidation and torn cache writes.
+Five release host pairs measure raw APK directory parsing plus signing at median
+1313.8 ms cold and 21.0 ms warm (2026-10-29; cache cold, OS file cache retained).
+Publication, construction, metadata completion and installd are outside that
+measurement; no guest boot or end-to-end boot speedup was measured.
 Every package read and write of the app
 host goes through the native session: there is no `Packages::load` join or
 host package model, and process starts, domains, permissions and the
@@ -559,14 +570,6 @@ its record while allowing an already admitted call to finish. The focused scan
 snapshot suite passes 27/0, and a fresh diagnostic boot held one SystemServer PID
 healthy for 153 seconds with repeated package probes. A rebuilt tail CTS run is
 still required; these diagnostics are not conformance acceptance.
-
-The native package boot scan parses the image's packages on worker threads
-(results in path order, so the outcome is the sequential one) and keeps each
-parse in `/data/system/aim_package_cache`, keyed by the image identity, the
-runtime build, the platform features and extensions and the package files.
-A reboot of the native image now reaches `sys.boot_completed` in 16–17 s
-(was 24–27 s; the original image takes 15–16 s); SystemServer's run to AMS
-ready takes 7.5 s (was 13.1 s; original 3.8 s).
 
 The current f89fddbf matched original/native images are build-qualified: both
 use the same vendor artifacts and the primary workflow restores the default
