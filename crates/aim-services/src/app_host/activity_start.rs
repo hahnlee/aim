@@ -23,7 +23,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 
 use super::activity::{ActivityRecord, Item, Token};
 use super::activity_stack::{self as stack, Command, Decision, Outcome, Then};
-use super::kept::{KeptIntent, RawIntent};
+use super::kept::{KeptIntent, RawBundle, RawIntent};
 use super::resources::WindowStyle;
 use super::uri_grants::{NeededUriGrants, Owner};
 use super::{AppHost, PER_USER_RANGE};
@@ -328,6 +328,7 @@ impl AppHost {
             result_to: request.result_to,
             result_who: request.result_who,
             request_code: request.request_code,
+            transition_overrides: Default::default(),
         };
         self.activities
             .records
@@ -372,7 +373,7 @@ impl AppHost {
         }
     }
 
-    fn run_one(self: &Arc<Self>, command: Command) -> Result<(), String> {
+    pub(super) fn run_one(self: &Arc<Self>, command: Command) -> Result<(), String> {
         let token_of = |t: u64| Binder::Local(t);
         let start_of = |t: u64| {
             self.activities
@@ -894,7 +895,7 @@ impl AppHost {
                 return Ok(code);
             }
             Outcome::New(task) => {
-                self.collect_open(task, 0);
+                self.collect_open_with_options(task, args.options.as_ref())?;
                 task
             }
         };
@@ -1123,6 +1124,7 @@ impl AppHost {
             }
         };
         if destroyed {
+            self.cancel_activity_transition(token);
             self.activity_connections_gone(token);
         }
         self.run(commands);
@@ -1182,6 +1184,7 @@ pub struct StartArgs {
     pub result_to: Option<Binder>,
     pub result_who: Option<String>,
     pub request_code: i32,
+    pub options: Option<RawBundle>,
 }
 
 /// A component name as `ComponentName.writeToParcel` writes it.

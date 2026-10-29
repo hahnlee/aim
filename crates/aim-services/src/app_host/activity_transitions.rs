@@ -1,7 +1,9 @@
 //! Same-task collection and native playback (#1725); Java owns animation resources.
 use std::collections::HashMap;
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{Binder, Exception, Parcel};
@@ -10,24 +12,46 @@ use aim_service_aidl::dev_aim_server_iactivityanimations as java;
 
 use super::AppHost;
 use super::activity_stack::{Command, Stack};
+use super::kept::{By, KeptBundle};
 
 #[derive(Default)]
 pub(super) struct Transitions {
     pub owner: Option<Arc<Strong>>,
     pub socket: Option<PathBuf>,
     collecting: HashMap<i32, Transition>,
+    next_id: u64,
+    // Serialize retirement with frame submission, without nesting the windows/state locks.
+    playback: Arc<Mutex<()>>,
 }
 
 struct Transition {
+    id: u64,
+    observer: Option<UnixStream>,
     from: u64,
     to: u64,
     open: bool,
     playing: bool,
     custom: Option<(String, i32, i32)>,
+    options: Option<KeptBundle>,
+    notified: bool,
     deferred: Vec<Command>,
 }
 
 impl Transition {
+    fn new(from: u64, to: u64, open: bool) -> Self {
+        Self {
+            id: 0,
+            observer: None,
+            from,
+            to,
+            open,
+            playing: false,
+            custom: None,
+            options: None,
+            notified: false,
+            deferred: Vec::new(),
+        }
+    }
     fn animation(&self, entering: bool) -> (i32, i32) {
         let attr = if self.open { 0 } else { 2 } + i32::from(!entering);
         (
@@ -57,7 +81,39 @@ impl Stack {
 }
 
 impl AppHost {
-    pub(super) fn collect_open(&self, task: Option<i32>, to: u64) {
+    fn collect_transition(self: &Arc<Self>, task: i32, mut next: Transition) {
+        let playback = self.windows.transitions.lock().unwrap().playback.clone();
+        let guard = playback.lock().unwrap();
+        let old = {
+            let mut state = self.windows.transitions.lock().unwrap();
+            if let Some(t) = state.collecting.get_mut(&task)
+                && !t.playing
+                && t.open
+                && next.open
+                && t.to == 0
+            {
+                t.to = next.to;
+                return;
+            }
+            state.collecting.remove(&task)
+        };
+        // DefaultTransitionHandler.mergeAnimation ends the previous animators first.
+        if let Some(t) = old.as_ref() {
+            self.reset_transition(t);
+        }
+        {
+            let mut state = self.windows.transitions.lock().unwrap();
+            state.next_id += 1;
+            next.id = state.next_id;
+            state.collecting.insert(task, next);
+        }
+        drop(guard);
+        if let Some(t) = old {
+            self.release_transition(t);
+        }
+    }
+
+    pub(super) fn collect_open(self: &Arc<Self>, task: Option<i32>, to: u64) {
         if !self.tasks.window_mode() {
             return;
         }
@@ -70,42 +126,189 @@ impl AppHost {
                 .map(|a| a.token)
         });
         if let (Some(task), Some(from)) = (task, from) {
-            let mut state = self.windows.transitions.lock().unwrap();
-            let t = state.collecting.entry(task).or_insert(Transition {
-                from,
-                to,
-                open: true,
-                playing: false,
-                custom: None,
-                deferred: Vec::new(),
-            });
-            if !t.playing && t.open && t.to == 0 {
-                t.to = to;
-            }
+            self.collect_transition(task, Transition::new(from, to, true));
         }
     }
 
-    pub(super) fn collect_close(&self, token: u64) {
+    pub(super) fn collect_close(self: &Arc<Self>, token: u64) {
         if !self.tasks.window_mode() {
             return;
         }
         let pair = self.activities.stack.lock().unwrap().closing_pair(token);
         if let Some((task, to)) = pair {
-            self.windows
-                .transitions
-                .lock()
-                .unwrap()
-                .collecting
-                .entry(task)
-                .or_insert(Transition {
-                    from: token,
-                    to,
-                    open: false,
-                    playing: false,
-                    custom: None,
-                    deferred: Vec::new(),
-                });
+            self.collect_transition(task, Transition::new(token, to, false));
         }
+    }
+
+    fn reset_transition(&self, t: &Transition) {
+        if let Some(observer) = &t.observer {
+            let _ = observer.shutdown(Shutdown::Both);
+        }
+        if t.notified {
+            self.notify_transition(t, false);
+        }
+        let mut exit = IDENTITY;
+        if !t.deferred.is_empty() {
+            exit[6] = 0.;
+        }
+        if let Err(e) = self.animate_activities(t.to, IDENTITY, t.from, exit) {
+            eprintln!("app host: transition finish: {e}");
+        }
+    }
+
+    fn notify_transition(&self, t: &Transition, started: bool) {
+        let owner = self.windows.transitions.lock().unwrap().owner.clone();
+        if let (Some(owner), Some(options)) = (owner, &t.options) {
+            let mut p = Parcel::new();
+            java::NotifyAnimation {
+                options: Some(By(&options.bundle)),
+                started,
+            }
+            .write(&mut p);
+            if let Err(e) = owner.transact(java::NOTIFY_ANIMATION, &p, true) {
+                eprintln!("app host: animation callback: {e}");
+            }
+        }
+    }
+
+    fn release_transition(self: &Arc<Self>, t: Transition) {
+        // Already retired: never collect these commands again in a newer transition.
+        for command in t.deferred {
+            if let Err(e) = self.run_one(command) {
+                eprintln!("app host: transition finish: {e}");
+            }
+        }
+    }
+
+    fn finish_transition(self: &Arc<Self>, task: i32, id: u64) {
+        let playback = self.windows.transitions.lock().unwrap().playback.clone();
+        let guard = playback.lock().unwrap();
+        let old = {
+            let mut state = self.windows.transitions.lock().unwrap();
+            if !state.collecting.get(&task).is_some_and(|t| t.id == id) {
+                return;
+            }
+            state.collecting.remove(&task).unwrap()
+        };
+        self.reset_transition(&old);
+        drop(guard);
+        self.release_transition(old);
+    }
+
+    pub(super) fn cancel_activity_transition(&self, token: u64) {
+        let work: Vec<_> = self
+            .windows
+            .transitions
+            .lock()
+            .unwrap()
+            .collecting
+            .iter()
+            .filter(|(_, t)| t.from == token || t.to == token)
+            .map(|(&task, t)| (task, t.id))
+            .collect();
+        if let Some(host) = self.me.upgrade() {
+            for (task, id) in work {
+                host.finish_transition(task, id);
+            }
+        }
+    }
+
+    fn transition_frame(
+        &self,
+        task: i32,
+        id: u64,
+        to: u64,
+        enter: [f32; 11],
+        from: u64,
+        exit: [f32; 11],
+    ) -> Result<bool, String> {
+        let playback = self.windows.transitions.lock().unwrap().playback.clone();
+        let _guard = playback.lock().unwrap();
+        if !self
+            .windows
+            .transitions
+            .lock()
+            .unwrap()
+            .collecting
+            .get(&task)
+            .is_some_and(|t| t.id == id)
+        {
+            return Ok(false);
+        }
+        self.animate_activities(to, enter, from, exit)?;
+        Ok(true)
+    }
+
+    pub(super) fn override_activity_transition(
+        &self,
+        uid: u32,
+        token: Option<Binder>,
+        open: bool,
+        custom: Option<(i32, i32, i32)>,
+    ) -> Result<(), Exception> {
+        let Some(Binder::Local(token)) = token else {
+            return Ok(());
+        };
+        let mut records = self.activities.records.lock().unwrap();
+        let Some(r) = records.get_mut(&token).filter(|r| r.uid == uid) else {
+            return Ok(());
+        };
+        if custom.is_some_and(|(_, _, background)| background != 0) {
+            return Err(
+                self.unimplemented_named("activity_task", "transition background color (#1725)")
+            );
+        }
+        r.transition_overrides[usize::from(!open)] =
+            custom.map(|(enter, exit, _)| (r.package.clone(), enter, exit));
+        Ok(())
+    }
+
+    pub(super) fn collect_open_with_options(
+        self: &Arc<Self>,
+        task: Option<i32>,
+        options: Option<&super::kept::RawBundle>,
+    ) -> Result<(), Exception> {
+        let Some(options) = options else {
+            self.collect_open(task, 0);
+            return Ok(());
+        };
+        if options.has_fds() {
+            return Err(Exception::illegal_argument(
+                "File descriptors passed in options",
+            ));
+        }
+        let bad = |_| Exception::illegal_argument("ActivityOptions animation bundle");
+        // ActivityOptions.fromBundle, ANIM_CUSTOM at android-16.0.0_r1.
+        if options.int("android:activity.animType", -1).map_err(bad)? != 1 {
+            self.collect_open(task, 0);
+            return Ok(());
+        }
+        let package = options
+            .string("android:activity.packageName")
+            .map_err(bad)?;
+        let enter = options
+            .int("android:activity.animEnterRes", 0)
+            .map_err(bad)?;
+        let exit = options
+            .int("android:activity.animExitRes", 0)
+            .map_err(bad)?;
+        if options
+            .int("android:activity.backgroundColor", 0)
+            .map_err(bad)?
+            != 0
+        {
+            return Err(
+                self.unimplemented_named("activity_task", "transition background color (#1725)")
+            );
+        }
+        let kept = KeptBundle::new(options.clone(), &self.process).map_err(bad)?;
+        self.collect_open(task, 0);
+        let mut state = self.windows.transitions.lock().unwrap();
+        if let Some(t) = task.and_then(|task| state.collecting.get_mut(&task)) {
+            t.custom = package.map(|p| (p, enter, exit));
+            t.options = Some(kept);
+        }
+        Ok(())
     }
 
     pub(super) fn override_transition(
@@ -186,6 +389,7 @@ impl AppHost {
             t.playing = true;
             (
                 task,
+                t.id,
                 t.from,
                 t.to,
                 t.open,
@@ -196,11 +400,11 @@ impl AppHost {
         };
         let host = self.clone();
         std::thread::spawn(move || {
-            let (task, from, to, open, custom, owner, socket) = work;
+            let (task, id, from, to, open, custom, owner, socket) = work;
             let play = || -> Result<(), String> {
                 let owner = owner.ok_or("activity animation Java owner unavailable")?;
                 let socket = socket.ok_or("activity animation display unavailable")?;
-                let (package, theme, user) = {
+                let (package, theme, user, activity_override) = {
                     let records = host.activities.records.lock().unwrap();
                     let r = records
                         .get(&if open { to } else { from })
@@ -214,16 +418,21 @@ impl AppHost {
                             app.theme
                         },
                         (r.uid / 100000) as i32,
+                        r.transition_overrides[usize::from(!open)].clone(),
                     )
                 };
                 let bounds = host.tasks.bounds(task).ok_or("animation task gone")?;
                 let style = host.activity_animation_style(if open { to } else { from });
                 let spec = Transition {
+                    id,
+                    observer: None,
                     from,
                     to,
                     open,
                     playing: true,
-                    custom,
+                    custom: custom.or(activity_override),
+                    options: None,
+                    notified: false,
                     deferred: Vec::new(),
                 };
                 let load = |entering| -> Result<Animation, String> {
@@ -250,13 +459,37 @@ impl AppHost {
                     Animation::new(samples).map_err(|e| e.to_string())
                 };
                 let (enter, exit) = (load(true)?, load(false)?);
+                {
+                    let playback = host.windows.transitions.lock().unwrap().playback.clone();
+                    let _guard = playback.lock().unwrap();
+                    let options = {
+                        let mut state = host.windows.transitions.lock().unwrap();
+                        let Some(t) = state.collecting.get_mut(&task).filter(|t| t.id == id) else {
+                            return Ok(());
+                        };
+                        t.notified = true;
+                        t.options.clone()
+                    };
+                    let mut spec = spec;
+                    spec.options = options;
+                    host.notify_transition(&spec, true);
+                }
                 let stream = animation::vsyncs(&socket).map_err(|e| e.to_string())?;
+                {
+                    let mut state = host.windows.transitions.lock().unwrap();
+                    let Some(t) = state.collecting.get_mut(&task).filter(|t| t.id == id) else {
+                        return Ok(());
+                    };
+                    t.observer = Some(stream.try_clone().map_err(|e| e.to_string())?);
+                }
                 let start = animation::next_vsync(&stream).map_err(|e| e.to_string())?;
                 let mut now = start;
                 loop {
                     let (a, more_a) = enter.at(now - start);
                     let (b, more_b) = exit.at(now - start);
-                    host.animate_activities(to, a, from, b)?;
+                    if !host.transition_frame(task, id, to, a, from, b)? {
+                        break;
+                    }
                     if !more_a && !more_b {
                         break;
                     }
@@ -264,25 +497,19 @@ impl AppHost {
                 }
                 Ok(())
             };
-            if let Err(e) = play() {
+            if let Err(e) = play()
+                && host
+                    .windows
+                    .transitions
+                    .lock()
+                    .unwrap()
+                    .collecting
+                    .get(&task)
+                    .is_some_and(|t| t.id == id)
+            {
                 eprintln!("app host: activity transition: {e}");
             }
-            let deferred = host
-                .windows
-                .transitions
-                .lock()
-                .unwrap()
-                .collecting
-                .remove(&task)
-                .map_or(Vec::new(), |t| t.deferred);
-            let mut final_exit = IDENTITY;
-            if !deferred.is_empty() {
-                final_exit[6] = 0.;
-            }
-            if let Err(e) = host.animate_activities(to, IDENTITY, from, final_exit) {
-                eprintln!("app host: transition finish: {e}");
-            }
-            host.run(deferred);
+            host.finish_transition(task, id);
         });
     }
 }
@@ -293,11 +520,15 @@ mod tests {
     #[test]
     fn open_close_and_pending_override_choose_both_animations() {
         let mut t = Transition {
+            id: 0,
+            observer: None,
             from: 1,
             to: 2,
             open: true,
             playing: false,
             custom: None,
+            options: None,
+            notified: false,
             deferred: Vec::new(),
         };
         assert_eq!((t.animation(true), t.animation(false)), ((0, -1), (1, -1)));
@@ -416,3 +647,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "activity_transition_tests.rs"]
+mod playback_tests;
