@@ -142,9 +142,11 @@ pub struct BootOptions {
     pub androidboot: Vec<(String, String)>,
     /// Run mode: stop everything after this long.
     pub timeout: Option<Duration>,
-    /// Run mode with `--only` or `--exclude`: a `wait_for_prop` or `exec`
-    /// nobody selected can satisfy is simulated after this long.
-    pub simulate_after: Duration,
+    /// Run mode: a `wait_for_prop` or `exec` still blocked after this long
+    /// is simulated. Init waits until the property is set or the exec
+    /// exits, so only a partial boot whose selection leaves out a wait's
+    /// owner on purpose (an integration test) sets it.
+    pub simulate_after: Option<Duration>,
     /// Run mode: the data templates (`userdata` build node) a new data
     /// directory starts from (`aim_storage::data::template`).
     pub userdata: Option<PathBuf>,
@@ -178,7 +180,7 @@ impl BootOptions {
             // fstab.aim (image/overlay.toml).
             androidboot: vec![("hardware".to_string(), "aim".to_string())],
             timeout: None,
-            simulate_after: Duration::from_secs(2),
+            simulate_after: None,
             userdata: None,
         }
     }
@@ -1403,8 +1405,8 @@ impl Boot {
         });
     }
 
-    /// Satisfies a wait nobody will: in a dry run always, in a run with
-    /// `--only` after `simulate_after`.
+    /// Satisfies a wait nobody will: in a dry run always, in a run after
+    /// `simulate_after`.
     fn simulate_property(&mut self, name: &str, value: &str) {
         let _ = self.executor.set_property(name, value);
         self.report.simulated.push(format!("{name}={value}"));
@@ -1536,10 +1538,9 @@ impl Boot {
             };
             // Run mode: sleep until an event, a restart, or the simulate
             // grace period.
-            if let Some((kind, name, value)) = &wait {
+            if let (Some((kind, name, value)), Some(after)) = (&wait, self.options.simulate_after) {
                 let since = *blocked_since.get_or_insert_with(Instant::now);
-                let selected = self.options.only.is_some() || !self.options.exclude.is_empty();
-                if selected && since.elapsed() >= self.options.simulate_after {
+                if since.elapsed() >= after {
                     blocked_since = None;
                     if *kind == "property" {
                         self.report.log.push(format!(
