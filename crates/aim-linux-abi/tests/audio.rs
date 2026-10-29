@@ -242,6 +242,8 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
         std::thread::spawn(move || {
             let mut options = BootOptions::new(image, data, RunMode::Run);
             options.only = Some(SERVICES.iter().map(|s| s.to_string()).collect());
+            // Init's waits for the daemons left out (apexd, odsign, ...).
+            options.simulate_after = Some(std::time::Duration::from_secs(2));
             options.linux_run = Some(env!("CARGO_BIN_EXE_linux-run").into());
             options.timeout = Some(Duration::from_secs(90));
             let mut boot = Boot::prepare(options).expect("guest-init");
