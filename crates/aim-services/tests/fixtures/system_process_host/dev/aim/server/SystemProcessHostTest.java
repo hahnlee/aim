@@ -22,8 +22,8 @@ public final class SystemProcessHostTest {
         } catch (Attached expected) {
             List<String> wanted = new ArrayList<>(List.of("jni", "context", "modules", "memory",
                     "systemApplication", "network", "roles", "installer", "installer:start", "packageLocals",
-                    "packageShutdown", "packageJava", "staging", "domain", "attachDomain", "foreground",
-                    "attachSystem", "companion", "crates", "activityStats", "taskManagerLocal",
+                    "packageShutdown", "packageJava", "staging", "domain", "attachDomain", "graphicsstats:construct", "graphicsstats:publish",
+                    "foreground", "attachSystem", "companion", "crates", "activityStats", "taskManagerLocal",
                     "PinnerService:construct", "PinnerService:start", "NetworkStatsInitializer:construct",
                     "NetworkStatsInitializer:start", "NearbyServiceInitializer:construct",
                     "NearbyServiceInitializer:start", "StatsPullAtomService:construct",
