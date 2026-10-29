@@ -8267,7 +8267,9 @@ the tombstone to `/data/tombstones/tombstone_NN` (an `O_TMPFILE` it names with
   `vendorBootstrap` APEXes), a lazy `aidl/apexservice` start no longer
   resets `apexd.status`, and `perform_apex_config --bootstrap` loads the
   scripts of `vendorBootstrap` APEXes (the gatekeeper HAL, class
-  `early_hal`).
+  `early_hal`). Its info-list writer includes `lastUpdateMillis`, which
+  apexd fills with the APEX file's `st_mtime` in seconds despite the name;
+  odrefresh asserts it for the ART APEX (#2418).
 - guest-init resolves symlinks in the image relative to the guest root, as
   a GSI's `/system_ext -> /system/system_ext` needs.
 - guest-init's shutdown stops services without running `onrestart`.
