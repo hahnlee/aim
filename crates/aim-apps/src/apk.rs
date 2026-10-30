@@ -14,8 +14,39 @@ use crate::table::{Config, Entry, Table};
 /// table is tens of megabytes).
 const MAX_ENTRY: u64 = 512 << 20;
 
-pub struct Apk {
+/// APK file access without decoding resources for a particular consumer.
+pub struct Files {
     source: Box<dyn ReadAt + Send + Sync>,
+}
+
+impl Files {
+    pub fn open(path: &Path) -> Result<Self> {
+        let source =
+            Box::new(FileSource::open(path).map_err(|e| bad(format!("{}: {e}", path.display())))?);
+        Ok(Self { source })
+    }
+
+    /// The file `name` of the archive.
+    pub fn file(&self, name: &str) -> Result<Vec<u8>> {
+        self.file_if_present(name)?
+            .ok_or_else(|| bad(format!("no {name}")))
+    }
+
+    /// Absence is distinct from decompression, size or CRC failure.
+    pub fn file_if_present(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let archive = Archive::open(self.source.as_ref()).map_err(|e| bad(e.to_string()))?;
+        let Some(entry) = archive.find(name.as_bytes()) else {
+            return Ok(None);
+        };
+        archive
+            .read(entry, MAX_ENTRY)
+            .map(Some)
+            .map_err(|e| bad(e.to_string()))
+    }
+}
+
+pub struct Apk {
+    files: Files,
     table: Option<Table>,
 }
 
@@ -28,34 +59,21 @@ impl Apk {
 
     /// An already-open APK, including a descriptor transferred over Binder.
     pub fn from_source(source: Box<dyn ReadAt + Send + Sync>) -> Result<Apk> {
-        let mut apk = Apk {
-            source,
-            table: None,
-        };
-        apk.table = apk
+        let files = Files { source };
+        let table = files
             .file_if_present("resources.arsc")?
             .map(|bytes| Table::parse(&bytes))
             .transpose()?;
-        Ok(apk)
+        Ok(Apk { files, table })
     }
 
-    /// The file `name` of the archive.
     pub fn file(&self, name: &str) -> Result<Vec<u8>> {
-        self.file_if_present(name)?
-            .ok_or_else(|| bad(format!("no {name}")))
+        self.files.file(name)
     }
 
-    /// Absence is distinct from a present entry failing decompression, size
-    /// bounds or CRC validation. Code-only APKs may omit resources.arsc.
+    /// Code-only APKs may omit resources.arsc; invalid entries fail.
     pub fn file_if_present(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        let archive = Archive::open(self.source.as_ref()).map_err(|e| bad(e.to_string()))?;
-        let Some(entry) = archive.find(name.as_bytes()) else {
-            return Ok(None);
-        };
-        archive
-            .read(entry, MAX_ENTRY)
-            .map(Some)
-            .map_err(|e| bad(e.to_string()))
+        self.files.file_if_present(name)
     }
 
     pub fn manifest(&self) -> Result<Element> {
@@ -170,5 +188,42 @@ impl<'a> Resources<'a> {
             Value::String(s) => Some(s),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_access_leaves_resource_decoding_to_its_consumer() {
+        let bytes = include_bytes!("fixtures/files.zip").to_vec();
+        let files = Files {
+            source: Box::new(bytes.clone()),
+        };
+        assert_eq!(files.file("asset").unwrap(), b"asset bytes");
+        assert_eq!(
+            files.file("resources.arsc").unwrap(),
+            b"not a resource table"
+        );
+        assert!(files.file_if_present("absent").unwrap().is_none());
+        assert!(files.file("absent").is_err());
+        // Consumers asking for this reader's resource model still reject it.
+        assert!(Apk::from_source(Box::new(bytes)).is_err());
+    }
+
+    #[test]
+    fn file_access_preserves_archive_and_crc_errors() {
+        let mut bytes = include_bytes!("fixtures/files.zip").to_vec();
+        let central = bytes.windows(4).position(|b| b == b"PK\x01\x02").unwrap();
+        bytes[central + 16] ^= 1;
+        let files = Files {
+            source: Box::new(bytes),
+        };
+        assert!(files.file_if_present("resources.arsc").is_err());
+        let files = Files {
+            source: Box::new(vec![0u8; 32]),
+        };
+        assert!(files.file_if_present("absent").is_err());
     }
 }

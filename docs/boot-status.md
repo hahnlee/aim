@@ -135,6 +135,12 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The window theme of a launching activity is read through file-only APK access
+(`aim_apps::apk::Files`), so the package owner parses `resources.arsc` once
+instead of aim-apps decoding it first and discarding it: Settings'
+`finishAttachApplication` drops from about 0.75 s to 0.49 s on a warm boot. The
+remaining full-table parse (about 0.43 s for Settings) is #2441.
+
 The app host watches each started process for exit (NOTE_EXIT) until it
 attaches, since there is no ApplicationThread Binder death before then
 (#2433): a process killed before attaching retires its start at once, and a
