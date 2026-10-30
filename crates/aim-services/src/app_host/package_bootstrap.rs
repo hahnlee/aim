@@ -1041,22 +1041,26 @@ impl Service for PackageBootstrap {
                         "invalid installer context path",
                     )),
                     // `SELinux.restorecon`, by the agent.
-                    Some(path) => host
-                        .call_agent(RESTORECON, "restorecon", |p| p.write_string16(Some(&path)))
-                        .and_then(|reply| {
-                            let mut r = reply.reader();
-                            r.read_exception()
-                                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("{s}")))??;
-                            r.read_i32()
-                                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("{s}")))
-                        })
-                        .and_then(|restored| match restored {
-                            0 => Err(Exception::new(
-                                EX_ILLEGAL_STATE,
-                                format!("installer restorecon failed: {path}"),
-                            )),
-                            _ => Ok(bridge::write_restore_installer_context_reply(&mut p)),
-                        }),
+                    Some(path) => super::package_boot::wait_for("restorecon agent", || {
+                        Ok(host.agent.lock().unwrap().is_some())
+                    })
+                    .and_then(|()| {
+                        host.call_agent(RESTORECON, "restorecon", |p| p.write_string16(Some(&path)))
+                    })
+                    .and_then(|reply| {
+                        let mut r = reply.reader();
+                        r.read_exception()
+                            .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("{s}")))??;
+                        r.read_i32()
+                            .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("{s}")))
+                    })
+                    .and_then(|restored| match restored {
+                        0 => Err(Exception::new(
+                            EX_ILLEGAL_STATE,
+                            format!("installer restorecon failed: {path}"),
+                        )),
+                        _ => Ok(bridge::write_restore_installer_context_reply(&mut p)),
+                    }),
                 }
             }
             // `PlatformCompat.isChangeEnabledInternal`.
@@ -1566,6 +1570,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn installer_label_waits_for_the_agent_and_preserves_its_result() {
+        struct Agent(i32);
+        impl Service for Agent {
+            fn descriptor(&self) -> &str {
+                super::super::AGENT_DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                assert_eq!(call.code, RESTORECON);
+                call.data.enforce_interface(self.descriptor())?;
+                assert_eq!(
+                    call.data.read_string16()?.as_deref(),
+                    Some("/data/app/vmdl1.tmp")
+                );
+                assert_eq!(call.data.remaining(), 0);
+                if self.0 < 0 {
+                    return reply(Err(Exception::security("restorecon denied")));
+                }
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                p.write_i32(self.0);
+                Ok(p)
+            }
+        }
+        for result in [-1, 0, 1] {
+            crate::system::with_discovery_binders(|host, _, _, export| {
+                let agent = export(Arc::new(Agent(result)));
+                let leaf = PackageBootstrap::new(host.clone());
+                let (sent, received) = std::sync::mpsc::channel();
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        let mut p = Parcel::new();
+                        bridge::RestoreInstallerContext {
+                            path: Some("/data/app/vmdl1.tmp".into()),
+                        }
+                        .write(&mut p);
+                        let response = leaf
+                            .transact(&mut Call {
+                                code: bridge::RESTORE_INSTALLER_CONTEXT,
+                                flags: 0,
+                                sender_pid: 42,
+                                sender_euid: SYSTEM_UID as u32,
+                                data: p.reader(),
+                            })
+                            .unwrap();
+                        sent.send(
+                            bridge::read_restore_installer_context_reply(&mut response.reader())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    });
+                    let pending = received.recv_timeout(std::time::Duration::from_millis(50));
+                    *host.agent.lock().unwrap() = Some(agent);
+                    let reply = received
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    assert_eq!(pending, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+                    match result {
+                        -1 => assert_eq!(reply, Err(Exception::security("restorecon denied"))),
+                        0 => assert_eq!(
+                            reply.unwrap_err().message,
+                            "installer restorecon failed: /data/app/vmdl1.tmp"
+                        ),
+                        _ => assert_eq!(reply, Ok(())),
+                    }
+                });
+            });
+        }
+    }
+
     /// The native boot's own bridge (`Bridge`) attached to this one as the
     /// process's node: its handshake and decisions, the users, a parsed
     /// package's decisions, the leaves, and a call not yet served.
@@ -1698,12 +1773,8 @@ mod tests {
             .restore_installer_context("/data/app/../system")
             .unwrap_err();
         assert!(format!("{error:?}").contains("invalid installer context path"));
-        // No agent has attached: the label cannot be restored.
-        assert!(
-            bridge
-                .restore_installer_context("/data/app/vmdl1.tmp")
-                .is_err()
-        );
+        // Ordinary agent calls still fail if no agent has attached.
+        assert!(host.call_agent(RESTORECON, "restorecon", |_| {}).is_err());
         let gids = |uid: i32| {
             let mut p = Parcel::new();
             bridge::GetPermissionGidsForUid { uid }.write(&mut p);

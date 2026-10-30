@@ -534,6 +534,12 @@ this adds vendor bridge classes only, with no replacement of original classes.
   chosen calls; the original's `bindApplication` to Calculator fixes the
   configuration, compatibility info, core settings and compat changes the
   app host's tests check.
+- **Initial display metrics (#2431).** The app host's resource configuration
+  takes size from the display server's independent observer hello (the composer's
+  `Connect` record) and density from `ro.sf.lcd_density`, without waiting for
+  SurfaceFlinger. Full display information still comes from SurfaceFlinger;
+  its first query must match those metrics, including its install-orientation
+  transformation, or fail with both values. No default display is synthesized.
 - **Window mode (2026-10-17).** The app host is the display server's task
   bridge itself, in `aim-windows`' place: a task opens at freeform's
   default bounds (`TaskLaunchParamsModifier`), its layer is a container

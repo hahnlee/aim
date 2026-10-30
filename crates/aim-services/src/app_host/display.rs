@@ -1,8 +1,8 @@
 //! The default display as SurfaceFlinger reports it
 //! (`android.gui.ISurfaceComposer` at `android-16.0.0_r1`, its C++ AIDL
 //! backend's wire form): its modes, density, color and HDR capabilities,
-//! which DisplayManager and WindowManager build their display info and
-//! configuration from.
+//! which DisplayManager and WindowManager build their display info from.
+//! Initial resource metrics come directly from the display owner.
 
 use aim_binder_host::local::{LocalProcess, Received, Strong};
 use aim_binder_host::parcel::{Binder, Parcel, Reader, Result as ParcelResult};
@@ -60,6 +60,50 @@ pub struct Display {
     pub x_dpi: f32,
     pub y_dpi: f32,
     pub refresh_rate: f32,
+}
+
+/// Initial resource metrics, owned by the display server and density property.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Metrics {
+    pub width: i32,
+    pub height: i32,
+    pub density_dpi: i32,
+}
+
+impl Metrics {
+    pub fn project(info: &aim_hostcall::display::Connect, density: &str) -> Result<Self, String> {
+        let positive = |v: u32| i32::try_from(v).ok().filter(|v| *v > 0);
+        Ok(Self {
+            width: positive(info.width).ok_or("invalid display server width")?,
+            height: positive(info.height).ok_or("invalid display server height")?,
+            density_dpi: density
+                .parse::<i32>()
+                .ok()
+                .filter(|v| *v > 0)
+                .ok_or("invalid ro.sf.lcd_density")?,
+        })
+    }
+
+    pub fn of(display: &Display) -> Self {
+        Self {
+            width: display.width,
+            height: display.height,
+            density_dpi: display.density_dpi(),
+        }
+    }
+
+    pub fn check(self, display: &Display) -> Result<(), String> {
+        // SF has already applied install orientation to its reported mode.
+        // AIM's composer reports Transform::NONE (android-16.0.0_r1).
+        let sf = Self::of(display);
+        if self != sf {
+            return Err(format!(
+                "display metrics mismatch: display server {self:?}, SurfaceFlinger {sf:?} (install orientation {})",
+                display.install_orientation
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Display {
@@ -375,6 +419,34 @@ pub(super) fn parcelable<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_metrics_match_surfaceflinger_and_reject_disagreement() {
+        let mut display = Display::phone_for_test();
+        let info = aim_hostcall::display::Connect {
+            width: 1080,
+            height: 1920,
+            ..Default::default()
+        };
+        let metrics = Metrics::project(&info, "320").unwrap();
+        assert_eq!(metrics, Metrics::of(&display));
+        metrics.check(&display).unwrap();
+        display.width = 1920;
+        display.height = 1080;
+        display.install_orientation = 1;
+        let error = metrics.check(&display).unwrap_err();
+        assert!(
+            error
+                .contains("display server Metrics { width: 1080, height: 1920, density_dpi: 320 }")
+        );
+        assert!(
+            error
+                .contains("SurfaceFlinger Metrics { width: 1920, height: 1080, density_dpi: 320 }")
+        );
+        assert!(Metrics::project(&info, "").is_err());
+        assert!(Metrics::project(&info, "0").is_err());
+        assert!(Metrics::project(&aim_hostcall::display::Connect::default(), "320").is_err());
+    }
 
     #[test]
     fn structured_parcelables_skip_newer_fields() {

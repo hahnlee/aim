@@ -569,6 +569,8 @@ pub struct AppHost {
     unlocked_users: Mutex<std::collections::BTreeMap<i32, i64>>,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
+    display_socket: OnceLock<PathBuf>,
+    display_metrics: OnceLock<Result<display::Metrics, Exception>>,
     /// The settings provider, its binder and its connection token.
     settings_provider: OnceLock<(Arc<settings_provider::SettingsProvider>, Binder, Binder)>,
     windows: window_manager::Windows,
@@ -704,6 +706,8 @@ impl AppHost {
             unlocked_users: Mutex::new(Default::default()),
             activities: Default::default(),
             display: OnceLock::new(),
+            display_socket: OnceLock::new(),
+            display_metrics: OnceLock::new(),
             settings_provider: OnceLock::new(),
             windows: Default::default(),
             composer: OnceLock::new(),
@@ -1250,6 +1254,13 @@ impl AppHost {
             .ok_or_else(|| state("app host not configured".into()))?;
         if let Some(platform) = self.platform.get() {
             return Ok(platform);
+        }
+        // The vendor post-fs-data action applies the Mac's locale after
+        // persistent property loading, including on fresh data.
+        if let Some(locale) = self.property("vendor.aim.mac.locale") {
+            package_boot::wait_for("initial locale", || {
+                Ok(self.property("persist.sys.locale").as_deref() == Some(locale.as_str()))
+            })?;
         }
         let _loading = self.loading.lock().unwrap();
         if let Some(platform) = self.platform.get() {
@@ -3272,6 +3283,24 @@ impl AppHost {
         Ok(())
     }
 
+    fn display_metrics(&self) -> Result<display::Metrics, Exception> {
+        self.display_metrics
+            .get_or_init(|| {
+                let state = |e| Exception::new(EX_ILLEGAL_STATE, e);
+                let socket = self
+                    .display_socket
+                    .get()
+                    .ok_or_else(|| state("no display server socket".to_string()))?;
+                let info = aim_host_display::display_info(socket)
+                    .map_err(|e| state(format!("display server: {e}")))?;
+                let density = self
+                    .property(aim_host_display::density::PROP)
+                    .ok_or_else(|| state("no ro.sf.lcd_density".to_string()))?;
+                display::Metrics::project(&info, &density).map_err(state)
+            })
+            .clone()
+    }
+
     /// The default display, from SurfaceFlinger, and the framework's
     /// resources describing it, read once.
     fn display(&self) -> Result<Arc<(display::Display, display_service::Resources)>, Exception> {
@@ -3280,6 +3309,7 @@ impl AppHost {
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let display = display::Display::query(&self.process).map_err(state)?;
+        self.display_metrics()?.check(&display).map_err(state)?;
         let packages = self.framework()?;
         let integer = |name: &str| {
             packages
@@ -4046,9 +4076,9 @@ impl AppHost {
     /// sequence number.
     fn global_configuration(&self) -> Result<config::Configuration, Exception> {
         let inputs = self.platform()?;
-        let display = self.display()?.0.clone();
-        Ok(config::Configuration::of(
-            &display,
+        let metrics = self.display_metrics()?;
+        Ok(config::Configuration::of_metrics(
+            &metrics,
             &config::Device {
                 locales: &inputs.locales,
                 right_to_left: false,
@@ -5594,9 +5624,8 @@ impl Service for Control {
             };
             *self.0.agent.lock().unwrap() = Some(self.0.process.strong(agent));
             eprintln!("app host: agent attached (pid {})", call.sender_pid);
-            // The guest's properties are set by now: what starts read is
-            // loaded while the boot goes on, as PackageManager scans at its
-            // start, and not by the first start.
+            // Join the package boot started from configured native inputs
+            // before initializing the user and admitting app starts.
             let host = self.0.clone();
             std::thread::spawn(move || {
                 let _ready = boot_ready::BootReady(&host);

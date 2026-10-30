@@ -66,11 +66,11 @@ impl BootConfiguration {
     /// `captureResources`.
     fn resources(&self) -> Result<Vec<u8>, Exception> {
         let configuration = self.host.global_configuration()?;
-        let display = self.host.display()?;
+        let metrics = self.host.display_metrics()?;
         let property = |name: &str| self.host.property(name).unwrap_or_default();
         resources(
             &configuration,
-            (display.0.width, display.0.height),
+            (metrics.width, metrics.height),
             resources_sdk(
                 &property("ro.build.version.sdk"),
                 &property("ro.build.version.codename"),
@@ -114,6 +114,9 @@ impl BootConfiguration {
     fn creation_inode(&self, path: Option<&str>) -> Result<Vec<u8>, Exception> {
         let path = path.unwrap_or_default();
         let (mode, parent) = creation(path)?;
+        super::package_boot::wait_for("user-0 DE storage", || {
+            Ok(self.host.property("vendor.aim.user0.de_ready").as_deref() == Some("true"))
+        })?;
         let host = super::resources::host_path(self.host.root()?, self.host.data()?, parent)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         if !host.is_dir() {
@@ -487,19 +490,10 @@ mod tests {
         );
         let display = super::super::display::Display::phone_for_test();
         let density = display.density_dpi();
-        assert!(
-            host.display
-                .set(Arc::new((
-                    display,
-                    super::super::display_service::Resources {
-                        name: "Built-in Screen".into(),
-                        density_dpi: density,
-                        brightness: (1, 255, 128),
-                        brightness_dim: 0.05,
-                    },
-                )))
-                .is_ok()
-        );
+        host.display_metrics
+            .set(Ok(super::super::display::Metrics::of(&display)))
+            .unwrap();
+        assert!(host.display.get().is_none());
         assert!(host.package_boot.runtime.get().is_none());
         let missing = host
             .package_system()

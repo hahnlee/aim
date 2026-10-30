@@ -346,7 +346,22 @@ host knows it; registering every pending start before the zygote start is
 Package boot now shares immutable image inputs across scanning, initial projection
 and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s
-against 6.978 s before (2026-10-30). The media services (mediaserver, mediaextractor,
+against 6.978 s before (2026-10-30). Package boot now starts from configured
+inputs (#2431): initial resource size comes from the display server's observer
+hello and density from `ro.sf.lcd_density`; the first full SurfaceFlinger query
+must agree. Persistent properties, the applied initial locale, APEX, user-0 DE
+readiness (published by vold after `initUser0`), restorecon and installd stay
+waits at their consumers. Three matched warm second boots reach median runtime
+publication at 3.720 s (4.516 before), `boot_completed` at 4.378 s (5.171), and
+app admission at 4.731 s (5.524). Fresh data reaches boot completion at 7.602 s
+(8.623 before); Settings is process-cold in all eight compared boots. Its warm
+median first presented frame is 1.094 s after open (1.128 before), without an
+established launch improvement. Raw capture now waits for user-0 DE storage
+about 0.2 s on warm data; fresh data also waits for init to apply the locale.
+Full modes, HDR/color/refresh and DisplayManager information still query
+SurfaceFlinger. Host lib suites (2,105 services and 45 display checks), 15 host
+integration checks and the matched boots pass; three M4 checks remain not run
+because their cohort input is absent (2026-10-30). The media services (mediaserver, mediaextractor,
 mediametrics, media.swcodec) start too: Codec2's software decoders take
 their buffers from `/dev/dma_heap/system`, which the syscall layer serves. The health HAL
 (`vendor.health-aim`) starts for the app host's battery service, which
@@ -547,7 +562,7 @@ app host image (2026-10-26) the native package boot ran its scans,
 construction and publication, the system process attached once after it, and
 the guest reached BOOT_COMPLETED. Faster startup exposed aim-system querying
 packages before that publication (#2392): init starts it independently of the
-agent-triggered native package boot. The public package Binder fronts now wait
+native package boot. The public package Binder fronts now wait
 for the same package-boot result as host consumers before dispatch, covering
 the ApplicationInfo query that precedes attachSystemProcess. Host regressions
 with delayed publication check one successful attach and no query exception;

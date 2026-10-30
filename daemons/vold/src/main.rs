@@ -31,6 +31,13 @@ use android_os_vold::aidl::android::os::{
 use binder::{BinderFeatures, ExceptionCode, Interface, PersistableBundle, Status, Strong};
 
 const SERVICE: &str = "vold";
+/// Set once `initUser0` has prepared user 0's DE storage and its views on
+/// this boot: the app host's package boot waits for it.
+const USER0_DE_READY: &std::ffi::CStr = c"vendor.aim.user0.de_ready";
+
+unsafe extern "C" {
+    fn __system_property_set(name: *const libc::c_char, value: *const libc::c_char) -> i32;
+}
 
 #[derive(Default)]
 struct State {
@@ -550,6 +557,13 @@ impl IVold::IVold for Vold {
     fn initUser0(&self) -> binder::Result<()> {
         let dirs = storage::init_user0().map_err(|e| io_error("initUser0", e))?;
         fuse::prepare_user_views(0).map_err(|error| io_error("initUser0 storage views", error))?;
+        // SAFETY: NUL-terminated strings.
+        if unsafe { __system_property_set(USER0_DE_READY.as_ptr(), c"true".as_ptr()) } != 0 {
+            return Err(io_error(
+                "initUser0 readiness",
+                std::io::Error::other("property write failed"),
+            ));
+        }
         log::info!("initialized user 0: {} directories", dirs.len());
         Ok(())
     }

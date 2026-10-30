@@ -10,6 +10,11 @@ fn host() -> Arc<AppHost> {
 fn system_process_start_waits_for_late_package_publication_and_attaches_once() {
     use aim_service_aidl::android_content_pm_ipackagemanager as pm;
     crate::system::with_late_package_boot(|host, publish| {
+        host.display_metrics
+            .set(Ok(
+                display::Metrics::of(&display::Display::phone_for_test()),
+            ))
+            .unwrap();
         assert!(
             host.display
                 .set(Arc::new((
