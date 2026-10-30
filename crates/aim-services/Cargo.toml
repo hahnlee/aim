@@ -40,7 +40,8 @@ p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 p521 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 rsa = { version = "0.9", default-features = false, features = ["std"] }
 sha1 = { version = "0.10", features = ["oid"] }
-sha2 = { workspace = true, features = ["oid"] }
+# sha2 0.10 gates its ARM64 hardware backend behind asm.
+sha2 = { workspace = true, features = ["oid", "asm"] }
 
 [dev-dependencies]
 aim-linux-abi = { path = "../aim-linux-abi" }

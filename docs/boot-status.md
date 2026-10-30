@@ -4695,6 +4695,9 @@ Original XML writers do not explicitly persist current flags: write preflight
 compares their persisted projection, while a separate original PackageSignatures
 reader compares actual restored flags and serialized public-key class/byte hashes
 for all 243 packages and 16 shared UIDs.
+Signature digests use the sha2 crate's ARM64 hardware backend (#2422): on a
+warm second boot the 42 APEX verifications take about 0.21 s instead of 0.34 s.
+
 Inputs::load/load_verified_code and the default Image/DataImage loaders still
 verify code afresh. Apks::collect_signing_details now implements the pinned
 certificate collection choice: matching saved code path/time, no forceCollect,

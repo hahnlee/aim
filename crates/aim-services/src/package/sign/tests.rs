@@ -221,3 +221,39 @@ fn verifies_v4_against_its_v3_signer() {
     let e = verify_bytes(&apk, Some(unprotected), SIGNING_BLOCK_V2, true).unwrap_err();
     assert!(e.message.contains("fs-verity"), "{e}");
 }
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn chunked_sha2_digests_preserve_section_and_megabyte_boundaries() {
+    let chunk = 1024 * 1024;
+    let signing_block_offset = 2 * chunk + 17;
+    let central_dir_offset = signing_block_offset + 64;
+    let eocd_offset = central_dir_offset + chunk + 9;
+    let data: Vec<u8> = (0..eocd_offset).map(|i| (i % 251) as u8).collect();
+    let info = block::SignatureInfo {
+        block: Vec::new(),
+        signing_block_offset: signing_block_offset as u64,
+        central_dir_offset: central_dir_offset as u64,
+        eocd_offset: eocd_offset as u64,
+        eocd: vec![0; 22],
+    };
+    // Independently computed with hashlib: six prefixed chunks, including
+    // the EOCD with its central-directory offset replaced by the block's.
+    let digests = block::chunked_digests(
+        &[CONTENT_DIGEST_CHUNKED_SHA256, CONTENT_DIGEST_CHUNKED_SHA512],
+        &data,
+        &info,
+    )
+    .unwrap();
+    assert_eq!(
+        hex(&digests[0]),
+        "59fa443d27a2c1be48d906244522a4cef48e5229f9e463d0f07616d60da6b23c"
+    );
+    assert_eq!(
+        hex(&digests[1]),
+        "0802c1c0c763e2da67b693f025da3845ad783ce8a96520fcb63b62a7fc62a06abbd28d5f50bd4ac0a5c6eebd3fcdec14e90dbeda460cef2978fd03280ee02b0e"
+    );
+}
