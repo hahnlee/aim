@@ -34,7 +34,7 @@ impl From<crate::package::parse::Error> for Failure {
         let (legacy_status, message) = match error {
             Error::Status(status, message) => (status, message),
             Error::OlderSdk(message) => (-12, message),
-            error => return Self::invalid(error.to_string()),
+            error => (-110, error.to_string()),
         };
         Self {
             legacy_status,
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn parse_status_and_message_survive_install_preparation() {
         use crate::package::parse::Error;
-        for status in [-101, -102, -106, -107, -108, -12, -14, -125] {
+        for status in [-100, -101, -102, -106, -107, -108, -12, -14, -125] {
             let failure = Failure::from(Error::Status(status, "manifest rejection".into()));
             assert_eq!(failure.legacy_status, status);
             assert_eq!(failure.message, "manifest rejection");

@@ -32,16 +32,7 @@ pub fn apk_lite(
     codenames: Vec<String>,
     property: impl Fn(&str) -> Option<String>,
 ) -> Result<ApkLite> {
-    if let Some(bytes) = apk
-        .file_if_present("resources.arsc")
-        .map_err(|_| super::Error::Parse(format!("Failed to parse {path}")))?
-    {
-        super::resources::Table::parse(&bytes)
-            .map_err(|_| super::Error::Parse(format!("Failed to parse {path}")))?;
-    }
-    let manifest = apk
-        .manifest()
-        .map_err(|_| super::Error::Parse(format!("Failed to parse {path}")))?;
+    let (manifest, _) = read_apk(apk, path)?;
     let properties = manifest
         .children
         .iter()
@@ -189,7 +180,7 @@ fn install_manifest(
             message,
         },
         error => InstallError {
-            legacy_status: -2,
+            legacy_status: -110,
             message: error.to_string(),
         },
     })?;
@@ -218,20 +209,22 @@ pub fn install_lite(
     path: &Path,
     environment: &Environment,
 ) -> std::result::Result<InstallLite, InstallError> {
-    let malformed = |error: String| InstallError {
-        legacy_status: -100,
-        message: error,
-    };
-    let apk = Apk::open(path).map_err(|error| malformed(error.to_string()))?;
-    if let Some(bytes) = apk
-        .file_if_present("resources.arsc")
-        .map_err(|error| malformed(error.to_string()))?
-    {
-        super::resources::Table::parse(&bytes).map_err(|error| malformed(error.to_string()))?;
-    }
-    let manifest = apk
-        .manifest()
-        .map_err(|error| malformed(error.to_string()))?;
+    let result = (|| {
+        let name = path.to_string_lossy();
+        let apk = open_apk(path, &name)?;
+        let (manifest, _) = read_apk(&apk, &name)?;
+        Ok(manifest)
+    })();
+    let manifest = result.map_err(|error| match error {
+        super::Error::Status(legacy_status, message) => InstallError {
+            legacy_status,
+            message,
+        },
+        error => InstallError {
+            legacy_status: -110,
+            message: error.to_string(),
+        },
+    })?;
     install_manifest(&manifest, environment)
 }
 /// Inherited base APKs contribute requirements, but only submitted bases provide types.
@@ -265,26 +258,32 @@ pub fn validate_install_splits(
     }
     Ok(())
 }
-pub fn package_name(path: &Path, environment: &Environment) -> Result<String> {
-    let apk = Apk::open(path).map_err(|error| super::Error::Parse(error.to_string()))?;
-    if let Some(bytes) = apk
+// ApkAssets loading throws IOException; opening/decoding the XML is the
+// separate UNEXPECTED_EXCEPTION boundary in parseApkLiteInner.
+pub(super) fn open_apk(host: &Path, path: &str) -> Result<Apk> {
+    Apk::open(host).map_err(|_| super::Error::Status(-100, format!("Failed to parse {path}")))
+}
+pub(super) fn read_apk(apk: &Apk, path: &str) -> Result<(Element, Option<super::Table>)> {
+    let table = apk
         .file_if_present("resources.arsc")
-        .map_err(|error| super::Error::Parse(error.to_string()))?
-    {
-        super::resources::Table::parse(&bytes)
-            .map_err(|error| super::Error::Parse(error.to_string()))?;
-    }
+        .and_then(|bytes| bytes.map(|bytes| super::Table::parse(&bytes)).transpose())
+        .map_err(|_| super::Error::Status(-100, format!("Failed to parse {path}")))?;
     let manifest = apk
         .manifest()
-        .map_err(|error| super::Error::Parse(error.to_string()))?;
-    package_name_manifest(&manifest, environment)
+        .map_err(|_| super::Error::Status(-102, format!("Failed to parse {path}")))?;
+    Ok((manifest, table))
+}
+pub fn package_name(path: &Path, environment: &Environment) -> Result<String> {
+    let name = path.to_string_lossy();
+    let apk = open_apk(path, &name)?;
+    let (manifest, _) = read_apk(&apk, &name)?;
+    package_name_manifest_at(&manifest, environment, &name)
 }
 pub fn split_name(path: &Path, environment: &Environment) -> Result<Option<String>> {
     package_name(path, environment)?;
-    let apk = Apk::open(path).map_err(|error| super::Error::Parse(error.to_string()))?;
-    let manifest = apk
-        .manifest()
-        .map_err(|error| super::Error::Parse(error.to_string()))?;
+    let name = path.to_string_lossy();
+    let apk = open_apk(path, &name)?;
+    let (manifest, _) = read_apk(&apk, &name)?;
     Ok(attr_value(&manifest, "", "split").filter(|name| !name.is_empty()))
 }
 fn package_name_manifest(manifest: &Element, environment: &Environment) -> Result<String> {

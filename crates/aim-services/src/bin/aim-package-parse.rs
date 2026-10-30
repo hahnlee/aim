@@ -287,9 +287,10 @@ fn run() -> Result<bool, String> {
         let result = match parse(host, guest, flags, &platform) {
             Err(e) => {
                 let c = match &e {
-                    Error::Parse(_) | Error::Status(..) => "(parse failed)".to_owned(),
+                    Error::Status(..) => "(parse failed)".to_owned(),
                     Error::OlderSdk(_) => "(older SDK)".to_owned(),
                     Error::Unsupported(s) => format!("(unsupported) {s}"),
+                    Error::KeySetCache(_) => "(key-set cache conversion)".to_owned(),
                 };
                 println!("{guest}: {e}");
                 clusters.entry(c).or_default().push(guest.clone());

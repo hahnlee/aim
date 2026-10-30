@@ -1,6 +1,6 @@
 //! ParsingPackageUtils.parseKeySets at android-16.0.0_r1.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use super::{Error, Result, malformed, package::Package, parcel::ArraySet};
+use super::{Error, KeySetCacheError, Result, malformed, package::Package, parcel::ArraySet};
 use crate::package::sign::{canonical_public_keys, deserialize_public_key, serialize_public_keys};
 use aim_apps::res::Element;
 use std::collections::{HashMap, HashSet};
@@ -43,9 +43,12 @@ pub(super) fn parse(
             .flatten()
             .map(deserialize_public_key)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::Parse)?;
+            .map_err(|e| Error::KeySetCache(KeySetCacheError(e)))?;
         public.extend(names.iter().map(|name| keys.public[name].clone()));
-        mapping.put(&name, serialize_public_keys(&public).map_err(Error::Parse)?);
+        mapping.put(
+            &name,
+            serialize_public_keys(&public).map_err(|e| Error::KeySetCache(KeySetCacheError(e)))?,
+        );
     }
     let mut upgrades = ArraySet::default();
     for name in keys.upgrades {

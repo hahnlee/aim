@@ -17,15 +17,17 @@ pub(super) struct Part {
 }
 
 pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
-    let files = if host.is_dir() {
-        std::fs::read_dir(host)
-            .map_err(|e| Error::Parse(e.to_string()))?
+    let is_cluster = host.is_dir();
+    let files = if is_cluster {
+        let entries = std::fs::read_dir(host)
+            .map_err(|_| Error::Status(-100, "No packages found in split".into()))?
             .map(|entry| {
                 entry
                     .map(|e| e.path())
-                    .map_err(|e| Error::Parse(e.to_string()))
+                    .map_err(|_| Error::Status(-100, "No packages found in split".into()))
             })
-            .collect::<Result<Vec<_>>>()?
+            .collect::<Result<Vec<_>>>()?;
+        entries
             .into_iter()
             .filter(|p| {
                 p.file_name()
@@ -40,27 +42,25 @@ pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
         vec![(host.to_owned(), path.to_owned())]
     };
     if files.is_empty() {
-        return fail("No packages found in split");
+        return fail_status(-100, "No packages found in split");
     }
     let mut parts = BTreeMap::new();
     let mut identity = None;
     for (host, path) in files {
-        let apk = Apk::open(&host).map_err(|e| Error::Parse(e.to_string()))?;
-        let manifest = apk.manifest().map_err(|e| Error::Parse(e.to_string()))?;
+        let apk = lite::open_apk(&host, &path)?;
+        let (manifest, table) = lite::read_apk(&apk, &path)?;
         let (package, split, version) = names(&manifest, &path)?;
-        if identity
-            .as_ref()
-            .is_some_and(|(name, v)| name != &package || *v != version)
-        {
-            return fail(format!("Inconsistent package or version in {path}"));
+        if let Some((name, v)) = &identity {
+            if name != &package {
+                let message = format!("Inconsistent package {package} in {path}; expected {name}");
+                return fail_status(-101, message);
+            }
+            if *v != version {
+                let message = format!("Inconsistent version {version} in {path}; expected {v}");
+                return fail_status(-101, message);
+            }
         }
         identity = Some((package, version));
-        let table = apk
-            .file_if_present("resources.arsc")
-            .map_err(|e| Error::Parse(e.to_string()))?
-            .map(|bytes| Table::parse(&bytes))
-            .transpose()
-            .map_err(|e| Error::Parse(e.to_string()))?;
         let revision = integer(&manifest, "revisionCode");
         let part = Part {
             path,
@@ -69,13 +69,24 @@ pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
             split: split.clone(),
             revision,
         };
-        if parts.insert(split, part).is_some() {
-            return fail("Split name defined more than once");
+        if !is_cluster {
+            return Ok(vec![part]);
+        }
+        if let Some(previous) = parts.insert(split.clone(), part) {
+            let name = split.as_deref().unwrap_or("null");
+            let current = &parts[&split].path;
+            let previous = previous.path;
+            return fail_status(
+                -101,
+                format!(
+                    "Split name {name} defined more than once; most recent was {current}, previous was {previous}"
+                ),
+            );
         }
     }
     let base = parts
         .remove(&None)
-        .ok_or_else(|| Error::Parse("Missing base APK".into()))?;
+        .ok_or_else(|| Error::Status(-101, format!("Missing base APK in {path}")))?;
     Ok(std::iter::once(base).chain(parts.into_values()).collect())
 }
 
@@ -89,8 +100,12 @@ pub(super) fn dependencies(parts: &[Part]) -> Result<Option<BTreeMap<i32, Vec<i3
                 .iter()
                 .find(|e| e.name == "uses-split")
                 .map(|e| {
-                    attr_value(e, ANDROID, "name")
-                        .ok_or_else(|| Error::Parse("<uses-split> requires android:name".into()))
+                    attr_value(e, ANDROID, "name").ok_or_else(|| {
+                        Error::Status(
+                            -108,
+                            "<uses-split> tag requires 'android:name' attribute".into(),
+                        )
+                    })
                 })
                 .transpose()
         })
@@ -98,17 +113,27 @@ pub(super) fn dependencies(parts: &[Part]) -> Result<Option<BTreeMap<i32, Vec<i3
     if parts.len() <= 1 || !attr_bool(&parts[0].manifest, ANDROID, "isolatedSplits", false) {
         return Ok(None);
     }
-    let find = |name: &str| {
+    let find = |i: usize, name: &str, relation: &str| {
+        let split = parts[i].split.as_deref().unwrap();
         parts
             .iter()
             .position(|p| p.split.as_deref() == Some(name))
-            .ok_or_else(|| Error::Parse(format!("Missing split '{name}'")))
+            .ok_or_else(|| {
+                Error::Status(
+                    -101,
+                    format!("Split '{split}' {relation} split '{name}', which is missing."),
+                )
+            })
     };
     let feature = |i: usize| attr_bool(&parts[i].manifest, ANDROID, "isFeatureSplit", false);
     let mut deps = BTreeMap::from([(0, vec![-1])]);
     for i in 1..parts.len() {
         if feature(i) {
-            let parent = uses[i].as_deref().map(find).transpose()?.unwrap_or(0);
+            let parent = uses[i]
+                .as_deref()
+                .map(|name| find(i, name, "requires"))
+                .transpose()?
+                .unwrap_or(0);
             deps.insert(i as i32, vec![parent as i32]);
         }
     }
@@ -116,9 +141,15 @@ pub(super) fn dependencies(parts: &[Part]) -> Result<Option<BTreeMap<i32, Vec<i3
         if !feature(i) {
             let parent = match attr_value(&parts[i].manifest, "", "configForSplit") {
                 Some(name) => {
-                    let target = find(&name)?;
+                    let target = find(i, &name, "targets")?;
                     if !feature(target) {
-                        return fail("Configuration split targets a non-feature split");
+                        let split = parts[i].split.as_deref().unwrap();
+                        return fail_status(
+                            -101,
+                            format!(
+                                "Split '{split}' declares itself as configuration split for a non-feature split '{name}'"
+                            ),
+                        );
                     }
                     target
                 }
@@ -132,7 +163,7 @@ pub(super) fn dependencies(parts: &[Part]) -> Result<Option<BTreeMap<i32, Vec<i3
         let mut next = start;
         while next != -1 {
             if !seen.insert(next) {
-                return fail("Cycle detected in split dependencies");
+                return fail_status(-101, "Cycle detected in split dependencies.");
             }
             next = deps.get(&next).map_or(-1, |values| values[0]);
         }

@@ -240,20 +240,12 @@ impl Image {
                 };
                 let parsed = match parsed {
                     Ok(parsed) => parsed,
-                    Err(
-                        parse::Error::Parse(reason)
-                        | parse::Error::Status(_, reason)
-                        | parse::Error::OlderSdk(reason),
-                    ) => {
+                    Err(parse::Error::Status(_, reason) | parse::Error::OlderSdk(reason)) => {
                         image.rejected.push(Rejected { location, reason });
                         continue;
                     }
-                    Err(parse::Error::Unsupported(reason)) => {
-                        return Err(fail(
-                            &location.path,
-                            "parse",
-                            format!("unsupported: {reason}"),
-                        ));
+                    Err(error @ (parse::Error::Unsupported(_) | parse::Error::KeySetCache(_))) => {
+                        return Err(fail(&location.path, "parse", error.to_string()));
                     }
                 };
                 let parsed = parsed.map_err(|e| {

@@ -93,10 +93,10 @@ impl ShellInstallPolicy {
         .map_err(|error| {
             use crate::package::parse::Error;
             let message = match error {
-                Error::Parse(message)
-                | Error::Status(_, message)
+                Error::Status(_, message)
                 | Error::OlderSdk(message)
                 | Error::Unsupported(message) => message,
+                error @ Error::KeySetCache(_) => error.to_string(),
             };
             parse_error(message)
         })?;
