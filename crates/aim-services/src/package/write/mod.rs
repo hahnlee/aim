@@ -174,7 +174,10 @@ impl Writes {
     /// Keeps `state`, observed now, as a pre-state of the writes taken
     /// from now on; `dropped`: the copies the shadow dropped so far.
     pub fn observe(&self, state: &Arc<State>, dropped: u64) {
-        let now = Instant::now();
+        self.observe_at(state, dropped, Instant::now());
+    }
+
+    fn observe_at(&self, state: &Arc<State>, dropped: u64, now: Instant) {
         let mut inner = self.inner.lock().unwrap();
         inner.dropped = inner.dropped.max(dropped);
         if inner
