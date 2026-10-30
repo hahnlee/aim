@@ -133,7 +133,26 @@ impl System {
         reason: i32,
         time: i64,
     ) -> Result<()> {
-        use crate::package::scan_snapshot::{Error, Store};
+        self.publish_package_usage_with(None, package_name, reason, time, || {})
+    }
+
+    pub(super) fn publish_package_usage_with(
+        &self,
+        public: Option<(&Arc<crate::package::bootstrap::Bridge>, i32)>,
+        package_name: Option<&str>,
+        reason: i32,
+        time: i64,
+        prepared: impl Fn(),
+    ) -> Result<()> {
+        use crate::package::{
+            apps_filter::{AppsFilter, Config},
+            query::Query,
+            scan_snapshot::{Error, Store},
+        };
+        // Public maintenance retains install admission, but shares the internal
+        // usage owner's exact query/canonical CAS and usage-only rebase below.
+        // Neither preparation nor a remote Binder call holds bootstrap.
+        let _install = public.map(|_| self.package_install_lock.lock().unwrap());
         loop {
             let (bridge, snapshots, capture, base) = {
                 let state = self.package_bootstrap.lock().unwrap();
@@ -141,6 +160,9 @@ impl System {
                     .current
                     .as_ref()
                     .ok_or_else(|| event_error("usage bootstrap unavailable"))?;
+                if public.is_some_and(|(bridge, _)| !Arc::ptr_eq(&current.bridge, bridge)) {
+                    return Err(event_error("Usage bootstrap replaced"));
+                }
                 let snapshots = current
                     .snapshots
                     .clone()
@@ -157,42 +179,74 @@ impl System {
                 )
             };
             self.check_package_bootstrap(&bridge)?;
-            let Some(name) = package_name.filter(|name| base.usage().times(name).is_some()) else {
-                return Ok(());
-            };
             let mut usage = base.usage().clone();
-            usage.notify(name, reason, time);
-            if usage == *base.usage() {
+            if let Some((_, uid)) = public {
+                let source = capture.state();
+                let filter = AppsFilter::new(
+                    source,
+                    &Config {
+                        force_system_packages_queryable: source
+                            .system
+                            .force_system_packages_queryable,
+                        force_queryable_packages: source.system.force_queryable_packages.clone(),
+                    },
+                )
+                .map_err(|error| event_error(format!("Usage visibility owner: {error:?}")))?;
+                crate::package::diagnostics::notify_package_use(
+                    &Query {
+                        state: source,
+                        filter: &filter,
+                        calling_uid: uid,
+                    },
+                    &mut usage,
+                    package_name,
+                    reason,
+                    time,
+                )?;
+            } else if let Some(name) = package_name {
+                usage.notify(name, reason, time);
+            }
+            let unchanged =
+                usage == *base.usage() && (public.is_none() || Arc::ptr_eq(capture.scan(), &base));
+            if unchanged && public.is_none() {
                 return Ok(());
             }
-            // AMS holds its own locks here. Prepare outside the coordinator and
-            // never wait for the install gate. If a user/install transition owns
+            // PMInternal callers may hold AMS locks: never wait for install
+            // admission. If a user/install transition owns
             // that gate, advance only the canonical usage owner. That transition
             // rebases this usage before publishing its already-resolved query.
-            let projection = match self.package_install_lock.try_lock() {
-                Ok(guard) => Some(guard),
-                Err(std::sync::TryLockError::WouldBlock) => None,
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    return Err(event_error("package install gate poisoned"));
+            let projection = if public.is_some() {
+                None
+            } else {
+                match self.package_install_lock.try_lock() {
+                    Ok(guard) => Some(guard),
+                    Err(std::sync::TryLockError::WouldBlock) => None,
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        return Err(event_error("package install gate poisoned"));
+                    }
                 }
             };
-            let projected = if projection.is_some() && Arc::ptr_eq(capture.scan(), &base) {
+            let projected = if !unchanged
+                && (public.is_some()
+                    || (projection.is_some() && Arc::ptr_eq(capture.scan(), &base)))
+            {
                 Some(
                     capture
-                        .prepare_usage_update(usage.clone())
+                        .prepare_usage_update_from(&base, usage.clone())
                         .map_err(event_error)?,
                 )
             } else {
                 None
             };
             let candidate =
-                if projected.is_some() {
+                if unchanged || projected.is_some() {
                     None
                 } else {
                     Some(Store::prepare_usage_store(&base, usage).map_err(|error| {
                         event_error(format!("usage canonical replica: {error:?}"))
                     })?)
                 };
+            prepared();
             let mut state = self.package_bootstrap.lock().unwrap();
             let current = state
                 .current
@@ -213,10 +267,16 @@ impl System {
             {
                 continue;
             }
-            let candidate = projected
+            let Some(candidate) = projected
                 .as_ref()
                 .map(|update| &update.store)
-                .unwrap_or_else(|| candidate.as_ref().unwrap());
+                .or(candidate.as_ref())
+            else {
+                if !Arc::ptr_eq(&snapshots.capture(), &base) {
+                    continue;
+                }
+                return Ok(());
+            };
             match snapshots.publish_validated_store_after(&base, candidate) {
                 Err(Error::Stale) => continue,
                 Err(error) => {

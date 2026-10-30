@@ -1915,7 +1915,18 @@ impl Capture {
         self: &Arc<Self>,
         usage: crate::package::owner::usage::Usage,
     ) -> Result<PackageUpdate, String> {
-        let store = super::Store::prepare_usage_store(&self.scan, usage)
+        self.prepare_usage_update_from(&self.scan, usage)
+    }
+
+    pub(crate) fn prepare_usage_update_from(
+        self: &Arc<Self>,
+        base: &Arc<super::Snapshot>,
+        usage: crate::package::owner::usage::Usage,
+    ) -> Result<PackageUpdate, String> {
+        if !Arc::ptr_eq(&self.scan, base) {
+            Self::validate_usage_rebase(&self.scan, base)?;
+        }
+        let store = super::Store::prepare_usage_store(base, usage)
             .map_err(|error| format!("usage query replica: {error:?}"))?;
         let version = store.capture().version();
         let mut context = (*self.context).clone();
@@ -1950,9 +1961,7 @@ impl Capture {
     ) -> Result<PackageUpdate, String> {
         let candidate = &self.scan;
         if candidate.version != base.version + 1
-            || !base.same_lineage(canonical)
             || !base.same_lineage(candidate)
-            || base.usage().names().ne(canonical.usage().names())
             || base.usage().names().ne(candidate.usage().names())
         {
             return Err(format!(
@@ -1960,14 +1969,7 @@ impl Capture {
                 base.version, canonical.version
             ));
         }
-        let mut advanced = base.owner().clone();
-        advanced.update_validated_replica_usage(base.usage(), canonical.usage())?;
-        if &advanced != canonical.owner() {
-            return Err(format!(
-                "canonical scan {} changed more than usage since publication base {}",
-                canonical.version, base.version
-            ));
-        }
+        Self::validate_usage_rebase(base, canonical)?;
         let mut usage = canonical.usage().clone();
         for name in base.usage().names() {
             let (before, after, latest) = (
@@ -2001,6 +2003,25 @@ impl Capture {
             resolver: Default::default(),
         });
         Ok(PackageUpdate { store, capture })
+    }
+    // Both exact usage preparation and a pending non-usage update may cross
+    // deferred canonical usage, but never a different scan owner or lineage.
+    fn validate_usage_rebase(
+        base: &Arc<super::Snapshot>,
+        canonical: &Arc<super::Snapshot>,
+    ) -> Result<(), String> {
+        if !base.same_lineage(canonical) || base.usage().names().ne(canonical.usage().names()) {
+            return Err("usage canonical lineage or inventory differs".into());
+        }
+        let mut advanced = base.owner().clone();
+        advanced.update_validated_replica_usage(base.usage(), canonical.usage())?;
+        if &advanced != canonical.owner() {
+            return Err(format!(
+                "canonical scan {} changed more than usage since publication base {}",
+                canonical.version, base.version
+            ));
+        }
+        Ok(())
     }
     pub fn with_launch_sender(
         self: &Arc<Self>,
