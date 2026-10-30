@@ -296,6 +296,15 @@ reports notify only the reporter's matching permissioned callbacks; reevaluation
 notifies all matching permissioned callbacks before its fresh report. There is no
 data-stall detector. Host Binder/JVM tests and pinned-image Java linkage are
 checked; no guest boot or live Settings check was run (2026-10-29).
+Cold app-host reads now serve `window.isKeyguardSecure` through the existing
+lock credential owner, display-content window contexts through the window-context
+registry, `power.isAmbientDisplayAvailable` from `config_dozeComponent`, internal
+ringer mode from the volume owner and immersive level from the HAL's absent
+spatializer. Mount cache-quota reads share StorageStatsService's quota map after
+its original identity/permission checks. Host checks cover denials, window/audio/
+ambient results, quota hints and owner errors; successful public quota and Mac
+lock reads remain unverified. No guest boot or app-open check was run for this slice.
+
 The audio owner serves product strategies through the original Java AudioProductStrategy and audioserver policy configuration, with MODIFY_AUDIO_ROUTING checks. Its device spatializer query checks MODIFY_DEFAULT_AUDIO_EFFECTS and rejects null devices; the HAL has no effects or supported spatialization modes, so availability is false. ContentService's sync-adapter type reads retain the original SyncAdaptersCache's package-scan metadata, UID ownership, persistence and package-change receivers, and filter packages for the Binder caller; cross-user reads require INTERACT_ACROSS_USERS_FULL (#1460). Focused native/JVM tests and pinned-image Java linkage pass; no guest boot was run (2026-10-29).
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
