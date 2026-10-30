@@ -411,31 +411,42 @@ mod tests {
                     "pty-owner-kernel-fixture",
                 ])
                 .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
+        // Drain both pipes while the child runs, so a full pipe cannot
+        // stall it and a failure reports what it printed.
+        let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut output = String::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_string(&mut output);
+                }
+                output
+            })
+        };
+        let stdout = drain(child.0.stdout.take().map(|p| Box::new(p) as _));
+        let stderr = drain(child.0.stderr.take().map(|p| Box::new(p) as _));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
+        let status = loop {
             if let Some(status) = child.0.try_wait().unwrap() {
-                assert!(status.success());
-                break;
+                break Some(status);
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "PTY kernel fixture timed out"
-            );
+            if std::time::Instant::now() >= deadline {
+                let _ = child.0.kill();
+                let _ = child.0.wait();
+                break None;
+            }
             std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        use std::io::Read;
-        let mut output = String::new();
-        child
-            .0
-            .stdout
-            .take()
-            .unwrap()
-            .read_to_string(&mut output)
-            .unwrap();
-        assert!(output.contains("1 passed"), "{output}");
+        };
+        let (stdout, stderr) = (stdout.join().unwrap(), stderr.join().unwrap());
+        let report = format!("{status:?}\n--- stdout\n{stdout}\n--- stderr\n{stderr}");
+        assert!(status.is_some(), "PTY kernel fixture timed out: {report}");
+        assert!(
+            status.unwrap().success() && stdout.contains("1 passed"),
+            "PTY kernel fixture failed: {report}"
+        );
         true
     }
     static NEXT_RUNTIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
