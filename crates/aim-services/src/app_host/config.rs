@@ -11,7 +11,9 @@
 use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::WriteParcelable;
 
+#[cfg(test)]
 use super::display::Display;
+use super::display::Metrics;
 use super::exit_info::fields;
 use crate::package::info::ApplicationInfo;
 
@@ -575,8 +577,15 @@ pub struct Device<'a> {
 
 impl Configuration {
     /// The global configuration on `display`.
+    #[cfg(test)]
     pub fn of(display: &Display, device: &Device<'_>) -> Configuration {
-        let dpi = display.density_dpi();
+        Self::of_metrics(&Metrics::of(display), device)
+    }
+
+    /// The global resource configuration needs only size and density.
+    pub fn of_metrics(display: &Metrics, device: &Device<'_>) -> Configuration {
+        let dpi = display.density_dpi;
+        let density = dpi as f32 / 160.0;
         let dp = |px: i32| px * 160 / dpi;
         let (width_dp, height_dp) = (dp(display.width), dp(display.height));
         let (short_dp, long_dp) = (width_dp.min(height_dp), width_dp.max(height_dp));
@@ -590,8 +599,7 @@ impl Configuration {
             long_dp,
             short_dp,
         );
-        let (compat_width, compat_height) =
-            compatible_size(display.width, display.height, display.density);
+        let (compat_width, compat_height) = compatible_size(display.width, display.height, density);
         let bounds = Rect {
             left: 0,
             top: 0,
@@ -627,10 +635,10 @@ impl Configuration {
             screen_height_dp: height_dp,
             smallest_screen_width_dp: short_dp,
             density_dpi: dpi,
-            compat_screen_width_dp: (compat_width as f32 / display.density) as i32,
-            compat_screen_height_dp: (compat_height as f32 / display.density) as i32,
-            compat_smallest_screen_width_dp: (compat_width.min(compat_height) as f32
-                / display.density) as i32,
+            compat_screen_width_dp: (compat_width as f32 / density) as i32,
+            compat_screen_height_dp: (compat_height as f32 / density) as i32,
+            compat_smallest_screen_width_dp: (compat_width.min(compat_height) as f32 / density)
+                as i32,
             window: WindowConfiguration {
                 bounds,
                 app_bounds: Some(bounds),
@@ -1138,6 +1146,46 @@ mod tests {
         let d = Configuration::generate_delta(&day, &night);
         assert_eq!(d.ui_mode, night.ui_mode & UI_MODE_NIGHT_MASK);
         assert_eq!(Configuration { ui_mode: 0, ..d }, unset());
+    }
+
+    #[test]
+    fn initial_metrics_preserve_device_and_window_configurations() {
+        let device = Device {
+            locales: "ko-KR,en-US",
+            right_to_left: false,
+            night: true,
+            font_scale: 1.2,
+            font_weight_adjustment: 100,
+            grammatical_gender: 3,
+            seq: 7,
+        };
+        for (width, height) in [(1080, 1920), (3840, 2160)] {
+            for density in [160, 320] {
+                let mut sf = Display::phone_for_test();
+                sf.width = width;
+                sf.height = height;
+                sf.density = density as f32 / 160.0;
+                let info = aim_hostcall::display::Connect {
+                    width: width as u32,
+                    height: height as u32,
+                    ..Default::default()
+                };
+                let metrics = Metrics::project(&info, &density.to_string()).unwrap();
+                let expected = Configuration::of(&sf, &device);
+                let actual = Configuration::of_metrics(&metrics, &device);
+                assert_eq!(actual, expected);
+                let bounds = Rect {
+                    left: 10,
+                    top: 20,
+                    right: 810,
+                    bottom: 620,
+                };
+                assert_eq!(
+                    actual.of_freeform_task(bounds),
+                    expected.of_freeform_task(bounds)
+                );
+            }
+        }
     }
 
     /// The original's configuration of a 1080x1920 display at 320 dpi

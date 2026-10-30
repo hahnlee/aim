@@ -218,6 +218,7 @@ impl AppHost {
     /// thread of its own; in window mode it keeps the connection and
     /// takes the server's requests.
     pub fn connect_display(self: &Arc<Self>, socket: &Path) {
+        let _ = self.display_socket.set(socket.to_path_buf());
         self.windows.transitions.lock().unwrap().socket = Some(socket.to_path_buf());
         let host = self.clone();
         let socket = socket.to_path_buf();
@@ -704,6 +705,11 @@ mod tests {
         let host = AppHost::new(ready.process.clone());
         let data = ready.data().unwrap();
         super::super::configure_test_host(&host, data, data, data, Box::new(|_| None));
+        host.display_metrics
+            .set(Ok(super::super::display::Metrics::of(
+                &super::super::display::Display::phone_for_test(),
+            )))
+            .unwrap();
         host.display
             .set(Arc::new((
                 super::super::display::Display::phone_for_test(),

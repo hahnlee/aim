@@ -188,6 +188,24 @@ fn open<T: Copy + Default>(hello: &Request) -> Result<(NativeStream, T), i64> {
     }
 }
 
+/// The composer's mode through an independent native observer connection.
+/// No guest descriptor is published and no composer state is reset.
+pub fn display_info(socket: &Path) -> std::io::Result<Connect> {
+    let stream = std::os::unix::net::UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+    wire::send(
+        stream.as_fd(),
+        wire::bytes(&Request {
+            op: wire::OP_VSYNC_OBSERVER,
+            id: wire::VERSION,
+            ..Default::default()
+        }),
+        None,
+    )?;
+    wire::recv_record(stream.as_fd())?.ok_or_else(|| std::io::ErrorKind::UnexpectedEof.into())
+}
+
 /// A guest fd for our end of `stream`; we keep the original.
 fn give_to_guest(stream: &NativeStream) -> Result<i64, i64> {
     let hooks = HOOKS.get().ok_or(neg(errno::ENODEV))?;

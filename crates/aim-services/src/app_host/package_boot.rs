@@ -55,6 +55,23 @@ pub(super) fn prepare<T>(
         .clone()
 }
 
+pub(super) fn wait_for(
+    name: &str,
+    ready: impl Fn() -> Result<bool, Exception>,
+) -> Result<(), Exception> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !ready()? {
+        if std::time::Instant::now() >= deadline {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("{name} did not become ready"),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 /// A call to the session, which is this process's node.
 fn call<T>(
     boot: &aim_binder_host::local::LocalService,
@@ -72,7 +89,7 @@ fn call<T>(
 }
 
 /// `NativePackageBootstrap.begin`, and `finish` through its construction.
-pub(super) fn run(host: &Arc<AppHost>) -> Result<(), Exception> {
+pub(crate) fn run(host: &Arc<AppHost>) -> Result<(), Exception> {
     prepare(
         &host.package_boot,
         || scan(host, host.package_system()?),
@@ -92,7 +109,18 @@ fn scan(
     host: &Arc<AppHost>,
     system: &Arc<System>,
 ) -> Result<aim_binder_host::local::LocalService, Exception> {
+    wait_for("persistent properties", || {
+        Ok(host.property("ro.persistent_properties.ready").as_deref() == Some("true"))
+    })?;
+    wait_for("APEX activation", || {
+        Ok(host.property("apex.all.ready").as_deref() == Some("true"))
+    })?;
     let image_inputs = host.image_inputs()?.clone();
+    // Immutable framework resources can load while init is still starting
+    // the owners of the live boot configuration.
+    image_inputs
+        .platform()
+        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
     let Binder::Local(ptr) = host
         .process
         .add_service(Arc::new(PackageBootstrap::new(host.clone())))

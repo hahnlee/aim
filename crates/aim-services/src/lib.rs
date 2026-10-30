@@ -281,7 +281,8 @@ impl NativeServices {
     }
 
     /// The app host's inputs (`app_host::AppHost::configure`), when
-    /// `activity` is native.
+    /// `activity` is native. Starts the native package boot; each consumer
+    /// waits for the init inputs it needs.
     #[allow(clippy::too_many_arguments)]
     pub fn configure_app_host(
         &self,
@@ -303,6 +304,12 @@ impl NativeServices {
             host.connect_display(display);
             host.connect_text_input(display);
         }
+        let host = host.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = app_host::package_boot::run(&host) {
+                eprintln!("app host: early package boot: {e:?}");
+            }
+        });
         Ok(())
     }
 
