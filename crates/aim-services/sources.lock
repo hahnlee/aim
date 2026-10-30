@@ -6,6 +6,14 @@
 # transaction code against the image's own stubs. Shell-style assignments.
 AOSP_TAG=android-16.0.0_r1
 
+# Original Java sources for the offline package shell intent parser tests.
+# Fetched and hash-checked by aidl-gen alongside the service sources.
+TEST_SOURCE_FILES=(
+  "platform/frameworks/base|core/java/android/content/Intent.java|4dc0215006dff72017b05a18451e4090385271bd511d0c399f0a15782e3d79d1"
+  "platform/frameworks/base|core/java/android/content/ComponentName.java|8077358457df668ce7d2f92c058ceaab6562e13d9026ccf85f98ca85d62e1ad4"
+  "platform/frameworks/libs/modules-utils|java/com/android/modules/utils/BasicShellCommandHandler.java|f56b4ac8f89b0361e31d63790357fc108e6d3d65b4b0338c67ca6c62e8f48bf9"
+)
+
 # project|path|sha256
 SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/content/pm/IBackgroundInstallControlService.aidl|d0f1e7892919cd816b4fc459d995667d373432540007af97c0c60355c9441e9f"

@@ -55,6 +55,10 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 | `target/aim/gen/` | Generated sources: the AIDL crates `hal/aidl/*` and `daemons/aidl/*` point at |
 | `target/aim-cache/` | Node stamps and logs |
 
+`aidl-gen` also fetches the hash-pinned `TEST_SOURCE_FILES` in
+`crates/aim-services/sources.lock` into `_build/aosp` for the offline package
+shell intent parser tests.
+
 `crates/aim-paths` is this layout as code. Tests, build scripts and
 `cargo aim` all use it, so no test guesses at `CARGO_MANIFEST_DIR/../../_build`.
 Nothing under `_build/` or `target/` is in Git.

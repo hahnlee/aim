@@ -31,7 +31,7 @@ pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
     built.extend([
         image::node(),
         product_properties::node(),
-        aidl::node(),
+        aidl::node()?,
         xsdc::node(),
         cts_host_tools::node(),
         art::node(),
@@ -110,7 +110,12 @@ pub fn clean(node: &Node) -> Result<(), String> {
     let paths: Vec<PathBuf> = match &node.action {
         Action::Cargo(unit) => unit.install.iter().cloned().collect(),
         Action::Image | Action::TranslationCache => Vec::new(),
-        Action::AidlGen => node.outputs.clone(),
+        Action::AidlGen => node
+            .outputs
+            .iter()
+            .filter(|path| path.starts_with(aim_paths::generated()))
+            .cloned()
+            .collect(),
         Action::Xsdc => vec![xsdc::out()],
         Action::CtsHostTools => vec![cts_host_tools::out()],
         Action::Cts { .. } => Vec::new(),
