@@ -33,6 +33,8 @@ fn fuse_host_latency_benchmark() {
     let metrics = Arc::new(Mutex::new(Metrics::default()));
     let recorded = metrics.clone();
     let device = connection.fd;
+    let client = Client::new(&connection.key);
+    client.mount().unwrap();
     let server = std::thread::spawn(move || {
         loop {
             let packet = next(device);
@@ -52,8 +54,6 @@ fn fuse_host_latency_benchmark() {
             }
         }
     });
-    let client = Client::new(&connection.key);
-    client.mount().unwrap();
     let mount = "/storage/emulated";
     let options =
         crate::sys::fuse_mount::parse(b"fd=17,rootmode=40000,user_id=0,group_id=0,allow_other")

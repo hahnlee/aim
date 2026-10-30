@@ -247,6 +247,13 @@ mod tests {
 
     #[test]
     fn sweeping_retains_locked_startup_and_live_legacy_brokers() {
+        // A concurrent spawn can retain the listener until its exec, even
+        // with CLOEXEC, so this fixture must own its last close.
+        if super::super::super::fdtab::isolated_kernel_test(
+            "sys::fuse::transport::tests::sweeping_retains_locked_startup_and_live_legacy_brokers",
+        ) {
+            return;
+        }
         let base = base();
         let startup = directory(&base, "af-1");
         let held = Directory::hold(&startup).unwrap();

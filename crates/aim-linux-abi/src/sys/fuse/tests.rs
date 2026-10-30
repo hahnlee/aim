@@ -136,6 +136,12 @@ fn unread_device_notifications_are_coalesced_and_metadata_replies_remain_live() 
 #[test]
 fn fuse_device_protocol_dup_clone_and_negative_reply() {
     let connection = Connection::new();
+    for nonblock in [false, true] {
+        assert_eq!(
+            read_device(connection.fd, &mut [0; 8192], nonblock),
+            Err(crate::errno::EPERM)
+        );
+    }
     initialize(&connection);
     assert_eq!(
         read_device(connection.fd, &mut [0; 8192], true),
