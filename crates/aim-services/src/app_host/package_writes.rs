@@ -1217,6 +1217,13 @@ impl AppHost {
         &self,
         change: &PackageChanged<'_>,
     ) -> Result<(), Exception> {
+        // Overlay packages can change attributes of other packages too.
+        // Retire resolved styles before publishing native discovery callbacks.
+        {
+            let mut styles = self.activities.styles.lock().unwrap();
+            styles.0 = styles.0.wrapping_add(1);
+            styles.1.clear();
+        }
         let mut failure = self.refresh_audio_permissions().err();
         for monitor in self.package_monitors.of(change.user) {
             if let Err(error) = monitor.package_changed(change) {

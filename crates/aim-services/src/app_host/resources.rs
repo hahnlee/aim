@@ -212,7 +212,7 @@ impl Framework {
         id: u32,
         read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
     ) -> Result<T, String> {
-        self.with_resources(root, data, pkg, |resources, apks, table_apks| {
+        self.with_resources(root, data, pkg, false, |resources, apks, table_apks| {
             let (table, file) = resources
                 .resource_string_source(id)
                 .ok_or_else(|| format!("no XML resource {id:#x}"))?;
@@ -252,7 +252,7 @@ impl Framework {
         pkg: &AndroidPackage,
         ids: &[u32],
     ) -> Result<Vec<(Option<(u8, String, String)>, Option<String>)>, String> {
-        self.with_resources(root, data, pkg, |resources, _, _| {
+        self.with_resources(root, data, pkg, false, |resources, _, _| {
             Ok(ids
                 .iter()
                 .map(|&id| {
@@ -274,7 +274,7 @@ impl Framework {
         pkg: &AndroidPackage,
         name: &str,
     ) -> Result<u32, String> {
-        self.with_resources(root, data, pkg, |resources, _, _| {
+        self.with_resources(root, data, pkg, false, |resources, _, _| {
             Ok(resources
                 .identifier(&pkg.package_name, "string", name)
                 .unwrap_or(0))
@@ -290,7 +290,7 @@ impl Framework {
         pkg: &AndroidPackage,
         name: &str,
     ) -> Result<u32, String> {
-        self.with_resources(root, data, pkg, |resources, _, _| {
+        self.with_resources(root, data, pkg, false, |resources, _, _| {
             Ok(full_name_identifier(resources, name).unwrap_or(0))
         })
     }
@@ -334,7 +334,7 @@ impl Framework {
         } else {
             "Theme.DeviceDefault.Light.DarkActionBar"
         })?;
-        self.with_resources(root, data, pkg, |resources, _, _| {
+        self.with_resources(root, data, pkg, true, |resources, _, _| {
             // `TypedArray.getBoolean`: an integer's, else false.
             let flag = |name: &str| -> Result<bool, String> {
                 let attr = self
@@ -365,6 +365,7 @@ impl Framework {
         root: &Path,
         data: &Path,
         pkg: &AndroidPackage,
+        indexed: bool,
         f: impl FnOnce(
             &parse::resources::Resources<'_>,
             &[aim_apps::apk::Files],
@@ -388,7 +389,14 @@ impl Framework {
             .map(|apk| {
                 apk.file_if_present("resources.arsc")
                     .map_err(|e| e.to_string())?
-                    .map(|b| parse::resources::Table::parse(&b).map_err(|e| e.to_string()))
+                    .map(|b| {
+                        if indexed {
+                            parse::resources::Table::indexed(b)
+                        } else {
+                            parse::resources::Table::parse(&b)
+                        }
+                        .map_err(|e| e.to_string())
+                    })
                     .transpose()
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -406,7 +414,11 @@ impl Framework {
             overlays: &self.0.framework_overlays,
             config: self.0.config(),
         };
-        f(&resources, &apks, &table_apks)
+        let result = f(&resources, &apks, &table_apks);
+        for table in tables.iter().flatten() {
+            table.check()?;
+        }
+        result
     }
 }
 

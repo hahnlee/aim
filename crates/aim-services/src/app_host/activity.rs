@@ -134,6 +134,18 @@ impl ActivityRecord {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct StyleKey {
+    generation: u64,
+    pub package: String,
+    pub user: i32,
+    paths: Vec<Option<String>>,
+    version: (i32, i32),
+    theme: u32,
+    target_sdk: i32,
+    config: crate::package::parse::resources::Config,
+}
+
 /// The activities, by their token, and their tasks' stack.
 #[derive(Default)]
 pub struct Activities {
@@ -143,8 +155,8 @@ pub struct Activities {
     /// The results and new intents the stack holds for delivery.
     pub(super) payloads: Mutex<HashMap<u64, super::activity_start::Payload>>,
     pub(super) next_payload: std::sync::atomic::AtomicU64,
-    /// The window styles read, by base APK and theme (`AttributeCache`).
-    styles: Mutex<HashMap<(String, u32), WindowStyle>>,
+    /// Resolved attributes, retired by the canonical package-change feed.
+    pub(super) styles: Mutex<(u64, HashMap<StyleKey, WindowStyle>)>,
     /// The tasks' `WindowContainerToken`s, by task.
     pub(super) task_tokens: Mutex<HashMap<i32, Binder>>,
 }
@@ -232,7 +244,7 @@ impl Activities {
 
 impl AppHost {
     /// The window style of an activity of `info` (`getWindowStyle`): read
-    /// from its package's resources once per APK and theme. One whose
+    /// from its package's resources per code version, user, configuration and theme. One whose
     /// theme cannot be read is opaque, as the original's is when
     /// `AttributeCache` has no entry for it.
     pub(super) fn window_style(&self, info: &ActivityInfo) -> WindowStyle {
@@ -242,7 +254,7 @@ impl AppHost {
         } else {
             app.theme
         } as u32;
-        let read = || -> Result<(String, Result<WindowStyle, String>), Exception> {
+        let read = || -> Result<(StyleKey, Result<WindowStyle, String>), Exception> {
             let (state, _) = self.packages()?;
             let package = app.item.package_name.as_deref().unwrap_or_default();
             let pkg = state
@@ -250,19 +262,24 @@ impl AppHost {
                 .get(package)
                 .and_then(|ps| ps.pkg.clone())
                 .ok_or_else(|| Exception::illegal_argument(format!("no package {package}")))?;
-            let apk = pkg.base_apk_path.clone().unwrap_or_default();
-            if let Some(style) = self
-                .activities
-                .styles
-                .lock()
-                .unwrap()
-                .get(&(apk.clone(), theme))
-            {
-                return Ok((apk, Ok(*style)));
+            let mut paths = vec![pkg.base_apk_path.clone()];
+            paths.extend(pkg.split_code_paths.iter().flatten().cloned());
+            let key = StyleKey {
+                generation: self.activities.styles.lock().unwrap().0,
+                package: package.to_owned(),
+                user: app.uid / super::PER_USER_RANGE as i32,
+                paths,
+                version: (pkg.version_code_major, pkg.version_code),
+                theme,
+                target_sdk: app.target_sdk_version,
+                config: self.framework()?.0.config(),
+            };
+            if let Some(style) = self.activities.styles.lock().unwrap().1.get(&key) {
+                return Ok((key, Ok(*style)));
             }
             let inputs = self.platform()?;
             Ok((
-                apk,
+                key,
                 self.framework()?.window_style(
                     self.root()?,
                     &inputs.data,
@@ -273,12 +290,14 @@ impl AppHost {
             ))
         };
         match read() {
-            Ok((apk, Ok(style))) => {
-                self.activities
-                    .styles
-                    .lock()
-                    .unwrap()
-                    .insert((apk, theme), style);
+            Ok((key, Ok(style))) => {
+                let mut styles = self.activities.styles.lock().unwrap();
+                if styles.0 == key.generation {
+                    if styles.1.len() >= 128 {
+                        styles.1.clear();
+                    }
+                    styles.1.insert(key, style);
+                }
                 style
             }
             Ok((_, Err(e))) => {
@@ -1385,6 +1404,38 @@ impl Service for ActivityClientController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_update_retires_window_attributes_before_discovery() {
+        use super::super::package_observers::{Discoveries, PackageListObserver};
+        let host = AppHost::new(crate::test_process(1000));
+        let key = StyleKey {
+            package: "org.example.app".into(),
+            user: 0,
+            generation: 0,
+            paths: vec![Some("/data/app/old/base.apk".into())],
+            version: (0, 1),
+            theme: 0x7f010001,
+            target_sdk: 36,
+            config: Default::default(),
+        };
+        host.activities
+            .styles
+            .lock()
+            .unwrap()
+            .1
+            .insert(key.clone(), WindowStyle::default());
+        // The canonical observer feed also carries same-version replacements.
+        Discoveries(Arc::downgrade(&host))
+            .package_changed(Some(&key.package), 10001)
+            .unwrap();
+        let styles = host.activities.styles.lock().unwrap();
+        assert!(styles.1.is_empty());
+        assert_ne!(
+            styles.0, key.generation,
+            "an in-flight read cannot republish old attributes"
+        );
+    }
 
     /// Integer properties parse as `ParseInt` does.
     #[test]

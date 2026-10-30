@@ -15,6 +15,8 @@
 //! `libs/androidfw`), Copyright (C) The Android Open Source Project,
 //! Licensed under the Apache License, Version 2.0.
 
+mod indexed;
+
 use std::{collections::HashMap, sync::Arc};
 
 use aim_apps::res::{
@@ -43,7 +45,7 @@ pub const TYPE_LAST_INT: u8 = 0x1f;
 pub const DATA_NULL_EMPTY: u32 = 1;
 
 /// A `ResTable_config`, every field (0 where a shorter one ends).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Config {
     pub mcc: u16,
     pub mnc: u16,
@@ -484,6 +486,7 @@ struct Package {
 /// A resource table (`resources.arsc`).
 #[derive(Clone)]
 pub struct Table {
+    indexed: Option<Arc<indexed::Index>>,
     strings: Arc<Strings>,
     styled_strings: Arc<HashMap<u32, ()>>,
     packages: Arc<Vec<Package>>,
@@ -523,24 +526,34 @@ impl Table {
             }
         }
         Ok(Table {
+            indexed: None,
             strings: Arc::new(strings.ok_or_else(|| bad("table without strings"))?),
             styled_strings: Arc::new(styled_strings),
             packages: Arc::new(packages),
         })
     }
 
+    fn eager(&self) -> Option<&Self> {
+        self.indexed
+            .as_ref()
+            .map_or(Some(self), |index| index.full())
+    }
+
     /// `ApkAssets.definesOverlayable`.
-    pub fn has_styled_text(&self, index: u32) -> bool {
-        self.styled_strings.contains_key(&index)
+    pub fn has_styled_text(&self, index_value: u32) -> bool {
+        self.eager()
+            .is_some_and(|table| table.styled_strings.contains_key(&index_value))
     }
 
     pub fn defines_overlayable(&self) -> bool {
-        self.packages.iter().any(|p| !p.overlayables.is_empty())
+        self.eager()
+            .is_some_and(|table| table.packages.iter().any(|p| !p.overlayables.is_empty()))
     }
 
     /// `AssetManager.getOverlayableMap` of each package, in package order.
     pub fn overlayables(&self) -> impl Iterator<Item = (&str, &str)> {
-        let mut packages: Vec<&Package> = self.packages.iter().collect();
+        let table = self.eager().unwrap_or(self);
+        let mut packages: Vec<&Package> = table.packages.iter().collect();
         packages.sort_by_key(|p| p.id);
         packages
             .into_iter()
@@ -550,7 +563,9 @@ impl Table {
     /// The attributes by name, public and private: what `android:<name>`
     /// stands for.
     pub fn attr_ids(&self) -> HashMap<String, u32> {
-        self.packages
+        let table = self.eager().unwrap_or(self);
+        table
+            .packages
             .iter()
             .flat_map(|p| &p.ids)
             .filter(|((kind, _), _)| kind == "attr" || kind == "^attr-private")
@@ -564,7 +579,9 @@ impl Table {
     /// `getIdentifier(name, kind, package)`: the id of `type/name` in the
     /// package named `package`.
     pub fn identifier(&self, package: &str, kind: &str, name: &str) -> Option<u32> {
-        self.packages
+        let table = self.eager()?;
+        table
+            .packages
             .iter()
             .filter(|p| p.name == package)
             .find_map(|p| p.ids.get(&(kind.to_owned(), name.to_owned())).copied())
@@ -572,15 +589,18 @@ impl Table {
 
     /// Resource `type/name`'s id.
     pub fn id(&self, kind: &str, name: &str) -> Option<u32> {
-        self.packages
+        let table = self.eager()?;
+        table
+            .packages
             .iter()
             .find_map(|p| p.ids.get(&(kind.to_owned(), name.to_owned())).copied())
     }
 
     /// `getResourceName`'s package id, type and entry of `id`.
     pub fn entry_name(&self, id: u32) -> Option<(u8, &str, &str)> {
+        let table = self.eager()?;
         let pid = (id >> 24) as u8;
-        let p = self
+        let p = table
             .packages
             .iter()
             .find(|p| p.id == pid || (p.id == 0 && pid == SHARED_LIBRARY_ID))?;
@@ -591,8 +611,9 @@ impl Table {
 
     /// `getResourceTypeName`.
     pub fn type_name(&self, id: u32) -> Option<&str> {
+        let table = self.eager()?;
         let pid = (id >> 24) as u8;
-        let p = self
+        let p = table
             .packages
             .iter()
             .find(|p| p.id == pid || (p.id == 0 && pid == SHARED_LIBRARY_ID))?;
@@ -601,7 +622,8 @@ impl Table {
 
     /// The global string pool's string `i`.
     pub fn string(&self, i: u32) -> Option<&str> {
-        self.strings.get(i)
+        let table = self.eager()?;
+        table.strings.get(i)
     }
 
     fn group(&self, id: u32) -> Option<&TypeGroup> {
@@ -613,11 +635,39 @@ impl Table {
         p.types.get(&((id >> 16) as u8))
     }
 
+    fn flags(&self, id: u32) -> u32 {
+        if let Some(index) = &self.indexed {
+            return index.flags(id);
+        }
+        self.group(id)
+            .and_then(|g| g.spec_flags.get(id as u16 as usize))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Index chunk headers and type specs; decode entries only when requested.
+    /// Consumers must check deferred errors after resolving their values.
+    pub fn indexed(data: Vec<u8>) -> Result<Self> {
+        Ok(Self {
+            indexed: Some(Arc::new(indexed::Index::new(data)?)),
+            strings: Arc::new(Strings::parse(&[0; 28])?),
+            styled_strings: Arc::default(),
+            packages: Arc::default(),
+        })
+    }
+
+    pub fn check(&self) -> std::result::Result<(), String> {
+        self.indexed.as_ref().map_or(Ok(()), |index| index.check())
+    }
+
     /// `FindEntry` within this table: resource `id`'s best entry for
     /// `config`, the type spec's flags for it, and the entry's
     /// configuration. A shared library's package (id 0) answers for the id
     /// the parser's `AssetManager` assigns it.
     fn find(&self, id: u32, config: &Config) -> Option<(&Entry, u32, Config)> {
+        if let Some(index) = &self.indexed {
+            return index.find(id, config);
+        }
         let group = self.group(id)?;
         let entry = (id & 0xffff) as u16;
         let flags = group.spec_flags.get(entry as usize).copied().unwrap_or(0);
@@ -638,7 +688,8 @@ impl Table {
 
     /// Every resource by type and name.
     fn names(&self) -> impl Iterator<Item = (&(String, String), &u32)> {
-        self.packages.iter().flat_map(|p| &p.ids)
+        let table = self.eager().unwrap_or(self);
+        table.packages.iter().flat_map(|p| &p.ids)
     }
 }
 
@@ -812,28 +863,32 @@ fn type_chunk(c: &[u8], header: usize) -> Result<Type> {
     let config = Config::parse(&c[20..header.max(20)]);
     let mut entries = HashMap::new();
     for (index, at) in offsets(c, header)? {
-        let size = u16_at(c, at)? as usize;
-        let eflags = u16_at(c, at + 2)?;
-        let entry = if eflags & ENTRY_COMPACT != 0 {
-            Entry::Value((eflags >> 8) as u8, u32_at(c, at + 4)?)
-        } else if eflags & ENTRY_COMPLEX != 0 {
-            let parent = u32_at(c, at + 8)?;
-            let n = u32_at(c, at + 12)? as usize;
-            let mut map = Vec::with_capacity(n);
-            for k in 0..n {
-                let m = at + size + 12 * k;
-                let kind = *c.get(m + 7).ok_or_else(|| bad("truncated map"))?;
-                map.push((u32_at(c, m)?, kind, u32_at(c, m + 8)?));
-            }
-            Entry::Bag(parent, map)
-        } else {
-            let v = at + size;
-            let kind = *c.get(v + 3).ok_or_else(|| bad("truncated value"))?;
-            Entry::Value(kind, u32_at(c, v + 4)?)
-        };
+        let entry = read_entry(c, at)?;
         entries.insert(index, entry);
     }
     Ok(Type { config, entries })
+}
+
+fn read_entry(c: &[u8], at: usize) -> Result<Entry> {
+    let size = u16_at(c, at)? as usize;
+    let eflags = u16_at(c, at + 2)?;
+    Ok(if eflags & ENTRY_COMPACT != 0 {
+        Entry::Value((eflags >> 8) as u8, u32_at(c, at + 4)?)
+    } else if eflags & ENTRY_COMPLEX != 0 {
+        let parent = u32_at(c, at + 8)?;
+        let n = u32_at(c, at + 12)? as usize;
+        let mut map = Vec::with_capacity(n);
+        for k in 0..n {
+            let m = at + size + 12 * k;
+            let kind = *c.get(m + 7).ok_or_else(|| bad("truncated map"))?;
+            map.push((u32_at(c, m)?, kind, u32_at(c, m + 8)?));
+        }
+        Entry::Bag(parent, map)
+    } else {
+        let v = at + size;
+        let kind = *c.get(v + 3).ok_or_else(|| bad("truncated value"))?;
+        Entry::Value(kind, u32_at(c, v + 4)?)
+    })
 }
 
 /// A value an attribute resolved to (`AssetManager2::SelectedValue`).
@@ -875,13 +930,7 @@ impl Resources<'_> {
         for (i, table) in self.tables.iter().enumerate() {
             // AssetManager2 accumulates type-spec flags even when this
             // APK has no configuration matching the requested value.
-            if let Some(group) = table.group(id) {
-                flags |= group
-                    .spec_flags
-                    .get((id & 0xffff) as usize)
-                    .copied()
-                    .unwrap_or(0);
-            }
+            flags |= table.flags(id);
             let Some((entry, _, config)) = table.find(id, &self.config) else {
                 continue;
             };
@@ -1092,8 +1141,96 @@ impl Resources<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires pinned original APK resources; no guest boot"]
+    fn pinned_window_styles_match_full_tables_across_configurations() {
+        let root = aim_paths::original_image();
+        let platform = crate::package::parse::Platform::load(&root, Default::default())
+            .expect("NOT RUN: original image");
+        let attributes = [
+            "windowIsTranslucent",
+            "windowIsFloating",
+            "windowShowWallpaper",
+            "windowNoDisplay",
+        ]
+        .map(|name| platform.framework.id("attr", name).unwrap());
+        for path in [
+            "system_ext/priv-app/SettingsGoogle/SettingsGoogle.apk",
+            "product/app/PrebuiltDeskClockGoogle/PrebuiltDeskClockGoogle.apk",
+            "system/framework/framework-res.apk",
+        ] {
+            let data = aim_apps::apk::Files::open(&root.join(path))
+                .unwrap()
+                .file("resources.arsc")
+                .unwrap();
+            let full = Table::parse(&data).unwrap();
+            let indexed = Table::indexed(data).unwrap();
+            let styles: std::collections::HashSet<_> = full
+                .names()
+                .filter(|((kind, _), _)| kind == "style")
+                .map(|(_, id)| *id)
+                .collect();
+            assert!(!styles.is_empty());
+            for (language, country, density, ui_mode, orientation) in [
+                (*b"en", *b"US", 160, 0x10, 1),
+                (*b"ko", *b"KR", 320, 0x20, 2),
+                (*b"fr", *b"FR", 480, 0x10, 2),
+                (*b"en", *b"GB", 640, 0x20, 1),
+            ] {
+                let config = Config {
+                    language,
+                    country,
+                    density,
+                    ui_mode,
+                    orientation,
+                    sdk_version: 36,
+                    ..Default::default()
+                };
+                for overlays in [&[][..], platform.framework_overlays.as_slice()] {
+                    let old = Resources {
+                        tables: if path.starts_with("system/framework/") {
+                            vec![&full]
+                        } else {
+                            vec![&platform.framework, &full]
+                        },
+                        overlays,
+                        config,
+                    };
+                    let new = Resources {
+                        tables: if path.starts_with("system/framework/") {
+                            vec![&indexed]
+                        } else {
+                            vec![&platform.framework, &indexed]
+                        },
+                        overlays,
+                        config,
+                    };
+                    for &style in &styles {
+                        for &attribute in &attributes {
+                            let default = platform
+                                .framework
+                                .id("style", "Theme.DeviceDefault.Light.DarkActionBar")
+                                .unwrap();
+                            assert_eq!(
+                                new.styled_attr(style, default, attribute),
+                                old.styled_attr(style, default, attribute),
+                                "{path}: style={style:#x} attr={attribute:#x} {config:?}"
+                            );
+                        }
+                    }
+                }
+                indexed.check().unwrap();
+            }
+            assert!(
+                indexed.indexed.as_ref().unwrap().full.get().is_none(),
+                "numeric theme reads must not decode names or strings"
+            );
+        }
+    }
+
     fn table(config: Config, value: u32, flags: u32) -> Table {
         Table {
+            indexed: None,
             strings: Arc::new(Strings::parse(&[0; 28]).unwrap()),
             styled_strings: Arc::new(HashMap::new()),
             packages: Arc::new(vec![Package {
@@ -1146,6 +1283,7 @@ mod tests {
             (2, Entry::Bag(0, vec![(themes, BOOLEAN, 1)])),
         ];
         let t = Table {
+            indexed: None,
             strings: Arc::new(Strings::parse(&[0; 28]).unwrap()),
             styled_strings: Arc::new(HashMap::new()),
             packages: Arc::new(vec![Package {
