@@ -28,6 +28,8 @@ pub mod package;
 pub mod parcel;
 pub mod platform;
 pub mod resources;
+#[cfg(test)]
+mod status_tests;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -202,6 +204,15 @@ impl fmt::Display for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+fn fail_status<T>(status: i32, msg: impl Into<String>) -> Result<T> {
+    Err(Error::Status(status, msg.into()))
+}
+
+/// `ParseTypeImpl.error(String)` and deferred errors use MANIFEST_MALFORMED.
+fn malformed<T>(msg: impl Into<String>) -> Result<T> {
+    fail_status(-108, msg)
+}
+
 fn fail<T>(msg: impl Into<String>) -> Result<T> {
     Err(Error::Parse(msg.into()))
 }
@@ -223,7 +234,7 @@ const MISSING_EXPORTED_FLAG: i32 = R;
 impl Input {
     fn defer(&mut self, msg: String, enabled_after: i32) -> Result<()> {
         match self.target_sdk {
-            Some(t) if t > enabled_after => fail(msg),
+            Some(t) if t > enabled_after => malformed(msg),
             Some(_) => Ok(()),
             None => {
                 if !self.deferred.iter().any(|(e, _)| *e == enabled_after) {
@@ -239,7 +250,7 @@ impl Input {
         self.target_sdk = Some(target_sdk);
         for (after, msg) in self.deferred.iter_mut().rev() {
             if target_sdk > *after {
-                return fail(msg.take().unwrap_or_default());
+                return malformed(msg.take().unwrap_or_default());
             }
         }
         Ok(())
@@ -284,7 +295,9 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
         flags,
         input: &input,
     };
-    let mut pkg = parser.parse_base_apk(manifest, &base.path, &path)?;
+    let mut pkg = parser.read_manifest(&base.path, || {
+        parser.parse_base_apk(manifest, &base.path, &path)
+    })?;
     if base.table.as_ref().is_some_and(Table::defines_overlayable) {
         for t in &res.tables {
             for (name, actor) in t.overlayables() {
@@ -322,14 +335,10 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
                 flags,
                 input: &input,
             };
-            split_parser.parse_split(&mut pkg, part, index)?;
-            if let Some(e) = split_parser.ctx.error.take() {
-                return fail(e);
-            }
+            split_parser.read_manifest(&part.path, || {
+                split_parser.parse_split(&mut pkg, part, index)
+            })?;
         }
-    }
-    if let Some(e) = parser.ctx.error.take() {
-        return fail(e);
     }
     // `set32BitAbiPreferred(lite.isUse32bitAbi())`.
     let use32 = manifest
@@ -399,17 +408,19 @@ fn build_class_name(pkg: &str, cls: Option<&str>) -> Option<String> {
 fn build_compound_name(pkg: &str, proc: &str, kind: &str) -> Result<String> {
     if let Some(sub) = proc.strip_prefix(':') {
         if sub.is_empty() {
-            return fail(format!("Bad {kind} name {proc} in package {pkg}"));
+            return malformed(format!(
+                "Bad {kind} name {proc} in package {pkg}: must be at least two characters"
+            ));
         }
         if let Some(e) = validate_name(sub, false) {
-            return fail(format!("Invalid {kind} name {proc} in package {pkg}: {e}"));
+            return malformed(format!("Invalid {kind} name {proc} in package {pkg}: {e}"));
         }
         return Ok(format!("{pkg}{proc}"));
     }
     if proc != "system"
         && let Some(e) = validate_name(proc, true)
     {
-        return fail(format!("Invalid {kind} name {proc} in package {pkg}: {e}"));
+        return malformed(format!("Invalid {kind} name {proc} in package {pkg}: {e}"));
     }
     Ok(proc.to_owned())
 }
@@ -472,27 +483,27 @@ impl Parser<'_> {
         value.unwrap_or(false) == negated
     }
 
+    /// The base/split wrappers catch Java exceptions, including TypedArray failures.
+    fn read_manifest<T>(&self, path: &str, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        let result = read();
+        if self.ctx.error.take().is_some() || matches!(&result, Err(Error::Status(-102, _))) {
+            return fail_status(-102, format!("Failed to read manifest from {path}"));
+        }
+        result
+    }
+
     fn parse_base_apk(
         &self,
         manifest: &Element,
         apk_path: &str,
         code_path: &str,
     ) -> Result<Package> {
-        if manifest.name != "manifest" {
-            return fail("No <manifest> tag");
+        if manifest.name == "manifest" && attr_value(manifest, "", "package").is_none() {
+            return fail_status(-102, format!("Failed to read manifest from {apk_path}"));
         }
-        let package_name = attr_value(manifest, "", "package").unwrap_or_default();
-        let split = attr_value(manifest, "", "split");
-        if package_name.is_empty() {
-            return fail("<manifest> has no package");
-        }
-        if package_name != "android"
-            && let Some(e) = validate_name(&package_name, true)
-        {
-            return fail(format!("Invalid manifest package: {e}"));
-        }
-        if split.is_some_and(|s| !s.is_empty()) {
-            return fail("Expected base APK, but found split");
+        let (package_name, split, _) = cluster::names(manifest, apk_path)?;
+        if let Some(split) = split {
+            return fail_status(-106, format!("Expected base APK, but found split {split}"));
         }
         let sa = self.obtain(manifest);
         let mut pkg = Package::new(&package_name, apk_path, code_path);
@@ -519,11 +530,12 @@ impl Parser<'_> {
             .filter(|s| !s.is_empty())
         {
             if pkg.package_name != "android"
-                && let Some(e) = validate_name(&id, true)
+                && let Some(e) = cluster::validate_filename_name(&id, true)
             {
-                return fail(format!(
-                    "<manifest> specifies bad sharedUserId name \"{id}\": {e}"
-                ));
+                return fail_status(
+                    -107,
+                    format!("<manifest> specifies bad sharedUserId name \"{id}\": {e}"),
+                );
             }
             let max = sa.integer("sharedUserMaxSdkVersion", 0);
             pkg.set(b::LEAVING_SHARED_UID, max != 0 && max < self.platform.sdk);
@@ -572,18 +584,18 @@ impl Parser<'_> {
         let mut tags = ArraySet::default();
         let mut inherited = ArraySet::default();
         if pkg.attributions.len() > 10_000 {
-            return fail("Combination <attribution> tags are not valid");
+            return fail_status(-101, "Combination <attribution> tags are not valid");
         }
         for a in &pkg.attributions {
             if tags.contains(&a.tag) {
-                return fail("Combination <attribution> tags are not valid");
+                return fail_status(-101, "Combination <attribution> tags are not valid");
             }
             tags.add(&a.tag);
         }
         for a in &pkg.attributions {
             for i in &a.inherit_from {
                 if tags.contains(i) || inherited.contains(i) {
-                    return fail("Combination <attribution> tags are not valid");
+                    return fail_status(-101, "Combination <attribution> tags are not valid");
                 }
                 inherited.add(i);
             }
@@ -645,7 +657,7 @@ impl Parser<'_> {
             }
         }
         if self.flags & PARSE_APEX != 0 && !pkg.permissions.is_empty() {
-            return fail(format!(
+            return malformed(format!(
                 "{} is an APEX package and shouldn't declare permissions.",
                 pkg.package_name
             ));
@@ -815,10 +827,10 @@ impl Parser<'_> {
         let target = sa.string("targetPackage");
         let priority = sa.int("priority", 0);
         let Some(target) = target else {
-            return fail("<overlay> does not specify a target package");
+            return malformed("<overlay> does not specify a target package");
         };
         if !(0..=9999).contains(&priority) {
-            return fail("<overlay> priority must be between 0 and 9999");
+            return malformed("<overlay> priority must be between 0 and 9999");
         }
         let prop_name = sa.string("requiredSystemPropertyName");
         let prop_value = sa.string("requiredSystemPropertyValue");
@@ -859,7 +871,10 @@ impl Parser<'_> {
                 "required-feature" | "required-not-feature" => {
                     let f = self.obtain(c).string("name").filter(|s| !s.is_empty());
                     let Some(f) = f else {
-                        return fail(format!("Feature name is missing from <{}> tag.", c.name));
+                        return malformed(format!(
+                            "Feature name is missing from <{}> tag.",
+                            c.name
+                        ));
                     };
                     if c.name == "required-feature" {
                         required.push(f);
@@ -883,7 +898,7 @@ impl Parser<'_> {
         }
         if let Some(existing) = pkg.uses_permissions.iter().find(|p| p.name == name) {
             if existing.flags != flags {
-                return fail(format!(
+                return malformed(format!(
                     "Conflicting uses-permissions flags: {name} in package: {}",
                     pkg.package_name
                 ));
@@ -932,6 +947,16 @@ impl Parser<'_> {
             let name = code.split('.').next().unwrap_or(code);
             self.platform.codenames.iter().any(|c| c == name)
         };
+        let development_error = |code: &str| {
+            if self.platform.codenames.is_empty() {
+                format!("Requires development platform {code} but this is a release platform.")
+            } else {
+                format!(
+                    "Requires development platform {code} (current platform is any of [{}])",
+                    self.platform.codenames.join(", ")
+                )
+            }
+        };
         // `computeTargetSdkVersion`.
         let target_sdk = match &target_code {
             None => target_vers,
@@ -941,22 +966,36 @@ impl Parser<'_> {
                 )));
             }
             Some(code) if matches_code(code) => CUR_DEVELOPMENT,
-            Some(code) => return fail(format!("Requires development platform {code}")),
+            Some(code) => return fail_status(-12, development_error(code)),
         };
         self.input.borrow_mut().enable(target_sdk)?;
         // `computeMinSdkVersion`.
         let min_sdk = match &min_code {
             None if min_vers <= self.platform.sdk => min_vers,
-            None => return fail(format!("Requires newer sdk version #{min_vers}")),
+            None => {
+                return fail_status(
+                    -12,
+                    format!(
+                        "Requires newer sdk version #{min_vers} (current version is #{})",
+                        self.platform.sdk
+                    ),
+                );
+            }
             Some(code) if matches_code(code) => CUR_DEVELOPMENT,
-            Some(code) => return fail(format!("Requires development platform {code}")),
+            Some(code) => return fail_status(-12, development_error(code)),
         };
         pkg.min_sdk_version = min_sdk;
         pkg.target_sdk_version = target_sdk;
         if apk_in_apex {
             // `computeMaxSdkVersion`.
             if self.platform.sdk > max_vers {
-                return fail(format!("Requires max SDK version {max_vers}"));
+                return fail_status(
+                    -14,
+                    format!(
+                        "Requires max SDK version {max_vers} but is {}",
+                        self.platform.sdk
+                    ),
+                );
             }
             pkg.max_sdk_version = max_vers;
         }
@@ -967,13 +1006,13 @@ impl Parser<'_> {
                 let sdk = attrs.int("sdkVersion", -1);
                 let minimum = attrs.int("minExtensionVersion", -1);
                 if sdk < 0 {
-                    return fail("<extension-sdk> must specify an sdkVersion >= 0");
+                    return malformed("<extension-sdk> must specify an sdkVersion >= 0");
                 }
                 if minimum < 0 {
-                    return fail("<extension-sdk> must specify minExtensionVersion >= 0");
+                    return malformed("<extension-sdk> must specify minExtensionVersion >= 0");
                 }
                 if sdk < 30 {
-                    return fail(format!("Specified sdkVersion {sdk} is not valid"));
+                    return malformed(format!("Specified sdkVersion {sdk} is not valid"));
                 }
                 let versions = self.platform.sdk_extensions.as_ref().ok_or_else(|| {
                     Error::Unsupported("extension SDK runtime property owner unavailable".into())
@@ -1019,13 +1058,17 @@ impl Parser<'_> {
                         .map(|a| a.orig_host.as_str())
                         .collect();
                     if schemes.is_empty() && types.is_empty() && actions.is_empty() {
-                        return fail("intent tags must contain either an action or data.");
+                        return malformed("intent tags must contain either an action or data.");
                     }
-                    if actions.len() > 1 || types.len() > 1 || schemes.len() > 1 || hosts.len() > 1
-                    {
-                        return fail(
-                            "intent tag may have at most one action, type, scheme and host.",
-                        );
+                    for (count, kind) in [
+                        (actions.len(), "action"),
+                        (types.len(), "data type"),
+                        (schemes.len(), "data scheme"),
+                        (hosts.len(), "data host"),
+                    ] {
+                        if count > 1 {
+                            return malformed(format!("intent tag may have at most one {kind}."));
+                        }
                     }
                     let mut intent = QueriesIntent::default();
                     if let Some(cats) = &f.categories {
@@ -1054,7 +1097,9 @@ impl Parser<'_> {
                     let name = self.obtain(c).non_config_string("name", 0);
                     match name.filter(|s| !s.is_empty()) {
                         Some(n) => pkg.queries_packages.push(n),
-                        None => return fail("Package name is missing from package tag."),
+                        None => {
+                            return malformed("Package name is missing from package tag.");
+                        }
                     }
                 }
                 "provider" => {
@@ -1064,7 +1109,7 @@ impl Parser<'_> {
                             .split(';')
                             .filter(|t| !t.is_empty())
                             .for_each(|t| pkg.queries_providers.add(t)),
-                        None => return fail("Authority missing from provider tag."),
+                        None => return malformed("Authority missing from provider tag."),
                     }
                 }
                 _ => {}
@@ -1079,10 +1124,10 @@ impl Parser<'_> {
         let sa = self.obtain(e);
         if let Some(name) = sa.non_config_string("name", 0) {
             let Some(cls) = build_class_name(&pkg_name, Some(&name)) else {
-                return fail(format!("Empty class name in package {pkg_name}"));
+                return malformed(format!("Empty class name in package {pkg_name}"));
             };
             if cls == APP_DETAILS_ACTIVITY_CLASS_NAME {
-                return fail("<application> invalid android:name");
+                return malformed("<application> invalid android:name");
             }
             pkg.class_name = Some(cls);
         }
@@ -1096,7 +1141,7 @@ impl Parser<'_> {
         if let Some(m) = sa.non_config_string("manageSpaceActivity", NATIVE_CONFIG_VERSION) {
             pkg.manage_space_activity_name =
                 Some(build_class_name(&pkg_name, Some(&m)).ok_or_else(|| {
-                    Error::Parse(format!("Empty class name in package {pkg_name}"))
+                    Error::Status(-108, format!("Empty class name in package {pkg_name}"))
                 })?);
         }
         if self
@@ -1109,7 +1154,7 @@ impl Parser<'_> {
             if let Some(agent) = sa.non_config_string("backupAgent", NATIVE_CONFIG_VERSION) {
                 pkg.backup_agent_name =
                     Some(build_class_name(&pkg_name, Some(&agent)).ok_or_else(|| {
-                        Error::Parse(format!("Empty class name in package {pkg_name}"))
+                        Error::Status(-108, format!("Empty class name in package {pkg_name}"))
                     })?);
                 pkg.set(b::KILL_AFTER_RESTORE, sa.boolean("killAfterRestore", true));
                 pkg.set(
@@ -1154,7 +1199,7 @@ impl Parser<'_> {
         if let Some(factory) = sa.non_resource_string("appComponentFactory") {
             pkg.app_component_factory =
                 Some(build_class_name(&pkg_name, Some(&factory)).ok_or_else(|| {
-                    Error::Parse(format!("Empty class name in package {pkg_name}"))
+                    Error::Status(-108, format!("Empty class name in package {pkg_name}"))
                 })?);
         }
         let pname = if target_sdk >= FROYO {
@@ -1164,7 +1209,7 @@ impl Parser<'_> {
         };
         let process = build_process_name(&pkg_name, None, pname.as_deref(), self.flags)?;
         if pkg.get(b::CANT_SAVE_STATE) && process.as_ref().is_some_and(|p| *p != pkg_name) {
-            return fail("cantSaveState applications can not use custom processes");
+            return malformed("cantSaveState applications can not use custom processes");
         }
         pkg.process_name = process;
         if let Some(cl) = &pkg.class_loader_name
@@ -1172,7 +1217,7 @@ impl Parser<'_> {
             && cl != "dalvik.system.DexClassLoader"
             && cl != "dalvik.system.DelegateLastClassLoader"
         {
-            return fail(format!("Invalid class loader name: {cl}"));
+            return malformed(format!("Invalid class loader name: {cl}"));
         }
         pkg.gwp_asan_mode = sa.int("gwpAsanMode", -1);
         pkg.memtag_mode = sa.int("memtagMode", -1);
@@ -1303,7 +1348,11 @@ impl Parser<'_> {
                 .collect()
         };
         if certs.is_empty() {
-            return fail("Defined a knownActivityEmbeddingCerts attribute but it is empty");
+            return malformed(if id != 0 {
+                "Defined a knownActivityEmbeddingCerts attribute but the provided resource is null"
+            } else {
+                "Defined a knownActivityEmbeddingCerts attribute but the provided string is empty"
+            });
         }
         Ok(Some(certs))
     }
@@ -1431,18 +1480,22 @@ impl Parser<'_> {
                 match name {
                     Some(n) if major >= 0 => {
                         if pkg.shared_user_id.is_some() {
-                            return fail("sharedUserId not allowed in SDK library");
+                            return fail_status(-107, "sharedUserId not allowed in SDK library");
                         }
                         if pkg.sdk_library_name.is_some() {
-                            return fail(format!("Multiple SDKs for package {}", pkg.package_name));
+                            return malformed(format!(
+                                "Multiple SDKs for package {}",
+                                pkg.package_name
+                            ));
                         }
                         pkg.sdk_library_name = Some(n);
                         pkg.sdk_lib_version_major = major;
                         pkg.set(b::SDK_LIBRARY, true);
                         Ok(())
                     }
-                    n => fail(format!(
-                        "Bad sdk-library declaration name: {n:?} version: {major}"
+                    n => malformed(format!(
+                        "Bad sdk-library declaration name: {} version: {major}",
+                        n.as_deref().unwrap_or("null")
                     )),
                 }
             }
@@ -1454,10 +1507,13 @@ impl Parser<'_> {
                 match name {
                     Some(n) if version >= 0 => {
                         if pkg.shared_user_id.is_some() {
-                            return fail("sharedUserId not allowed in static shared library");
+                            return fail_status(
+                                -107,
+                                "sharedUserId not allowed in static shared library",
+                            );
                         }
                         if pkg.static_shared_library_name.is_some() {
-                            return fail(format!(
+                            return malformed(format!(
                                 "Multiple static-shared libs for package {}",
                                 pkg.package_name
                             ));
@@ -1468,8 +1524,9 @@ impl Parser<'_> {
                         pkg.set(b::STATIC_SHARED_LIBRARY, true);
                         Ok(())
                     }
-                    n => fail(format!(
-                        "Bad static-library declaration name: {n:?} version: {version}"
+                    n => malformed(format!(
+                        "Bad static-library declaration name: {} version: {version}",
+                        n.as_deref().unwrap_or("null")
                     )),
                 }
             }
@@ -1527,14 +1584,16 @@ impl Parser<'_> {
         let name = sa.non_resource_string("name");
         let version = sa.int("version", -1);
         let digest = sa.non_resource_string("certDigest");
-        let (Some(name), Some(digest)) = (name, digest) else {
-            return fail("Bad uses-static-library declaration");
-        };
-        if version < 0 {
-            return fail("Bad uses-static-library declaration");
+        if name.is_none() || digest.is_none() || version < 0 {
+            return malformed(format!(
+                "Bad uses-static-library declaration name: {} version: {version} certDigest{}",
+                name.as_deref().unwrap_or("null"),
+                digest.as_deref().unwrap_or("null")
+            ));
         }
+        let (name, digest) = (name.unwrap(), digest.unwrap());
         if pkg.uses_static_libraries.contains(&name) {
-            return fail(format!(
+            return malformed(format!(
                 "Depending on multiple versions of static library {name}"
             ));
         }
@@ -1550,9 +1609,13 @@ impl Parser<'_> {
                         .non_resource_string("certDigest")
                         .filter(|d| !d.is_empty());
                     let Some(d) = d else {
-                        return fail(
-                            "Bad additional-certificate declaration with empty certDigest",
-                        );
+                        return malformed(format!(
+                            "Bad additional-certificate declaration with empty certDigest:{}",
+                            self.obtain(c)
+                                .non_resource_string("certDigest")
+                                .as_deref()
+                                .unwrap_or("null")
+                        ));
                     };
                     digests.push(d.replace(':', "").to_lowercase());
                 }
@@ -1643,13 +1706,13 @@ impl Parser<'_> {
     ) -> Result<Option<Property>> {
         let sa = self.obtain(e);
         let Some(name) = sa.non_config_string("name", 0) else {
-            return fail(format!("{tag} requires an android:name attribute"));
+            return malformed(format!("{tag} requires an android:name attribute"));
         };
         let value = match sa.peek("resource") {
             Some(v) if v.resource_id != 0 => PropertyValue::Resource(v.resource_id as i32),
             _ => match sa.peek("value") {
                 None => {
-                    return fail(format!(
+                    return malformed(format!(
                         "{tag} requires an android:value or android:resource attribute"
                     ));
                 }
