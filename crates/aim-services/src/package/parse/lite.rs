@@ -4,7 +4,7 @@
 use super::{
     Result,
     attrs::{ANDROID, attr_value},
-    cluster, fail,
+    cluster, fail_status, malformed,
 };
 use aim_apps::{apk::Apk, res::Element};
 use std::{
@@ -316,13 +316,13 @@ fn package_name_manifest_at(
                                 .is_none_or(|value| value.chars().all(java_whitespace))
                                 || version < 0
                             {
-                                return fail(format!(
+                                return malformed(format!(
                                     "Bad uses-sdk-library declaration name: {} version: {version}",
                                     name.as_deref().unwrap_or("null")
                                 ));
                             }
                             if sdk_libraries.contains(&name) {
-                                return fail(format!(
+                                return malformed(format!(
                                     "Bad uses-sdk-library declaration. Depending on multiple versions of SDK library: {}",
                                     name.as_deref().unwrap()
                                 ));
@@ -338,14 +338,14 @@ fn package_name_manifest_at(
                                 || version < 0
                                 || digest.is_none()
                             {
-                                return fail(format!(
+                                return malformed(format!(
                                     "Bad uses-static-library declaration name: {} version: {version} certDigest: {}",
                                     name.as_deref().unwrap_or("null"),
                                     digest.as_deref().unwrap_or("null")
                                 ));
                             }
                             if static_libraries.contains(&name) {
-                                return fail(format!(
+                                return malformed(format!(
                                     "Bad uses-sdk-library declaration. Depending on multiple versions of static library: {}",
                                     name.as_deref().unwrap()
                                 ));
@@ -357,7 +357,7 @@ fn package_name_manifest_at(
                                     && attr_value(cert, ANDROID, "certDigest")
                                         .is_none_or(|v| v.is_empty())
                                 {
-                                    return fail(format!(
+                                    return malformed(format!(
                                         "Bad additional-certificate declaration with empty certDigest:{}",
                                         attr_value(cert, ANDROID, "certDigest")
                                             .as_deref()
@@ -370,7 +370,7 @@ fn package_name_manifest_at(
                         "sdk-library" => {
                             let version = integer(entry, "versionMajor", -1);
                             if name.is_none() || version < 0 {
-                                return fail(format!(
+                                return malformed(format!(
                                     "Bad sdk-library declaration name: {} version: {version}",
                                     name.as_deref().unwrap_or("null")
                                 ));
@@ -379,7 +379,7 @@ fn package_name_manifest_at(
                         "static-library" => {
                             let version = integer(entry, "version", -1);
                             if name.is_none() || version < 0 {
-                                return fail(format!(
+                                return malformed(format!(
                                     "Bad static-library declaration name: {} version: {version}",
                                     name.as_deref().unwrap_or("null")
                                 ));
@@ -387,7 +387,7 @@ fn package_name_manifest_at(
                         }
                         "library" => {
                             if name.is_none() {
-                                return fail("Bad library declaration name: null");
+                                return malformed("Bad library declaration name: null");
                             }
                         }
                         _ => {}
@@ -396,7 +396,7 @@ fn package_name_manifest_at(
             }
             "uses-split" if !uses_split => {
                 if attr_value(child, ANDROID, "name").is_none() {
-                    return fail("<uses-split> tag requires 'android:name' attribute");
+                    return malformed("<uses-split> tag requires 'android:name' attribute");
                 }
                 uses_split = true;
             }
@@ -443,12 +443,15 @@ fn overlay_error<T>(
         .rev()
         .find(|child| child.name == "overlay")
         .and_then(|child| attr_value(child, ANDROID, "targetPackage"));
-    fail(format!(
-        "Skipping target and overlay pair {} and {path}: overlay ignored due to required system property: {} with value: {}",
-        target.as_deref().unwrap_or("null"),
-        names.as_deref().unwrap_or("null"),
-        values.as_deref().unwrap_or("null")
-    ))
+    fail_status(
+        -125,
+        format!(
+            "Skipping target and overlay pair {} and {path}: overlay ignored due to required system property: {} with value: {}",
+            target.as_deref().unwrap_or("null"),
+            names.as_deref().unwrap_or("null"),
+            values.as_deref().unwrap_or("null")
+        ),
+    )
 }
 fn convert_int(value: &str) -> Option<i32> {
     if value.is_empty() {
@@ -691,7 +694,12 @@ mod tests {
         env.properties.insert("second".into(), "b".into());
         assert!(package_name_manifest(&manifest, &env).is_ok());
         env.properties.insert("second".into(), "no".into());
-        assert!(package_name_manifest(&manifest, &env).is_err());
+        let error = install_manifest(&manifest, &env).unwrap_err();
+        assert_eq!(error.legacy_status, -125);
+        assert_eq!(
+            error.message,
+            "Skipping target and overlay pair null and : overlay ignored due to required system property: first,second, with value: a,b,"
+        );
         assert!(!java_whitespace('\u{a0}'));
         assert!(!java_whitespace('\u{2007}'));
         assert!(java_whitespace('\u{2008}'));

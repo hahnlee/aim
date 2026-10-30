@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn parse_status_and_message_survive_install_preparation() {
         use crate::package::parse::Error;
-        for status in [-101, -102, -106, -107, -108, -12, -14] {
+        for status in [-101, -102, -106, -107, -108, -12, -14, -125] {
             let failure = Failure::from(Error::Status(status, "manifest rejection".into()));
             assert_eq!(failure.legacy_status, status);
             assert_eq!(failure.message, "manifest rejection");
