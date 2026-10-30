@@ -785,6 +785,7 @@ pub struct Pinned {
     socket_allowed: bool,
     fuse: Option<Arc<super::fuse_client::Open>>,
     borrowed: Option<Borrow>,
+    regular_access: Option<i32>,
 }
 impl Pinned {
     pub fn descriptor(&self) -> std::os::fd::BorrowedFd<'_> {
@@ -799,6 +800,9 @@ impl Pinned {
     }
     pub fn socket_allowed(&self) -> bool {
         self.socket_allowed
+    }
+    pub fn regular_access(&self) -> Option<i32> {
+        self.regular_access
     }
 }
 impl Drop for Pinned {
@@ -863,6 +867,14 @@ pub fn pin_guest(fd: i32) -> Result<Pinned, crate::errno::Errno> {
         use std::os::fd::AsRawFd;
         if let Some(file) = &fuse {
             super::fuse_client::install_private_alias(descriptor.as_raw_fd(), file.clone())?;
+        } else {
+            if let Some(error) = super::fuse_client::inherited_error(descriptor.as_raw_fd()) {
+                return Err(error);
+            }
+            fuse = super::fuse_client::get(descriptor.as_raw_fd());
+            if fuse.is_some() {
+                socket_allowed = false;
+            }
         }
         if let Some(kind) = &kind {
             insert(descriptor.as_raw_fd(), kind.clone());
@@ -874,6 +886,7 @@ pub fn pin_guest(fd: i32) -> Result<Pinned, crate::errno::Errno> {
         socket_allowed,
         fuse,
         borrowed: None,
+        regular_access: None,
     })
 }
 
@@ -885,6 +898,16 @@ static BORROWS: LazyLock<Box<[std::sync::atomic::AtomicU32]>> = LazyLock::new(||
         .map(|_| std::sync::atomic::AtomicU32::new(0))
         .collect()
 });
+// Only plain host regular descriptions qualify. Owners are checked on every
+// pin, before this cache; installation and exec adoption also invalidate it.
+// The borrow serializes descriptor replacement; type/access mode are immutable.
+// Zero is unknown; otherwise the value is O_ACCMODE + 1.
+static REGULAR_ACCESS: [AtomicU8; SLOW_FDS] = [const { AtomicU8::new(0) }; SLOW_FDS];
+fn clear_regular_access(fd: i32) {
+    if let Some(slot) = REGULAR_ACCESS.get(fd as usize) {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
 const CLOSER: u32 = 1 << 16;
 thread_local! {static OWN_BORROWS:std::cell::RefCell<Vec<i32>>=const{std::cell::RefCell::new(Vec::new())};}
 struct Borrow(i32);
@@ -918,25 +941,51 @@ pub fn pin_guest_io(fd: i32) -> Result<Pinned, crate::errno::Errno> {
     let kind = get(fd);
     if !matches!(kind, None | Some(Kind::Regular(_)))
         || super::fuse_client::get(fd).is_some()
-        || super::fuse_device::is_device(fd)
+        || super::fuse_device::is_typed(fd)
     {
+        clear_regular_access(fd);
         drop(borrow);
         return pin_guest(fd);
     }
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } < 0 {
-        return Err(crate::errno::last());
-    }
-    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
-        drop(borrow);
-        return pin_guest(fd);
-    }
+    let cached = REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed);
+    let access = if cached != 0 && kind.is_none() {
+        Some(cached as i32 - 1)
+    } else {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } < 0 {
+            return Err(crate::errno::last());
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            drop(borrow);
+            return pin_guest(fd);
+        }
+        if kind.is_some() {
+            clear_regular_access(fd);
+            None
+        } else {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 {
+                return Err(crate::errno::last());
+            }
+            let access = flags & libc::O_ACCMODE;
+            // Serialize cache publication with Linux owner installation.
+            let table = TABLE.read().unwrap();
+            if table.contains_key(&fd) {
+                drop(table);
+                drop(borrow);
+                return pin_guest(fd);
+            }
+            REGULAR_ACCESS[fd as usize].store(access as u8 + 1, Ordering::Relaxed);
+            Some(access)
+        }
+    };
     Ok(Pinned {
         descriptor: None,
         kind,
         socket_allowed: false,
         fuse: None,
         borrowed: Some(borrow),
+        regular_access: access,
     })
 }
 /// Held by a closer of `fd` until the fd is gone: new borrows take the
@@ -1023,6 +1072,7 @@ fn set_slow(fd: i32, on: bool) {
 
 /// A producer publishes only after the complete open description is installed.
 pub fn publish_guest(fd: i32) -> Result<(), crate::errno::Errno> {
+    clear_regular_access(fd);
     if is_hidden(fd) || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
         return Err(crate::errno::EBADF);
     }
@@ -1035,6 +1085,7 @@ pub fn publish_guest(fd: i32) -> Result<(), crate::errno::Errno> {
     Ok(())
 }
 pub fn publish_typed_guest(fd: i32) -> Result<(), crate::errno::Errno> {
+    clear_regular_access(fd);
     if is_hidden(fd) || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
         return Err(crate::errno::EBADF);
     }
@@ -1049,14 +1100,24 @@ pub fn require_guest_visible(fd: i32) -> Result<(), crate::errno::Errno> {
     super::fd_visibility::require(fd)
 }
 pub fn withdraw_guest(fd: i32) -> Result<(), crate::errno::Errno> {
+    clear_regular_access(fd);
     set_slow(fd, true);
     super::fd_visibility::withdraw(fd).map(|_| ())
 }
 
 pub fn insert(fd: i32, kind: Kind) {
-    let previous = match kind {
-        Kind::Memfd(k) => memfd::install(fd, k, || TABLE.write().unwrap().insert(fd, kind)),
-        _ => TABLE.write().unwrap().insert(fd, kind),
+    let key = match &kind {
+        Kind::Memfd(key) => Some(*key),
+        _ => None,
+    };
+    let install = || {
+        let mut table = TABLE.write().unwrap();
+        clear_regular_access(fd);
+        table.insert(fd, kind)
+    };
+    let previous = match key {
+        Some(key) => memfd::install(fd, key, install),
+        None => install(),
     };
     set_slow(fd, true);
     retire(previous);
@@ -1074,6 +1135,7 @@ pub fn get(fd: i32) -> Option<Kind> {
 
 /// The guest closed `fd` (or is about to replace it with dup2).
 pub fn on_close(fd: i32) {
+    clear_regular_access(fd);
     super::fuse_client::close(fd);
     if super::fuse_device::is_device(fd) {
         set_slow(fd, false);
@@ -1252,6 +1314,9 @@ fn adopt_inherited() {
 /// execve in place: the kept fds this process holds as plain fds (a fork
 /// child's evdev fds, say) get their Linux state, as in a new process.
 pub fn adopt_plain() {
+    for slot in &REGULAR_ACCESS {
+        slot.store(0, Ordering::Relaxed);
+    }
     for fd in open_fds()
         .into_iter()
         .filter(|&fd| get(fd).is_none() && !is_hidden(fd))
@@ -2013,6 +2078,42 @@ fn keep_inherited_hidden(parent: Vec<i32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regular_cache_is_invalidated_by_exec_and_owner_installation() {
+        if isolated_kernel_test(
+            "sys::fdtab::tests::regular_cache_is_invalidated_by_exec_and_owner_installation",
+        ) {
+            return;
+        }
+        use std::os::fd::IntoRawFd;
+        let (_guard, root) = crate::vfs::test_view();
+        let path = root.join("cache-owner");
+        std::fs::write(&path, b"data").unwrap();
+        let fd = std::fs::File::open(path).unwrap().into_raw_fd();
+        publish_guest(fd).unwrap();
+        assert!(pin_guest_io(fd).unwrap().regular_access().is_some());
+        assert_ne!(REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed), 0);
+        adopt_plain();
+        assert_eq!(REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed), 0);
+        assert!(pin_guest_io(fd).unwrap().regular_access().is_some());
+        insert(
+            fd,
+            Kind::Path(PathDescription::new(super::super::fs::O_PATH)),
+        );
+        assert_eq!(REGULAR_ACCESS[fd as usize].load(Ordering::Relaxed), 0);
+        assert!(pin_guest_io(fd).unwrap().regular_access().is_none());
+        let mut byte = 0u8;
+        assert_eq!(
+            super::super::fs::read([fd as u64, (&mut byte as *mut u8) as u64, 1, 0, 0, 0]),
+            -(crate::errno::EBADF as i64)
+        );
+        assert_eq!(
+            super::super::fs::lseek([fd as u64, 0, 0, 0, 0, 0]),
+            -(crate::errno::EBADF as i64)
+        );
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
 
     unsafe extern "C" {
         fn posix_spawn_file_actions_addinherit_np(

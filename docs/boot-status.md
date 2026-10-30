@@ -8131,13 +8131,13 @@ shipped (#722), so the scan parses every package: 0.63-1.03 s against
 (host load 8-14, 2026-10-02). Between the mount and zygote-start, init runs its exec
 programs one after another (about 25-120 ms each, mostly starting
 `linux-run`); the longest are bpfloader (0.3-0.6 s) and
-`aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader's 0.32 s
-(run alone: 0.31 s) is three process images (netbpfload execs
-uprobestatsbpfload, then the platform bpfloader, about 0.03 s each),
-netbpfload's own 300,000 `lseek`/`read` calls of 0.3-0.6 us each
-(bionic stdio re-reading its ELF objects; a Linux kernel costs about the
-same) and the 142 objects' file creations, pins (hard links), renames and
-owner records at 0.1-0.5 ms each on the host (#418, #561).
+`aconfigd-mainline init` (0.12-0.36 s) (#529). bpfloader takes about
+0.35 s on a warm resident boot: three process images (netbpfload execs
+uprobestatsbpfload, then the platform bpfloader), netbpfload's 200,000
+`lseek` and 100,000 `read` calls re-reading its ELF objects (0.17 s; the
+I/O owner keeps a plain regular file's type and access mode per descriptor
+instead of re-querying them, #2434), and about 0.03 s of BPF map creation,
+program loads and pins (#418, #561).
 
 ## Debugging
 

@@ -907,6 +907,9 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
 }
 
 fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    if pin.regular_access().is_some() && pin.kind().is_none() {
+        return None;
+    }
     use std::os::fd::AsRawFd;
     let fd = pin.descriptor().as_raw_fd();
     if is_path_fd(fd) {
@@ -962,6 +965,9 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
 }
 
 fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    if pin.regular_access().is_some() && pin.kind().is_none() {
+        return None;
+    }
     use std::os::fd::AsRawFd;
     let fd = pin.descriptor().as_raw_fd();
     if is_path_fd(fd) {
@@ -1163,6 +1169,10 @@ fn prepare_iov(pin: &fdtab::Pinned, iov: &[libc::iovec], write: bool) -> Result<
     } else if let Some(Kind::Regular(description)) = pin.kind() {
         let mode = description.flags & 3;
         if mode == 3 || write && mode == 0 || !write && mode == 1 {
+            return Err(EBADF);
+        }
+    } else if let Some(mode) = pin.regular_access() {
+        if write && mode == libc::O_RDONLY || !write && mode == libc::O_WRONLY {
             return Err(EBADF);
         }
     } else {
@@ -1474,6 +1484,16 @@ pub fn lseek(a: [u64; 6]) -> i64 {
             whence => whence,
         };
         return description.seek(pin.descriptor(), a[1] as i64, whence);
+    }
+    if pin.regular_access().is_some() {
+        let whence = match a[2] as i32 {
+            3 => libc::SEEK_DATA,
+            4 => libc::SEEK_HOLE,
+            whence => whence,
+        };
+        return errno::check(unsafe {
+            libc::lseek(pin.descriptor().as_raw_fd(), a[1] as i64, whence)
+        });
     }
     if let Some(Kind::ProcMem(_)) = pin.kind() {
         return super::proc_mem::seek(pin.descriptor().as_raw_fd(), a[1] as i64, a[2] as i32);
@@ -2824,6 +2844,134 @@ mod dac_tests {
     use super::super::cred::Identity;
     use super::*;
     use std::{fs, os::unix::ffi::OsStrExt};
+
+    #[test]
+    fn regular_io_preserves_access_offsets_and_reused_descriptor_types() {
+        if fdtab::isolated_kernel_test(
+            "sys::fs::dac_tests::regular_io_preserves_access_offsets_and_reused_descriptor_types",
+        ) {
+            return;
+        }
+        use std::os::fd::IntoRawFd;
+        let (_guard, root) = vfs::test_view();
+        let path = root.join("regular-io");
+        fs::write(&path, b"abcdef").unwrap();
+        let publish = |file: fs::File| {
+            let fd = file.into_raw_fd();
+            fdtab::publish_guest(fd).unwrap();
+            fd as u64
+        };
+        let reader = publish(fs::File::open(&path).unwrap());
+        let writer = publish(fs::File::options().write(true).open(&path).unwrap());
+        let mut byte = [0u8];
+        let read_byte = |fd, byte: &mut [u8; 1]| read([fd, byte.as_mut_ptr() as u64, 1, 0, 0, 0]);
+        assert_eq!(read_byte(reader, &mut byte), 1);
+        assert_eq!(byte, *b"a");
+        assert_eq!(
+            write([reader, b"x".as_ptr() as u64, 1, 0, 0, 0]),
+            -(EBADF as i64)
+        );
+        assert_eq!(read_byte(writer, &mut byte), -(EBADF as i64));
+        let alias = dup([reader, 0, 0, 0, 0, 0]);
+        assert!(alias >= 0);
+        assert_eq!(read_byte(alias as u64, &mut byte), 1);
+        assert_eq!(byte, *b"b");
+        assert_eq!(lseek([reader, 0, 1, 0, 0, 0]), 2);
+        assert_eq!(lseek([reader, u64::MAX, 0, 0, 0, 0]), -(EINVAL as i64));
+        assert_eq!(lseek([reader, 0, 1, 0, 0, 0]), 2);
+        assert_eq!(lseek([reader, 0, 99, 0, 0, 0]), -(EINVAL as i64));
+        assert_eq!(lseek([reader, 0, 3, 0, 0, 0]), 0);
+        assert_eq!(lseek([reader, 0, 4, 0, 0, 0]), 6);
+        assert_eq!(lseek([reader, 10, 0, 0, 0, 0]), 10);
+        assert_eq!(read_byte(reader, &mut byte), 0);
+        assert_eq!(read([reader, 1, 1, 0, 0, 0]), -(errno::EFAULT as i64));
+        assert_eq!(dup3([writer, reader, 0, 0, 0, 0]), reader as i64);
+        assert_eq!(read_byte(reader, &mut byte), -(EBADF as i64));
+        assert_eq!(fcntl([reader, 4, O_APPEND, 0, 0, 0]), 0);
+        assert_eq!(write([reader, b"g".as_ptr() as u64, 1, 0, 0, 0]), 1);
+        assert_eq!(fs::read(&path).unwrap(), b"abcdefg");
+        let mut pipe = [0i32; 2];
+        assert_eq!(pipe2([pipe.as_mut_ptr() as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(dup3([pipe[0] as u64, reader, 0, 0, 0, 0]), reader as i64);
+        assert_eq!(lseek([reader, 0, 1, 0, 0, 0]), -ESPIPE);
+        assert_eq!(write([pipe[1] as u64, b"p".as_ptr() as u64, 1, 0, 0, 0]), 1);
+        assert_eq!(read_byte(reader, &mut byte), 1);
+        assert_eq!(byte, *b"p");
+        closed(reader as i64);
+        let reused = publish(fs::File::open(&path).unwrap());
+        assert_eq!(reused, reader);
+        assert_eq!(read_byte(reused, &mut byte), 1);
+        assert_eq!(byte, *b"a");
+        assert_eq!(
+            write([reused, b"x".as_ptr() as u64, 1, 0, 0, 0]),
+            -(EBADF as i64)
+        );
+        for fd in [
+            reused as i64,
+            writer as i64,
+            alias,
+            pipe[0] as i64,
+            pipe[1] as i64,
+        ] {
+            closed(fd);
+        }
+    }
+
+    #[test]
+    fn regular_io_borrow_survives_concurrent_replacement() {
+        if fdtab::isolated_kernel_test(
+            "sys::fs::dac_tests::regular_io_borrow_survives_concurrent_replacement",
+        ) {
+            return;
+        }
+        use std::{
+            os::fd::{AsRawFd, IntoRawFd},
+            sync::mpsc,
+            time::Duration,
+        };
+        let (_guard, root) = vfs::test_view();
+        let path = root.join("regular-io-borrow");
+        fs::write(&path, b"a").unwrap();
+        let fd = fs::File::open(&path).unwrap().into_raw_fd();
+        fdtab::publish_guest(fd).unwrap();
+        // Prime the retained type before racing replacement with a pipe.
+        drop(fdtab::pin_guest_io(fd).unwrap());
+        let held = fdtab::pin_guest_io(fd).unwrap();
+        let mut pipe = [0i32; 2];
+        assert_eq!(pipe2([pipe.as_mut_ptr() as u64, 0, 0, 0, 0, 0]), 0);
+        let (ready, started) = mpsc::channel();
+        let (done, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            done.send(dup3([pipe[0] as u64, fd as u64, 0, 0, 0, 0]))
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let mut byte = [0u8];
+        assert_eq!(
+            unsafe { libc::read(held.descriptor().as_raw_fd(), byte.as_mut_ptr().cast(), 1) },
+            1
+        );
+        assert_eq!(byte, *b"a");
+        drop(held);
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(5)).unwrap(),
+            fd as i64
+        );
+        worker.join().unwrap();
+        // Blocking descriptions must be duplicated rather than borrowed.
+        let held = fdtab::pin_guest_io(fd).unwrap();
+        assert_ne!(held.descriptor().as_raw_fd(), fd);
+        assert!(held.regular_access().is_none());
+        drop(held);
+        for fd in [fd, pipe[0], pipe[1]] {
+            closed(fd as i64);
+        }
+    }
 
     fn identity(uid: u32, gid: u32) -> Identity {
         Identity {
