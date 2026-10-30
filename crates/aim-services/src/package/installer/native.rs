@@ -152,7 +152,7 @@ impl NativeOwners {
                 )
             })?;
             let sessions = owner.sessions.clone();
-            Ok(Arc::new(move |uid, id| {
+            Ok(Arc::new(move |uid: u32, id: i32| {
                 let Some((session, record)) = sessions
                     .records()
                     .into_iter()
@@ -5343,6 +5343,78 @@ mod tests {
         drop(owner);
         drop(io);
         drop(callback);
+    }
+
+    #[test]
+    fn test_only_admission_consumes_normalized_shell_app_and_delegated_flags() {
+        let state = state();
+        let resolver = crate::package::resolve::Resolver::default();
+        let resolution = resolver.resolution(&state).unwrap();
+        for (uid, flags, permission, delegated, accepted) in [
+            (0, 4, false, false, true),
+            (0, 0, false, false, false),
+            (2000, 4, false, false, true),
+            (2000, 0, false, false, false),
+            (10100, 4, false, false, false),
+            (10100, 4, true, false, true),
+            (10100, 4, false, true, true),
+            (1000, 0, true, false, false),
+        ] {
+            let mut device = device();
+            device.permissions = policy::CallingPermissions::new(Arc::new(move |name, _, _| {
+                Ok(permission && name == "android.permission.INSTALL_TEST_ONLY_PACKAGE")
+            }));
+            if delegated {
+                device.adopted_shell_uids.insert(uid as u32);
+            }
+            let mut params = request();
+            params.install_flags = flags;
+            let (record, _) = policy::normalize(
+                &Query {
+                    state: &state,
+                    filter: &resolution.apps_filter,
+                    calling_uid: uid,
+                },
+                77,
+                &device,
+                &mut policy::ServicePolicy::default(),
+                &SystemConfig::default(),
+                params,
+                Some("fixture".into()),
+                None,
+                0,
+                1,
+            )
+            .unwrap();
+            let pkg = crate::package::pkg::AndroidPackage {
+                booleans: crate::package::pkg::booleans::TEST_ONLY,
+                target_sdk_version: 22,
+                ..Default::default()
+            };
+            let result = super::super::admission::prepare(
+                &pkg,
+                record.params.install_flags,
+                false,
+                &super::super::admission::Policy {
+                    min_target: 24,
+                    require_manifest: false,
+                },
+                || Ok(crate::package::sign::SigningDetails::unknown()),
+            );
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "uid={uid} flags={flags} permission={permission} delegated={delegated}"
+            );
+            if !accepted {
+                let error = result.unwrap_err();
+                assert_eq!(error.legacy_status, -15);
+                assert_eq!(
+                    error.message,
+                    "Failed to install test-only apk. Did you forget to add -t?"
+                );
+            }
+        }
     }
 }
 

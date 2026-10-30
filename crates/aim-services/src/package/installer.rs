@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
+mod admission;
 pub mod app_data;
 pub mod archive_queries;
 mod archive_timer;
