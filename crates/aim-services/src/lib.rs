@@ -521,8 +521,9 @@ mod shutdown_tests {
         assert!(shutdown.package && shutdown.runtime);
         assert!(matches!(&shutdown.phase, ShutdownPhase::Closed(Ok(()))));
         drop(shutdown);
+        // The file is closed with its last owner. Its descriptor number may
+        // already be reused by another test thread, so it proves nothing.
         assert!(weak.upgrade().is_none());
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
         retained.shutdown().unwrap();
         fs::remove_file(path).unwrap();
     }
