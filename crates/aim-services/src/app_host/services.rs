@@ -524,6 +524,7 @@ impl Conn {
 
 /// `ConnectionRecord`.
 struct Connection {
+    id: u64,
     conn: Conn,
     /// Its service's token, and the intent of its binding.
     service: Binder,
@@ -549,13 +550,17 @@ pub struct Services {
     /// The handler (`mAm.mHandler`) the services' notifications are posted
     /// and cancelled on, in order and outside their lock.
     handler: Mutex<Option<mpsc::Sender<Job>>>,
+    process_starts: Mutex<Option<mpsc::Sender<Job>>>,
 }
 
 #[derive(Default)]
 struct State {
     records: Vec<Record>,
+    /// `mPendingServices`, in bring-up order until attach or failed start.
+    pending_services: Vec<Binder>,
     connections: Vec<Connection>,
     next_bind_seq: i64,
+    next_connection: u64,
     /// `mFgsStartTempAllowList`: until when a uid may start foreground
     /// services, and why.
     fgs_temp_allowlist: HashMap<i32, (Instant, i32)>,
@@ -1474,7 +1479,10 @@ impl AppHost {
             });
         }
         let (package, class) = (r.package.clone(), r.class.clone());
+        state.next_connection += 1;
+        let id = state.next_connection;
         state.connections.push(Connection {
+            id,
             conn,
             service: token,
             intent: kept.intent.intent.clone(),
@@ -1492,8 +1500,8 @@ impl AppHost {
         if created && b.received {
             let binder = b.binder.as_ref().map(|s| Binder::Handle(s.handle));
             let rebind = b.do_rebind;
-            let conn = state.connections.last().unwrap();
-            connected(&conn.conn, &package, &class, binder, false);
+            let connection = state.connections.iter().find(|c| c.id == id).unwrap();
+            connected(&connection.conn, &package, &class, binder, false);
             if rebind && state.of_binding(token, &kept.intent.intent).count() == 1 {
                 self.request_binding(&mut state, token, &kept.intent.intent, true);
             }
@@ -1688,10 +1696,11 @@ impl AppHost {
         }
         // No longer restarting.
         r.next_restart_time = None;
-        if r.app.is_some() {
+        if r.app.is_some() || state.pending_services.contains(&token) {
             // Waiting for its process to attach.
             return Ok(());
         }
+        let r = state.record(token).unwrap();
         let package = r.package.clone();
         // The `android` package's services still need their owners'
         // system_server internals (#1518).
@@ -1707,50 +1716,123 @@ impl AppHost {
         let process = super::providers::process_name(&r.info.info);
         // `getProcessNameForService`: an isolated service runs alone in a
         // new isolated process named after it.
-        if r.info.flags & FLAG_ISOLATED_PROCESS != 0 {
-            let process = format!("{process}:{}", r.class);
-            // The WebView provider's services start by the WebView zygote
-            // (`HostingRecord.byWebviewZygote`).
-            let defining = r.info.info.item.package_name.as_deref();
-            let (seq, _) = if defining.is_some()
-                && self.webview_zygote_package().as_deref() == defining
+        let isolated = r.info.flags & FLAG_ISOLATED_PROCESS != 0;
+        if !isolated {
+            if let Some((seq, attached)) =
+                self.running_process(&process, r.info.info.application_info.uid as u32)
             {
-                self.start_webview_service_process(r.info.info.application_info.clone(), &process)?
-            } else {
-                self.start_isolated_process(&package, &process)?
-            };
-            state.record(token).unwrap().app = Some(seq);
-            return Ok(());
-        }
-        let running = self.running_process(&process, r.info.info.application_info.uid as u32);
-        match running {
-            Some((seq, attached)) => {
-                state.record(token).unwrap().app = Some(seq);
+                r.app = Some(seq);
                 if attached {
+                    self.attach_services(state, seq);
                     self.real_start(state, token);
+                } else {
+                    state.pending_services.push(token);
                 }
-            }
-            None => {
-                // `startProcessLocked` with hosting type `service`.
-                let pid = self.start_process_for(&package, &process, None, false)?;
-                let seq = self
-                    .apps
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(_, a)| a.pid == pid)
-                    .map(|(seq, _)| *seq);
-                let r = state.record(token).unwrap();
-                r.app = seq;
-                // `fg-service-launch`: its app may make it foreground.
-                if r.fg.required {
-                    let uid = r.info.info.application_info.uid;
-                    let timeout = r.fg.timeout_policy.as_ref().unwrap().required;
-                    Self::temp_allowlist(state, uid, timeout, REASON_SERVICE_LAUNCH);
-                }
+                return Ok(());
             }
         }
+        let info = r.info.info.application_info.clone();
+        let defining = r.info.info.item.package_name.clone();
+        let class = r.class.clone();
+        // `fg-service-launch`: its app may make it foreground.
+        if r.fg.required && !isolated {
+            let timeout = r.fg.timeout_policy.as_ref().unwrap().required;
+            Self::temp_allowlist(state, info.uid, timeout, REASON_SERVICE_LAUNCH);
+        }
+        state.pending_services.push(token);
+        self.queue_service_start(token, move |host| {
+            if isolated {
+                let process = format!("{process}:{class}");
+                // The WebView provider's services start by the WebView zygote
+                // (`HostingRecord.byWebviewZygote`).
+                if defining.is_some() && host.webview_zygote_package() == defining {
+                    host.start_webview_service_process(info, &process)
+                } else {
+                    host.start_isolated_process(&package, &process)
+                }
+            } else {
+                // `startProcessLocked` with hosting type `service`.
+                host.start_app_process(&package, &process, None, false, false)
+            }
+            .map(|(seq, _)| seq)
+        });
         Ok(())
+    }
+
+    /// ProcessList's process-start handler: preparation and zygote IO never
+    /// hold service state or delay the caller's accepted bind/start result.
+    fn queue_service_start(
+        &self,
+        token: Binder,
+        start: impl FnOnce(&Arc<AppHost>) -> Result<i64, Exception> + Send + 'static,
+    ) {
+        let mut queue = self.services.process_starts.lock().unwrap();
+        let sender = queue.get_or_insert_with(|| {
+            let (sender, jobs) = mpsc::channel::<Job>();
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                for job in jobs {
+                    let Some(host) = me.upgrade() else { return };
+                    job(&host);
+                }
+            });
+            sender
+        });
+        sender
+            .send(Box::new(move |host| {
+                let mut state = host.services.state.lock().unwrap();
+                if !state.pending_services.contains(&token)
+                    || state.record(token).is_none_or(|r| r.app.is_some())
+                {
+                    return;
+                }
+                drop(state);
+                let result = start(host);
+                host.service_process_started(token, result);
+            }))
+            .expect("service process-start handler");
+    }
+
+    fn service_process_started(&self, token: Binder, result: Result<i64, Exception>) {
+        let mut state = self.services.state.lock().unwrap();
+        let Some(r) = state.record(token) else { return };
+        let isolated = r.info.flags & FLAG_ISOLATED_PROCESS != 0;
+        let uid = r.info.info.application_info.uid;
+        let process = super::providers::process_name(&r.info.info);
+        let waiting: Vec<_> = state
+            .records
+            .iter()
+            .filter(|r| {
+                state.pending_services.contains(&r.token)
+                    && r.app.is_none()
+                    && (r.token == token
+                        || (!isolated
+                            && r.info.flags & FLAG_ISOLATED_PROCESS == 0
+                            && r.info.info.application_info.uid == uid
+                            && super::providers::process_name(&r.info.info) == process))
+            })
+            .map(|r| r.token)
+            .collect();
+        let apps = self.apps.lock().unwrap();
+        let alive = result.as_ref().ok().and_then(|seq| apps.get(seq));
+        let attached = alive.is_some_and(|a| a.thread.is_some());
+        let alive = alive.is_some();
+        for token in &waiting {
+            if alive {
+                state.record(*token).unwrap().app = result.as_ref().ok().copied();
+            }
+        }
+        drop(apps);
+        if !alive {
+            if let Err(e) = &result {
+                eprintln!("app host: service process start: {}", e.message);
+            }
+            for token in waiting {
+                self.bring_down(&mut state, token);
+            }
+        } else if attached {
+            self.attach_services(&mut state, result.unwrap());
+        }
     }
 
     /// Resume services held for process readiness, on the boot worker.
@@ -1969,9 +2051,14 @@ impl AppHost {
     fn bring_down_if_needed(&self, state: &mut State, token: Binder) {
         let needed =
             state.record(token).is_some_and(|r| r.start_requested) || state.auto_created(token);
-        if needed {
+        if needed || state.pending_services.contains(&token) {
             return;
         }
+        self.bring_down(state, token);
+    }
+
+    fn bring_down(&self, state: &mut State, token: Binder) {
+        state.pending_services.retain(|t| *t != token);
         let Some(at) = state.records.iter().position(|r| r.token == token) else {
             return;
         };
@@ -2046,14 +2133,34 @@ impl AppHost {
     /// `start_seq` are created in it.
     pub(super) fn services_attached(&self, start_seq: i64) {
         let mut state = self.services.state.lock().unwrap();
-        let waiting: Vec<Binder> = state
-            .records
+        self.attach_services(&mut state, start_seq);
+    }
+
+    fn attach_services(&self, state: &mut State, start_seq: i64) {
+        let apps = self.apps.lock().unwrap();
+        let Some(app) = apps.get(&start_seq).filter(|a| a.thread.is_some()) else {
+            return;
+        };
+        let waiting: Vec<_> = state
+            .pending_services
             .iter()
-            .filter(|r| r.app == Some(start_seq) && !r.created)
-            .map(|r| r.token)
+            .copied()
+            .filter(|token| {
+                state.records.iter().any(|r| {
+                    r.token == *token
+                        && (r.app == Some(start_seq)
+                            || (r.info.flags & FLAG_ISOLATED_PROCESS == 0
+                                && r.info.info.application_info.uid as u32 == app.uid
+                                && super::providers::process_name(&r.info.info) == app.process))
+                })
+            })
             .collect();
+        drop(apps);
         for token in waiting {
-            self.real_start(&mut state, token);
+            state.pending_services.retain(|t| *t != token);
+            state.record(token).unwrap().app = Some(start_seq);
+            self.real_start(state, token);
+            self.bring_down_if_needed(state, token);
         }
     }
 
@@ -2088,6 +2195,15 @@ impl AppHost {
     /// it crashed too often.
     pub(super) fn services_process_died(self: &Arc<Self>, start_seq: i64, allow_restart: bool) {
         let mut state = self.services.state.lock().unwrap();
+        let pending: Vec<_> = state
+            .records
+            .iter()
+            .filter(|r| r.app == Some(start_seq) && state.pending_services.contains(&r.token))
+            .map(|r| r.token)
+            .collect();
+        for token in pending {
+            self.bring_down(&mut state, token);
+        }
         // Its services are no longer in it, so that its connections to them
         // are not unbound in it.
         let tokens: Vec<Binder> = state
@@ -4167,3 +4283,7 @@ mod tests {
         assert_eq!(r.remaining(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "service_start_tests.rs"]
+mod service_start_tests;

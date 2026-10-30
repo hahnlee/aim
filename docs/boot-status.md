@@ -147,6 +147,13 @@ if a runtime grant or context publication changed it (#2442). The mutation's
 longest bootstrap hold fell from 0.11-0.21 s to 0.02-0.06 s; persistence
 still runs under the lock.
 
+Service binds now queue process preparation outside service state and return
+before zygote IO (#2442 step 2, 2026-10-30). Pending services attach in request
+order; host regressions cover joining, failed starts, early death and unbind.
+Three matched boots reduce Settings' bind-held service state from 45–97 ms to
+<1 ms. Total binds remain 3.1–69.9 ms because package-bootstrap contention
+persists; usage publication and persistence are unchanged.
+
 The app host watches each started process for exit (NOTE_EXIT) until it
 attaches, since there is no ApplicationThread Binder death before then
 (#2433): a process killed before attaching retires its start at once, and a
