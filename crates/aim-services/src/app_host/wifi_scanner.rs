@@ -161,7 +161,7 @@ impl ReadParcelable for PnoSettings {
 }
 
 /// A bundle's entries, read as `Bundle.readFromParcel` keeps them.
-struct Extras(HashMap<String, Value>);
+pub(super) struct Extras(pub(super) HashMap<String, Value>);
 
 impl ReadParcelable for Extras {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
@@ -241,7 +241,7 @@ impl WifiScanner {
         let package = package.ok_or_else(|| {
             Exception::security(format!("Checking UID {uid} but Package Name is Null"))
         })?;
-        if !self.host.owns_package(uid, package)? {
+        if !self.host.app_ops_owns_package(uid, package)? {
             return Err(Exception::security(format!(
                 "Package {package} does not belong to {uid}"
             )));
@@ -465,12 +465,12 @@ impl WifiScanner {
             .is_some_and(|ai| ai.target_sdk_version < sdk))
     }
 
-    /// `WifiPermissionsUtil.enforceNearbyDevicesPermission(source, true,
-    /// message)`.
-    fn enforce_nearby_devices(
+    /// `WifiPermissionsUtil.enforceNearbyDevicesPermission`.
+    pub(super) fn enforce_nearby_devices(
         &self,
         calling_uid: i32,
         source: Option<&AttributionSourceState>,
+        check_for_location: bool,
         message: &str,
     ) -> Result<(), Exception> {
         let source = source.ok_or_else(|| {
@@ -509,6 +509,9 @@ impl WifiScanner {
             return Err(Exception::security(format!(
                 "package={package} UID={uid} does not have nearby devices permission."
             )));
+        }
+        if !check_for_location {
+            return Ok(());
         }
         // A renouncement of location anywhere along the chain disavows it.
         let mut current = Some(source);
@@ -582,6 +585,7 @@ impl WifiScanner {
             self.enforce_nearby_devices(
                 uid,
                 source.as_ref(),
+                true,
                 &format!("{TAG} getAvailableChannels"),
             )?;
         }
