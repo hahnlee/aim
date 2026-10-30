@@ -621,6 +621,29 @@ impl Service for PowerManager {
                         | DRAW_WAKE_LOCK
                 )))
             }
+            pm::IS_AMBIENT_DISPLAY_AVAILABLE => {
+                pm::IsAmbientDisplayAvailable::read(&mut call.data).map_err(bad)?;
+                bool_reply((|| {
+                    let permission = "android.permission.READ_DREAM_STATE";
+                    let uid = call.sender_euid as i32;
+                    if self.host.check_permission(Some(permission), uid)? != 0 {
+                        return Err(Exception::security(format!(
+                            "Neither user {uid} nor current process has {permission}."
+                        )));
+                    }
+                    let component = self
+                        .host
+                        .framework()?
+                        .framework_string("config_dozeComponent")
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "missing config_dozeComponent",
+                            )
+                        })?;
+                    Ok(!component.is_empty())
+                })())
+            }
             pm::IS_INTERACTIVE => {
                 pm::IsInteractive::read(&mut call.data).map_err(bad)?;
                 bool_reply(Ok(true))

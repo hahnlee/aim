@@ -159,7 +159,7 @@ impl Item for WindowContextInfoChangeItem {
 }
 
 impl AppHost {
-    /// `attachWindowContextToDisplayArea`: none for a caller that is not
+    /// `attachWindowContextToDisplayArea` / `…ToDisplayContent`: none for a caller that is not
     /// a process of the app host or a display that does not exist; else
     /// the context registered on the display area its type goes in, which
     /// in the app host (no decor) has the display's configuration.
@@ -169,11 +169,16 @@ impl AppHost {
         thread: Option<Binder>,
         token: Option<Binder>,
         display: i32,
+        content: bool,
     ) -> Result<Option<Configuration>, Exception> {
         let (Some(thread), Some(Binder::Handle(token))) = (thread, token) else {
             return Err(Exception::new(
                 aim_binder_host::parcel::EX_NULL_POINTER,
-                "attachWindowContextToDisplayArea",
+                if content {
+                    ""
+                } else {
+                    "attachWindowContextToDisplayArea"
+                },
             ));
         };
         let start_seq = self
@@ -191,6 +196,18 @@ impl AppHost {
             return Ok(None);
         };
         if display != 0 {
+            if content {
+                if self.apps.lock().unwrap().values().any(|a| {
+                    a.process == super::SYSTEM_PROCESS
+                        && a.uid == super::SYSTEM_UID
+                        && a.pid == call.sender_pid
+                }) {
+                    return Ok(None);
+                }
+                return Err(Exception::illegal_argument(format!(
+                    "attachWindowContextToDisplayContent: trying to attach to a non-existing display:{display}"
+                )));
+            }
             eprintln!(
                 "app host: attachWindowContextToDisplayArea: trying to attach to a non-existing display:{display}"
             );
@@ -351,14 +368,57 @@ impl Service for WindowManager {
                     &mut call.data,
                 )
                 .map_err(|_| BAD_VALUE)?;
-                match self
-                    .0
-                    .attach_window_context(call, a.app_thread, a.client_token, a.display_id)
-                {
+                match self.0.attach_window_context(
+                    call,
+                    a.app_thread,
+                    a.client_token,
+                    a.display_id,
+                    false,
+                ) {
                     Ok(config) => wm::write_attach_window_context_to_display_area_reply(
                         &mut p,
                         config.as_ref().map(|c| WindowContextInfoBody(c)).as_ref(),
                     ),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            wm::ATTACH_WINDOW_CONTEXT_TO_DISPLAY_CONTENT => {
+                let a = wm::AttachWindowContextToDisplayContent::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                match self.0.attach_window_context(
+                    call,
+                    a.app_thread,
+                    a.client_token,
+                    a.display_id,
+                    true,
+                ) {
+                    Ok(config) => wm::write_attach_window_context_to_display_content_reply(
+                        &mut p,
+                        config.as_ref().map(WindowContextInfoBody).as_ref(),
+                    ),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            wm::IS_KEYGUARD_SECURE => {
+                let a = wm::IsKeyguardSecure::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let result = (|| {
+                    let uid = call.sender_euid as i32;
+                    if a.user_id != uid / super::PER_USER_RANGE as i32
+                        && self.0.check_permission(
+                            Some("android.permission.INTERACT_ACROSS_USERS"),
+                            uid,
+                        )? != 0
+                    {
+                        return Err(Exception::security(
+                            "Requires INTERACT_ACROSS_USERS permission",
+                        ));
+                    }
+                    super::lock_settings::LockSettings::new(self.0.clone())
+                        .credential_type(a.user_id)
+                        .map(|kind| kind != -1)
+                })();
+                match result {
+                    Ok(secure) => wm::write_is_keyguard_secure_reply(&mut p, secure),
                     Err(e) => return reply(Err(e)),
                 }
             }

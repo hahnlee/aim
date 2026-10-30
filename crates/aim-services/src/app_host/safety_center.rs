@@ -691,6 +691,10 @@ impl Service for SafetyCenter {
                     Ok(())
                 })()
             }
+            sc::GET_SAFETY_CENTER_DATA => Err(self.host.unimplemented_named(
+                "safety_center",
+                "getSafetyCenterData: aggregate profiles, status and actions (#2467)",
+            )),
             sc::SET_SAFETY_SOURCE_DATA => {
                 let a = sc::SetSafetySourceData::<SourceData, Event>::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

@@ -344,6 +344,7 @@ pub struct Volumes {
     /// Whether the ringer mode is normal and zen mode off: else what they
     /// mute is read, but not changed.
     ringer_normal: bool,
+    pub ringer_mode: i32,
     pub fixed_volume: bool,
     replace_bt_sco: bool,
     pub absolute: Option<Absolute>,
@@ -499,6 +500,12 @@ impl Volumes {
         let ringer_affected = (c.setting)(Table::System, "mode_ringer_streams_affected")
             .unwrap_or(DEFAULT_RINGER_STREAMS_AFFECTED);
         let ringer = (c.setting)(Table::Global, "mode_ringer").unwrap_or(RINGER_MODE_NORMAL);
+        // AudioService.readPersistedSettings: the image has no vibrator.
+        let ringer = match ringer {
+            _ if c.fixed_volume || c.single_volume => RINGER_MODE_NORMAL,
+            0 | 1 => 0,
+            _ => RINGER_MODE_NORMAL,
+        };
         let zen = (c.setting)(Table::Global, "zen_mode").unwrap_or(ZEN_MODE_OFF);
         let mut v = Volumes {
             streams,
@@ -506,6 +513,7 @@ impl Volumes {
             mute_affected,
             ringer_affected,
             ringer_normal: ringer == RINGER_MODE_NORMAL && zen == ZEN_MODE_OFF,
+            ringer_mode: ringer,
             fixed_volume: c.fixed_volume,
             replace_bt_sco: c.replace_bt_sco,
             absolute: None,
@@ -1024,6 +1032,15 @@ mod tests {
             property: &none,
             setting,
         })
+    }
+
+    #[test]
+    fn ringer_mode_keeps_the_persisted_mode_and_normalizes_incompatible_modes() {
+        for (persisted, expected) in [(0, 0), (1, 0), (2, 2), (-1, 2), (3, 2)] {
+            let v =
+                volumes(&|t, n| (t == Table::Global && n == "mode_ringer").then_some(persisted));
+            assert_eq!(v.ringer_mode, expected);
+        }
     }
 
     /// Volume is fixed by `config_useFixedVolume` alone, as the speaker's

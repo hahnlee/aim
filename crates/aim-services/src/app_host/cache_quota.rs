@@ -573,6 +573,21 @@ fn read_hints(r: &mut Reader<'_>) -> Result<Vec<Hint>, i32> {
 mod tests {
     use super::*;
 
+    /// StorageStatsService.getCacheQuotaBytes: cached uid/volume hint, else DEFAULT_QUOTA.
+    #[test]
+    fn quota_results_follow_the_owned_uid_and_volume_map() {
+        let host = AppHost::new(crate::test_process(1000));
+        let quotas = CacheQuotas::new(&host);
+        quotas.state.lock().unwrap().started = true;
+        let (_, hints) = read_xml(br#"<cache-info previousBytes="1"><quota uid="10100" bytes="12345"/><quota uuid="private" uid="10100" bytes="67890"/></cache-info>"#).unwrap().unwrap();
+        quotas.push_processed_quotas(&hints);
+        assert_eq!(quotas.quota(None, 10100), 12345);
+        assert_eq!(quotas.quota(Some("private"), 10100), 67890);
+        assert_eq!(quotas.quota(None, 10101), DEFAULT_QUOTA);
+        assert_eq!(quotas.quota(Some("other"), 10100), DEFAULT_QUOTA);
+        host.process.shutdown().unwrap();
+    }
+
     /// The hints of a result bundle, as `putParcelableArrayList` writes
     /// them.
     #[test]

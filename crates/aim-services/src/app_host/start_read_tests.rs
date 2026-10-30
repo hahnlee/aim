@@ -323,3 +323,220 @@ fn sync_adapter_types_allow_same_user_without_read_sync_settings_and_require_ful
         }
     });
 }
+
+/// Pinned WMS, PMS, AudioService and StorageManagerService cold reads.
+#[test]
+fn owned_boot_reads_keep_permissions_and_results() {
+    use aim_service_aidl::{
+        android_os_ipowermanager as pm, android_os_storage_istoragemanager as sm,
+        android_view_iwindowmanager as wm,
+    };
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        permissions(host);
+        let window = window_manager::WindowManager(host.clone());
+        let power = power_service::PowerManager::new(host.clone());
+        let audio = audio_service::AudioService::new(host.clone());
+        let storage = storage::StorageManager(host.clone());
+        let denied = |p: Parcel, message: &str| {
+            let e = p.reader().read_exception().unwrap().unwrap_err();
+            assert_eq!(e.code, EX_SECURITY);
+            assert_eq!(e.message, message);
+        };
+        let mut data = Parcel::new();
+        wm::IsKeyguardSecure { user_id: 1 }.write(&mut data);
+        denied(
+            call(&window, wm::IS_KEYGUARD_SECURE, &data, 10100),
+            "Requires INTERACT_ACROSS_USERS permission",
+        );
+        let mut data = Parcel::new();
+        pm::IsAmbientDisplayAvailable {}.write(&mut data);
+        denied(
+            call(&power, pm::IS_AMBIENT_DISPLAY_AVAILABLE, &data, 10100),
+            "Neither user 10100 nor current process has android.permission.READ_DREAM_STATE.",
+        );
+        let mut data = Parcel::new();
+        sm::GetCacheQuotaBytes {
+            volume_uuid: None,
+            uid: 10101,
+        }
+        .write(&mut data);
+        denied(
+            call(&storage, sm::GET_CACHE_QUOTA_BYTES, &data, 10100),
+            "StorageManagerService: Neither user 10100 nor current process has android.permission.STORAGE_INTERNAL.",
+        );
+        assert!(host.storage_stats.get().is_none());
+        for uid in [10100, 1000] {
+            let mut data = Parcel::new();
+            audio::GetSpatializerImmersiveAudioLevel {}.write(&mut data);
+            assert_eq!(
+                audio::read_get_spatializer_immersive_audio_level_reply(
+                    &mut call(
+                        &audio,
+                        audio::GET_SPATIALIZER_IMMERSIVE_AUDIO_LEVEL,
+                        &data,
+                        uid
+                    )
+                    .reader()
+                )
+                .unwrap()
+                .unwrap(),
+                0
+            );
+            let mut data = Parcel::new();
+            wm::IsKeyguardSecure { user_id: 0 }.write(&mut data);
+            let secure = wm::read_is_keyguard_secure_reply(
+                &mut call(&window, wm::IS_KEYGUARD_SECURE, &data, uid).reader(),
+            )
+            .unwrap();
+            match aim_host_lock::secure() {
+                Ok(expected) => assert_eq!(secure.unwrap(), expected),
+                Err(code) => {
+                    let error = secure.unwrap_err();
+                    assert_eq!(error.code, aim_binder_host::parcel::EX_ILLEGAL_STATE);
+                    assert_eq!(
+                        error.message,
+                        format!("lock_settings: the Mac's lock: LocalAuthentication error {code}")
+                    );
+                    eprintln!(
+                        "not run: successful Mac lock read; LocalAuthentication error {code}; propagation checked"
+                    );
+                }
+            }
+        }
+        // Both Objects.requireNonNull checks precede process/display lookup. No permission guard.
+        for (thread, token) in [(None, None), (Some(Binder::Local(1)), None)] {
+            let mut data = Parcel::new();
+            wm::AttachWindowContextToDisplayContent {
+                app_thread: thread,
+                client_token: token,
+                display_id: 4,
+            }
+            .write(&mut data);
+            assert_eq!(
+                call(
+                    &window,
+                    wm::ATTACH_WINDOW_CONTEXT_TO_DISPLAY_CONTENT,
+                    &data,
+                    10100
+                )
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+                EX_NULL_POINTER
+            );
+        }
+        let original = aim_paths::original_image();
+        if !original
+            .join("system/framework/framework-res.apk")
+            .is_file()
+        {
+            eprintln!("not run: original framework resources for boot-read results");
+            return;
+        }
+        assert!(
+            host.framework
+                .set(resources::Framework::load(&original, 160, "en-US").unwrap())
+                .is_ok()
+        );
+        host.display_metrics
+            .set(Ok(display::Metrics {
+                width: 1080,
+                height: 1920,
+                density_dpi: 160,
+            }))
+            .unwrap();
+        let mut data = Parcel::new();
+        pm::IsAmbientDisplayAvailable {}.write(&mut data);
+        let expected = !host
+            .framework()
+            .unwrap()
+            .framework_string("config_dozeComponent")
+            .unwrap()
+            .is_empty();
+        assert_eq!(
+            pm::read_is_ambient_display_available_reply(
+                &mut call(&power, pm::IS_AMBIENT_DISPLAY_AVAILABLE, &data, 1000).reader()
+            )
+            .unwrap()
+            .unwrap(),
+            expected
+        );
+        for uid in [10100, 1000] {
+            let mut data = Parcel::new();
+            audio::GetRingerModeInternal {}.write(&mut data);
+            assert_eq!(
+                audio::read_get_ringer_mode_internal_reply(
+                    &mut call(&audio, audio::GET_RINGER_MODE_INTERNAL, &data, uid).reader()
+                )
+                .unwrap()
+                .unwrap(),
+                2
+            );
+        }
+        let thread = export(Arc::new(activity::Token));
+        let client = export(Arc::new(activity::Token));
+        let mut app = tests::host_with_start(7, Arc::new(|| {}))
+            .apps
+            .lock()
+            .unwrap()
+            .remove(&7)
+            .unwrap();
+        app.thread = Some(host.process.strong(thread.handle));
+        host.apps.lock().unwrap().insert(900, app);
+        let request = |display_id| {
+            let mut data = Parcel::new();
+            wm::AttachWindowContextToDisplayContent {
+                app_thread: Some(thread.binder()),
+                client_token: Some(client.binder()),
+                display_id,
+            }
+            .write(&mut data);
+            call(
+                &window,
+                wm::ATTACH_WINDOW_CONTEXT_TO_DISPLAY_CONTENT,
+                &data,
+                10100,
+            )
+        };
+        let e = request(4).reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(
+            e.message,
+            "attachWindowContextToDisplayContent: trying to attach to a non-existing display:4"
+        );
+        let result = request(0);
+        let mut expected = Parcel::new();
+        expected.write_no_exception();
+        expected.write_i32(1); // WindowContextInfo
+        expected.write_i32(1); // Configuration
+        host.global_configuration().unwrap().write_to(&mut expected);
+        expected.write_i32(0);
+        assert_eq!(result.data(), expected.data());
+        assert_eq!(host.window_contexts.lock().unwrap().len(), 1);
+        // This package fixture deliberately has no installed android/UID 1000.
+        // Mount must preserve the stats owner's failure after clearing identity.
+        let mut data = Parcel::new();
+        sm::GetCacheQuotaBytes {
+            volume_uuid: None,
+            uid: 10100,
+        }
+        .write(&mut data);
+        let error = sm::read_get_cache_quota_bytes_reply(
+            &mut call(&storage, sm::GET_CACHE_QUOTA_BYTES, &data, 10100).reader(),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "android from uid 1000 not allowed to perform GET_USAGE_STATS"
+        );
+        assert_eq!(
+            error.message,
+            host.storage_stats_service()
+                .cache_quota_bytes(1000, None, 10100, Some("android"))
+                .unwrap_err()
+                .message
+        );
+    });
+}

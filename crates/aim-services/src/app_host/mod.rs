@@ -584,6 +584,7 @@ pub struct AppHost {
     safe_labels: Mutex<Option<Arc<Strong>>>,
     provider_queries: Mutex<Option<Arc<Strong>>>,
     storage_crates: Mutex<Option<Arc<Strong>>>,
+    storage_stats: OnceLock<Arc<storage_stats::StorageStatsService>>,
     /// Cold package helpers in the current system process.
     package_bootstrap_java: Mutex<Option<Arc<Strong>>>,
     device_policy_defaults: Mutex<Option<Arc<Strong>>>,
@@ -720,6 +721,7 @@ impl AppHost {
             safe_labels: Mutex::new(None),
             provider_queries: Mutex::new(None),
             storage_crates: Mutex::new(None),
+            storage_stats: OnceLock::new(),
             package_bootstrap_java: Mutex::new(None),
             device_policy_defaults: Mutex::new(None),
             user_switcher_policy: Mutex::new(None),
@@ -1061,10 +1063,7 @@ impl AppHost {
                 Arc::new(domain_verification::DomainVerification::new(self.clone())),
             ),
             ("usb", Arc::new(usb_service::UsbService::new(self.clone()))),
-            (
-                "storagestats",
-                Arc::new(storage_stats::StorageStatsService::new(self.clone())),
-            ),
+            ("storagestats", self.storage_stats_service().clone()),
             (
                 "system_update",
                 Arc::new(system_update::SystemUpdate::new(self.clone())),
