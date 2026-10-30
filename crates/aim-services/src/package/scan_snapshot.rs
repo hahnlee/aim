@@ -179,8 +179,8 @@ pub(super) fn diagnose_metadata(
     version: u64,
     metadata: u64,
 ) {
-    static COUNTS: [std::sync::atomic::AtomicUsize; 7] =
-        [const { std::sync::atomic::AtomicUsize::new(0) }; 7];
+    static COUNTS: [std::sync::atomic::AtomicUsize; 6] =
+        [const { std::sync::atomic::AtomicUsize::new(0) }; 6];
     if before.is_some_and(|before| before.metadata_revision() == metadata) {
         return;
     }
@@ -194,7 +194,6 @@ pub(super) fn diagnose_metadata(
         "publish_after",
         "install",
         "removal",
-        "replace_validated",
     ];
     let fields = if let Some(before) = before {
         let mut normalized = before.owner().clone();
@@ -237,14 +236,8 @@ impl Store {
     pub(crate) fn publish_validated_store(&self, candidate: &Store) {
         let snapshot = candidate.capture();
         let mut current = self.current.lock().unwrap();
-        diagnose_metadata(
-            6,
-            Some(&current),
-            snapshot.owner(),
-            snapshot.usage(),
-            snapshot.version(),
-            snapshot.metadata_revision(),
-        );
+        // Candidate construction already diagnoses its metadata delta. Keep
+        // publication to the validated pointer swap under the coordinator.
         *current = snapshot;
     }
     /// Publish a validated candidate only while its exact canonical base remains

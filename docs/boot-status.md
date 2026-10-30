@@ -141,6 +141,12 @@ with resolved styles keyed by package, user, code version, theme and
 configuration and dropped on any package change: Settings' first lookup takes
 about 5 ms instead of 0.16-0.43 s.
 
+Native package mutations prepare and validate their query candidate outside
+the package-bootstrap lock and recheck the capture before persisting, retrying
+if a runtime grant or context publication changed it (#2442). The mutation's
+longest bootstrap hold fell from 0.11-0.21 s to 0.02-0.06 s; persistence
+still runs under the lock.
+
 The app host watches each started process for exit (NOTE_EXIT) until it
 attaches, since there is no ApplicationThread Binder death before then
 (#2433): a process killed before attaching retires its start at once, and a
