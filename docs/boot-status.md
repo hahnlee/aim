@@ -3322,7 +3322,14 @@ policy/storage/callback owner contracts. A retained bootstrap can install a nati
 installer Binder with real session storage, five oneway callbacks and per-call
 original UM/DPM policy reads. It handles 15 of 26 top-level methods and 29 of 34
 session methods; default publication and durable install/commit recovery remain
-#986. The original policy/FileBridge oracle passes in 20.16s without skips using
+#986. FileBridge shutdown now carries cancellation with each worker's server
+socket, independently of session registration and client EOF (#2415, #1617
+item 1). Removed-session and leaked-dup guard-drop checks, incomplete-payload
+error handling and the original native FileBridge transfer pass together in
+200 alarm-bounded rounds (1,400 passes). The installer lib cohort has 110
+passes and one SDM pipeline test blocked by the original image's lock-file
+sandbox denial; no missing-input skips or guest boot (2026-10-31).
+The original policy/FileBridge oracle passes in 20.16s without skips using
 fixture UM/DPM owners and the original FileBridge output stream. A separate
 original ART test passes in 57.66s with an explicit native true-mode writer:
 Binder imports its typed proxy FD, writes and reads back 17,003 bytes, duplicates
