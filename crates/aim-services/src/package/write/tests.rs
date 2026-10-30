@@ -151,6 +151,13 @@ fn answer(writes: &Writes, uid: u32, seq: u64, sent: Instant, call: (u32, Parcel
         .expect("a write")
 }
 
+/// Consecutive clock reads can tie; the fixture needs a strictly older state.
+fn observe_before_call(writes: &Writes, state: &Arc<State>, dropped: u64) -> Instant {
+    let at = Instant::now();
+    writes.observe_at(state, dropped, at);
+    at + Duration::from_nanos(1)
+}
+
 /// The exception of a reply; `None` for none.
 fn exception(a: &Answer) -> Option<(i32, String)> {
     let Answer::Reply(p) = a else {
@@ -175,8 +182,7 @@ fn due(writes: &Writes, state: Arc<State>) -> Vec<Check> {
 fn an_app_changes_its_components_and_the_original_agrees() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre, 0);
-    let sent = Instant::now();
+    let sent = observe_before_call(&writes, &pre, 0);
     let a = answer(&writes, 10100, 1, sent, set(Some(MAIN), APP, 2));
     assert_eq!(exception(&a), None);
     let a = answer(&writes, 10100, 2, sent, set(Some(B), APP, 0));
@@ -210,8 +216,8 @@ fn an_app_changes_its_components_and_the_original_agrees() {
 fn a_difference_shows_both_states() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre, 0);
-    answer(&writes, 10100, 1, Instant::now(), set(None, APP, 3));
+    let sent = observe_before_call(&writes, &pre, 0);
+    answer(&writes, 10100, 1, sent, set(None, APP, 3));
     // The original did not change the package.
     let checks = due(&writes, pre);
     let CheckOutcome::Differed { original, model } = &checks[0].outcome else {
@@ -242,22 +248,22 @@ fn a_difference_shows_both_states() {
 
 #[test]
 fn the_pre_state_is_older_than_the_call() {
-    let writes = Writes::default();
     let sent = Instant::now();
-    std::thread::sleep(Duration::from_millis(2));
-    writes.observe(&state(|_| {}), 0);
-    let a = answer(&writes, 10100, 1, sent, set(Some(MAIN), APP, 2));
-    assert!(
-        matches!(a, Answer::NotModelled),
-        "no state from before the call"
-    );
+    for at in [sent, sent + Duration::from_nanos(1)] {
+        let writes = Writes::default();
+        writes.observe_at(&state(|_| {}), 0, at);
+        let a = answer(&writes, 10100, 1, sent, set(Some(MAIN), APP, 2));
+        assert!(
+            matches!(a, Answer::NotModelled),
+            "no state from before the call"
+        );
+    }
 }
 
 #[test]
 fn the_original_s_exceptions() {
     let writes = Writes::default();
-    writes.observe(&state(|_| {}), 0);
-    let now = Instant::now();
+    let now = observe_before_call(&writes, &state(|_| {}), 0);
     let a = answer(&writes, 10100, 1, now, set(Some(MAIN), OTHER, 2));
     assert_eq!(
         exception(&a),
@@ -308,11 +314,12 @@ fn the_original_s_exceptions() {
 fn another_package_s_protection_is_not_modelled() {
     for protection in [BTreeMap::new(), BTreeMap::from([(10, (false, false))])] {
         let writes = Writes::default();
-        writes.observe(
+        let sent = observe_before_call(
+            &writes,
             &state(|s| s.packages.get_mut(APP).unwrap().protection = protection),
             0,
         );
-        let a = answer(&writes, 1000, 1, Instant::now(), set(None, APP, 2));
+        let a = answer(&writes, 1000, 1, sent, set(None, APP, 2));
         assert!(matches!(a, Answer::NotModelled));
     }
 }
@@ -337,8 +344,7 @@ fn original_protection_decisions_guard_privileged_writes_and_allow_the_owner() {
                     .push("android.permission.CHANGE_COMPONENT_ENABLED_STATE".into());
                 s.platform.query_filtering_disabled = true;
             });
-            writes.observe(&pre, 0);
-            let sent = Instant::now();
+            let sent = observe_before_call(&writes, &pre, 0);
             // A later policy publication must not replace the call's pre-state.
             let mut later = (*pre).clone();
             later
@@ -347,7 +353,7 @@ fn original_protection_decisions_guard_privileged_writes_and_allow_the_owner() {
                 .unwrap()
                 .protection
                 .insert(0, (!protected, false));
-            writes.observe(&Arc::new(later), 0);
+            writes.observe_at(&Arc::new(later), 0, sent + Duration::from_nanos(1));
             let expected = protected.then(|| {
                 (
                     EX_SECURITY,
@@ -370,8 +376,8 @@ fn original_protection_decisions_guard_privileged_writes_and_allow_the_owner() {
 fn the_same_state_again_changes_nothing() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre, 0);
-    let a = answer(&writes, 10100, 1, Instant::now(), set(Some(B), APP, 2));
+    let sent = observe_before_call(&writes, &pre, 0);
+    let a = answer(&writes, 10100, 1, sent, set(Some(B), APP, 2));
     assert_eq!(exception(&a), None);
     let checks = due(&writes, pre);
     assert!(matches!(checks[0].outcome, CheckOutcome::Matched));
@@ -734,8 +740,8 @@ fn an_install_s_signers_are_verified_from_its_apks() {
 fn only_what_the_writes_named_is_compared() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre, 0);
-    answer(&writes, 10100, 1, Instant::now(), set(Some(MAIN), APP, 2));
+    let sent = observe_before_call(&writes, &pre, 0);
+    answer(&writes, 10100, 1, sent, set(Some(MAIN), APP, 2));
     // system_server enabled B itself, in process: not the app's write.
     let post = state(|s| {
         let u = s.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap();
@@ -750,7 +756,7 @@ fn only_what_the_writes_named_is_compared() {
 fn a_package_written_while_copies_were_dropped_is_not_compared() {
     let writes = Writes::default();
     let pre = state(|_| {});
-    writes.observe(&pre, 3);
+    let sent = observe_before_call(&writes, &pre, 3);
     let (code, data) = set(Some(MAIN), APP, 2);
     writes.answer(&mut ShadowCall {
         service: "package",
@@ -760,7 +766,7 @@ fn a_package_written_while_copies_were_dropped_is_not_compared() {
         sender_pid: 77,
         sender_euid: 10100,
         seq: 1,
-        sent: Instant::now(),
+        sent,
         dropped: 5,
         data: Reader::new(data.data(), &[]),
     });
