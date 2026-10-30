@@ -35,7 +35,7 @@ impl ServiceHost {
             .system
             .upgrade()
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native package system unavailable"))
-            .and_then(|system| system.begin_package_manager_boot(args.factory_test));
+            .and_then(|system| system.begin_package_manager_boot(args.factory_test, None));
         let mut reply = Parcel::new();
         match result {
             Ok(binder) => host::write_begin_package_manager_boot_reply(&mut reply, Some(binder)),

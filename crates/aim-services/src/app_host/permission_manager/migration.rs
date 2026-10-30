@@ -14,10 +14,7 @@ impl PermissionManager {
         let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let data = self.host.data()?;
         let configured = self.host.configured.get().expect("configured");
-        let config = crate::package::system_config::SystemConfig::read(
-            self.host.root()?,
-            &configured.properties,
-        );
+        let config = self.host.image_inputs()?.config(&configured.properties);
         let root = crate::package::resilient(
             data,
             &data.join("system/packages.xml"),

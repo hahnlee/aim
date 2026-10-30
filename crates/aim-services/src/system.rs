@@ -7714,17 +7714,17 @@ impl System {
                 )
             })?;
         let properties = (facts.properties)()?;
-        let system_config =
-            crate::package::system_config::SystemConfig::read(&image.image, &|name| {
-                properties.get(name).cloned()
-            });
+        let system_config = scanned
+            .image_inputs
+            .config(&|name| properties.get(name).cloned());
         let apks = image
-            .apks(
+            .apks_with_platform(
                 &system_config,
                 self.package_signing_overrides()?,
                 facts.density,
                 resources,
                 &|name| Ok(properties.get(name).cloned()),
+                || scanned.image_inputs.platform().cloned(),
             )
             .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         let kernel = Arc::new(
@@ -7745,6 +7745,7 @@ impl System {
                 image: image.image.clone(),
                 data: image.data.clone(),
                 apks,
+                image_inputs: scanned.image_inputs,
                 resource_config: resources,
                 system_config,
                 prepared: scanned.prepared,
@@ -7772,6 +7773,7 @@ impl System {
     pub(crate) fn begin_package_manager_boot(
         self: &Arc<Self>,
         factory_test: bool,
+        image_inputs: Option<Arc<crate::package::boot_image::Inputs>>,
     ) -> Result<Binder> {
         if !self
             .package_requested
@@ -7784,6 +7786,13 @@ impl System {
         }
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as api;
         let image = self.native_package_image()?;
+        let image_inputs =
+            image_inputs.unwrap_or_else(|| crate::package::boot_image::Inputs::new(&image.image));
+        if image_inputs.image != image.image {
+            return Err(Exception::illegal_argument(
+                "package boot inputs use another image",
+            ));
+        }
         let bridge = self.package_bootstrap()?;
         {
             let mut state = self.package_bootstrap.lock().unwrap();
@@ -7835,9 +7844,7 @@ impl System {
         };
         let leaf = self.package_bootstrap_node(&bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
         let initial = package_boot_scan::InitialOwner::new(leaf);
-        let config = crate::package::system_config::SystemConfig::read(&image.image, &|name| {
-            initial.property_value(name)
-        });
+        let config = image_inputs.config(&|name| initial.property_value(name));
         initial.check()?;
         // The original UM creates the first user roster. Settings recovery
         // therefore belongs to finishRawScan, after its constructor returns.
@@ -7851,6 +7858,7 @@ impl System {
             user_operations,
             internal,
             factory_test,
+            image_inputs,
         );
         let mut state = self.package_bootstrap.lock().unwrap();
         let Some(current) = state
@@ -7879,6 +7887,7 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         factory_test: bool,
         early: &Arc<crate::package::early_user_operations::Endpoint>,
+        image_inputs: Arc<crate::package::boot_image::Inputs>,
     ) -> Result<package_boot_scan::Begun> {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as api;
         self.check_package_bootstrap(bridge)?;
@@ -7950,9 +7959,7 @@ impl System {
                     "actual native persistence inputs unavailable",
                 )
             })?;
-        let config = crate::package::system_config::SystemConfig::read(&image.image, &|name| {
-            initial.property_value(name)
-        });
+        let config = image_inputs.config(&|name| initial.property_value(name));
         initial.check()?;
         let recovered =
             crate::system_package_persistence_init::construct_package_persistence_owned(
@@ -7966,6 +7973,7 @@ impl System {
             &image.data,
             initial,
             ce,
+            image_inputs,
         )?;
         begun.retained_readers = Some(recovered.readers);
         early.bind_lifecycle(begun.lifecycle.owner.clone())?;
@@ -8014,12 +8022,13 @@ impl System {
                 )
             })?;
         let apks = image
-            .apks(
+            .apks_with_platform(
                 &begun.system_config,
                 self.package_signing_overrides()?,
                 early_configuration.density_dpi(),
                 resources,
                 &|name| begun.initial.property(name).map_err(|error| error.message),
+                || begun.image_inputs.platform().cloned(),
             )
             .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         self.finish_raw_from_image(bridge, begun, &apks, policy, resources)

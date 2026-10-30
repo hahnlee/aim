@@ -87,7 +87,7 @@ pub trait PlatformFacts {
 
 impl ImageScanInputs {
     pub fn load(
-        image: &Path,
+        image: &crate::package::boot_image::Inputs,
         platform: &Platform,
         facts: &dyn PlatformFacts,
         lifecycle: &crate::package::lifecycle::Owner,
@@ -143,7 +143,7 @@ impl ImageScanInputs {
         };
         let first_api = number("ro.product.first_api_level")?;
         let vendor_sdk = number("ro.vendor.api_level")?;
-        let seinfo = seinfo::Policy::load(image).map_err(|message| {
+        let seinfo = image.seinfo().map_err(|message| {
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message)
         })?;
         let preferred_abi = all.first().cloned().ok_or_else(|| {
@@ -382,7 +382,7 @@ impl System {
             .take()
             .ok_or_else(|| failed("original boot-context owner not bound".into()))?;
         let inputs = ImageScanInputs::load(
-            &begin.image,
+            &begin.image_inputs,
             &apks.platform,
             begin.initial.as_ref(),
             &begin.lifecycle.owner,

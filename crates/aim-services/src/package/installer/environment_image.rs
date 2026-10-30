@@ -34,6 +34,19 @@ impl ImageInputs {
         bridge: Arc<Bridge>,
         attachment: Attachment,
     ) -> Result<Self, String> {
+        Self::load_with_seinfo(data, apks, properties, bridge, attachment, || {
+            seinfo::Policy::load(image)
+        })
+    }
+
+    pub(crate) fn load_with_seinfo(
+        data: &Path,
+        apks: Arc<Apks>,
+        properties: &Properties,
+        bridge: Arc<Bridge>,
+        attachment: Attachment,
+        seinfo: impl FnOnce() -> Result<seinfo::Policy, String>,
+    ) -> Result<Self, String> {
         attachment()?;
         let list = |name: &str| -> Result<Vec<String>, String> {
             let value =
@@ -73,7 +86,7 @@ impl ImageInputs {
         };
         let abi =
             scan::AbiPolicy::from_platform(&apks.platform, &all, &supported, properties.as_ref())?;
-        let seinfo = seinfo::Policy::load(image)?;
+        let seinfo = seinfo()?;
         let data = std::fs::canonicalize(data).map_err(|error| error.to_string())?;
         let code_root = data.join("app");
         if !std::fs::symlink_metadata(&code_root)

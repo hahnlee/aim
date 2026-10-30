@@ -53,14 +53,14 @@ impl BootConfiguration {
     }
 
     fn flag(&self, name: &str) -> Result<bool, Exception> {
-        Ok(
-            crate::package::parse::Platform::load(self.host.root()?, Default::default())
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
-                .flags
-                .get(name)
-                .copied()
-                .unwrap_or(false),
-        )
+        let image_inputs = self.host.image_inputs()?;
+        Ok(image_inputs
+            .platform()
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+            .flags
+            .get(name)
+            .copied()
+            .unwrap_or(false))
     }
 
     /// `captureResources`.

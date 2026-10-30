@@ -25,6 +25,7 @@ pub struct Framework(pub Platform);
 
 impl Framework {
     /// The device's framework resources, read below the image `root`.
+    #[cfg(test)]
     pub fn load(root: &Path, density_dpi: i32, locale: &str) -> Result<Self, String> {
         device_platform(root, density_dpi, locale).map(Framework)
     }
@@ -134,12 +135,24 @@ impl Framework {
 
 /// The image's platform at the device's density and locale, as
 /// `persist.sys.locale` holds it (`ko-KR`).
+#[cfg(test)]
 pub(super) fn device_platform(
     root: &Path,
     density_dpi: i32,
     locale: &str,
 ) -> Result<Platform, String> {
-    let mut platform = Platform::load(root, Default::default())?;
+    Ok(configure_platform(
+        Platform::load(root, Default::default())?,
+        density_dpi,
+        locale,
+    ))
+}
+
+pub(super) fn configure_platform(
+    mut platform: Platform,
+    density_dpi: i32,
+    locale: &str,
+) -> Platform {
     platform.density_dpi = Some(density_dpi);
     if let Some((language, country)) = locale.split_once('-')
         && let (Ok(language), Ok(country)) = (
@@ -149,7 +162,7 @@ pub(super) fn device_platform(
     {
         platform.locale = (language, country);
     }
-    Ok(platform)
+    platform
 }
 
 /// `ActivityRecord.WindowStyle`: what an activity's theme says of its

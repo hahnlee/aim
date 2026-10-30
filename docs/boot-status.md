@@ -321,8 +321,11 @@ reconciliation and application forks still wait for default grants. The
 WebView relro creator's isolated uid is recorded before its zygote start, as
 `newProcessRecordLocked` does, so the child no longer attaches before the app
 host knows it; registering every pending start before the zygote start is
-#2416. AudioPolicy's load time fell from 3.3–3.8 s to 2.6–2.8 s; the second
-boot's `boot_completed` stays at about 7 s (three boots each, 2026-10-29). The media services (mediaserver, mediaextractor,
+#2416. AudioPolicy's load time fell from 3.3–3.8 s to 2.6–2.8 s (2026-10-29).
+Package boot now shares immutable image inputs across scanning, initial projection
+and construction (#2421): three matched warm second boots reduce median raw scan
+from 2.028 to 1.214 s; median `boot_completed` is 6.216 s
+against 6.978 s before (2026-10-30). The media services (mediaserver, mediaextractor,
 mediametrics, media.swcodec) start too: Codec2's software decoders take
 their buffers from `/dev/dma_heap/system`, which the syscall layer serves. The health HAL
 (`vendor.health-aim`) starts for the app host's battery service, which

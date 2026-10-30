@@ -72,6 +72,7 @@ const DEFAULT_PRE_O_MAX_ASPECT_RATIO: f32 = 1.86;
 const APP_DETAILS_ACTIVITY_CLASS_NAME: &str = "android.app.AppDetailsActivity";
 
 /// What a parse depends on besides the APK: the platform it runs on.
+#[derive(Clone)]
 pub struct Platform {
     /// `Build.VERSION.SDK_INT` (and `RESOURCES_SDK_INT`, the same on a
     /// release build).
@@ -170,6 +171,7 @@ impl Platform {
 }
 
 /// `PermissionManager.SplitPermissionInfo`.
+#[derive(Clone)]
 pub struct SplitPermission {
     pub name: String,
     pub new_permissions: Vec<String>,

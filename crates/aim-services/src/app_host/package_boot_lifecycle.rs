@@ -101,10 +101,8 @@ impl BootLifecycle {
     /// disables until used; with some, their privileges are telephony's
     /// (#1923).
     fn prepare_ready(&self) -> Result<(), Exception> {
-        let config =
-            crate::package::system_config::SystemConfig::read(self.host.root()?, &|name| {
-                self.host.property(name)
-            });
+        let image_inputs = self.host.image_inputs()?;
+        let config = image_inputs.config(&|name| self.host.property(name));
         if config.disabled_until_used_carrier_apps.is_empty() {
             return Ok(());
         }

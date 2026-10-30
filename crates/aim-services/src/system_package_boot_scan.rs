@@ -248,6 +248,7 @@ pub struct Begun {
     pub lifecycle: Production,
     pub system_config: crate::package::system_config::SystemConfig,
     pub model_system: model::System,
+    pub image_inputs: Arc<crate::package::boot_image::Inputs>,
     pub image: PathBuf,
     pub data: PathBuf,
     pub initial: Arc<InitialOwner>,
@@ -255,6 +256,7 @@ pub struct Begun {
     pub retained_readers: Option<crate::package::settings::native_read::SharedReaders>,
 }
 pub struct Scanned {
+    pub image_inputs: Arc<crate::package::boot_image::Inputs>,
     pub prepared: Prepared,
     pub capture: Arc<Capture>,
     pub runtime_metadata: crate::package::owner::runtime_metadata::State,
@@ -391,6 +393,7 @@ impl System {
         data: &Path,
         initial: Arc<InitialOwner>,
         ce_leaf: crate::system::ServiceOwner,
+        image_inputs: Arc<crate::package::boot_image::Inputs>,
     ) -> Result<Begun> {
         self.check_package_bootstrap(bridge)?;
         let original = prepared.settings.clone();
@@ -403,16 +406,25 @@ impl System {
         )?;
         let values = initial.clone();
         let property = |name: &str| values.property_value(name);
-        let system_config = crate::package::system_config::SystemConfig::read(image, &property);
-        let framework = crate::package::system_config::Framework::load(image).map_err(failure)?;
-        let model_system =
-            crate::package::system_config::system(image, &property, &framework).map_err(failure)?;
+        let system_config = image_inputs.config(&property);
+        let framework = crate::package::system_config::Framework::from_platform(
+            image,
+            image_inputs.platform().map_err(failure)?,
+        )
+        .map_err(failure)?;
+        let model_system = crate::package::system_config::system_with_config(
+            image_inputs.config(&property),
+            &property,
+            &framework,
+        )
+        .map_err(failure)?;
         initial.check()?;
         Ok(Begun {
             prepared,
             lifecycle,
             system_config,
             model_system,
+            image_inputs,
             image: image.into(),
             data: data.into(),
             initial,
@@ -854,10 +866,9 @@ impl System {
                     .is_some_and(|name| bcp_modules.contains(name))
         });
 
-        let platform = Arc::new(
-            crate::package::parse::Platform::load(&begin.image, apks.platform.features.clone())
-                .map_err(failure)?,
-        );
+        let mut platform = begin.image_inputs.platform().map_err(failure)?.clone();
+        platform.features = apks.platform.features.clone();
+        let platform = Arc::new(platform);
         Ok(RawScanned {
             projection: Mutex::new(Some(RawProjection {
                 begin,
@@ -984,6 +995,7 @@ impl System {
         self.initialize_web_instant_policy(bridge)?;
         let capture = self.capture_package_queries_for(bridge)?;
         Ok(Scanned {
+            image_inputs: begin.image_inputs,
             prepared: begin.prepared,
             capture,
             runtime_metadata,

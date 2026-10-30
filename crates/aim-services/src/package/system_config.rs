@@ -139,6 +139,13 @@ pub struct RejectedOemUid {
     pub reason: &'static str,
 }
 
+#[derive(Clone)]
+pub(crate) struct ImageConfig {
+    config: SystemConfig,
+    low_ram: bool,
+    first_sdk: i32,
+}
+
 impl SystemConfig {
     /// `readAllPermissions` of the image whose root is `root`.
     /// SystemConfig.getOverlayConfigSignaturePackage, including fatal duplicate
@@ -154,6 +161,10 @@ impl SystemConfig {
     }
 
     pub fn read(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> SystemConfig {
+        Self::read_image(root, prop).with_environment(prop)
+    }
+
+    pub(crate) fn read_image(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> ImageConfig {
         let mut c = SystemConfig::default();
         let low_ram = prop("ro.config.low_ram").as_deref() == Some("true");
         let first_sdk = int(prop("ro.product.first_api_level")).unwrap_or(0);
@@ -228,6 +239,22 @@ impl SystemConfig {
             .sort_by_key(|name| super::info::java_hash(name));
         c.oem_defined_uids
             .sort_by_key(|(name, _)| super::info::java_hash(name));
+        ImageConfig {
+            config: c,
+            low_ram,
+            first_sdk,
+        }
+    }
+}
+
+impl ImageConfig {
+    pub(crate) fn with_environment(self, prop: &dyn Fn(&str) -> Option<String>) -> SystemConfig {
+        let Self {
+            mut config,
+            low_ram,
+            first_sdk,
+        } = self;
+        let c = &mut config;
         // readAllPermissionsFromEnvironment.
         if prop("ro.crypto.type").as_deref() == Some("file") {
             c.add(FEATURE_FILE_BASED_ENCRYPTION, 0);
@@ -257,9 +284,11 @@ impl SystemConfig {
         for name in std::mem::take(&mut c.unavailable) {
             c.features.retain(|(n, _)| *n != name);
         }
-        c
+        config
     }
+}
 
+impl SystemConfig {
     /// `readPermissions` of a directory: its XML files, `platform.xml` of a
     /// `permissions` directory last.
     fn read_dir(
@@ -833,6 +862,10 @@ pub struct Framework {
 impl Framework {
     pub fn load(root: &Path) -> Result<Framework, String> {
         let platform = Platform::load(root, Default::default())?;
+        Self::from_platform(root, &platform)
+    }
+
+    pub(crate) fn from_platform(root: &Path, platform: &Platform) -> Result<Self, String> {
         let mut flags: Vec<(String, bool)> = platform.flags.clone().into_iter().collect();
         flags.sort();
         Ok(Framework {
@@ -860,7 +893,14 @@ pub fn system(
     prop: &dyn Fn(&str) -> Option<String>,
     framework: &Framework,
 ) -> Result<System, String> {
-    let config = SystemConfig::read(root, prop);
+    system_with_config(SystemConfig::read(root, prop), prop, framework)
+}
+
+pub(crate) fn system_with_config(
+    config: SystemConfig,
+    prop: &dyn Fn(&str) -> Option<String>,
+    framework: &Framework,
+) -> Result<System, String> {
     Ok(System {
         features: config.features,
         system_permissions: Some(config.system_permissions),
