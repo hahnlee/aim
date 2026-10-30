@@ -445,6 +445,9 @@ fn verifier_status_retries_package_write_and_persists_without_mutating_retained_
             .unwrap();
         let pending = retained.prepare_domain_update(pending).unwrap();
         enabled(Some("p.Main"), 2);
+        system
+            .write_due_package_restrictions(&bridge, None)
+            .unwrap();
         assert!(
             system
                 .commit_package_domains_if_current(&bridge, pending, &mut disk.lock().unwrap())

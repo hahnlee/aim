@@ -631,7 +631,7 @@ fn cached_host_enabled_writes_publish_and_persist_without_losing_runtime_state()
         runtime.state().system.implicit_access,
         old.state().system.implicit_access
     );
-    let (code, request) = enabled_request(Some("p.Main"), 2, 0);
+    let (code, request) = enabled_request(Some("p.Main"), 2, 2);
     ok(transact(&cached, 1000, code, &request));
     let data = fixture.root.join("data");
     let current = fixture.system.capture_package_queries().unwrap();
@@ -704,7 +704,7 @@ fn concurrent_enabled_mutations_preserve_runtime_visibility_and_uid_publications
             start.wait();
             for i in 0..16 {
                 let (code, request) =
-                    enabled_request(Some("p.Main"), if i % 2 == 0 { 1 } else { 2 }, 0);
+                    enabled_request(Some("p.Main"), if i % 2 == 0 { 1 } else { 2 }, 2);
                 ok(transact(&cached, 1000, code, &request));
             }
         });
@@ -1983,4 +1983,94 @@ fn enabled_projection_matches_full_for_users_and_factory_aliases() {
         }
     }
     drop(workers);
+}
+
+#[test]
+fn package_restrictions_timer_flush_shutdown_and_failure() {
+    let session = session();
+    let system = &session.fixture.system;
+    let boot = &system.package_bootstrap;
+    let tick = |now| system.write_due_package_restrictions(&session.bridge, Some(now));
+    let path = session
+        .fixture
+        .root
+        .join("data/system/users/0/package-restrictions.xml");
+    let initial = std::fs::read(&path).ok();
+    let deadline = || {
+        let state = boot.lock().unwrap();
+        let current = state.current.as_ref().unwrap();
+        current.restriction_writes.as_ref().unwrap().deadline
+    };
+    let set = |state, flags| {
+        let (code, request) = enabled_request(Some("p.Main"), state, flags);
+        ok(transact(&session.cached, 1000, code, &request));
+    };
+    // No-op SYNCHRONOUS carries no timer and writes nothing.
+    set(0, 2);
+    assert!(deadline().is_none());
+    set(1, 0);
+    let at = deadline().unwrap();
+    set(1, 2);
+    assert_eq!(deadline(), Some(at));
+    set(2, 0);
+    assert_eq!(deadline(), Some(at));
+    assert_eq!(std::fs::read(&path).ok(), initial);
+    let current = system.capture_package_queries().unwrap();
+    assert_eq!(
+        current.state().packages["p"].users[&0].disabled_components,
+        ["p.Main"]
+    );
+    tick(at - Duration::from_millis(1)).unwrap();
+    assert_eq!(std::fs::read(&path).ok(), initial);
+    tick(at).unwrap();
+    assert!(deadline().is_none());
+    let bytes = std::fs::read(&path).unwrap();
+    let disk = crate::package::State::read(&session.fixture.root.join("data"), &[0])
+        .unwrap()
+        .unwrap();
+    let user = &disk.users[0].1.restrictions;
+    let package = user.packages.iter().find(|(name, _)| name == "p").unwrap();
+    assert_eq!(
+        package.1.disabled_components.as_deref(),
+        Some(["p.Main".to_string()].as_slice())
+    );
+    std::fs::rename(&path, path.with_extension("saved")).unwrap();
+    tick(at + Duration::from_secs(20)).unwrap();
+    assert!(!path.exists());
+    std::fs::rename(path.with_extension("saved"), &path).unwrap();
+    set(1, 0);
+    let stale = deadline().unwrap();
+    set(0, 2);
+    assert!(deadline().is_none());
+    assert_ne!(std::fs::read(&path).unwrap(), bytes);
+    tick(stale).unwrap();
+    set(2, 0);
+    let due = deadline().unwrap();
+    let reserve = path.with_file_name("package-restrictions.xml.reservecopy");
+    std::fs::remove_file(&reserve).unwrap();
+    std::fs::create_dir(&reserve).unwrap();
+    let published = system.capture_package_queries().unwrap();
+    let error = tick(due).unwrap_err();
+    assert!(error.message.contains("user 0:"), "{}", error.message);
+    assert!(Arc::ptr_eq(
+        &published,
+        &system.capture_package_queries().unwrap()
+    ));
+    {
+        let state = boot.lock().unwrap();
+        assert!(
+            state
+                .current
+                .as_ref()
+                .unwrap()
+                .dirty_restrictions
+                .contains(&0)
+        );
+    }
+    std::fs::remove_dir(&reserve).unwrap();
+    // NativeServices::shutdown and app host stop both retire through this gate.
+    system.detach_package_bootstrap(&session.bridge).unwrap();
+    assert!(boot.lock().unwrap().current.is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    drop(session.workers);
 }

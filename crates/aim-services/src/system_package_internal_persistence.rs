@@ -534,7 +534,14 @@ impl System {
     pub(crate) fn flush_pending_internal_settings(&self) -> Result<()> {
         let owner = self.internal_persistence_owner()?;
         let pending = owner.signal.0.lock().unwrap().1.is_some();
-        if pending {
+        let restrictions = self
+            .package_bootstrap
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .is_some_and(|current| !current.dirty_restrictions.is_empty());
+        if pending || restrictions {
             self.persist_internal_settings(&owner)?;
         }
         Ok(())

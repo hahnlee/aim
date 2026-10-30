@@ -153,8 +153,10 @@ longest bootstrap hold fell from 0.11-0.21 s to 0.02-0.06 s; persistence
 still runs under the lock.
 
 Enabled-only mutations project changed packages and UID/shared-UID aliases from
-that capture (#2478); restrictions still write immediately. Host parity/no-op/CAS
-checks and three Contacts first-open/reopen boots pass (2026-10-31).
+that capture (#2478). Enabled-setting restrictions now coalesce for ten seconds;
+SYNCHRONOUS and shutdown flush pending state. Host timer/failure checks cover the
+writer; no guest boot was rerun. The projection's earlier parity/no-op/CAS checks
+and three Contacts first-open/reopen boots passed (2026-10-31).
 
 Service binds queue process preparation outside service state and return
 before zygote IO (#2442, 2026-10-30). Pending services attach in request order;

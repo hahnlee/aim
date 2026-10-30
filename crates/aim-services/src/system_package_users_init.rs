@@ -119,6 +119,9 @@ pub fn create(
                 .upgrade()
                 .ok_or_else(|| error("package list system stopped"))?;
             system.check_package_bootstrap(&list_bridge)?;
+            if creating_user.is_none() {
+                system.write_due_package_restrictions(&list_bridge, None)?;
+            }
             let mut users: Vec<_> = capture.state().users.keys().copied().collect();
             if let Some(user) = creating_user {
                 if !users.contains(&user) {
