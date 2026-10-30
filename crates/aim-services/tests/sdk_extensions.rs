@@ -166,7 +166,8 @@ fn extension_sdk_duplicate_validation_actual_property_policy_and_errors() {
             "{name}: {error:?}"
         );
         if !older {
-            assert!(matches!(error, Error::Parse(_)), "{name}: {error:?}");
+            // ParsingPackageUtils reports these as MANIFEST_MALFORMED.
+            assert!(matches!(error, Error::Status(-108, _)), "{name}: {error:?}");
         }
     }
 }
