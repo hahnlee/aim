@@ -245,11 +245,58 @@ fn count(r: &mut Reader<'_>, min_bytes: usize) -> ParcelResult<usize> {
 /// parcelables then include a size starting at the size word itself.
 fn sized_parcelable(r: &mut Reader<'_>) -> ParcelResult<()> {
     if r.read_bool()? {
-        let size = r.read_i32()?;
-        if size < 4 || size % 4 != 0 {
+        sized_body(r)?;
+    }
+    Ok(())
+}
+
+fn sized_body(r: &mut Reader<'_>) -> ParcelResult<()> {
+    let size = r.read_i32()?;
+    if size < 4 || size % 4 != 0 {
+        return Err(BAD_VALUE);
+    }
+    r.skip(size as usize - 4)
+}
+
+/// WindowInfo is custom: its name-presence word, then fixed fields and a
+/// directly sized InputApplicationInfo (no writeParcelable presence word).
+fn window_info(r: &mut Reader<'_>) -> ParcelResult<()> {
+    if r.read_bool()? {
+        r.read_binder()?; // token
+        r.skip(12)?; // dispatch timeout, id
+        r.read_string16()?; // name
+        // flags/type, frame, content size, inset, scales, transform,
+        // touch occlusion mode, owner pid/uid
+        r.skip(80)?;
+        r.read_string16()?; // package name
+        r.skip(8)?; // InputConfig (int32 flags), display id
+        sized_body(r)?; // InputApplicationInfo, including its token
+        light(r)?; // touchable region
+        r.read_bool()?; // replace touchable region with crop
+        for _ in 0..3 {
+            r.read_binder()?; // crop handle, windowToken, focusTransferTarget
+        }
+        r.read_bool()?; // can occlude presentation
+        if r.read_bool()? {
+            r.skip(24)?; // optional clone layer stack transform
+        }
+    }
+    Ok(())
+}
+
+fn display_luts(r: &mut Reader<'_>) -> ParcelResult<()> {
+    if r.read_bool()? {
+        // hasLuts implies a non-null writeParcelable, without a size word.
+        if r.read_i32()? != 1 {
             return Err(BAD_VALUE);
         }
-        r.skip(size as usize - 4)?;
+        // writeUniqueFileDescriptor is a raw fd object, without
+        // ParcelFileDescriptor's communication word.
+        r.read_fd()?;
+        let offsets = count(r, 4)?;
+        r.skip(offsets * 4)?;
+        let entries = count(r, 12)?;
+        r.skip(entries * 12)?; // dimension, size, sampling key
     }
     Ok(())
 }
@@ -386,9 +433,7 @@ fn layer(r: &mut Reader<'_>, file: &impl Fn(u32) -> Option<File>) -> Result<Laye
     surface_control(r)?; // relative layer
     surface_control(r)?; // parent for child
     r.skip(16)?; // color
-    if r.read_bool()? {
-        return Err(Error::Unsupported("WindowInfo"));
-    }
+    window_info(r)?;
     light(r)?; // transparent region
     r.skip(12)?; // buffer transform, inverse, dataspace
     light(r)?; // HDR metadata
@@ -438,9 +483,7 @@ fn layer(r: &mut Reader<'_>, file: &impl Fn(u32) -> Option<File>) -> Result<Laye
         r.read_fd()?;
     }
     r.skip(12)?; // picture profile handle and app content priority (enabled in pin)
-    if r.read_bool()? {
-        return Err(Error::Unsupported("DisplayLuts"));
-    }
+    display_luts(r)?;
     Ok(LayerState {
         handle,
         state: copy(r, start, file)?,
@@ -684,8 +727,236 @@ mod tests {
         assert!(DrawTransaction::read_with_files(&mut p.reader(), &|_| None).is_err());
     }
 
+    // Constructed from the android-16.0.0_r1 WindowInfo.cpp writer and
+    // InputApplicationInfo.aidl, not from the reader under test.
+    fn input_info(rects: &[[i32; 4]], full: bool) -> (Parcel, usize, usize) {
+        let mut p = Parcel::new();
+        let token = |id| full.then_some(Binder::Local(id));
+        p.write_i32(1); // nonempty window name
+        if let Some(token) = token(31) {
+            p.write_vintf_binder(token);
+        } else {
+            p.write_binder(None);
+        }
+        p.write_i64(5_000_000_000); // timeout in ns
+        p.write_i32(32); // id
+        p.write_string16(Some("input 창"));
+        p.write_u32(0x8000_0008); // layout flags
+        p.write_i32(2); // type
+        for v in [0, 0, 640, 480, 640, 480, 3] {
+            // frame, content size, inset
+            p.write_i32(v);
+        }
+        for v in [1., 0.75, 1., 0., 17., 0., 1., 19.] {
+            // scales, transform
+            p.write_f32(v);
+        }
+        for v in [2, 1234, 10001] {
+            // occlusion mode, owner pid/uid
+            p.write_i32(v);
+        }
+        p.write_string16(Some("dev.aim.input"));
+        p.write_u32(0x7ffff); // all pinned InputConfig bits
+        p.write_i32(7); // display
+        let application = p.position();
+        p.write_i32(0); // generated AIDL size; no presence marker
+        p.write_binder(token(33));
+        p.write_string16(Some("application 앱"));
+        p.write_i64(5000); // timeout in ms
+        p.set_i32_at(application, (p.position() - application) as i32);
+        let region = p.position();
+        p.write_i32((4 + rects.len() * 16) as i32);
+        p.write_i32(rects.len() as i32); // Region::flatten storage count
+        for rect in rects {
+            for v in rect {
+                p.write_i32(*v);
+            }
+        }
+        p.write_bool(full); // replace touchable region with crop
+        p.write_binder(token(34));
+        p.write_binder(full.then_some(Binder::Handle(35))); // windowToken
+        p.write_binder(token(36)); // focusTransferTarget
+        p.write_bool(true); // can occlude presentation
+        p.write_bool(full);
+        if full {
+            for v in [2., 0., 5., 0., 2., 7.] {
+                // clone layer stack transform
+                p.write_f32(v);
+            }
+        }
+        (p, application, region)
+    }
+
+    fn luts(file: File, entries: usize) -> Parcel {
+        let mut p = Parcel::new();
+        p.write_bool(true); // hasLuts
+        p.write_i32(1); // writeParcelable presence, no size
+        p.write_file(file); // writeUniqueFileDescriptor, not a Java PFD
+        p.write_i32(entries as i32);
+        for offset in [0, 256].into_iter().take(entries) {
+            p.write_i32(offset);
+        }
+        p.write_i32(entries as i32);
+        for (dimension, size, sampling) in [(1, 256, 0), (3, 17, 2)].into_iter().take(entries) {
+            p.write_i32(dimension);
+            p.write_i32(size);
+            p.write_i32(sampling);
+        }
+        p
+    }
+
+    fn with_payloads(info: &Parcel, luts: &Parcel) -> Parcel {
+        let original = original_layer();
+        let input = 28 + 68 + 8 + 16;
+        let mut p = Parcel::new();
+        range(&mut p, &original, 0, input);
+        append(&mut p, info);
+        range(&mut p, &original, input + 4, original.position() - 4);
+        append(&mut p, luts);
+        p.set_i32_at(32, 0x4000_1000); // eInputInfoChanged | eLutsChanged
+        p
+    }
+
     #[test]
-    fn null_closed_truncated_and_unsupported_parcels_are_distinct() {
+    fn window_info_and_luts_round_trip_pinned_writer_layout() {
+        use std::os::{fd::AsFd, unix::fs::MetadataExt};
+        let os_file = std::fs::File::open("/dev/null").unwrap();
+        let device = os_file.metadata().unwrap().rdev();
+        let file = aim_binder_host::server::file_from_fd(os_file.as_fd()).unwrap();
+        drop(os_file); // only the owned Binder file remains
+        let many: Vec<_> = (0..1024)
+            .map(|x| [2 * x, 0, 2 * x + 1, 1])
+            .chain([[0, 0, 2047, 1]])
+            .collect(); // Region's final bounding rect
+        let regions = [
+            vec![[0; 4]],
+            vec![[i32::MIN, i32::MIN, i32::MAX, i32::MAX]],
+            many,
+        ];
+        for (i, rects) in regions.iter().enumerate() {
+            let (info, _, _) = input_info(rects, i != 0);
+            let lut = luts(file.clone(), if i == 0 { 0 } else { 2 });
+            let layer = with_payloads(&info, &lut);
+            let p = native(&layer, &no_map());
+            let draw = decode(&p);
+            assert_eq!(draw.layers[0].state.data(), layer.data());
+            assert_eq!(draw.layers[0].state.objects(), layer.objects());
+            let applied = draw.transaction(100, Binder::Local(101));
+            drop((draw, p));
+            let mut r = applied.reader();
+            r.enforce_interface(TRANSACTIONS_DESCRIPTOR).unwrap();
+            r.skip(24).unwrap(); // id, flags, timestamp, auto timestamp
+            sized_parcelable(&mut r).unwrap();
+            r.read_binder().unwrap();
+            r.skip(128).unwrap(); // display flags/count, one display, layer count
+            let start = r.position();
+            r.skip(layer.position()).unwrap();
+            assert_eq!(r.since(start), (layer.data(), layer.objects().to_vec()));
+            assert_eq!(applied.files().len(), 1);
+            let (at, retained) = &applied.files()[0];
+            assert_eq!(*at, start as u64 + layer.files()[0].0);
+            assert!(std::sync::Arc::ptr_eq(retained, &file));
+            assert_eq!(
+                aim_binder_host::server::file_fd(retained)
+                    .unwrap()
+                    .metadata()
+                    .unwrap()
+                    .rdev(),
+                device
+            );
+            // Adding callbacks shifts the trailing LUT fd; all objects survive.
+            let mapped = decode(&native(&layer, &callback_map(true, &[Binder::Local(2)])));
+            let applied = mapped.transaction(102, Binder::Local(103));
+            let mut prefix = mapped.layers[0].state.reader();
+            prefix.set_position(120 + info.position());
+            assert_eq!(prefix.since(120), (info.data(), info.objects().to_vec()));
+            assert!(std::sync::Arc::ptr_eq(&applied.files()[0].1, &file));
+            let mut r = applied.reader();
+            r.set_position(applied.files()[0].0 as usize);
+            assert_eq!(r.read_fd(), Ok(0));
+            let tail = mapped.layers[0].state.position() - lut.position();
+            let mut r = mapped.layers[0].state.reader();
+            r.set_position(mapped.layers[0].state.position());
+            assert_eq!(r.since(tail), (lut.data(), lut.objects().to_vec()));
+        }
+    }
+
+    #[test]
+    fn window_info_and_luts_reject_malformed_lengths_and_objects() {
+        use aim_binder_host::parcel::{BAD_TYPE, NOT_ENOUGH_DATA};
+        use std::os::fd::AsFd;
+        let os_file = std::fs::File::open("/dev/null").unwrap();
+        let file = aim_binder_host::server::file_from_fd(os_file.as_fd()).unwrap();
+        let (info, app, region) = input_info(&[[0; 4]], true);
+        let lut = luts(file.clone(), 2);
+        for (field, at, values) in [
+            (0, app, vec![-1, 0, 3, 5, i32::MAX - 3]),
+            (0, region, vec![-1, i32::MAX]),
+            (1, 4, vec![0, 2, -1]),      // non-null Parcelable marker
+            (1, 32, vec![-1, i32::MAX]), // offsets count after markers and fd
+            (1, 44, vec![-1, i32::MAX]), // entries count after two offsets
+        ] {
+            for value in values {
+                let mut bad_info = Parcel::new();
+                append(&mut bad_info, &info);
+                let mut bad_lut = Parcel::new();
+                append(&mut bad_lut, &lut);
+                if field == 0 {
+                    bad_info.set_i32_at(at, value);
+                } else {
+                    bad_lut.set_i32_at(at, value);
+                }
+                let p = native(&with_payloads(&bad_info, &bad_lut), &no_map());
+                assert!(
+                    matches!(
+                        DrawTransaction::read_with_files(&mut p.reader(), &|_| Some(file.clone())),
+                        Err(Error::Parcel(BAD_VALUE | NOT_ENOUGH_DATA))
+                    ),
+                    "field={field} at={at} value={value}"
+                );
+            }
+        }
+        let p = native(&with_payloads(&info, &lut), &no_map());
+        for end in (0..p.position()).step_by(4) {
+            assert!(
+                DrawTransaction::read_with_files(
+                    &mut Reader::new(&p.data()[..end], p.objects()),
+                    &|_| Some(file.clone())
+                )
+                .is_err(),
+                "truncated at {end}"
+            );
+        }
+        assert!(matches!(
+            DrawTransaction::read_with_files(&mut p.reader(), &|_| None),
+            Err(Error::Parcel(BAD_VALUE))
+        ));
+        for at in p.objects().iter().copied() {
+            let object = FlatBinderObject::decode(&p.data()[at as usize..at as usize + 24]);
+            if object.binder == 33 {
+                let mut bad = Parcel::new();
+                append(&mut bad, &p);
+                bad.set_i32_at(at as usize, 0); // malformed nested application token
+                assert!(matches!(
+                    DrawTransaction::read_with_files(&mut bad.reader(), &|_| Some(file.clone())),
+                    Err(Error::Parcel(BAD_TYPE))
+                ));
+            }
+            if object.kind != BINDER_TYPE_FD && ![31, 34, 35, 36].contains(&object.binder) {
+                continue;
+            }
+            let objects: Vec<_> = p.objects().iter().copied().filter(|o| *o != at).collect();
+            assert!(matches!(
+                DrawTransaction::read_with_files(&mut Reader::new(p.data(), &objects), &|_| Some(
+                    file.clone()
+                )),
+                Err(Error::Parcel(BAD_TYPE))
+            ));
+        }
+    }
+
+    #[test]
+    fn null_closed_and_truncated_parcels_are_distinct() {
         let p = native(&original_layer(), &no_map());
         for end in (0..p.position()).step_by(4) {
             let objects: Vec<_> = p
@@ -710,21 +981,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let mut layer = original_layer();
-        // WindowInfo follows binder, the 68-byte geometry, nullable SCs, color.
-        layer.set_i32_at(28 + 68 + 8 + 16, 1);
-        let unsupported = native(&layer, &no_map());
-        assert!(matches!(
-            DrawTransaction::read_with_files(&mut unsupported.reader(), &|_| None),
-            Err(Error::Unsupported("WindowInfo"))
-        ));
-        let mut layer = original_layer();
-        layer.set_i32_at(layer.position() - 4, 1);
-        let unsupported = native(&layer, &no_map());
-        assert!(matches!(
-            DrawTransaction::read_with_files(&mut unsupported.reader(), &|_| None),
-            Err(Error::Unsupported("DisplayLuts"))
-        ));
         let mut layer = Parcel::new();
         write_layer_state(&mut layer, Binder::Local(2), 7, &Change::default());
         assert!(super::layer(&mut layer.reader(), &|_| None).is_ok());
