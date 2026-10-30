@@ -199,6 +199,50 @@ static void moved_task_inheritance(void) {
   CHECK(born_in_a && moved_main && grandchild_in_a && moved_group && child_in_b);
 }
 
+// cgroups(7): a transaction retains every live sibling, while exited tasks
+// leave the group. A later transaction must read the new task set again.
+struct sibling {
+  pthread_barrier_t* sync;
+  long tid;
+};
+
+static void* live_sibling(void* arg) {
+  struct sibling* s = arg;
+  s->tid = syscall(SYS_gettid);
+  pthread_barrier_wait(s->sync);
+  pthread_barrier_wait(s->sync);
+  return NULL;
+}
+
+static void pruning_siblings(void) {
+  enum { COUNT = 16, HALF = COUNT / 2 };
+  CHECK(mkdir("/dev/cpuctl/siblings", 0755) == 0);
+  CHECK(put("/dev/cpuctl/siblings/tasks", "0") == 0);
+  pthread_barrier_t sync[2];
+  pthread_t threads[COUNT];
+  struct sibling siblings[COUNT];
+  for (int i = 0; i < 2; i++)
+    CHECK(pthread_barrier_init(&sync[i], NULL, HALF + 1) == 0);
+  for (int i = 0; i < COUNT; i++) {
+    siblings[i].sync = &sync[i / HALF];
+    CHECK(pthread_create(&threads[i], NULL, live_sibling, &siblings[i]) == 0);
+  }
+  for (int i = 0; i < 2; i++) pthread_barrier_wait(&sync[i]);
+  int ok = put("/dev/cpuctl/tasks", "0") == 0;
+  for (int i = 0; i < COUNT; i++)
+    ok &= lists("/dev/cpuctl/siblings/tasks", siblings[i].tid);
+  pthread_barrier_wait(&sync[0]);
+  for (int i = 0; i < HALF; i++) ok &= pthread_join(threads[i], NULL) == 0;
+  ok &= put("/dev/cpuctl/tasks", "0") == 0;
+  for (int i = 0; i < COUNT; i++)
+    ok &= lists("/dev/cpuctl/siblings/tasks", siblings[i].tid) == (i >= HALF);
+  pthread_barrier_wait(&sync[1]);
+  for (int i = HALF; i < COUNT; i++) ok &= pthread_join(threads[i], NULL) == 0;
+  for (int i = 0; i < 2; i++) ok &= pthread_barrier_destroy(&sync[i]) == 0;
+  CHECK(ok);
+  CHECK(rmdir("/dev/cpuctl/siblings") == 0);
+}
+
 static void values(void) {
   char value[64];
   CHECK(mkdir("/dev/cpuctl/g", 0755) == 0);
@@ -391,6 +435,7 @@ int main(int argc, char** argv) {
   RUN(mounts);
   RUN(moves);
   RUN(moved_task_inheritance);
+  RUN(pruning_siblings);
   RUN(values);
   RUN(unified);
   RUN(exec_drops_threads);

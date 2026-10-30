@@ -23,6 +23,7 @@ mod state;
 pub(super) use host::qos as clamp_qos;
 pub(crate) use host::{Policy, apply as apply_policy};
 
+use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
@@ -123,11 +124,6 @@ fn tids(pid: i32) -> Vec<i32> {
     super::procfs::tids(pid)
 }
 
-/// Whether thread `tid` of process `owner` (started at `start`) exists.
-fn thread_live(owner: i32, start: Start, tid: i32) -> bool {
-    live(owner, start) && tids(owner).contains(&tid)
-}
-
 /// A process's start time, if it is in the guest's pid namespace.
 fn start_of(pid: i32) -> Option<Start> {
     if !super::pidns::contains(pid) || !super::pidns::running(pid) {
@@ -141,8 +137,22 @@ fn start_of(pid: i32) -> Option<Start> {
 /// Drops entries of tasks that exited.
 fn prune(m: &mut Membership) {
     m.processes.retain(|(pid, start, _)| live(*pid, *start));
-    m.threads
-        .retain(|(tid, start, _)| thread_live(super::thread::owner(*tid), *start, *tid));
+    // One task snapshot per process incarnation, confined to this transaction.
+    // Avoid rereading the whole remote thread record for every tid under the lock.
+    let mut tasks: HashMap<(i32, Start), HashSet<i32>> = HashMap::new();
+    m.threads.retain(|(tid, start, _)| {
+        let owner = super::thread::owner(*tid);
+        tasks
+            .entry((owner, *start))
+            .or_insert_with(|| {
+                if live(owner, *start) {
+                    tids(owner).into_iter().collect()
+                } else {
+                    HashSet::new()
+                }
+            })
+            .contains(tid)
+    });
 }
 
 /// The group of thread `tid`: its own, else its process's, else the root.
@@ -787,10 +797,13 @@ mod tests {
         let start = own_start().unwrap();
         let mut m = Membership {
             processes: vec![(me(), start, "/a".into()), (me(), (1, 1), "/b".into())],
-            threads: vec![(super::super::thread::gettid() as i32, (1, 1), "/c".into())],
+            threads: vec![
+                (me(), start, "/live".into()),
+                (me(), (1, 1), "/reused".into()),
+            ],
         };
         prune(&mut m);
         assert_eq!(m.processes, vec![(me(), start, "/a".to_string())]);
-        assert!(m.threads.is_empty());
+        assert_eq!(m.threads, vec![(me(), start, "/live".to_string())]);
     }
 }

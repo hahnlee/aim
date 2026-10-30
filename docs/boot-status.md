@@ -8878,10 +8878,18 @@ inheritance now records per-process membership fragments under shared locks;
 migrations and controller writes merge them under the existing exclusive
 transaction (#2389). Host checks cover concurrent births/reads/migrations,
 independent descendant membership, process-incarnation reuse and rollback.
-The parallel host startup workload improves; measurements are host-only, not
-app launch times. Original-bionic cgroup/priority tests stop at PID-namespace
-watcher initialization (Address already in use) on both the baseline and this
-change, before exercising cgroups. No guest boot was run (2026-10-29). Cpuset
+Dead-task pruning reads each process incarnation's thread record once within
+the exclusive transaction, instead of rereading it for every tid (#2485).
+Twelve focused host checks and three original-bionic cgroup/priority checks
+pass, including live siblings, exits between transactions and stale process
+incarnations. Three disposable warm app-host boots reduce Settings'
+spawn-return-to-attach median from 1460.5 to 167.5 ms against rebuilt unmodified
+source controls. First HWUI timestamps are 2692.9 to 1214.7 ms (the latter has
+two presentation values and one render-completion fallback); process-cold
+reopen is 1116.8 to 542.0 ms, all presentation values. This does not establish
+a presentation-speed ratio or reproduce the earlier 5175.5 ms cohort's entire
+gap. Boot-completion medians are 6.55/6.60 s in the source controls/patched
+cohorts (2026-10-31). Cpuset
 masks and uclamp maxima preserve Linux scheduling class: reduced placement
 or frequency hints cannot background foreground/system audio or throttle its
 I/O (#297). The audio profiles' neutral controller defaults and reduced-mask/
