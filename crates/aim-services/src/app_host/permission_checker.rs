@@ -1109,15 +1109,8 @@ impl System for Host<'_> {
                         {
                             return;
                         }
-                        let permissions = PermissionManager::new(host.clone());
-                        let system = Host {
-                            host: &host,
-                            permissions: &permissions,
-                            caller: SYSTEM_UID,
-                            message: None,
-                        };
-                        if let Err(e) = self::chain(&source).and_then(|chain| {
-                            Checks(&system).finish_data_delivery(op, &chain, from_datasource)
+                        if let Err(e) = as_system(&host, None, |checks| {
+                            checks.finish_data_delivery(op, &self::chain(&source)?, from_datasource)
                         }) {
                             eprintln!(
                                 "app host: permission_checker finishDataDelivery at a death: {e:?}"
@@ -1177,10 +1170,15 @@ fn as_system<R>(
     let me = host.me.upgrade().ok_or_else(|| {
         Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host gone")
     })?;
-    let permissions = PermissionManager::new(me.clone());
+    let permissions = me.permission_manager.get().ok_or_else(|| {
+        Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+            "no permissionmgr",
+        )
+    })?;
     let system = Host {
         host: &me,
-        permissions: &permissions,
+        permissions,
         caller: SYSTEM_UID,
         message,
     };

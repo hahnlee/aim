@@ -476,21 +476,26 @@ impl Constants {
     }
 }
 
-/// What the controller decides with, read once its services are ready.
-struct Controller {
+/// Exemptions read once the controller's services are ready.
+struct Policy {
     enabled: bool,
-    constants: Constants,
-    history: History,
     /// `mHeadlessSystemApps`.
     headless: BTreeSet<String>,
+}
+
+struct Controller {
+    policy: Arc<Policy>,
+    constants: Constants,
+    history: History,
     /// `Flags.screenTimeBypass`.
     screen_time_bypass: bool,
 }
 
-/// App standby: the controller, made when first needed.
+/// App standby: the controller and serialized handler idle passes.
 #[derive(Default)]
 pub(super) struct AppStandby {
     controller: Mutex<Option<Controller>>,
+    checks: Mutex<()>,
 }
 
 /// An app usage event AppStandbyController takes (`onUsageEvent`).
@@ -520,8 +525,13 @@ impl AppHost {
             && global("adaptive_battery_management_enabled"))
     }
 
-    /// Runs `f` on the controller, made (and the apps' buckets first
-    /// checked) when first needed.
+    /// `PHASE_SYSTEM_SERVICES_READY`: initialize the controller before
+    /// application admission; its worker takes the posted idle pass.
+    pub(super) fn start_app_standby(self: &Arc<Self>) -> Result<(), Exception> {
+        self.with_standby(|_, _| Ok(()))
+    }
+
+    /// Runs `f` under the history lock, without an all-package idle pass.
     fn with_standby<T>(
         self: &Arc<Self>,
         f: impl FnOnce(&AppHost, &mut Controller) -> Result<T, Exception>,
@@ -558,16 +568,17 @@ impl AppHost {
         let mut history = History::new(&inputs.data.join("system"), now);
         history.update_display(true, now);
         let mut c = Controller {
-            enabled,
+            policy: Arc::new(Policy {
+                enabled,
+                headless: self.headless_system_apps()?,
+            }),
             constants,
             history,
-            headless: self.headless_system_apps()?,
             screen_time_bypass: self.flag("com.android.server.usage.screen_time_bypass")?,
         };
         if !c.history.user_file(0).exists() {
             self.initialize_defaults_for_system_apps(&mut c, 0, now)?;
         }
-        self.check_idle_states(&mut c, now)?;
         Ok(c)
     }
 
@@ -575,13 +586,14 @@ impl AppHost {
     /// reload (`postOneTimeCheckIdleStates`) and after a system update
     /// (`onNewUpdate`: `initializeDefaultsForSystemApps`).
     pub(super) fn standby_usage_notified(self: &Arc<Self>, new_update: bool) {
-        let checked = self.with_standby(|h, c| {
-            let now = elapsed_realtime();
+        let checked: Result<(), Exception> = (|| {
             if new_update {
-                h.initialize_defaults_for_system_apps(c, 0, now)?;
+                self.with_standby(|h, c| {
+                    h.initialize_defaults_for_system_apps(c, 0, elapsed_realtime())
+                })?;
             }
-            h.check_idle_states(c, now)
-        });
+            self.check_idle_states()
+        })();
         if let Err(e) = checked {
             eprintln!("app host: app standby: {}", e.message);
         }
@@ -673,30 +685,43 @@ impl AppHost {
     }
 
     /// `checkIdleStates` for the running user.
-    fn check_idle_states(&self, c: &mut Controller, now: i64) -> Result<(), Exception> {
-        if !c.enabled {
+    fn check_idle_states(self: &Arc<Self>) -> Result<(), Exception> {
+        let _check = self.app_standby.checks.lock().unwrap();
+        let policy = self.with_standby(|_, c| Ok(c.policy.clone()))?;
+        if !policy.enabled {
             return Ok(());
         }
+        let now = elapsed_realtime();
         for (package, uid, _) in self.installed(MATCH_DISABLED_COMPONENTS, 0)? {
-            self.check_and_update(c, &package, 0, uid, now)?;
+            self.update_package_idle_state(&package, 0, uid, now)?;
         }
         Ok(())
     }
 
-    /// `checkAndUpdateStandbyState`.
-    fn check_and_update(
-        &self,
-        c: &mut Controller,
+    /// `checkAndUpdateStandbyState`: external permission/app-op owners are
+    /// queried before taking `mAppIdleLock`, then the current history is
+    /// updated, including any usage reported while those queries ran.
+    fn update_package_idle_state(
+        self: &Arc<Self>,
         package: &str,
         user: i32,
         uid: i32,
         now: i64,
     ) -> Result<(), Exception> {
-        let min_bucket = self.app_min_bucket(c, package, uid % PER_USER_RANGE as i32, user)?;
+        let policy = self.with_standby(|_, c| Ok(c.policy.clone()))?;
+        let min_bucket =
+            self.app_min_bucket(&policy, package, uid % PER_USER_RANGE as i32, user)?;
+        self.with_standby(|_, c| {
+            Self::check_and_update(c, package, user, min_bucket, now);
+            Ok(())
+        })
+    }
+
+    fn check_and_update(c: &mut Controller, package: &str, user: i32, min_bucket: i32, now: i64) {
         if min_bucket <= STANDBY_BUCKET_ACTIVE {
             c.history
                 .set_bucket(package, user, now, min_bucket, REASON_MAIN_DEFAULT);
-            return Ok(());
+            return;
         }
         let elapsed = c.history.elapsed_time(now);
         let app = c.history.usage(package, user).clone();
@@ -705,7 +730,7 @@ impl AppHost {
         if old_main_reason == REASON_MAIN_FORCED_BY_USER
             || app.current_bucket == STANDBY_BUCKET_NEVER
         {
-            return Ok(());
+            return;
         }
         let mut new_bucket = app.current_bucket.max(STANDBY_BUCKET_ACTIVE);
         let prediction_late = app.last_predicted_time > 0
@@ -769,13 +794,12 @@ impl AppHost {
         if app.current_bucket != new_bucket || prediction_late {
             c.history.set_bucket(package, user, now, new_bucket, reason);
         }
-        Ok(())
     }
 
     /// `getAppMinBucket`: the lowest bucket `package` should ever enter.
     fn app_min_bucket(
         &self,
-        c: &Controller,
+        c: &Policy,
         package: &str,
         app_id: i32,
         user: i32,
@@ -960,12 +984,10 @@ impl AppHost {
         // `getAppId`: of any user's install, disabled or not.
         let (state, _) = self.packages()?;
         let app_id = state.packages.get(package).map_or(-1, |ps| ps.app_id);
-        self.with_standby(|host, c| {
-            if c.history.bucket(package, user) < IDLE_BUCKET_CUTOFF {
-                return Ok(false);
-            }
-            Ok(host.app_min_bucket(c, package, app_id, user)? >= IDLE_BUCKET_CUTOFF)
-        })
+        let (bucket, policy) =
+            self.with_standby(|_, c| Ok((c.history.bucket(package, user), c.policy.clone())))?;
+        Ok(bucket >= IDLE_BUCKET_CUTOFF
+            && self.app_min_bucket(&policy, package, app_id, user)? >= IDLE_BUCKET_CUTOFF)
     }
 
     /// `onUsageEvent` of `package`'s `event` for `user`: an activity
@@ -1011,8 +1033,8 @@ impl AppHost {
 
     /// `MSG_CHECK_PACKAGE_IDLE_STATE`.
     fn check_package_idle_state(self: &Arc<Self>, package: &str, user: i32) {
-        let checked = self.with_standby(|host, c| {
-            let (state, resolution) = host.packages()?;
+        let checked: Result<(), Exception> = (|| {
+            let (state, resolution) = self.packages()?;
             let query = Query {
                 state: &state,
                 filter: &resolution.apps_filter,
@@ -1022,10 +1044,10 @@ impl AppHost {
                 .package_uid(package, 0, user)
                 .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.0))??;
             if uid > 0 {
-                host.check_and_update(c, package, user, uid, elapsed_realtime())?;
+                self.update_package_idle_state(package, user, uid, elapsed_realtime())?;
             }
             Ok(())
-        });
+        })();
         if let Err(e) = checked {
             eprintln!("app host: app standby: {package}: {}", e.message);
         }
@@ -1035,12 +1057,13 @@ impl AppHost {
 /// `MSG_CHECK_IDLE_STATES` for the running user, every `interval`.
 fn check_idle_states_periodically(host: Weak<AppHost>, interval: i64) {
     loop {
-        std::thread::sleep(Duration::from_millis(interval as u64));
-        let Some(host) = host.upgrade() else { return };
-        let checked = host.with_standby(|h, c| h.check_idle_states(c, elapsed_realtime()));
-        if let Err(e) = checked {
-            eprintln!("app host: app standby: {}", e.message);
+        {
+            let Some(host) = host.upgrade() else { return };
+            if let Err(e) = host.check_idle_states() {
+                eprintln!("app host: app standby: {}", e.message);
+            }
         }
+        std::thread::sleep(Duration::from_millis(interval as u64));
     }
 }
 
@@ -1137,6 +1160,55 @@ mod tests {
             STANDBY_BUCKET_ACTIVE
         );
         assert_eq!(h.bucket("com.example.absent", 0), STANDBY_BUCKET_NEVER);
+    }
+
+    /// AppStandbyController.checkAndUpdateStandbyState reads the latest
+    /// history after getAppMinBucket returns, including intervening usage.
+    #[test]
+    fn an_idle_check_keeps_usage_reported_during_its_policy_queries() {
+        let mut c = Controller {
+            policy: Arc::new(Policy {
+                enabled: true,
+                headless: BTreeSet::new(),
+            }),
+            constants: Constants::read(&|_| None, true),
+            history: history(0),
+            screen_time_bypass: false,
+        };
+        let now = 9 * ONE_DAY;
+        AppHost::check_and_update(&mut c, "com.example.used", 0, STANDBY_BUCKET_NEVER, now);
+        assert_eq!(
+            c.history.bucket("com.example.used", 0),
+            STANDBY_BUCKET_RESTRICTED
+        );
+        // The scan captured `now` before another thread's resumed event.
+        c.history.report_usage(
+            "com.example.used",
+            0,
+            STANDBY_BUCKET_ACTIVE,
+            REASON_SUB_USAGE_MOVE_TO_FOREGROUND,
+            now + 1,
+            now + ONE_HOUR,
+        );
+        AppHost::check_and_update(&mut c, "com.example.used", 0, STANDBY_BUCKET_NEVER, now);
+        assert_eq!(
+            c.history.bucket("com.example.used", 0),
+            STANDBY_BUCKET_ACTIVE
+        );
+        assert_eq!(
+            c.history.usage("com.example.used", 0).bucketing_reason,
+            REASON_MAIN_USAGE | REASON_SUB_USAGE_MOVE_TO_FOREGROUND
+        );
+        // The same pass still checks other packages and applies exemptions.
+        AppHost::check_and_update(&mut c, "com.example.never", 0, STANDBY_BUCKET_EXEMPTED, now);
+        assert_eq!(
+            c.history.bucket("com.example.never", 0),
+            STANDBY_BUCKET_EXEMPTED
+        );
+        assert_eq!(
+            c.history.bucket("com.example.used", 0),
+            STANDBY_BUCKET_ACTIVE
+        );
     }
 
     #[test]
