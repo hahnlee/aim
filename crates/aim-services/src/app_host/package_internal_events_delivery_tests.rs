@@ -29,6 +29,16 @@ fn register(
     package: &str,
     uid: i32,
 ) -> mpsc::Receiver<(RawIntent, i32)> {
+    register_filter(host, export, package, uid, false)
+}
+
+pub(in crate::app_host) fn register_filter(
+    host: &Arc<AppHost>,
+    export: &dyn Fn(Arc<dyn Service>) -> Strong,
+    package: &str,
+    uid: i32,
+    keyguard: bool,
+) -> mpsc::Receiver<(RawIntent, i32)> {
     let (send, receive) = mpsc::channel();
     let thread = export(Arc::new(AppThread(send)));
     let binder = thread.binder();
@@ -64,9 +74,13 @@ fn register(
         },
     );
     let mut filter = IntentFilter::default();
-    filter.add_action(RESTARTED);
-    filter.add_action(CLEARED);
-    filter.add_data_scheme("package");
+    if keyguard {
+        filter.add_action("android.app.action.KEYGUARD_PRIVATE_NOTIFICATIONS_CHANGED");
+    } else {
+        filter.add_action(RESTARTED);
+        filter.add_action(CLEARED);
+        filter.add_data_scheme("package");
+    }
     let data = Parcel::new();
     host.broadcasts
         .register(

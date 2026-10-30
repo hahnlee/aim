@@ -467,6 +467,7 @@ struct State {
     /// `notification_policy.xml`'s root, its ranking rewritten on saves.
     policy: Element,
     prefs: Preferences,
+    private_notifications_allowed: bool,
     zen_mode: i32,
     zen: zen_config::ZenModeConfig,
     default_zen: Option<Element>,
@@ -590,10 +591,18 @@ impl NotificationManager {
                 .and_then(|z| z.children().find(|e| e.name == "manual"))
                 .and_then(|m| m.int("zen").ok().flatten())
                 .unwrap_or(ZEN_MODE_OFF);
+            let private_notifications_allowed = policy
+                .children()
+                .find(|e| e.name == "allow-secure-notifications-on-lockscreen")
+                .map(|e| e.bool("value").map_err(fail))
+                .transpose()?
+                .flatten()
+                .unwrap_or(true);
             *guard = Some(State {
                 path,
                 policy,
                 prefs,
+                private_notifications_allowed,
                 zen_mode,
                 zen,
                 default_zen,
@@ -776,6 +785,19 @@ impl NotificationManager {
                 state.policy.content.push(Node::Element(zen.clone()));
             }
         }
+        let secure = Element {
+            name: "allow-secure-notifications-on-lockscreen".into(),
+            attrs: vec![(
+                "value".into(),
+                aim_android_xml::Value::Bool(state.private_notifications_allowed),
+            )],
+            content: Vec::new(),
+        };
+        state
+            .policy
+            .content
+            .retain(|n| !matches!(n, Node::Element(e) if e.name == secure.name));
+        state.policy.content.push(Node::Element(secure));
         let ranking = state.prefs.to_xml();
         let content = &mut state.policy.content;
         match content
@@ -809,6 +831,47 @@ impl NotificationManager {
             std::fs::rename(&new, &state.path)
         };
         write().map_err(|e| fail(e.to_string()))
+    }
+
+    /// NotificationManagerService.setPrivateNotificationsAllowed, android-16.0.0_r1.
+    fn set_private_notifications_allowed(&self, uid: i32, allow: bool) -> Result<(), Exception> {
+        if self.host.check_permission(
+            Some("android.permission.CONTROL_KEYGUARD_SECURE_NOTIFICATIONS"),
+            uid,
+        )? != 0
+        {
+            return Err(Exception::security(
+                "Requires CONTROL_KEYGUARD_SECURE_NOTIFICATIONS permission",
+            ));
+        }
+        let mut guard = self.state()?;
+        let state = guard.as_mut().unwrap();
+        if allow != state.private_notifications_allowed {
+            state.private_notifications_allowed = allow;
+            let enabled = self
+                .host
+                .flag("android.app.keyguard_private_notifications")?;
+            if enabled {
+                let intent = super::kept::RawIntent::new(
+                    "android.app.action.KEYGUARD_PRIVATE_NOTIFICATIONS_CHANGED",
+                    0,
+                    &[(
+                        "android.app.extra.KM_PRIVATE_NOTIFS_ALLOWED",
+                        crate::bundle::Value::Bool(allow),
+                    )],
+                );
+                self.host.broadcasts.try_send_package_effect(
+                    &self.host,
+                    intent,
+                    0,
+                    None,
+                    &["android.permission.STATUS_BAR_SERVICE".into()],
+                    None,
+                )?;
+            }
+            Self::save(state)?;
+        }
+        Ok(())
     }
 
     /// `clearData(package, uid, fromApp)`, which ActivityManager calls as
@@ -2627,6 +2690,11 @@ impl Service for NotificationManager {
                     Ok(())
                 })())
             }
+            nm::SET_PRIVATE_NOTIFICATIONS_ALLOWED => {
+                let a = nm::SetPrivateNotificationsAllowed::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                empty(self.set_private_notifications_allowed(uid, a.allow))
+            }
             nm::CANCEL_ALL_NOTIFICATIONS => {
                 let a = nm::CancelAllNotifications::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let package = a.pkg.unwrap_or_default();
@@ -3105,6 +3173,118 @@ mod tests {
             assert_eq!(saved.children().filter(|e| e.name == "zen").count(), 1);
             assert_eq!(zen_config::read(&saved).unwrap(), before);
             assert_eq!(manager.zen_mode_config(1000).unwrap(), before);
+        }
+    }
+
+    /// NotificationManagerService's permission, policy reload and flag/receiver gates.
+    #[test]
+    fn private_notifications_policy_persists_and_broadcasts_only_changes() {
+        let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
+            return;
+        };
+        for enabled in [false, true] {
+            crate::system::with_discovery_binders_flags(
+                &[("android.app.keyguard_private_notifications", enabled)],
+                true,
+                |host, _, _, export| {
+                    host.framework
+                        .set(super::super::resources::Framework::load(&root, 320, "en-US").unwrap())
+                        .ok()
+                        .unwrap();
+                    let permissions =
+                        super::super::permission_manager::PermissionManager::with_system(
+                            host.clone(),
+                            crate::package::permissions::AccessSystem::parse(&aim_android_xml::read(
+                                b"<access><permissions><permission name='android.permission.STATUS_BAR_SERVICE' packageName='android' protectionLevel='2' type='0'/></permissions></access>"
+                            ).unwrap()).unwrap(),
+                        );
+                    host.permission_manager
+                        .set(Arc::new(permissions))
+                        .ok()
+                        .unwrap();
+                    let register =
+                        super::super::broadcasts::internal_package_tests::register_filter;
+                    let allowed = register(host, export, "android", 1000, true);
+                    let denied = register(host, export, "p", 10100, true);
+                    let path = host.data().unwrap().join("system/notification_policy.xml");
+                    let initial =
+                        b"<notification-policy><zen version='12' user='0'/></notification-policy>";
+                    std::fs::write(&path, initial).unwrap();
+                    let manager = NotificationManager::new(host.clone());
+                    let set = |allow, uid| {
+                        let mut data = Parcel::new();
+                        nm::SetPrivateNotificationsAllowed { allow }.write(&mut data);
+                        manager
+                            .transact(&mut Call {
+                                code: nm::SET_PRIVATE_NOTIFICATIONS_ALLOWED,
+                                flags: 0,
+                                sender_pid: 71,
+                                sender_euid: uid,
+                                data: data.reader(),
+                            })
+                            .unwrap()
+                            .reader()
+                            .read_exception()
+                            .unwrap()
+                    };
+                    let e = set(false, 10100).unwrap_err();
+                    assert_eq!(e.code, aim_binder_host::parcel::EX_SECURITY);
+                    assert_eq!(
+                        e.message,
+                        "Requires CONTROL_KEYGUARD_SECURE_NOTIFICATIONS permission"
+                    );
+                    assert!(
+                        manager
+                            .state()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .private_notifications_allowed
+                    );
+                    set(true, 1000).unwrap();
+                    assert_eq!(std::fs::read(&path).unwrap(), initial);
+                    assert!(allowed.try_recv().is_err());
+                    for allow in [false, true] {
+                        set(allow, 1000).unwrap();
+                        let saved = std::fs::read(&path).unwrap();
+                        let reloaded = NotificationManager::new(host.clone());
+                        assert_eq!(
+                            reloaded
+                                .state()
+                                .unwrap()
+                                .as_ref()
+                                .unwrap()
+                                .private_notifications_allowed,
+                            allow
+                        );
+                        if enabled {
+                            let (intent, user) = allowed
+                                .recv_timeout(std::time::Duration::from_secs(2))
+                                .unwrap();
+                            assert_eq!(user, 0);
+                            assert_eq!(
+                                intent.intent.action.as_deref(),
+                                Some("android.app.action.KEYGUARD_PRIVATE_NOTIFICATIONS_CHANGED")
+                            );
+                            assert_eq!(
+                                intent
+                                    .test_extras()
+                                    .get("android.app.extra.KM_PRIVATE_NOTIFS_ALLOWED"),
+                                Some(&crate::bundle::Value::Bool(allow))
+                            );
+                        } else {
+                            assert!(allowed.try_recv().is_err());
+                        }
+                        set(allow, 1000).unwrap();
+                        assert_eq!(std::fs::read(&path).unwrap(), saved);
+                        assert!(allowed.try_recv().is_err());
+                        assert!(denied.try_recv().is_err());
+                    }
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::create_dir(&path).unwrap();
+                    assert_eq!(set(false, 1000).unwrap_err().code, EX_ILLEGAL_STATE);
+                },
+            );
         }
     }
 

@@ -1452,6 +1452,55 @@ impl Service for AudioService {
                 })();
                 return reply(result);
             }
+            audio::GET_DEVICES_FOR_ATTRIBUTES => {
+                let a = audio::GetDevicesForAttributes::<Attributes>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                return reply((|| {
+                    if !host.granted(MODIFY_AUDIO_ROUTING, uid)?
+                        && !host.granted(QUERY_AUDIO_STATE, uid)?
+                    {
+                        return Err(Exception::security(
+                            "Missing MODIFY_AUDIO_ROUTING or QUERY_AUDIO_STATE permissions",
+                        ));
+                    }
+                    let attributes = a
+                        .attributes
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
+                    use aim_service_aidl::dev_aim_server_iaudiopolicyqueries as queries;
+                    let owner = host
+                        .audio_policy_queries
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "audio policy queries not attached",
+                            )
+                        })?;
+                    let mut data = Parcel::new();
+                    queries::GetDevicesForAttributes {
+                        attributes: Some(attributes),
+                        calling_uid: uid,
+                    }
+                    .write(&mut data);
+                    let result = owner
+                        .transact_as_owner(queries::GET_DEVICES_FOR_ATTRIBUTES, &data, false)
+                        .map_err(|s| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                format!("audio policy query: {s:?}"),
+                            )
+                        })?;
+                    let bytes =
+                        queries::read_get_devices_for_attributes_reply(&mut result.reader())
+                            .map_err(|_| Exception::illegal_argument("audio policy query reply"))??
+                            .ok_or_else(|| Exception::new(EX_NULL_POINTER, "audio devices"))?;
+                    p.write_no_exception();
+                    p.write_raw(&bytes, &[]);
+                    Ok(p)
+                })());
+            }
             audio::GET_AUDIO_PRODUCT_STRATEGIES => {
                 audio::GetAudioProductStrategies::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 return reply((|| {

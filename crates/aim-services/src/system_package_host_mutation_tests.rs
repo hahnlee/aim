@@ -1434,7 +1434,7 @@ pub(crate) fn with_discovery_session_flags(
     });
 }
 
-fn with_discovery_binders_flags(
+pub(crate) fn with_discovery_binders_flags(
     flags: &[(&str, bool)],
     ready: bool,
     test: impl FnOnce(
