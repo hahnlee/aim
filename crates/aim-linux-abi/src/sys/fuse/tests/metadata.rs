@@ -473,3 +473,96 @@ fn broker_workers_keep_blocked_requests_and_errors_independent() {
     }
     daemon.join().unwrap();
 }
+
+#[test]
+fn inherited_and_adopted_fuse_io_keeps_its_owner() {
+    if crate::sys::fdtab::isolated_kernel_test(
+        "sys::fuse::tests::metadata::inherited_and_adopted_fuse_io_keeps_its_owner",
+    ) {
+        return;
+    }
+    use crate::sys::{fdtab, fs as calls};
+    use std::os::fd::AsRawFd;
+    let (_guard, root) = crate::vfs::test_view();
+    let connection = Connection::new();
+    initialize(&connection);
+    let lower = root.join("inherited-fuse");
+    fs::create_dir(&lower).unwrap();
+    fs::write(lower.join("file"), b"abcdef").unwrap();
+    let device = connection.fd;
+    let server = std::thread::spawn(move || {
+        let daemon = aim_emulated_storage::Daemon::new(lower);
+        let mut reads = 0;
+        let mut writes = 0;
+        loop {
+            let packet = next(device);
+            let op = u32::from_le_bytes(packet[4..8].try_into().unwrap());
+            if op == 38 {
+                respond(device, &packet, 0, &[]);
+                return (reads, writes);
+            }
+            reads += usize::from(op == 15);
+            writes += usize::from(op == 16);
+            if let Some(reply) = daemon.handle(&packet) {
+                write_device(device, &reply).unwrap();
+            }
+        }
+    });
+    let fd = fuse_client::open_fd(
+        route(&connection, "file"),
+        "/mnt/inherited/file".into(),
+        2,
+        0,
+    )
+    .unwrap();
+    // A raw duplicate has the broker's marker but no process-local Open, as
+    // with an inherited or transferred description before adoption.
+    let inherited = unsafe { libc::dup(fd) };
+    assert!(inherited >= 0);
+    fdtab::publish_guest(inherited).unwrap();
+    assert!(fuse_client::get(inherited).is_none());
+    assert_eq!(marker(inherited), Some(FILE_MARKER));
+    let pin = fdtab::pin_guest_io(inherited).unwrap();
+    assert!(pin.regular_access().is_none());
+    assert!(!pin.socket_allowed());
+    let private = pin.descriptor().as_raw_fd();
+    assert_ne!(private, inherited);
+    assert!(fuse_client::get(private).is_some());
+    drop(pin);
+    assert!(fuse_client::get(private).is_none());
+    let mut bytes = [0u8; 3];
+    assert_eq!(
+        calls::read([inherited as u64, bytes.as_mut_ptr() as u64, 3, 0, 0, 0]),
+        3
+    );
+    assert_eq!(bytes, *b"abc");
+    fdtab::adopt(inherited);
+    assert!(fuse_client::get(inherited).is_some());
+    assert!(
+        fdtab::pin_guest_io(inherited)
+            .unwrap()
+            .regular_access()
+            .is_none()
+    );
+    assert_eq!(calls::lseek([inherited as u64, 1, 0, 0, 0, 0]), 1);
+    assert_eq!(
+        calls::write([inherited as u64, b"XY".as_ptr() as u64, 2, 0, 0, 0]),
+        2
+    );
+    assert_eq!(calls::lseek([fd as u64, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(
+        calls::read([fd as u64, bytes.as_mut_ptr() as u64, 3, 0, 0, 0]),
+        3
+    );
+    assert_eq!(bytes, *b"aXY");
+    for fd in [fd, inherited] {
+        assert_eq!(calls::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+    Client::from_key(&connection.key)
+        .unwrap()
+        .request(38, 1, &[], 0, 0, 1)
+        .unwrap();
+    let (reads, writes) = server.join().unwrap();
+    assert!(reads > 0);
+    assert!(writes > 0);
+}
