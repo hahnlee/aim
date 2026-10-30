@@ -425,14 +425,26 @@ fn format_with_clock(
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
                 let error = command_error(command, &output);
-                // Retry only the formatter's device-open diagnostic, without
-                // format progress. Persistent permission failures still fail.
+                // Retry only the formatter's diagnostics for this device being
+                // claimed (opening its raw or whole node, or the volume inside
+                // the container it just made), without format progress.
+                // Persistent permission failures still fail.
                 let stderr = String::from_utf8_lossy(&output.stderr);
+                let whole = raw.replacen("/dev/rdisk", "/dev/disk", 1);
                 let unavailable = output.status.code().is_some()
                     && output.stdout.is_empty()
                     && ["Operation not permitted", "Resource busy"]
                         .iter()
-                        .any(|reason| stderr.trim() == format!("newfs_apfs: {raw}: {reason}"));
+                        .any(|reason| {
+                            [
+                                format!("newfs_apfs: {raw}: {reason}"),
+                                format!("newfs_apfs: unable to open {whole}: {reason}"),
+                                format!(
+                                    "newfs_apfs: unable to format volume inside {whole}: {reason}"
+                                ),
+                            ]
+                            .contains(&stderr.trim().to_string())
+                        });
                 if unavailable && now() < deadline {
                     sleep(
                         Duration::from_millis(200).min(deadline.saturating_duration_since(now())),
@@ -474,32 +486,36 @@ mod format_tests {
 
     #[test]
     fn device_open_eperm_and_ebusy_recover_with_one_deadline() {
-        for reason in ["Operation not permitted", "Resource busy"] {
-            let start = Instant::now();
-            let elapsed = Cell::new(Duration::ZERO);
-            let patience = Duration::from_secs(1);
-            let mut calls = 0;
-            format_with_clock(
-                &mut command(),
-                "/dev/rdisk-fixture",
-                patience,
-                |_, deadline| {
-                    assert_eq!(deadline, start + patience);
-                    calls += 1;
-                    if calls == 3 {
-                        Ok(output(""))
-                    } else {
-                        Ok(output(&format!(
-                            "newfs_apfs: /dev/rdisk-fixture: {reason}\n"
-                        )))
-                    }
-                },
-                || start + elapsed.get(),
-                |delay| elapsed.set(elapsed.get() + delay),
-            )
-            .unwrap();
-            assert_eq!(calls, 3);
-            assert_eq!(elapsed.get(), Duration::from_millis(400));
+        for diagnostic in [
+            "newfs_apfs: /dev/rdisk-fixture",
+            "newfs_apfs: unable to open /dev/disk-fixture",
+            "newfs_apfs: unable to format volume inside /dev/disk-fixture",
+        ] {
+            for reason in ["Operation not permitted", "Resource busy"] {
+                let start = Instant::now();
+                let elapsed = Cell::new(Duration::ZERO);
+                let patience = Duration::from_secs(1);
+                let mut calls = 0;
+                format_with_clock(
+                    &mut command(),
+                    "/dev/rdisk-fixture",
+                    patience,
+                    |_, deadline| {
+                        assert_eq!(deadline, start + patience);
+                        calls += 1;
+                        if calls == 3 {
+                            Ok(output(""))
+                        } else {
+                            Ok(output(&format!("{diagnostic}: {reason}\n")))
+                        }
+                    },
+                    || start + elapsed.get(),
+                    |delay| elapsed.set(elapsed.get() + delay),
+                )
+                .unwrap();
+                assert_eq!(calls, 3);
+                assert_eq!(elapsed.get(), Duration::from_millis(400));
+            }
         }
     }
 
@@ -536,6 +552,7 @@ mod format_tests {
         let errors = [
             output("newfs_apfs: /dev/rdisk-fixture: Permission denied"),
             output("newfs_apfs: /dev/rdisk-other: Operation not permitted"),
+            output("newfs_apfs: unable to open /dev/disk-other: Operation not permitted"),
             output("newfs_apfs: /dev/rdisk-fixture: Input/output error"),
             Output {
                 stdout: b"Creating a new APFS Container\n".to_vec(),
