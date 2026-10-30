@@ -56,6 +56,7 @@ pub fn verify_batch(
     members: Vec<(Session, Record, String)>,
     lite: &super::native::LitePolicy,
 ) -> Result<Vec<VerifiedCode>, Failure> {
+    let admission = super::admission::Policy::capture(apks, lite);
     let mut names = BTreeSet::new();
     let mut result = Vec::with_capacity(members.len());
     for (session, record, path) in members {
@@ -94,6 +95,7 @@ pub fn verify_batch(
             if entry.path().is_dir()
                 || name.ends_with(".removed")
                 || name.ends_with(".idsig")
+                || name.ends_with(".dm")
                 || name.ends_with("app.metadata")
                 || name.ends_with(".digests")
                 || name.ends_with(".digests.signature")
@@ -143,6 +145,20 @@ pub fn verify_batch(
                 },
                 error => Failure::invalid(error.to_string()),
             })?;
+        super::admission::dex_metadata(&apks.files, &package, &admission)?;
+        let signing = super::admission::prepare(
+            &package,
+            record.params.install_flags,
+            record.params.volume_uuid.is_some(),
+            &admission,
+            || {
+                apks.signing_details(&package).map_err(|message| Failure {
+                    legacy_status: -110,
+                    committed: false,
+                    message: format!("Failed collect during installPackageLI: {message}"),
+                })
+            },
+        )?;
         if record
             .params
             .app_package_name
@@ -160,11 +176,6 @@ pub fn verify_batch(
                 package.package_name
             )));
         }
-        let signing = apks.signing_details(&package).map_err(|message| Failure {
-            legacy_status: -103,
-            committed: false,
-            message,
-        })?;
         if lite.cloud_compilation_verification {
             super::sdm::verify(
                 &host,

@@ -31,6 +31,7 @@ android-image-extract = { path = "../../tools/android-image-extract" }
 crc32fast = "1.5"
 png = "0.17.16"
 rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1"
 dsa = "0.6"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 libc.workspace = true

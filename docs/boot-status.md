@@ -5,6 +5,11 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+Native verified-code preparation now reads associated dex metadata and applies
+captured low-SDK, instant/declaration and test-only gates before signing, then
+instant v2 admission (#1415). Snapshot, permission and ABI/reservation phases
+remain open. Host validation is recorded in the task report; no guest boot (2026-10-31).
+
 The app host collects same-task activity opens and closes/back, retains the
 outgoing window, and accepts collecting `overridePendingTransition`, persistent
 per-activity open/close overrides and ActivityOptions custom animation resource
