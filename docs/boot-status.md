@@ -153,6 +153,18 @@ attaches, since there is no ApplicationThread Binder death before then
 provider caller waiting for it no longer sleeps until the ten-second attach
 timeout.
 
+View start timestamps use the authenticated UID and PackageManager's first
+package for that UID, as Android 16's AMS does; oneway Binder reports carry no
+sender PID (#2445). Ten disposable resident device-mode sequences before and
+after the fix each delivered all 40 Settings/Clock reports with positive
+present-fence timestamps. The former PID match discarded all 40. After the
+fix, all 20 Clock starts, including ten process-cold reopens, record their
+timestamps; all 40 killed process records retire. Settings shares UID 1000,
+whose first package is `android`, so its reports follow that package's
+once-per-start attribution rather than making separate Settings records.
+Host regressions cover oneway identity, duplicate timestamps, package/UID
+selection and death/reopen (2026-10-30).
+
 The app host publishes AMS's plain `gfxinfo` Binder (#2388), checks DUMP and
 usage-stats access, selects live processes by pid/process name and sends the
 unchanged arguments (including `reset` and `framestats`) to their original

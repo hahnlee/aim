@@ -3223,16 +3223,34 @@ impl AppHost {
         })
     }
 
-    /// `reportStartInfoViewTimestamps`: the first frame of the caller's
-    /// latest start, kept once (`AppStartInfoTracker.addTimestampToStart`).
-    fn report_view_timestamps(&self, call: &Call<'_>, draw_start: i64, presented: i64) {
+    /// `ActivityManagerService.reportStartInfoViewTimestamps` and
+    /// `AppStartInfoTracker.addTimestampToStart`, android-16.0.0_r1.
+    fn report_view_timestamps(
+        &self,
+        call: &Call<'_>,
+        draw_start: i64,
+        presented: i64,
+    ) -> Result<(), Exception> {
+        // This oneway call has no sender pid. Settings.getPackageNameForUid
+        // selects the first package, including for a shared uid; the tracker
+        // adds each timestamp once to that package/uid's latest start.
+        let (state, resolution) = self.packages()?;
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID as i32,
+        };
+        let package = query
+            .packages_for_uid(call.sender_euid as i32)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("getPackagesForUid: {}", e.0)))?
+            .and_then(|names| names.into_iter().next().flatten());
         let mut apps = self.apps.lock().unwrap();
         let Some(app) = apps
             .values_mut()
-            .filter(|a| a.pid == call.sender_pid && a.uid == call.sender_euid)
+            .filter(|a| a.uid == call.sender_euid && Some(&a.package) == package.as_ref())
             .max_by_key(|a| a.started)
         else {
-            return;
+            return Ok(());
         };
         if app.first_frame.is_none() {
             app.first_frame = Some((draw_start, presented));
@@ -3242,6 +3260,7 @@ impl AppHost {
                 presented / 1_000_000 - app.start_uptime
             );
         }
+        Ok(())
     }
 
     /// `finishAttachApplication`: the application's `onCreate` returned,
@@ -5372,12 +5391,15 @@ impl Service for Activity {
             am::REPORT_START_INFO_VIEW_TIMESTAMPS => {
                 let args = am::ReportStartInfoViewTimestamps::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
-                self.0.report_view_timestamps(
-                    call,
-                    args.render_thread_draw_start_time_ns,
-                    args.frame_presented_time_ns,
-                );
-                Ok(Parcel::new())
+                reply(
+                    self.0
+                        .report_view_timestamps(
+                            call,
+                            args.render_thread_draw_start_time_ns,
+                            args.frame_presented_time_ns,
+                        )
+                        .map(|()| Parcel::new()),
+                )
             }
             // The render thread's priority is the process's; the app host
             // does not boost it.
@@ -6069,3 +6091,6 @@ mod application_info_tests;
 
 #[cfg(test)]
 mod start_read_tests;
+
+#[cfg(test)]
+mod start_info_tests;
