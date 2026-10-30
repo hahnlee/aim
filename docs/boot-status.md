@@ -3634,10 +3634,11 @@ including multi-user installs (#760; focused host regression, no guest boot).
 Installed GMS's full parser parcel has not been compared against the original.
 This remains an incomplete native scan check.
 Manifest/application, component and child-tag failures retain Android 16's
-status and check message through native installation (#1419 slices 1–2).
-Base/split attribute and parsing exceptions report the current APK path; lite
-overlay skips retain -125. Archive/cluster and native key-cache conversion errors
-remain under #1419. Host parser/pipeline checks, 2026-10-31; no guest boot was run.
+status and check message through native installation (#1419). Archive/resource
+loading, unreadable manifests, cluster identity/base selection and illegal split
+dependencies retain their pinned statuses; absent resource tables remain valid.
+Base/split exceptions retain APK paths; lite overlay skips retain -125. Key-cache
+conversion errors have a distinct internal type. Host checks, 2026-10-31; no guest boot.
 Shared-library dependency resolution now has ordered direct selection,
 static/SDK version and signer checks,
 and file-path assembly from resolved provider snapshots. Tests cover

@@ -593,7 +593,7 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     fs::copy(&feature, cluster.join("duplicate.apk")).unwrap();
     assert!(matches!(
         parse(&cluster, "/data/app/example", 0, &platform),
-        Err(Error::Parse(_) | Error::Status(..))
+        Err(Error::Status(..))
     ));
     fs::remove_file(cluster.join("duplicate.apk")).unwrap();
     link(
@@ -603,7 +603,7 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     );
     assert!(matches!(
         parse(&cluster, "/data/app/example", 0, &platform),
-        Err(Error::Parse(_) | Error::Status(..))
+        Err(Error::Status(..))
     ));
 
     let isolated = data.0.join("isolated");
@@ -653,7 +653,7 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     );
     assert!(matches!(
         parse(&isolated, "/data/app/example", 0, &platform),
-        Err(Error::Parse(_) | Error::Status(..))
+        Err(Error::Status(..))
     ));
     link(
         &isolated,
@@ -673,7 +673,7 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     );
     assert!(matches!(
         parse(&isolated, "/data/app/example", 0, &platform),
-        Err(Error::Parse(_) | Error::Status(..))
+        Err(Error::Status(..))
     ));
     link(
         &isolated,
@@ -685,13 +685,13 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     );
     assert!(matches!(
         parse(&isolated, "/data/app/example", 0, &platform),
-        Err(Error::Parse(_) | Error::Status(..))
+        Err(Error::Status(..))
     ));
     let missing = data.0.join("missing");
     link(&missing, "feature", FEATURE);
     assert!(matches!(
         parse(&missing, "/data/app/example", 0, &platform),
-        Err(Error::Parse(_) | Error::Status(..))
+        Err(Error::Status(..))
     ));
     let invalid = data.0.join("invalid-types");
     link(
@@ -701,7 +701,7 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     );
     assert!(matches!(
         parse(&invalid, "/data/app/example", 0, &platform),
-        Err(Error::Parse(_) | Error::Status(..))
+        Err(Error::Status(..))
     ));
 }
 
@@ -779,7 +779,7 @@ fn compiled_manifest_keysets_parse_and_roundtrip() {
         assert!(
             matches!(
                 parse(&apk, "/data/app/keys/base.apk", 0, &platform),
-                Err(Error::Parse(_) | Error::Status(..))
+                Err(Error::Status(..))
             ),
             "{name}"
         );
@@ -944,7 +944,7 @@ fn manifest_keysets_match_original_parser() {
                     writeln!(&mut expected, "UPGRADE {upgrade}").unwrap();
                 }
             }
-            Err(Error::Parse(_) | Error::Status(..)) => {
+            Err(Error::Status(..)) => {
                 writeln!(&mut expected, "CASE {name}.apk ERROR").unwrap();
             }
             Err(error) => panic!("native parser gap for {name}: {error}"),
@@ -1013,7 +1013,7 @@ fn manifest_keysets_match_original_parser() {
         assert!(error.to_string().contains(diagnostic), "{name}: {error}");
         assert!(matches!(
             parse(&apk, "/data/app/bad/base.apk", 0, &platform),
-            Err(Error::Parse(_) | Error::Status(..))
+            Err(Error::Status(..))
         ));
         // The original accepts this inconsistent stored entry size; native
         // reading reaches its existing entry bound. Compatibility is #828.

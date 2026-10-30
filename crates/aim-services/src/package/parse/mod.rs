@@ -18,6 +18,8 @@
 //! `FrameworkParsingPackageUtils`), Copyright (C) The Android Open Source
 //! Project, Licensed under the Apache License, Version 2.0.
 
+#[cfg(test)]
+mod archive_tests;
 pub mod attrs;
 mod cluster;
 pub mod component;
@@ -36,7 +38,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
-use aim_apps::apk::Apk;
 use aim_apps::res::Element;
 
 use attrs::{ANDROID, Ctx, NATIVE_CONFIG_VERSION, TypedArray, attr_bool, attr_value};
@@ -182,8 +183,8 @@ pub struct SplitPermission {
 
 #[derive(Debug)]
 pub enum Error {
-    /// The original fails too (`INSTALL_PARSE_FAILED_*`), or skips it.
-    Parse(String),
+    /// Native key-set cache conversion, without an Android parse counterpart.
+    KeySetCache(KeySetCacheError),
     /// The original fails with this `INSTALL_PARSE_FAILED_*` status.
     Status(i32, String),
     /// Original INSTALL_FAILED_OLDER_SDK compatibility rejection.
@@ -195,12 +196,16 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Parse(s) | Error::Status(_, s) => write!(f, "parse failed: {s}"),
+            Error::Status(_, s) => write!(f, "parse failed: {s}"),
+            Error::KeySetCache(e) => write!(f, "key-set cache conversion failed: {}", e.0),
             Error::OlderSdk(s) => write!(f, "older sdk: {s}"),
             Error::Unsupported(s) => write!(f, "unsupported: {s}"),
         }
     }
 }
+
+#[derive(Debug)]
+pub struct KeySetCacheError(String);
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -211,10 +216,6 @@ fn fail_status<T>(status: i32, msg: impl Into<String>) -> Result<T> {
 /// `ParseTypeImpl.error(String)` and deferred errors use MANIFEST_MALFORMED.
 fn malformed<T>(msg: impl Into<String>) -> Result<T> {
     fail_status(-108, msg)
-}
-
-fn fail<T>(msg: impl Into<String>) -> Result<T> {
-    Err(Error::Parse(msg.into()))
 }
 
 /// `ParseInput`'s deferred errors (`ParseTypeImpl`): each change id is an
@@ -354,16 +355,15 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
 fn descend(host: &Path, path: &str) -> Result<(std::path::PathBuf, String)> {
     if host.is_dir() {
         let entries: Vec<_> = std::fs::read_dir(host)
-            .map_err(|e| Error::Parse(format!("{}: {e}", host.display())))?
-            .map(|entry| entry.map_err(|e| Error::Parse(format!("{}: {e}", host.display()))))
+            .map_err(|_| Error::Status(-100, "No packages found in split".into()))?
+            .map(|entry| {
+                entry.map_err(|_| Error::Status(-100, "No packages found in split".into()))
+            })
             .collect::<Result<_>>()?;
         if let [one] = entries.as_slice()
             && one.path().is_dir()
         {
-            let name = one
-                .file_name()
-                .into_string()
-                .map_err(|_| Error::Parse(format!("{}: non-UTF8 package path", host.display())))?;
+            let name = one.file_name().to_string_lossy().into_owned();
             return descend(&one.path(), &format!("{path}/{name}"));
         }
     }
