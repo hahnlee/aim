@@ -28,7 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn node() -> Node {
+pub fn node() -> Result<Node, String> {
     let mut inputs = vec![
         repo("hal/sources.lock"),
         repo("daemons/sources.lock"),
@@ -47,21 +47,26 @@ pub fn node() -> Node {
     for dir in ["hal/aidl", "daemons/aidl"] {
         inputs.extend(files(dir).into_iter().filter(|p| p.ends_with("Cargo.toml")));
     }
-    Node {
+    let lock = Lock::read(&repo(service_aidl::LOCK))?;
+    let mut outputs = vec![
+        hal_out(),
+        daemon_out(),
+        service_aidl::out(),
+        binder_roots_out(),
+    ];
+    for entry in lock.array("TEST_SOURCE_FILES") {
+        outputs.push(Source::parse(entry, lock.get("AOSP_TAG")?)?.dest());
+    }
+    Ok(Node {
         name: "aidl-gen".into(),
         deps: vec![Dep::order_only("image")],
         inputs,
-        outputs: vec![
-            hal_out(),
-            daemon_out(),
-            service_aidl::out(),
-            binder_roots_out(),
-        ],
+        outputs,
         tools: vec![Tool::Aidl, Tool::Python],
-        recipe: 8,
+        recipe: 9,
         action: Action::AidlGen,
         boot: true,
-    }
+    })
 }
 
 fn hal_out() -> PathBuf {
@@ -224,6 +229,10 @@ pub fn run(log: &mut Log) -> Result<(), String> {
             .arg(repo("daemons/aidl"))
             .args(daemons.array("AIDL_CRATES")),
     )?;
+    let services = Lock::read(&repo(service_aidl::LOCK))?;
+    for entry in services.array("TEST_SOURCE_FILES") {
+        Source::parse(entry, services.get("AOSP_TAG")?)?.file(log)?;
+    }
     service_aidl::run(log)
 }
 
@@ -233,7 +242,7 @@ mod tests {
 
     #[test]
     fn rust_generators_are_keyed_inputs() {
-        let n = node();
+        let n = node().unwrap();
         for source in ["aidl.rs", "service_aidl.rs"] {
             assert!(
                 n.inputs

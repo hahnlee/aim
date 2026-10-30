@@ -1,5 +1,5 @@
 //! Original Java syntax behind the production parser attachment, without a guest boot.
-//! Requires the pinned host JDK and network access to hash-pinned AOSP sources.
+//! Requires the pinned host JDK and local hash-pinned AOSP sources from aidl-gen.
 use super::*;
 use aim_service_aidl::dev_aim_server_ipackageintentparser as parser;
 use sha2::{Digest, Sha256};
@@ -18,21 +18,11 @@ fn run(command: &mut Command) -> Vec<u8> {
     output.stdout
 }
 
-fn original(dir: &Path, project: &str, path: &str, hash: &str) -> String {
-    let encoded = dir.join("source.base64");
-    fs::write(
-        &encoded,
-        run(Command::new("curl").args([
-            "-fsSL",
-            "--max-time",
-            "30",
-            &format!("https://android.googlesource.com/platform/{project}/+/android-16.0.0_r1/{path}?format=TEXT"),
-        ])),
-    )
-    .unwrap();
-    let bytes = run(Command::new("base64").arg("-d").arg("-i").arg(encoded));
+fn original(project: &str, path: &str, hash: &str) -> Option<String> {
+    let path = aim_paths::input(aim_paths::aosp().join(project).join(path), "aidl-gen")?;
+    let bytes = fs::read(path).unwrap();
     assert_eq!(format!("{:x}", Sha256::digest(&bytes)), hash);
-    String::from_utf8(bytes).unwrap()
+    Some(String::from_utf8(bytes).unwrap())
 }
 
 fn method<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -41,17 +31,27 @@ fn method<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 impl JavaParser {
-    pub(super) fn new(root: &Path) -> Self {
+    pub(super) fn new(root: &Path) -> Option<Self> {
+        let source = original(
+            "frameworks/base",
+            "core/java/android/content/Intent.java",
+            "4dc0215006dff72017b05a18451e4090385271bd511d0c399f0a15782e3d79d1",
+        )?;
+        let component = original(
+            "frameworks/base",
+            "core/java/android/content/ComponentName.java",
+            "8077358457df668ce7d2f92c058ceaab6562e13d9026ccf85f98ca85d62e1ad4",
+        )?;
+        let basic = original(
+            "frameworks/libs/modules-utils",
+            "java/com/android/modules/utils/BasicShellCommandHandler.java",
+            "f56b4ac8f89b0361e31d63790357fc108e6d3d65b4b0338c67ca6c62e8f48bf9",
+        )?;
+        aim_paths::input(Self::jdk().join("javac"), "device-services")?;
         let dir = root.join("intent-parser");
         fs::create_dir(&dir).unwrap();
         let owner = Self(dir);
         let dir = &owner.0;
-        let source = original(
-            dir,
-            "frameworks/base",
-            "core/java/android/content/Intent.java",
-            "4dc0215006dff72017b05a18451e4090385271bd511d0c399f0a15782e3d79d1",
-        );
         let parse = method(
             &source,
             "    public static Intent parseCommandArgs(",
@@ -82,12 +82,6 @@ impl JavaParser {
             .replace("// ORIGINAL_CONSTANTS", &format!("{constants}\n public static final String ACTION_MAIN=\"android.intent.action.MAIN\", CATEGORY_LAUNCHER=\"android.intent.category.LAUNCHER\";"))
             .replace("// ORIGINAL_METHODS", &format!("{decode}\n{parse}"));
         fs::write(dir.join("Intent.java"), intent).unwrap();
-        let component = original(
-            dir,
-            "frameworks/base",
-            "core/java/android/content/ComponentName.java",
-            "8077358457df668ce7d2f92c058ceaab6562e13d9026ccf85f98ca85d62e1ad4",
-        );
         let unflatten = method(
             &component,
             "    public static @Nullable ComponentName unflattenFromString(",
@@ -97,12 +91,6 @@ impl JavaParser {
             .unwrap()
             .replace("// ORIGINAL_METHODS", unflatten);
         fs::write(dir.join("ComponentName.java"), component).unwrap();
-        let basic = original(
-            dir,
-            "frameworks/libs/modules-utils",
-            "java/com/android/modules/utils/BasicShellCommandHandler.java",
-            "f56b4ac8f89b0361e31d63790357fc108e6d3d65b4b0338c67ca6c62e8f48bf9",
-        );
         fs::write(dir.join("BasicShellCommandHandler.java"), basic).unwrap();
         let production = aim_paths::root().join("java/device-services");
         let mut compile = Command::new(Self::jdk().join("javac"));
@@ -131,7 +119,7 @@ impl JavaParser {
                 "crates/aim-services/tests/fixtures/domain_shell/android/os/UserHandle.java",
             ));
         run(&mut compile);
-        owner
+        Some(owner)
     }
     fn jdk() -> PathBuf {
         aim_paths::fetched().join("java/temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home/bin")

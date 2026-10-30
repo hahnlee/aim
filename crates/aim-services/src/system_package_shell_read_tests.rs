@@ -253,12 +253,12 @@ struct Shell {
     retained: Arc<Mutex<Option<Arc<Strong>>>>,
 }
 impl Shell {
-    fn with_intent_parser() -> Self {
+    fn with_intent_parser() -> Option<Self> {
         let shell = Self::new();
         let original = &shell.session.fixture.original[0];
         let parser = original.add_service(Arc::new(intent_parser::JavaParser::new(
             &shell.session.fixture.root,
-        )));
+        )?));
         let mut p = Parcel::new();
         sp::AttachPackageIntentParser {
             parser: Some(parser),
@@ -271,7 +271,7 @@ impl Shell {
             .read_exception()
             .unwrap()
             .unwrap();
-        shell
+        Some(shell)
     }
     fn new() -> Self {
         let services = Arc::new(Mutex::new(BTreeMap::new()));
@@ -568,7 +568,9 @@ fn list_users() {
 }
 #[test]
 fn resolve_activity() {
-    let s = Shell::with_intent_parser();
+    let Some(s) = Shell::with_intent_parser() else {
+        return;
+    };
     s.check(
         &["resolve-activity", "--components", "-n", "p/.Main"],
         0,
@@ -582,7 +584,10 @@ fn resolve_activity() {
 }
 #[test]
 fn query_activities() {
-    Shell::with_intent_parser().check(
+    let Some(s) = Shell::with_intent_parser() else {
+        return;
+    };
+    s.check(
         &["query-activities", "--components", "-n", "p/.Main"],
         0,
         "p/.Main\n",
@@ -590,7 +595,10 @@ fn query_activities() {
 }
 #[test]
 fn query_receivers() {
-    Shell::with_intent_parser().check(
+    let Some(s) = Shell::with_intent_parser() else {
+        return;
+    };
+    s.check(
         &["query-receivers", "--components", "-n", "p/.Main"],
         0,
         "p/.Main\n",
