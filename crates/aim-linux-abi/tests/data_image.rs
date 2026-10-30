@@ -168,9 +168,11 @@ fn a_full_volume_gives_the_guest_enospc() {
     eprintln!("{out}");
     let lines: Vec<&str> = out.lines().collect();
     let (avail, bsize) = lines[0].split_once(' ').unwrap();
-    let before = avail.parse::<u64>().unwrap() * bsize.parse::<u64>().unwrap();
+    let bsize = bsize.parse::<u64>().unwrap();
+    let before = avail.parse::<u64>().unwrap() * bsize;
+    // The preallocation rounds to the volume's allocation block.
     assert!(
-        (200 << 20..=256 << 20).contains(&before),
+        (200 << 20..=(256 << 20) + bsize).contains(&before),
         "the guest saw {before} bytes free"
     );
     assert!(out.contains("No space left on device"), "{out}");
