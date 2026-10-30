@@ -22,6 +22,8 @@ struct Group {
 
 pub(super) struct Index {
     data: Vec<u8>,
+    string_pool: Range<usize>,
+    strings: OnceLock<Result<Strings>>,
     packages: Vec<(u8, HashMap<u8, Group>)>,
     pub(super) full: OnceLock<Result<Table>>,
     error: Mutex<Option<String>>,
@@ -36,10 +38,13 @@ impl Index {
             return Err(bad("not a resource table"));
         }
         let mut packages = Vec::new();
-        let mut strings = false;
+        let mut string_pool = None;
         for package in chunks(&top.data[top.header..]) {
             let package = package?;
-            strings |= package.kind == STRING_POOL;
+            if package.kind == STRING_POOL {
+                let start = package.data.as_ptr() as usize - data.as_ptr() as usize;
+                string_pool = Some(start..start + package.data.len());
+            }
             if package.kind != TABLE_PACKAGE {
                 continue;
             }
@@ -88,11 +93,11 @@ impl Index {
             }
             packages.push((pid, groups));
         }
-        if !strings {
-            return Err(bad("table without strings"));
-        }
+        let string_pool = string_pool.ok_or_else(|| bad("table without strings"))?;
         Ok(Self {
             data,
+            string_pool,
+            strings: OnceLock::new(),
             packages,
             full: OnceLock::new(),
             error: Mutex::new(None),
@@ -124,6 +129,14 @@ impl Index {
 
     pub(super) fn full(&self) -> Option<&Table> {
         self.retain_error(self.full.get_or_init(|| Table::parse(&self.data)))
+    }
+
+    pub(super) fn string(&self, index: u32) -> Option<&str> {
+        self.retain_error(
+            self.strings
+                .get_or_init(|| Strings::parse(&self.data[self.string_pool.clone()])),
+        )?
+        .get(index)
     }
 
     pub(super) fn flags(&self, id: u32) -> u32 {
@@ -198,6 +211,8 @@ mod tests {
         data[16..20].copy_from_slice(&24u32.to_le_bytes());
         let index = Index {
             data,
+            string_pool: 0..0,
+            strings: OnceLock::new(),
             packages: vec![(
                 0x7f,
                 [(

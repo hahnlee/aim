@@ -212,7 +212,7 @@ impl Framework {
         id: u32,
         read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
     ) -> Result<T, String> {
-        self.with_resources(root, data, pkg, false, |resources, apks, table_apks| {
+        self.with_resources(root, data, pkg, true, |resources, apks, table_apks| {
             let (table, file) = resources
                 .resource_string_source(id)
                 .ok_or_else(|| format!("no XML resource {id:#x}"))?;

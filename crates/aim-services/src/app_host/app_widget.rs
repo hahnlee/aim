@@ -722,16 +722,21 @@ impl AppWidgetService {
         };
         let inputs = self.host.platform()?;
         let root = self.host.root()?;
+        let app = &activity.info.application_info.item;
         let fail = |e: String| self.unimplemented(&format!("the provider XML of {name}: {e}"));
         let parsed = self
             .host
             .framework()?
             .xml_resource(root, &inputs.data, &pkg, id as u32, |e, ctx| {
-                (e.name == "appwidget-provider")
-                    .then(|| read_provider_info(&ctx.obtain(e), &provider.component.package))
+                (e.name == "appwidget-provider").then(|| {
+                    let info = read_provider_info(&ctx.obtain(e), &provider.component.package);
+                    let texts = [item.label_res, app.label_res]
+                        .map(|id| ctx.res.resource_string(id as u32));
+                    (info, texts)
+                })
             })
             .map_err(fail)?;
-        let Some(mut info) = parsed else {
+        let Some((mut info, texts)) = parsed else {
             eprintln!(
                 "app host: appwidget: Meta-data does not start with appwidget-provider tag for AppWidget provider {name}"
             );
@@ -739,17 +744,7 @@ impl AppWidgetService {
         };
         // `ComponentInfo.loadUnsafeLabel`, then `loadSafeLabel` (the system
         // server loads safe labels).
-        let app = &activity.info.application_info.item;
-        let ids: Vec<u32> = [item.label_res, app.label_res]
-            .iter()
-            .map(|&r| r as u32)
-            .collect();
-        let texts = self
-            .host
-            .framework()?
-            .resource_names_and_strings(root, &inputs.data, &pkg, &ids)
-            .map_err(fail)?;
-        let text = |i: usize, res: i32| (res != 0).then(|| texts[i].1.clone()).flatten();
+        let text = |i: usize, res: i32| (res != 0).then(|| texts[i].clone()).flatten();
         let unsafe_label = item
             .non_localized_label
             .clone()
@@ -1233,6 +1228,81 @@ fn write_atomic(path: &std::path::Path, root: &Element) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The original provider XML and labels resolve identically through the
+    /// indexed path, including localized strings and configuration variants.
+    #[test]
+    #[ignore = "requires pinned original APK resources; no guest boot"]
+    fn pinned_widget_metadata_matches_eager_resources() {
+        use crate::package::parse::{attrs, resources::Table};
+        let root = aim_paths::original_image();
+        for locale in ["en-US", "ko-KR"] {
+            let framework = super::super::resources::Framework::load(&root, 320, locale).unwrap();
+            for path in [
+                "product/app/PrebuiltDeskClockGoogle/PrebuiltDeskClockGoogle.apk",
+                "product/priv-app/Velvet/Velvet.apk",
+            ] {
+                let apk = aim_apps::apk::Files::open(&root.join(path)).unwrap();
+                let manifest =
+                    aim_apps::res::xml(&apk.file("AndroidManifest.xml").unwrap()).unwrap();
+                let application = manifest
+                    .children
+                    .iter()
+                    .find(|e| e.name == "application")
+                    .unwrap();
+                let package = attrs::attr_value(&manifest, "", "package").unwrap();
+                let pkg = crate::package::pkg::AndroidPackage {
+                    package_name: package.clone(),
+                    base_apk_path: Some(format!("/{path}")),
+                    ..Default::default()
+                };
+                let table = Table::parse(&apk.file("resources.arsc").unwrap()).unwrap();
+                let resources = framework.package_resources(&table);
+                let resource = |e: &aim_apps::res::Element, name| {
+                    e.attrs
+                        .iter()
+                        .find(|a| a.ns == attrs::ANDROID && a.name == name)
+                        .filter(|a| a.kind == crate::package::parse::resources::TYPE_REFERENCE)
+                        .map_or(0, |a| a.data)
+                };
+                let mut count = 0;
+                for receiver in application.children.iter().filter(|e| e.name == "receiver") {
+                    for meta in receiver.children.iter().filter(|e| {
+                        e.name == "meta-data"
+                            && attrs::attr_value(e, attrs::ANDROID, "name").as_deref()
+                                == Some(META_DATA_APPWIDGET_PROVIDER)
+                    }) {
+                        let id = resource(meta, "resource");
+                        let (_, file) = resources.resource_string_source(id).unwrap();
+                        let xml = aim_apps::res::xml(&apk.file(file).unwrap()).unwrap();
+                        let labels = [resource(receiver, "label"), resource(application, "label")];
+                        let read = |e: &aim_apps::res::Element, ctx: &attrs::Ctx<'_>| {
+                            assert_eq!(e.name, "appwidget-provider");
+                            (
+                                read_provider_info(&ctx.obtain(e), &package),
+                                labels.map(|id| ctx.res.resource_string(id)),
+                            )
+                        };
+                        let ctx = attrs::Ctx {
+                            res: &resources,
+                            attrs: &framework.0.framework_attrs,
+                            error: Default::default(),
+                        };
+                        let expected = read(&xml, &ctx);
+                        assert!(ctx.error.take().is_none());
+                        let actual = framework
+                            .xml_resource(&root, &root, &pkg, id, read)
+                            .unwrap();
+                        assert_eq!(actual, expected, "{path} {locale} {id:#x}");
+                        count += 1;
+                    }
+                }
+                assert!(count > 0, "no widget metadata exercised: {path}");
+            }
+        }
+    }
+
     /// AppWidgetServiceImpl's package receiver updates the loaded providers
     /// for component and application PACKAGE_CHANGED alike.
     #[test]
@@ -1380,8 +1450,6 @@ mod tests {
             assert_eq!(group.bind_allowed, ["q"]);
         });
     }
-    use super::*;
-
     /// `readAppWidgetProviderInfoLocked`: the attributes of a provider
     /// persisted with this build, none of another build's.
     #[test]
