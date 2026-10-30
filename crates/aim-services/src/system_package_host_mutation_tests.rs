@@ -1588,3 +1588,143 @@ pub(crate) fn install_publication(
         .package_install_query_publication(&bridge, snapshots, context)
         .unwrap()
 }
+
+// Maintenance and PMInternal share this preparation/CAS loop. Pause after
+// projection so each competing real owner must complete before publication.
+#[test]
+fn maintenance_usage_retries_concurrent_grant_canonical_usage_and_uid_context() {
+    for change in 0..4 {
+        let Session {
+            fixture,
+            host,
+            bridge,
+            old,
+            workers,
+            ..
+        } = session();
+        let system = fixture.system.clone();
+        let retained = bridge.clone();
+        let (ready, waiting) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let publisher = std::thread::spawn(move || {
+            system.publish_package_usage_with(Some((&retained, 1000)), Some("p"), 0, 111, || {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ready.send(()).unwrap();
+                    proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            })
+        });
+        waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+        let system = fixture.system.clone();
+        let (done, completed) = mpsc::channel();
+        let concurrent = std::thread::spawn(move || {
+            let result = match change {
+                0 => host.grant_implicit_access(10100, 10101),
+                1 | 3 => system
+                    .publish_package_usage(Some("p"), 0, if change == 1 { 222 } else { 111 })
+                    .and_then(|_| system.publish_package_usage(Some("p"), 2, 222)),
+                _ => system.internal_add_isolated_uid(99001, 10100, 1000, 0),
+            };
+            let capture = system.capture_package_queries().unwrap();
+            done.send((result, capture)).unwrap();
+        });
+        let advanced = completed.recv_timeout(Duration::from_secs(3));
+        release.send(()).unwrap();
+        publisher.join().unwrap().unwrap();
+        concurrent.join().unwrap();
+        let (result, intermediate) = advanced.expect("concurrent owner waited for preparation");
+        result.unwrap();
+        let after = fixture.system.capture_package_queries().unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(after.scan().usage().times("p").unwrap()[0], 111);
+        assert_eq!(old.scan().usage().times("p").unwrap(), &[0; 8]);
+        match change {
+            0 => {
+                assert_ne!(
+                    intermediate.state().system.implicit_access,
+                    old.state().system.implicit_access
+                );
+                assert_eq!(
+                    after.state().system.implicit_access,
+                    intermediate.state().system.implicit_access
+                );
+            }
+            1 | 3 => {
+                // Holding install admission advances only canonical usage; the
+                // unchanged query pointer must not let the first candidate win.
+                assert!(Arc::ptr_eq(&intermediate, &old));
+                assert_eq!(after.scan().usage().times("p").unwrap()[2], 222);
+            }
+            _ => {
+                assert_eq!(
+                    intermediate.state().system.isolated_owners,
+                    [(99001, 10100)]
+                );
+                assert_eq!(after.context().system.isolated_owners, [(99001, 10100)]);
+                assert_eq!(after.state().system.isolated_owners, [(99001, 10100)]);
+                assert_eq!(after.state().uid_owners, intermediate.state().uid_owners);
+            }
+        }
+        let state = fixture.system.package_bootstrap.lock().unwrap();
+        let current = state.current.as_ref().unwrap();
+        assert!(Arc::ptr_eq(
+            &current.snapshots.as_ref().unwrap().capture(),
+            after.scan()
+        ));
+        assert_eq!(state.version, after.scan().version());
+        assert_eq!(after.context().scan_version, state.version);
+        assert_eq!(after.state().generation, state.version);
+        assert_eq!(
+            after
+                .scan()
+                .owner()
+                .replica_runtime("p", false)
+                .unwrap()
+                .unwrap()
+                .usage,
+            *after.scan().usage().times("p").unwrap()
+        );
+        let fresh = Capture::new(after.scan().clone(), (**after.context()).clone()).unwrap();
+        assert_eq!(after.state(), fresh.state());
+        drop(state);
+        drop(workers);
+    }
+}
+
+#[test]
+fn maintenance_usage_rejects_bridge_retired_during_preparation() {
+    let Session {
+        mut fixture,
+        bridge,
+        workers,
+        ..
+    } = session();
+    let system = fixture.system.clone();
+    let retained = bridge.clone();
+    let (ready, waiting) = mpsc::channel();
+    let (release, proceed) = mpsc::channel();
+    let publisher = std::thread::spawn(move || {
+        system.publish_package_usage_with(Some((&retained, 1000)), Some("p"), 0, 111, || {
+            ready.send(()).unwrap();
+            proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+        })
+    });
+    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+    let replacement = fixture.attach();
+    release.send(()).unwrap();
+    assert!(
+        publisher
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .message
+            .contains("retired")
+    );
+    assert!(Arc::ptr_eq(
+        &fixture.system.package_bootstrap().unwrap(),
+        &replacement
+    ));
+    drop(workers);
+}

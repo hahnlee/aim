@@ -1,10 +1,8 @@
 //! Production maintenance construction over the canonical native package owners.
 use super::System;
 use crate::package::{
-    apps_filter::{AppsFilter, Config},
     bootstrap::Bridge,
     diagnostics::{self, Inputs},
-    query::Query,
 };
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 use std::sync::Arc;
@@ -143,55 +141,6 @@ impl System {
         reason: i32,
         now: i64,
     ) -> Result<(), Exception> {
-        // No remote Binder call is made while either serialization lock is held.
-        let _gate = self.package_install_lock.lock().unwrap();
-        let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state
-            .current
-            .as_mut()
-            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
-            .ok_or_else(|| illegal("Usage bootstrap replaced"))?;
-        let capture = current
-            .queries
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| illegal("Usage query capture unavailable"))?;
-        let canonical = current
-            .snapshots
-            .as_ref()
-            .ok_or_else(|| illegal("Usage canonical native store unavailable"))?;
-        if !Arc::ptr_eq(capture.scan(), &canonical.capture()) {
-            return Err(illegal("Usage scan/query generations differ"));
-        }
-        let source = capture.state();
-        let filter = AppsFilter::new(
-            source,
-            &Config {
-                force_system_packages_queryable: source.system.force_system_packages_queryable,
-                force_queryable_packages: source.system.force_queryable_packages.clone(),
-            },
-        )
-        .map_err(|error| illegal(format!("Usage visibility owner: {error:?}")))?;
-        let query = Query {
-            state: source,
-            filter: &filter,
-            calling_uid: uid,
-        };
-        let mut usage = capture.scan().usage().clone();
-        diagnostics::notify_package_use(&query, &mut usage, package, reason, now)?;
-        if usage == *capture.scan().usage() {
-            return Ok(());
-        }
-        let update = capture.prepare_usage_update(usage).map_err(illegal)?;
-        let published = update.capture.scan().clone();
-        let update = current.publish_update(update)?;
-        current.set_queries(Some(update.capture));
-        if let Some(page) = &current.version_page {
-            page.publish(published.version());
-        }
-        state.version = published.version();
-        // Source notifyPackageUse modifies usage only; no Settings write, package
-        // info nonce invalidation, permission lifecycle or broadcast is requested.
-        Ok(())
+        self.publish_package_usage_with(Some((bridge, uid)), package, reason, now, || {})
     }
 }
