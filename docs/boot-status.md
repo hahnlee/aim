@@ -135,6 +135,12 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The app host watches each started process for exit (NOTE_EXIT) until it
+attaches, since there is no ApplicationThread Binder death before then
+(#2433): a process killed before attaching retires its start at once, and a
+provider caller waiting for it no longer sleeps until the ten-second attach
+timeout.
+
 The app host publishes AMS's plain `gfxinfo` Binder (#2388), checks DUMP and
 usage-stats access, selects live processes by pid/process name and sends the
 unchanged arguments (including `reset` and `framestats`) to their original

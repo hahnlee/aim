@@ -156,6 +156,7 @@ pub mod platform_compat;
 pub mod playback;
 pub mod power_service;
 mod preferred_records;
+mod process_start;
 mod provider_queries;
 pub mod providers;
 mod recovery_certificates;
@@ -1537,7 +1538,7 @@ impl AppHost {
                 oom_adj: 0,
             },
         );
-        self.watch_start(start_seq);
+        self.watch_start(start_seq)?;
         Ok(pid)
     }
 
@@ -1654,7 +1655,7 @@ impl AppHost {
                 oom_adj: 0,
             },
         );
-        self.watch_start(start_seq);
+        self.watch_start(start_seq)?;
         Ok((start_seq, pid))
     }
 
@@ -1923,7 +1924,8 @@ impl AppHost {
                 oom_adj: 0,
             },
         );
-        self.watch_start(start_seq);
+        drop(zygote);
+        self.watch_start(start_seq)?;
         Ok((start_seq, pid))
     }
 
@@ -2255,19 +2257,50 @@ impl AppHost {
 
     /// `PROC_START_TIMEOUT_MSG` for the start `start_seq`, posted once it
     /// started (`handleProcessStartedLocked`).
-    fn watch_start(&self, start_seq: i64) {
+    fn watch_start(&self, start_seq: i64) -> Result<(), Exception> {
         const PROC_START_TIMEOUT: Duration = Duration::from_secs(10);
+        let Some(pid) = self.apps.lock().unwrap().get(&start_seq).map(|app| app.pid) else {
+            return Ok(());
+        };
+        let watch = match process_start::ExitWatch::new(pid) {
+            Ok(watch) => watch,
+            Err(error) => {
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    if let Err(kill) = self.kill_process(
+                        start_seq,
+                        exit_info::REASON_INITIALIZATION_FAILURE,
+                        exit_info::SUBREASON_UNKNOWN,
+                        "process death notification failed",
+                    ) {
+                        eprintln!("app host: kill after start watch failure: {kill}");
+                    }
+                }
+                self.process_died(start_seq, pid);
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("watch process {pid}: {error}"),
+                ));
+            }
+        };
         let multiplier = self
             .property("ro.hw_timeout_multiplier")
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
         let host = self.me.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(PROC_START_TIMEOUT * multiplier);
+            let exited = watch.wait(PROC_START_TIMEOUT * multiplier);
             if let Some(host) = host.upgrade() {
-                host.start_timed_out(start_seq);
+                match exited {
+                    Ok(true) => host.process_died(start_seq, pid),
+                    Ok(false) => host.start_timed_out(start_seq),
+                    Err(error) => {
+                        eprintln!("app host: process {pid} death watch: {error}");
+                        host.start_timed_out(start_seq);
+                    }
+                }
             }
         });
+        Ok(())
     }
 
     /// `handleProcessStartOrKillTimeoutLocked` of a start: a process that
@@ -2303,6 +2336,9 @@ impl AppHost {
     fn process_died(&self, start_seq: i64, pid: i32) {
         let (removed, gone, exit, isolated) = {
             let mut apps = self.apps.lock().unwrap();
+            if !apps.get(&start_seq).is_some_and(|app| app.pid == pid) {
+                return;
+            }
             let app = apps.remove(&start_seq);
             let isolated = app.as_ref().is_some_and(|a| a.isolated);
             let gone = app.as_ref().filter(|a| {
