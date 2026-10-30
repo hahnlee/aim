@@ -421,6 +421,24 @@ impl AppHost {
                     .get(table, name)
                     .and_then(|v| v.parse().ok())
             };
+            // AudioService.readPersistedSettings persists a corrected legacy mode.
+            let persisted = setting(Table::Global, "mode_ringer").unwrap_or(2);
+            let normalized = match persisted {
+                0 | 1 => 0,
+                _ => 2,
+            };
+            if normalized != persisted {
+                self.settings_provider()?.call(
+                    &super::settings_provider::Caller {
+                        uid: SYSTEM_UID,
+                        package: Some("android".into()),
+                    },
+                    "PUT_global",
+                    Some("mode_ringer"),
+                    &HashMap::from([("value".into(), Value::String(Some(normalized.to_string())))]),
+                    None,
+                )?;
+            }
             *volumes = Some(Volumes::new(&Config {
                 // `TelephonyManager.isVoiceCapable`.
                 voice_capable: resource("config_voice_capable"),
@@ -1382,8 +1400,22 @@ impl Service for AudioService {
                     Err(e) => return reply(Err(e)),
                 }
             }
-            // `AudioDeviceBroker.mBluetoothA2dpEnabled`, which only a
-            // Bluetooth A2DP connection sets; the app host has no Bluetooth.
+            audio::GET_RINGER_MODE_INTERNAL => {
+                audio::GetRingerModeInternal::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match host.volumes() {
+                    Ok(v) => audio::write_get_ringer_mode_internal_reply(
+                        &mut p,
+                        v.as_ref().unwrap().ringer_mode,
+                    ),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            audio::GET_SPATIALIZER_IMMERSIVE_AUDIO_LEVEL => {
+                audio::GetSpatializerImmersiveAudioLevel::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                // SpatializerHelper.init: the HAL's effect factory has no spatializer.
+                audio::write_get_spatializer_immersive_audio_level_reply(&mut p, 0);
+            }
             audio::IS_SPATIALIZER_ENABLED => {
                 audio::IsSpatializerEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // `SpatializerHelper.isEnabled`: without the effect

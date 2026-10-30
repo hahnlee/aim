@@ -1543,6 +1543,27 @@ impl Service for StorageManager {
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
+            sm::GET_CACHE_QUOTA_BYTES => {
+                let a = sm::GetCacheQuotaBytes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply((|| {
+                    let uid = call.sender_euid as i32;
+                    let permission = "android.permission.STORAGE_INTERNAL";
+                    if a.uid != uid && self.0.check_permission(Some(permission), uid)? != 0 {
+                        return Err(Exception::security(format!(
+                            "StorageManagerService: Neither user {uid} nor current process has {permission}."
+                        )));
+                    }
+                    let quota = self.0.storage_stats_service().cache_quota_bytes(
+                        1000,
+                        a.volume_uuid.as_deref(),
+                        a.uid,
+                        Some("android"),
+                    )?;
+                    let mut p = Parcel::new();
+                    sm::write_get_cache_quota_bytes_reply(&mut p, quota);
+                    Ok(p)
+                })())
+            }
             sm::GET_VOLUME_LIST => {
                 let args = sm::GetVolumeList::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(

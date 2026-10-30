@@ -673,6 +673,11 @@ pub struct StorageStatsService {
 }
 
 impl AppHost {
+    pub(super) fn storage_stats_service(self: &Arc<Self>) -> &Arc<StorageStatsService> {
+        self.storage_stats
+            .get_or_init(|| Arc::new(StorageStatsService::new(self.clone())))
+    }
+
     pub(super) fn attach_storage_crates(&self, owner: Option<Binder>) -> Result<(), Exception> {
         let Some(Binder::Handle(handle)) = owner else {
             return Err(Exception::illegal_argument("no storage crates bridge"));
@@ -699,6 +704,17 @@ impl StorageStatsService {
     pub fn new(host: Arc<AppHost>) -> Self {
         let cache_quotas = CacheQuotas::new(&host);
         StorageStatsService { host, cache_quotas }
+    }
+
+    pub(super) fn cache_quota_bytes(
+        &self,
+        caller: i32,
+        uuid: Option<&str>,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<i64, Exception> {
+        self.enforce_stats_permission(caller, package)?;
+        Ok(self.cache_quotas.quota(uuid, uid))
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
@@ -1118,11 +1134,13 @@ impl Service for StorageStatsService {
             }
             ss::GET_CACHE_QUOTA_BYTES => {
                 let a = ss::GetCacheQuotaBytes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.enforce_stats_permission(uid, a.calling_package.as_deref())
-                    .map(|()| {
-                        let quota = self.cache_quotas.quota(a.volume_uuid.as_deref(), a.uid);
-                        ss::write_get_cache_quota_bytes_reply(&mut p, quota)
-                    })
+                self.cache_quota_bytes(
+                    uid,
+                    a.volume_uuid.as_deref(),
+                    a.uid,
+                    a.calling_package.as_deref(),
+                )
+                .map(|quota| ss::write_get_cache_quota_bytes_reply(&mut p, quota))
             }
             ss::QUERY_STATS_FOR_PACKAGE => {
                 let a = ss::QueryStatsForPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;

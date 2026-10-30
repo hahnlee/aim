@@ -802,7 +802,7 @@ impl LockSettings {
 
     /// `getCredentialTypeInternal` of the Mac's lock: a password while
     /// the Mac's user has one, as `isDeviceSecure` answers.
-    fn credential_type(&self, user: i32) -> Result<i32, Exception> {
+    pub(super) fn credential_type(&self, user: i32) -> Result<i32, Exception> {
         if is_special_user(user) {
             return Err(self
                 .host
