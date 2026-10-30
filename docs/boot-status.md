@@ -294,10 +294,13 @@ waits remain. Over three boots (2026-10-30), keystore's shared secret negotiatio
 concludes and `earlyBootEnded` reaches TRUSTED_ENVIRONMENT KeyMint; odsign
 initializes its keystore key. The second boot's `boot_completed` stays at about
 7 s (7.3-7.9 s, against 6.7-7.4 s without the change): the SharedSecret retries
-had run in a background thread. On a data directory's first boot odrefresh
-compiles the system server artifacts and odsign signs them, which init waits
-for (first boot about 18 s instead of 10 s); later boots verify them and keep
-the second boot at about 7.4 s (#2418, #2424; three boots, 2026-10-30).
+had run in a background thread. The derived product declares
+`ro.dalvik.vm.enable_uffd_gc=false`, matching its ART copying collector, so
+odrefresh accepts the shipped boot and system-server artifacts on `/system`
+instead of recompiling them (#2432). A fresh resident boot only writes
+odrefresh's cache metadata (no dex2oat): app-open admission at about 8.5 s,
+against 16.1 s before; warm second boots reach it at about 5.9 s (three boots
+each, 2026-10-30).
 
 The app host image ([app-host.md](app-host.md)) boots without
 system_server. In the original measurement, `--only` selected 33 services and
@@ -8226,7 +8229,7 @@ keeps exiting and init restarts it every 5 s.
 | system_aconfigd_mainline_init | exit 1 | "aconfigd_mainline is enabled, skipping mainline init" |
 | derive_sdk, derive_classpath, art_boot, logd-reinit, update_verifier | exit 0 | |
 | usbd | exit 0 | no USB HAL |
-| odsign | exits 0 | its keystore key initializes (#200); the first boot compiles and signs the odrefresh artifacts, later boots find them valid (#2418) |
+| odsign | exits 0 | its keystore key initializes (#200); odrefresh accepts the shipped system preopts after correcting the product's GC property, creates cache metadata on fresh data without dex2oat, and finds it valid on later boots; verification succeeds (#2418, #2432) |
 | misctrl | exit 1 | no `/misc` partition |
 | exec `recovery-refresh` | exit 254 | no pstore |
 | exec `chattr +F /data/media` | exit 1 | `FS_IOC_GETFLAGS` is ENOTTY |

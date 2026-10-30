@@ -59,6 +59,7 @@ pub enum Action {
     Angle,
     MoltenVk,
     SystemServer,
+    ProductProperties,
     DeviceServices,
     Oat,
     DerivedImage,
