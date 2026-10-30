@@ -28,6 +28,21 @@ impl Failure {
         }
     }
 }
+impl From<crate::package::parse::Error> for Failure {
+    fn from(error: crate::package::parse::Error) -> Self {
+        use crate::package::parse::Error;
+        let (legacy_status, message) = match error {
+            Error::Status(status, message) => (status, message),
+            Error::OlderSdk(message) => (-12, message),
+            error => return Self::invalid(error.to_string()),
+        };
+        Self {
+            legacy_status,
+            committed: false,
+            message,
+        }
+    }
+}
 fn owner_failure(stage: &str, mut error: Exception) -> Exception {
     error.message = format!("{stage} (exception {}): {}", error.code, error.message);
     error
@@ -128,21 +143,7 @@ pub fn verify_batch(
                 }
             })?;
         }
-        let package = apks
-            .checked_parsed_path(&path, 0)
-            .map_err(|error| match error {
-                crate::package::parse::Error::OlderSdk(message) => Failure {
-                    legacy_status: -12,
-                    committed: false,
-                    message,
-                },
-                crate::package::parse::Error::Status(status, message) => Failure {
-                    legacy_status: status,
-                    committed: false,
-                    message,
-                },
-                error => Failure::invalid(error.to_string()),
-            })?;
+        let package = apks.checked_parsed_path(&path, 0).map_err(Failure::from)?;
         if record
             .params
             .app_package_name
@@ -335,6 +336,16 @@ pub fn install(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    #[test]
+    fn parse_status_and_message_survive_install_preparation() {
+        use crate::package::parse::Error;
+        for status in [-101, -102, -106, -107, -108, -12, -14] {
+            let failure = Failure::from(Error::Status(status, "manifest rejection".into()));
+            assert_eq!(failure.legacy_status, status);
+            assert_eq!(failure.message, "manifest rejection");
+            assert!(!failure.committed);
+        }
+    }
     struct Prepared {
         events: Arc<Mutex<Vec<&'static str>>>,
         fail: bool,

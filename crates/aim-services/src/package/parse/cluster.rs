@@ -47,7 +47,7 @@ pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
     for (host, path) in files {
         let apk = Apk::open(&host).map_err(|e| Error::Parse(e.to_string()))?;
         let manifest = apk.manifest().map_err(|e| Error::Parse(e.to_string()))?;
-        let (package, split, version) = names(&manifest)?;
+        let (package, split, version) = names(&manifest, &path)?;
         if identity
             .as_ref()
             .is_some_and(|(name, v)| name != &package || *v != version)
@@ -165,29 +165,27 @@ pub(super) fn assets(
     assets
 }
 
-pub(super) fn names(manifest: &Element) -> Result<(String, Option<String>, i32)> {
+pub(super) fn names(manifest: &Element, path: &str) -> Result<(String, Option<String>, i32)> {
     if manifest.name != "manifest" {
-        return fail("No <manifest> tag");
+        return malformed("No <manifest> tag");
     }
     for name in ["requiredSplitTypes", "splitTypes"] {
         if let Some(value) = attr_value(manifest, ANDROID, name).filter(|s| !s.is_empty()) {
             validate_split_types(&value)?;
         }
     }
-    let package = attr_value(manifest, "", "package").unwrap_or_default();
-    if package.is_empty() {
-        return fail("<manifest> has no package");
-    }
+    let package = attr_value(manifest, "", "package")
+        .ok_or_else(|| Error::Status(-102, format!("Failed to parse {path}")))?;
     if package != "android"
         && let Some(e) = validate_filename_name(&package, true)
     {
-        return fail(format!("Invalid manifest package: {e}"));
+        return fail_status(-106, format!("Invalid manifest package: {e}"));
     }
     let split = attr_value(manifest, "", "split").filter(|s| !s.is_empty());
     if let Some(split) = &split
         && let Some(e) = validate_name(split, false)
     {
-        return fail(format!("Invalid manifest split: {e}"));
+        return fail_status(-106, format!("Invalid manifest split: {e}"));
     }
     Ok((package, split, integer(manifest, "versionCode")))
 }
@@ -204,14 +202,14 @@ pub(super) fn validate_split_types(value: &str) -> Result<()> {
     for name in types {
         let name = name.trim_matches(|c| c <= '\u{20}');
         if let Some(error) = validate_filename_name(name, false) {
-            return fail(format!("Invalid manifest split types: {error}"));
+            return malformed(format!("Invalid manifest split types: {error}"));
         }
     }
     Ok(())
 }
 
-fn validate_filename_name(name: &str, separator: bool) -> Option<String> {
-    validate_name(name, separator).or_else(|| {
+pub(super) fn validate_filename_name(name: &str, separator: bool) -> Option<String> {
+    let error = validate_name(name, false).or_else(|| {
         if matches!(name, "" | "." | "..") {
             Some("Invalid filename".into())
         } else if name.len() > 223 {
@@ -219,7 +217,8 @@ fn validate_filename_name(name: &str, separator: bool) -> Option<String> {
         } else {
             None
         }
-    })
+    });
+    error.or_else(|| validate_name(name, separator))
 }
 
 fn integer(manifest: &Element, name: &str) -> i32 {
@@ -268,7 +267,10 @@ impl Parser<'_> {
                     && s != "dalvik.system.DexClassLoader"
                     && s != "dalvik.system.DelegateLastClassLoader"
             }) {
-                return fail(format!("Invalid class loader name: {loader:?}"));
+                return malformed(format!(
+                    "Invalid class loader name: {}",
+                    loader.as_deref().unwrap()
+                ));
             }
             pkg.split_class_loader_names.as_mut().unwrap()[index] = loader;
             let split = part.split.as_deref();
