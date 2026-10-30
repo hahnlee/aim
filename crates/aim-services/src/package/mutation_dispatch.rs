@@ -102,6 +102,22 @@ impl Prepared {
                 .all(|plan| matches!(plan.change, Change::None | Change::Enabled(_)))
     }
 
+    pub(crate) fn defer_restrictions(
+        &self,
+        before: &super::model::State,
+        after: &super::model::State,
+    ) -> bool {
+        match &self.finish {
+            Finish::Single(Request::Enabled(setting)) => {
+                setting.flags & 2 == 0 || !enabled_changed(before, after, setting)
+            }
+            Finish::Enabled(settings) => !settings
+                .iter()
+                .any(|setting| setting.flags & 2 != 0 && enabled_changed(before, after, setting)),
+            _ => false,
+        }
+    }
+
     pub fn changes_state(&self) -> bool {
         self.global.is_some()
             || self

@@ -347,6 +347,9 @@ struct BootConfigurationValues {
     early: Option<Arc<crate::package::boot_configuration::Early>>,
 }
 
+#[path = "system_package_restriction_writes.rs"]
+mod package_restriction_writes;
+
 struct PackageBootstrap {
     boot_configuration: Arc<BootConfiguration>,
     bridge: Arc<crate::package::bootstrap::Bridge>,
@@ -378,6 +381,7 @@ struct PackageBootstrap {
     changes: Arc<crate::package::changes::Owner>,
     customization: Option<Arc<crate::package::customization::Owner>>,
     dirty_restrictions: std::collections::BTreeSet<i32>,
+    restriction_writes: Option<package_restriction_writes::Writer>,
     events: Option<Arc<crate::package::events::Owner>>,
     moves: Option<Arc<crate::package::moves::Owner>>,
     relocation: Option<Arc<crate::package::move_package::Owner>>,
@@ -1253,6 +1257,7 @@ impl System {
             changes: Arc::new(crate::package::changes::Owner::default()),
             customization: None,
             dirty_restrictions: std::collections::BTreeSet::new(),
+            restriction_writes: None,
             events: None,
             moves: None,
             relocation: None,
@@ -2933,7 +2938,7 @@ impl System {
         &self,
         query: &crate::package::query::Query<'_>,
         user: i32,
-        base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        _base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
     ) -> Result<()> {
         let bridge = self.package_bootstrap()?;
         let persistence = self
@@ -2950,28 +2955,34 @@ impl System {
                 )
             })?;
         let mut disk = persistence.lock().unwrap();
-        self.check_package_bootstrap(&bridge)?;
-        crate::package::customization::flush(query, &mut disk, base.scan().owner(), user, |user| {
-            let mut state = self.package_bootstrap.lock().unwrap();
-            let current = state
-                .current
-                .as_mut()
-                .filter(|current| {
-                    Arc::ptr_eq(&current.bridge, &bridge)
-                        && current
-                            .queries
-                            .as_ref()
-                            .is_some_and(|current| Arc::ptr_eq(current, base))
-                })
-                .ok_or_else(|| {
-                    Exception::new(
-                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                        "restriction flush generation changed",
-                    )
-                })?;
-            current.dirty_restrictions.remove(&user);
-            Ok(())
-        })
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_mut()
+            .filter(|current| Arc::ptr_eq(&current.bridge, &bridge))
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "restriction flush generation changed",
+                )
+            })?;
+        let latest = current.queries.clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "restriction capture absent",
+            )
+        })?;
+        crate::package::customization::flush(
+            query,
+            &mut disk,
+            latest.scan().owner(),
+            user,
+            |user| {
+                current.dirty_restrictions.remove(&user);
+                current.cancel_clean_restrictions();
+                Ok(())
+            },
+        )
     }
 
     pub fn install_package_app_metadata_files(
@@ -3788,6 +3799,10 @@ impl System {
                             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
                         })?;
                 }
+                if !created {
+                    current.dirty_restrictions.remove(&user);
+                    current.cancel_clean_restrictions();
+                }
                 let update = current.publish_update(update)?;
                 current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page {
@@ -4192,6 +4207,7 @@ impl System {
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
     ) -> Result<()> {
+        let install = self.package_install_guard();
         let detached = {
             let mut state = self.package_bootstrap.lock().unwrap();
             if state
@@ -4208,9 +4224,18 @@ impl System {
                 None
             }
         };
-        let Some(detached) = detached else {
+        let Some(mut detached) = detached else {
             return Ok(());
         };
+        let flushed = match detached.persistence.clone() {
+            Some(disk) => detached.write_dirty_restrictions(&mut disk.lock().unwrap()),
+            None => Ok(()),
+        };
+        drop(install);
+        let joined = detached
+            .restriction_writes
+            .take()
+            .map_or(Ok(()), |writer| writer.close());
         let closed = match &detached.installer {
             Some((installer, _)) => installer.close_external(),
             None => match &detached.installer_external {
@@ -4227,7 +4252,7 @@ impl System {
             None => Ok(()),
         };
         drop(detached);
-        closed.and(observers).and(web)
+        flushed.and(joined).and(closed).and(observers).and(web)
     }
 
     pub(crate) fn close_package_boot_session(
@@ -4357,7 +4382,7 @@ impl System {
     }
 
     pub fn install_package_mutations(
-        &self,
+        self: &Arc<Self>,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         dependencies: Arc<crate::package::mutation_dispatch::Dependencies>,
     ) -> Result<()> {
@@ -4394,6 +4419,7 @@ impl System {
                 "mutation producer differs from bootstrap owners",
             ));
         }
+        current.restriction_writes = Some(package_restriction_writes::Writer::start(self, bridge)?);
         current.mutations = Some(dependencies);
         Ok(())
     }
@@ -4606,6 +4632,7 @@ impl System {
             } else {
                 None
             };
+            let candidate = candidate.filter(|(owner, _)| owner != base.scan().owner());
             before_publish();
             let mut state = self.package_bootstrap.lock().unwrap();
             let current = state
@@ -4639,7 +4666,21 @@ impl System {
             }
             let mut written = Ok(());
             let after = if let Some((owner, update)) = candidate {
-                written = prepared.persist(&mut disk, &owner);
+                let deferred = prepared.defer_restrictions(&before, update.capture.state());
+                if deferred {
+                    current
+                        .restriction_writes
+                        .as_mut()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "restriction scheduler unavailable",
+                            )
+                        })?
+                        .schedule(std::time::Instant::now())?;
+                } else {
+                    written = prepared.persist(&mut disk, &owner);
+                }
                 if written.as_ref().is_err_and(|error| !error.committed) {
                     return Err(Exception::new(
                         aim_binder_host::parcel::EX_ILLEGAL_STATE,
@@ -4648,6 +4689,14 @@ impl System {
                 }
                 let update = current.publish_update(update)?;
                 current.set_queries(Some(update.capture.clone()));
+                for user in prepared.plans.iter().filter_map(|plan| plan.user) {
+                    if deferred {
+                        current.dirty_restrictions.insert(user);
+                    } else if written.is_ok() {
+                        current.dirty_restrictions.remove(&user);
+                    }
+                }
+                current.cancel_clean_restrictions();
                 if let Some(page) = &current.version_page {
                     page.publish(update.capture.scan().version());
                 }
@@ -4664,7 +4713,7 @@ impl System {
         drop(install);
         // Original AM/UM/permission/broadcast owners can reenter native PM here.
         let finished = prepared.finish(dependencies, &before, &after, caller);
-        let invalidated = if prepared.changes_state() {
+        let invalidated = if !Arc::ptr_eq(&before, &after) {
             bridge.invalidate_package_info_cache().map_err(|error| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
