@@ -205,10 +205,12 @@ The app host applies supported finishDrawing transactions to SurfaceFlinger,
 preserving buffers/fences, barriers, display/input state, cache operations and
 callbacks with the host's ordered apply token (#1431). It requests no BLAST
 sync; older and repeated draw seqIds still apply. WindowInfo and DisplayLuts
-payloads fail explicitly. Host parcel and Binder apply-path checks cover this
-change, using the captured original layer state plus constructed full parcels;
-a complete original Transaction oracle and guest validation remain unrun
-(2026-10-28; no guest boot).
+now preserve their pinned writer layout, nested Binder objects and owned LUT
+FDs; input dispatch remains #1434. Host parcel checks cover empty and large
+regions, LUT entries, callback rebasing and malformed lengths. These and the
+Binder apply-path checks use the captured original layer state plus constructed
+full parcels; a complete original Transaction oracle and guest validation
+remain unrun (2026-10-31; no guest boot).
 The package bootstrap bridge delegates preferred-activity change broadcasts,
 timestamp formatting and the background-handler barrier to the existing Java
 PackageBootstrapBridge in aim-system (#2330). The system process attaches it

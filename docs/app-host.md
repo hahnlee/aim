@@ -186,11 +186,14 @@ The host transaction keeps its apply token and id, records the merged id,
 and preserves layer/display states, input commands, buffer/fence FD objects,
 barriers, uncache requests and callback listeners. It requests no BLAST sync
 (`syncSeqId=-1`), so older or repeated completion seqIds still apply, as in
-WindowState's non-sync path. WindowInfo and DisplayLuts payloads produce
-explicit errors rather than being dropped. Host checks reuse the captured
-original layer-state fixture and construct complete Transaction parcels;
-there is no complete real-app Transaction fixture or executed original
-Transaction JVM oracle yet (#1431). No guest boot was run for this change.
+WindowState's non-sync path. WindowInfo and DisplayLuts follow the pinned
+libgui writer layout and preserve nested Binder objects and owned LUT FDs
+without interpreting input state (#1431; input dispatch remains #1434).
+Host checks reuse the captured original layer-state fixture and construct
+complete Transaction parcels, including nullable tokens, empty and large
+regions, LUT entries, callback rebasing and malformed lengths. There is no
+complete real-app Transaction fixture or executed original Transaction JVM
+oracle. No guest boot was run for this change.
 
 ## Coverage
 
@@ -210,8 +213,7 @@ of their 5,444 transactions; 158 Java services were absent.
 
 Focus changes within an app and accessibility (#1422); the mouse, other
 keyboards, the window manager policy's key interception and the rest of
-input dispatch (#1434); finishDrawing transactions carrying WindowInfo or
-DisplayLuts (#1431); the input method's candidates at the caret (#1458); scoped storage's
-per-file ownership and the media database (#1455); the font map in
+input dispatch (#1434); the input method's candidates at the caret (#1458);
+scoped storage's per-file ownership and the media database (#1455); the font map in
 `bindApplication`, to come from the Mac's fonts (#1449),
 PackageManager's writes other than the enabled settings (#1425), PermissionManager's writes (#1508), sync adapters (#1460), and device policy beyond a device without owners (#1521).
