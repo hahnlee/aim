@@ -3637,6 +3637,8 @@ Manifest/application, component and child-tag failures retain Android 16's
 status and check message through native installation (#1419). Archive/resource
 loading, unreadable manifests, cluster identity/base selection and illegal split
 dependencies retain their pinned statuses; absent resource tables remain valid.
+Directories with no APKs report -100, `No packages found in split`; clusters
+with APKs but no base report -101, `Missing base APK in <directory>`.
 Base/split exceptions retain APK paths; lite overlay skips retain -125. Key-cache
 conversion errors have a distinct internal type. Host checks, 2026-10-31; no guest boot.
 Shared-library dependency resolution now has ordered direct selection,

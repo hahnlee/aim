@@ -27,9 +27,6 @@ pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
                     .map_err(|_| Error::Status(-100, "No packages found in split".into()))
             })
             .collect::<Result<Vec<_>>>()?;
-        if entries.is_empty() {
-            return fail_status(-100, "No packages found in split");
-        }
         entries
             .into_iter()
             .filter(|p| {
@@ -44,6 +41,9 @@ pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
     } else {
         vec![(host.to_owned(), path.to_owned())]
     };
+    if files.is_empty() {
+        return fail_status(-100, "No packages found in split");
+    }
     let mut parts = BTreeMap::new();
     let mut identity = None;
     for (host, path) in files {

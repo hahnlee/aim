@@ -116,19 +116,35 @@ fn archive_resource_and_manifest_boundaries() {
     assert!(lite::install_lite(&path, &environment).is_ok());
 }
 #[test]
-fn cluster_identity_and_base_selection() {
+fn cluster_without_apks_or_base() {
     let dir = Directory(aim_paths::scratch_dir("parse-archive"));
     status(
         cluster::load(&dir.0, "/code"),
         -100,
         "No packages found in split",
     );
-    std::fs::write(dir.0.join("other"), b"ignored").unwrap();
+    for name in ["boot.art", "boot.oat", "boot.vdex"] {
+        std::fs::write(dir.0.join(name), b"ignored").unwrap();
+    }
+    status(
+        cluster::load(&dir.0, "/code"),
+        -100,
+        "No packages found in split",
+    );
+    std::fs::write(
+        dir.0.join("feature.apk"),
+        zip::resource_apk(&manifest("org.example.archive", "feature", 1), None),
+    )
+    .unwrap();
     status(
         cluster::load(&dir.0, "/code"),
         -101,
         "Missing base APK in /code",
     );
+}
+#[test]
+fn cluster_identity_and_base_selection() {
+    let dir = Directory(aim_paths::scratch_dir("parse-archive"));
     let first = dir.0.join("first.apk");
     let base = zip::resource_apk(&manifest("org.example.archive", "", 1), None);
     let second = dir.0.join("second.apk");
@@ -156,12 +172,6 @@ fn cluster_identity_and_base_selection() {
         assert!(expected.contains(&message.as_str()), "{message}");
     }
     assert!(cluster::load(&second, "/code/feature.apk").is_ok());
-    std::fs::remove_file(first).unwrap();
-    status(
-        cluster::load(&dir.0, "/code"),
-        -101,
-        "Missing base APK in /code",
-    );
 }
 #[test]
 fn illegal_split_dependencies() {
