@@ -350,6 +350,7 @@ pub type SetProperty = Box<dyn Fn(&str, &str) + Send + Sync>;
 /// Where the app host finds its inputs, set once guest-init knows them.
 struct Configured {
     root: PathBuf,
+    image_inputs: Arc<crate::package::boot_image::Inputs>,
     data: PathBuf,
     bpf: PathBuf,
     /// The boot's runtime network directory, with its test hook.
@@ -846,6 +847,7 @@ impl AppHost {
         self.configured
             .set(Configured {
                 root: root.to_path_buf(),
+                image_inputs: crate::package::boot_image::Inputs::new(root),
                 data: data.to_path_buf(),
                 bpf: bpf.to_path_buf(),
                 net: net.to_path_buf(),
@@ -1281,6 +1283,13 @@ impl AppHost {
         Ok(self.platform.get_or_init(|| Arc::new(platform)))
     }
 
+    fn image_inputs(&self) -> Result<&Arc<crate::package::boot_image::Inputs>, Exception> {
+        self.configured
+            .get()
+            .map(|configured| &configured.image_inputs)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))
+    }
+
     /// The framework's resources as the device configures them, without
     /// acquiring the package model.
     fn framework(&self) -> Result<&resources::Framework, Exception> {
@@ -1288,9 +1297,15 @@ impl AppHost {
             return Ok(framework);
         }
         let platform = self.platform()?;
-        let framework =
-            resources::Framework::load(self.root()?, platform.device_density, &platform.locales)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let image = self
+            .image_inputs()?
+            .platform()
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let framework = resources::Framework(resources::configure_platform(
+            image.clone(),
+            platform.device_density,
+            &platform.locales,
+        ));
         Ok(self.framework.get_or_init(|| framework))
     }
 

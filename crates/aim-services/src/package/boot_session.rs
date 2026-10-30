@@ -42,6 +42,7 @@ pub struct Session {
     internal_host: Binder,
     factory_test: bool,
     captures: Captures,
+    image_inputs: Arc<super::boot_image::Inputs>,
     raw_metadata_leases: Mutex<Vec<Weak<super::scan_snapshot::endpoint::Endpoint>>>,
     closed: AtomicBool,
     state: Mutex<State>,
@@ -57,6 +58,7 @@ impl Session {
         user_operations: Binder,
         internal_host: Binder,
         factory_test: bool,
+        image_inputs: Arc<super::boot_image::Inputs>,
     ) -> Arc<Self> {
         let process = system.binder_process();
         let session = Arc::new(Self {
@@ -67,6 +69,7 @@ impl Session {
             user_operations,
             internal_host,
             factory_test,
+            image_inputs,
             captures: Captures::new(system, bridge.clone()),
             raw_metadata_leases: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
@@ -156,6 +159,7 @@ impl Session {
             &self.bridge,
             self.factory_test,
             &self.early,
+            self.image_inputs.clone(),
         ) {
             Ok(begin) => begin,
             Err(error) => return Err(self.fail_and_close(error)),

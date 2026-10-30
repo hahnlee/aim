@@ -35,6 +35,7 @@ pub(super) fn install_users_for_snapshot(
     Ok(users)
 }
 pub struct EnvironmentBootInputs {
+    pub image_inputs: Arc<crate::package::boot_image::Inputs>,
     pub factory_test: bool,
     pub parser_cache: Option<std::path::PathBuf>,
 }
@@ -49,6 +50,9 @@ impl System {
         boot: EnvironmentBootInputs,
     ) -> Result<environment::Config> {
         self.check_package_bootstrap(bridge)?;
+        if boot.image_inputs.image != image {
+            return Err(environment_error("install environment uses another image"));
+        }
         let (snapshots, installer, capture) = {
             let state = self.package_bootstrap.lock().unwrap();
             let current = state
@@ -96,13 +100,13 @@ impl System {
                 .check_package_bootstrap(&retained)
                 .map_err(|error| error.message)
         });
-        let image_inputs = environment_image::ImageInputs::load(
-            image,
+        let image_inputs = environment_image::ImageInputs::load_with_seinfo(
             data,
             apks.clone(),
             &properties,
             bridge.clone(),
             attachment.clone(),
+            || boot.image_inputs.seinfo(),
         )
         .map_err(environment_error)?;
         let external = self.package_installer_external(bridge)?;

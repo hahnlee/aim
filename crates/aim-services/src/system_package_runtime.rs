@@ -16,6 +16,7 @@ pub struct Inputs {
     pub image: PathBuf,
     pub data: PathBuf,
     pub apks: Arc<crate::package::write::Apks>,
+    pub image_inputs: Arc<crate::package::boot_image::Inputs>,
     pub resource_config: Config,
     pub system_config: crate::package::system_config::SystemConfig,
     pub prepared: crate::system_package_persistence_init::Prepared,
@@ -242,6 +243,7 @@ impl System {
             super::package_environment_init::EnvironmentBootInputs {
                 factory_test: inputs.factory_test,
                 parser_cache: inputs.parser_cache,
+                image_inputs: inputs.image_inputs,
             },
         )?;
         if let Some(error) = property_error.lock().unwrap().take() {

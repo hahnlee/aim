@@ -15,7 +15,7 @@
 //! `libs/androidfw`), Copyright (C) The Android Open Source Project,
 //! Licensed under the Apache License, Version 2.0.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use aim_apps::res::{
     Result, STRING_POOL, Strings, TABLE, TABLE_PACKAGE, TABLE_TYPE, bad, chunks, u16_at, u32_at,
@@ -482,10 +482,11 @@ struct Package {
 }
 
 /// A resource table (`resources.arsc`).
+#[derive(Clone)]
 pub struct Table {
-    strings: Strings,
-    styled_strings: HashMap<u32, ()>,
-    packages: Vec<Package>,
+    strings: Arc<Strings>,
+    styled_strings: Arc<HashMap<u32, ()>>,
+    packages: Arc<Vec<Package>>,
 }
 
 const FLAG_SPARSE: u8 = 0x01;
@@ -522,9 +523,9 @@ impl Table {
             }
         }
         Ok(Table {
-            strings: strings.ok_or_else(|| bad("table without strings"))?,
-            styled_strings,
-            packages,
+            strings: Arc::new(strings.ok_or_else(|| bad("table without strings"))?),
+            styled_strings: Arc::new(styled_strings),
+            packages: Arc::new(packages),
         })
     }
 
@@ -659,9 +660,10 @@ pub fn runtime_id(id: u32) -> u32 {
 /// `OverlayConfig.createImmutableFrameworkIdmapsInZygote` has the zygote
 /// load them): its table and its idmap, the framework's resources it
 /// overlays by type and name.
+#[derive(Clone)]
 pub struct Overlay {
     table: Table,
-    map: HashMap<u32, u32>,
+    map: Arc<HashMap<u32, u32>>,
 }
 
 impl Overlay {
@@ -670,7 +672,10 @@ impl Overlay {
             .names()
             .filter_map(|((kind, name), &id)| Some((target.id(kind, name)?, id)))
             .collect();
-        Overlay { table, map }
+        Overlay {
+            table,
+            map: Arc::new(map),
+        }
     }
 }
 
@@ -1089,9 +1094,9 @@ mod tests {
 
     fn table(config: Config, value: u32, flags: u32) -> Table {
         Table {
-            strings: Strings::parse(&[0; 28]).unwrap(),
-            styled_strings: HashMap::new(),
-            packages: vec![Package {
+            strings: Arc::new(Strings::parse(&[0; 28]).unwrap()),
+            styled_strings: Arc::new(HashMap::new()),
+            packages: Arc::new(vec![Package {
                 id: 0x7f,
                 name: String::new(),
                 types: [(
@@ -1109,7 +1114,7 @@ mod tests {
                 type_names: HashMap::new(),
                 ids: HashMap::new(),
                 names: HashMap::new(),
-            }],
+            }]),
         }
     }
 
@@ -1141,9 +1146,9 @@ mod tests {
             (2, Entry::Bag(0, vec![(themes, BOOLEAN, 1)])),
         ];
         let t = Table {
-            strings: Strings::parse(&[0; 28]).unwrap(),
-            styled_strings: HashMap::new(),
-            packages: vec![Package {
+            strings: Arc::new(Strings::parse(&[0; 28]).unwrap()),
+            styled_strings: Arc::new(HashMap::new()),
+            packages: Arc::new(vec![Package {
                 id: 0x7f,
                 name: String::new(),
                 types: [(
@@ -1161,7 +1166,7 @@ mod tests {
                 type_names: HashMap::new(),
                 ids: HashMap::new(),
                 names: HashMap::new(),
-            }],
+            }]),
         };
         let res = Resources {
             tables: vec![&t],

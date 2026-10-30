@@ -33,10 +33,10 @@ impl PermissionManager {
             system: owner.system.clone().expect("loaded"),
             user0: owner.user0.clone().expect("loaded"),
         };
-        let config =
-            crate::package::system_config::SystemConfig::read(self.host.root()?, &|name| {
-                self.host.property(name)
-            });
+        let config = self
+            .host
+            .image_inputs()?
+            .config(&|name| self.host.property(name));
         let policy = Policy {
             splits: crate::package::parse::platform::split_permissions(self.host.root()?)
                 .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?,

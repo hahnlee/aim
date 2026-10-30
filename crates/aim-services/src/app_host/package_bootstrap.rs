@@ -77,8 +77,6 @@ pub struct PackageBootstrap {
     /// ApexManager's `mApexSystemServices`' names, kept across its
     /// notifications.
     apex_system_services: Mutex<Vec<String>>,
-    /// `SystemConfig.getInstance()`, read once.
-    config: OnceLock<SystemConfig>,
     /// The installer's external owner, made once (`installerExternal`).
     installer_external: OnceLock<aim_binder_host::parcel::Binder>,
     /// The installer's file owner, made once (`installerFiles`).
@@ -242,7 +240,6 @@ impl PackageBootstrap {
             observers,
             observer_events: OnceLock::new(),
             apex_system_services: Mutex::new(Vec::new()),
-            config: OnceLock::new(),
             installer_external: OnceLock::new(),
             installer_files: OnceLock::new(),
             domain_settings: OnceLock::new(),
@@ -288,12 +285,11 @@ impl PackageBootstrap {
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable"))
     }
 
-    fn config(&self) -> Result<&SystemConfig, Exception> {
-        if let Some(config) = self.config.get() {
-            return Ok(config);
-        }
-        let config = SystemConfig::read(self.host.root()?, &|name| self.host.property(name));
-        Ok(self.config.get_or_init(|| config))
+    fn config(&self) -> Result<SystemConfig, Exception> {
+        Ok(self
+            .host
+            .image_inputs()?
+            .config(&|name| self.host.property(name)))
     }
 
     /// `ExistingInstallEffects.complete`: only the public status extra,
@@ -1477,7 +1473,7 @@ impl Service for PackageBootstrap {
                     Ok(Some(permissions)) => self
                         .config()
                         .and_then(|config| {
-                            permissions.legacy_permission_state(a.app_id, &users, config)
+                            permissions.legacy_permission_state(a.app_id, &users, &config)
                         })
                         .map(|record| {
                             bridge::write_get_legacy_permission_state_reply(&mut p, &Some(record))
@@ -1497,7 +1493,7 @@ impl Service for PackageBootstrap {
                         )),
                         Some(permissions) => self
                             .config()
-                            .and_then(|config| permissions.gids_for_uid(a.uid, config))
+                            .and_then(|config| permissions.gids_for_uid(a.uid, &config))
                             .map(|gids| {
                                 bridge::write_get_permission_gids_for_uid_reply(&mut p, &Some(gids))
                             }),

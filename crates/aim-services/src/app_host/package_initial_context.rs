@@ -57,8 +57,9 @@ impl InitialContext {
 
     /// `captureImageScanInputs`.
     fn scan_inputs(&self) -> Result<Vec<u8>, Exception> {
-        let root = self.host.root()?;
-        let flags = crate::package::parse::Platform::load(root, Default::default())
+        let inputs = self.host.image_inputs()?;
+        let flags = &inputs
+            .platform()
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
             .flags;
         let now = std::time::SystemTime::now()

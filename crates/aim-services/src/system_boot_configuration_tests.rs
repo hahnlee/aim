@@ -194,7 +194,7 @@ mod boot_configuration_epoch {
         let capture=fixture.system.publish_package_scan_with_queries(&old,None,owner,usage,context).unwrap();
         let early=early_user_operations::Endpoint::new(&crate::package::system_config::SystemConfig::default());
         let users=fixture.native.add_service(early.clone());let internal=fixture.system.package_internal_host().unwrap();
-        let session=Session::new(&fixture.system,old.clone(),early,users,internal,false);
+        let session=Session::new(&fixture.system,old.clone(),early,users,internal,false,crate::package::boot_image::Inputs::new(&fixture.root.join("image")));
         let metadata=Arc::new(endpoint::Endpoint::raw_metadata(capture.scan().clone()));
         let metadata_binder=fixture.native.add_service(metadata.clone());
         let prepared=crate::system_package_persistence_init::epoch_fixture_prepared(&fixture.root.join("data")).unwrap();
@@ -206,7 +206,7 @@ mod boot_configuration_epoch {
         std::fs::create_dir(fixture.root.join("data/app")).unwrap();
         let decompression=Arc::new(crate::package::scan::boot_compressed::BootDecompression::new(fixture.root.join("data/app")).unwrap());
         let decompression_weak=Arc::downgrade(&decompression);
-        session.epoch_fixture_set_scanned(crate::system::package_boot_scan::Scanned{prepared,capture,runtime_metadata:Default::default(),
+        session.epoch_fixture_set_scanned(crate::system::package_boot_scan::Scanned{image_inputs:crate::package::boot_image::Inputs::new(&fixture.root.join("image")),prepared,capture,runtime_metadata:Default::default(),
             apex_results:vec![],registrations:vec![],lifecycle,boot_apex_changed:false,decompression},&metadata);
         {
             let mut state=fixture.system.package_bootstrap.lock().unwrap();
@@ -303,7 +303,7 @@ mod boot_configuration_epoch {
         let capture=fixture.system.publish_package_scan_with_queries(&bridge,None,owner,usage,context).unwrap();
         let early=early_user_operations::Endpoint::new(&crate::package::system_config::SystemConfig::default());
         let users=fixture.native.add_service(early.clone());let internal=fixture.system.package_internal_host().unwrap();
-        let session=Session::new(&fixture.system,bridge.clone(),early,users,internal,false);
+        let session=Session::new(&fixture.system,bridge.clone(),early,users,internal,false,crate::package::boot_image::Inputs::new(&fixture.root.join("image")));
         let metadata=Arc::new(endpoint::Endpoint::raw_metadata(capture.scan().clone()));
         let prepared=crate::system_package_persistence_init::epoch_fixture_prepared(&fixture.root.join("data")).unwrap();
         let disk=Arc::downgrade(&prepared.disk);
@@ -314,7 +314,7 @@ mod boot_configuration_epoch {
         std::fs::create_dir(fixture.root.join("data/app")).unwrap();
         let decompression=Arc::new(crate::package::scan::boot_compressed::BootDecompression::new(fixture.root.join("data/app")).unwrap());
         let decompression_weak=Arc::downgrade(&decompression);
-        session.epoch_fixture_set_scanned(crate::system::package_boot_scan::Scanned{prepared,capture,runtime_metadata:Default::default(),
+        session.epoch_fixture_set_scanned(crate::system::package_boot_scan::Scanned{image_inputs:crate::package::boot_image::Inputs::new(&fixture.root.join("image")),prepared,capture,runtime_metadata:Default::default(),
             apex_results:vec![],registrations:vec![],lifecycle,boot_apex_changed:false,decompression},&metadata);
         fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().boot_session=Some(Arc::downgrade(&session));
         fixture.native.add_service(session.clone());

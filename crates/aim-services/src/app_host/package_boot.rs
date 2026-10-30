@@ -92,6 +92,7 @@ fn scan(
     host: &Arc<AppHost>,
     system: &Arc<System>,
 ) -> Result<aim_binder_host::local::LocalService, Exception> {
+    let image_inputs = host.image_inputs()?.clone();
     let Binder::Local(ptr) = host
         .process
         .add_service(Arc::new(PackageBootstrap::new(host.clone())))
@@ -107,7 +108,7 @@ fn scan(
     // Retain the epoch owner even before the first notification, so session
     // teardown revokes native service registrations too.
     system.package_observer_owner(&system.package_bootstrap()?)?;
-    let Binder::Local(ptr) = system.begin_package_manager_boot(false)? else {
+    let Binder::Local(ptr) = system.begin_package_manager_boot(false, Some(image_inputs))? else {
         unreachable!("the session is this process's")
     };
     let boot = local(ptr)?;

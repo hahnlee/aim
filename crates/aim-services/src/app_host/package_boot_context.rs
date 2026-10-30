@@ -94,12 +94,15 @@ impl BootContext {
     fn capture(&self) -> Result<Vec<u8>, Exception> {
         let property = |name: &str| self.host.property(name).unwrap_or_default();
         let density = property("ro.sf.lcd_density").parse().unwrap_or(160);
-        let platform = super::resources::device_platform(
-            self.host.root()?,
+        let image_inputs = self.host.image_inputs()?;
+        let platform = super::resources::configure_platform(
+            image_inputs
+                .platform()
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+                .clone(),
             density,
             &property("persist.sys.locale"),
-        )
-        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        );
         let users = super::user_service::boot_context_users(&self.host)?
             .into_iter()
             .map(|user| Ok((self.host.user_unlocking_or_unlocked(user.id)?, user)))
