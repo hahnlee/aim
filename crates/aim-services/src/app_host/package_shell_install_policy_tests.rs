@@ -118,6 +118,7 @@ fn shell_install_policy_uses_transferred_apk_and_platform_owners() {
                 .into(),
             )
         }),
+        Box::new(|_, _, _| panic!("unexpected property wait")),
         Box::new(|_, _| {}),
         Box::new(|| Err(std::io::Error::other("no zygote"))),
     )

@@ -33,7 +33,9 @@ use crate::launch::{
 };
 use crate::mount::DataMount;
 use crate::paths::{Layout, Sweep};
-use crate::props::{Properties, heap_properties, mapped_properties, read_property, share_areas};
+use crate::props::{
+    Properties, heap_properties, mapped_properties, read_property, share_areas, wait_property,
+};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
 
@@ -981,6 +983,7 @@ impl Boot {
             )?;
             if let Some(services) = &native_services {
                 let properties_dir = layout.properties_dir();
+                let wait_dir = properties_dir.clone();
                 let socket_dir = layout.socket_dir();
                 let sets = std::sync::Mutex::new(host_properties.clone());
                 services
@@ -990,6 +993,10 @@ impl Boot {
                         &layout.bpf_dir(),
                         &layout.net_dir(),
                         Box::new(move |name| read_property(&properties_dir, name)),
+                        Box::new(move |name, value, deadline| {
+                            wait_property(&wait_dir, name, value, deadline)
+                                .map_err(|e| e.to_string())
+                        }),
                         Box::new(move |name, value| {
                             drop(
                                 sets.lock()

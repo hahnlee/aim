@@ -351,7 +351,12 @@ inputs (#2431): initial resource size comes from the display server's observer
 hello and density from `ro.sf.lcd_density`; the first full SurfaceFlinger query
 must agree. Persistent properties, the applied initial locale, APEX, user-0 DE
 readiness (published by vold after `initUser0`), restorecon and installd stay
-waits at their consumers. Three matched warm second boots reach median runtime
+waits at their consumers. Property readiness now blocks on the shared
+`properties_serial` word through guest-init's property owner, and restorecon
+blocks on agent attachment; both keep the named 60-second timeout (#2450).
+Host property-wake, timeout and attach regressions cover these waits; no guest
+boot was run for this change (2026-10-30).
+Three matched warm second boots reach median runtime
 publication at 3.720 s (4.516 before), `boot_completed` at 4.378 s (5.171), and
 app admission at 4.731 s (5.524). Fresh data reaches boot completion at 7.602 s
 (8.623 before); Settings is process-cold in all eight compared boots. Its warm

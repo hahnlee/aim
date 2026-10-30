@@ -6,9 +6,12 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use aim_android_init::props::area::{AreaMemory, HeapMemory};
 use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO};
@@ -20,7 +23,7 @@ use aim_binder_host::mach;
 use aim_binder_host::server::Server;
 use aim_binder_host::wire::SharedFile;
 
-use crate::futex::{SharedFutex, UlockShared};
+use crate::futex::{SharedFutex, UlockShared, wait_shared};
 
 /// A `MAP_SHARED`, read-write mapping of one area file.
 pub struct MmapMemory {
@@ -203,6 +206,61 @@ pub fn read_property(dir: &Path, name: &str) -> Option<String> {
     PropAreaReader::new(&area).ok()?.get(name).map(|p| p.value)
 }
 
+/// Waits for a property's value through bionic's global area serial
+/// (`SystemProperties::WaitAny`), including properties not yet added.
+pub fn wait_property(dir: &Path, name: &str, value: &str, deadline: Instant) -> io::Result<bool> {
+    let file = fs::File::open(dir.join(PROPERTIES_SERIAL))?;
+    if file.metadata()?.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short property serial area",
+        ));
+    }
+    // SAFETY: the file contains the area header, mapped read-only and shared.
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            8,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    struct Mapping(*mut libc::c_void);
+    impl Drop for Mapping {
+        fn drop(&mut self) {
+            // SAFETY: this mapping owns the range mapped above.
+            unsafe { libc::munmap(self.0, 8) };
+        }
+    }
+    let mapping = Mapping(base);
+    // SAFETY: the aligned serial word is at offset 4 in the mapped header.
+    let serial = unsafe { &*mapping.0.cast::<u8>().add(4).cast::<AtomicU32>() };
+    loop {
+        // Snapshot before reading the condition so a concurrent write cannot
+        // be lost between the read and the shared wait's compare.
+        let expected = serial.load(Ordering::Acquire);
+        if read_property(dir, name).as_deref() == Some(value) {
+            return Ok(true);
+        }
+        let Some(remaining) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|t| !t.is_zero())
+        else {
+            return Ok(false);
+        };
+        wait_shared(
+            serial,
+            expected,
+            remaining.as_nanos().min(u64::MAX as u128) as u64,
+        );
+    }
+}
+
 /// Creates and maps the area files `names` in `dir` on several threads: a
 /// writable shared mapping of a file costs about a millisecond each while
 /// the host's endpoint security agent looks at it (#337), and those waits
@@ -375,6 +433,64 @@ impl<'a> ProtoReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn property_wait_follows_shared_service_wakes_and_deadline() {
+        use aim_android_init::props::build_trie;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!("aim-property-wait-{}", std::process::id()));
+        let info = build_trie(&[], "u:object_r:default_prop:s0", "string").unwrap();
+        let mut service = mapped_properties(&dir, info).unwrap();
+        for value in ["added", "updated"] {
+            std::thread::scope(|scope| {
+                let (sent, received) = mpsc::channel();
+                let dir = &dir;
+                scope.spawn(move || {
+                    sent.send(wait_property(
+                        dir,
+                        "debug.ready",
+                        value,
+                        Instant::now() + Duration::from_secs(5),
+                    ))
+                    .unwrap();
+                });
+                assert!(matches!(
+                    received.recv_timeout(Duration::from_millis(50)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+                assert!(service.init_set("debug.unrelated", value).is_success());
+                assert!(service.init_set("debug.ready", "wrong").is_success());
+                assert!(matches!(
+                    received.recv_timeout(Duration::from_millis(50)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+                assert!(service.init_set("debug.ready", value).is_success());
+                assert!(
+                    received
+                        .recv_timeout(Duration::from_secs(1))
+                        .unwrap()
+                        .unwrap()
+                );
+            });
+            assert!(wait_property(&dir, "debug.ready", value, Instant::now()).unwrap());
+        }
+        let started = Instant::now();
+        assert!(
+            !wait_property(
+                &dir,
+                "debug.missing",
+                "true",
+                started + Duration::from_millis(30)
+            )
+            .unwrap()
+        );
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(service);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn persistent_properties_round_trip() {

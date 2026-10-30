@@ -219,7 +219,7 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
@@ -345,6 +345,8 @@ const P: i32 = 28;
 
 /// Reads one of the device's properties.
 pub type Properties = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Waits for a guest property value until the deadline, returning false on timeout.
+pub type WaitProperty = Box<dyn Fn(&str, &str, Instant) -> Result<bool, String> + Send + Sync>;
 /// Sets a guest property as the system (`SystemProperties.set`).
 pub type SetProperty = Box<dyn Fn(&str, &str) + Send + Sync>;
 
@@ -357,6 +359,7 @@ struct Configured {
     /// The boot's runtime network directory, with its test hook.
     net: PathBuf,
     properties: Properties,
+    wait_property: WaitProperty,
     set_property: SetProperty,
     connect: Connect,
 }
@@ -576,6 +579,7 @@ pub struct AppHost {
     windows: window_manager::Windows,
     composer: OnceLock<surface::Composer>,
     agent: Mutex<Option<Strong>>,
+    agent_attached: Condvar,
     /// PackageItemInfo's retained original text presentation in aim-system.
     safe_labels: Mutex<Option<Arc<Strong>>>,
     provider_queries: Mutex<Option<Arc<Strong>>>,
@@ -712,6 +716,7 @@ impl AppHost {
             windows: Default::default(),
             composer: OnceLock::new(),
             agent: Mutex::new(None),
+            agent_attached: Condvar::new(),
             safe_labels: Mutex::new(None),
             provider_queries: Mutex::new(None),
             storage_crates: Mutex::new(None),
@@ -846,6 +851,7 @@ impl AppHost {
         bpf: &Path,
         net: &Path,
         properties: Properties,
+        wait_property: WaitProperty,
         set_property: SetProperty,
         connect: Connect,
     ) -> Result<(), String> {
@@ -857,6 +863,7 @@ impl AppHost {
                 bpf: bpf.to_path_buf(),
                 net: net.to_path_buf(),
                 properties,
+                wait_property,
                 set_property,
                 connect,
             })
@@ -1258,8 +1265,8 @@ impl AppHost {
         // The vendor post-fs-data action applies the Mac's locale after
         // persistent property loading, including on fresh data.
         if let Some(locale) = self.property("vendor.aim.mac.locale") {
-            package_boot::wait_for("initial locale", || {
-                Ok(self.property("persist.sys.locale").as_deref() == Some(locale.as_str()))
+            package_boot::wait_for("initial locale", |deadline| {
+                self.wait_property("persist.sys.locale", &locale, deadline)
             })?;
         }
         let _loading = self.loading.lock().unwrap();
@@ -2540,6 +2547,11 @@ impl AppHost {
         (self.configured.get()?.properties)(name)
     }
 
+    fn wait_property(&self, name: &str, value: &str, deadline: Instant) -> Result<bool, String> {
+        let configured = self.configured.get().ok_or("app host not configured")?;
+        (configured.wait_property)(name, value, deadline)
+    }
+
     /// Sets a guest property, as the system.
     pub(super) fn set_property(&self, name: &str, value: &str) {
         if let Some(c) = self.configured.get() {
@@ -3556,6 +3568,23 @@ impl AppHost {
             write_input(data, input);
         })
         .map(|_| ())
+    }
+
+    fn attach_agent(&self, agent: Strong) {
+        *self.agent.lock().unwrap() = Some(agent);
+        self.agent_attached.notify_all();
+    }
+
+    fn wait_for_agent(&self, deadline: Instant) -> bool {
+        let (agent, _) = self
+            .agent_attached
+            .wait_timeout_while(
+                self.agent.lock().unwrap(),
+                deadline.saturating_duration_since(Instant::now()),
+                |agent| agent.is_none(),
+            )
+            .unwrap();
+        agent.is_some()
     }
 
     /// The agent's call `code` (`name`) of the arguments `write` writes:
@@ -5622,7 +5651,7 @@ impl Service for Control {
             else {
                 return Err(BAD_VALUE);
             };
-            *self.0.agent.lock().unwrap() = Some(self.0.process.strong(agent));
+            self.0.attach_agent(self.0.process.strong(agent));
             eprintln!("app host: agent attached (pid {})", call.sender_pid);
             // Join the package boot started from configured native inputs
             // before initializing the user and admitting app starts.
@@ -5807,12 +5836,15 @@ pub(crate) fn configure_boot_test_host(
     runtime: &Path,
     properties: Properties,
 ) {
+    let properties = Arc::new(properties);
+    let read = properties.clone();
     host.configure(
         root,
         data,
         runtime,
         runtime,
-        properties,
+        Box::new(move |name| read(name)),
+        Box::new(move |name, value, _| Ok(properties(name).as_deref() == Some(value))),
         Box::new(|_, _| {}),
         Box::new(|| Err(std::io::Error::other("no zygote"))),
     )
