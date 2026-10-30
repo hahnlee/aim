@@ -4530,90 +4530,103 @@ impl System {
                 )
             })?;
         let mut disk = persistence.lock().unwrap();
-        let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state
-            .current
-            .as_mut()
-            .filter(|current| {
-                Arc::ptr_eq(&current.bridge, bridge)
-                    && current
-                        .persistence
-                        .as_ref()
-                        .is_some_and(|owner| Arc::ptr_eq(owner, &persistence))
-            })
-            .ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "prepared mutation generation changed",
-                )
-            })?;
-        // Select latest while holding the publication coordinator, after the
-        // disk lock. Freezer/other context publications cannot race this rebase.
-        let latest = current.queries.clone().ok_or_else(|| {
-            Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                "prepared mutation current capture unavailable",
-            )
-        })?;
         let source = base.clone();
-        let rebased = !Arc::ptr_eq(&latest, &source);
-        if rebased {
-            let result = if strict_code {
-                prepared.validate_rebase(source.scan().owner(), latest.scan().owner())
-            } else {
-                prepared.validate_rebase_after_install_side_effects(
-                    source.scan().owner(),
-                    latest.scan().owner(),
-                )
-            };
-            result.map_err(|error| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
-            })?;
-        }
-        let base = &latest;
-        let before = base.state().clone();
-        let mut written = Ok(());
-        let after = if prepared.changes_state() {
-            let mut owner = base.scan().owner().clone();
-            disk.rebase_unchanged_key_set_metadata(
-                &base.scan().owner().settings,
-                &mut owner.settings,
-            )
-            .map_err(|error| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
-            })?;
-            disk.validate_committed_scan(&owner).map_err(|error| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
-            })?;
+        let (before, after, written) = loop {
+            let latest = self.capture_package_queries_for(bridge)?;
+            let rebased = !Arc::ptr_eq(&latest, &source);
             if rebased {
-                prepared.apply_scan_rebased(source.scan().owner(), &mut owner)
-            } else {
-                prepared.apply_scan(&mut owner)
+                let result = if strict_code {
+                    prepared.validate_rebase(source.scan().owner(), latest.scan().owner())
+                } else {
+                    prepared.validate_rebase_after_install_side_effects(
+                        source.scan().owner(),
+                        latest.scan().owner(),
+                    )
+                };
+                result.map_err(|error| {
+                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
+                })?;
             }
-            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-            let update = base
-                .prepare_package_update(owner.clone())
+            let base = &latest;
+            let before = base.state().clone();
+            let candidate = if prepared.changes_state() {
+                let mut owner = base.scan().owner().clone();
+                disk.rebase_unchanged_key_set_metadata(
+                    &base.scan().owner().settings,
+                    &mut owner.settings,
+                )
+                .map_err(|error| {
+                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+                })?;
+                disk.validate_committed_scan(&owner).map_err(|error| {
+                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+                })?;
+                if rebased {
+                    prepared.apply_scan_rebased(source.scan().owner(), &mut owner)
+                } else {
+                    prepared.apply_scan(&mut owner)
+                }
                 .map_err(|error| {
                     Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
                 })?;
-            written = prepared.persist(&mut disk, &owner);
-            if written.as_ref().is_err_and(|error| !error.committed) {
-                return Err(Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    written.unwrap_err().to_string(),
-                ));
+                let update = base
+                    .prepare_package_update(owner.clone())
+                    .map_err(|error| {
+                        Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
+                    })?;
+                Some((owner, update))
+            } else {
+                None
+            };
+            let mut state = self.package_bootstrap.lock().unwrap();
+            let current = state
+                .current
+                .as_mut()
+                .filter(|current| {
+                    Arc::ptr_eq(&current.bridge, bridge)
+                        && current
+                            .persistence
+                            .as_ref()
+                            .is_some_and(|owner| Arc::ptr_eq(owner, &persistence))
+                })
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "prepared mutation generation changed",
+                    )
+                })?;
+            if !current
+                .queries
+                .as_ref()
+                .is_some_and(|capture| Arc::ptr_eq(capture, &latest))
+            {
+                // Runtime grants and context publications do not take the install
+                // gate. Rebase before any write so their deltas are retained.
+                continue;
             }
-            let update = current.publish_update(update)?;
-            current.set_queries(Some(update.capture.clone()));
-            if let Some(page) = &current.version_page {
-                page.publish(update.capture.scan().version());
-            }
-            state.version = update.capture.scan().version();
-            update.capture.state().clone()
-        } else {
-            before.clone()
+            let mut written = Ok(());
+            let after = if let Some((owner, update)) = candidate {
+                written = prepared.persist(&mut disk, &owner);
+                if written.as_ref().is_err_and(|error| !error.committed) {
+                    return Err(Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        written.unwrap_err().to_string(),
+                    ));
+                }
+                let update = current.publish_update(update)?;
+                current.set_queries(Some(update.capture.clone()));
+                if let Some(page) = &current.version_page {
+                    page.publish(update.capture.scan().version());
+                }
+                state.version = update.capture.scan().version();
+                drop(state);
+                update.capture.state().clone()
+            } else {
+                drop(state);
+                before.clone()
+            };
+            break (before, after, written);
         };
-        drop(state);
         drop(disk);
         drop(install);
         // Original AM/UM/permission/broadcast owners can reenter native PM here.

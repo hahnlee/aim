@@ -673,6 +673,77 @@ fn cached_host_enabled_writes_publish_and_persist_without_losing_runtime_state()
 }
 
 #[test]
+fn concurrent_enabled_mutations_preserve_runtime_visibility_and_uid_publications() {
+    let Session {
+        fixture,
+        host,
+        cached,
+        old,
+        workers,
+        ..
+    } = session();
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|threads| {
+        threads.spawn(|| {
+            start.wait();
+            for i in 0..16 {
+                let (code, request) =
+                    enabled_request(Some("p.Main"), if i % 2 == 0 { 1 } else { 2 }, 0);
+                ok(transact(&cached, 1000, code, &request));
+            }
+        });
+        threads.spawn(|| {
+            start.wait();
+            host.grant_implicit_access(10100, 10101).unwrap();
+            for i in 0..16 {
+                fixture
+                    .system
+                    .internal_add_isolated_uid(99000 + i, 10100, 1000, 0)
+                    .unwrap();
+            }
+        });
+    });
+    let current = fixture.system.capture_package_queries().unwrap();
+    assert_ne!(
+        current.state().system.implicit_access,
+        old.state().system.implicit_access
+    );
+    for i in 0..16 {
+        assert!(
+            current
+                .state()
+                .system
+                .isolated_owners
+                .contains(&(99000 + i, 10100))
+        );
+    }
+    assert_eq!(
+        current.state().packages["p"].users[&0].disabled_components,
+        ["p.Main"]
+    );
+    assert!(
+        old.state().packages["p"].users[&0]
+            .disabled_components
+            .is_empty()
+    );
+    let persisted = crate::package::State::read(&fixture.root.join("data"), &[0])
+        .unwrap()
+        .unwrap();
+    let package = persisted.users[0]
+        .1
+        .restrictions
+        .packages
+        .iter()
+        .find(|(name, _)| name == "p")
+        .unwrap();
+    assert_eq!(
+        package.1.disabled_components.as_deref(),
+        Some(["p.Main".to_string()].as_slice())
+    );
+    drop(workers);
+}
+
+#[test]
 fn permission_refresh_updates_launch_inputs_and_preserves_enabled_state() {
     let Session {
         fixture,
