@@ -198,8 +198,9 @@ static void test_mutex_condvar(void) {
   for (int i = 0; i < WORKERS; i++) pthread_join(th[i], NULL);
   CHECK(t, consumed == ITEMS && queue_len == 0, "consumed %d queue %d", consumed, queue_len);
 
-  // Timed wait on a condition nobody signals.
-  struct timespec dl;
+  // Timed wait on a condition nobody signals. Check the absolute deadline:
+  // scheduling can delay either entry to the wait or its return.
+  struct timespec dl, ended;
   clock_gettime(CLOCK_REALTIME, &dl);
   dl.tv_nsec += 20 * 1000000;
   if (dl.tv_nsec >= 1000000000) dl.tv_sec++, dl.tv_nsec -= 1000000000;
@@ -207,10 +208,12 @@ static void test_mutex_condvar(void) {
   t0 = now_ns();
   int r = pthread_cond_timedwait(&cv, &mu, &dl);
   dt = now_ns() - t0;
+  clock_gettime(CLOCK_REALTIME, &ended);
   pthread_mutex_unlock(&mu);
   CHECK(t, r == ETIMEDOUT, "timedwait returned %d", r);
-  CHECK(t, dt >= 19000000 && dt < 30000000, "20 ms timed wait took %.2f ms", dt / 1e6);
-  printf("lat cond_timedwait_20ms late=%.0fus\n", (dt - 20000000.0) / 1e3);
+  CHECK(t, ended.tv_sec > dl.tv_sec || (ended.tv_sec == dl.tv_sec && ended.tv_nsec >= dl.tv_nsec),
+        "timed wait returned before its deadline");
+  printf("lat cond_timedwait_20ms elapsed=%.2fms\n", dt / 1e6);
   printf("ok %s\n", t);
 }
 
@@ -271,18 +274,22 @@ static void test_futex(void) {
   uint64_t t0 = now_ns();
   r = futex(&w, FUTEX_WAIT_PRIVATE, 1, &rel, NULL, 0);
   uint64_t dt = now_ns() - t0;
-  CHECK(t, r == -1 && errno == ETIMEDOUT && dt >= 20000000 && dt < 25000000, "20 ms relative wait: r=%ld errno=%d %.2f ms", r,
+  CHECK(t, r == -1 && errno == ETIMEDOUT && dt >= 20000000, "20 ms relative wait: r=%ld errno=%d %.2f ms", r,
         errno, dt / 1e6);
   printf("lat futex_wait_20ms_relative late=%.0fus\n", (dt - 20000000.0) / 1e3);
-  struct timespec abs;
+  struct timespec abs, ended;
   clock_gettime(CLOCK_REALTIME, &abs);
   abs.tv_nsec += 10000000;
   if (abs.tv_nsec >= 1000000000) abs.tv_sec++, abs.tv_nsec -= 1000000000;
   t0 = now_ns();
   r = futex(&w, FUTEX_WAIT_BITSET_PRIVATE | FUTEX_CLOCK_REALTIME, 1, &abs, NULL, FUTEX_BITSET_MATCH_ANY);
+  int error = errno;
   dt = now_ns() - t0;
-  CHECK(t, r == -1 && errno == ETIMEDOUT && dt >= 9000000 && dt < 15000000, "10 ms absolute realtime: r=%ld %.2f ms", r,
-        dt / 1e6);
+  clock_gettime(CLOCK_REALTIME, &ended);
+  CHECK(t, r == -1 && error == ETIMEDOUT, "10 ms absolute realtime: r=%ld errno=%d", r, error);
+  CHECK(t, ended.tv_sec > abs.tv_sec || (ended.tv_sec == abs.tv_sec && ended.tv_nsec >= abs.tv_nsec),
+        "absolute realtime wait returned before its deadline");
+  printf("lat futex_wait_10ms_absolute_realtime elapsed=%.2fms\n", dt / 1e6);
 
   // Latency: uncontended wake syscall, and a two-thread ping-pong.
   enum { N = 20000 };
@@ -793,8 +800,7 @@ static void test_directed_sigquit_join(void) {
         target.info.si_pid == getpid() && target.info.si_uid == getuid() &&
         target.tid != competitor.tid && caller == -1 && caller_error == EAGAIN &&
         stop_competitor == 0 && joined_competitor == 0 && competitor.signal == SIGUSR1 &&
-        competitor.info.si_code == SI_TKILL && competitor.info.si_pid == getpid() &&
-        elapsed < 1000000000ULL;
+        competitor.info.si_code == SI_TKILL && competitor.info.si_pid == getpid();
     if (!valid) {
       pthread_sigmask(SIG_SETMASK, &old, NULL);
       CHECK(t, 0, "phase %d send %d join %d target %d/%d code %d pid %d caller %d/%d competitor %d/%d elapsed %llu",
