@@ -5656,6 +5656,9 @@ impl Service for Control {
                 if let Err(e) = host.system_ready() {
                     return eprintln!("app host: system ready: {e:?}");
                 }
+                if let Err(e) = host.start_app_standby() {
+                    return eprintln!("app host: app standby: {}", e.message);
+                }
                 // BluetoothService's `onUserStarting` of the system user.
                 if let Some(bluetooth) = host.bluetooth.get() {
                     bluetooth.on_user_starting();

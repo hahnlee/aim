@@ -353,6 +353,13 @@ fn internal_instant_package_events_require_access_instant_apps_and_the_allow_lis
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, xml).unwrap();
         }
+        assert!(
+            host.permission_manager
+                .set(Arc::new(
+                    super::super::permission_manager::PermissionManager::new(host.clone(),)
+                ))
+                .is_ok()
+        );
         let granted = register(host, export, "p", 10100);
         let denied = register(host, export, "q", 10101);
         let leaf = super::super::package_internal_events::InternalEvents::new(host.clone());

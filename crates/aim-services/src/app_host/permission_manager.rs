@@ -2557,6 +2557,52 @@ mod tests {
     }
 
     #[test]
+    fn internal_preflights_use_live_access_without_reopening_persisted_state() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let permission = "android.permission.USE_EXACT_ALARM";
+            let manager = Arc::new(PermissionManager::with_system(
+                host.clone(),
+                AccessSystem {
+                    permissions: vec![definition(permission, "android", 0)],
+                    ..Default::default()
+                },
+            ));
+            assert!(host.permission_manager.set(manager.clone()).is_ok());
+            // AccessCheckingService's published state is authoritative, even
+            // while its persistence is unavailable. A new reader must not
+            // construct another access owner from these files.
+            for path in [SYSTEM_ACCESS, USER0_ACCESS] {
+                let path = host.data().unwrap().join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"unavailable persisted state").unwrap();
+            }
+            for granted in [true, false, true] {
+                manager.owner.lock().unwrap().user0 = Some(Arc::new(AccessUser {
+                    app_id_permissions: vec![(
+                        10100,
+                        vec![(
+                            permission.into(),
+                            if granted {
+                                INSTALL_GRANTED
+                            } else {
+                                INSTALL_REVOKED
+                            },
+                        )],
+                    )],
+                    ..Default::default()
+                }));
+                for _ in 0..2 {
+                    assert_eq!(
+                        super::super::permission_checker::preflight(host, permission, 10100, "p")
+                            .unwrap(),
+                        granted
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
     fn audio_batch_uses_the_live_permission_owner_and_retained_package_capture() {
         crate::system::with_discovery_session(|host, publish, _| {
             let manager = PermissionManager::with_system(
