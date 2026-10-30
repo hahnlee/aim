@@ -57,17 +57,14 @@ pub(super) fn prepare<T>(
 
 pub(super) fn wait_for(
     name: &str,
-    ready: impl Fn() -> Result<bool, Exception>,
+    wait: impl FnOnce(std::time::Instant) -> Result<bool, String>,
 ) -> Result<(), Exception> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !ready()? {
-        if std::time::Instant::now() >= deadline {
-            return Err(Exception::new(
-                EX_ILLEGAL_STATE,
-                format!("{name} did not become ready"),
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    if !wait(deadline).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{name}: {e}")))? {
+        return Err(Exception::new(
+            EX_ILLEGAL_STATE,
+            format!("{name} did not become ready"),
+        ));
     }
     Ok(())
 }
@@ -109,11 +106,11 @@ fn scan(
     host: &Arc<AppHost>,
     system: &Arc<System>,
 ) -> Result<aim_binder_host::local::LocalService, Exception> {
-    wait_for("persistent properties", || {
-        Ok(host.property("ro.persistent_properties.ready").as_deref() == Some("true"))
+    wait_for("persistent properties", |deadline| {
+        host.wait_property("ro.persistent_properties.ready", "true", deadline)
     })?;
-    wait_for("APEX activation", || {
-        Ok(host.property("apex.all.ready").as_deref() == Some("true"))
+    wait_for("APEX activation", |deadline| {
+        host.wait_property("apex.all.ready", "true", deadline)
     })?;
     let image_inputs = host.image_inputs()?.clone();
     // Immutable framework resources can load while init is still starting
@@ -162,6 +159,30 @@ mod tests {
     use aim_service_aidl::android_content_pm_ipackagemanager as pm;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn readiness_wait_keeps_its_deadline_and_named_timeout() {
+        let started = std::time::Instant::now();
+        let error = wait_for("persistent properties", |deadline| {
+            assert!(deadline >= started + Duration::from_secs(60));
+            Ok(false)
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                "persistent properties did not become ready"
+            )
+        );
+        assert_eq!(
+            wait_for("APEX activation", |_| Err("mapping failed".into())),
+            Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "APEX activation: mapping failed"
+            ))
+        );
+    }
 
     fn feature_query(host: &Arc<AppHost>) -> Result<bool, Exception> {
         let service = super::super::package_service::PackageService::new(host.clone());

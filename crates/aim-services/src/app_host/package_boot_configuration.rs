@@ -114,8 +114,9 @@ impl BootConfiguration {
     fn creation_inode(&self, path: Option<&str>) -> Result<Vec<u8>, Exception> {
         let path = path.unwrap_or_default();
         let (mode, parent) = creation(path)?;
-        super::package_boot::wait_for("user-0 DE storage", || {
-            Ok(self.host.property("vendor.aim.user0.de_ready").as_deref() == Some("true"))
+        super::package_boot::wait_for("user-0 DE storage", |deadline| {
+            self.host
+                .wait_property("vendor.aim.user0.de_ready", "true", deadline)
         })?;
         let host = super::resources::host_path(self.host.root()?, self.host.data()?, parent)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;

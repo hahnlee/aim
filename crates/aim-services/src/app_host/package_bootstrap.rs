@@ -1041,8 +1041,8 @@ impl Service for PackageBootstrap {
                         "invalid installer context path",
                     )),
                     // `SELinux.restorecon`, by the agent.
-                    Some(path) => super::package_boot::wait_for("restorecon agent", || {
-                        Ok(host.agent.lock().unwrap().is_some())
+                    Some(path) => super::package_boot::wait_for("restorecon agent", |deadline| {
+                        Ok(host.wait_for_agent(deadline))
                     })
                     .and_then(|()| {
                         host.call_agent(RESTORECON, "restorecon", |p| p.write_string16(Some(&path)))
@@ -1623,7 +1623,7 @@ mod tests {
                         .unwrap();
                     });
                     let pending = received.recv_timeout(std::time::Duration::from_millis(50));
-                    *host.agent.lock().unwrap() = Some(agent);
+                    host.attach_agent(agent);
                     let reply = received
                         .recv_timeout(std::time::Duration::from_secs(5))
                         .unwrap();

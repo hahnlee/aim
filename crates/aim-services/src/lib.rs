@@ -291,6 +291,7 @@ impl NativeServices {
         bpf: &std::path::Path,
         net: &std::path::Path,
         properties: app_host::Properties,
+        wait_property: app_host::WaitProperty,
         set_property: app_host::SetProperty,
         connect: app_host::Connect,
         display: Option<&std::path::Path>,
@@ -298,7 +299,16 @@ impl NativeServices {
         let Some(host) = &self.app_host else {
             return Ok(());
         };
-        host.configure(root, data, bpf, net, properties, set_property, connect)?;
+        host.configure(
+            root,
+            data,
+            bpf,
+            net,
+            properties,
+            wait_property,
+            set_property,
+            connect,
+        )?;
         // Window mode is the display server's (`FN_WINDOWS`).
         if let Some(display) = display {
             host.connect_display(display);
