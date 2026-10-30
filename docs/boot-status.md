@@ -305,7 +305,7 @@ its original identity/permission checks. Host checks cover denials, window/audio
 ambient results, quota hints and owner errors; successful public quota and Mac
 lock reads remain unverified. No guest boot or app-open check was run for this slice.
 
-The audio owner serves product strategies through the original Java AudioProductStrategy and audioserver policy configuration, with MODIFY_AUDIO_ROUTING checks. Its device spatializer query checks MODIFY_DEFAULT_AUDIO_EFFECTS and rejects null devices; the HAL has no effects or supported spatialization modes, so availability is false. ContentService's sync-adapter type reads retain the original SyncAdaptersCache's package-scan metadata, UID ownership, persistence and package-change receivers, and filter packages for the Binder caller; cross-user reads require INTERACT_ACROSS_USERS_FULL (#1460). Focused native/JVM tests and pinned-image Java linkage pass; no guest boot was run (2026-10-29).
+The audio owner serves product strategies through the original Java AudioProductStrategy and audioserver policy configuration, with MODIFY_AUDIO_ROUTING checks. It also routes arbitrary AudioAttributes through AudioSystem, retaining full typed device lists and anonymizing Bluetooth addresses according to the caller’s BLUETOOTH_CONNECT grant or system UID (#2468; host Binder/JVM checks, no guest boot, 2026-10-31). Its device spatializer query checks MODIFY_DEFAULT_AUDIO_EFFECTS and rejects null devices; the HAL has no effects or supported spatialization modes, so availability is false. ContentService's sync-adapter type reads retain the original SyncAdaptersCache's package-scan metadata, UID ownership, persistence and package-change receivers, and filter packages for the Binder caller; cross-user reads require INTERACT_ACROSS_USERS_FULL (#1460). Focused native/JVM tests and pinned-image Java linkage pass; no guest boot was run (2026-10-29).
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 BatteryStats answers apps' uid health snapshots through the original Java health writer, and records camera and flashlight notes.
 The app host routes `lock_settings.generateKey` and `removeKey` through retained Android 16 Java and its original keystore owners with `RECOVER_KEYSTORE` checks (#1888; host tests, fresh-data app-host boot).
@@ -337,6 +337,10 @@ URI grants publish indirect package visibility of their provider to the target, 
 The app host prepares user 0's CE storage before starting vold's user and mounting the emulated volume at unlocking, and logs external storage failures without aborting boot completion (#2227; host tests only, no guest boot rerun).
 Storage crate queries use the original Java Installer, installd and CrateInfo conversion in aim-system, after native caller permission and package visibility checks (#1826; focused host tests, JVM lifecycle and pinned-image Java linkage, no guest boot, 2026-10-29).
 The app host treats an absent `/data/system/overlays.xml` as empty overlay settings and reports guest paths at the data-file error sources used by its native settings and package readers (#2233; host tests only, no guest boot rerun).
+
+The app host persists private-notification policy changes, defaulting to allowed,
+with CONTROL_KEYGUARD_SECURE_NOTIFICATIONS checks and flag-gated broadcasts to
+STATUS_BAR_SERVICE receivers (#2468). Host contract checks pass; no guest boot (2026-10-31).
 
 The app host's selected services now include the original software gatekeeper
 (`vendor.gatekeeper_nonsecure`), whose declared `ISharedSecret/gatekeeper` must

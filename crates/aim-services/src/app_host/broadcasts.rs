@@ -2845,7 +2845,7 @@ impl Broadcasts {
 
 #[cfg(test)]
 #[path = "package_internal_events_delivery_tests.rs"]
-mod internal_package_tests;
+pub(super) mod internal_package_tests;
 
 #[cfg(test)]
 #[path = "system_receiver_tests.rs"]

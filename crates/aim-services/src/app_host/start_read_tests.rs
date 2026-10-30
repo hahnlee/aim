@@ -540,3 +540,109 @@ fn owned_boot_reads_keep_permissions_and_results() {
         );
     });
 }
+
+/// AudioService.getDevicesForAttributes: permission precedes null, the owner
+/// sees arbitrary attributes and the caller, and its typed list/errors survive.
+#[test]
+fn audio_devices_for_attributes_preserve_routing_and_caller() {
+    struct Routes;
+    impl Service for Routes {
+        fn descriptor(&self) -> &str {
+            aq::DESCRIPTOR
+        }
+        fn transact(&self, c: &mut Call<'_>) -> Reply {
+            assert_eq!(c.sender_euid, 1000);
+            let a = aq::GetDevicesForAttributes::<playback::Attributes>::read(&mut c.data)?;
+            let attributes = a.attributes.unwrap();
+            assert!(matches!(a.calling_uid, 1000 | 10100));
+            let mut p = Parcel::new();
+            match attributes.usage {
+                99 => p.write_exception(&Exception::illegal_argument("routing failure")),
+                98 => return Err(UNKNOWN_TRANSACTION),
+                _ => {
+                    assert_eq!(attributes.usage, 4);
+                    let mut devices = Parcel::new();
+                    devices.write_i32(2);
+                    for (kind, address) in [(2, "speaker"), (8, "AA:BB:CC:DD:EE:FF")] {
+                        devices.write_i32(1);
+                        devices.write_i32(2);
+                        devices.write_i32(kind);
+                        devices.write_string16(Some(address));
+                        devices.write_string16(Some("route"));
+                        devices.write_i32(if kind == 2 { 2 } else { 128 });
+                        devices.write_i32(0);
+                        devices.write_i32(0);
+                    }
+                    aq::write_get_devices_for_attributes_reply(
+                        &mut p,
+                        &Some(devices.data().to_vec()),
+                    );
+                }
+            }
+            Ok(p)
+        }
+    }
+    for permission in ["MODIFY_AUDIO_ROUTING", "QUERY_AUDIO_STATE"] {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let name = format!("android.permission.{permission}");
+            let system = format!(
+                "<access><permissions><permission name='{name}' packageName='android' protectionLevel='2' type='0'/></permissions></access>"
+            );
+            let system = crate::package::permissions::AccessSystem::parse(
+                &aim_android_xml::read(system.as_bytes()).unwrap(),
+            )
+            .unwrap();
+            let path = host
+                .data()
+                .unwrap()
+                .join("misc_de/0/apexdata/com.android.permission/access.abx");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("<access><app-id-permissions><app-id id='10100'><permission name='{name}' flags='4'/></app-id></app-id-permissions></access>")).unwrap();
+            host.permission_manager
+                .set(Arc::new(
+                    permission_manager::PermissionManager::with_system(host.clone(), system),
+                ))
+                .ok()
+                .unwrap();
+            let service = audio_service::AudioService::new(host.clone());
+            attach(host, export(Arc::new(Routes)).binder(), true);
+            for (uid, usage, code) in [
+                (10101, None, EX_SECURITY),
+                (10100, None, EX_NULL_POINTER),
+                (10100, Some(4), 0),
+                (1000, None, EX_NULL_POINTER),
+                (1000, Some(99), aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT),
+                (1000, Some(98), aim_binder_host::parcel::EX_ILLEGAL_STATE),
+                (1000, Some(4), 0),
+            ] {
+                let mut data = Parcel::new();
+                audio::GetDevicesForAttributes {
+                    attributes: usage.map(|u| playback::Attributes::built(u, 1, 0x10)),
+                }
+                .write(&mut data);
+                let result = call(&service, audio::GET_DEVICES_FOR_ATTRIBUTES, &data, uid);
+                if code != 0 {
+                    let e = result.reader().read_exception().unwrap().unwrap_err();
+                    assert_eq!(e.code, code);
+                    if code == EX_SECURITY {
+                        assert_eq!(
+                            e.message,
+                            "Missing MODIFY_AUDIO_ROUTING or QUERY_AUDIO_STATE permissions"
+                        );
+                    }
+                } else {
+                    let devices = audio::read_get_devices_for_attributes_reply::<
+                        volume::DeviceAttributes,
+                    >(&mut result.reader())
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(devices.len(), 2);
+                    if !devices.is_empty() {
+                        assert_eq!(devices[1].as_ref().unwrap().internal_type, 128);
+                    }
+                }
+            }
+        });
+    }
+}
