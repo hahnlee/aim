@@ -622,8 +622,10 @@ impl Table {
 
     /// The global string pool's string `i`.
     pub fn string(&self, i: u32) -> Option<&str> {
-        let table = self.eager()?;
-        table.strings.get(i)
+        match &self.indexed {
+            Some(index) => index.string(i),
+            None => self.strings.get(i),
+        }
     }
 
     fn group(&self, id: u32) -> Option<&TypeGroup> {
@@ -1140,6 +1142,47 @@ impl Resources<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_string_errors_are_retained() {
+        let mut data = vec![0u8; 44];
+        data[..2].copy_from_slice(&TABLE.to_le_bytes());
+        data[2..4].copy_from_slice(&12u16.to_le_bytes());
+        data[4..8].copy_from_slice(&44u32.to_le_bytes());
+        data[12..14].copy_from_slice(&STRING_POOL.to_le_bytes());
+        data[14..16].copy_from_slice(&28u16.to_le_bytes());
+        data[16..20].copy_from_slice(&32u32.to_le_bytes());
+        data[20..24].copy_from_slice(&1u32.to_le_bytes());
+        data[32..36].copy_from_slice(&32u32.to_le_bytes());
+        assert!(Table::parse(&data).is_err());
+        let indexed = Table::indexed(data).unwrap();
+        assert!(indexed.string(0).is_none());
+        assert!(indexed.check().is_err());
+        assert!(indexed.indexed.as_ref().unwrap().full.get().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires pinned original APK resources; no guest boot"]
+    fn pinned_indexed_strings_match_without_full_entry_decoding() {
+        let root = aim_paths::original_image();
+        for path in [
+            "product/app/PrebuiltDeskClockGoogle/PrebuiltDeskClockGoogle.apk",
+            "product/priv-app/Velvet/Velvet.apk",
+        ] {
+            let data = aim_apps::apk::Files::open(&root.join(path))
+                .unwrap()
+                .file("resources.arsc")
+                .unwrap();
+            let full = Table::parse(&data).unwrap();
+            let indexed = Table::indexed(data).unwrap();
+            for i in (0..).take_while(|&i| full.string(i).is_some()) {
+                assert_eq!(indexed.string(i), full.string(i));
+            }
+            assert_eq!(indexed.string(u32::MAX), None);
+            indexed.check().unwrap();
+            assert!(indexed.indexed.as_ref().unwrap().full.get().is_none());
+        }
+    }
 
     #[test]
     #[ignore = "requires pinned original APK resources; no guest boot"]
