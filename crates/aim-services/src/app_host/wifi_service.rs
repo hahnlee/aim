@@ -23,23 +23,27 @@ use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_SECURITY, Exception, Parcel,
 };
-use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_location_ilocationmanager as lm;
 use aim_service_aidl::android_net_wifi_iwifimanager as wm;
 use aim_service_aidl::dev_aim_server_iwifibridge as bridge;
+use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::appops_service::MODE_ALLOWED;
+use super::permission_checker::AttributionSourceState;
 use super::settings::Table;
 use super::wifi_config::{
     self, LoadError, SECURITY_TYPE_OWE, SECURITY_TYPE_SAE, SecurityParams, WifiConfiguration,
 };
+use super::wifi_scanner::{Extras, WifiScanner};
 use super::{AppHost, PER_USER_RANGE, reply};
+use crate::bundle::Value;
 use crate::package::list_slice::Slice;
 use crate::package::parse::resources::{
     Selected, TYPE_FIRST_INT, TYPE_REFERENCE, Table as ResourceTable,
 };
 use crate::package::query::Query;
 
+const READ_WIFI_CREDENTIAL: &str = "android.permission.READ_WIFI_CREDENTIAL";
 const ACCESS_WIFI_STATE: &str = "android.permission.ACCESS_WIFI_STATE";
 const CHANGE_WIFI_MULTICAST_STATE: &str = "android.permission.CHANGE_WIFI_MULTICAST_STATE";
 const NETWORK_SETTINGS: &str = "android.permission.NETWORK_SETTINGS";
@@ -97,6 +101,27 @@ impl WriteParcelable for NoScanResult {
         match *self {}
     }
 }
+
+/// There is no Wi-Fi Network while the radio is off.
+enum NoNetwork {}
+
+impl WriteParcelable for NoNetwork {
+    fn write_to(&self, _: &mut Parcel) {
+        match *self {}
+    }
+}
+/// Matching slices: only their count is needed with empty local registries.
+/// Nonempty OSU scans still require the Mac's ANQP data (#2459).
+struct MatchingList(i32);
+
+impl ReadParcelable for MatchingList {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
+        Ok(Self(r.read_i32()?))
+    }
+}
+
 /// `WifiManager.WIFI_STATE_DISABLED`, `WIFI_STATE_ENABLED`.
 const WIFI_STATE_DISABLED: i32 = 1;
 const WIFI_STATE_ENABLED: i32 = 3;
@@ -366,6 +391,62 @@ impl WifiService {
         .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "null wifi Passpoint parcel (#2261)"))
     }
 
+    /// WifiServiceImpl's matching queries check Settings, then Setup Wizard,
+    /// before their null/empty-list result. No ACCESS_WIFI_STATE or package check.
+    fn empty_matches(
+        &self,
+        uid: i32,
+        list: Option<&MatchingList>,
+        code: u32,
+    ) -> Result<(), Exception> {
+        self.enforce_settings_or_suw(uid)?;
+        if !list.is_some_and(|l| l.0 > 0) {
+            return Ok(());
+        }
+        if code == wm::GET_MATCHING_OSU_PROVIDERS {
+            return Err(self
+                .host
+                .unimplemented_named("wifi", "OSU scan/ANQP matching (#2459)"));
+        }
+        // Mutations are unsupported. Reject persisted registrations instead of
+        // claiming an empty owner when the disposable data contains them.
+        let data = self.host.data()?;
+        for (file, entry) in [
+            (
+                "misc_ce/0/apexdata/com.android.wifi/WifiConfigStoreNetworkSuggestions.xml",
+                "NetworkSuggestion",
+            ),
+            (USER_STORE, "Provider"),
+        ]
+        .into_iter()
+        .filter(|(file, _)| {
+            code != wm::GET_WIFI_CONFIG_FOR_MATCHED_NETWORK_SUGGESTIONS_SHARED_WITH_USER
+                || *file != USER_STORE
+        }) {
+            let bytes = match std::fs::read(data.join(file)) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("wifi: {file}: {e}"),
+                    ));
+                }
+            };
+            let root =
+                aim_android_xml::read(&bytes).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            fn contains(root: &aim_android_xml::Element, name: &str) -> bool {
+                root.name == name || root.children().any(|c| contains(c, name))
+            }
+            if contains(&root, entry) {
+                return Err(self
+                    .host
+                    .unimplemented_named("wifi", "stored suggestion/Passpoint matching (#2459)"));
+            }
+        }
+        Ok(())
+    }
+
     /// `enforceMulticastChangePermission`.
     fn enforce_multicast_change(&self, uid: i32) -> Result<(), Exception> {
         if self
@@ -494,11 +575,34 @@ impl WifiService {
         }
         Err(self
             .host
-            .unimplemented_named("wifi", "the Mac's Wi-Fi connection (#2261)"))
+            .unimplemented_named("wifi", "the Mac's Wi-Fi connection (#2459)"))
     }
 
     fn held(&self, permission: &str, uid: i32) -> Result<bool, Exception> {
         Ok(self.host.check_permission(Some(permission), uid)? == 0)
+    }
+
+    fn enforce_settings_or_suw(&self, uid: i32) -> Result<(), Exception> {
+        if !self.held(NETWORK_SETTINGS, uid)? && !self.held(NETWORK_SETUP_WIZARD, uid)? {
+            return Err(Exception::security("WifiService: Permission denied"));
+        }
+        Ok(())
+    }
+
+    /// WifiServiceImpl.getCurrentNetwork / ActiveModeWarden: no Network
+    /// without an active radio. Powered-on Network ownership remains #2459.
+    fn current_network(
+        &self,
+        uid: i32,
+        state: impl FnOnce() -> i32,
+    ) -> Result<Option<NoNetwork>, Exception> {
+        self.enforce_settings_or_suw(uid)?;
+        if state() == WIFI_STATE_DISABLED {
+            return Ok(None);
+        }
+        Err(self
+            .host
+            .unimplemented_named("wifi", "current Wi-Fi Network (#2459)"))
     }
 
     /// `noteAppOpAllowed`.
@@ -557,7 +661,8 @@ impl WifiService {
             ));
         }
         let peers = self.held(PEERS_MAC_ADDRESS, uid)?;
-        if !peers && !self.location_permitted(package, uid)? {
+        let location = self.location_permitted(package, uid)?;
+        if !peers && !location {
             return Err(Exception::security(format!(
                 "UID {uid} has no location permission"
             )));
@@ -602,7 +707,7 @@ impl WifiService {
         if self.wifi_state() == WIFI_STATE_ENABLED {
             return Err(self
                 .host
-                .unimplemented_named("wifi", "the Mac's scan results (#2261)"));
+                .unimplemented_named("wifi", "the Mac's scan results (#2459)"));
         }
         Ok(Some(Slice::new(
             self.host.process.clone(),
@@ -682,7 +787,7 @@ impl WifiService {
         }
         let unmodelled = |what: &str| {
             self.host
-                .unimplemented_named("wifi", &format!("{what} (#2261)"))
+                .unimplemented_named("wifi", &format!("{what} (#2459)"))
         };
         let (state, resolution) = self.host.packages()?;
         let query = Query {
@@ -863,9 +968,18 @@ impl WifiService {
             eprintln!("app host: wifi: getConfiguredNetworks not allowed for uid={uid}");
             return Ok(none());
         }
-        // `getSavedNetworks(targetConfigUid)`: MAC addresses for the
-        // privileged, else for none.
         let target = if privileged { WIFI_UID } else { INVALID_UID };
+        self.network_configurations(uid, target, caller_networks_only, true)
+    }
+
+    /// Shared external-copy and legacy conversion for both configured-network APIs.
+    fn network_configurations(
+        &self,
+        uid: i32,
+        target: i32,
+        caller_networks_only: bool,
+        saved_only: bool,
+    ) -> Result<Slice<WifiConfiguration>, Exception> {
         let resources = self.resources()?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -873,8 +987,15 @@ impl WifiService {
         let saved: Vec<WifiConfiguration> = self
             .networks()?
             .iter()
-            .filter(|c| !c.ephemeral)
-            .map(|c| c.external(target, resources.mac_randomization_supported, now))
+            .filter(|c| !saved_only || !c.ephemeral)
+            .map(|c| {
+                c.external_with_mask(
+                    target,
+                    saved_only,
+                    resources.mac_randomization_supported,
+                    now,
+                )
+            })
             .collect();
         // `shouldOmitAutoUpgradeParams`.
         let omit = |p: &SecurityParams| {
@@ -897,6 +1018,73 @@ impl WifiService {
             WIFI_CONFIGURATION,
             configs,
         ))
+    }
+
+    /// `getPrivilegedConfiguredNetworks`: credential/access checks throw;
+    /// scan or nearby-device denial returns a null slice, as WifiServiceImpl does.
+    fn privileged_configured_networks(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        extras: Option<&Extras>,
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> Result<Option<Slice<WifiConfiguration>>, Exception> {
+        if !self.held(READ_WIFI_CREDENTIAL, uid)? {
+            return Err(Exception::security(format!(
+                "WifiService: Neither user {uid} nor current process has {READ_WIFI_CREDENTIAL}."
+            )));
+        }
+        self.enforce_access(uid)?;
+        let package = package.ok_or_else(|| {
+            Exception::security(format!("Checking UID {uid} but Package Name is Null"))
+        })?;
+        if !self.host.app_ops_owns_package(uid, package)? {
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
+        }
+        let before_t = self
+            .host
+            .application_info(package, 0, None)?
+            .is_some_and(|ai| ai.target_sdk_version < 33);
+        let checked = if before_t {
+            let _system = aim_binder_host::local::clear_calling_identity();
+            self.enforce_can_access_scan_results(Some(package), uid)
+        } else {
+            let extras = extras.ok_or_else(|| Exception::new(EX_NULL_POINTER,
+                "Attempt to invoke virtual method 'android.os.Parcelable android.os.Bundle.getParcelable(java.lang.String)' on a null object reference"))?;
+            let source = match extras.0.get("EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE") {
+                Some(Value::Lazy { start, .. }) => {
+                    r.set_position(*start);
+                    if r.read_string16().map_err(bridge_error)?.as_deref()
+                        != Some("android.content.AttributionSource")
+                    {
+                        return Err(Exception::illegal_argument("invalid AttributionSource"));
+                    }
+                    Some(AttributionSourceState::read_from(r).map_err(bridge_error)?)
+                }
+                _ => None,
+            };
+            WifiScanner::new(self.host.clone()).enforce_nearby_devices(
+                uid,
+                source.as_ref(),
+                false,
+                "WifiService getPrivilegedConfiguredNetworks",
+            )
+        };
+        match checked {
+            Ok(()) => self
+                .network_configurations(uid, WIFI_UID, false, false)
+                .map(Some),
+            Err(e) if e.code == EX_SECURITY => {
+                eprintln!(
+                    "app host: wifi: Permission violation - getPrivilegedConfiguredNetworks not allowed for uid={uid}, packageName={package}, reason={}",
+                    e.message
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// `ActiveModeWarden.getWifiState`: the Mac's radio, on or off.
@@ -984,6 +1172,68 @@ impl Service for WifiService {
                 self.state_listener(uid, a.listener, false)
                     .map(|()| wm::write_remove_wifi_state_changed_listener_reply(&mut p))
             }
+            wm::GET_WIFI_CONFIG_FOR_MATCHED_NETWORK_SUGGESTIONS_SHARED_WITH_USER => {
+                let a = wm::GetWifiConfigForMatchedNetworkSuggestionsSharedWithUser::<MatchingList>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.empty_matches(uid, a.scan_results.as_ref(), call.code).map(|()| {
+                    let empty = Slice::<WifiConfiguration>::new(self.host.process.clone(), WIFI_CONFIGURATION, vec![]);
+                    wm::write_get_wifi_config_for_matched_network_suggestions_shared_with_user_reply(&mut p, Some(&empty));
+                })
+            }
+            wm::GET_WIFI_CONFIGS_FOR_PASSPOINT_PROFILES => {
+                let a =
+                    wm::GetWifiConfigsForPasspointProfiles::<MatchingList>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                self.empty_matches(uid, a.fqdn_list.as_ref(), call.code)
+                    .map(|()| {
+                        let empty = Slice::<WifiConfiguration>::new(
+                            self.host.process.clone(),
+                            WIFI_CONFIGURATION,
+                            vec![],
+                        );
+                        wm::write_get_wifi_configs_for_passpoint_profiles_reply(
+                            &mut p,
+                            Some(&empty),
+                        );
+                    })
+            }
+            wm::GET_ALL_MATCHING_PASSPOINT_PROFILES_FOR_SCAN_RESULTS
+            | wm::GET_MATCHING_OSU_PROVIDERS
+            | wm::GET_MATCHING_PASSPOINT_CONFIGS_FOR_OSU_PROVIDERS => {
+                let list = match call.code {
+                    wm::GET_ALL_MATCHING_PASSPOINT_PROFILES_FOR_SCAN_RESULTS => {
+                        wm::GetAllMatchingPasspointProfilesForScanResults::<MatchingList>::read(
+                            &mut call.data,
+                        )
+                        .map(|a| a.scan_result)
+                    }
+                    wm::GET_MATCHING_OSU_PROVIDERS => {
+                        wm::GetMatchingOsuProviders::<MatchingList>::read(&mut call.data)
+                            .map(|a| a.scan_result)
+                    }
+                    _ => wm::GetMatchingPasspointConfigsForOsuProviders::<MatchingList>::read(
+                        &mut call.data,
+                    )
+                    .map(|a| a.osu_providers),
+                }
+                .map_err(|_| BAD_VALUE)?;
+                self.empty_matches(uid, list.as_ref(), call.code).map(|()| {
+                    p.write_no_exception();
+                    p.write_i32(0); // Parcel.writeMap(Collections.emptyMap()).
+                })
+            }
+            wm::IS_AUTO_WAKEUP_ENABLED => {
+                wm::IsAutoWakeupEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.enforce_access(uid).and_then(|()| {
+                    let enabled = self
+                        .host
+                        .inputs()?
+                        .settings
+                        .get(Table::Global, "wifi_wakeup_enabled");
+                    let enabled = enabled.and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) == 1;
+                    wm::write_is_auto_wakeup_enabled_reply(&mut p, enabled);
+                    Ok(())
+                })
+            }
             wm::GET_PASSPOINT_CONFIGURATIONS => {
                 let a =
                     wm::GetPasspointConfigurations::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -1027,6 +1277,11 @@ impl Service for WifiService {
                     .and_then(|()| self.store("wifi_scan_always_enabled", false))
                     .map(|on| wm::write_is_scan_always_available_reply(&mut p, on))
             }
+            wm::GET_CURRENT_NETWORK => {
+                wm::GetCurrentNetwork::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.current_network(uid, || self.wifi_state())
+                    .map(|network| wm::write_get_current_network_reply(&mut p, network.as_ref()))
+            }
             wm::GET_CONNECTION_INFO => {
                 let a = wm::GetConnectionInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.connection_info(uid, a.calling_package.as_deref())
@@ -1036,6 +1291,17 @@ impl Service for WifiService {
                 let a = wm::GetScanResults::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.scan_results(uid, a.calling_package.as_deref())
                     .map(|r| wm::write_get_scan_results_reply(&mut p, r.as_ref()))
+            }
+            wm::GET_PRIVILEGED_CONFIGURED_NETWORKS => {
+                let a = wm::GetPrivilegedConfiguredNetworks::<Extras>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.privileged_configured_networks(
+                    uid,
+                    a.package_name.as_deref(),
+                    a.extras.as_ref(),
+                    &mut call.data,
+                )
+                .map(|r| wm::write_get_privileged_configured_networks_reply(&mut p, r.as_ref()))
             }
             wm::GET_CONFIGURED_NETWORKS => {
                 let a = wm::GetConfiguredNetworks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -1047,9 +1313,10 @@ impl Service for WifiService {
                     .iter()
                     .find(|(c, _)| *c == code)
                     .map_or("an unknown call", |(_, n)| n);
+                let issue = if code == wm::START_SCAN { 2459 } else { 2261 };
                 Err(self
                     .host
-                    .unimplemented_named("wifi", &format!("{name} (#2261)")))
+                    .unimplemented_named("wifi", &format!("{name} (#{issue})")))
             }
         };
         reply(result.map(|()| p))

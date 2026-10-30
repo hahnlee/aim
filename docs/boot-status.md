@@ -538,7 +538,20 @@ runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).
 The app host's system process starts the original DeviceLock APEX service when `android.software.device_lock` is declared, as in the pinned image; linkage is checked, with no guest boot run (#2234).
-The app host's Wi-Fi owner serves state listener registration/removal through the original Java callback registry in `aim-system`, follows the Mac's radio state, and returns permission-checked empty Passpoint configurations; host tests and pinned-image linkage are checked without a guest boot, and other missing Wi-Fi calls name #2261.
+The app host's Wi-Fi owner serves state listeners through the original Java
+registry in `aim-system` and follows the Mac's radio. Privileged configured-network
+queries apply Android 16 credential/access, package and scan/nearby checks, retaining
+credentials and configured MACs (#2459). Permission-checked suggestion/Passpoint
+matching returns empty with no registrations; OSU matching serves null/empty scans,
+with nonempty scan/ANQP data explicitly unsupported. Wi-Fi wakeup reads live settings.
+getCurrentNetwork checks Settings/SUW permissions and returns typed null with the
+radio off; powered-on Network ownership remains explicitly unsupported (#2459).
+Build/image/library checks pass (2026-10-31). With the Mac's Wi-Fi off, three
+independent warm clones of a fresh exact-binary prime keep process-cold Settings
+home and the Wi-Fi page alive for over 30 seconds each, with no fatal entry in
+the accepted boots. The Wi-Fi intent is sent by an ordinary SDK fixture because
+the app host lacks ActivityManager's am-start shell route. Contaminated attempts
+are discarded; powered-on scan, connection and capability support remains incomplete.
 Manifest receivers of process `system` and uid 1000, including framework-res's BootReceiver and CertPinInstallReceiver, now route to `aim-system`'s original ActivityThread with the system-server class loader; host delivery/finish tests and linkage are checked without a guest boot, while unserved framework services and providers remain explicit UnsupportedOperation (#1518).
 The app host's domain-verification front end keeps verifier-status persistence native and handles URI group set/get with original Java permission, Bundle, validation and conversion helpers over runtime-only native state; paired host tests, pinned-image linkage and a fresh-data app-host boot pass (#1763). Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun). Its `pm` and `cmd domain_verification` shell routes now serve all DomainVerificationShell verbs (#2187), retaining the original internal permission checks and parser. `set-app-links` and `reset-app-links` use the durable native writer; `verify-app-links` selects default/re-verify eligibility from native attached state and sends through the existing domain owner's selected original verifier proxy. The original modern proxy builds the domain-verification request broadcast; the original unavailable proxy handles an absent verifier. Host tests cover eligibility, filtering, state writes and delivery errors; pinned Java methods, exact shell output and the original modern proxy/request path over recorded JVM boundaries pass without a guest boot. Android 16's verification package argument is positional; `--package` retains the original unknown-option error.
 Telecom is loaded in the system process: TelecomLoaderService's part

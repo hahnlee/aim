@@ -235,9 +235,17 @@ fn wifi_missing_bridge_and_other_calls_explicitly_name_2261() {
                 wm::GET_WIFI_ENABLED_STATE,
                 wm::GET_VERBOSE_LOGGING_LEVEL,
                 wm::IS_SCAN_ALWAYS_AVAILABLE,
+                wm::GET_CURRENT_NETWORK,
                 wm::GET_CONNECTION_INFO,
                 wm::GET_SCAN_RESULTS,
                 wm::GET_CONFIGURED_NETWORKS,
+                wm::GET_PRIVILEGED_CONFIGURED_NETWORKS,
+                wm::GET_WIFI_CONFIG_FOR_MATCHED_NETWORK_SUGGESTIONS_SHARED_WITH_USER,
+                wm::GET_ALL_MATCHING_PASSPOINT_PROFILES_FOR_SCAN_RESULTS,
+                wm::GET_MATCHING_OSU_PROVIDERS,
+                wm::GET_MATCHING_PASSPOINT_CONFIGS_FOR_OSU_PROVIDERS,
+                wm::GET_WIFI_CONFIGS_FOR_PASSPOINT_PROFILES,
+                wm::IS_AUTO_WAKEUP_ENABLED,
             ]
             .contains(&code)
             {
@@ -246,8 +254,231 @@ fn wifi_missing_bridge_and_other_calls_explicitly_name_2261() {
             let e = invoke(wifi.as_ref(), 1000, code, &Parcel::new());
             let e = e.reader().read_exception().unwrap().unwrap_err();
             assert_eq!(e.code, EX_UNSUPPORTED_OPERATION, "{name}");
-            assert!(e.message.contains("#2261"), "{name}: {}", e.message);
+            let issue = if code == wm::START_SCAN {
+                "#2459"
+            } else {
+                "#2261"
+            };
+            assert!(e.message.contains(issue), "{name}: {}", e.message);
             assert!(!e.message.contains("#1686"));
+        }
+    });
+}
+
+/// WifiServiceImpl / WifiConfigManager at android-16.0.0_r1: denial order,
+/// and the shared conversion's password/MAC policy.
+#[test]
+fn privileged_networks_preserve_credentials_macs_and_empty_slice_protocol() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        let wifi = service(host);
+        let mut p = Parcel::new();
+        wm::GetPrivilegedConfiguredNetworks::<NoConnection> {
+            package_name: None,
+            feature_id: None,
+            extras: None,
+        }
+        .write(&mut p);
+        let denied = invoke(
+            wifi.as_ref(),
+            10100,
+            wm::GET_PRIVILEGED_CONFIGURED_NETWORKS,
+            &p,
+        );
+        let error = denied.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(error.code, EX_SECURITY);
+        assert_eq!(
+            error.message,
+            "WifiService: Neither user 10100 nor current process has android.permission.READ_WIFI_CREDENTIAL."
+        );
+        wifi.resources
+            .set(WifiResources {
+                mac_randomization_supported: true,
+                owe_upgrade: true,
+                sae_upgrade: true,
+                oem_admins: vec![],
+            })
+            .ok()
+            .unwrap();
+        let encode = |slice: Slice<WifiConfiguration>| {
+            let mut p = Parcel::new();
+            wm::write_get_privileged_configured_networks_reply(&mut p, Some(&slice));
+            p.data().to_vec()
+        };
+        assert_eq!(
+            encode(
+                wifi.network_configurations(0, WIFI_UID, false, false)
+                    .unwrap()
+            ),
+            [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let mut c = WifiConfiguration::default();
+        c.pre_shared_key = Some("\"password\"".into());
+        c.randomized_mac = 0x6e53_d6a0_fc69;
+        c.security = vec![SecurityParams::of(wifi_config::SECURITY_TYPE_PSK).unwrap()];
+        let mut wifi = Arc::try_unwrap(wifi).ok().unwrap();
+        wifi.networks = OnceLock::from(vec![c.clone()]);
+        let privileged = encode(
+            wifi.network_configurations(0, WIFI_UID, false, false)
+                .unwrap(),
+        );
+        let mut masked = c.external(WIFI_UID, true, 0);
+        assert_eq!(masked.pre_shared_key.as_deref(), Some("*"));
+        assert_eq!(masked.randomized_mac, c.randomized_mac);
+        let expected = |c| {
+            encode(Slice::new(
+                host.process.clone(),
+                WIFI_CONFIGURATION,
+                wifi_config::legacy_configs(&[c], false, &|_| false),
+            ))
+        };
+        assert_eq!(privileged, expected(c.clone()));
+        assert_eq!(
+            encode(wifi.configured_networks(0, Some("root"), false).unwrap()),
+            expected(masked.clone())
+        );
+        // The privileged API also includes configured ephemeral/suggestion entries.
+        masked.ephemeral = true;
+        wifi.networks = OnceLock::from(vec![masked]);
+        assert_ne!(
+            encode(
+                wifi.network_configurations(0, WIFI_UID, false, false)
+                    .unwrap()
+            ),
+            encode(wifi.configured_networks(0, Some("root"), false).unwrap())
+        );
+    });
+}
+
+/// WifiServiceImpl's Settings/SUW checks precede null/empty matching results.
+#[test]
+fn matching_queries_check_permissions_before_empty_results() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        let wifi = service(host);
+        for code in [
+            wm::GET_WIFI_CONFIG_FOR_MATCHED_NETWORK_SUGGESTIONS_SHARED_WITH_USER,
+            wm::GET_ALL_MATCHING_PASSPOINT_PROFILES_FOR_SCAN_RESULTS,
+            wm::GET_MATCHING_OSU_PROVIDERS,
+            wm::GET_MATCHING_PASSPOINT_CONFIGS_FOR_OSU_PROVIDERS,
+            wm::GET_WIFI_CONFIGS_FOR_PASSPOINT_PROFILES,
+        ] {
+            for present in [false, true] {
+                let mut p = Parcel::new();
+                p.write_interface_token(wm::DESCRIPTOR);
+                p.write_i32(i32::from(present));
+                if present {
+                    p.write_i32(0);
+                }
+                for uid in [10100, 1000] {
+                    let result = invoke(wifi.as_ref(), uid, code, &p);
+                    let mut r = result.reader();
+                    if uid == 10100 {
+                        let e = r.read_exception().unwrap().unwrap_err();
+                        assert_eq!(e.code, EX_SECURITY);
+                        assert_eq!(e.message, "WifiService: Permission denied");
+                    } else {
+                        r.read_exception().unwrap().unwrap();
+                        if [
+                            wm::GET_WIFI_CONFIG_FOR_MATCHED_NETWORK_SUGGESTIONS_SHARED_WITH_USER,
+                            wm::GET_WIFI_CONFIGS_FOR_PASSPOINT_PROFILES,
+                        ]
+                        .contains(&code)
+                        {
+                            assert_eq!(r.read_i32().unwrap(), 1);
+                        }
+                        assert_eq!(r.read_i32().unwrap(), 0);
+                        assert_eq!(r.remaining(), 0);
+                    }
+                }
+            }
+            let nonempty = wifi.empty_matches(1000, Some(&MatchingList(1)), code);
+            if code == wm::GET_MATCHING_OSU_PROVIDERS {
+                assert!(nonempty.unwrap_err().message.contains("ANQP"));
+            } else {
+                nonempty.unwrap();
+            }
+        }
+    });
+}
+
+#[test]
+fn current_network_checks_settings_or_suw_before_radio_state() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        let wifi = service(host);
+        for state in [WIFI_STATE_DISABLED, WIFI_STATE_ENABLED] {
+            let error = wifi
+                .current_network(10100, || panic!("denied caller read radio state {state}"))
+                .err()
+                .unwrap();
+            assert_eq!(error.code, EX_SECURITY);
+            assert_eq!(error.message, "WifiService: Permission denied");
+        }
+        let network = wifi.current_network(1000, || WIFI_STATE_DISABLED).unwrap();
+        assert!(network.is_none());
+        let mut p = Parcel::new();
+        wm::write_get_current_network_reply(&mut p, network.as_ref());
+        let mut r = p.reader();
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i32().unwrap(), 0); // typed null Network
+        assert_eq!(r.remaining(), 0);
+        let error = wifi
+            .current_network(1000, || WIFI_STATE_ENABLED)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
+        assert!(error.message.contains("current Wi-Fi Network (#2459)"));
+        let mut request = Parcel::new();
+        wm::GetCurrentNetwork {}.write(&mut request);
+        let denied = invoke(wifi.as_ref(), 10100, wm::GET_CURRENT_NETWORK, &request);
+        assert_eq!(
+            denied.reader().read_exception().unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+    });
+}
+
+#[test]
+fn wifi_wakeup_checks_access_and_reads_the_live_global_setting() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        let wifi = service(host);
+        let mut p = Parcel::new();
+        wm::IsAutoWakeupEnabled {}.write(&mut p);
+        let denied = invoke(wifi.as_ref(), 10100, wm::IS_AUTO_WAKEUP_ENABLED, &p);
+        let e = denied.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(e.code, EX_SECURITY);
+        assert_eq!(
+            e.message,
+            "WifiService: Neither user 10100 nor current process has android.permission.ACCESS_WIFI_STATE."
+        );
+        for (value, expected) in [
+            (None, false),
+            (Some("1"), true),
+            (Some("2"), false),
+            (Some("bad"), false),
+        ] {
+            host.inputs()
+                .unwrap()
+                .settings
+                .insert(
+                    Table::Global,
+                    "wifi_wakeup_enabled",
+                    &super::super::settings::Change {
+                        value,
+                        tag: None,
+                        make_default: false,
+                        package: Some("android"),
+                        caller_system: true,
+                        overrideable_by_restore: false,
+                    },
+                    false,
+                )
+                .unwrap();
+            let result = invoke(wifi.as_ref(), 1000, wm::IS_AUTO_WAKEUP_ENABLED, &p);
+            assert_eq!(
+                wm::read_is_auto_wakeup_enabled_reply(&mut result.reader())
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
         }
     });
 }

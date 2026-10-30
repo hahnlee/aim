@@ -235,7 +235,7 @@ pub struct SecurityParams {
 
 impl SecurityParams {
     /// `createSecurityParamsBySecurityType` of the types modelled.
-    fn of(kind: i32) -> Result<SecurityParams, LoadError> {
+    pub(super) fn of(kind: i32) -> Result<SecurityParams, LoadError> {
         use key_mgmt::*;
         let (key_mgmt, protocols, pairwise, group, require_pmf) = match kind {
             SECURITY_TYPE_OPEN => (
@@ -625,18 +625,29 @@ impl WifiConfiguration {
         key
     }
 
-    /// `createExternalWifiConfiguration(config, true, targetUid)` at
-    /// `now`, the wall clock in ms: the password masked, the randomized MAC
+    /// `createExternalWifiConfiguration(config, maskPasswords, targetUid)` at
+    /// `now`, the wall clock in ms: optional password masking, the randomized MAC
     /// address but to the Wi-Fi stack, the system and the creator, and no
     /// randomization where it is not supported.
+    #[cfg(test)]
     pub fn external(
         &self,
         target_uid: i32,
         mac_randomization_supported: bool,
         now: i64,
     ) -> WifiConfiguration {
+        self.external_with_mask(target_uid, true, mac_randomization_supported, now)
+    }
+
+    pub fn external_with_mask(
+        &self,
+        target_uid: i32,
+        mask_passwords: bool,
+        mac_randomization_supported: bool,
+        now: i64,
+    ) -> WifiConfiguration {
         let mut c = self.clone();
-        if c.pre_shared_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        if mask_passwords && c.pre_shared_key.as_deref().is_some_and(|k| !k.is_empty()) {
             c.pre_shared_key = Some(PASSWORD_MASK.into());
         }
         if !matches!(target_uid, 1010 | 1000) && target_uid != self.creator_uid {
