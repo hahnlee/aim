@@ -91,6 +91,17 @@ fn enabled_changed(
 }
 
 impl Prepared {
+    pub(crate) fn enabled_only(&self) -> bool {
+        matches!(
+            self.finish,
+            Finish::Enabled(_) | Finish::Single(Request::Enabled(_))
+        ) && self.global.is_none()
+            && self
+                .plans
+                .iter()
+                .all(|plan| matches!(plan.change, Change::None | Change::Enabled(_)))
+    }
+
     pub fn changes_state(&self) -> bool {
         self.global.is_some()
             || self
