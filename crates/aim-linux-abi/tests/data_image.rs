@@ -94,7 +94,9 @@ fn free(path: &Path) -> u64 {
     fs.f_bavail * u64::from(fs.f_bsize)
 }
 
-/// `fsck_apfs -n` on the volume of the detached image `image`.
+/// `fsck_apfs -n` on the volume of the detached image `image`, through
+/// DiskManagement: a direct fsck can be denied the raw synthesized APFS
+/// container (EPERM) before it checks anything (#2435).
 fn fsck(image: &Path) -> std::process::Output {
     let device = disk::attach(image, disk::Attach::default()).unwrap();
     let volume = disk::attachments_of(image)
@@ -107,12 +109,11 @@ fn fsck(image: &Path) -> std::process::Output {
                 .find(|d| d.trim_start_matches("/dev/disk").contains('s'))
         })
         .unwrap();
-    let out = Command::new("fsck_apfs")
-        .args(["-n", &volume])
-        .output()
-        .unwrap();
+    let out = Command::new("diskutil")
+        .args(["verifyVolume", &volume])
+        .output();
     disk::detach(&device, Duration::from_secs(20)).unwrap();
-    out
+    out.unwrap()
 }
 
 /// The guest's `/data` on a small disposable volume that fills up: the
@@ -187,8 +188,11 @@ fn a_full_volume_gives_the_guest_enospc() {
     let check = fsck(&volume_image);
     assert!(
         check.status.success(),
-        "{}",
-        String::from_utf8_lossy(&check.stdout)
+        "diskutil verifyVolume exited with {} (code {:?})\nstdout:\n{}\nstderr:\n{}",
+        check.status,
+        check.status.code(),
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
     );
     std::fs::remove_file(&volume_image).unwrap();
     let _ = std::fs::remove_dir_all(&volume);
