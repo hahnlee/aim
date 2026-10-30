@@ -1861,14 +1861,10 @@ impl Client {
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::DirBuilderExt, path::PathBuf};
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     fn runtime() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "aim-pty-transport-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        // A unique name: an earlier run with this pid may have left one.
+        let root = aim_paths::scratch_dir("aim-pty-transport");
+        fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         fs::canonicalize(root).unwrap()
     }
     #[test]
