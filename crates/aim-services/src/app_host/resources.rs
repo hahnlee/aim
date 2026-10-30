@@ -221,8 +221,10 @@ impl Framework {
                 .ok_or("an XML resource of an overlay")?
             {
                 Some(i) => apks[*i].file(file),
-                None => aim_apps::apk::Apk::open(&root.join("system/framework/framework-res.apk"))
-                    .and_then(|apk| apk.file(file)),
+                None => {
+                    aim_apps::apk::Files::open(&root.join("system/framework/framework-res.apk"))
+                        .and_then(|apk| apk.file(file))
+                }
             }
             .map_err(|e| e.to_string())?;
             let document = aim_apps::res::xml(&bytes).map_err(|e| e.to_string())?;
@@ -365,7 +367,7 @@ impl Framework {
         pkg: &AndroidPackage,
         f: impl FnOnce(
             &parse::resources::Resources<'_>,
-            &[aim_apps::apk::Apk],
+            &[aim_apps::apk::Files],
             &[Option<usize>],
         ) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -378,7 +380,7 @@ impl Framework {
             .iter()
             .map(|path| {
                 let host = host_path(root, data, path)?;
-                aim_apps::apk::Apk::open(&host).map_err(|e| format!("{}: {e}", host.display()))
+                aim_apps::apk::Files::open(&host).map_err(|e| format!("{}: {e}", host.display()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let tables = apks
