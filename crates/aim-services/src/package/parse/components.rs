@@ -25,7 +25,7 @@ use super::resources::{TYPE_DIMENSION, TYPE_FLOAT, TYPE_FRACTION};
 use super::{
     APP_DETAILS_ACTIVITY_CLASS_NAME, EMPTY_INTENT_ACTION_CATEGORY, Error, FROYO,
     MISSING_EXPORTED_FLAG, Parser, Result, build_class_name, build_process_name,
-    build_task_affinity_name, fail, validate_name,
+    build_task_affinity_name, fail_status, malformed, validate_name,
 };
 
 // `ActivityInfo` flags.
@@ -180,11 +180,11 @@ impl Parser<'_> {
     ) -> Result<()> {
         let name = sa.non_config_string("name", 0).filter(|n| !n.is_empty());
         let Some(name) = name else {
-            return fail(format!("{tag} does not specify android:name"));
+            return malformed(format!("{tag} does not specify android:name"));
         };
         let class = build_class_name(&pkg.package_name, Some(&name)).unwrap_or_default();
         if class == APP_DETAILS_ACTIVITY_CLASS_NAME {
-            return fail(format!("{tag} invalid android:name"));
+            return malformed(format!("{tag} invalid android:name"));
         }
         c.name = class;
         c.package_name = pkg.package_name.clone();
@@ -307,7 +307,7 @@ impl Parser<'_> {
             match c.name.as_str() {
                 "action" | "category" => {
                     let Some(v) = attr_value(c, ANDROID, "name") else {
-                        return fail("No value supplied for <android:name>");
+                        return malformed("No value supplied for <android:name>");
                     };
                     if c.name == "action" {
                         info.filter.add_action(&v);
@@ -346,8 +346,12 @@ impl Parser<'_> {
         let f = &mut info.filter;
         let s = |attr: &str| sa.non_config_string(attr, 0);
         if let Some(t) = s("mimeType") {
-            f.add_data_type(&t)
-                .map_err(|_| Error::Parse(format!("MalformedMimeTypeException: {t}")))?;
+            f.add_data_type(&t).map_err(|_| {
+                Error::Status(
+                    -108,
+                    format!("android.content.IntentFilter$MalformedMimeTypeException: {t}"),
+                )
+            })?;
         }
         if let Some(g) = s("mimeGroup") {
             f.add_mime_group(&g);
@@ -364,16 +368,16 @@ impl Parser<'_> {
         ] {
             if let Some(v) = s(attr) {
                 if glob && !allow_globs {
-                    return fail(format!("{attr} not allowed here; ssp must be literal"));
+                    return malformed(format!("{attr} not allowed here; ssp must be literal"));
                 }
                 f.add_data_scheme_specific_part(pattern(v, kind)?);
             }
         }
         if let Some(host) = s("host") {
             let port = s("port");
-            // `Integer.parseInt` of the port throws.
+            // `Integer.parseInt` throws; read_manifest supplies the base/split APK path.
             if port.as_deref().is_some_and(|p| parse_int(p).is_none()) {
-                return fail(format!("NumberFormatException: port {port:?}"));
+                return fail_status(-102, "");
             }
             f.add_data_authority(&host, port.as_deref());
         }
@@ -386,7 +390,7 @@ impl Parser<'_> {
         ] {
             if let Some(v) = s(attr) {
                 if glob && !allow_globs {
-                    return fail(format!("{attr} not allowed here; path must be literal"));
+                    return malformed(format!("{attr} not allowed here; path must be literal"));
                 }
                 f.add_data_path(pattern(v, kind)?);
             }
@@ -478,7 +482,7 @@ impl Parser<'_> {
             && pkg.get(b::CANT_SAVE_STATE)
             && a.main.process_name.as_deref() == Some(pkg.package_name.as_str())
         {
-            return fail("Heavy-weight applications can not have receivers in main process");
+            return malformed("Heavy-weight applications can not have receivers in main process");
         }
         a.theme = sa.resource_id("theme", 0);
         a.ui_options = sa.int("uiOptions", pkg.ui_options);
@@ -611,7 +615,7 @@ impl Parser<'_> {
         if let Some(c) = &category
             && validate_name(c, false).is_some()
         {
-            return fail(
+            return malformed(
                 "requiredDisplayCategory attribute can only consist of alphanumeric characters, '_', and '.'",
             );
         }
@@ -630,17 +634,17 @@ impl Parser<'_> {
     ) -> Result<Activity> {
         let sa = self.obtain(e);
         let Some(target) = sa.non_config_string("targetActivity", NATIVE_CONFIG_VERSION) else {
-            return fail("<activity-alias> does not specify android:targetActivity");
+            return malformed("<activity-alias> does not specify android:targetActivity");
         };
         let Some(target) = build_class_name(&pkg.package_name, Some(&target)) else {
-            return fail(format!("Empty class name in package {}", pkg.package_name));
+            return malformed(format!("Empty class name in package {}", pkg.package_name));
         };
         let Some(t) = pkg
             .activities
             .iter()
             .find(|a| a.main.component.name == target)
         else {
-            return fail(format!(
+            return malformed(format!(
                 "<activity-alias> target activity {target} not found in manifest"
             ));
         };
@@ -996,7 +1000,7 @@ impl Parser<'_> {
         if pkg.get(b::CANT_SAVE_STATE)
             && s.main.process_name.as_deref() == Some(pkg.package_name.as_str())
         {
-            return fail("Heavy-weight applications can not have services in main process");
+            return malformed("Heavy-weight applications can not have services in main process");
         }
         for c in &e.children {
             if self.skip(pkg, c) {
@@ -1081,11 +1085,13 @@ impl Parser<'_> {
         if pkg.get(b::CANT_SAVE_STATE)
             && p.main.process_name.as_deref() == Some(pkg.package_name.as_str())
         {
-            return fail("Heavy-weight applications can not have providers in main process");
+            return malformed("Heavy-weight applications can not have providers in main process");
         }
         match authority {
-            None => return fail("<provider> does not include authorities attribute"),
-            Some(a) if a.is_empty() => return fail("<provider> has empty authorities attribute"),
+            None => return malformed("<provider> does not include authorities attribute"),
+            Some(a) if a.is_empty() => {
+                return malformed("<provider> has empty authorities attribute");
+            }
             Some(a) => p.authority = Some(a),
         }
         for c in &e.children {
@@ -1191,10 +1197,8 @@ impl Parser<'_> {
             } else if p.component.flags & PERMISSION_FLAG_HARD_RESTRICTED != 0
                 && p.component.flags & PERMISSION_FLAG_SOFT_RESTRICTED != 0
             {
-                return fail(format!(
-                    "Permission cannot be both soft and hard restricted: {}",
-                    p.component.name
-                ));
+                // The original throws IllegalStateException, caught by read_manifest.
+                return fail_status(-102, "");
             }
         }
         p.protection_level = fix_protection_level(p.protection_level);
@@ -1203,7 +1207,7 @@ impl Parser<'_> {
             & !(PROTECTION_FLAG_APPOP | PROTECTION_FLAG_INSTANT | PROTECTION_FLAG_RUNTIME_ONLY);
         let base = p.protection_level & PROTECTION_MASK_BASE;
         if other != 0 && base != PROTECTION_SIGNATURE && base != PROTECTION_INTERNAL {
-            return fail(
+            return malformed(
                 "<permission> protectionLevel specifies a non-instant, non-appop, non-runtimeOnly flag but is not based on signature or internal type",
             );
         }
@@ -1226,7 +1230,7 @@ impl Parser<'_> {
             .filter(|&i| i > 0)
             .and_then(|i| name[i + 1..].find('.'));
         if segments.is_none() {
-            return fail(format!(
+            return malformed(format!(
                 "<permission-tree> name has less than three segments: {name}"
             ));
         }
@@ -1276,19 +1280,19 @@ impl Parser<'_> {
     pub(super) fn parse_attribution(&self, e: &Element) -> Result<Attribution> {
         let sa = self.obtain(e);
         let Some(tag) = sa.non_config_string("tag", 0) else {
-            return fail("<attribution> does not specify android:tag");
+            return malformed("<attribution> does not specify android:tag");
         };
         if tag.encode_utf16().count() > 50 {
-            return fail("android:tag is too long. Max length is 50");
+            return malformed("android:tag is too long. Max length is 50");
         }
         let label = sa.resource_id("label", 0);
         if label == 0 {
-            return fail("<attribution> does not specify android:label");
+            return malformed("<attribution> does not specify android:label");
         }
         let mut inherit_from = Vec::new();
         for c in &e.children {
             if c.name != "inherit-from" {
-                return fail(format!("Bad element under <attribution>: {}", c.name));
+                return malformed(format!("Bad element under <attribution>: {}", c.name));
             }
             let t = self
                 .obtain(c)
@@ -1315,7 +1319,10 @@ impl Parser<'_> {
                 "process" => {
                     let proc = self.parse_process(pkg, denied.as_ref(), c)?;
                     if processes.contains(&proc.name) {
-                        return fail(format!("<process> specified existing name '{}'", proc.name));
+                        return malformed(format!(
+                            "<process> specified existing name '{}'",
+                            proc.name
+                        ));
                     }
                     processes.put(&proc.name.clone(), proc);
                 }
@@ -1401,7 +1408,7 @@ impl Parser<'_> {
     pub(super) fn parse_apex_system_service(&self, e: &Element) -> Result<ApexSystemService> {
         let sa = self.obtain(e);
         let Some(name) = sa.string("name").filter(|n| !n.is_empty()) else {
-            return fail("<apex-system-service> does not have name attribute");
+            return malformed("<apex-system-service> does not have name attribute");
         };
         Ok(ApexSystemService {
             name,
@@ -1450,7 +1457,7 @@ fn pattern(p: String, kind: i32) -> Result<PatternMatcher> {
     if kind == PATTERN_ADVANCED_GLOB {
         return Err(Error::Unsupported("an advanced glob pattern".into()));
     }
-    PatternMatcher::new(&p, kind).map_err(Error::Parse)
+    PatternMatcher::new(&p, kind).map_err(|e| Error::Status(-102, e))
 }
 
 /// A grant or path permission's pattern: advanced, simple glob, prefix,

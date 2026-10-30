@@ -295,7 +295,9 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
         flags,
         input: &input,
     };
-    let mut pkg = parser.parse_base_apk(manifest, &base.path, &path)?;
+    let mut pkg = parser.read_manifest(&base.path, || {
+        parser.parse_base_apk(manifest, &base.path, &path)
+    })?;
     if base.table.as_ref().is_some_and(Table::defines_overlayable) {
         for t in &res.tables {
             for (name, actor) in t.overlayables() {
@@ -333,14 +335,10 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
                 flags,
                 input: &input,
             };
-            split_parser.parse_split(&mut pkg, part, index)?;
-            if let Some(e) = split_parser.ctx.error.take() {
-                return fail(e);
-            }
+            split_parser.read_manifest(&part.path, || {
+                split_parser.parse_split(&mut pkg, part, index)
+            })?;
         }
-    }
-    if let Some(e) = parser.ctx.error.take() {
-        return fail(e);
     }
     // `set32BitAbiPreferred(lite.isUse32bitAbi())`.
     let use32 = manifest
@@ -483,6 +481,15 @@ impl Parser<'_> {
             pkg.feature_flag_state.put(flag, value);
         }
         value.unwrap_or(false) == negated
+    }
+
+    /// The base/split wrappers catch Java exceptions, including TypedArray failures.
+    fn read_manifest<T>(&self, path: &str, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        let result = read();
+        if self.ctx.error.take().is_some() || matches!(&result, Err(Error::Status(-102, _))) {
+            return fail_status(-102, format!("Failed to read manifest from {path}"));
+        }
+        result
     }
 
     fn parse_base_apk(
@@ -864,7 +871,10 @@ impl Parser<'_> {
                 "required-feature" | "required-not-feature" => {
                     let f = self.obtain(c).string("name").filter(|s| !s.is_empty());
                     let Some(f) = f else {
-                        return fail(format!("Feature name is missing from <{}> tag.", c.name));
+                        return malformed(format!(
+                            "Feature name is missing from <{}> tag.",
+                            c.name
+                        ));
                     };
                     if c.name == "required-feature" {
                         required.push(f);
@@ -888,7 +898,7 @@ impl Parser<'_> {
         }
         if let Some(existing) = pkg.uses_permissions.iter().find(|p| p.name == name) {
             if existing.flags != flags {
-                return fail(format!(
+                return malformed(format!(
                     "Conflicting uses-permissions flags: {name} in package: {}",
                     pkg.package_name
                 ));
@@ -1470,18 +1480,22 @@ impl Parser<'_> {
                 match name {
                     Some(n) if major >= 0 => {
                         if pkg.shared_user_id.is_some() {
-                            return fail("sharedUserId not allowed in SDK library");
+                            return fail_status(-107, "sharedUserId not allowed in SDK library");
                         }
                         if pkg.sdk_library_name.is_some() {
-                            return fail(format!("Multiple SDKs for package {}", pkg.package_name));
+                            return malformed(format!(
+                                "Multiple SDKs for package {}",
+                                pkg.package_name
+                            ));
                         }
                         pkg.sdk_library_name = Some(n);
                         pkg.sdk_lib_version_major = major;
                         pkg.set(b::SDK_LIBRARY, true);
                         Ok(())
                     }
-                    n => fail(format!(
-                        "Bad sdk-library declaration name: {n:?} version: {major}"
+                    n => malformed(format!(
+                        "Bad sdk-library declaration name: {} version: {major}",
+                        n.as_deref().unwrap_or("null")
                     )),
                 }
             }
@@ -1493,10 +1507,13 @@ impl Parser<'_> {
                 match name {
                     Some(n) if version >= 0 => {
                         if pkg.shared_user_id.is_some() {
-                            return fail("sharedUserId not allowed in static shared library");
+                            return fail_status(
+                                -107,
+                                "sharedUserId not allowed in static shared library",
+                            );
                         }
                         if pkg.static_shared_library_name.is_some() {
-                            return fail(format!(
+                            return malformed(format!(
                                 "Multiple static-shared libs for package {}",
                                 pkg.package_name
                             ));
@@ -1507,8 +1524,9 @@ impl Parser<'_> {
                         pkg.set(b::STATIC_SHARED_LIBRARY, true);
                         Ok(())
                     }
-                    n => fail(format!(
-                        "Bad static-library declaration name: {n:?} version: {version}"
+                    n => malformed(format!(
+                        "Bad static-library declaration name: {} version: {version}",
+                        n.as_deref().unwrap_or("null")
                     )),
                 }
             }
@@ -1566,14 +1584,16 @@ impl Parser<'_> {
         let name = sa.non_resource_string("name");
         let version = sa.int("version", -1);
         let digest = sa.non_resource_string("certDigest");
-        let (Some(name), Some(digest)) = (name, digest) else {
-            return fail("Bad uses-static-library declaration");
-        };
-        if version < 0 {
-            return fail("Bad uses-static-library declaration");
+        if name.is_none() || digest.is_none() || version < 0 {
+            return malformed(format!(
+                "Bad uses-static-library declaration name: {} version: {version} certDigest{}",
+                name.as_deref().unwrap_or("null"),
+                digest.as_deref().unwrap_or("null")
+            ));
         }
+        let (name, digest) = (name.unwrap(), digest.unwrap());
         if pkg.uses_static_libraries.contains(&name) {
-            return fail(format!(
+            return malformed(format!(
                 "Depending on multiple versions of static library {name}"
             ));
         }
@@ -1589,9 +1609,13 @@ impl Parser<'_> {
                         .non_resource_string("certDigest")
                         .filter(|d| !d.is_empty());
                     let Some(d) = d else {
-                        return fail(
-                            "Bad additional-certificate declaration with empty certDigest",
-                        );
+                        return malformed(format!(
+                            "Bad additional-certificate declaration with empty certDigest:{}",
+                            self.obtain(c)
+                                .non_resource_string("certDigest")
+                                .as_deref()
+                                .unwrap_or("null")
+                        ));
                     };
                     digests.push(d.replace(':', "").to_lowercase());
                 }
@@ -1682,13 +1706,13 @@ impl Parser<'_> {
     ) -> Result<Option<Property>> {
         let sa = self.obtain(e);
         let Some(name) = sa.non_config_string("name", 0) else {
-            return fail(format!("{tag} requires an android:name attribute"));
+            return malformed(format!("{tag} requires an android:name attribute"));
         };
         let value = match sa.peek("resource") {
             Some(v) if v.resource_id != 0 => PropertyValue::Resource(v.resource_id as i32),
             _ => match sa.peek("value") {
                 None => {
-                    return fail(format!(
+                    return malformed(format!(
                         "{tag} requires an android:value or android:resource attribute"
                     ));
                 }

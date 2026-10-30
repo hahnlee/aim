@@ -1,6 +1,6 @@
 //! ParsingPackageUtils.parseKeySets at android-16.0.0_r1.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use super::{Error, Result, package::Package, parcel::ArraySet};
+use super::{Error, Result, malformed, package::Package, parcel::ArraySet};
 use crate::package::sign::{canonical_public_keys, deserialize_public_key, serialize_public_keys};
 use aim_apps::res::Element;
 use std::collections::{HashMap, HashSet};
@@ -25,8 +25,9 @@ pub(super) fn parse(
         .iter()
         .any(|(name, _)| keys.public.contains_key(name))
     {
-        return Err(Error::Parse(
-            "key-set and public-key names must be distinct".into(),
+        return malformed(format!(
+            "Package{} AndroidManifest.xml 'key-set' and 'public-key' names must be distinct.",
+            pkg.package_name
         ));
     }
     let mut mapping = pkg.key_set_mapping.clone();
@@ -34,7 +35,8 @@ pub(super) fn parse(
         if names.is_empty() || keys.improper.contains(&name) {
             continue;
         }
-        let name = name.ok_or_else(|| Error::Parse("public-key outside a named key-set".into()))?;
+        let name =
+            name.ok_or_else(|| Error::Status(-108, "Improperly nested 'key-set' tag".into()))?;
         let mut public = mapping
             .get(&name)
             .into_iter()
@@ -48,8 +50,9 @@ pub(super) fn parse(
     let mut upgrades = ArraySet::default();
     for name in keys.upgrades {
         let Some(name) = name.filter(|name| mapping.contains(name)) else {
-            return Err(Error::Parse(
-                "manifest does not define all upgrade-key-sets".into(),
+            return malformed(format!(
+                "Package{} AndroidManifest.xml does not define all 'upgrade-key-set's .",
+                pkg.package_name
             ));
         };
         upgrades.add(&name);
@@ -70,7 +73,7 @@ impl Keys {
             match e.name.as_str() {
                 "key-set" => {
                     if current.is_some() {
-                        return Err(Error::Parse("improperly nested key-set".into()));
+                        return malformed("Improperly nested 'key-set' tag");
                     }
                     let name = attr(e, "name");
                     if let Some((_, members)) =
@@ -83,8 +86,9 @@ impl Keys {
                     self.walk(&e.children, name.as_deref(), attr)?;
                 }
                 "public-key" => {
-                    let current = current
-                        .ok_or_else(|| Error::Parse("public-key outside a named key-set".into()))?;
+                    let current = current.ok_or_else(|| {
+                        Error::Status(-108, "Improperly nested 'key-set' tag".into())
+                    })?;
                     let name = attr(e, "name");
                     if let Some(encoded) = attr(e, "value") {
                         let parsed = match base64(&encoded) {
@@ -102,14 +106,16 @@ impl Keys {
                             continue;
                         };
                         if self.public.get(&name).is_some_and(|old| old != &public) {
-                            return Err(Error::Parse(
-                                "public-key value conflicts with previous definition".into(),
+                            return malformed(format!(
+                                "Value of 'public-key' {} conflicts with previously defined value",
+                                name.as_deref().unwrap_or("null")
                             ));
                         }
                         self.public.insert(name.clone(), public);
                     } else if !self.public.contains_key(&name) {
-                        return Err(Error::Parse(
-                            "public-key must define a value on first use".into(),
+                        return malformed(format!(
+                            "'public-key' {} must define a public-key value on first use",
+                            name.as_deref().unwrap_or("null")
                         ));
                     }
                     let members = &mut self
@@ -325,7 +331,7 @@ mod tests {
     fn rejects_nested_missing_conflicting_and_colliding_names() {
         let (_, one) = key(1);
         let (_, two) = key(2);
-        for children in [
+        for (children, message) in [
             vec![node("public-key", &[("value", one.clone())], vec![])],
             vec![node(
                 "key-set",
@@ -362,9 +368,18 @@ mod tests {
                     vec![],
                 )],
             )],
-        ] {
+        ].into_iter().zip([
+            "Improperly nested 'key-set' tag",
+            "Improperly nested 'key-set' tag",
+            "'public-key' missing must define a public-key value on first use",
+            "Value of 'public-key' one conflicts with previously defined value",
+            "Packageexample.app AndroidManifest.xml 'key-set' and 'public-key' names must be distinct.",
+        ]) {
             let mut package = Package::new("example.app", "/base.apk", "/");
-            assert!(parse(&mut package, &node("key-sets", &[], children), attr).is_err());
+            match parse(&mut package, &node("key-sets", &[], children), attr) {
+                Err(Error::Status(-108, actual)) => assert_eq!(actual, message),
+                result => panic!("expected malformed key set: {result:?}"),
+            }
             assert!(package.key_set_mapping.is_empty());
         }
     }
