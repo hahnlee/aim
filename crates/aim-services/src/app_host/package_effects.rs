@@ -753,6 +753,22 @@ impl PackageEffects {
         }
         Ok(())
     }
+
+    /// `PackageManagerService.isSuspensionAllowed`: the system or the
+    /// user's device or profile owner, or no `no_control_apps` /
+    /// `no_uninstall_apps` restriction. The app host has no owner (#1521).
+    fn suspension_allowed(&self, user: i32, uid: i32) -> Result<bool, Exception> {
+        if uid == SYSTEM_UID as i32 {
+            return Ok(true);
+        }
+        if self.host.device_policies()?.owned() {
+            return Err(self
+                .host
+                .unimplemented_named("package effects", "a device or profile owner (#1521)"));
+        }
+        Ok(!self.host.has_user_restriction("no_control_apps", user)?
+            && !self.host.has_user_restriction("no_uninstall_apps", user)?)
+    }
 }
 
 impl Service for PackageEffects {
@@ -773,6 +789,11 @@ impl Service for PackageEffects {
                     .map_err(|_| BAD_VALUE)?;
                 self.require_installer_permission(a.calling_uid)
                     .map(|v| bridge::write_require_installer_permission_reply(&mut p, v))
+            }
+            bridge::IS_SUSPENSION_ALLOWED => {
+                let a = bridge::IsSuspensionAllowed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.suspension_allowed(a.user_id, a.calling_uid)
+                    .map(|v| bridge::write_is_suspension_allowed_reply(&mut p, v))
             }
             bridge::KILL_PACKAGE => {
                 let a = bridge::KillPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
