@@ -125,15 +125,18 @@ fn sdk(element: &Element, environment: &Environment) -> Result<()> {
     };
     if let Some(code) = target_code {
         if !matches(code) {
-            return fail(development_error(code));
+            return super::fail_status(-12, development_error(code));
         }
     }
     match min_code {
-        Some(code) if !matches(code) => fail(development_error(code)),
-        None if min_version > environment.sdk => fail(format!(
-            "Requires newer sdk version #{min_version} (current version is #{})",
-            environment.sdk
-        )),
+        Some(code) if !matches(code) => super::fail_status(-12, development_error(code)),
+        None if min_version > environment.sdk => super::fail_status(
+            -12,
+            format!(
+                "Requires newer sdk version #{min_version} (current version is #{})",
+                environment.sdk
+            ),
+        ),
         _ => Ok(()),
     }
 }
@@ -169,17 +172,26 @@ fn install_manifest(
         if let Some(value) = attr_value(manifest, ANDROID, name).filter(|value| !value.is_empty()) {
             cluster::validate_split_types(&value).map_err(|error| InstallError {
                 legacy_status: -108,
-                message: error.to_string(),
+                message: match error {
+                    super::Error::Status(_, message) => message,
+                    error => error.to_string(),
+                },
             })?;
         }
     }
-    let package = package_name_manifest(manifest, environment).map_err(|error| InstallError {
-        legacy_status: if matches!(error, super::Error::OlderSdk(_)) {
-            -12
-        } else {
-            -2
+    let package = package_name_manifest(manifest, environment).map_err(|error| match error {
+        super::Error::Status(legacy_status, message) => InstallError {
+            legacy_status,
+            message,
         },
-        message: error.to_string(),
+        super::Error::OlderSdk(message) => InstallError {
+            legacy_status: -12,
+            message,
+        },
+        error => InstallError {
+            legacy_status: -2,
+            message: error.to_string(),
+        },
     })?;
     let types = |name| {
         attr_value(manifest, ANDROID, name)
@@ -283,14 +295,7 @@ fn package_name_manifest_at(
     environment: &Environment,
     path: &str,
 ) -> Result<String> {
-    if manifest.name == "manifest" {
-        match attr_value(manifest, "", "package").as_deref() {
-            None => return fail(format!("Failed to parse {path}")),
-            Some("") => return fail("Invalid manifest package: Invalid filename"),
-            _ => {}
-        }
-    }
-    let (package, _, _) = cluster::names(manifest)?;
+    let (package, _, _) = cluster::names(manifest, path)?;
     let mut uses_split = false;
     let mut property_names = None;
     let mut property_values = None;

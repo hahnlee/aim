@@ -3607,6 +3607,9 @@ details from both sides. It runs independently of install-state modelling,
 including multi-user installs (#760; focused host regression, no guest boot).
 Installed GMS's full parser parcel has not been compared against the original.
 This remains an incomplete native scan check.
+Manifest/application-attribute failures retain Android 16's status and message
+through native installation (#1419 slice 1; host parser/pipeline tests, 2026-10-31).
+Component, child-tag and archive errors remain under #1419. No guest boot was run.
 Shared-library dependency resolution now has ordered direct selection,
 static/SDK version and signer checks,
 and file-path assembly from resolved provider snapshots. Tests cover
