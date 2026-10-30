@@ -344,6 +344,9 @@ fn fuse_namei_walk_is_linear_and_rechecks_zero_timeout_entries() {
     let recorded = counts.clone();
     let device = connection.fd;
     let daemon_lower = lower.clone();
+    // An unmounted device returns EPERM even for a blocking read.
+    let client = Client::new(&connection.key);
+    client.mount().unwrap();
     let daemon = std::thread::spawn(move || {
         let daemon = aim_emulated_storage::Daemon::new(daemon_lower);
         loop {
@@ -358,8 +361,6 @@ fn fuse_namei_walk_is_linear_and_rechecks_zero_timeout_entries() {
             }
         }
     });
-    let client = Client::new(&connection.key);
-    client.mount().unwrap();
     let resolve = |suffix: &str| {
         crate::vfs::resolve(
             crate::vfs::LINUX_AT_FDCWD,
