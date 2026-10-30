@@ -438,15 +438,7 @@ fn fork_attach_inherited_mount_namespace_preserves_independent_locks() {
 }
 
 fn fork_attach_in_namespace(child_namespace: &str) {
-    let directory = std::env::temp_dir().join(format!(
-        "aim-posix-fork-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = aim_paths::scratch_dir("aim-posix-fork");
     let table = directory.join("native-identity");
     let path = directory.join("file");
     std::fs::write(&path, b"fork lock proof").unwrap();
