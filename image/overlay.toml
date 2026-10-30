@@ -64,6 +64,11 @@ path = "/vendor/build.prop"
 source = "image/vendor/build.prop"
 reason = "the emulator's own with what claims its hardware gone (ADR 0010): ro.kernel.qemu, the ranchu power, gralloc and UWB device, ro.soc.* (aim-guest-init sets the Mac's), and the board is aim; a set ro.* property cannot be unset by a later file or setprop"
 
+[[replace]]
+path = "/product/etc/build.prop"
+source = "target/aim/product-properties/build.prop"
+reason = "the ART exception uses concurrent copying with read barriers without userfaultfd; set ro.dalvik.vm.enable_uffd_gc=false to match this product's collector so odrefresh can check its system preopts (ADR 0012, #2432); every other byte is the pinned original's"
+
 [[remove]]
 path = "/vendor/etc/init/hw/init.ranchu.rc"
 reason = "the emulator's device script (QEMU props, kernel modules, zram, virtio Wi-Fi); init.aim.rc replaces it"

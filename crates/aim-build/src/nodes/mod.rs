@@ -14,6 +14,7 @@ mod image;
 pub(crate) mod java;
 mod moltenvk;
 mod oat;
+mod product_properties;
 pub(crate) mod service_aidl;
 mod system_server;
 mod translation_cache;
@@ -29,6 +30,7 @@ use std::path::PathBuf;
 pub fn declare(mut built: Vec<Node>) -> Result<Vec<Node>, String> {
     built.extend([
         image::node(),
+        product_properties::node(),
         aidl::node(),
         xsdc::node(),
         cts_host_tools::node(),
@@ -66,6 +68,7 @@ pub fn run(node: &Node, ctx: &Ctx, log: &mut Log) -> Result<Vec<PathBuf>, String
         Action::Angle => angle::run(log)?,
         Action::MoltenVk => moltenvk::run(log)?,
         Action::SystemServer => system_server::run(log)?,
+        Action::ProductProperties => product_properties::run(log)?,
         Action::DeviceServices => device_services::run(log)?,
         Action::Oat => oat::run(ctx, log)?,
         Action::DerivedImage => derived_image::run(log)?,
@@ -117,6 +120,7 @@ pub fn clean(node: &Node) -> Result<(), String> {
         Action::Angle => Vec::new(),
         Action::MoltenVk => vec![aim_paths::moltenvk()],
         Action::SystemServer => vec![system_server::out()],
+        Action::ProductProperties => node.outputs.clone(),
         Action::DeviceServices => vec![device_services::out()],
         Action::Oat => vec![oat::out()],
         Action::EmptyUserdata => vec![userdata::out().join(aim_storage::data::EMPTY_TEMPLATE)],

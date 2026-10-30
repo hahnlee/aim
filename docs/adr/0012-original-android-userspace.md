@@ -73,7 +73,11 @@ programs, and implement only what lies below it.
      their vdex is used as it is. The runtime still differs from the
      original's in one respect: without userfaultfd it uses the copying
      collector with read barriers instead of CMC, so ART also opens no
-     original odex (#442).
+     original odex (#442). The derived product's `product/etc/build.prop`
+     therefore sets `ro.dalvik.vm.enable_uffd_gc=false`, matching that collector
+     configuration so odrefresh can validate the system preopts (#2432).
+     The `product-properties` node generates this explicit replacement from
+     the pinned original, changing only that property and rejecting input drift.
    - **SystemServer (ADR 0013):** `services.jar` without the start of each
      service a native implementation replaces (`image/native-services`):
      that one call's instructions become `nop`s in place, checked
