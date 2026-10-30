@@ -15,7 +15,7 @@ use std::{
 #[derive(Default)]
 pub struct Transfer {
     closed: AtomicBool,
-    stop: AtomicBool,
+    stop: Arc<AtomicBool>,
     server: Mutex<Option<Arc<UnixStream>>>,
     proxy: Mutex<Option<Arc<aim_binder_host::proxy_file::Owner>>>,
     error: Mutex<Option<String>>,
@@ -111,6 +111,7 @@ impl Transfer {
             client,
             Worker {
                 socket: Arc::downgrade(&socket),
+                stop: self.stop.clone(),
                 thread: worker,
             },
         ))
@@ -119,7 +120,16 @@ impl Transfer {
 struct Worker {
     // The worker owns the socket until exit, even after session removal.
     socket: Weak<UnixStream>,
+    stop: Arc<AtomicBool>,
     thread: JoinHandle<()>,
+}
+impl Worker {
+    fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(socket) = self.socket.upgrade() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+    }
 }
 #[derive(Default)]
 pub struct Registry {
@@ -209,9 +219,7 @@ impl Registry {
             }
         }
         for worker in self.workers.lock().unwrap().iter() {
-            if let Some(socket) = worker.socket.upgrade() {
-                let _ = socket.shutdown(Shutdown::Both);
-            }
+            worker.stop();
         }
     }
     pub fn take_guard(self: &Arc<Self>) -> Option<IoWorkerGuard> {
@@ -307,42 +315,73 @@ mod tests {
         drop(guard);
     }
     #[test]
-    fn guard_drop_stops_workers_with_a_client_clone_held_open() {
-        for registered in [true, false] {
-            let (_data, file) = target();
-            let registry = Arc::new(Registry::default());
-            let guard = registry.take_guard().unwrap();
-            let transfer = registry.register(7).unwrap();
-            let mut client = registry.start(7, transfer.clone(), file).unwrap();
-            client
-                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                .unwrap();
+    fn guard_drop_stops_workers_removed_from_registry() {
+        guard_drop_stops_workers(false);
+    }
+    #[test]
+    fn guard_drop_stops_workers_with_a_leaked_client_fd() {
+        guard_drop_stops_workers(true);
+    }
+    fn guard_drop_stops_workers(registered: bool) {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let registry = Arc::new(Registry::default());
+        let guard = registry.take_guard().unwrap();
+        let mut targets = Vec::new();
+        let mut transfers = Vec::new();
+        let mut inherited = Vec::new();
+        for id in 7..10 {
+            let (data, file) = target();
+            targets.push(data);
+            let transfer = registry.register(id).unwrap();
+            let mut client = registry.start(id, transfer.clone(), file).unwrap();
             command(&mut client, 2, 0);
             let mut ack = [0u8; 8];
             client.read_exact(&mut ack).unwrap();
             assert_eq!(i32::from_be_bytes(ack[..4].try_into().unwrap()), 2);
-            let inherited = client.try_clone().unwrap();
+            // Keep a non-CLOEXEC duplicate alive through guard drop, as a
+            // concurrently spawned child can do (#1617).
+            let fd = unsafe { libc::dup(client.as_raw_fd()) };
+            assert!(fd >= 0, "dup: {}", io::Error::last_os_error());
+            inherited.push(unsafe { OwnedFd::from_raw_fd(fd) });
+            if id == 8 {
+                // Also interrupt a payload read, where shutdown is an EOF error.
+                command(&mut client, 1, 1);
+            }
             drop(client);
             if !registered {
-                registry.transfers.lock().unwrap().remove(&7);
+                registry.transfers.lock().unwrap().remove(&id).unwrap();
             }
-            let (done, finished) = std::sync::mpsc::channel();
-            let dropper = thread::spawn(move || {
-                drop(guard);
-                done.send(()).unwrap();
-            });
-            let result = finished.recv_timeout(std::time::Duration::from_secs(2));
-            // Wake the worker before joining even if the regression returns.
-            let _ = inherited.shutdown(Shutdown::Both);
-            drop(inherited);
-            dropper.join().unwrap();
-            assert!(
-                result.is_ok(),
-                "guard drop waited for client EOF (registered={registered})"
-            );
+            transfers.push(transfer);
+        }
+        // The external test alarm bounds a regression; no client close or
+        // timeout can wake these workers before the guard has joined them.
+        drop(guard);
+        assert!(registry.workers.lock().unwrap().is_empty());
+        for transfer in transfers {
+            assert!(transfer.stop.load(Ordering::SeqCst));
             assert!(transfer.is_closed());
             assert!(transfer.error().is_none());
         }
+        drop(inherited);
+    }
+    #[test]
+    fn payload_eof_without_stop_reports_the_error() {
+        let (_data, file) = target();
+        let registry = Arc::new(Registry::default());
+        let guard = registry.take_guard().unwrap();
+        let transfer = registry.register(7).unwrap();
+        let mut client = registry.start(7, transfer.clone(), file).unwrap();
+        command(&mut client, 1, 1);
+        drop(client);
+        let worker = registry.workers.lock().unwrap().pop().unwrap();
+        worker.thread.join().unwrap();
+        assert!(worker.socket.upgrade().is_none());
+        assert!(transfer.is_closed());
+        assert_eq!(
+            transfer.error().as_deref(),
+            Some("Unexpected EOF; still expected 1 bytes")
+        );
+        drop(guard);
     }
     #[test]
     fn fileport_client_writes_syncs_closes_and_acknowledges_original_headers() {
