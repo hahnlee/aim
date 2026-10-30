@@ -4514,6 +4514,29 @@ impl System {
         install: std::sync::MutexGuard<'_, ()>,
         strict_code: bool,
     ) -> Result<Parcel> {
+        self.publish_prepared_package_mutation_with(
+            bridge,
+            base,
+            prepared,
+            dependencies,
+            caller,
+            install,
+            strict_code,
+            || {},
+        )
+    }
+
+    fn publish_prepared_package_mutation_with(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        prepared: crate::package::mutation_dispatch::Prepared,
+        dependencies: &crate::package::mutation_dispatch::Dependencies,
+        caller: i32,
+        install: std::sync::MutexGuard<'_, ()>,
+        strict_code: bool,
+        mut before_publish: impl FnMut(),
+    ) -> Result<Parcel> {
         self.check_package_bootstrap(bridge)?;
         let persistence = self
             .package_bootstrap
@@ -4532,6 +4555,7 @@ impl System {
         let mut disk = persistence.lock().unwrap();
         let source = base.clone();
         let (before, after, written) = loop {
+            let canonical = self.capture_package_scan()?;
             let latest = self.capture_package_queries_for(bridge)?;
             let rebased = !Arc::ptr_eq(&latest, &source);
             if rebased {
@@ -4569,8 +4593,12 @@ impl System {
                 .map_err(|error| {
                     Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
                 })?;
-                let update = base
-                    .prepare_package_update(owner.clone())
+                let update =
+                    if prepared.enabled_only() && owner.settings == base.scan().owner().settings {
+                        base.prepare_enabled_update(source.scan().owner(), &prepared)
+                    } else {
+                        base.prepare_package_update(owner.clone())
+                    }
                     .map_err(|error| {
                         Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
                     })?;
@@ -4578,6 +4606,7 @@ impl System {
             } else {
                 None
             };
+            before_publish();
             let mut state = self.package_bootstrap.lock().unwrap();
             let current = state
                 .current
@@ -4599,6 +4628,10 @@ impl System {
                 .queries
                 .as_ref()
                 .is_some_and(|capture| Arc::ptr_eq(capture, &latest))
+                || !current
+                    .snapshots
+                    .as_ref()
+                    .is_some_and(|snapshots| Arc::ptr_eq(&snapshots.capture(), &canonical))
             {
                 // Runtime grants and context publications do not take the install
                 // gate. Rebase before any write so their deltas are retained.

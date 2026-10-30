@@ -152,6 +152,10 @@ if a runtime grant or context publication changed it (#2442). The mutation's
 longest bootstrap hold fell from 0.11-0.21 s to 0.02-0.06 s; persistence
 still runs under the lock.
 
+Enabled-only mutations project changed packages and UID/shared-UID aliases from
+that capture (#2478); restrictions still write immediately. Host parity/no-op/CAS
+checks and three Contacts first-open/reopen boots pass (2026-10-31).
+
 Service binds queue process preparation outside service state and return
 before zygote IO (#2442, 2026-10-30). Pending services attach in request order;
 host regressions cover joining, failed starts, early death and unbind. Three

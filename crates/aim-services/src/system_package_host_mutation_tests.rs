@@ -579,11 +579,27 @@ fn cached_and_public_hosts_share_one_monitor_registry() {
     let Session {
         fixture,
         cached,
+        old,
         workers,
         ..
     } = session();
     let (public, _) = crate::package::service::PackageQueries::from_system(&fixture.system);
     let receive = register_monitor(&fixture, &[&cached, public.as_ref()]);
+    let path = fixture
+        .root
+        .join("data/system/users/0/package-restrictions.xml");
+    let bytes = std::fs::read(&path).ok();
+    for class in [Some("p.Main"), None] {
+        let (code, request) = enabled_request(class, 0, 2);
+        ok(transact(&cached, 1000, code, &request));
+        assert!(Arc::ptr_eq(
+            &old,
+            &fixture.system.capture_package_queries().unwrap()
+        ));
+        assert_eq!(std::fs::read(&path).ok(), bytes);
+    }
+    wait_events(&fixture.system, 2000);
+    assert!(receive.try_recv().is_err());
     let (code, request) = enabled_request(Some("p.Main"), 2, 0);
     ok(transact(&cached, 1000, code, &request));
     receive.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1726,5 +1742,245 @@ fn maintenance_usage_rejects_bridge_retired_during_preparation() {
         &fixture.system.package_bootstrap().unwrap(),
         &replacement
     ));
+    drop(workers);
+}
+
+#[test]
+fn enabled_preparation_retries_concurrent_visibility_publication() {
+    let Session {
+        fixture,
+        host,
+        bridge,
+        dependencies,
+        old,
+        workers,
+        ..
+    } = session();
+    let resolution = old.resolution().unwrap();
+    let query = crate::package::query::Query {
+        state: old.state(),
+        filter: &resolution.apps_filter,
+        calling_uid: 1000,
+    };
+    let (code, request) = enabled_request(Some("p.Main"), 2, 2);
+    let prepared = crate::package::mutation_dispatch::prepare(
+        code,
+        &mut request.reader(),
+        &query,
+        77,
+        &dependencies,
+    )
+    .unwrap()
+    .unwrap();
+    let mut attempts = 0;
+    let mut intermediate = old.clone();
+    let install = fixture.system.package_install_guard();
+    fixture
+        .system
+        .publish_prepared_package_mutation_with(
+            &bridge,
+            &old,
+            prepared,
+            &dependencies,
+            1000,
+            install,
+            true,
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    std::thread::scope(|threads| {
+                        threads
+                            .spawn(|| host.grant_implicit_access(10100, 10101))
+                            .join()
+                            .unwrap()
+                            .unwrap();
+                    });
+                    intermediate = fixture.system.capture_package_queries().unwrap();
+                } else if attempts == 2 {
+                    fixture
+                        .system
+                        .publish_package_usage(Some("p"), 0, 111)
+                        .unwrap();
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(attempts, 3);
+    let current = fixture.system.capture_package_queries().unwrap();
+    assert_eq!(current.scan().usage().times("p").unwrap()[0], 111);
+    assert_eq!(
+        current.state().system.implicit_access,
+        intermediate.state().system.implicit_access
+    );
+    assert_eq!(
+        current.state().packages["p"].users[&0].disabled_components,
+        ["p.Main"]
+    );
+    drop(workers);
+}
+
+#[test]
+fn enabled_projection_matches_full_for_users_and_factory_aliases() {
+    use crate::package::{
+        scan::CapturedUsers,
+        scan_snapshot::Store,
+        write::{
+            Enabled,
+            mutation::{Change, Plan},
+        },
+    };
+    let Session { old, workers, .. } = session();
+    let mut owner = old.scan().owner().clone();
+    let mut factory = owner.settings.packages[0].clone();
+    factory.code_path = "/system/app/p".into();
+    owner.settings.disabled_system_packages.push(factory);
+    let mut context = (**old.context()).clone();
+    let mut factory_extra = context.packages[&("p".into(), false)].clone();
+    factory_extra.path = "/system/app/p".into();
+    context.packages.insert(("p".into(), true), factory_extra);
+    let mut users = BTreeMap::new();
+    for user in [0, 10, 11] {
+        users.insert(
+            user,
+            crate::package::restrictions::UserState {
+                enabled: user % 3,
+                enabled_components: Some(vec!["p.Other".into()]),
+                ..Default::default()
+            },
+        );
+        let mut record = context.users[&0].clone();
+        record.id = user;
+        context.users.insert(user, record);
+        for inputs in context.packages.values_mut() {
+            inputs.users.insert(user, inputs.users[&0].clone());
+        }
+    }
+    let keys: Vec<_> = context.packages.keys().cloned().collect();
+    owner
+        .capture_user_states(
+            keys.iter()
+                .cloned()
+                .map(|key| {
+                    let active_aliases = if key.1 {
+                        [0, 11].into()
+                    } else {
+                        Default::default()
+                    };
+                    (
+                        key,
+                        CapturedUsers {
+                            states: users.clone(),
+                            active_aliases,
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+    let groups = owner
+        .identities
+        .shared_users
+        .keys()
+        .map(|n| (n.clone(), Default::default()))
+        .collect();
+    owner
+        .capture_legacy_permissions(
+            &[0, 10, 11],
+            keys.iter()
+                .cloned()
+                .map(|k| (k, Default::default()))
+                .collect(),
+            groups,
+        )
+        .unwrap();
+    owner
+        .capture_install_permissions_fixed(keys.iter().cloned().map(|k| (k, false)).collect())
+        .unwrap();
+    owner
+        .complete_library_dependencies(&|_, _| {
+            Ok(crate::package::libraries::Policy {
+                enforce_native_dependencies: false,
+                sdk_library_independence: false,
+            })
+        })
+        .unwrap();
+    let original = old.scan().owner();
+    let runtime = keys
+        .iter()
+        .map(|(name, factory)| {
+            let value = original.replica_runtime(name, false).unwrap();
+            ((name.clone(), *factory), value.unwrap().clone())
+        })
+        .collect();
+    owner.capture_replica_runtime(runtime).unwrap();
+    let store = Store::new_replica(owner, old.scan().usage().clone()).unwrap();
+    context.scan_version = store.capture().version();
+    let base = Capture::new(store.capture(), context).unwrap();
+    let old_resolution = base.resolution().unwrap();
+    for user in [0, 10, 11] {
+        for application in [false, true] {
+            for new in [1, 2, 0] {
+                let mut enabled = Enabled::of(&base.state().packages["p"], user);
+                if application {
+                    enabled.enabled = new;
+                } else {
+                    enabled.enabled_components.retain(|c| c != "p.Main");
+                    enabled.disabled_components.retain(|c| c != "p.Main");
+                    if new == 1 {
+                        enabled.enabled_components.insert("p.Main".into());
+                    }
+                    if new == 2 {
+                        enabled.disabled_components.insert("p.Main".into());
+                    }
+                }
+                let prepared = crate::package::mutation_dispatch::Prepared {
+                    code: pm::SET_COMPONENT_ENABLED_SETTING,
+                    plans: vec![Plan {
+                        package: "p".into(),
+                        user: Some(user),
+                        change: Change::Enabled(enabled),
+                    }],
+                    global: None,
+                    finish: crate::package::mutation_dispatch::Finish::Enabled(vec![]),
+                    reply: Parcel::new(),
+                    distraction_cleanup: vec![],
+                };
+                let mut full_owner = base.scan().owner().clone();
+                prepared.apply_scan(&mut full_owner).unwrap();
+                let full = base.prepare_package_update(full_owner).unwrap().capture;
+                let delta = base
+                    .prepare_enabled_update(base.scan().owner(), &prepared)
+                    .unwrap()
+                    .capture;
+                assert_eq!(delta.scan().owner(), full.scan().owner());
+                assert_eq!(delta.state(), full.state());
+                assert_eq!(
+                    delta.scan().metadata_revision(),
+                    full.scan().metadata_revision()
+                );
+                let resolution = delta.resolution().unwrap();
+                assert!(!Arc::ptr_eq(&old_resolution, &resolution));
+                let full_resolution = full.resolution().unwrap();
+                let component = crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                };
+                for app_id in [1000, 10100, 10101] {
+                    let caller = user * 100000 + app_id;
+                    let query = |r: &crate::package::resolve::Resolution| {
+                        crate::package::query::Query {
+                            state: &r.state,
+                            filter: &r.apps_filter,
+                            calling_uid: caller,
+                        }
+                        .activity_info(&component, 0, caller, user)
+                        .unwrap()
+                        .unwrap()
+                    };
+                    assert_eq!(query(&resolution), query(&full_resolution));
+                }
+            }
+        }
+    }
     drop(workers);
 }

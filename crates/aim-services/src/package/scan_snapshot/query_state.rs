@@ -891,6 +891,124 @@ impl Capture {
         Ok(PackageUpdate { store, capture })
     }
 
+    pub(crate) fn prepare_enabled_update(
+        self: &Arc<Self>,
+        source: &crate::package::scan::SigningScan,
+        prepared: &crate::package::mutation_dispatch::Prepared,
+    ) -> Result<PackageUpdate, String> {
+        use crate::package::owner::app_ids::Owner;
+        let store = super::Store::prepare_enabled_store(&self.scan, source, prepared)
+            .map_err(|error| format!("enabled replica: {error:?}"))?;
+        let scan = store.capture();
+        let owner = scan.owner();
+        let names: BTreeSet<_> = prepared
+            .plans
+            .iter()
+            .filter_map(|plan| {
+                matches!(
+                    plan.change,
+                    crate::package::write::mutation::Change::Enabled(_)
+                )
+                .then_some(plan.package.as_str())
+            })
+            .collect();
+        let mut context = (*self.context).clone();
+        context.scan_version = scan.version();
+        let mut state = (*self.state).clone();
+        state.generation = scan.version();
+        for (settings, target, factory) in [
+            (&owner.settings.packages, &mut state.packages, false),
+            (
+                &owner.settings.disabled_system_packages,
+                &mut state.disabled_system_packages,
+                true,
+            ),
+        ] {
+            for setting in settings
+                .iter()
+                .filter(|setting| names.contains(setting.name.as_str()))
+            {
+                let extra = context
+                    .packages
+                    .get(&(setting.name.clone(), factory))
+                    .ok_or("enabled query inputs absent")?
+                    .clone();
+                target.insert(
+                    setting.name.clone(),
+                    package(&scan, setting, factory, extra, &context)?,
+                );
+            }
+        }
+        for (name, group) in &owner.identities.shared_users {
+            if !group.package_names().any(|name| names.contains(name)) {
+                continue;
+            }
+            let mut members = group
+                .package_names()
+                .filter(|name| group.has_package(name))
+                .map(|name| {
+                    state
+                        .packages
+                        .get(name)
+                        .cloned()
+                        .ok_or("enabled shared member absent")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for (name, value) in group.retained_settings() {
+                let extra = context
+                    .retained_packages
+                    .get(&(group.app_id, name.into()))
+                    .ok_or("enabled retained inputs absent")?
+                    .clone();
+                members.push(retained(owner, value, extra, &context)?);
+            }
+            state
+                .shared_users
+                .get_mut(name)
+                .ok_or("enabled shared owner absent")?
+                .native_packages = Some(members);
+        }
+        for (id, slot) in owner.identities.ids.owners() {
+            let value = match slot {
+                Owner::Package(name) if names.contains(name.as_str()) => Some(
+                    model::UidOwner::Package(Box::new(state.packages[name].clone())),
+                ),
+                Owner::DetachedPackage(name) if names.contains(name.as_str()) => {
+                    let value = owner
+                        .identities
+                        .ids
+                        .detached_setting(id)
+                        .ok_or("enabled detached owner absent")?;
+                    let extra = context
+                        .retained_packages
+                        .get(&(id, name.clone()))
+                        .ok_or("enabled detached inputs absent")?
+                        .clone();
+                    Some(model::UidOwner::Package(Box::new(retained(
+                        owner, value, extra, &context,
+                    )?)))
+                }
+                _ => None,
+            };
+            if let Some(value) = value {
+                state
+                    .uid_owners
+                    .as_mut()
+                    .ok_or("enabled UID owners absent")?
+                    .insert(id, value);
+            }
+        }
+        let capture = Arc::new(Self {
+            scan,
+            state: Arc::new(state),
+            context: Arc::new(context),
+            domains: self.domains.clone(),
+            frozen: self.frozen.clone(),
+            resolver: Default::default(),
+        });
+        Ok(PackageUpdate { store, capture })
+    }
+
     /// Prepare a new query version retaining the immutable package scan while
     /// publishing Settings' global uninstall-block owner.
     pub(crate) fn prepare_uninstall_blocks_update(

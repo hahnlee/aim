@@ -301,6 +301,27 @@ impl Store {
         Self::prepare_usage_store(base, base.usage().clone())
     }
 
+    pub(crate) fn prepare_enabled_store(
+        base: &Arc<Snapshot>,
+        source: &SigningScan,
+        prepared: &super::mutation_dispatch::Prepared,
+    ) -> Result<Self, Error> {
+        if !base.replica_validated || !prepared.enabled_only() {
+            return Err(Error::Invalid("invalid enabled delta".into()));
+        }
+        let mut store = Self::prepare_unchanged_metadata_store(base)?;
+        let snapshot = Arc::get_mut(store.current.get_mut().unwrap()).unwrap();
+        // Only the typed enabled plans can mutate this validated replica.
+        // set_user_state also updates the scan's retained/factory aliases.
+        prepared
+            .apply_scan_rebased(source, &mut snapshot.owner)
+            .map_err(Error::Invalid)?;
+        if snapshot.owner != *base.owner() {
+            snapshot.metadata_revision = snapshot.version;
+        }
+        Ok(store)
+    }
+
     #[track_caller]
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
         Self::create(owner, usage, false, 1)
