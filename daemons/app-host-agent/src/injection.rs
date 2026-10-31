@@ -258,6 +258,9 @@ impl Channel {
 #[cfg(test)]
 #[test]
 fn result_and_finished_share_deadline_and_removal_releases_completion() {
+    if isolated_test() {
+        return;
+    }
     use std::os::unix::net::UnixDatagram;
     let d = Dispatcher::new();
     let (server, client) = UnixDatagram::pair().unwrap();
@@ -305,6 +308,9 @@ fn result_and_finished_share_deadline_and_removal_releases_completion() {
 #[cfg(test)]
 #[test]
 fn removal_closes_socket_while_channel_references_survive() {
+    if isolated_test() {
+        return;
+    }
     use std::os::unix::net::UnixDatagram;
     for full in [false, true] {
         let d = Dispatcher::new();

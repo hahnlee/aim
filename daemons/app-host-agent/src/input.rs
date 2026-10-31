@@ -736,3 +736,28 @@ fn drain(channel: &injection::Channel, dispatcher: &Dispatcher, index: i32) {
         }
     }
 }
+
+// Forks in concurrent tests retain even CLOEXEC sockets until exec. On Darwin
+// a datagram recv waiting at the last close can time out before ECONNRESET.
+// Keep descriptor-lifetime fixtures alone, including when services compiles us.
+#[cfg(test)]
+pub(crate) fn isolated_test() -> bool {
+    const MARKER: &str = "isolated-input-fixture";
+    if std::env::args().any(|arg| arg == MARKER) {
+        return false;
+    }
+    let thread = std::thread::current();
+    let name = thread.name().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--skip", MARKER, "--nocapture"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
+    true
+}

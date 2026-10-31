@@ -156,6 +156,9 @@ mod tests {
 
     #[test]
     fn sync_waits_for_window_commit_and_dispatch_uses_the_new_frame() {
+        if dispatcher::isolated_test() {
+            return;
+        }
         crate::system::with_discovery_binders(|host, _, _, export| {
             let dispatcher = dispatcher::Dispatcher::new();
             let (server, client) = UnixDatagram::pair().unwrap();
