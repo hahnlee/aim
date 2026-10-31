@@ -5,7 +5,7 @@ import com.android.server.devicepolicy.DevicePolicyCacheImpl;
 
 public final class DevicePolicyDefaultsTest {
     public static void main(String[] args) {
-        DevicePolicyDefaults bridge = new DevicePolicyDefaults();
+        DevicePolicyDefaults bridge = new DevicePolicyDefaults(null);
         for (int user : new int[] {-1, 0, 10}) {
             if (bridge.getContentProtectionPolicyDefault(user) != 37
                     || DevicePolicyCacheImpl.user != user)

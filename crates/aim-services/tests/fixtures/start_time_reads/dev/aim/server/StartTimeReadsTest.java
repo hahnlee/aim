@@ -14,7 +14,7 @@ public final class StartTimeReadsTest {
     public static void main(String[] args) {
         var role = new Role(); role.exclusivity = 2; Roles.roles.put("exclusive", role);
         var roles = new RoleQueries(null);
-        var policy = new DevicePolicyDefaults();
+        var policy = new DevicePolicyDefaults(null);
         for (int uid : new int[]{0, 2000, 10100, 101000}) {
             Binder.uid = uid;
             int calls = Roles.calls;
