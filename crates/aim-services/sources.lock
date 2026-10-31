@@ -16,6 +16,7 @@ TEST_SOURCE_FILES=(
 
 # project|path|sha256
 SOURCE_FILES=(
+  "platform/frameworks/base|core/java/android/companion/virtual/IVirtualDeviceManager.aidl|e786d33da9995d27a0d28ccb86e9fbd072edd5a52518d4aae6e78230573dfbd8"
   "platform/frameworks/base|core/java/android/content/pm/IBackgroundInstallControlService.aidl|d0f1e7892919cd816b4fc459d995667d373432540007af97c0c60355c9441e9f"
   "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmManager.aidl|78d732d32eb4f06bc5c6fe24bdaea98888eed17cc73605060827063e6b39a15a"
   "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmListener.aidl|9410b8de3eb90001ace6ddca3cc2bf83228eed5a1bd50b2e8d59824a49aae563"
@@ -220,6 +221,7 @@ SOURCE_FILES=(
 # Every method's code is generated and checked; only these get Rust for
 # their arguments and replies.
 INTERFACES=(
+  "android.companion.virtual.IVirtualDeviceManager|system/framework/framework.jar|getVirtualDevices,getVirtualDevice,getDeviceIdForDisplayId,getDevicePolicy,isValidVirtualDeviceId,getAudioPlaybackSessionId,getAudioRecordingSessionId,isVirtualDeviceOwnedMirrorDisplay,getDisplayNameForPersistentDeviceId,getAllPersistentDeviceIds"
   "android.content.pm.IStagedApexObserver|system/framework/framework.jar|*"
   "android.content.IClipboard|system/framework/framework.jar|*"
   "android.content.IOnPrimaryClipChangedListener|system/framework/framework.jar|*"

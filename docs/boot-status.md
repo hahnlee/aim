@@ -302,6 +302,13 @@ reports notify only the reporter's matching permissioned callbacks; reevaluation
 notifies all matching permissioned callbacks before its fresh report. There is no
 data-stall detector. Host Binder/JVM tests and pinned-image Java linkage are
 checked; no guest boot or live Settings check was run (2026-10-29).
+The native `virtualdevice` service (#2490) serves the original's empty live-device
+reads and guards persistent-ID reads through the companion-association owner;
+persisted associations retain its explicit #1790 error. Creation and other
+unserved calls retain named UnsupportedOperation errors. Both focused host tests
+and four AIDL integration tests pass. No guest boot, Settings check or CTS was
+run; `time_zone_detector` and `print` remain unserved (2026-10-31).
+
 Cold app-host reads now serve `window.isKeyguardSecure` through the existing
 lock credential owner, display-content window contexts through the window-context
 registry, `power.isAmbientDisplayAvailable` from `config_dozeComponent`, internal
