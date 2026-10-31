@@ -200,6 +200,7 @@ pub mod user_boot;
 pub mod user_service;
 pub mod user_types;
 mod vibrator;
+pub mod virtual_device;
 pub mod volume;
 pub mod vpn_manager;
 mod web_instant_apps;
@@ -1028,6 +1029,10 @@ impl AppHost {
                     .clone(),
             ),
             ("sensorservice", Arc::new(sensor_service::SensorService)),
+            (
+                "virtualdevice",
+                Arc::new(virtual_device::VirtualDeviceManager(self.clone())),
+            ),
             (
                 "wifi",
                 self.wifi_service
