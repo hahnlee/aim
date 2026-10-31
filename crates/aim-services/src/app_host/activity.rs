@@ -205,29 +205,43 @@ impl Activities {
             .any(|r| r.start_seq == start_seq)
     }
 
-    /// The activities of the process of `start_seq` are gone with it:
-    /// their tokens, and what the stack does then; their results never
-    /// sent go too.
-    pub fn remove_start(&self, start_seq: i64) -> (Vec<u64>, Vec<super::activity_stack::Command>) {
-        let gone = self
-            .records
-            .lock()
-            .unwrap()
-            .extract_if(|_, r| r.start_seq == start_seq)
-            .map(|(token, _)| token)
-            .collect();
+    /// Detach the dead process, retaining activities with their initial state.
+    pub fn remove_start(
+        &self,
+        start_seq: i64,
+        removed: bool,
+    ) -> (Vec<u64>, Vec<super::activity_stack::Command>) {
         let mut stack = self.stack.lock().unwrap();
-        let mut payloads = self.payloads.lock().unwrap();
-        for result in stack
+        let results: Vec<_> = stack
             .activities
             .iter()
-            .filter(|a| a.start_seq == start_seq)
-            .filter_map(|a| a.result)
+            .filter_map(|a| a.result.map(|result| (a.token, result)))
+            .collect();
+        let commands = stack.process_died(start_seq, removed);
+        let mut gone = Vec::new();
+        self.records.lock().unwrap().retain(|token, r| {
+            if r.start_seq != start_seq {
+                return true;
+            }
+            if stack.get(*token).is_some() {
+                r.start_seq = 0;
+                r.resumed = false;
+                r.reported = None;
+                true
+            } else {
+                gone.push(*token);
+                false
+            }
+        });
+        let mut payloads = self.payloads.lock().unwrap();
+        for (_, result) in results
+            .into_iter()
+            .filter(|(token, _)| gone.contains(token))
         {
             payloads.remove(&result);
         }
         drop(payloads);
-        (gone, stack.process_died(start_seq))
+        (gone, commands)
     }
 
     pub(super) fn with<T>(
@@ -1096,6 +1110,11 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_RESUMED => {
                 let token = Self::token(call)?;
                 self.report(token, "resumed", |r| r.resumed = true);
+                if let Some(Binder::Local(t)) = token
+                    && let Some(a) = self.0.activities.stack.lock().unwrap().get_mut(t)
+                {
+                    a.never_resumed = false;
+                }
                 self.0.update_window_focus();
                 if let Some(start_seq) = self.0.activities.with(token, |r| r.start_seq) {
                     self.0.activity_changed(start_seq);

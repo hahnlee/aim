@@ -515,8 +515,16 @@ the Linux layer's socket accounting fills): Maps gets past its terms
 (WebView) and its sign-in page to its Explore screen, whose map draws its
 tiles: Play Store is visible to it as `config_forceQueryablePackages`
 makes it, so it uses Play services (2026-10-20); the AOSP Camera app fails on a Mac without a camera, which
-no longer declares one (#646). Gmail draws its welcome page and its
-add-an-address page; Calendar its month view (Play services' account
+no longer declares one (#646). Gmail's first open now retains its pending
+WelcomeTourActivity and task when its flag-zero TasksSyncAdapterService
+enabled-state change kills the process, then resumes Welcome in a replacement
+process, matching Android 16's initial-state recovery. Two fresh-data app-host
+window boots opened Gmail over 60 seconds after boot completion, displayed its
+welcome page, and kept the replacement PID and resumed activity through Maps
+and Contacts opens; both comparison apps retained their PIDs. The 19 lifecycle
+and eight package-writer host tests pass (2026-10-31). This verifies recovery
+before the first client resume, not general saved-state restoration. Calendar
+draws its month view (Play services' account
 sign-in starts from its add-account session and shows its Google
 sign-in page); Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which publishes

@@ -87,6 +87,8 @@ pub struct Activity {
     pub launch_mode: i32,
     pub user: u32,
     pub state: State,
+    /// `ActivityRecord.mHaveState` starts true, until the first client resume.
+    pub never_resumed: bool,
     pub finishing: bool,
     /// The activity its result goes to (`resultTo`), and its result:
     /// `RESULT_CANCELED` unless it set one.
@@ -122,6 +124,7 @@ impl Activity {
             launch_mode,
             user,
             state: State::Initializing,
+            never_resumed: true,
             finishing: false,
             result_to,
             result: None,
@@ -324,7 +327,7 @@ impl Stack {
         (to.filter(|t| self.get(*t).is_some()), result)
     }
 
-    fn get_mut(&mut self, token: u64) -> Option<&mut Activity> {
+    pub(super) fn get_mut(&mut self, token: u64) -> Option<&mut Activity> {
         self.activities.iter_mut().find(|a| a.token == token)
     }
 
@@ -1000,9 +1003,10 @@ impl Stack {
         self.report_top_resumed(out);
     }
 
-    fn report_top_resumed(&mut self, out: &mut Vec<Command>) {
+    pub(super) fn report_top_resumed(&mut self, out: &mut Vec<Command>) {
         if let Some(top) = self.top_resumed
             && !self.waiting_for_prev
+            && self.get(top).is_some_and(|a| a.start_seq != 0)
         {
             out.push(Command::TopResumed {
                 token: top,
@@ -1256,9 +1260,10 @@ impl Stack {
         }
     }
 
-    /// The process of `start_seq` died: its activities go, and the tasks
-    /// they leave empty.
-    pub fn process_died(&mut self, start_seq: i64) -> Vec<Command> {
+    /// `ActivityRecord.handleAppDied`: an activity not yet resumed has its
+    /// initial state and survives unless finishing or force-stopped. Visible
+    /// survivors are launched again (`ensureVisibilityOnVisibleActivityDiedOrCrashed`).
+    pub fn process_died(&mut self, start_seq: i64, removed: bool) -> Vec<Command> {
         let mut out = Vec::new();
         let gone: Vec<(u64, i32)> = self
             .activities
@@ -1266,7 +1271,18 @@ impl Stack {
             .filter(|a| a.start_seq == start_seq)
             .map(|a| (a.token, a.task))
             .collect();
-        self.activities.retain(|a| a.start_seq != start_seq);
+        self.activities.retain_mut(|a| {
+            if a.start_seq != start_seq {
+                return true;
+            }
+            if !removed && !a.finishing && a.never_resumed {
+                a.start_seq = 0;
+                a.state = State::Initializing;
+                true
+            } else {
+                false
+            }
+        });
         for &(token, task) in &gone {
             if self.last_reported == Some(token) {
                 self.last_reported = None;
@@ -1992,8 +2008,91 @@ mod tests {
         b.start_seq = 2;
         let d = Decision::default();
         s.apply(&d, Then::Add(b, Some(task(8, "B", None))), None, true);
-        assert_eq!(s.process_died(2), [TaskEmpty(8), Front(7)]);
+        s.get_mut(2).unwrap().never_resumed = false;
+        assert_eq!(s.process_died(2, false), [TaskEmpty(8), Front(7)]);
         assert!(s.get(2).is_none() && s.get(1).is_some());
+    }
+
+    // android-16.0.0_r1 ActivityRecord.hasSavedState/handleAppDied:
+    // mHaveState starts true, and activityResumedLocked clears it. A
+    // never-resumed, non-finishing activity survives; a removed process's
+    // activities are made finishing by WindowProcessController.handleAppDied.
+    #[test]
+    fn death_before_first_resume_relaunches_the_pending_activity_in_its_task() {
+        for freeform in [false, true] {
+            let mut s = Stack {
+                freeform,
+                ..Default::default()
+            };
+            launch_new(&mut s, 1, 7, "Launcher", 0);
+            s.get_mut(1).unwrap().never_resumed = false;
+            let d = Decision {
+                outcome: Outcome::New(Some(7)),
+                ..Default::default()
+            };
+            s.apply(
+                &d,
+                Then::Add(activity(2, 7, "Welcome", 0), None),
+                None,
+                true,
+            );
+            s.finish(1);
+            s.top_resumed_released(None);
+            s.paused(1);
+            let commands = s.process_died(1, false);
+            assert!(commands.contains(&Launch(2)), "{commands:?}");
+            assert!(!commands.contains(&TaskEmpty(7)));
+            assert!(s.get(1).is_none());
+            assert_eq!(s.get(2).unwrap().start_seq, 0);
+            assert_eq!(s.top(7).unwrap().token, 2);
+            assert!(s.task(7).is_some());
+            assert!(!commands.contains(&TopResumed {
+                token: 2,
+                on_top: true
+            }));
+            s.get_mut(2).unwrap().start_seq = 3;
+            let mut attached = Vec::new();
+            s.report_top_resumed(&mut attached);
+            assert_eq!(
+                attached,
+                [TopResumed {
+                    token: 2,
+                    on_top: true
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn a_finishing_or_removed_initial_activity_is_not_restarted() {
+        for removed in [false, true] {
+            let mut s = Stack::default();
+            launch_new(&mut s, 1, 7, "A", 0);
+            s.get_mut(1).unwrap().finishing = !removed;
+            let commands = s.process_died(1, removed);
+            assert!(s.get(1).is_none());
+            assert!(commands.contains(&TaskEmpty(7)));
+            assert!(!commands.contains(&Launch(1)));
+        }
+    }
+
+    #[test]
+    fn an_initial_activity_in_a_hidden_task_waits_until_visible_to_restart() {
+        let mut s = Stack::default();
+        launch_new(&mut s, 1, 7, "A", 0);
+        let mut b = activity(2, 8, "B", 0);
+        b.start_seq = 2;
+        s.apply(
+            &Decision::default(),
+            Then::Add(b, Some(task(8, "B", None))),
+            None,
+            true,
+        );
+        s.paused(1);
+        assert!(!s.process_died(1, false).contains(&Launch(1)));
+        assert_eq!(s.get(1).unwrap().start_seq, 0);
+        s.get_mut(2).unwrap().never_resumed = false;
+        assert!(s.process_died(2, false).contains(&Launch(1)));
     }
 
     #[test]
