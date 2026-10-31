@@ -610,8 +610,10 @@ creates BootReceiver's tracefs instance; synthesized instance controls and the
 Its `trace_pipe` has no host event producer: nonblocking reads return EAGAIN,
 blocking descriptors remain unreadable to poll/epoll, and open pipes prevent
 instance removal with EBUSY, including dup/fork lifetimes. Host syscall checks
-pass; NDK execution and guest boot remain unverified. Receiver delivery/finish
-and linkage were checked without a boot; unserved framework services and
+pass. Top-level `tracing_on` retains `0\n`, while new instances start at `1\n`;
+host openat/read regressions cover both tracing paths and instance defaults
+(2026-10-31). NDK tests cannot run in this sandbox; guest boot remains unverified.
+Receiver delivery/finish and linkage were checked without a boot; unserved framework services and
 providers remain explicit UnsupportedOperation.
 The app host's domain-verification front end keeps verifier-status persistence native and handles URI group set/get with original Java permission, Bundle, validation and conversion helpers over runtime-only native state; paired host tests, pinned-image linkage and a fresh-data app-host boot pass (#1763). Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun). Its `pm` and `cmd domain_verification` shell routes now serve all DomainVerificationShell verbs (#2187), retaining the original internal permission checks and parser. `set-app-links` and `reset-app-links` use the durable native writer; `verify-app-links` selects default/re-verify eligibility from native attached state and sends through the existing domain owner's selected original verifier proxy. The original modern proxy builds the domain-verification request broadcast; the original unavailable proxy handles an absent verifier. Host tests cover eligibility, filtering, state writes and delivery errors; pinned Java methods, exact shell output and the original modern proxy/request path over recorded JVM boundaries pass without a guest boot. Android 16's verification package argument is positional; `--package` retains the original unknown-option error.
 Telecom is loaded in the system process: TelecomLoaderService's part

@@ -108,6 +108,7 @@ pub(super) fn node(tail: &str) -> Option<Node> {
         }
         "instances" if tail == rest => Node::Dir(Vec::new()),
         "trace_pipe" | "trace_marker" => Node::File(Vec::new()),
+        "tracing_on" if tail == rest => Node::File(b"0\n".to_vec()),
         "tracing_on" => Node::File(b"1\n".to_vec()),
         "buffer_size_kb" => Node::File(b"7\n".to_vec()),
         "trace_options" => Node::File(b"\n".to_vec()),
@@ -203,6 +204,57 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    fn read_control(path: &str, expected: &[u8]) {
+        let path = CString::new(path).unwrap();
+        let fd = fs::openat([
+            vfs::LINUX_AT_FDCWD as u64,
+            path.as_ptr() as u64,
+            0o2000000,
+            0,
+            0,
+            0,
+        ]);
+        assert!(fd >= 0, "open {path:?}: {fd}");
+        let mut bytes = [0u8; 64];
+        let count = fs::read([fd as u64, bytes.as_mut_ptr() as u64, 64, 0, 0, 0]);
+        let mut byte = 0u8;
+        let eof = fs::read([fd as u64, &mut byte as *mut _ as u64, 1, 0, 0, 0]);
+        assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(count, expected.len() as i64, "read {path:?}");
+        assert_eq!(&bytes[..expected.len()], expected, "content {path:?}");
+        assert_eq!(eof, 0, "EOF {path:?}");
+    }
+
+    #[test]
+    fn top_level_tracing_on() {
+        if fdtab::isolated_kernel_test("sys::tracefs::tests::top_level_tracing_on") {
+            return;
+        }
+        let (_view, root) = vfs::test_view();
+        let host = root.join("tracefs-sys");
+        std::fs::create_dir_all(&host).unwrap();
+        vfs::add_mount("/sys", host.clone(), vfs::Area::Kernfs, "sysfs", "sysfs").unwrap();
+        for root in [ROOT, "/sys/kernel/debug/tracing"] {
+            let marker = CString::new(format!("{root}/trace_marker")).unwrap();
+            let fd = fs::openat([
+                vfs::LINUX_AT_FDCWD as u64,
+                marker.as_ptr() as u64,
+                0o2000001,
+                0,
+                0,
+                0,
+            ]);
+            assert!(fd >= 0, "open {marker:?}: {fd}");
+            assert_eq!(
+                fs::write([fd as u64, b"E|1".as_ptr() as u64, 3, 0, 0, 0]),
+                3
+            );
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+            read_control(&format!("{root}/tracing_on"), b"0\n");
+        }
+        std::fs::remove_dir_all(host).unwrap();
+    }
+
     #[test]
     fn tracefs_instances() {
         if fdtab::isolated_kernel_test("sys::tracefs::tests::tracefs_instances") {
@@ -220,6 +272,7 @@ mod tests {
         let make = || fsops::mkdirat([cwd, path("").as_ptr() as u64, 0o700, 0, 0, 0]);
         assert_eq!(make(), 0);
         assert_eq!(make(), -(errno::EEXIST as i64));
+        read_control(path("/tracing_on").to_str().unwrap(), b"1\n");
         let stat = procfs::stat(path("").to_str().unwrap(), true)
             .unwrap()
             .unwrap();
