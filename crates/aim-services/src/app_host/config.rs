@@ -9,7 +9,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use aim_binder_host::parcel::Parcel;
-use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 #[cfg(test)]
 use super::display::Display;
@@ -215,6 +215,154 @@ impl WriteParcelable for Configuration {
         ] {
             p.write_i32(v);
         }
+    }
+}
+
+impl ReadParcelable for Configuration {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
+        let mut c = unset();
+        c.font_scale = r.read_f32()?;
+        c.mcc = r.read_i32()?;
+        c.mnc = r.read_i32()?;
+        if r.read_i32()? == 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        c.locales = r.read_string8()?.unwrap_or_default();
+        c.user_set_locale = r.read_i32()? == 1;
+        for field in [
+            &mut c.touchscreen,
+            &mut c.keyboard,
+            &mut c.keyboard_hidden,
+            &mut c.hard_keyboard_hidden,
+            &mut c.navigation,
+            &mut c.navigation_hidden,
+            &mut c.orientation,
+            &mut c.screen_layout,
+            &mut c.color_mode,
+            &mut c.ui_mode,
+            &mut c.screen_width_dp,
+            &mut c.screen_height_dp,
+            &mut c.smallest_screen_width_dp,
+            &mut c.density_dpi,
+            &mut c.compat_screen_width_dp,
+            &mut c.compat_screen_height_dp,
+            &mut c.compat_smallest_screen_width_dp,
+        ] {
+            *field = r.read_i32()?;
+        }
+        let rect =
+            |r: &mut aim_binder_host::parcel::Reader<'_>| -> aim_binder_host::parcel::Result<Rect> {
+                Ok(Rect {
+                    left: r.read_i32()?,
+                    top: r.read_i32()?,
+                    right: r.read_i32()?,
+                    bottom: r.read_i32()?,
+                })
+            };
+        c.window.bounds = rect(r)?;
+        c.window.app_bounds = if r.read_i32()? != 0 {
+            Some(rect(r)?)
+        } else {
+            None
+        };
+        c.window.max_bounds = rect(r)?;
+        for field in [
+            &mut c.window.windowing_mode,
+            &mut c.window.activity_type,
+            &mut c.window.always_on_top,
+            &mut c.window.rotation,
+            &mut c.window.display_rotation,
+            &mut c.assets_seq,
+            &mut c.seq,
+            &mut c.font_weight_adjustment,
+            &mut c.grammatical_gender,
+        ] {
+            *field = r.read_i32()?;
+        }
+        Ok(c)
+    }
+}
+
+impl Configuration {
+    /// Persistent updates use `Configuration.updateFrom`'s undefined values.
+    /// ATMS explicitly clears windowConfiguration and assigns its own seq.
+    /// Fields owned by display/input/other services must never disappear silently.
+    pub fn merge_persistent(&self, d: &Self) -> Result<Self, aim_binder_host::parcel::Exception> {
+        let unsupported = |field| {
+            aim_binder_host::parcel::Exception::new(
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+                format!("persistent Configuration change of {field} is not implemented (#2555)"),
+            )
+        };
+        macro_rules! check {
+            ($($field:ident = $undefined:expr),* $(,)?) => {$(
+                if d.$field != $undefined && d.$field != self.$field {
+                    return Err(unsupported(stringify!($field)));
+                }
+            )*};
+        }
+        check!(
+            mcc = 0,
+            mnc = 0,
+            touchscreen = 0,
+            keyboard = 0,
+            keyboard_hidden = 0,
+            hard_keyboard_hidden = 0,
+            navigation = 0,
+            navigation_hidden = 0,
+            orientation = 0,
+            screen_width_dp = 0,
+            screen_height_dp = 0,
+            smallest_screen_width_dp = 0,
+            density_dpi = 0,
+            compat_screen_width_dp = 0,
+            compat_screen_height_dp = 0,
+            compat_smallest_screen_width_dp = 0,
+            assets_seq = 0,
+            font_weight_adjustment = i32::MAX,
+            grammatical_gender = -1
+        );
+        for (name, delta, old, masks) in [
+            (
+                "screen_layout",
+                d.screen_layout,
+                self.screen_layout,
+                &[0xf, 0x30, 0x300][..],
+            ),
+            ("color_mode", d.color_mode, self.color_mode, &[0x3, 0xc][..]),
+            ("ui_mode", d.ui_mode, self.ui_mode, &[0xf, 0x30][..]),
+        ] {
+            if masks.iter().any(|m| delta & m != 0 && delta & m != old & m) {
+                return Err(unsupported(name));
+            }
+        }
+        let mut c = self.clone();
+        if d.screen_layout != 0 {
+            c.screen_layout = (c.screen_layout & !SCREENLAYOUT_COMPAT_NEEDED)
+                | (d.screen_layout & SCREENLAYOUT_COMPAT_NEEDED);
+        }
+        if d.font_scale > 0.0 {
+            c.font_scale = d.font_scale;
+        }
+        if !d.locales.is_empty() {
+            if d.locales.split(',').next() != c.locales.split(',').next() {
+                c.screen_layout = (c.screen_layout & !SCREENLAYOUT_LAYOUTDIR_MASK)
+                    | if crate::locale::right_to_left(&d.locales) {
+                        SCREENLAYOUT_LAYOUTDIR_RTL
+                    } else {
+                        SCREENLAYOUT_LAYOUTDIR_LTR
+                    };
+            }
+            c.locales = d.locales.clone();
+        }
+        let direction = d.screen_layout & SCREENLAYOUT_LAYOUTDIR_MASK;
+        if direction != 0 {
+            c.screen_layout = (c.screen_layout & !SCREENLAYOUT_LAYOUTDIR_MASK) | direction;
+        }
+        c.user_set_locale |= d.user_set_locale;
+        Ok(c)
     }
 }
 
@@ -783,7 +931,13 @@ impl Configuration {
             CONFIG_GRAMMATICAL_GENDER,
         );
         if self.locales != newer.locales {
-            changed |= CONFIG_LOCALE | CONFIG_LAYOUT_DIRECTION;
+            changed |= CONFIG_LOCALE;
+            if self.locales.split(',').next() != newer.locales.split(',').next() {
+                changed |= CONFIG_LAYOUT_DIRECTION;
+            }
+        }
+        if !self.user_set_locale && newer.user_set_locale {
+            changed |= CONFIG_LOCALE;
         }
         changed
     }

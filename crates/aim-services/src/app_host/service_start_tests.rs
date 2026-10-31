@@ -220,7 +220,9 @@ fn attach_preserves_pending_order_and_unbound_services_create_then_stop() {
                     data: path.into(),
                     compat: Default::default(),
                     settings: Default::default(),
-                    locales: "en-US".into(),
+                    locales: Mutex::new(super::super::persistent_configuration::Locales::new(
+                        "en-US".into()
+                    )),
                     serial: String::new(),
                     device_density: 320,
                     shared_memory: Default::default(),

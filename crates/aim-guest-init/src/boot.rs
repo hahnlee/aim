@@ -1383,7 +1383,7 @@ impl Boot {
     /// Sets a property for the host, as init sets one, and runs its
     /// triggers.
     fn set_host_property(&mut self, name: &str, value: &str) {
-        if let Err(error) = self.executor.set_property(name, value) {
+        if let Err(error) = self.executor.set_host_property(name, value) {
             self.report.log.push(format!("{name}={value}: {error}"));
         }
         self.pump_outbox();

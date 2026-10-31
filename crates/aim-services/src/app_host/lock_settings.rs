@@ -645,7 +645,7 @@ impl LockSettings {
             ));
         }
         let path = self.host.data()?.join("system/locksettings.db");
-        let locale = self.host.inputs()?.locales.clone();
+        let locale = self.host.inputs()?.locale_tags();
         let disabled = super::system_boolean(
             self.host
                 .property("ro.lockscreen.disable.default")
@@ -838,7 +838,7 @@ impl LockSettings {
     fn check_recovery_agent(&self, uid: i32) -> Result<(Connection, PathBuf), Exception> {
         self.enforce_recover_keystore(uid)?;
         let path = self.host.data()?.join("system/recoverablekeystore.db");
-        let locale = self.host.inputs()?.locales.clone();
+        let locale = self.host.inputs()?.locale_tags();
         let db = open_keystore(&path, &locale).map_err(|e| db_error(&path, e))?;
         // `CleanupManager.registerRecoveryAgent`: a user whose serial
         // number is not stored yet gets it, if the user exists.

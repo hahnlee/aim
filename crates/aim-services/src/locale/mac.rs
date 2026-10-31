@@ -16,6 +16,7 @@ aim_hostcall::dylib! {
     static CORE_FOUNDATION = c"/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" {
         static kCFPreferencesAnyApplication: CFTypeRef;
         static kCFLocaleCurrentLocaleDidChangeNotification: CFTypeRef;
+        fn CFLocaleGetLanguageCharacterDirection(language: CFTypeRef) -> isize;
         fn CFLocaleCopyPreferredLanguages() -> CFTypeRef;
         fn CFPreferencesAppSynchronize(app: CFTypeRef) -> bool;
         fn CFPreferencesCopyAppValue(key: CFTypeRef, app: CFTypeRef) -> CFTypeRef;
@@ -196,5 +197,19 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "no change heard");
         }
+    }
+}
+
+/// CoreFoundation resolves the locale's likely script, including explicit script tags.
+pub(crate) fn right_to_left(tags: &str) -> bool {
+    let Ok(tag) = std::ffi::CString::new(tags.split(',').next().unwrap_or_default()) else {
+        return false;
+    };
+    // SAFETY: a valid C string; release the copied CFString after querying it.
+    unsafe {
+        let language = CFStringCreateWithCString(std::ptr::null(), tag.as_ptr(), UTF8);
+        let direction = CFLocaleGetLanguageCharacterDirection(language);
+        CFRelease(language);
+        direction == 2
     }
 }

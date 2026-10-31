@@ -2196,7 +2196,7 @@ impl ShortcutManager {
     /// `ShortcutUser.onCalledByPublisher`: `detectLocaleChange`, then
     /// `rescanPackageIfNeeded(package, false)`.
     fn on_called_by_publisher(&self, user: &User, package: &str) -> Result<(), Exception> {
-        let locales = self.host.inputs()?.locales.clone();
+        let locales = self.host.inputs()?.locale_tags();
         if user
             .root
             .string("locales")

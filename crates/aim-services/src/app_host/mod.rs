@@ -133,6 +133,7 @@ pub mod package_bootstrap;
 mod package_checksums;
 mod package_domain_settings;
 mod package_effects;
+mod persistent_configuration;
 #[cfg(test)]
 pub(crate) use package_effects::PackageEffects;
 mod package_enable;
@@ -379,7 +380,7 @@ struct Platform {
     compat: compat::CompatConfig,
     settings: settings::Settings,
     /// `persist.sys.locale`.
-    locales: String,
+    locales: Mutex<persistent_configuration::Locales>,
     /// `ro.serialno`, the serial of apps targeting an SDK before P.
     serial: String,
     /// `ro.sf.lcd_density`, the processes' `DisplayMetrics.DENSITY_DEVICE`.
@@ -573,6 +574,7 @@ pub struct AppHost {
     published: Mutex<Vec<(String, Binder)>>,
     /// The global configuration's sequence number.
     config_seq: AtomicI64,
+    configuration_update: Mutex<()>,
     /// GrammaticalInflectionService's `mGrammaticalGenderCache`: each
     /// user's system grammatical gender, read from its file once.
     grammatical_genders: Mutex<HashMap<i32, i32>>,
@@ -720,6 +722,7 @@ impl AppHost {
             instrumentation: instrumentation::State::default(),
             published: Mutex::new(Vec::new()),
             config_seq: AtomicI64::new(1),
+            configuration_update: Mutex::new(()),
             grammatical_genders: Mutex::new(HashMap::new()),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             unlocked_users: Mutex::new(Default::default()),
@@ -1322,7 +1325,9 @@ impl AppHost {
             data: configured.data.clone(),
             compat,
             settings,
-            locales: property("persist.sys.locale")?,
+            locales: Mutex::new(persistent_configuration::Locales::new(property(
+                "persist.sys.locale",
+            )?)),
             serial: property("ro.serialno").unwrap_or_else(|_| "unknown".into()),
             device_density: number("ro.sf.lcd_density")?,
             shared_memory: OnceLock::new(),
@@ -1351,7 +1356,7 @@ impl AppHost {
         let framework = resources::Framework(resources::configure_platform(
             image.clone(),
             platform.device_density,
-            &platform.locales,
+            &platform.locale_tags(),
         ));
         Ok(self.framework.get_or_init(|| framework))
     }
@@ -4260,11 +4265,12 @@ impl AppHost {
     fn global_configuration(&self) -> Result<config::Configuration, Exception> {
         let inputs = self.platform()?;
         let metrics = self.display_metrics()?;
-        Ok(config::Configuration::of_metrics(
+        let locales = inputs.locales.lock().unwrap().clone();
+        let mut configuration = config::Configuration::of_metrics(
             &metrics,
             &config::Device {
-                locales: &inputs.locales,
-                right_to_left: false,
+                locales: &locales.tags,
+                right_to_left: locales.direction == 0x80,
                 night: crate::uimode::mac::dark(),
                 font_scale: inputs
                     .settings
@@ -4279,7 +4285,12 @@ impl AppHost {
                 grammatical_gender: grammatical_inflection::merged_final(self)?,
                 seq: self.config_seq.load(Ordering::Relaxed) as i32,
             },
-        ))
+        );
+        configuration.user_set_locale = locales.user_set;
+        if let Some(compat) = locales.compat {
+            configuration.screen_layout = (configuration.screen_layout & !0x1000_0000) | compat;
+        }
+        Ok(configuration)
     }
 
     /// `ActivityTaskManagerService.updateGlobalConfigurationLocked` once
@@ -4289,22 +4300,30 @@ impl AppHost {
     /// (`RootWindowContainer.onConfigurationChanged`), and the
     /// broadcasts `broadcastGlobalConfigurationChanged` sends.
     fn update_global_configuration(&self) -> Result<(), Exception> {
+        let _update = self.configuration_update.lock().unwrap();
+        let old = self
+            .apps
+            .lock()
+            .unwrap()
+            .values()
+            .find_map(|a| a.config.clone());
+        match old {
+            Some(old) => self.propagate_configuration(&old, &[]),
+            None => Ok(()),
+        }
+    }
+
+    fn propagate_configuration(
+        &self,
+        old: &config::Configuration,
+        settings_changes: &[&str],
+    ) -> Result<(), Exception> {
         const FLAG_RECEIVER_REGISTERED_ONLY: i32 = 0x4000_0000;
         const FLAG_RECEIVER_REPLACE_PENDING: i32 = 0x2000_0000;
         const FLAG_RECEIVER_FOREGROUND: i32 = 0x1000_0000;
         const FLAG_RECEIVER_INCLUDE_BACKGROUND: i32 = 0x0100_0000;
         const FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS: i32 = 0x0020_0000;
         const FLAG_RECEIVER_OFFLOAD_FOREGROUND: i32 = 0x0000_0800;
-        let Some(old) = self
-            .apps
-            .lock()
-            .unwrap()
-            .values()
-            .find_map(|a| a.config.clone())
-        else {
-            // No process was bound with one: the next is bound with the new.
-            return Ok(());
-        };
         let changes = old.diff(&self.global_configuration()?);
         if changes == 0 {
             return Ok(());
@@ -4354,6 +4373,11 @@ impl AppHost {
         for (start_seq, items) in by_start {
             if let Err(e) = self.schedule(start_seq, items) {
                 eprintln!("app host: activities of start {start_seq}: {e}");
+            }
+        }
+        if let Some((provider, ..)) = self.settings_provider.get() {
+            for name in settings_changes {
+                provider.notify(settings::Table::System, 0, name)?;
             }
         }
         let flags = FLAG_RECEIVER_REGISTERED_ONLY
@@ -5034,6 +5058,44 @@ impl Service for Activity {
                         .map(|sender| {
                             let mut p = Parcel::new();
                             am::write_get_intent_sender_with_feature_reply(&mut p, sender);
+                            p
+                        }),
+                )
+            }
+            am::GET_CONFIGURATION => {
+                am::GetConfiguration::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.global_configuration().map(|mut c| {
+                    c.user_set_locale = false; // ATMS.getConfiguration returns a delta-safe copy.
+                    let mut p = Parcel::new();
+                    am::write_get_configuration_reply(&mut p, Some(&c));
+                    p
+                }))
+            }
+            am::UPDATE_PERSISTENT_CONFIGURATION
+            | am::UPDATE_PERSISTENT_CONFIGURATION_WITH_ATTRIBUTION => {
+                let (values, attribution) = if call.code == am::UPDATE_PERSISTENT_CONFIGURATION {
+                    let a = am::UpdatePersistentConfiguration::<config::Configuration>::read(
+                        &mut call.data,
+                    )
+                    .map_err(|_| BAD_VALUE)?;
+                    (a.values, None)
+                } else {
+                    let a = am::UpdatePersistentConfigurationWithAttribution::<config::Configuration>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    (
+                        a.values,
+                        Some((a.calling_package_name, a.calling_attribution_tag)),
+                    )
+                };
+                reply(
+                    self.0
+                        .update_persistent_configuration(
+                            call.sender_euid as i32,
+                            values,
+                            attribution,
+                        )
+                        .map(|()| {
+                            let mut p = Parcel::new();
+                            am::write_update_persistent_configuration_reply(&mut p);
                             p
                         }),
                 )
@@ -5981,6 +6043,19 @@ impl Service for Control {
                 if let Err(e) = host.system_ready() {
                     return eprintln!("app host: system ready: {e:?}");
                 }
+                let weak = Arc::downgrade(&host);
+                crate::locale::start_native(move |tags| {
+                    if let Some(host) = weak.upgrade()
+                        && let Err(e) =
+                            host.apply_persistent_configuration(&config::Configuration {
+                                locales: tags,
+                                user_set_locale: true,
+                                ..config::Configuration::from_proto(&[]).unwrap()
+                            })
+                    {
+                        eprintln!("locale: native update: {}", e.message);
+                    }
+                });
                 if let Err(e) = host.start_app_standby() {
                     return eprintln!("app host: app standby: {}", e.message);
                 }
@@ -6103,7 +6178,16 @@ pub(crate) fn configure_boot_test_host(
     runtime: &Path,
     properties: Properties,
 ) {
-    let properties = Arc::new(properties);
+    let values = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let saved = values.clone();
+    let properties = Arc::new(move |name: &str| {
+        values
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .or_else(|| properties(name))
+    });
     let read = properties.clone();
     host.configure(
         root,
@@ -6112,7 +6196,9 @@ pub(crate) fn configure_boot_test_host(
         runtime,
         Box::new(move |name| read(name)),
         Box::new(move |name, value, _| Ok(properties(name).as_deref() == Some(value))),
-        Box::new(|_, _| {}),
+        Box::new(move |name, value| {
+            saved.lock().unwrap().insert(name.into(), value.into());
+        }),
         Box::new(|| Err(std::io::Error::other("no zygote"))),
     )
     .unwrap();

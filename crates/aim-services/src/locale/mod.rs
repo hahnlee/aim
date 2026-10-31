@@ -15,6 +15,7 @@ use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::dev_aim_server_ibridge as ib;
 
 pub use mac::preferred_locales;
+pub(crate) use mac::right_to_left;
 
 use crate::system::System;
 
@@ -260,4 +261,27 @@ mod tests {
         assert_eq!(update(&mut last, Vec::new(), true), None);
         assert_eq!(update(&mut last, strings(&["ja-JP", "ko-KR"]), false), None);
     }
+}
+
+/// App-host counterpart of the bridge receiver: same Mac-list comparison,
+/// same configuration owner as Android's persistent updates.
+pub(crate) fn start_native(apply: impl Fn(String) + Send + 'static) {
+    let (events, received) = mpsc::channel();
+    mac::watch(Box::new(move || {
+        let _ = events.send(());
+    }));
+    std::thread::Builder::new()
+        .name("locale".into())
+        .spawn(move || {
+            let mut last = Vec::new();
+            if let Some(tags) = update(&mut last, preferred_locales(), true) {
+                apply(tags);
+            }
+            for () in received {
+                if let Some(tags) = update(&mut last, preferred_locales(), false) {
+                    apply(tags);
+                }
+            }
+        })
+        .expect("spawn the native locale thread");
 }

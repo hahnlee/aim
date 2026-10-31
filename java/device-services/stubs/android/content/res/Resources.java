@@ -15,6 +15,7 @@ public class Resources {
     public boolean getBoolean(int id) { throw new RuntimeException("stub"); }
     public String[] getStringArray(int id) { throw new RuntimeException("stub"); }
     public int getInteger(int id) { throw new RuntimeException("stub"); }
+    public AssetManager getAssets() { throw new RuntimeException("stub"); }
     public Configuration getConfiguration() { throw new RuntimeException("stub"); }
     public int getDimensionPixelSize(int id) { throw new RuntimeException("stub"); }
     public float getFloat(int id) { throw new RuntimeException("stub"); }

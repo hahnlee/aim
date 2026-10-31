@@ -183,9 +183,6 @@ impl NativeServices {
             &[&clipboard::APP_OPS[..], &location::APP_OPS[..]].concat(),
         );
         let settings = settings::Settings::new(process.clone(), system.clone());
-        // The device's languages follow the Mac's, whichever services are
-        // native.
-        locale::start(process.clone(), &system);
         // First, so system_server finds it whichever services are native.
         let mut services = vec![(
             SERVICE_HOST.to_string(),
@@ -268,6 +265,9 @@ impl NativeServices {
             system.set_window_manager_internal(Box::new(move |uid| {
                 host.upgrade().is_some_and(|h| h.uid_focused(uid))
             }));
+        }
+        if app_host.is_none() {
+            locale::start(process.clone(), &system);
         }
         process.start();
         Ok(Self {
