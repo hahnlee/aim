@@ -449,6 +449,18 @@ signal or exit record, then kills the returned PID as an invalid start. PID look
 exclude pending records; running-app listings require a thread, isolated-process
 queries retain PID 0. Host race, kill/force-stop and listing tests pass; no guest
 boot was run (2026-10-31). AudioPolicy's load time fell from 3.3–3.8 s to 2.6–2.8 s (2026-10-29).
+The resident's window-mode shim keeper starts only after user readiness: user 0
+unlocking/unlocked in the app host, or `sys.boot_completed` in full Android
+(#2522). Existing bundles survive startup; the deferred initial scan reconciles
+them or creates fresh shims, then retains the package/host watch. Readiness and
+shim create/update/keep/remove checks pass (51 host tests). Three alternating
+warm pairs reduce median pre-scan-release keeper CPU from 2.326 s to zero;
+median boot completion is 7.206/6.781 s before/after, with mixed paired changes.
+Two empty-data pairs have median boot completion 13.395/12.822 s and keeper
+CPU 3.656/0 s. Settled shim sync moves from 4.708/9.680 s warm and
+9.623/19.156 s fresh; existing warm bundles remain available. All five paired
+final bundle sets match, including a pre-existing fresh Camera component-state
+watch gap; this is baseline equivalence, not full launcher parity (2026-10-31).
 Package boot now shares immutable image inputs across scanning, initial projection
 and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s

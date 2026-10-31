@@ -14,7 +14,6 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::program;
 use crate::state::{self, Files, State};
 
 /// How long the display server may take to open its socket.
@@ -458,16 +457,29 @@ fn sweep_memfds(inputs: &crate::inputs::Inputs, deadline: Instant) -> Result<(),
     }
 }
 
+fn start_shims_when_ready(
+    files: &Files,
+    state: &State,
+    app_host: bool,
+    children: &mut Children,
+) -> Result<bool, String> {
+    if !crate::guest::Guest::of(files, state).is_some_and(|g| g.booted(app_host)) {
+        return Ok(false);
+    }
+    children.0.push(
+        Command::new(state.inputs.program("aim-apps"))
+            .args(shims_args(files, files.is_default(), &state.inputs))
+            .spawn()
+            .map_err(|e| format!("aim-apps: {e}"))?,
+    );
+    Ok(true)
+}
+
 fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
     let mut children = Children(vec![start_display(files, state.windows, &state.inputs)?]);
-    if state.windows {
-        children.0.push(
-            Command::new(program("aim-apps"))
-                .args(shims_args(files, files.is_default(), &state.inputs))
-                .spawn()
-                .map_err(|e| format!("aim-apps: {e}"))?,
-        );
-    }
+    let app_host = state.inputs.app_host_services()?.is_some();
+    let mut shims_pending = state.windows;
+    let mut shims_check = Instant::now();
     let mut guest = Command::new(state.inputs.program("guest-init"))
         .args(guest_init_args(files, &state.inputs)?)
         .spawn()
@@ -477,6 +489,7 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
     state.guest = Some(guest.id());
     state.write(&files.state())?;
     let mut stopping: Option<Instant> = None;
+    let mut shims_error = None;
     let status = loop {
         if let Some(status) = guest.try_wait().map_err(|e| e.to_string())? {
             break status;
@@ -496,6 +509,21 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
                 let _ = guest.kill();
             }
             _ => {}
+        }
+        // Existing bundles survive a stop. Reconcile them (or create fresh
+        // ones) only after user readiness, which follows the app host's
+        // package scan and default grants, rather than scanning beside it.
+        if stopping.is_none() && shims_pending && Instant::now() >= shims_check {
+            match start_shims_when_ready(files, state, app_host, &mut children) {
+                Ok(started) => shims_pending = !started,
+                Err(error) => {
+                    shims_error = Some(error);
+                    // SAFETY: stop our unreaped guest before normal cleanup.
+                    unsafe { libc::kill(guest.id() as i32, libc::SIGTERM) };
+                    stopping = Some(Instant::now());
+                }
+            }
+            shims_check = Instant::now() + Duration::from_secs(1);
         }
         std::thread::sleep(Duration::from_millis(100));
     };
@@ -522,6 +550,9 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
     }
     if !status.success() {
         return Err(format!("guest-init stopped with {status}"));
+    }
+    if let Some(error) = shims_error {
+        return Err(error);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -827,6 +858,128 @@ fn end_run_owned(lock: &Path, owner: ProcessIdentity, patience: Duration) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeper_waits_for_user_readiness_and_then_keeps_watching() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            aim_paths::root().join(format!("target/aimctl-keeper-test-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let files = Files::of(&root.join("data")).unwrap();
+        let mut state = State {
+            pid: std::process::id(),
+            guest: Some(42),
+            windows: true,
+            started: 0,
+            inputs: crate::inputs::Inputs {
+                host_runtime: root.clone(),
+                ..Default::default()
+            },
+        };
+        let executable = root.join("linux-run");
+        let write_script = |path: &Path, text: &str| {
+            fs::write(path, text).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_script(
+            &root.join("aim-apps"),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/keeper-args\"\n",
+        );
+        let ready = |unlocked: bool| {
+            write_script(
+                &executable,
+                &format!(
+                    "#!/bin/sh\ncase \"$*\" in\n*'/system/bin/service call user {} i32 0') echo \"Result: Parcel(00000000 {:08x} '........')\" ;;\n*sys.boot_completed) echo 1 ;;\n*) exit 1 ;;\nesac\n",
+                    aim_service_aidl::android_os_iusermanager::IS_USER_UNLOCKING_OR_UNLOCKED,
+                    i32::from(unlocked)
+                ),
+            );
+        };
+        let mut children = Children(Vec::new());
+        ready(true);
+        assert!(!start_shims_when_ready(&files, &state, true, &mut children).unwrap());
+        fs::create_dir_all(files.path_map().parent().unwrap()).unwrap();
+        fs::write(files.path_map(), "fixture").unwrap();
+        // A previous run's shims and package list cannot release the keeper.
+        fs::create_dir_all(files.apps()).unwrap();
+        fs::write(files.apps().join("existing"), "preserved").unwrap();
+        fs::create_dir_all(files.guest_data().join("system")).unwrap();
+        fs::write(files.guest_data().join("system/packages.list"), "old").unwrap();
+        ready(false);
+        assert!(!start_shims_when_ready(&files, &state, true, &mut children).unwrap());
+        assert!(children.0.is_empty());
+        assert!(!root.join("keeper-args").exists());
+        assert_eq!(
+            fs::read_to_string(files.apps().join("existing")).unwrap(),
+            "preserved"
+        );
+        ready(true);
+        assert!(start_shims_when_ready(&files, &state, true, &mut children).unwrap());
+        assert!(children.0[0].wait().unwrap().success());
+        let args = fs::read_to_string(root.join("keeper-args")).unwrap();
+        assert!(args.lines().any(|a| a == "--watch"));
+        assert!(
+            args.lines()
+                .any(|a| a == files.guest_data().to_str().unwrap())
+        );
+        // Full Android boots retain their boot-completed readiness signal.
+        ready(false);
+        assert!(start_shims_when_ready(&files, &state, false, &mut children).unwrap());
+        assert!(children.0[1].wait().unwrap().success());
+        fs::remove_file(root.join("aim-apps")).unwrap();
+        state.guest = None;
+        assert!(!start_shims_when_ready(&files, &state, false, &mut children).unwrap());
+        state.guest = Some(42);
+        assert!(start_shims_when_ready(&files, &state, false, &mut children).is_err());
+        drop(children);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shim_reconciliation_creates_updates_keeps_and_removes_bundles() {
+        use aim_apps::{apk::Apk, installed::Installed, shim};
+        let clock = "product/app/PrebuiltDeskClockGoogle/PrebuiltDeskClockGoogle.apk";
+        let image = aim_paths::original_image_with(clock).expect("pinned Clock APK");
+        let framework = Apk::open(&image.join("system/framework/framework-res.apk")).unwrap();
+        let apk_path = image.join(clock);
+        let apk = Apk::open(&apk_path).unwrap();
+        let app = aim_apps::app::read(&apk, Some(&framework), None)
+            .unwrap()
+            .remove(0);
+        let root = aim_paths::root().join(format!(
+            "target/aimctl-shim-sync-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let dir = root.join("apps");
+        let socket = root.join("display");
+        let host = aim_paths::root().join("target/release/aim-display");
+        let mut apps = vec![Installed { apk: apk_path, app }];
+        let sync = |apps: &[Installed]| {
+            shim::sync(&dir, apps, &framework, &socket, &host, Some("keeper-test")).unwrap()
+        };
+        let first = sync(&apps);
+        assert_eq!(first.written.len(), 1);
+        let bundle = dir.join(&first.written[0]);
+        let stamp = shim::stamp(&bundle).unwrap();
+        assert!(
+            !fs::read(bundle.join("Contents/Resources/AppIcon.icns"))
+                .unwrap()
+                .is_empty()
+        );
+        let plist = bundle.join("Contents/Info.plist");
+        let modified = fs::metadata(&plist).unwrap().modified().unwrap();
+        assert!(sync(&apps).written.is_empty());
+        assert_eq!(fs::metadata(&plist).unwrap().modified().unwrap(), modified);
+        // Model updated package metadata without changing the original APK.
+        apps[0].app.version += 1;
+        assert_eq!(sync(&apps).written, first.written);
+        assert_ne!(shim::stamp(&bundle).unwrap().version, stamp.version);
+        let last = sync(&[]);
+        assert_eq!(last.removed, first.written);
+        assert!(!bundle.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn strings(args: &[OsString]) -> Vec<&str> {
         args.iter().map(|a| a.to_str().unwrap()).collect()
