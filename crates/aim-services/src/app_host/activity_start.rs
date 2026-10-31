@@ -91,6 +91,8 @@ impl LaunchIntent {
 
 /// What starts an activity, in a process yet to start.
 pub struct StartRequest {
+    /// An existing activity detached from a dead process, retaining its token/task.
+    pub restart: Option<u64>,
     pub class: String,
     pub intent: LaunchIntent,
     pub referrer: String,
@@ -111,6 +113,7 @@ impl StartRequest {
     /// The launcher's start of `class`.
     pub fn launcher(class: &str) -> StartRequest {
         StartRequest {
+            restart: None,
             class: class.to_string(),
             intent: LaunchIntent::Component,
             referrer: "com.android.shell".into(),
@@ -394,6 +397,32 @@ impl AppHost {
         match command {
             Command::Launch(t) => {
                 let (start_seq, uid) = start_of(t).ok_or("no activity to launch")?;
+                if start_seq == 0 {
+                    let (package, process, request) = {
+                        let records = self.activities.records.lock().unwrap();
+                        let r = records.get(&t).ok_or("no activity to restart")?;
+                        (
+                            r.package.clone(),
+                            super::providers::process_name(&r.info.info),
+                            StartRequest {
+                                restart: Some(t),
+                                class: r.class.clone(),
+                                intent: r.intent.clone(),
+                                referrer: r.referrer.clone(),
+                                result_to: r.result_to,
+                                result_who: r.result_who.clone(),
+                                request_code: r.request_code,
+                                task: Some(r.task),
+                                source_task: None,
+                                grants: None,
+                            },
+                        )
+                    };
+                    return self
+                        .start_process_for(&package, &process, Some(request), false)
+                        .map(|_| ())
+                        .map_err(|e| e.message);
+                }
                 self.activity_usage(t, super::app_standby::Event::ActivityResumed);
                 let global = self.global_config(uid).ok_or("launch before bind")?;
                 let task = self
@@ -901,6 +930,7 @@ impl AppHost {
             }
         };
         let request = StartRequest {
+            restart: None,
             class,
             intent: LaunchIntent::Raw(Box::new(kept)),
             referrer: caller_package,

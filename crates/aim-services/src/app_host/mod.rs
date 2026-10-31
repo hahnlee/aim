@@ -2392,7 +2392,7 @@ impl AppHost {
             self.uid_changed(uid as i32, uid_observers::Change::Gone);
         }
         self.providers_process_died(start_seq);
-        let (gone, commands) = self.activities.remove_start(start_seq);
+        let (gone, commands) = self.activities.remove_start(start_seq, removed);
         for token in gone {
             self.cancel_activity_transition(token);
             self.release_uri_grants(uri_grants::Owner::Activity(token));
@@ -3146,13 +3146,16 @@ impl AppHost {
             .apps
             .lock()
             .unwrap()
-            .iter()
+            .iter_mut()
             .filter(|(_, app)| {
                 (user == USER_ALL || app.uid / PER_USER_RANGE == user as u32)
                     && (app.uid % PER_USER_RANGE == app_id as u32
                         || app.package_deps.iter().any(|name| name == package))
             })
-            .map(|(seq, _)| *seq)
+            .map(|(seq, app)| {
+                app.removed = true;
+                *seq
+            })
             .collect();
         let mut failure = None;
         let subreason = if exit_reason == exit_info::REASON_USER_REQUESTED {
@@ -3302,6 +3305,27 @@ impl AppHost {
         package: &str,
         request: activity_start::StartRequest,
     ) -> Result<(), Exception> {
+        if let Some(token) = request.restart {
+            let mut stack = self.activities.stack.lock().unwrap();
+            let mut records = self.activities.records.lock().unwrap();
+            let Some(a) = stack.get_mut(token).filter(|a| a.start_seq == 0) else {
+                return Ok(());
+            };
+            let Some(r) = records.get_mut(&token) else {
+                return Ok(());
+            };
+            a.start_seq = start_seq;
+            r.start_seq = start_seq;
+            r.started = Instant::now();
+            let mut commands = vec![activity_stack::Command::Launch(token)];
+            stack.report_top_resumed(&mut commands);
+            drop(records);
+            drop(stack);
+            if let Some(me) = self.me.upgrade() {
+                me.run(commands);
+            }
+            return Ok(());
+        }
         let info = self.activity_info_of(package, &request.class)?;
         let decision = activity_stack::Decision {
             outcome: activity_stack::Outcome::New(request.task),
