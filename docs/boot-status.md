@@ -158,6 +158,10 @@ guest-init --image <derived> --data <data> --run \
 SettingsProvider publishes `device_config` over its existing Config and sync-mode
 owners (#2531). Host Binder command/permission/state checks pass; full namespace
 and local-override enumeration remain explicitly unsupported. No guest/CTS/app run (2026-10-31).
+Allowlisted DeviceConfig writes now enforce the image's protection/API flags,
+pinned namespace/prefix/individual-flag lists and native package APEX namespace
+files, including override keys and whole RESET/SET_ALL batches (#1776). Host
+policy checks cover both image flag branches; no guest or CTS rerun (2026-10-31).
 
 ActivityManager serves core instrumentation sessions, process binding, results and
 watcher retirement (#2511; host regressions only, no guest/CTS/app run, 2026-10-31).
