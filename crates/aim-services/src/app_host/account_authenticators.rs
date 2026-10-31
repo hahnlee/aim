@@ -283,6 +283,7 @@ fn write_persisted(path: &Path, services: &[(String, i32)]) -> std::io::Result<(
             .collect(),
     };
     let bytes = aim_android_xml::abx::write(&root).map_err(std::io::Error::other)?;
+    std::fs::create_dir_all(path.parent().unwrap())?;
     let new = path.with_extension("xml.new");
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -387,10 +388,9 @@ mod tests {
     /// them read back.
     #[test]
     fn persisted_services_round_trip() {
-        let path = std::env::temp_dir().join(format!(
-            "aim-registered-services-{}.xml",
-            std::process::id()
-        ));
+        let data = aim_paths::scratch_dir("aim-registered-services");
+        let path = data.join(format!("system/users/0/registered_services/{ACTION}.xml"));
+        assert!(!path.parent().unwrap().exists());
         let services = vec![
             ("com.google".to_string(), 10144),
             ("com.google.android.gm.pop3".to_string(), 10156),
@@ -399,5 +399,6 @@ mod tests {
         assert_eq!(read_persisted(&path), services);
         std::fs::remove_file(&path).unwrap();
         assert!(read_persisted(&path).is_empty());
+        std::fs::remove_dir_all(data).unwrap();
     }
 }

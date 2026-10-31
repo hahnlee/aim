@@ -1452,6 +1452,45 @@ impl Service for AudioService {
                 })();
                 return reply(result);
             }
+            audio::GET_DEVICE_MASK_FOR_STREAM => {
+                let a =
+                    audio::GetDeviceMaskForStream::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply((|| {
+                    let stream_type = if a.stream_type == volume::STREAM_BLUETOOTH_SCO
+                        && host.flag("com.android.media.audio.replace_stream_bt_sco")?
+                    {
+                        volume::STREAM_VOICE_CALL
+                    } else {
+                        a.stream_type
+                    };
+                    use aim_service_aidl::dev_aim_server_iaudiopolicyqueries as queries;
+                    let owner = host
+                        .audio_policy_queries
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "audio policy queries not attached",
+                            )
+                        })?;
+                    let mut data = Parcel::new();
+                    queries::GetDeviceMaskForStream { stream_type }.write(&mut data);
+                    let result = owner
+                        .transact_as_owner(queries::GET_DEVICE_MASK_FOR_STREAM, &data, false)
+                        .map_err(|s| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                format!("audio policy query: {s:?}"),
+                            )
+                        })?;
+                    let mask = queries::read_get_device_mask_for_stream_reply(&mut result.reader())
+                        .map_err(|_| Exception::illegal_argument("audio policy query reply"))??;
+                    audio::write_get_device_mask_for_stream_reply(&mut p, mask);
+                    Ok(p)
+                })());
+            }
             audio::GET_DEVICES_FOR_ATTRIBUTES => {
                 let a = audio::GetDevicesForAttributes::<Attributes>::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

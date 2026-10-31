@@ -54,7 +54,7 @@ use crate::notifications::parcels::{
 };
 use crate::package::component_resolver::Info;
 use crate::package::info::flags::{GET_META_DATA, GET_SERVICES};
-use crate::package::intent::Intent;
+use crate::package::intent::{ComponentName, Intent};
 use crate::package::list_slice::{self, Slice};
 use crate::package::query::Query;
 
@@ -3084,6 +3084,44 @@ impl Service for NotificationManager {
             }
             nm::GET_ACTIVE_NOTIFICATIONS_FROM_LISTENER => reply(self.active_from_listener(call)),
             nm::CANCEL_NOTIFICATIONS_FROM_LISTENER => empty(self.cancel_from_listener(call)),
+            nm::IS_NOTIFICATION_LISTENER_ACCESS_GRANTED => {
+                let a =
+                    nm::IsNotificationListenerAccessGranted::<ComponentName>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                bool_reply((|| {
+                    let listener = a
+                        .listener
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
+                    self.check_system_or_same_app(uid, &listener.package)?;
+                    let user = uid / PER_USER_RANGE as i32;
+                    let guard = self.state()?;
+                    let policy = &guard.as_ref().unwrap().policy;
+                    let entries = if policy.children().any(|e| {
+                        matches!(
+                            e.name.as_str(),
+                            "enabled_listeners" | "enabled_assistants" | "dnd_apps"
+                        )
+                    }) {
+                        approved_listeners(policy, user)
+                    } else if user == USER_SYSTEM {
+                        // ManagedServices.migrateToXml, before any managed-service XML exists.
+                        self.host
+                            .inputs()?
+                            .settings
+                            .get(
+                                super::settings::Table::Secure,
+                                "enabled_notification_listeners",
+                            )
+                            .unwrap_or_default()
+                            .split(':')
+                            .map(str::to_owned)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(entries.contains(&format!("{}/{}", listener.package, listener.class)))
+                })())
+            }
             nm::IS_NOTIFICATION_POLICY_ACCESS_GRANTED => {
                 let a = nm::IsNotificationPolicyAccessGranted::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -3307,6 +3345,82 @@ mod tests {
             ["com.a/com.a.L", "com.b", "com.c/.L"]
         );
         assert_eq!(approved_listeners(&policy, 10), ["com.d/.L"]);
+    }
+
+    /// NMS null/ownership order and ManagedServices exact, per-user approval lookup.
+    #[test]
+    fn listener_access_checks_caller_and_approved_component() {
+        use super::super::{
+            resources::Framework,
+            settings::{Change, Table},
+        };
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            host.framework
+                .set(Framework::load(&aim_paths::derived_image(), 320, "en-US").unwrap())
+                .ok()
+                .unwrap();
+            let path = host.data().unwrap().join("system/notification_policy.xml");
+            let query = |manager: &NotificationManager, uid, package: Option<&str>, class: &str| {
+                let mut data = Parcel::new();
+                nm::IsNotificationListenerAccessGranted {
+                    listener: package.map(|package| ComponentName {
+                        package: package.into(),
+                        class: class.into(),
+                    }),
+                }
+                .write(&mut data);
+                let result = manager
+                    .transact(&mut Call {
+                        code: nm::IS_NOTIFICATION_LISTENER_ACCESS_GRANTED,
+                        flags: 0,
+                        sender_pid: 71,
+                        sender_euid: uid,
+                        data: data.reader(),
+                    })
+                    .unwrap();
+                nm::read_is_notification_listener_access_granted_reply(&mut result.reader())
+                    .unwrap()
+            };
+            std::fs::write(&path, "<notification-policy><zen version='12' user='0'/><enabled_listeners><service_listing approved='p/p.L:p:p/.Short' user='0' primary='false'/><service_listing approved='q/q.L' user='10' primary='true'/></enabled_listeners></notification-policy>").unwrap();
+            let manager = NotificationManager::new(host.clone());
+            assert_eq!(
+                query(&manager, 10100, None, "").unwrap_err().code,
+                EX_NULL_POINTER
+            );
+            assert_eq!(
+                query(&manager, 10100, Some("q"), "q.L").unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+            assert!(query(&manager, 10100, Some("p"), "p.L").unwrap());
+            assert!(!query(&manager, 10100, Some("p"), "p.Other").unwrap());
+            assert!(!query(&manager, 10100, Some("p"), "p.Short").unwrap());
+            assert!(!query(&manager, 1000, Some("q"), "q.L").unwrap());
+            assert!(query(&manager, 1001000, Some("q"), "q.L").unwrap());
+            let settings = &host.inputs().unwrap().settings;
+            settings
+                .insert(
+                    Table::Secure,
+                    "enabled_notification_listeners",
+                    &Change {
+                        value: Some("p/p.Other"),
+                        package: Some("android"),
+                        caller_system: true,
+                        tag: None,
+                        make_default: false,
+                        overrideable_by_restore: false,
+                    },
+                    false,
+                )
+                .unwrap();
+            assert!(!query(&manager, 10100, Some("p"), "p.Other").unwrap());
+            std::fs::write(
+                &path,
+                "<notification-policy><zen version='12' user='0'/></notification-policy>",
+            )
+            .unwrap();
+            let fresh = NotificationManager::new(host.clone());
+            assert!(query(&fresh, 10100, Some("p"), "p.Other").unwrap());
+        });
     }
 
     const INTENT: Binder = Binder::Local(0x10);

@@ -646,3 +646,63 @@ fn audio_devices_for_attributes_preserve_routing_and_caller() {
         });
     }
 }
+
+/// Android 16 has no permission gate here; the original policy sees system identity.
+#[test]
+fn audio_stream_mask_uses_policy_and_original_errors() {
+    struct Policy;
+    impl Service for Policy {
+        fn descriptor(&self) -> &str {
+            aq::DESCRIPTOR
+        }
+        fn transact(&self, c: &mut Call<'_>) -> Reply {
+            assert_eq!(c.sender_euid, 1000);
+            assert_eq!(c.code, aq::GET_DEVICE_MASK_FOR_STREAM);
+            let a = aq::GetDeviceMaskForStream::read(&mut c.data)?;
+            let mut p = Parcel::new();
+            match a.stream_type {
+                -1 | 12 => p.write_exception(&Exception::illegal_argument(format!(
+                    "Bad stream type {}",
+                    a.stream_type
+                ))),
+                11 => return Err(UNKNOWN_TRANSACTION),
+                stream => aq::write_get_device_mask_for_stream_reply(&mut p, 1 << stream),
+            }
+            Ok(p)
+        }
+    }
+    for replace in [false, true] {
+        crate::system::with_discovery_binders_flags(
+            &[("com.android.media.audio.replace_stream_bt_sco", replace)],
+            true,
+            |host, _, _, export| {
+                let service = audio_service::AudioService::new(host.clone());
+                attach(host, export(Arc::new(Policy)).binder(), true);
+                for stream in [-1, 0, 3, 6, 11, 12] {
+                    let mut data = Parcel::new();
+                    audio::GetDeviceMaskForStream {
+                        stream_type: stream,
+                    }
+                    .write(&mut data);
+                    let result = call(&service, audio::GET_DEVICE_MASK_FOR_STREAM, &data, 10100);
+                    let result =
+                        audio::read_get_device_mask_for_stream_reply(&mut result.reader()).unwrap();
+                    match stream {
+                        -1 | 12 => assert_eq!(
+                            result.unwrap_err().message,
+                            format!("Bad stream type {stream}")
+                        ),
+                        11 => assert_eq!(
+                            result.unwrap_err().code,
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE
+                        ),
+                        _ => assert_eq!(
+                            result.unwrap(),
+                            1 << if replace && stream == 6 { 0 } else { stream }
+                        ),
+                    }
+                }
+            },
+        );
+    }
+}

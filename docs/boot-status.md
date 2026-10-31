@@ -353,6 +353,8 @@ The app host prepares user 0's CE storage before starting vold's user and mounti
 Storage crate queries use the original Java Installer, installd and CrateInfo conversion in aim-system, after native caller permission and package visibility checks (#1826; focused host tests, JVM lifecycle and pinned-image Java linkage, no guest boot, 2026-10-29).
 The app host treats an absent `/data/system/overlays.xml` as empty overlay settings and reports guest paths at the data-file error sources used by its native settings and package readers (#2233; host tests only, no guest boot rerun).
 
+Notification-listener access uses per-user approvals and legacy settings after null/ownership checks; stream masks use original Java audio policy (#2491). Account authenticator writes create missing parents (#2492). Host/JVM and pinned Java linkage checks pass; no guest boot was run (2026-10-31).
+
 The app host persists private-notification policy changes, defaulting to allowed,
 with CONTROL_KEYGUARD_SECURE_NOTIFICATIONS checks and flag-gated broadcasts to
 STATUS_BAR_SERVICE receivers (#2468). Host contract checks pass; no guest boot (2026-10-31).

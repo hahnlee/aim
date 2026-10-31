@@ -65,4 +65,22 @@ public final class AudioPolicyQueries extends IAudioPolicyQueries.Stub {
             Binder.restoreCallingIdentity(token);
         }
     }
+    /** AudioService.getDeviceMaskForStream and getDeviceSetForStreamDirect, android-16.0.0_r1.
+     * The native endpoint applies replaceBtScoStreamWithVoiceCall; no permission required. */
+    @Override public int getDeviceMaskForStream(int streamType) {
+        Bridge.enforceSystemUid();
+        if (streamType < 0 || streamType >= AudioSystem.getNumStreamTypes()) {
+            throw new IllegalArgumentException("Bad stream type " + streamType);
+        }
+        long token = Binder.clearCallingIdentity();
+        try {
+            var attributes = AudioProductStrategy
+                    .getAudioAttributesForStrategyWithLegacyStreamType(streamType);
+            return AudioSystem.getDeviceMaskFromSet(AudioSystem.generateAudioDeviceTypesSet(
+                    AudioSystem.getDevicesForAttributes(attributes, true)));
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
 }
