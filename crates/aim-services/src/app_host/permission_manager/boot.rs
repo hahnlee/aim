@@ -2,7 +2,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::*;
 use crate::package::scan::permission_admissions::Admission;
-mod implicit;
+pub(super) mod implicit;
 #[cfg(test)]
 mod update_tests;
 mod upgrade;
@@ -490,7 +490,7 @@ fn reconcile(
 /// Keep this mount-time evaluation before publication, not at systemReady:
 /// PackageManagerService.java:2368-2376; PermissionService.kt:2394-2404;
 /// AppIdPermissionPolicy.kt:101-127. No Java state or late policy owner is needed.
-fn evaluate_permission(
+pub(super) fn evaluate_permission(
     permission: &Permission,
     info_flags: i32,
     target: i32,
@@ -540,7 +540,7 @@ fn evaluate_permission(
 }
 
 /// Existing runtime transitions; restrictions are evaluated before publication.
-fn runtime_flags(
+pub(super) fn runtime_flags(
     base: &permissions::AccessView,
     user: &AccessUser,
     id: i32,

@@ -90,7 +90,7 @@ impl PermissionManager {
     }
 }
 
-fn exemption_flags(name: &str, info: i32, target: i32, old: i32, mut flags: i32) -> i32 {
+pub(super) fn exemption_flags(name: &str, info: i32, target: i32, old: i32, mut flags: i32) -> i32 {
     if old == flags {
         return flags;
     }

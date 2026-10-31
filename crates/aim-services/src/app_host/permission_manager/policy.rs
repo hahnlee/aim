@@ -303,7 +303,7 @@ fn update_revoked_compat(
     Ok(changes)
 }
 
-fn set_mode<K: PartialEq>(
+pub(super) fn set_mode<K: PartialEq>(
     entries: &mut Vec<(K, permissions::Named)>,
     key: K,
     op: &str,
