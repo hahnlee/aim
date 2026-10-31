@@ -19,6 +19,7 @@ public class Intent {
     // ORIGINAL_METHODS
 
     private ComponentName component;
+    private int intentFlags;
     private static AssertionError unsupported() { return new AssertionError("unexercised Intent boundary"); }
     public Intent() {}
     public Intent(String action) { throw unsupported(); }
@@ -33,7 +34,7 @@ public class Intent {
         out.writeInt(0); // data URI
         out.writeString8(null); // type
         out.writeString8(null); // identifier
-        out.writeInt(0); out.writeInt(0); // flags, extended flags
+        out.writeInt(intentFlags); out.writeInt(0); // flags, extended flags
         out.writeString8(null); // package
         out.writeString(component.pkg); out.writeString(component.cls);
         for (int i = 0; i < 4; i++) out.writeInt(0); // bounds, categories, selector, clip
@@ -45,8 +46,8 @@ public class Intent {
     public Intent addCategory(String value) { throw unsupported(); }
     public Intent putExtra(String key, Object value) { throw unsupported(); }
     public Intent setPackage(String value) { throw unsupported(); }
-    public Intent setFlags(int value) { throw unsupported(); }
-    public Intent addFlags(int value) { throw unsupported(); }
+    public Intent setFlags(int value) { intentFlags=value;return this; }
+    public Intent addFlags(int value) { intentFlags|=value;return this; }
     public void setSelector(Intent value) { throw unsupported(); }
     public static Intent parseUri(String value, int flags) throws URISyntaxException { throw unsupported(); }
     public Bundle getExtras() { throw unsupported(); }

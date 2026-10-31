@@ -150,7 +150,12 @@ guest-init --image <derived> --data <data> --run \
 
 ActivityManager serves core instrumentation sessions, process binding, results and
 watcher retirement (#2511; host regressions only, no guest/CTS/app run, 2026-10-31).
-SDK sandbox and shell permission delegation explicitly fail with #2511; activity shell is a later slice.
+The activity shell now checks root/shell identity, preserves the original
+`am instrument` entry path, sends ordered broadcasts through the native owner,
+and waits on actual broadcast queue idle/barrier notifications (#2511, slice B1).
+Other subcommands (including `start`) and wait flush options explicitly fail
+with #2511. Host validation only; no guest/CTS/app run (2026-10-31).
+SDK sandbox and shell permission delegation still explicitly fail with #2511.
 
 Launcher package/UID reads retain the starting caller and Android 16 access rules
 (#2508; host Binder regressions, no guest boot rerun, 2026-10-31).

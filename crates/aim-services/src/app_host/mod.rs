@@ -13,6 +13,7 @@ pub mod account_service;
 mod account_session;
 pub mod accounts_db;
 pub mod activity;
+mod activity_shell;
 pub mod activity_stack;
 pub mod activity_start;
 mod activity_stats;
@@ -4718,6 +4719,7 @@ impl Service for Activity {
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
+            crate::shell::SHELL_COMMAND_TRANSACTION => activity_shell::transact(&self.0, call),
             am::START_INSTRUMENTATION
             | am::ADD_INSTRUMENTATION_RESULTS
             | am::FINISH_INSTRUMENTATION

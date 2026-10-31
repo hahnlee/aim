@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use aim_binder_host::local::{Call, Strong};
 use aim_binder_host::parcel::{
@@ -150,6 +150,7 @@ struct Filter {
 
 /// `BroadcastRecord`: what each of a broadcast's receivers is sent.
 struct Record {
+    enqueue_id: u64,
     intent: RawIntent,
     /// The binders among the intent, held.
     binders: Arc<Vec<Strong>>,
@@ -246,11 +247,13 @@ struct Chain {
     result_to: Option<(Strong, Option<i64>)>,
     /// A system service's own result receiver (`IIntentReceiver.Stub`).
     done: Option<Done>,
+    shell_done: Option<ShellDone>,
 }
 
 /// What a system service of the app host runs when its ordered broadcast
 /// has gone through its receivers.
 pub type Done = Box<dyn FnOnce() + Send>;
+pub(super) type ShellDone = Box<dyn FnOnce(i32, Option<String>, Option<KeptBundle>) + Send>;
 
 /// A delivery a process waits for, by its receiver.
 enum Delivery {
@@ -269,6 +272,7 @@ struct State {
     stickies: Vec<Sticky>,
     chains: HashMap<u64, Chain>,
     next_chain: u64,
+    next_enqueue: u64,
     /// Each process's deliveries, by start, in order.
     queues: HashMap<i64, VecDeque<Delivery>>,
     /// The processes whose first delivery, a chained or a manifest one, was
@@ -341,6 +345,43 @@ fn next_to_run(
 pub struct Broadcasts {
     state: Mutex<State>,
     limits: std::sync::OnceLock<Limits>,
+    changed: Condvar,
+}
+
+impl State {
+    fn enqueue_id(&mut self) -> u64 {
+        self.next_enqueue += 1;
+        self.next_enqueue
+    }
+
+    fn pending_through(&self, barrier: u64) -> bool {
+        let pending = |d: &Delivery| match d {
+            Delivery::Once(r, _) | Delivery::Manifest(r, ..) => r.enqueue_id <= barrier,
+            Delivery::Chained(id, _) => self
+                .chains
+                .get(id)
+                .is_some_and(|c| c.record.enqueue_id <= barrier),
+        };
+        self.chains.values().any(|c| c.record.enqueue_id <= barrier)
+            || self.queues.values().flatten().any(pending)
+            || self.cold.iter().flat_map(|c| &c.deliveries).any(pending)
+    }
+}
+
+impl Broadcasts {
+    /// Snapshot enqueue order under the queue lock. A chain keeps its original
+    /// identity when it advances; later broadcasts do not extend a barrier.
+    pub(super) fn wait(&self, barrier: bool) {
+        let mut state = self.state.lock().unwrap();
+        let through = if barrier {
+            state.next_enqueue
+        } else {
+            u64::MAX
+        };
+        while state.pending_through(through) {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
 }
 
 /// A sender, as BroadcastSkipPolicy checks a receiver for it.
@@ -891,6 +932,7 @@ impl Broadcasts {
                 preflight,
             )? {
                 let replay = Record {
+                    enqueue_id: st.enqueue_id(),
                     intent: r.intent.clone(),
                     binders: r.binders.clone(),
                     sender,
@@ -985,6 +1027,28 @@ impl Broadcasts {
         caller_app: Option<i64>,
         caller_package: Option<String>,
         args: am::BroadcastIntentWithFeature<RawIntent, RawBundle>,
+    ) -> Result<i32, Exception> {
+        self.broadcast_with_result(
+            host,
+            calling_uid,
+            calling_pid,
+            caller_app,
+            caller_package,
+            args,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn broadcast_with_result(
+        &self,
+        host: &AppHost,
+        calling_uid: i32,
+        calling_pid: i32,
+        caller_app: Option<i64>,
+        caller_package: Option<String>,
+        args: am::BroadcastIntentWithFeature<RawIntent, RawBundle>,
+        shell_done: Option<ShellDone>,
     ) -> Result<i32, Exception> {
         if is_isolated(calling_uid) {
             return Err(Exception::security(
@@ -1221,6 +1285,7 @@ impl Broadcasts {
             }),
         };
         let record = Arc::new(Record {
+            enqueue_id: st.enqueue_id(),
             urgent: urgent(intent.intent.flags, options.flags),
             intent,
             binders: Arc::new(binders),
@@ -1316,11 +1381,13 @@ impl Broadcasts {
             Vec::new()
         };
         let targets = merge(manifest, registered);
-        if targets.is_empty() && result_to.is_none() {
+        if targets.is_empty() && result_to.is_none() && shell_done.is_none() {
             return Ok(BROADCAST_SUCCESS);
         }
         match result_to {
-            None if !record.ordered => self.enqueue(host, &mut st, &record, targets),
+            None if !record.ordered && shell_done.is_none() => {
+                self.enqueue(host, &mut st, &record, targets)
+            }
             _ => {
                 let id = st.next_chain;
                 st.next_chain += 1;
@@ -1335,6 +1402,7 @@ impl Broadcasts {
                         aborted: false,
                         result_to: result_to.map(|h| (host.process.strong(h), result_to_app)),
                         done: None,
+                        shell_done,
                     },
                 );
                 self.advance(host, &mut st, id);
@@ -1573,7 +1641,18 @@ impl Broadcasts {
             .into_iter()
             .map(|h| host.process.strong(h))
             .collect();
+        let preflight = match host.flag(AVOID_NOTE_OP_AT_ENQUEUE) {
+            Ok(preflight) => preflight,
+            Err(e) => {
+                if let Some(done) = done {
+                    std::thread::spawn(done);
+                }
+                return Err(e);
+            }
+        };
+        let mut st = self.state.lock().unwrap();
         let record = Arc::new(Record {
+            enqueue_id: st.enqueue_id(),
             urgent: urgent(intent.intent.flags, 0),
             intent,
             binders: Arc::new(binders),
@@ -1588,16 +1667,6 @@ impl Broadcasts {
             id_for_response_event: 0,
             temp_allowlist,
         });
-        let preflight = match host.flag(AVOID_NOTE_OP_AT_ENQUEUE) {
-            Ok(preflight) => preflight,
-            Err(e) => {
-                if let Some(done) = done {
-                    std::thread::spawn(done);
-                }
-                return Err(e);
-            }
-        };
-        let mut st = self.state.lock().unwrap();
         let i = &record.intent.intent;
         let allowed = |uid: i32| {
             let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
@@ -1644,6 +1713,7 @@ impl Broadcasts {
                         aborted: false,
                         result_to: None,
                         done: Some(done),
+                        shell_done: None,
                     },
                 );
                 self.advance(host, &mut st, id);
@@ -2008,6 +2078,7 @@ impl Broadcasts {
     /// time; a warm queue sends what it has, a cold one has its process
     /// started for its first receiver not skipped.
     fn update_running(&self, host: &AppHost, st: &mut State) {
+        self.changed.notify_all();
         let limits = self.limits(host);
         loop {
             let running: Vec<i64> = st.busy.iter().copied().chain(st.cold_start).collect();
@@ -2189,6 +2260,7 @@ impl Broadcasts {
         let extended = intent.intent.extended_flags;
         intent.set_flags(flags, extended);
         let record = Arc::new(Record {
+            enqueue_id: 0,
             intent: intent.clone(),
             binders: Arc::new(
                 intent
@@ -2537,6 +2609,14 @@ impl Broadcasts {
                 // Off the queue's lock: it may broadcast again.
                 if let Some(done) = chain.done.take() {
                     std::thread::spawn(done);
+                }
+                if let Some(done) = chain.shell_done.take() {
+                    let (code, data, extras) = (
+                        chain.result_code,
+                        chain.result_data.clone(),
+                        chain.result_extras.clone(),
+                    );
+                    std::thread::spawn(move || done(code, data, extras));
                 }
                 self.send_result(host, chain);
                 return;
@@ -3084,5 +3164,112 @@ mod tests {
         assert!(urgent(0, OPTION_INTERACTIVE));
         assert!(urgent(0, OPTION_IS_ALARM_BROADCAST));
         assert!(!urgent(FLAG_RECEIVER_NO_ABORT, OPTION_SHARE_IDENTITY));
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    fn record(enqueue_id: u64) -> Arc<Record> {
+        Arc::new(Record {
+            enqueue_id,
+            intent: RawIntent::new("fixture.broadcast", 0, &[]),
+            binders: Arc::new(vec![]),
+            sender: Sender::system(&[]),
+            ordered: true,
+            initial_sticky: false,
+            user: 0,
+            share_identity: false,
+            result_code: 0,
+            result_data: None,
+            result_extras: None,
+            id_for_response_event: 0,
+            temp_allowlist: None,
+            urgent: false,
+        })
+    }
+    fn registered(start_seq: i64) -> Registered {
+        Registered {
+            handle: 1,
+            filter: 0,
+            start_seq,
+        }
+    }
+
+    #[test]
+    fn barrier_tracks_earlier_chains_across_continuations_and_ignores_later_work() {
+        let mut state = State::default();
+        let earlier = record(state.enqueue_id());
+        state.chains.insert(
+            0,
+            Chain {
+                record: earlier.clone(),
+                targets: VecDeque::new(),
+                result_code: 0,
+                result_data: None,
+                result_extras: None,
+                aborted: false,
+                result_to: None,
+                done: None,
+                shell_done: None,
+            },
+        );
+        let barrier = state.next_enqueue;
+        let later = record(state.enqueue_id());
+        state
+            .queues
+            .insert(9, VecDeque::from([Delivery::Once(later, registered(9))]));
+        assert!(state.pending_through(barrier)); // a chain between receivers
+        state
+            .queues
+            .insert(1, VecDeque::from([Delivery::Chained(0, registered(1))]));
+        assert!(state.pending_through(barrier));
+        state.queues.remove(&1); // next receiver is queued after the barrier
+        state.cold.push(Cold {
+            process: "fixture".into(),
+            uid: 10100,
+            package: "p".into(),
+            deliveries: VecDeque::from([Delivery::Once(earlier, registered(1))]),
+        });
+        state.chains.remove(&0);
+        assert!(state.pending_through(barrier)); // cold work is not idle
+        let cold = state.cold.pop().unwrap();
+        state.queues.insert(1, cold.deliveries);
+        state.busy.insert(1);
+        assert!(state.pending_through(barrier)); // attached, still waiting for finish
+        state.queues.remove(&1);
+        state.busy.remove(&1);
+        assert!(!state.pending_through(barrier));
+        assert!(state.pending_through(u64::MAX)); // global idle includes later work
+    }
+
+    #[test]
+    fn process_death_wakes_idle_waiters() {
+        let host = AppHost::new(crate::test_process(1000));
+        {
+            let mut state = host.broadcasts.state.lock().unwrap();
+            let record = record(state.enqueue_id());
+            state
+                .queues
+                .insert(7, VecDeque::from([Delivery::Once(record, registered(7))]));
+            state.busy.insert(7);
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let waiting_host = host.clone();
+        let waiter = std::thread::spawn(move || {
+            waiting_host.broadcasts.wait(false);
+            send.send(()).unwrap();
+        });
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err()
+        );
+        host.broadcasts.process_died(&host, 7);
+        let completed = receive.recv_timeout(std::time::Duration::from_secs(2));
+        host.broadcasts.changed.notify_all();
+        waiter.join().unwrap();
+        completed.unwrap();
     }
 }

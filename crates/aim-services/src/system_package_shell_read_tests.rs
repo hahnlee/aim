@@ -900,3 +900,149 @@ fn domain_shell_entrypoints_transfer_fds_identity_status_and_errors() {
         }
     }
 }
+
+#[test]
+fn activity_shell_transferred_streams_status_and_caller_guard() {
+    let mut s = Shell::new();
+    s.package = lookup(&s.process, "activity");
+    for command in ["start", "force-stop", "help", "unknown"] {
+        assert_eq!(
+            s.command(&[command]),
+            (
+                -1,
+                String::new(),
+                format!("Error: unsupported activity shell command '{command}' (#2511)\n")
+            )
+        );
+    }
+    assert_eq!(
+        s.command(&["instrument", "-w", "-r"]),
+        (
+            -1,
+            String::new(),
+            "Error: must be invoked through 'am instrument'.\n".into()
+        )
+    );
+    s.check(
+        &["wait-for-broadcast-idle"],
+        0,
+        "Test idle passed\nAll broadcast queues are idle!\n",
+    );
+    s.check(&["wait-for-broadcast-barrier"], 0, "Test barrier passed\n");
+    let denied = LocalProcess::open(
+        &s.session.fixture.driver,
+        Device::Binder,
+        Credentials {
+            pid: 97331,
+            euid: 10100,
+            security_context: None,
+        },
+    );
+    denied.start();
+    let activity = lookup(&denied, "activity");
+    // Binder checks the caller before decoding streams or contacting any leaf.
+    let response = activity
+        .transact(
+            crate::shell::SHELL_COMMAND_TRANSACTION,
+            &Parcel::new(),
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        response
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap_err()
+            .code,
+        aim_binder_host::parcel::EX_SECURITY
+    );
+    s.session.fixture.driver.release(denied.proc_handle());
+    let before = s.session.fixture.system.capture_package_queries().unwrap();
+    let mut context = (**before.context()).clone();
+    context.scan_version = before.scan().version() + 1;
+    context.system.system_permissions = Some(Default::default());
+    s.session
+        .fixture
+        .system
+        .publish_package_scan_with_queries(
+            &s.session.bridge,
+            Some(before.scan()),
+            before.scan().owner().clone(),
+            before.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    let (status, _, error) = s.command(&["wait-for-broadcast-idle"]);
+    assert_eq!(status, -1);
+    assert!(
+        error.contains("java.lang.SecurityException") && error.contains("android.permission.DUMP")
+    );
+}
+
+struct BroadcastSyntax;
+impl Service for BroadcastSyntax {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_ipackageintentparser::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_ipackageintentparser as syntax;
+        assert_eq!(call.sender_euid, 1000);
+        let mut p = Parcel::new();
+        if call.code == syntax::PARSE_BROADCAST {
+            let args = syntax::ParseBroadcast::read(&mut call.data)?
+                .arguments
+                .unwrap();
+            if args.iter().any(|v| v.as_deref() == Some("--bad")) {
+                p.write_exception(&Exception::illegal_argument("Unknown option: --bad"));
+            } else {
+                let mut parsed = Parcel::new();
+                parsed.write_i32(-2);
+                parsed.write_string16(None);
+                parsed.write_string16(Some("Intent { act=fixture.BROADCAST flg=0x400000 }"));
+                crate::app_host::kept::RawIntent::new("fixture.BROADCAST", 0x00400000, &[])
+                    .write_to(&mut parsed);
+                syntax::write_parse_broadcast_reply(&mut p, &Some(parsed.data().to_vec()));
+            }
+        } else {
+            assert_eq!(call.code, syntax::FORMAT_BROADCAST_RESULT);
+            let bytes = syntax::FormatBroadcastResult::read(&mut call.data)?
+                .result
+                .unwrap();
+            let mut r = Reader::new(&bytes, &[]);
+            assert_eq!(r.read_i32()?, 0);
+            assert_eq!(r.read_string16()?, None);
+            assert_eq!(r.read_i32()?, -1);
+            syntax::write_format_broadcast_result_reply(
+                &mut p,
+                &Some("Broadcast completed: result=0".into()),
+            );
+        }
+        Ok(p)
+    }
+}
+
+#[test]
+fn activity_shell_broadcast_completion_and_parser_failure() {
+    let mut s = Shell::new();
+    s.package = lookup(&s.process, "activity");
+    let original = &s.session.fixture.original[0];
+    let mut p = Parcel::new();
+    sp::AttachPackageIntentParser {
+        parser: Some(original.add_service(Arc::new(BroadcastSyntax))),
+    }
+    .write(&mut p);
+    lookup(original, "aim.system_process")
+        .transact(sp::ATTACH_PACKAGE_INTENT_PARSER, &p, false)
+        .unwrap()
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    s.check(&["broadcast", "-a", "fixture.BROADCAST"], 0,
+        "Broadcasting: Intent { act=fixture.BROADCAST flg=0x400000 }\nBroadcast completed: result=0\n");
+    let (status, out, error) = s.command(&["broadcast", "--bad"]);
+    assert_eq!(status, -1);
+    assert!(out.is_empty());
+    assert!(error.contains("java.lang.IllegalArgumentException: Unknown option: --bad"));
+}
