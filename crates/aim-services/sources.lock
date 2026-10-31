@@ -343,7 +343,7 @@ INTERFACES=(
   "android.location.provider.IPopulationDensityProvider|system/framework/framework-location.jar|getDefaultCoarseningLevel,getCoarsenedS2Cells"
   "android.location.provider.IS2CellIdsCallback|system/framework/framework-location.jar|onError"
   "android.location.provider.IS2LevelCallback|system/framework/framework-location.jar|*"
-  "com.android.internal.statusbar.IStatusBar|system/framework/framework.jar|showScreenPinningRequest,showPinningEnterExitToast,showAuthenticationDialog,hideAuthenticationDialog,showToast,hideToast,requestAddTile,requestTileServiceListeningState"
+  "com.android.internal.statusbar.IStatusBar|system/framework/framework.jar|showScreenPinningRequest,showPinningEnterExitToast,showAuthenticationDialog,hideAuthenticationDialog,showToast,hideToast,requestAddTile,requestTileServiceListeningState,animateExpandNotificationsPanel,animateExpandSettingsPanel,animateCollapsePanels"
   "android.app.ITransientNotificationCallback|system/framework/framework.jar|*"
   "android.hardware.biometrics.IAuthService|system/framework/framework.jar|canAuthenticate,hasEnrolledBiometrics,getAuthenticatorIds"
   "android.hardware.biometrics.IBiometricSysuiReceiver|system/framework/framework.jar|onDialogDismissed"

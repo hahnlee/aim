@@ -1048,6 +1048,133 @@ fn activity_shell_broadcast_completion_and_parser_failure() {
     assert!(error.contains("java.lang.IllegalArgumentException: Unknown option: --bad"));
 }
 
+// StatusBarShellCommand / StatusBarManagerService, android-16.0.0_r1:
+// shell dispatch, per-command permission and generated IStatusBar callbacks.
+#[test]
+fn statusbar_shell_dispatch_permissions_and_help() {
+    use aim_service_aidl::{
+        com_android_internal_statusbar_istatusbar as bar,
+        com_android_internal_statusbar_istatusbarservice as sb,
+    };
+    struct Panels(mpsc::Sender<u32>);
+    impl Service for Panels {
+        fn descriptor(&self) -> &str {
+            bar::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.sender_euid, 1000);
+            match call.code {
+                bar::ANIMATE_EXPAND_NOTIFICATIONS_PANEL => {
+                    bar::AnimateExpandNotificationsPanel::read(&mut call.data)?;
+                }
+                bar::ANIMATE_EXPAND_SETTINGS_PANEL => {
+                    let a = bar::AnimateExpandSettingsPanel::read(&mut call.data)?;
+                    assert_eq!(a.sub_panel, None);
+                }
+                bar::ANIMATE_COLLAPSE_PANELS => {
+                    bar::AnimateCollapsePanels::read(&mut call.data)?;
+                }
+                _ => panic!("unexpected status bar callback"),
+            }
+            assert_eq!(call.data.remaining(), 0);
+            self.0.send(call.code).unwrap();
+            Ok(Parcel::new())
+        }
+    }
+    let mut s = Shell::new();
+    s.package = lookup(&s.process, "statusbar");
+    let grant = |permissions: &[&str]| {
+        let system = &s.session.fixture.system;
+        let before = system.capture_package_queries().unwrap();
+        let mut context = (**before.context()).clone();
+        context.scan_version = before.scan().version() + 1;
+        context.system.system_permissions.as_mut().unwrap().insert(
+            2000,
+            permissions
+                .iter()
+                .map(|p| format!("android.permission.{p}"))
+                .collect(),
+        );
+        system
+            .publish_package_scan_with_queries(
+                &s.session.bridge,
+                Some(before.scan()),
+                before.scan().owner().clone(),
+                before.scan().usage().clone(),
+                context,
+            )
+            .unwrap();
+    };
+    for (command, permission) in [
+        ("expand-notifications", "EXPAND_STATUS_BAR"),
+        ("expand-settings", "EXPAND_STATUS_BAR"),
+        ("collapse", "STATUS_BAR"),
+    ] {
+        let (status, out, error) = s.command(&[command]);
+        assert_eq!((status, out), (-1, String::new()));
+        assert!(
+            error.contains("java.lang.SecurityException") && error.contains(permission),
+            "{error}"
+        );
+    }
+    for (args, status) in [(&["help"][..], 0), (&["-h"][..], 0), (&[][..], 1)] {
+        let (result, out, error) = s.command(args);
+        assert_eq!(result, status);
+        assert!(out.starts_with("Status bar commands:\n"));
+        for text in "expand-notifications expand-settings collapse unsupported".split_whitespace() {
+            assert!(out.contains(text));
+        }
+        assert!(error.is_empty());
+    }
+    for command in "bogus add-tile remove-tile set-tiles click-tile check-support get-status-icons
+        disable-for-setup send-disable-flag tracing run-gc dump"
+        .split_whitespace()
+    {
+        let (status, out, error) = s.command(&[command]);
+        assert_eq!((status, out), (-1, String::new()));
+        assert!(error.contains("unsupported statusbar command") && error.contains(command));
+    }
+    grant(&["STATUS_BAR_SERVICE", "EXPAND_STATUS_BAR"]);
+    let (status, _, error) = s.command(&["expand-notifications"]);
+    assert_eq!(status, -1);
+    assert!(error.contains("No registered IStatusBar"));
+    let (tx, rx) = mpsc::channel();
+    let mut p = Parcel::new();
+    sb::RegisterStatusBar {
+        callbacks: Some(s.process.add_service(Arc::new(Panels(tx)))),
+    }
+    .write(&mut p);
+    s.package
+        .transact(sb::REGISTER_STATUS_BAR, &p, false)
+        .unwrap()
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    for (command, code) in [
+        (
+            "expand-notifications",
+            bar::ANIMATE_EXPAND_NOTIFICATIONS_PANEL,
+        ),
+        ("expand-settings", bar::ANIMATE_EXPAND_SETTINGS_PANEL),
+    ] {
+        s.check(&[command], 0, "");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), code);
+    }
+    assert_eq!(s.command(&["collapse"]).0, -1);
+    assert!(rx.try_recv().is_err());
+    grant(&["STATUS_BAR"]);
+    s.check(&["collapse"], 0, "");
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        bar::ANIMATE_COLLAPSE_PANELS
+    );
+    for command in ["expand-notifications", "expand-settings"] {
+        assert_eq!(s.command(&[command]).0, -1);
+    }
+    assert!(rx.try_recv().is_err());
+}
+
 // DeviceConfigService.MyShellCommand, android-16.0.0_r1: actual Binder streams/status.
 #[test]
 fn device_config_shell_shares_provider_state_and_preserves_errors() {
