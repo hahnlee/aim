@@ -669,8 +669,9 @@ pub(super) fn forget_write_mode(fd: i32) {
         slot.store(0, Ordering::Relaxed);
     }
 }
-/// Linux should_remove_suid: only positive writes to regular files, without
-/// CAP_FSETID, drop S_ISUID and executable S_ISGID. Zero and failed I/O keep them.
+/// Linux file_remove_privs mode rule: a positive write or admitted fallocate on
+/// a regular file drops S_ISUID and executable S_ISGID without CAP_FSETID.
+/// Zero and failed writes keep them.
 pub(super) fn written(fd: i32, result: i64) -> i64 {
     if result <= 0 || !recording() {
         return result;

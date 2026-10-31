@@ -1574,6 +1574,13 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
         if memfd::write_sealed(fd) {
             return -EPERM;
         }
+        // Linux v6.12 ext4_punch_hole skips file_modified at/past EOF.
+        if off < stat.st_size {
+            let result = attrs::written(fd, 1);
+            if result < 0 {
+                return result;
+            }
+        }
         let ph = libc::fpunchhole_t {
             fp_flags: 0,
             reserved: 0,
@@ -1594,6 +1601,11 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
     let end = off + len;
     if mode & FALLOC_FL_KEEP_SIZE == 0 && end > st.st_size && memfd::resize_sealed(fd, end as u64) {
         return -EPERM;
+    }
+    // ext4_fallocate calls file_modified even for KEEP_SIZE or an allocated range.
+    let result = attrs::written(fd, 1);
+    if result < 0 {
+        return result;
     }
     // Linux reserves the blocks up to `end` or fails (ENOSPC, EOPNOTSUPP
     // where the filesystem cannot): reserve from the file's physical end,
