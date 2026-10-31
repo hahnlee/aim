@@ -482,3 +482,63 @@ fn wifi_wakeup_checks_access_and_reads_the_live_global_setting() {
         }
     });
 }
+
+#[test]
+fn resources_apk_requires_wifi_action_system_app_and_wifi_apex() {
+    use crate::package::{
+        intent_filter::{IntentFilter, ParsedIntentInfo},
+        pkg::booleans,
+    };
+    crate::system::with_discovery_session(|host, publish, _| {
+        for (system, action, apex, found) in [
+            (false, RESOURCES_APK_ACTION, WIFI_APEX, false),
+            (true, "other.action", WIFI_APEX, false),
+            (
+                true,
+                RESOURCES_APK_ACTION,
+                "/apex/com.android.permission/",
+                false,
+            ),
+            (
+                true,
+                RESOURCES_APK_ACTION,
+                "/apex/com.android.wifi.other/",
+                false,
+            ),
+            (true, RESOURCES_APK_ACTION, WIFI_APEX, true),
+        ] {
+            let source = format!("{apex}app/Resources/base.apk");
+            publish(&mut |package| {
+                package.activities.clear();
+                if package.package_name != "p" {
+                    return;
+                }
+                if system {
+                    package.booleans |= booleans::SYSTEM;
+                }
+                package.base_apk_path = Some(source.clone());
+                let mut activity = crate::package::pkg::Activity::default();
+                activity.max_aspect_ratio = Some(0.0);
+                activity.min_aspect_ratio = Some(0.0);
+                activity.main.enabled = true;
+                activity.main.exported = true;
+                activity.main.direct_boot_aware = true;
+                activity.main.component.package_name = "p".into();
+                activity.main.component.name = "p.Resources".into();
+                let mut filter = IntentFilter::default();
+                filter.add_action(action);
+                activity.main.component.intents = vec![ParsedIntentInfo {
+                    filter,
+                    ..Default::default()
+                }];
+                package.activities.push(activity);
+            });
+            let result = resources_apk(host, "wifi", RESOURCES_APK_ACTION, WIFI_APEX).unwrap();
+            let expected = found.then(|| ("p".into(), host.root().unwrap().join(&source[1..])));
+            assert_eq!(
+                result, expected,
+                "system={system}, action={action}, apex={apex}"
+            );
+        }
+    });
+}

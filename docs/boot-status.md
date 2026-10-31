@@ -581,7 +581,23 @@ their configuration changes answered and reported. Settings' home shows the stor
 ExtServices over the persisted usage stats); `system_update`, which its
 System page asks, is served (2026-10-20). Play services' persistent process gets its
 installed modules, Wi-Fi scan results (none, the Mac's radio being off),
-statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
+statsd, DeviceConfig writes, usb, Safety Center and app op mode watches.
+Safety Center now starts the original Permission APEX service in `aim-system`
+after phase 520 and before AppSearch, with subsequent boot/user-0 callbacks.
+The native publisher, config/source-data owners and history writer are removed
+(#2467, #1785). Host JVM lifecycle, Wi-Fi resource-filtering and pinned-image
+DEX/linkage checks cover the migration, including original disabled exits and
+API/state routes. A fresh app-host boot of the print-based local rebase publishes
+the original service in aim-system, reports supported/available/enabled config,
+returns aggregate data and renders the original Safety Center page. The initial
+PermissionController process later crashes in HibernatedPackagesLiveData with a
+null reference; the retained window capture is after its relaunch. This is scoped
+page/aggregate validation, not sustained app acceptance or listener, persistence,
+stats, refresh/action or notification conformance. Official Safety Center CTS
+executes no tests: APK installation fails permission PREPARE (#2161), and the
+module command reaches unsupported activity.startInstrumentation. Fresh empty-data
+boots of main, print and 8bd9d5e64 all spend tens of seconds in synchronous default
+permission mutations; print starts after that attach returns (2026-10-31).
 AppSearch is the original module, run by the app host's system process
 (`aim-system`, of the system uid), so Play services finds its
 `AppSearchManager`; so is the Connectivity module's NearbyService, which
