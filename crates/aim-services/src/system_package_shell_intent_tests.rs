@@ -146,3 +146,63 @@ impl Service for JavaParser {
         Ok(p)
     }
 }
+
+#[test]
+fn activity_broadcast_uses_original_option_syntax_and_user_parser() {
+    use aim_service_aidl::ReadParcelable;
+    let root = crate::app_host::test_temp_dir("activity-intent-syntax");
+    let parser = JavaParser::new(&root).expect("pinned original Intent parser and JDK");
+    for user in ["current", "0"] {
+        let bytes = run(Command::new(JavaParser::jdk().join("java"))
+            .arg("-cp")
+            .arg(&parser.0)
+            .arg("dev.aim.server.PackageIntentParserTest")
+            .args([
+                "--broadcast",
+                "-n",
+                "p/.Receiver",
+                "-f",
+                "0x10000000",
+                "--user",
+                user,
+                "--receiver-permission",
+                "android.permission.DUMP",
+            ]));
+        let mut r = Reader::new(&bytes, &[]);
+        assert_eq!(r.read_i32().unwrap(), if user == "0" { 0 } else { -2 });
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.permission.DUMP")
+        );
+        r.read_string16().unwrap(); // Android presentation is checked by image linkage.
+        let intent = crate::app_host::kept::RawIntent::read_from(&mut r).unwrap();
+        assert_eq!(intent.intent.flags, 0x10400000);
+        let component = intent.intent.component.unwrap();
+        assert_eq!(
+            (component.package.as_str(), component.class.as_str()),
+            ("p", "p.Receiver")
+        );
+        assert_eq!(r.remaining(), 0);
+    }
+    for args in [
+        vec!["--bad"],
+        vec!["-n"],
+        vec!["-n", "bad"],
+        vec!["-W", "-n", "p/.Receiver"],
+    ] {
+        let output = Command::new(JavaParser::jdk().join("java"))
+            .arg("-cp")
+            .arg(&parser.0)
+            .arg("dev.aim.server.PackageIntentParserTest")
+            .arg("--broadcast")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("java.lang.IllegalArgumentException")
+        );
+        assert!(output.stdout.is_empty());
+    }
+    fs::remove_dir_all(root).unwrap();
+}

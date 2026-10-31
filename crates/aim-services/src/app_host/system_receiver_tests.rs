@@ -82,6 +82,11 @@ fn receiver(package: &str, class: &str, uid: u32) -> Arc<Manifest> {
 
 #[test]
 fn system_manifest_receivers_are_delivered_and_finished_in_the_attached_process() {
+    system_deliveries(false);
+    system_deliveries(true);
+}
+
+fn system_deliveries(ordered: bool) {
     crate::system::with_discovery_binders(|host, _, _, export| {
         let (send, received) = mpsc::channel();
         let thread = export(Arc::new(SystemThread(send)));
@@ -119,6 +124,7 @@ fn system_manifest_receivers_are_delivered_and_finished_in_the_attached_process(
             },
         );
         let record = Arc::new(Record {
+            enqueue_id: host.broadcasts.state.lock().unwrap().enqueue_id(),
             intent: RawIntent::new(
                 "android.intent.action.BOOT_COMPLETED",
                 FLAG_RECEIVER_INCLUDE_BACKGROUND,
@@ -126,7 +132,7 @@ fn system_manifest_receivers_are_delivered_and_finished_in_the_attached_process(
             ),
             binders: Arc::new(vec![]),
             sender: Sender::system(&[]),
-            ordered: false,
+            ordered,
             initial_sticky: false,
             user: 0,
             share_identity: false,
@@ -158,18 +164,59 @@ fn system_manifest_receivers_are_delivered_and_finished_in_the_attached_process(
             ),
             QueueId::Cold(_, 10123)
         ));
+        let (result, final_result) = mpsc::channel();
         {
             let mut state = host.broadcasts.state.lock().unwrap();
-            host.broadcasts.enqueue(
-                host,
-                &mut state,
-                &record,
-                targets.iter().cloned().map(Target::Manifest).collect(),
-            );
+            if ordered {
+                state.chains.insert(
+                    0,
+                    Chain {
+                        record: record.clone(),
+                        targets: targets.iter().cloned().map(Target::Manifest).collect(),
+                        result_code: 0,
+                        result_data: None,
+                        result_extras: None,
+                        aborted: false,
+                        result_to: None,
+                        done: None,
+                        shell_done: Some(Box::new(move |code, data, extras| {
+                            result
+                                .send((
+                                    code,
+                                    data,
+                                    extras.unwrap().bundle.int("final", -1).unwrap(),
+                                ))
+                                .unwrap();
+                        })),
+                    },
+                );
+                host.broadcasts.advance(host, &mut state, 0);
+                host.broadcasts.update_running(host, &mut state);
+            } else {
+                host.broadcasts.enqueue(
+                    host,
+                    &mut state,
+                    &record,
+                    targets.iter().cloned().map(Target::Manifest).collect(),
+                );
+            }
             assert!(state.busy.contains(&seq));
             assert!(state.cold.is_empty());
         }
-        for target in &targets {
+        let (completed, completions) = mpsc::channel();
+        let waiters: Vec<_> = [true, false]
+            .into_iter()
+            .map(|barrier| {
+                let host = host.clone();
+                let completed = completed.clone();
+                std::thread::spawn(move || {
+                    host.broadcasts.wait(barrier);
+                    completed.send(barrier).unwrap();
+                })
+            })
+            .collect();
+        assert!(completions.recv_timeout(Duration::from_millis(30)).is_err());
+        for (index, target) in targets.iter().enumerate() {
             let delivered = received.recv_timeout(Duration::from_secs(5)).unwrap();
             let component = delivered.intent.component.unwrap();
             assert_eq!(component.package, manifest_package(target));
@@ -186,15 +233,35 @@ fn system_manifest_receivers_are_delivered_and_finished_in_the_attached_process(
                     host,
                     am::FinishReceiver {
                         who: Some(who),
-                        result_code: 0,
-                        result_data: None,
-                        map: None,
+                        result_code: index as i32 + 1,
+                        result_data: Some(format!("receiver-{index}")),
+                        map: Some(
+                            RawBundle::empty()
+                                .with_ints(&[("final", index as i32)])
+                                .unwrap(),
+                        ),
                         abort_broadcast: false,
                         flags: 0,
                     },
                 )
                 .unwrap();
         }
+        if ordered {
+            assert_eq!(
+                final_result.recv_timeout(Duration::from_secs(2)).unwrap(),
+                (3, Some("receiver-2".into()), 2)
+            );
+        }
+        let results = [
+            completions.recv_timeout(Duration::from_secs(2)),
+            completions.recv_timeout(Duration::from_secs(2)),
+        ];
+        // Release regression waiters before asserting a missed notification.
+        host.broadcasts.changed.notify_all();
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
+        assert!(results.iter().all(Result::is_ok));
         let state = host.broadcasts.state.lock().unwrap();
         assert!(!state.busy.contains(&seq));
         assert!(state.queues.get(&seq).is_none_or(VecDeque::is_empty));

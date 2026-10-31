@@ -19,4 +19,9 @@ public class Parcel {
     public void writeString8(String value) { string(value, java.nio.charset.StandardCharsets.UTF_8, 1); }
     public byte[] marshall() { return bytes.toByteArray(); }
     public void recycle() {}
+    public void unmarshall(byte[] data,int offset,int length) { throw new AssertionError("unexercised read boundary"); }
+    public void setDataPosition(int position) { throw new AssertionError("unexercised read boundary"); }
+    public int readInt() { throw new AssertionError("unexercised read boundary"); }
+    public String readString() { throw new AssertionError("unexercised read boundary"); }
+    public Bundle readBundle() { throw new AssertionError("unexercised read boundary"); }
 }
