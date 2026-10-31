@@ -410,9 +410,13 @@ first stage. Runtime-owner calls and aim-system's pre-attach ApplicationInfo
 query retain the construction result barrier (#2392); storage startup waits for
 reconciliation and application forks still wait for default grants. The
 WebView relro creator's isolated uid is recorded before its zygote start, as
-`newProcessRecordLocked` does, so the child no longer attaches before the app
-host knows it; registering every pending start before the zygote start is
-#2416. AudioPolicy's load time fell from 3.3–3.8 s to 2.6–2.8 s (2026-10-29).
+`newProcessRecordLocked` does. All three start paths register pending records before
+zygote (#2416); early attaches match sequence and Binder UID and supply the PID.
+Failed starts are removed. Killing a pending start rejects attach without a PID-0
+signal or exit record, then kills the returned PID as an invalid start. PID lookups
+exclude pending records; running-app listings require a thread, isolated-process
+queries retain PID 0. Host race, kill/force-stop and listing tests pass; no guest
+boot was run (2026-10-31). AudioPolicy's load time fell from 3.3–3.8 s to 2.6–2.8 s (2026-10-29).
 Package boot now shares immutable image inputs across scanning, initial projection
 and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s

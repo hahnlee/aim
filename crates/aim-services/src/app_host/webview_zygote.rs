@@ -200,3 +200,7 @@ impl AppHost {
         Ok(Child { pid, session })
     }
 }
+
+#[cfg(test)]
+#[path = "pending_start_tests.rs"]
+mod pending_start_tests;
