@@ -63,7 +63,7 @@ impl AppHost {
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../../daemons/app-host-agent/src/input.rs"]
-mod dispatcher;
+pub(crate) mod dispatcher;
 
 #[cfg(test)]
 mod tests {
@@ -156,6 +156,9 @@ mod tests {
 
     #[test]
     fn sync_waits_for_window_commit_and_dispatch_uses_the_new_frame() {
+        if dispatcher::isolated_test() {
+            return;
+        }
         crate::system::with_discovery_binders(|host, _, _, export| {
             let dispatcher = dispatcher::Dispatcher::new();
             let (server, client) = UnixDatagram::pair().unwrap();
@@ -243,9 +246,12 @@ mod tests {
             host.windows.windows.lock().unwrap().clear();
             sync(host, true);
             dispatcher.inject(&motion);
+            // Removal closes the server fd before acknowledging the barrier.
+            client.set_nonblocking(false).unwrap();
+            client.set_read_timeout(Some(TIMEOUT)).unwrap();
             assert_eq!(
                 client.recv(&mut bytes).unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock
+                std::io::ErrorKind::ConnectionReset // removal closes the channel publisher
             );
             // Transport/owner errors remain errors, rather than successful syncs.
             *host.agent.lock().unwrap() = None;

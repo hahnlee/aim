@@ -7,7 +7,7 @@
 //! only for the target's own app). Windows stack in the order they were added or focused;
 //! the front one has the focus and is told so (`publishFocusEvent`). What
 //! a window sends back (finished and timeline messages) is read and
-//! dropped: no input times out (no ANR). A display's touch mode changes
+//! correlated for injected foreground completion (ordinary input has no ANR). A display's touch mode changes
 //! as `setInTouchMode` allows it, and its windows are told. The built-in keyboard's keys go
 //! to the focused window as `KeyboardInputMapper` maps them through the
 //! device's key layout and key character map, which EventHub finds by its
@@ -32,6 +32,9 @@ use aim_input_transport::keyboard::{
 use aim_input_transport::{
     ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Motion, Touch, focus, touch_mode, touched,
 };
+
+#[path = "injection.rs"]
+mod injection;
 
 /// The display the windows are on.
 const DEFAULT_DISPLAY: i32 = 0;
@@ -73,8 +76,14 @@ const fn eviocgabs(axis: u16) -> u64 {
 /// A window: its channel's index and server end, and its region.
 struct Target {
     index: i32,
-    channel: Arc<OwnedFd>,
+    channel: Arc<injection::Channel>,
     region: Region,
+}
+
+impl Drop for Target {
+    fn drop(&mut self) {
+        self.channel.close();
+    }
 }
 
 impl Target {
@@ -125,6 +134,11 @@ pub struct Dispatcher {
     /// its timer.
     repeat: Mutex<(Repeat, RepeatConfiguration)>,
     repeat_changed: Condvar,
+    injections: std::sync::mpsc::Sender<(
+        aim_input_transport::injection::Event,
+        i32,
+        Arc<injection::Injection>,
+    )>,
 }
 
 impl Dispatcher {
@@ -153,13 +167,17 @@ impl Dispatcher {
             Some(k) => (Some(k.info), Some((k.device, k.map))),
             None => (None, None),
         };
+        let (injections, jobs) = injection::queue();
         let dispatcher = Arc::new(Dispatcher {
             windows: Mutex::new(Windows::default()),
             next_seq: Mutex::new((0, 0)),
             keyboard: info,
             repeat: Mutex::new((Repeat::default(), RepeatConfiguration::default())),
             repeat_changed: Condvar::new(),
+            injections,
         });
+        let injector = dispatcher.clone();
+        std::thread::spawn(move || injector.inject_queue(jobs));
         let reader = dispatcher.clone();
         std::thread::spawn(move || reader.read_touchscreen());
         if let Some((device, map)) = device {
@@ -289,11 +307,11 @@ impl Dispatcher {
         display: (i32, i32),
         region: Region,
     ) {
-        let channel = Arc::new(channel);
+        let channel = injection::Channel::new(channel);
         let drained = channel.clone();
         let dispatcher = self.clone();
         std::thread::spawn(move || {
-            drain(&drained);
+            drain(&drained, &dispatcher, index);
             dispatcher.remove_window(index);
         });
         let mut windows = self.windows.lock().unwrap();
@@ -685,45 +703,61 @@ fn open_keyboard() -> std::io::Result<Option<OpenKeyboard>> {
     Ok(None)
 }
 
-/// `InputChannel::sendMessage`: one packet, retried when interrupted.
-fn send(channel: &OwnedFd, message: &[u8]) {
-    loop {
-        // SAFETY: a packet from a live buffer on a socket this process owns.
-        let n = unsafe {
-            libc::send(
-                channel.as_raw_fd(),
-                message.as_ptr().cast(),
-                message.len(),
-                libc::MSG_NOSIGNAL,
-            )
-        };
-        if n >= 0 {
-            return;
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return log::warn!("input channel: {error}");
-        }
-    }
+fn send(channel: &injection::Channel, message: &[u8]) {
+    channel.enqueue(message.to_vec(), None);
 }
 
 /// Reads what the window sends back until it closes its end.
-fn drain(channel: &OwnedFd) {
+fn drain(channel: &injection::Channel, dispatcher: &Dispatcher, index: i32) {
     let mut buffer = [0u8; 256];
     loop {
-        // SAFETY: a receive into a local buffer.
-        let n = unsafe {
-            libc::recv(
-                channel.as_raw_fd(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                0,
-            )
+        let n = {
+            let socket = channel.socket.read().unwrap();
+            let Some(socket) = socket.as_ref() else {
+                return;
+            };
+            // SAFETY: a receive into a local buffer; close waits for this borrow.
+            unsafe {
+                libc::recv(
+                    socket.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    0,
+                )
+            }
         };
+        if n == 24 && u32::from_ne_bytes(buffer[..4].try_into().unwrap()) == 2 {
+            dispatcher.finished(index, u32::from_ne_bytes(buffer[4..8].try_into().unwrap()));
+        }
         if n == 0
             || (n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted)
         {
             return;
         }
     }
+}
+
+// Forks in concurrent tests retain even CLOEXEC sockets until exec. On Darwin
+// a datagram recv waiting at the last close can time out before ECONNRESET.
+// Keep descriptor-lifetime fixtures alone, including when services compiles us.
+#[cfg(test)]
+pub(crate) fn isolated_test() -> bool {
+    const MARKER: &str = "isolated-input-fixture";
+    if std::env::args().any(|arg| arg == MARKER) {
+        return false;
+    }
+    let thread = std::thread::current();
+    let name = thread.name().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--skip", MARKER, "--nocapture"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(&format!("test {name} ... ok")), "{stdout}");
+    true
 }

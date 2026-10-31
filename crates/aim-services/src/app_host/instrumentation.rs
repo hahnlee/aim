@@ -237,6 +237,17 @@ fn shell_caller(uid: i32) -> Result<()> {
     }
 }
 impl AppHost {
+    pub(super) fn instrumentation_source(&self, uid: i32) -> Option<i32> {
+        self.apps
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|a| a.uid as i32 == uid)
+            .filter_map(|a| a.instrumentation.as_ref())
+            .find(|s| s.live())
+            .map(|s| s.source_uid)
+    }
+
     /// AccessCheckDelegateImpl invalidates PackageManager's permission-cache
     /// nonce on adoption/removal. Apps' native shared memory has no such nonce,
     /// but aim-system owns a mutable store, so invalidate through its owner.

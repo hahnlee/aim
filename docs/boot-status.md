@@ -456,17 +456,24 @@ identity matrix for absent windows and the inactive magnifier's default spec
 when requested, serializes with eager placement/input updates, and commits live
 channel membership under the agent dispatch lock (#2549). Both original
 five-second waits remain; input timeout is silent and animation timeout logs.
-Fifteen focused native window/animation checks pass. One fresh full
-Safety Center CTS run remains 475 pass / 1 fail / 52 assumption skips, with
-all 475 prior passes preserved (2026-11-01). The sole failure now reaches
-`IInputManager.injectInputEventToTarget` (`input#12`) during UiAutomation scrolling;
-that input-injection API remains unserved. The input-sync call and its native
-dispatcher acknowledgment both complete before that failure.
+Native `IInputManager.injectInputEventToTarget` (`input#12`) now decodes pinned
+key/motion parcels, checks INJECT_EVENTS with the live instrumentation-source
+fallback, and dispatches through the agent's window owner (#2551). UID targeting,
+display selection and all three modes use one injection deadline; foreground
+FINISHED sequences are tracked separately from selection and queued publication.
+Full socket buffers retain outbound messages until writable. Forty focused
+transport/input/instrumentation checks pass. One fresh full Safety Center CTS
+run remains 475 pass / 1 fail / 52 assumption skips, preserving every prior pass
+(2026-11-01). The targeted and full runs now complete input injection and scrolling,
+then time out finding the English title description `Security & privacy`; the UI
+dump's collapsing toolbar instead describes `보안 및 개인 정보 보호` in Korean.
+This subsequent title-selector/localization boundary remains unresolved.
 The 21 DeviceConfig-toggle skips follow the original fixed
 `safety_center_enabled_no_device_config` flag on Android 16; the 31 tests for unsupported devices skip because
 `config_enableSafetyCenter=true`. Neither policy changed.
 The final crash buffer, ANR and tombstone directories are empty. Both fresh CTS
-boots followed twenty quiet seconds, with no observed foreign guest/build overlap.
+boots followed twenty quiet seconds; unrelated builds overlapped parts of each
+run, with no observed foreign guest overlap. The frozen runtime stayed unchanged.
 Magnification and other unserved local operations remain explicit
 #2529 failures; full accessibility conformance is not established.
 
