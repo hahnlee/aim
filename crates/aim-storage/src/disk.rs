@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+mod info;
 mod registry;
+
+pub(crate) use info::leftover_devices;
 
 /// An attached image.
 #[derive(Clone, Debug, PartialEq, Eq)]

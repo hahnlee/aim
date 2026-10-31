@@ -91,8 +91,13 @@ remeasured and no guest boot was run (2026-10-29).
 The userdata template's settings capture waits until the primary and reserve copies of each settings file are nonempty and parse as XML/ABX before it freezes them: ResilientAtomicFile creates both files before serializing either, so matching empty copies are not a commit (#2287).
 Its parent now stops and reaps the owned boot before detaching the exact DATA
 backing on success, error, timeout and panic unwinding (#2232). Stale work cleanup
-holds the data lock while detaching that backing before removing the work tree;
-foreign mounts and live owners are refused. The data lock explicitly unlocks
+holds the data lock while detaching that backing before removing the work tree.
+If IORegistry misses a still-mounted DATA image, cleanup now checks
+`hdiutil info -plist` for its exact image and mount paths; foreign mounts,
+shadows and live owners are refused, and a remaining mount is an error.
+Three plist fixture tests pass (2026-10-31); no real attach is possible in this
+sandbox, so this fallback's mounted-volume recovery remains unverified.
+The data lock explicitly unlocks
 when its owner drops, so an unrelated spawn's pre-exec descriptor cannot keep a
 failed attach or a stopped owner busy. The deterministic inherited-descriptor
 regression and live-owner/handoff checks pass; the plain-directory regression

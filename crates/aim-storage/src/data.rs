@@ -118,7 +118,15 @@ fn lock(dir: &Path) -> Result<DataLock, String> {
 
 fn detach_image(dir: &Path) -> Result<(), String> {
     let image = image_of(dir);
-    for attached in disk::attachments_of(&image)? {
+    let attachments = disk::attachments_of(&image)?;
+    // A mounted volume must not be removed just because one inventory missed
+    // its backing. Keep the data lock while checking the independent inventory.
+    if attachments.is_empty() && disk::is_mount_point(dir) {
+        for device in disk::leftover_devices(&image, dir)? {
+            disk::detach(&device, PATIENCE)?;
+        }
+    }
+    for attached in attachments {
         if attached.shadow.is_some() || attached.mounts.iter().any(|mount| mount != dir) {
             return Err(format!(
                 "{}: attachment has a foreign mount or shadow",
@@ -131,6 +139,12 @@ fn detach_image(dir: &Path) -> Result<(), String> {
             attached.device
         );
         disk::detach(&attached.device, PATIENCE)?;
+    }
+    if disk::is_mount_point(dir) {
+        return Err(format!(
+            "{}: DATA mount remains attached or is unrelated",
+            dir.display()
+        ));
     }
     Ok(())
 }
