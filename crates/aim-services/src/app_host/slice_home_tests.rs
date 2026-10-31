@@ -351,3 +351,129 @@ fn non_home_pin_keeps_role_and_selection_exceptions() {
         });
     }
 }
+
+#[test]
+fn queued_app_pin_waits_for_package_settings_readiness_or_its_failure() {
+    use super::super::{content_service::ContentService, package_boot_context::BootContext};
+    use crate::package::resolve::settings::Owner as SettingsOwner;
+    use crate::system::ServiceOwner;
+    use std::time::Duration;
+
+    for fail in [false, true] {
+        crate::system::with_boot_discovery_binders(|host, publish, _, _| {
+            install_home_owner(host, publish, 2, true, false, None, None, None);
+            publish(&mut |package| {
+                if package.package_name == "p" {
+                    let mut settings = package.providers[0].clone();
+                    settings.main.component.name = "p.Settings".into();
+                    settings.authority = Some("settings".into());
+                    package.providers.push(settings);
+                }
+            });
+            host.content_service
+                .get_or_init(|| Arc::new(ContentService::new(host.clone())));
+            let Binder::Local(ptr) = host.process.add_service(BootContext::new(host.clone()))
+            else {
+                unreachable!()
+            };
+            let settings = SettingsOwner::new(
+                Arc::new(ServiceOwner::Local(
+                    host.process.local_service(ptr).unwrap(),
+                )),
+                false,
+            );
+            let system = host.package_system().unwrap();
+            let base = host.package_capture().unwrap();
+            let mut context = (**base.context()).clone();
+            context.platform.settings_owner = Some(settings.clone());
+            context.scan_version += 1;
+            system
+                .publish_package_scan_with_queries(
+                    &system.package_bootstrap().unwrap(),
+                    Some(base.scan()),
+                    base.scan().owner().clone(),
+                    base.scan().usage().clone(),
+                    context,
+                )
+                .unwrap();
+            // Current default grants must not bypass the package settings phase.
+            let path = host
+                .data()
+                .unwrap()
+                .join("misc_de/0/apexdata/com.android.permission/access.abx");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let fingerprint =
+                super::super::package_bootstrap::build_fingerprint(|n| host.property(n));
+            let access = crate::package::permissions::with_default_grant_fingerprint(
+                aim_android_xml::read(b"<access/>").unwrap(),
+                Some(&fingerprint),
+            )
+            .unwrap();
+            std::fs::write(path, aim_android_xml::abx::write(&access).unwrap()).unwrap();
+            assert!(
+                host.permission_manager
+                    .set(Arc::new(
+                        super::super::permission_manager::PermissionManager::new(host.clone())
+                    ))
+                    .is_ok()
+            );
+            let service = SliceManager::new(host.clone());
+            let before = pin(&service).unwrap_err();
+            assert_eq!(
+                before,
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "SettingsProvider phase has not reached PMS.systemReady"
+                )
+            );
+            let phase_error = Exception::new(EX_ILLEGAL_STATE, "package prepare-ready failed");
+            let (entered, queued) = mpsc::channel();
+            let (sent, received) = mpsc::channel();
+            let app = host.clone();
+            let worker = std::thread::spawn(move || {
+                entered.send(()).unwrap();
+                let start = app.start_package_process("q", "q", None, false, false);
+                let result = match app.processes_ready.wait().clone() {
+                    Ok(()) => {
+                        // No zygote in this fixture: startup has reached launch
+                        // validation, so observe the app's real Binder pin next.
+                        assert!(start.is_err());
+                        pin(&service)
+                    }
+                    Err(error) => {
+                        assert_eq!(start.unwrap_err(), error);
+                        Err(error)
+                    }
+                };
+                sent.send(result).unwrap();
+            });
+            queued.recv().unwrap();
+            let mut pending = None;
+            let ready = host.complete_system_ready(|| {
+                pending = Some(received.recv_timeout(Duration::from_millis(50)));
+                if fail {
+                    return Err(phase_error.clone());
+                }
+                settings.begin_system_ready()?;
+                settings.system_ready().map(|_| ())
+            });
+            let result = received.recv_timeout(Duration::from_secs(5));
+            worker.join().unwrap();
+            assert_eq!(pending.unwrap(), Err(mpsc::RecvTimeoutError::Timeout));
+            if fail {
+                assert_eq!(ready, Err(phase_error.clone()));
+                assert_eq!(result.unwrap(), Err(phase_error));
+            } else {
+                ready.clone().unwrap();
+                let denied = result.unwrap().unwrap_err();
+                assert_eq!(denied.code, aim_binder_host::parcel::EX_SECURITY);
+                assert!(denied.message.starts_with("Access to slice "));
+            }
+            // The package lifecycle is one-shot, including failed readiness.
+            assert_eq!(
+                host.complete_system_ready(|| panic!("repeated phase")),
+                ready
+            );
+        });
+    }
+}

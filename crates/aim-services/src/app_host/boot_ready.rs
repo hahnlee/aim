@@ -14,13 +14,27 @@ impl Drop for BootReady<'_> {
 }
 impl AppHost {
     pub(super) fn system_ready(&self) -> Result<(), Exception> {
-        let result = self
-            .permission_manager
-            .get()
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission owner unavailable"))
-            .and_then(|owner| owner.system_ready());
-        let _ = self.processes_ready.set(result.clone());
-        result?;
+        self.complete_system_ready(|| self.package_system()?.run_native_package_lifecycle(1))
+    }
+
+    pub(super) fn complete_system_ready(
+        &self,
+        packages: impl FnOnce() -> Result<(), Exception>,
+    ) -> Result<(), Exception> {
+        self.processes_ready
+            .get_or_init(|| {
+                // SystemServer calls PMS.systemReady before AMS.systemReady:
+                // package prepare-ready (including SettingsProvider access)
+                // and default grants must both precede application forks.
+                packages()?;
+                self.permission_manager
+                    .get()
+                    .ok_or_else(|| {
+                        Exception::new(EX_ILLEGAL_STATE, "permission owner unavailable")
+                    })?
+                    .system_ready()
+            })
+            .clone()?;
         self.start_pending_services()
     }
 }
@@ -39,8 +53,17 @@ mod tests {
     #[test]
     fn readiness_requires_a_permission_owner() {
         let host = AppHost::new(crate::test_process(1000));
-        assert!(host.system_ready().is_err());
+        assert!(host.complete_system_ready(|| Ok(())).is_err());
         assert!(host.processes_ready.wait().is_err());
         host.process.shutdown().unwrap();
+    }
+
+    #[test]
+    fn readiness_requires_the_package_lifecycle_before_default_grants() {
+        crate::system::with_boot_discovery_binders(|host, _, _, _| {
+            let error = host.system_ready().unwrap_err();
+            assert_eq!(error.message, "Boot lifecycle runtime unavailable");
+            assert_eq!(host.processes_ready.wait(), &Err(error));
+        });
     }
 }

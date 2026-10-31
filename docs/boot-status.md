@@ -23,13 +23,15 @@ playback submits matrix/alpha/clip transactions on display vsync. Host Binder an
 compositor checks pass; cold readiness timeout and nonzero animation background
 colors remain under #1725. No guest boot or live visual verification (2026-10-29).
 
-Slice pins retain the native default-home lookup's exception code and cause
-instead of replacing them with a generic UnsupportedOperationException (#2362).
-Host Binder tests cover a non-home caller with zero, one and two HOME activities,
-stale preferred-home cleanup, system-home fallback and role/selection failures.
-Those ordinary HOME states already answered normally; the discarded cause of
-the reported post-app-open crash remains unknown. No guest boot was run
-(2026-10-29).
+The app host runs native package prepare-ready before default grants and opening
+application startup (#2362), matching SystemServer's PMS-before-AMS ordering.
+Previously it omitted that phase: slice pin access checks could read
+`DEVICE_PROVISIONED` through default-home resolution while SettingsProvider's
+phase was still closed. Readiness retains package/grant failures and releases
+queued starts with that error. Host Binder tests cover the real settings-phase
+exception, queued startup, normal slice denial after readiness and phase failure,
+alongside zero/one/two HOME candidates, stale-home cleanup, system-home fallback
+and preserved role/selection exceptions. No guest boot was run (2026-10-31).
 
 Build freshness checks regular-file output fingerprints and includes the Rust
 AIDL generators as inputs, so restoring sources cannot leave an externally
