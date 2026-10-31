@@ -32,7 +32,11 @@ phase was still closed. Readiness retains package/grant failures and releases
 queued starts with that error. Host Binder tests cover the real settings-phase
 exception, queued startup, normal slice denial after readiness and phase failure,
 alongside zero/one/two HOME candidates, stale-home cleanup, system-home fallback
-and preserved role/selection exceptions. No guest boot was run (2026-10-31).
+and preserved role/selection exceptions. Prepare-ready policy publications now
+retain validated package projections; app-data reconciliation skips identical
+inode receipts, and an empty compressed-release batch avoids the guest agent
+(#2530). Host validation is recorded in the task report; no guest boot or
+boot-time improvement was measured (2026-10-31).
 
 Build freshness checks regular-file output fingerprints and includes the Rust
 AIDL generators as inputs, so restoring sources cannot leave an externally

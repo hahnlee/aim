@@ -1982,6 +1982,90 @@ fn query_epochs_retain_metadata_only_for_equal_complete_native_owners() {
 }
 
 #[test]
+fn ready_policy_updates_match_full_projection_without_changing_package_metadata() {
+    use crate::package::{scan_snapshot::query_state::Capture, web_instant_state::Snapshot};
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let base = publish(&fixture, &bridge);
+    assert!(!base.state().packages.is_empty());
+    let policy = Snapshot {
+        epoch: 1,
+        disabled: base
+            .state()
+            .users
+            .keys()
+            .map(|user| (*user, true))
+            .collect(),
+    };
+    let web = base.prepare_web_instant_policy(policy.clone()).unwrap();
+    let compatibility = web
+        .capture
+        .prepare_compatibility_mode(!base.state().system.compatibility_mode)
+        .unwrap();
+    for update in [&web, &compatibility] {
+        let capture = &update.capture;
+        let full = Capture::new(capture.scan().clone(), (**capture.context()).clone()).unwrap();
+        assert_eq!(capture.state(), full.state());
+        assert_eq!(capture.scan().owner(), base.scan().owner());
+        assert_eq!(capture.scan().usage(), base.scan().usage());
+        assert_eq!(
+            capture.scan().metadata_revision(),
+            base.scan().metadata_revision()
+        );
+        assert_eq!(capture.context().scan_version, capture.scan().version());
+        assert_eq!(capture.state().generation, capture.scan().version());
+        assert_eq!(
+            capture.state().system.web_instant_policy.as_deref(),
+            Some(&policy)
+        );
+        for (name, package) in &base.state().packages {
+            if let Some(code) = &package.pkg {
+                assert!(Arc::ptr_eq(
+                    code,
+                    capture.state().packages[name].pkg.as_ref().unwrap()
+                ));
+            }
+            if let Some(parcel) = &package.parcel {
+                assert!(Arc::ptr_eq(
+                    parcel,
+                    capture.state().packages[name].parcel.as_ref().unwrap()
+                ));
+            }
+        }
+    }
+    assert_eq!(web.capture.scan().version(), base.scan().version() + 1);
+    assert_eq!(
+        compatibility.capture.scan().version(),
+        base.scan().version() + 2
+    );
+    assert_eq!(
+        web.capture.state().system.compatibility_mode,
+        base.state().system.compatibility_mode
+    );
+    assert_ne!(
+        compatibility.capture.state().system.compatibility_mode,
+        base.state().system.compatibility_mode
+    );
+    assert_ne!(
+        base.state().system.web_instant_policy.as_deref(),
+        Some(&policy)
+    );
+    // Concurrent canonical usage must still be retained by publication rebasing.
+    let usage = base
+        .prepare_usage_update(base.scan().usage().clone())
+        .unwrap();
+    let rebased = web
+        .capture
+        .rebase_over_usage(base.scan(), usage.capture.scan())
+        .unwrap();
+    assert_eq!(
+        rebased.capture.state().system.web_instant_policy.as_deref(),
+        Some(&policy)
+    );
+    assert_eq!(rebased.capture.scan().usage(), usage.capture.scan().usage());
+}
+
+#[test]
 fn duplicate_app_data_receipt_keeps_metadata_but_persists_and_publishes_each_commit() {
     use crate::package::{installer::removal::NativeStore, owner::Store as Disk};
     let mut fixture = Fixture::new();

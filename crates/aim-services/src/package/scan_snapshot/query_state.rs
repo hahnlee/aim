@@ -447,14 +447,13 @@ impl Capture {
         self: &Arc<Self>,
         enabled: bool,
     ) -> Result<PackageUpdate, String> {
-        let update = self.prepare_package_update(self.scan.owner().clone())?;
-        let mut context = (*update.capture.context).clone();
-        context.system.compatibility_mode = enabled;
-        let capture = Self::new(update.store.capture(), context)?;
-        Ok(PackageUpdate {
-            store: update.store,
-            capture,
-        })
+        let mut update = self.prepare_usage_update(self.scan.usage().clone())?;
+        let capture = Arc::get_mut(&mut update.capture).unwrap();
+        Arc::make_mut(&mut capture.context)
+            .system
+            .compatibility_mode = enabled;
+        Arc::make_mut(&mut capture.state).system.compatibility_mode = enabled;
+        Ok(update)
     }
     pub(crate) fn prepare_web_instant_policy(
         self: &Arc<Self>,
@@ -477,14 +476,16 @@ impl Capture {
         {
             return Err("web instant policy epoch did not advance".into());
         }
-        let update = self.prepare_package_update(self.scan.owner().clone())?;
-        let mut context = (*update.capture.context).clone();
-        context.system.web_instant_policy = Some(Arc::new(policy));
-        let capture = Self::new(update.store.capture(), context)?;
-        Ok(PackageUpdate {
-            store: update.store,
-            capture,
-        })
+        // These settings change query policy only. Retain the validated scan
+        // metadata and package projections, as a usage-only capture does.
+        let mut update = self.prepare_usage_update(self.scan.usage().clone())?;
+        let capture = Arc::get_mut(&mut update.capture).unwrap();
+        let policy = Arc::new(policy);
+        Arc::make_mut(&mut capture.context)
+            .system
+            .web_instant_policy = Some(policy.clone());
+        Arc::make_mut(&mut capture.state).system.web_instant_policy = Some(policy);
+        Ok(update)
     }
 
     pub(crate) fn prepare_archive_owner(

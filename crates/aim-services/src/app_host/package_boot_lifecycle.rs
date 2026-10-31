@@ -84,6 +84,9 @@ impl BootLifecycle {
             .into_iter()
             .map(|p| p.ok_or_else(|| Exception::new(EX_NULL_POINTER, "")))
             .collect::<Result<_, _>>()?;
+        if paths.is_empty() {
+            return Ok(());
+        }
         let release = self.secure_int(RELEASE_COMPRESS_BLOCKS_ON_INSTALL, 1)? != 0;
         self.host
             .call_agent(RELEASE_COMPRESSED_BLOCKS, "releaseCompressedBlocks", |p| {
@@ -454,6 +457,8 @@ mod tests {
         }
         let null = call(leaf::RELEASE_COMPRESSED_BLOCKS, &|p| p.write_i32(-1));
         assert_eq!(null.unwrap_err().code, EX_NULL_POINTER);
+        // An unchanged boot has no compressed paths and needs no guest agent.
+        assert!(call(leaf::RELEASE_COMPRESSED_BLOCKS, &|p| p.write_i32(0)).is_ok());
         assert!(call(leaf::CLOSE, &|_| {}).is_ok());
         std::fs::remove_dir_all(&data).unwrap();
     }
