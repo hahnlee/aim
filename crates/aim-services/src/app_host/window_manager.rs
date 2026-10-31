@@ -294,7 +294,7 @@ impl AppHost {
 pub struct WindowManager(pub Arc<AppHost>);
 
 #[path = "window_input_sync.rs"]
-mod input_sync;
+pub(super) mod input_sync;
 
 impl Service for WindowManager {
     fn descriptor(&self) -> &str {

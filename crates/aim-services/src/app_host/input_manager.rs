@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
-use aim_service_aidl::WriteParcelable;
+use aim_input_transport::injection::Event;
 use aim_service_aidl::android_hardware_input_iinputmanager as im;
+use aim_service_aidl::{ReadParcelable, WriteParcelable};
 use sha1::{Digest, Sha1};
 
 use aim_input_transport::keychars::KeyCharacterMap;
@@ -239,6 +240,29 @@ pub(super) fn watch_key_repeat(host: &Arc<AppHost>) -> Result<(), Exception> {
     update_key_repeat_info(host)
 }
 
+struct InputEvent(Event);
+impl ReadParcelable for InputEvent {
+    fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> Result<Self, i32> {
+        let start = r.position();
+        let object = r.next_object();
+        let bytes = (0..r.remaining() / 4)
+            .map(|_| r.read_u32())
+            .collect::<Result<Vec<_>, _>>()?;
+        let bytes: Vec<_> = bytes.into_iter().flat_map(u32::to_le_bytes).collect();
+        let (event, used) = Event::decode(&bytes).ok_or(BAD_VALUE)?;
+        if object.is_some_and(|at| at < start + used) {
+            return Err(BAD_VALUE);
+        }
+        r.set_position(start + used);
+        Ok(Self(event))
+    }
+}
+impl WriteParcelable for InputEvent {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_raw(&self.0.parcel, &[]);
+    }
+}
+
 pub struct InputManager {
     host: Arc<AppHost>,
     virtual_keyboard: OnceLock<Arc<InputDevice>>,
@@ -253,6 +277,59 @@ impl InputManager {
             virtual_keyboard: OnceLock::new(),
             keyboard: OnceLock::new(),
             listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn inject(
+        &self,
+        caller: (i32, i32),
+        a: im::InjectInputEventToTarget<InputEvent>,
+    ) -> Result<bool, Exception> {
+        let permission = Some("android.permission.INJECT_EVENTS");
+        if self.host.check_permission(permission, caller.1)? != 0
+            && !self
+                .host
+                .instrumentation_source(caller.1)
+                .map(|uid| self.host.check_permission(permission, uid))
+                .transpose()?
+                .is_some_and(|r| r == 0)
+        {
+            return Err(Exception::security(
+                "Injecting input events requires the caller (or the source of the instrumentation, if any) to have the INJECT_EVENTS permission.",
+            ));
+        }
+        let event = a.ev.ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "event must not be null",
+            )
+        })?;
+        if !(0..=2).contains(&a.mode) {
+            return Err(Exception::illegal_argument("mode is invalid"));
+        }
+        let result = self.host.call_agent(19, "injectInputEventToTarget", |p| {
+            aim_service_aidl::write_byte_array(p, Some(&event.0.parcel));
+            p.write_i32(a.mode);
+            p.write_i32(a.target_uid);
+        })?;
+        let mut r = result.reader();
+        let bad = |e| Exception::new(EX_ILLEGAL_STATE, format!("injectInputEvent reply: {e}"));
+        r.read_exception().map_err(bad)??;
+        match r.read_i32().map_err(bad)? {
+            0 => Ok(true),
+            1 if a.target_uid == -1 => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "Injection should not result in TARGET_MISMATCH when it is not targeted into to a specific uid.",
+            )),
+            1 => Err(Exception::illegal_argument(format!(
+                "Targeted input event injection from pid {} was not directed at a window owned by uid {}.",
+                caller.0, a.target_uid
+            ))),
+            result => {
+                let reason = if result == 3 { "timed out" } else { "failed" };
+                eprintln!("Input event injection from pid {} {reason}.", caller.0);
+                Ok(false)
+            }
         }
     }
 
@@ -426,6 +503,16 @@ impl Service for InputManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            im::INJECT_INPUT_EVENT_TO_TARGET => {
+                let a = im::InjectInputEventToTarget::<InputEvent>::read(&mut call.data)?;
+                return reply(
+                    self.inject((call.sender_pid, call.sender_euid as i32), a)
+                        .map(|value| {
+                            im::write_inject_input_event_to_target_reply(&mut p, value);
+                            p
+                        }),
+                );
+            }
             im::HAS_KEYS => {
                 let a = im::HasKeys::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // Java AIDL sends the allocated out-array's length after the inputs.
@@ -669,3 +756,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "input_injection_tests.rs"]
+pub(super) mod injection_tests;
