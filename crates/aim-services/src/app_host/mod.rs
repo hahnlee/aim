@@ -21,6 +21,7 @@ mod activity_user;
 pub mod alarm_service;
 pub mod apex_manager;
 mod app_data;
+mod app_hibernation;
 mod app_op_infos;
 mod app_standby;
 pub mod app_widget;
@@ -956,6 +957,10 @@ impl AppHost {
                 Arc::new(permission_controller::PermissionController(self.clone())),
             ),
             ("permissionmgr", permission_manager.clone()),
+            (
+                "app_hibernation",
+                Arc::new(app_hibernation::AppHibernation(self.clone())),
+            ),
             // SystemServer's optional_background_install_control flag is on;
             // the image leaves background_install_control_enabled at true.
             (

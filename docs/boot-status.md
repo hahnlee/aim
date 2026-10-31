@@ -594,8 +594,13 @@ DEX/linkage checks cover the migration, including original disabled exits and
 API/state routes. A fresh app-host boot of the print-based local rebase publishes
 the original service in aim-system, reports supported/available/enabled config,
 returns aggregate data and renders the original Safety Center page. The initial
-PermissionController process later crashes in HibernatedPackagesLiveData with a
-null reference; the retained window capture is after its relaunch. This is scoped
+PermissionController process later crashed in HibernatedPackagesLiveData because
+`getSystemService("app_hibernation")` returned null (#2512; pinned APK DEX line 48).
+The app host now publishes that service: fresh-state reads return false and a
+nonnull empty package list, with MANAGE_APP_HIBERNATION and full cross-user checks.
+Persisted states and transitions remain unsupported (#2064). Host regressions cover
+these paths; no guest boot or Safety Center rerun verifies recovery. The retained
+capture follows the earlier relaunch. This is scoped
 page/aggregate validation, not sustained app acceptance or listener, persistence,
 stats, refresh/action or notification conformance. Official Safety Center CTS
 executes no tests: APK installation fails permission PREPARE (#2161), and the

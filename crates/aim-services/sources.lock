@@ -16,6 +16,7 @@ TEST_SOURCE_FILES=(
 
 # project|path|sha256
 SOURCE_FILES=(
+  "platform/frameworks/base|core/java/android/apphibernation/IAppHibernationService.aidl|ca49ac1c0b71c90ffc8c72fdd692b313e2c6470bed25142f1b14158d24d3183d"
   "platform/frameworks/base|core/java/android/app/time/ITimeZoneDetectorListener.aidl|d7ebe47768db29bbe4693d73b01c9eec5a200f7e2b5749bc69573860ba79bca5"
   "platform/frameworks/base|core/java/android/app/timezonedetector/ITimeZoneDetectorService.aidl|f137138bec579434ea2cf34ccdb65274ee20c8f038620de1fef7515cff471637"
   "platform/frameworks/base|core/java/android/companion/virtual/IVirtualDeviceManager.aidl|e786d33da9995d27a0d28ccb86e9fbd072edd5a52518d4aae6e78230573dfbd8"
@@ -278,6 +279,7 @@ INTERFACES=(
   "android.content.pm.IPackageStatsObserver|system/framework/framework.jar|*"
   "android.content.pm.IOnChecksumsReadyListener|system/framework/framework.jar|*"
   "android.content.pm.IDexModuleRegisterCallback|system/framework/framework.jar|*"
+  "android.apphibernation.IAppHibernationService|system/framework/framework.jar|isHibernatingForUser,getHibernatingPackagesForUser"
   "android.content.pm.IBackgroundInstallControlService|system/framework/framework.jar|*"
   "android.os.IRemoteCallback|system/framework/framework.jar|*"
   "com.android.internal.policy.IDeviceLockedStateListener|system/framework/framework.jar|*"

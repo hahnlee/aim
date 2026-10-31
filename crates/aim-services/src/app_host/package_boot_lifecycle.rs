@@ -173,8 +173,8 @@ impl BootLifecycle {
     }
 
     /// `isHibernationSuppressed`: AppHibernationManagerInternal's global
-    /// hibernation with oat artifact deletion; the app host runs no
-    /// hibernation service (#2064), so none is hibernating.
+    /// hibernation with oat artifact deletion; the app host performs no
+    /// hibernation transitions (#2064), so none is hibernating.
     fn hibernation_suppressed(&self, name: Option<String>) -> Result<bool, Exception> {
         name.ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
         Ok(false)
