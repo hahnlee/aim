@@ -145,6 +145,7 @@ impl Policy {
         ps: &PackageState,
         permission: &Permission,
         declaration: Option<&Declaration>,
+        unsupported: fn(&str) -> Exception,
     ) -> Result<bool, Exception> {
         let flags = permission.protection_level;
         if flags & (0x10 | 0x4000) != 0 && ps.is.system {
@@ -164,6 +165,31 @@ impl Policy {
             }
         }
         if flags & 0x80 != 0 && ps.target_sdk_version < M {
+            return Ok(true);
+        }
+        let selected = |flag, label: &str, kinds: &[i32]| -> Result<bool, Exception> {
+            if flags & flag == 0 {
+                return Ok(false);
+            }
+            for kind in kinds {
+                let selected = state
+                    .system
+                    .roles
+                    .as_ref()
+                    .and_then(|owner| owner.permission_known_package(*kind, &ps.name))
+                    .ok_or_else(|| {
+                        unsupported(&format!(
+                            "{label} protection flag: KnownPackages {kind} selection unavailable"
+                        ))
+                    })?;
+                // KnownPackages owns selection; there is no isSystem condition.
+                if selected {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        if selected(0x100, "installer", &[2, 7])? || selected(0x200, "verifier", &[4])? {
             return Ok(true);
         }
         if flags & 0x400 != 0 && ps.is.system {
@@ -196,34 +222,17 @@ impl Policy {
                 }
             }
         }
-        for (flag, kinds) in [
-            (0x100, &[2, 7][..]),
-            (0x200, &[4][..]),
-            (0x800, &[1][..]),
-            (0x10000, &[6][..]),
-            (0x80000, &[10][..]),
-            (0x100000, &[11][..]),
-            (0x200000, &[12][..]),
-            (0x800000, &[15][..]),
-            (0x2000000, &[17][..]),
+        for (flag, label, kind) in [
+            (0x800, "setup", 1),
+            (0x10000, "systemTextClassifier", 6),
+            (0x80000, "configurator", 10),
+            (0x100000, "incidentReportApprover", 11),
+            (0x200000, "appPredictor", 12),
+            (0x800000, "companion", 15),
+            (0x2000000, "recents", 17),
         ] {
-            if flags & flag == 0 {
-                continue;
-            }
-            for kind in kinds {
-                let selected = state
-                    .system
-                    .roles
-                    .as_ref()
-                    .and_then(|owner| owner.permission_known_package(*kind, &ps.name))
-                    .ok_or_else(|| {
-                        unsupported("known-package protection grants before role selection")
-                    })?;
-                // AppIdPermissionPolicy.kt:1641-1725: KnownPackages already
-                // owns selection; there is no additional isSystem condition.
-                if selected {
-                    return Ok(true);
-                }
+            if selected(flag, label, &[kind])? {
+                return Ok(true);
             }
         }
         // PermissionInfo.java:259; AppIdPermissionPolicy.kt:1727-1730.
@@ -238,6 +247,7 @@ impl Policy {
         requesters: &[&PackageState],
         permission: &Permission,
         declaration: Option<&Declaration>,
+        unsupported: fn(&str) -> Exception,
     ) -> Result<bool, Exception> {
         let mut may_grant_privileged = permission.protection_level & 0x10 == 0;
         let mut granted = false;
@@ -250,7 +260,7 @@ impl Policy {
             let by_signature = permission.protection_level & PROTECTION_MASK_BASE
                 == PROTECTION_SIGNATURE
                 && self.signature(state, ps, permission);
-            let by_flags = self.protection(state, ps, permission, declaration)?;
+            let by_flags = self.protection(state, ps, permission, declaration, unsupported)?;
             granted |= by_signature || by_flags;
         }
         Ok(may_grant_privileged && granted)

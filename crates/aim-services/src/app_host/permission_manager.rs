@@ -33,6 +33,8 @@ mod policy;
 mod ready;
 mod removal;
 mod reset;
+#[path = "permission_manager/boot/signature.rs"]
+mod signature;
 mod writeback;
 
 pub(super) use policy::PermissionPolicy;

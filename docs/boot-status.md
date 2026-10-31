@@ -611,9 +611,14 @@ Persisted states and transitions remain unsupported (#2064). Host regressions co
 these paths; no guest boot or Safety Center rerun verifies recovery. The retained
 capture follows the earlier relaunch. This is scoped
 page/aggregate validation, not sustained app acceptance or listener, persistence,
-stats, refresh/action or notification conformance. Official Safety Center CTS
-executes no tests: APK installation fails permission PREPARE (#2161), and the
-module command reaches unsupported activity.startInstrumentation. Fresh empty-data
+stats, refresh/action or notification conformance. Install permission PREPARE now
+uses the boot policy's signature lineage, known-signer, allowlist and static
+protection decisions for non-system user-0 installs (#2161). Ungranted signature
+and internal permissions no longer abort installation; unavailable KnownPackages
+selections name the individual flag. Host branch tests include a signed APK whose
+own signature permission is granted and platform permission denied. Official
+Safety Center CTS still has no executed results: installation has not been rerun,
+and the module command reaches unsupported activity.startInstrumentation. Fresh empty-data
 boots of main, print and 8bd9d5e64 all spend tens of seconds in synchronous default
 permission mutations; print starts after that attach returns (2026-10-31).
 AppSearch is the original module, run by the app host's system process
