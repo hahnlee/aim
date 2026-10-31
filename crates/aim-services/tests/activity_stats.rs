@@ -63,6 +63,9 @@ fn activity_stats_publishes_original_local_shape_and_formats_owner_snapshots() {
                     "ActivityStatsProcess",
                     "ActivityStatsPendingIntent",
                     "CachedAppsWatermark",
+                    "IAccessibilityWindowHost",
+                    "IAccessibilityWindowCallback",
+                    "AccessibilityWindowData",
                 ]
                 .map(|name| input.join(format!("dev/aim/server/{name}.aidl"))),
             ),
