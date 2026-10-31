@@ -5,6 +5,9 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+Regular-file writes clear set-ID modes without CAP_FSETID (#779); a shared generation invalidates
+cached modes. Host syscall/metadata checks pass; no guest boot was run (2026-10-31).
+
 Native verified-code preparation now reads associated dex metadata and applies
 captured low-SDK, instant/declaration and test-only gates before signing, then
 instant v2 admission (#1415). Snapshot, permission and ABI/reservation phases

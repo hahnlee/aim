@@ -1067,6 +1067,7 @@ pub(crate) fn isolated_kernel_test(name: &str) -> bool {
 }
 
 fn set_slow(fd: i32, on: bool) {
+    super::attrs::forget_write_mode(fd);
     if let Some(b) = SLOW.get(fd as usize) {
         b.store(on as u8, Ordering::Relaxed);
     }
@@ -1316,8 +1317,9 @@ fn adopt_inherited() {
 /// execve in place: the kept fds this process holds as plain fds (a fork
 /// child's evdev fds, say) get their Linux state, as in a new process.
 pub fn adopt_plain() {
-    for slot in &REGULAR_ACCESS {
+    for (fd, slot) in REGULAR_ACCESS.iter().enumerate() {
         slot.store(0, Ordering::Relaxed);
+        super::attrs::forget_write_mode(fd as i32);
     }
     for fd in open_fds()
         .into_iter()
