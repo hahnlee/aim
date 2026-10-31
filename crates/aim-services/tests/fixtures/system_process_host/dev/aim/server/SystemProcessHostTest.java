@@ -3,6 +3,7 @@ import java.util.ArrayList;
 import java.util.List;
 public final class SystemProcessHostTest {
     public static boolean deviceLock;
+    public static boolean printing;
     public static void loadLibrary(String name) {
         if (!name.equals("android_servers")) throw new AssertionError(name);
         events.add("jni");
@@ -16,6 +17,7 @@ public final class SystemProcessHostTest {
     public static final class Attached extends Error {}
     public static void main(String[] args) throws Exception {
         deviceLock = Boolean.parseBoolean(args[0]);
+        printing = Boolean.parseBoolean(args[1]);
         try {
             SystemProcessHost.Server.main(new String[0]);
             throw new AssertionError("startup returned");
@@ -26,9 +28,15 @@ public final class SystemProcessHostTest {
                     "foreground", "attachSystem", "companion", "crates", "activityStats", "taskManagerLocal",
                     "PinnerService:construct", "PinnerService:start", "NetworkStatsInitializer:construct",
                     "NetworkStatsInitializer:start", "NearbyServiceInitializer:construct",
-                    "NearbyServiceInitializer:start", "StatsPullAtomService:construct",
-                    "StatsPullAtomService:start", "AdServices:construct", "AdServices:start"));
-            List<String> early = List.of("PinnerService", "NearbyServiceInitializer", "StatsPullAtomService", "AdServices");
+                    "NearbyServiceInitializer:start"));
+            List<String> early = new ArrayList<>(List.of("PinnerService", "NearbyServiceInitializer"));
+            if (printing) {
+                wanted.addAll(List.of("PrintManagerService:construct", "PrintManagerService:start"));
+                early.add("PrintManagerService");
+            }
+            wanted.addAll(List.of("StatsPullAtomService:construct", "StatsPullAtomService:start",
+                    "AdServices:construct", "AdServices:start"));
+            early.addAll(List.of("StatsPullAtomService", "AdServices"));
             for (int phase : new int[] {480, 500, 520}) {
                 for (String service : early) wanted.add(service+":phase="+phase);
             }

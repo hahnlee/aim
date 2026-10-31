@@ -312,7 +312,18 @@ The native `time_zone_detector` (#2490) serves Android 16 AIDL using the Mac's
 passive automatic-source slot and the alarm owner's zone/confidence. Host tests
 cover forbidden user configuration, distinct grants, confidence writes and location
 callbacks with duplicate/unregister/death/already-dead cleanup. No guest boot,
-Settings check or CTS was run; `print` remains unserved (2026-10-31).
+Settings check or CTS was run (2026-10-31).
+
+The system process now starts the image's original PrintManagerService when
+FEATURE_PRINTING is declared, before StatsPullAtomService and phase 480, and
+delivers its subsequent boot phases and initial user-0 callbacks (#2501).
+The original publishes `print` and retains its UserManager/PackageManager checks,
+settings/package observers, listener records and original PrintSpooler APK binding
+path. No native print endpoint or original-class replacement is added. JVM
+lifecycle/feature-guard checks, original DEX route checks and the device-services
+build/linkage check pass; no guest boot, Settings check or CTS was run.
+The restriction-triggered `print()` path still lacks DevicePolicyManagerInternal's
+disabled-reason owner in aim-system (#2501).
 
 Cold app-host reads now serve `window.isKeyguardSecure` through the existing
 lock credential owner, display-content window contexts through the window-context
