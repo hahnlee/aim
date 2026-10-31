@@ -25,6 +25,7 @@ DEVICE_CONFIG_LISTS=(
 
 # project|path|sha256
 SOURCE_FILES=(
+  "platform/frameworks/native|libs/gui/aidl/android/gui/ISurfaceComposer.aidl|217bdf7b4c19fd672cffb69d1201a02d84ff4f0763dc653d7da57bf006560907"
   "platform/frameworks/base|core/java/android/apphibernation/IAppHibernationService.aidl|ca49ac1c0b71c90ffc8c72fdd692b313e2c6470bed25142f1b14158d24d3183d"
   "platform/frameworks/base|core/java/android/app/IUiAutomationConnection.aidl|d149c5694a217431cdb65a69676a0acec4cb903907de278299a7aa2bb8ead96b"
   "platform/frameworks/base|core/java/android/app/IInstrumentationWatcher.aidl|e624e8c75c94e4e467d6ecfa9f706e3fcf3e58810c0bb98d04adac7f67a477ac"
@@ -249,7 +250,7 @@ INTERFACES=(
   "com.android.internal.policy.IKeyguardDismissCallback|system/framework/framework.jar|*"
   "android.app.IActivityClientController|system/framework/framework.jar|activityIdle,activityResumed,overridePendingTransition,overrideActivityTransition,clearOverrideActivityTransition,activityTopResumedStateLost,activityPaused,activityStopped,activityDestroyed,reportSizeConfigurations,getDisplayId,setTaskDescription,finishActivity,isTopOfTask,getRequestedOrientation,setRequestedOrientation,getCallingActivity,getCallingPackage,getLaunchedFromUid,getLaunchedFromPackage,onBackPressed,moveActivityTaskToBack,reportActivityFullyDrawn,convertFromTranslucent,convertToTranslucent,enableTaskLocaleOverride,setRecentsScreenshotEnabled,finishActivityAffinity,dismissKeyguard,setShowWhenLocked,setInheritShowWhenLocked,setTurnScreenOn"
   "android.hardware.display.IDisplayManager|system/framework/framework.jar|getDisplayInfo,getDisplayIds,registerCallbackWithEventMask,getPreferredWideGamutColorSpaceId,getOverlaySupport,getStableDisplaySize,getWifiDisplayStatus"
-  "android.view.IWindowManager|system/framework/framework.jar|openSession,syncInputTransactions,getCurrentAnimatorScale,hasNavigationBar,getWindowInsets,attachWindowContextToDisplayArea,detachWindowContext,isKeyguardLocked,isKeyguardSecure,attachWindowContextToDisplayContent,isRotationFrozen,freezeRotation,thawRotation,getDefaultDisplayRotation,setInTouchMode,setInTouchModeOnAllDisplays,isInTouchMode,addKeyguardLockedStateListener,removeKeyguardLockedStateListener"
+  "android.view.IWindowManager|system/framework/framework.jar|openSession,captureDisplay,syncInputTransactions,getCurrentAnimatorScale,hasNavigationBar,getWindowInsets,attachWindowContextToDisplayArea,detachWindowContext,isKeyguardLocked,isKeyguardSecure,attachWindowContextToDisplayContent,isRotationFrozen,freezeRotation,thawRotation,getDefaultDisplayRotation,setInTouchMode,setInTouchModeOnAllDisplays,isInTouchMode,addKeyguardLockedStateListener,removeKeyguardLockedStateListener"
   "android.view.IWindowSession|system/framework/framework.jar|getWindowId"
   "android.view.IWindowId|system/framework/framework.jar|*"
   "android.view.IWindowFocusObserver|system/framework/framework.jar|*"
@@ -552,4 +553,9 @@ OWN_INTERFACES=(
   "dev.aim.server.IPackageFeed|java/device-services/aidl/dev/aim/server/IPackageFeed.aidl|*"
   "dev.aim.server.IPackageFeedHost|java/device-services/aidl/dev/aim/server/IPackageFeedHost.aidl|*"
   "dev.aim.server.IPackageWritesHost|java/device-services/aidl/dev/aim/server/IPackageWritesHost.aidl|*"
+)
+
+# Native-only AIDL: generated codes, without a Java stub in the image.
+NATIVE_INTERFACES=(
+  "android.gui.ISurfaceComposer"
 )

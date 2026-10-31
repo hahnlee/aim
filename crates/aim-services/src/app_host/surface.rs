@@ -60,6 +60,7 @@ pub struct Layer {
 /// The app host's `ISurfaceComposerClient`, and SurfaceFlinger's service
 /// of transactions.
 pub struct Composer {
+    service: Strong,
     client: Strong,
     handle: u32,
     transactions: Strong,
@@ -89,6 +90,7 @@ impl Composer {
     #[cfg(test)]
     pub(super) fn for_test(process: &LocalProcess, handle: u32) -> Self {
         Self {
+            service: process.strong(handle),
             client: process.strong(handle),
             handle,
             transactions: process.strong(handle),
@@ -113,6 +115,7 @@ impl Composer {
             return Err("createConnection: no client".into());
         };
         Ok(Composer {
+            service: sf,
             client: process.strong(handle),
             handle,
             transactions: super::display::check_service(process, TRANSACTIONS)?,
@@ -124,6 +127,16 @@ impl Composer {
     /// The client, as a `SurfaceControl` names it.
     pub fn binder(&self) -> Binder {
         Binder::Handle(self.handle)
+    }
+
+    pub(super) fn capture_layers(&self, data: &Parcel) -> Result<(), i32> {
+        self.service
+            .transact(
+                aim_service_aidl::android_gui_isurfacecomposer::CAPTURE_LAYERS,
+                data,
+                true,
+            )
+            .map(|_| ())
     }
 
     /// A layer `name` with `flags` and the metadata `metadata` (key,

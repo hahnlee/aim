@@ -388,13 +388,15 @@ impl AppHost {
         let made = self.tasks.with_layer(
             id,
             |task| {
-                composer.create_surface(
-                    &self.process,
-                    &format!("Task={id} {}", task.component),
-                    surface::CONTAINER,
-                    None,
-                    &[],
-                )
+                self.with_display_layer(|parent| {
+                    composer.create_surface(
+                        &self.process,
+                        &format!("Task={id} {}", task.component),
+                        surface::CONTAINER,
+                        Some(parent),
+                        &[],
+                    )
+                })
             },
             f,
         )?;

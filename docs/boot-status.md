@@ -473,6 +473,13 @@ existing process/activity/broadcast path (#2555). Native-service property writes
 request on-disk persistence at guest-init's property owner. Focused host checks
 pass; fresh locale/persistence and official CTS checks below pass (2026-11-01).
 
+Native `window.captureDisplay` now forwards the logical display's WM root
+subtree and caller's capture listener to original SurfaceFlinger `captureLayers`
+(#2570). Crop bounds and scales stay in Android pixels; SurfaceFlinger owns
+secure/protected capture and GraphicBuffer results. Host Binder checks cover
+forwarding, permission/display rejection and transport failure; no guest boot
+or live screenshot/CTS check was run.
+
 The app host starts the original AccessibilityManagerService with native overlay
 and window callback ownership and ordered initial-user initialization (#2529).
 App attach no longer waits for accessibility's user-initialization completion
