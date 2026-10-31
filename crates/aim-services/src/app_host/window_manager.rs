@@ -89,6 +89,7 @@ struct Window {
 /// The app host's windows, by their `IWindow`.
 #[derive(Default)]
 pub struct Windows {
+    accessibility: accessibility::Accessibility,
     pub(super) transitions: Mutex<super::activity_transitions::Transitions>,
     windows: Mutex<HashMap<u32, Window>>,
     next: Mutex<u32>,
@@ -321,6 +322,55 @@ impl Service for WindowManager {
                     pid: call.sender_pid,
                 }));
                 wm::write_open_session_reply(&mut p, Some(session));
+            }
+            wm::IS_ROTATION_FROZEN => {
+                wm::IsRotationFrozen::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                wm::write_is_rotation_frozen_reply(
+                    &mut p,
+                    *self.0.windows.accessibility.rotation_frozen.lock().unwrap(),
+                );
+            }
+            wm::GET_DEFAULT_DISPLAY_ROTATION => {
+                wm::GetDefaultDisplayRotation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let rotation = match self.0.global_configuration() {
+                    Ok(c) => c.window.display_rotation,
+                    Err(e) => return reply(Err(e)),
+                };
+                wm::write_get_default_display_rotation_reply(&mut p, rotation);
+            }
+            wm::FREEZE_ROTATION | wm::THAW_ROTATION => {
+                let result = (|| {
+                    if self.0.check_permission(
+                        Some("android.permission.SET_ORIENTATION"),
+                        call.sender_euid as i32,
+                    )? != 0
+                    {
+                        return Err(Exception::security("SET_ORIENTATION required"));
+                    }
+                    let freeze = call.code == wm::FREEZE_ROTATION;
+                    if freeze {
+                        let a = wm::FreezeRotation::read(&mut call.data)
+                            .map_err(|_| Exception::illegal_argument("rotation"))?;
+                        if !(-1..=3).contains(&a.rotation) {
+                            return Err(Exception::illegal_argument("invalid rotation"));
+                        }
+                        let rotation = self.0.global_configuration()?.window.display_rotation;
+                        if a.rotation != -1 && a.rotation != rotation {
+                            return Err(self
+                                .0
+                                .unimplemented_named("window", "rotation changes (#2529)"));
+                        }
+                    } else {
+                        wm::ThawRotation::read(&mut call.data)
+                            .map_err(|_| Exception::illegal_argument("rotation"))?;
+                    }
+                    *self.0.windows.accessibility.rotation_frozen.lock().unwrap() = freeze;
+                    Ok(())
+                })();
+                if let Err(e) = result {
+                    return reply(Err(e));
+                }
+                p.write_no_exception();
             }
             wm::GET_CURRENT_ANIMATOR_SCALE => {
                 wm::GetCurrentAnimatorScale::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -888,6 +938,8 @@ impl Session {
             task_fragment_bounds: frame,
         }
         .write(&mut p);
+        drop(windows);
+        self.host.accessibility_windows_changed()?;
         Ok(p)
     }
 }
@@ -1011,6 +1063,10 @@ impl super::AppHost {
                 .map(|w| (w.id, w.focus_callbacks.clone()))
         };
         if focus.current.as_ref().map(|(id, _)| *id) == new.as_ref().map(|(id, _)| *id) {
+            drop(focus);
+            if let Err(e) = self.accessibility_windows_changed() {
+                eprintln!("app host: accessibility: {e:?}");
+            }
             return;
         }
         let old = std::mem::replace(&mut focus.current, new.clone());
@@ -1039,6 +1095,9 @@ impl super::AppHost {
                 break;
             };
             callbacks.report(gained);
+        }
+        if let Err(e) = self.accessibility_windows_changed() {
+            eprintln!("app host: accessibility: {e:?}");
         }
     }
 
@@ -1153,6 +1212,9 @@ impl super::AppHost {
             self.place_window(w, task)?;
             laid.push((handle, w.frames, w.uid, w.pid));
         }
+        drop(windows);
+        self.accessibility_windows_changed()
+            .map_err(|e| format!("{e:?}"))?;
         Ok(laid)
     }
 
@@ -1657,10 +1719,25 @@ impl Service for Session {
                 Ok(Parcel::new())
             }
             ws::SET_ON_BACK_INVOKED_CALLBACK_INFO => Ok(Parcel::new()),
-            // Oneway: WindowManager passes it to accessibility's
-            // magnification (`AccessibilityController`), which no service
-            // runs here.
-            ws::ON_RECTANGLE_ON_SCREEN_REQUESTED => Ok(Parcel::new()),
+            // IWindowSession's oneway rectangle request, projected into display coordinates.
+            ws::ON_RECTANGLE_ON_SCREEN_REQUESTED => {
+                call.data
+                    .enforce_interface(ws::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let token = call.data.read_binder().map_err(|_| BAD_VALUE)?;
+                if !call.data.read_bool().map_err(|_| BAD_VALUE)? {
+                    return Err(BAD_VALUE);
+                }
+                let mut rect = [0; 4];
+                for value in &mut rect {
+                    *value = call.data.read_i32().map_err(|_| BAD_VALUE)?;
+                }
+                reply(
+                    self.host
+                        .accessibility_rectangle(token, rect, (self.uid, self.pid))
+                        .map(|()| Parcel::new()),
+                )
+            }
             code => reply(Err(self.host.unimplemented(
                 "window session",
                 self.descriptor(),
@@ -1985,3 +2062,7 @@ impl AppHost {
         self.remove_window(id);
     }
 }
+
+#[path = "window_accessibility.rs"]
+mod accessibility;
+pub(super) use accessibility::service as accessibility_host;

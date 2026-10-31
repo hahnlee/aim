@@ -612,6 +612,7 @@ pub struct AppHost {
     package_boot: package_boot::Readiness,
     /// AMS.mProcessesReady: package settings and default grants before app forks.
     processes_ready: OnceLock<Result<(), Exception>>,
+    pub(crate) accessibility_ready: boot_ready::AccessibilityReady,
     /// Retained verifier API in the current system process; replaced on attach.
     domain_frontend: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     /// Retained cold MediaRouter2 queries, replaced when aim-system attaches.
@@ -744,6 +745,7 @@ impl AppHost {
             system: OnceLock::new(),
             package_boot: Default::default(),
             processes_ready: OnceLock::new(),
+            accessibility_ready: Default::default(),
             domain_frontend: Mutex::new(None),
             system_route_queries: Mutex::new(None),
             native_staging_bridge: Mutex::new(None),
@@ -2134,6 +2136,14 @@ impl AppHost {
                 "attachApplication without a thread",
             ));
         };
+        let needs_accessibility = {
+            let apps = self.apps.lock().unwrap();
+            apps.get(&start_seq)
+                .is_some_and(|a| !a.isolated && a.entry_point.is_none())
+        };
+        if needs_accessibility {
+            self.accessibility_ready.wait()?;
+        }
         let mut apps = self.apps.lock().unwrap();
         let strong = self.process.strong(handle);
         let Some(app) = apps.get_mut(&start_seq).filter(|a| {
@@ -2268,6 +2278,8 @@ impl AppHost {
             Box::new(move || {
                 eprintln!("app host: the system process (pid {pid}) died");
                 if let Some(host) = host.upgrade() {
+                    host.accessibility_ready
+                        .failed("system process died (#2529)");
                     host.process_died(seq, pid);
                 }
             }),
@@ -4388,6 +4400,9 @@ impl AppHost {
         bind::Bundle(core_settings).write_to(&mut settings_parcel);
         let core_settings = kept::RawBundle::read_from(&mut settings_parcel.reader())
             .map_err(|e| state(format!("core settings: {e}")))?;
+        let accessibility = (!is_isolated(app.uid as i32))
+            .then(|| self.accessibility_ready.wait())
+            .transpose()?;
         let published = self.published.lock().unwrap();
         // An isolated process gets only those it may use (`getCommonServicesLocked`).
         let isolated = is_isolated(app.uid as i32);
@@ -4401,6 +4416,12 @@ impl AppHost {
                     ParcelValue::Binder(Some(*binder)),
                 )
             })
+            .chain(accessibility.iter().map(|service| {
+                (
+                    ParcelValue::String(Some("accessibility".into())),
+                    ParcelValue::Binder(Some(service.binder())),
+                )
+            }))
             .collect();
         let target_sdk = info.target_sdk_version;
         let app_package = info.item.package_name.clone().unwrap_or_default();

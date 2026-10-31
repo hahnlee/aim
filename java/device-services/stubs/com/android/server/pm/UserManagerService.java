@@ -1,6 +1,8 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class UserManagerService extends android.os.IUserManager.Stub {
+    public boolean isUserVisible(int user) { throw new RuntimeException("stub"); }
+    public boolean isUserForeground(int user) { throw new RuntimeException("stub"); }
     public android.content.pm.UserInfo getUserInfo(int user) { throw new RuntimeException("stub"); }
     public android.content.pm.UserProperties getUserPropertiesCopy(int user) { throw new RuntimeException("stub"); }
     public boolean isUserRunning(int user) { throw new RuntimeException("stub"); }

@@ -636,6 +636,7 @@ this adds vendor bridge classes only, with no replacement of original classes.
   maintenance `JobService`, a component of the `android` package, whose
   unserved services and providers still require their owners' internals
   and remain explicit UnsupportedOperation (#1518).
+The original AccessibilityManagerService.Lifecycle also runs in aim-system (#2529), over a typed system-UID adapter to native window tokens, window-change callbacks and rotation state. Its initial user switch uses the image's original USER_SWITCHED receiver; ordinary app binding waits outside the app lock for publication after that receiver completes. Window content introspection and other unsupported local window operations remain explicit #2529 errors; no original class or image replacement is added.
 
 The app host runs the pinned original `DefaultPermissionGrantPolicy` in
 `aim-system` at package readiness, before opening AMS process startup (#2361).

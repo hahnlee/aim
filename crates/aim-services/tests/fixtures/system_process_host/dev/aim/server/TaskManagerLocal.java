@@ -1,4 +1,4 @@
 package dev.aim.server;
 final class TaskManagerLocal {
-    static void publish() { SystemProcessHostTest.events.add("taskManagerLocal"); }
+    static void publish(ISystemProcess host) { SystemProcessHostTest.events.add("taskManagerLocal"); }
 }

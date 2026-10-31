@@ -45,6 +45,7 @@ pub struct LayoutParams {
     pub y: i32,
     pub kind: i32,
     pub flags: i32,
+    pub private_flags: i32,
     pub window_animations: i32,
     pub gravity: i32,
     pub horizontal_margin: f32,
@@ -66,7 +67,7 @@ impl LayoutParams {
         let y = r.read_i32()?;
         let kind = r.read_i32()?;
         let flags = r.read_i32()?;
-        r.read_i32()?; // private flags
+        let private_flags = r.read_i32()?;
         r.read_i32()?; // soft input mode
         r.read_i32()?; // display cutout mode
         let gravity = r.read_i32()?;
@@ -100,6 +101,7 @@ impl LayoutParams {
             y,
             kind,
             flags,
+            private_flags,
             window_animations,
             gravity,
             horizontal_margin,

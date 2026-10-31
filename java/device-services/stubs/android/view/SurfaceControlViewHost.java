@@ -3,5 +3,6 @@
 package android.view;
 
 public class SurfaceControlViewHost {
+    public static final class SurfacePackage { public SurfacePackage(SurfacePackage p) { throw new RuntimeException("stub"); } }
     public SurfaceControlViewHost(android.content.Context context, Display display, android.os.IBinder hostToken) { throw new RuntimeException("stub"); }
 }

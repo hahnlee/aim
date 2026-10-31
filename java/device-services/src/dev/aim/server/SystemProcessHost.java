@@ -171,7 +171,10 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachRecoverableKeyStoreKeys(new RecoverableKeyStoreKeys(context));
             host.attachStorageCrates(new StorageCrates(context));
             ActivityStats.publish(host);
-            TaskManagerLocal.publish();
+            TaskManagerLocal.publish(host);
+            AccessibilityWindows.publish(host);
+            SystemService accessibility = new com.android.server.accessibility.AccessibilityManagerService$Lifecycle(context);
+            accessibility.onStart();
             SystemService pinner = new PinnerService(context);
             pinner.onStart();
             // ZygoteInit's class loader of the standalone jar
@@ -187,7 +190,7 @@ public final class SystemProcessHost extends RuntimeInit {
             startService("dev.aim.server.nearby.ConnectivityDumpInitializer", nearbyLoader, context);
             startService("dev.aim.server.nearby.NetworkStatsInitializer", nearbyLoader, context);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
-            List<SystemService> services = new ArrayList<>(List.of(pinner, nearby));
+            List<SystemService> services = new ArrayList<>(List.of(pinner, nearby, accessibility));
             if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_PRINTING)) {
                 SystemService print = new PrintManagerService(context);
                 print.onStart();
@@ -230,6 +233,7 @@ public final class SystemProcessHost extends RuntimeInit {
                 service.onUserStarting(user);
             }
             pinner.onUserSwitching(null, user);
+            accessibility.onUserSwitching(null, user);
             for (SystemService service : services) {
                 service.onUserUnlocking(user);
             }
@@ -239,6 +243,17 @@ public final class SystemProcessHost extends RuntimeInit {
             for (SystemService service : services) {
                 service.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
             }
+            // This image initializes accessibility from USER_SWITCHED (its Lifecycle flag is off).
+            // The ordered completion keeps app admission behind the original receiver's work.
+            context.sendOrderedBroadcastAsUser(new android.content.Intent(android.content.Intent.ACTION_USER_SWITCHED)
+                    .putExtra(android.content.Intent.EXTRA_USER_HANDLE, UserHandle.USER_SYSTEM)
+                    .addFlags(android.content.Intent.FLAG_RECEIVER_REGISTERED_ONLY | android.content.Intent.FLAG_RECEIVER_FOREGROUND),
+                    UserHandle.ALL, null, new android.content.BroadcastReceiver() {
+                        @Override public void onReceive(Context c, android.content.Intent intent) {
+                            try { host.accessibilityReady(ServiceManager.getService(Context.ACCESSIBILITY_SERVICE)); }
+                            catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+                        }
+                    }, new Handler(Looper.getMainLooper()), 0, null, null);
             Slog.i(TAG, "System process services started");
             new TelecomLoader(context).onActivityManagerReady();
             Looper.loop();

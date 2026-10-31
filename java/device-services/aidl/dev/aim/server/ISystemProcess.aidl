@@ -1,5 +1,6 @@
 package dev.aim.server;
 import dev.aim.server.IForegroundServicePolicy;
+import dev.aim.server.IAccessibilityWindowHost;
 import dev.aim.server.IBatteryHealthStats;
 import dev.aim.server.ISafeLabels;
 import dev.aim.server.IStatsCompanionUidMap;
@@ -19,6 +20,8 @@ import dev.aim.server.IDexUsePackages;
  * does, calls it. It answers the system uid only.
  */
 interface ISystemProcess {
+    IAccessibilityWindowHost getAccessibilityWindowHost();
+    void accessibilityReady(IBinder service);
     /**
      * `ActivityManagerService.setSystemProcess`: `applicationThread`, the
      * caller's IApplicationThread, is the system process's. The app host
