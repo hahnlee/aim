@@ -7,4 +7,6 @@ interface IActivityStatsHost {
     ActivityStatsProcess[] getProcesses();
     ActivityStatsPendingIntent[] getPendingIntents();
     CachedAppsWatermark getCachedAppsWatermark(boolean resetAfterPull);
+    boolean isAppStartModeDisabled(int uid, String packageName);
+    int getRestrictionLevel(int uid);
 }

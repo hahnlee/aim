@@ -4,6 +4,16 @@ package com.android.server.pm.permission;
 
 public interface LegacyPermissionManagerInternal {
     void resetRuntimePermissions();
+    interface SyncAdapterPackagesProvider { String[] getPackages(String authority, int userId); }
+    void setSyncAdapterPackagesProvider(SyncAdapterPackagesProvider provider);
+    void setDialerAppPackagesProvider(PackagesProvider provider);
+    void setSimCallManagerPackagesProvider(PackagesProvider provider);
+    void setSmsAppPackagesProvider(PackagesProvider provider);
+    void setUseOpenWifiAppPackagesProvider(PackagesProvider provider);
+    void setVoiceInteractionPackagesProvider(PackagesProvider provider);
+    void grantDefaultPermissionsToDefaultSimCallManager(String name, int user);
+    void grantDefaultPermissionsToDefaultUseOpenWifiApp(String name, int user);
+    int checkSoundTriggerRecordAudioPermissionForDataDelivery(int uid, String name, String tag, String reason);
     interface PackagesProvider {
         String[] getPackages(int userId);
     }

@@ -38,6 +38,7 @@ public final class PackageLocalOwners {
         LocalServices.addService(PermissionManagerServiceInternal.class, new Permissions(host));
         LocalServices.addService(StorageManagerInternal.class, new Storage(host));
         var localPackages = packages();
+        com.android.server.pm.permission.AppHostDefaultPermissionGrants.publish(context);
         var dynamic = new com.android.server.pm.dex.DynamicCodeLogger(installer);
         localPackages.dynamic = dynamic;
         var optimizer = new com.android.server.pm.PackageDexOptimizer(installer,
@@ -120,10 +121,16 @@ public final class PackageLocalOwners {
             return java.util.Objects.requireNonNull(dynamic, "dynamic code owner unavailable");
         }
         private final PackageSnapshots.Source scans;
+        private final java.util.function.Supplier<ISystemProcess> host;
         private final ThreadLocal<PackageScanLease> iteration = new ThreadLocal<>();
         Packages(android.content.pm.IPackageManager owner, PackageSnapshots.Source scans) {
+            this(owner, scans, () -> ISystemProcess.Stub.asInterface(ServiceManager.getService("aim.system_process")));
+        }
+        Packages(android.content.pm.IPackageManager owner, PackageSnapshots.Source scans,
+                java.util.function.Supplier<ISystemProcess> host) {
             this.owner = java.util.Objects.requireNonNull(owner);
             this.scans = java.util.Objects.requireNonNull(scans);
+            this.host = java.util.Objects.requireNonNull(host);
         }
         @Override public android.content.ComponentName getSystemUiServiceComponent() {
             return com.android.server.pm.NativeUserManagerBridge.getSystemUiServiceComponent();
@@ -145,9 +152,26 @@ public final class PackageLocalOwners {
         }
         @Override public boolean filterAppAccess(String name, int uid, int user, boolean uninstalled) {
             if (!uninstalled) throw unsupported();
-            try { return ISystemProcess.Stub.asInterface(ServiceManager.getService("aim.system_process"))
-                    .filterSyncAdapterPackageAccess(name, uid, user); }
+            try { return host.get().filterSyncAdapterPackageAccess(name, uid, user); }
             catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+        }
+        @Override public boolean filterAppAccess(String name, int uid, int user) {
+            return filterAppAccess(name, uid, user, true);
+        }
+        @Override public boolean filterAppAccess(com.android.server.pm.pkg.AndroidPackage pkg, int uid, int user) {
+            return filterAppAccess(java.util.Objects.requireNonNull(pkg).getPackageName(), uid, user);
+        }
+        @Override public boolean wasPackageEverLaunched(String name, int user) {
+            return userState(name, user, state -> {
+                if (state == null) throw new IllegalArgumentException("Unknown package: " + name);
+                return !state.notLaunched;
+            });
+        }
+        @Override public boolean isPackageStopped(String name, int user)
+                throws android.content.pm.PackageManager.NameNotFoundException {
+            var state = userState(name, user, value -> value);
+            if (state == null) throw new android.content.pm.PackageManager.NameNotFoundException(name);
+            return state.stopped;
         }
         java.util.List<android.content.pm.PackageInfo> installedPackages(int user) {
             try { return owner.getInstalledPackages(0, user).getList(); }

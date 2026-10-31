@@ -11,6 +11,18 @@ final class PackageLocalOwnersTest {
     }
     static void run() {
         var calls = new java.util.ArrayList<String>();
+        int[] filters = {0};
+        var visibility = owner(ISystemProcess.class, (proxy, method, args) -> {
+            if (!method.getName().equals("filterSyncAdapterPackageAccess") || (int)args[1] != 10123 || (int)args[2] != 0) throw new AssertionError(method);
+            filters[0]++; return args[0].equals("hidden");
+        });
+        var packages = new PackageLocalOwners.Packages(owner(android.content.pm.IPackageManager.class,
+                (p, m, a) -> { throw new AssertionError(m); }), () -> { throw new AssertionError(); }, () -> visibility);
+        if (!packages.filterAppAccess("hidden", 10123, 0) || packages.filterAppAccess("visible", 10123, 0, true)) throw new AssertionError();
+        var adapter = owner(com.android.server.pm.pkg.AndroidPackage.class, (p, m, a) -> "hidden");
+        if (!packages.filterAppAccess(adapter, 10123, 0) || filters[0] != 3) throw new AssertionError();
+        try { packages.filterAppAccess("visible", 10123, 0, false); throw new AssertionError(); }
+        catch (UnsupportedOperationException expected) {}
         boolean[] dead = {false};
         var backend = owner(ISystemProcess.class, (proxy, method, args) -> {
             if (dead[0]) throw new android.os.RemoteException("owner died");

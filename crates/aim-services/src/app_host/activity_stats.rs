@@ -261,6 +261,21 @@ impl AppHost {
         *self.process_stats.collector.lock().unwrap() = Some(Arc::new(collector));
         Ok(self.process.add_service(Arc::new(Backend(self.clone()))))
     }
+
+    /// AMS.getAppStartModeLOSP(disabledOnly): only idle instant apps are disabled.
+    /// Native bound UIDs are active; package state comes from the package owner.
+    fn app_start_mode_disabled(&self, uid: i32, name: Option<&str>) -> Result<bool, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("packageName is null"))?;
+        if self.uid_runs(uid) {
+            return Ok(false);
+        }
+        let (state, _) = self.packages()?;
+        let user = uid.div_euclid(super::PER_USER_RANGE as i32);
+        Ok(state
+            .packages
+            .get(name)
+            .is_some_and(|ps| crate::package::info::user_state(ps, user).instant_app))
+    }
 }
 
 pub(super) struct Backend(pub Arc<AppHost>);
@@ -276,6 +291,23 @@ impl Service for Backend {
         }
         let mut p = Parcel::new();
         match call.code {
+            api::IS_APP_START_MODE_DISABLED => {
+                let a = api::IsAppStartModeDisabled::read(&mut call.data)?;
+                let result = self
+                    .0
+                    .app_start_mode_disabled(a.uid, a.package_name.as_deref());
+                return reply(result.map(|disabled| {
+                    api::write_is_app_start_mode_disabled_reply(&mut p, disabled);
+                    p
+                }));
+            }
+            api::GET_RESTRICTION_LEVEL => {
+                api::GetRestrictionLevel::read(&mut call.data)?;
+                return reply(Err(Exception::new(
+                    aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+                    "native app restriction settings owner unavailable (#2274)",
+                )));
+            }
             api::GET_PROCESSES => {
                 api::GetProcesses::read(&mut call.data)?;
                 api::write_get_processes_reply(&mut p, Some(&self.0.stats_processes()));
@@ -444,6 +476,64 @@ mod tests {
         assert_eq!(samples.load(Ordering::Relaxed), 2);
     }
     #[test]
+    fn sync_local_queries_use_uid_state_and_keep_missing_owners_explicit() {
+        let host = super::super::tests::host_with_start(7, Arc::new(|| {}));
+        assert!(
+            !host
+                .app_start_mode_disabled(99000, Some("android"))
+                .unwrap()
+        );
+        assert!(host.app_start_mode_disabled(99000, None).is_err());
+        let backend = Backend(host.clone());
+        let mut request = Parcel::new();
+        api::IsAppStartModeDisabled {
+            uid: 99000,
+            package_name: Some("android".into()),
+        }
+        .write(&mut request);
+        let response = backend
+            .transact(&mut Call {
+                code: api::IS_APP_START_MODE_DISABLED,
+                flags: 0,
+                sender_pid: 1,
+                sender_euid: SYSTEM_UID,
+                data: request.reader(),
+            })
+            .unwrap();
+        assert!(
+            !api::read_is_app_start_mode_disabled_reply(&mut response.reader())
+                .unwrap()
+                .unwrap()
+        );
+        let mut request = Parcel::new();
+        api::GetRestrictionLevel { uid: 99000 }.write(&mut request);
+        let response = backend
+            .transact(&mut Call {
+                code: api::GET_RESTRICTION_LEVEL,
+                flags: 0,
+                sender_pid: 1,
+                sender_euid: SYSTEM_UID,
+                data: request.reader(),
+            })
+            .unwrap();
+        assert_eq!(
+            response
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
+        host.apps.lock().unwrap().clear();
+        // No package owner is available in this fixture; never invent "allowed".
+        assert!(
+            host.app_start_mode_disabled(99000, Some("android"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn bridge_checks_uid_and_reads_the_live_process_owner() {
         let host = super::super::tests::host_with_start(7, Arc::new(|| {}));
         let backend = Backend(host.clone());
@@ -464,6 +554,8 @@ mod tests {
             api::GET_PROCESSES,
             api::GET_PENDING_INTENTS,
             api::GET_CACHED_APPS_WATERMARK,
+            api::IS_APP_START_MODE_DISABLED,
+            api::GET_RESTRICTION_LEVEL,
         ] {
             let p = backend
                 .transact(&mut Call {
