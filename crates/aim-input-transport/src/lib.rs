@@ -6,6 +6,7 @@
 //! The window a touch goes to is chosen as `InputDispatcher` chooses it
 //! (`findTouchedWindowTargets`).
 
+pub mod injection;
 pub mod keyboard;
 pub mod keychars;
 pub mod keylayout;
