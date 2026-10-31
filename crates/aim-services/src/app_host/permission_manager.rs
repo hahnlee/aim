@@ -1937,6 +1937,12 @@ impl PermissionManager {
         self.user_writes.close()
     }
 
+    /// Issue the pending delayed access write now, as a test's reload point.
+    #[cfg(test)]
+    pub(crate) fn flush_writes(&self) -> Result<(), Exception> {
+        self.user_writes.flush()
+    }
+
     fn write_user(&self, relative: &str, state: &AccessUser) -> Result<(), Exception> {
         Self::write_user_at(&self.host, relative, state)?;
         #[cfg(test)]

@@ -722,6 +722,7 @@ fn shell_grant_revoke_reset_persist_publish_and_deny_unprivileged_callers() {
                 .any(|p| p == CAMERA),
             expected == 0
         );
+        manager.flush_writes().unwrap();
         assert_eq!(
             PermissionManager::new(host.clone())
                 .retained_access()
