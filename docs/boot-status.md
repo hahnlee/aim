@@ -155,6 +155,11 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+The statusbar shell dispatches panel commands to its registered IStatusBar with
+per-command permissions (#2561); other commands and legacy collapse without an
+ATM policy owner fail explicitly. Host Binder validation is in the task report;
+no guest boot, CTS or visible panel behavior was verified (2026-11-01).
+
 SettingsProvider publishes `device_config` over its existing Config and sync-mode
 owners (#2531). Host Binder command/permission/state checks pass; full namespace
 and local-override enumeration remain explicitly unsupported. No guest/CTS/app run (2026-10-31).
