@@ -38,6 +38,11 @@ fn pending_starts_attach_fail_or_are_killed_without_signalling_zero() {
                 &[("android.permission.flags.appop_mode_caching_enabled", true)],
                 true,
                 |host, _, _, export| {
+                    // Neither an unpublished service nor its failure holds up AMS attach.
+                    if path == 0 && outcome == 0 {
+                        host.accessibility_ready.failed("accessibility unavailable");
+                    }
+                    assert!(host.accessibility_ready.service().is_none());
                     let pm = permission_manager::PermissionManager::with_system(
                         host.clone(),
                         Default::default(),
