@@ -347,10 +347,11 @@ offer while carrier is present and tracks the requests needing it. The snapshot
 includes its prospective score and the agent's FullScore policies, keep-connected
 reason, factory serial and observed lifecycle times; netd creation is recorded
 only after networkCreate succeeds. Revalidation preserves the first validation
-time. Unavailable owners (including BPF, inactivity timers and histories) still
-produce named errors; full original dump fidelity remains incomplete. Host
-snapshot/lifecycle, exact-output formatting and denial checks cover this cold
-path; no guest boot was run.
+time. Absent owners use Android 16's empty-state text. Diagnostics reuse the original
+NetworkDiagnostics with its five-second budget; ancillary configuration and
+read-only pinned BPF maps are read in the module loader. Host snapshot/denial,
+selector and formatting checks pass with parcelable/module-leaf doubles, as does
+pinned-image Java linkage; no guest boot or live dump was run (2026-10-31).
 Staged APEX inventory queries now reach the retained `NativeStagingBridge` in
 `aim-system`, using the image's original `ApexManager.getStagedApexInfos` for
 apexd inputs and failure handling (#2158). System-UID-only attachment and queries

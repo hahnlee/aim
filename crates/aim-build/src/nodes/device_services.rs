@@ -179,11 +179,13 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     )?;
     let nearby_generated = work.join("nearby-aidl");
     fs::create_dir_all(&nearby_generated).map_err(|e| e.to_string())?;
-    fs::copy(
-        generated.join("dev/aim/server/INetworkStatsBridge.java"),
-        nearby_generated.join("INetworkStatsBridge.java"),
-    )
-    .map_err(|e| e.to_string())?;
+    for name in ["INetworkStatsBridge", "IConnectivityDumpLeaf"] {
+        fs::copy(
+            generated.join(format!("dev/aim/server/{name}.java")),
+            nearby_generated.join(format!("{name}.java")),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let nearby_classes = work.join("nearby-classes");
     tools.javac(
         log,

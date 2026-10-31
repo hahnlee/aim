@@ -5,4 +5,8 @@ public final class LinkProperties implements android.os.Parcelable {
  public static final android.os.Parcelable.Creator<LinkProperties> CREATOR = null;
  public int describeContents() { throw new RuntimeException("stub"); }
  public void writeToParcel(android.os.Parcel p, int flags) { throw new RuntimeException("stub"); }
+ public LinkProperties(LinkProperties other) { throw new RuntimeException("stub"); }
+ public boolean isPrivateDnsActive() { throw new RuntimeException("stub"); }
+ public String getPrivateDnsServerName() { throw new RuntimeException("stub"); }
+ public java.util.List<java.net.InetAddress> getValidatedPrivateDnsServers() { throw new RuntimeException("stub"); }
 }
