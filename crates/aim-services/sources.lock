@@ -15,6 +15,14 @@ TEST_SOURCE_FILES=(
   "platform/frameworks/libs/modules-utils|java/com/android/modules/utils/BasicShellCommandHandler.java|f56b4ac8f89b0361e31d63790357fc108e6d3d65b4b0338c67ca6c62e8f48bf9"
 )
 
+# SettingsProvider DeviceConfig write policy, generated from the pinned lists.
+DEVICE_CONFIG_LISTS=(
+  "ADB_WRITABLE_NAMESPACES|platform/packages/modules/ConfigInfrastructure|framework/java/android/provider/WritableNamespaces.java|004e734185eb82b1686d8f6519fee0a80b24f92ca7d35a7751de0d709991c5c5"
+  "LEGACY_WRITABLE_NAMESPACES|platform/frameworks/base|packages/SettingsProvider/src/com/android/providers/settings/WritableNamespaces.java|726ccaffa133b8f79af0b02144eb57b3be76c5d73be9a877998ce415e27b5a08"
+  "WRITABLE_PREFIXES|platform/frameworks/base|packages/SettingsProvider/src/com/android/providers/settings/WritableNamespacePrefixes.java|c047acfff6cfc01b05dba624d6106c50d93c7a6f89d188e4a844da16d791ccd5"
+  "WRITABLE_FLAGS|platform/packages/modules/ConfigInfrastructure|framework/java/android/provider/WritableFlags.java|d4aa1e6af5fb4b9216b67b90ad28a9ec2487f938d3f0cf83418fbd4bf3a165b6"
+)
+
 # project|path|sha256
 SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/apphibernation/IAppHibernationService.aidl|ca49ac1c0b71c90ffc8c72fdd692b313e2c6470bed25142f1b14158d24d3183d"

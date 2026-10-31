@@ -9,11 +9,55 @@
 //! its Object Serialization form (`Parcel.writeSerializable`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::exit_info::fields;
 use crate::package::info::java_hash;
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
+use aim_service_aidl::device_config_write as write_policy;
+
+/// `SettingsProvider.getAllowlistedDeviceConfigNamespaces`, Android 16 r1
+/// lines 2595–2640. APEX paths come from the native package owner's inventory.
+pub(super) fn writable_namespaces(
+    state: &crate::package::model::State,
+    root: &Path,
+) -> Result<HashSet<String>, Exception> {
+    let api = state.system.flags.iter().any(|(name, on)| {
+        name == "android.provider.flags.device_config_writable_namespaces_api" && *on
+    });
+    let list = if api {
+        write_policy::ADB_WRITABLE_NAMESPACES
+    } else {
+        write_policy::LEGACY_WRITABLE_NAMESPACES
+    };
+    let mut namespaces: HashSet<String> = list.iter().map(|s| s.to_string()).collect();
+    let apex = state.apex_inventory.as_ref().ok_or_else(|| {
+        Exception::new(
+            EX_ILLEGAL_STATE,
+            "native accepted APEX inventory unavailable",
+        )
+    })?;
+    for apex in &apex.active {
+        let path = root
+            .join(apex.mount_path.trim_start_matches('/'))
+            .join("etc/writable_namespaces");
+        if !path.is_file() {
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => namespaces.extend(
+                String::from_utf8_lossy(&bytes)
+                    .split(['\r', '\n'])
+                    .map(|line| line.trim_matches(|c| c <= '\u{20}'))
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_string),
+            ),
+            Err(e) => eprintln!("app host: settings: parsing {}: {e}", path.display()),
+        }
+    }
+    Ok(namespaces)
+}
 
 /// `SettingsState.sAconfigTextProtoFilesOnDevice`.
 const PROTO_FILES: [&str; 4] = [

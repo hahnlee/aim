@@ -38,6 +38,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::android_content_icontentprovider as cp;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 use aim_service_aidl::dev_aim_server_isettingsvalues as settings_values;
+use aim_service_aidl::device_config_write as write_policy;
 
 use super::activity_user::AllowMode;
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
@@ -275,6 +276,7 @@ pub struct SettingsProvider {
     /// `mConfigMonitorCallback`.
     monitor: Mutex<Option<Arc<Strong>>>,
     values_bridge: Mutex<Option<Arc<Strong>>>,
+    writable_namespaces: OnceLock<HashSet<String>>,
 }
 
 /// `SettingsProvider.scheduleWriteFallbackFilesJob`: once daily while
@@ -1605,6 +1607,7 @@ impl SettingsProvider {
             sync_disabled_until_reboot: AtomicBool::new(false),
             monitor: Mutex::new(None),
             values_bridge: Mutex::new(None),
+            writable_namespaces: OnceLock::new(),
         }
     }
 
@@ -2287,29 +2290,62 @@ impl SettingsProvider {
         })
     }
 
-    /// `enforceDeviceConfigWritePermission`: WRITE_DEVICE_CONFIG, whose
-    /// background users' deny list (`assertCallingUserDenyList`) spares
-    /// the system user, the app host's one. A caller with only
-    /// WRITE_ALLOWLISTED_DEVICE_CONFIG is not implemented (#1776).
-    fn enforce_device_config_write(&self, caller: &Caller) -> Result<(), Exception> {
-        if self.has(caller, WRITE_DEVICE_CONFIG)? {
-            if caller.user() != 0 {
-                return Err(self.host.unimplemented_named(
-                    "settings provider",
-                    "another user's DeviceConfig writes (#1523)",
+    /// `SettingsProvider.enforceDeviceConfigWritePermission`, Android 16 r1
+    /// lines 2468–2532; background-user enforcement remains #1523.
+    fn enforce_device_config_write<'a>(
+        &self,
+        caller: &Caller,
+        flags: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), Exception> {
+        if !self.has(caller, WRITE_DEVICE_CONFIG)? {
+            if !self.has(caller, WRITE_ALLOWLISTED_DEVICE_CONFIG)? {
+                return Err(Exception::security(
+                    "Permission denial to mutate flag, must have root, WRITE_DEVICE_CONFIG, or WRITE_ALLOWLISTED_DEVICE_CONFIG",
                 ));
             }
-            return Ok(());
+            let restricted = self
+                .host
+                .flag("android.security.protect_device_config_flags")?;
+            if restricted && self.writable_namespaces.get().is_none() {
+                let (state, _) = self.host.packages()?;
+                let configured = self.host.configured.get().ok_or_else(|| {
+                    Exception::new(EX_ILLEGAL_STATE, "app host is not configured")
+                })?;
+                let namespaces = device_config::writable_namespaces(&state, &configured.root)?;
+                let _ = self.writable_namespaces.set(namespaces);
+            }
+            for flag in flags {
+                let mut flag = flag.to_string();
+                let allowed = if restricted {
+                    let mut namespace = flag.split('/').next().unwrap().to_string();
+                    if namespace == "device_config_overrides"
+                        && let Some((ns, name)) =
+                            flag.split_once('/').and_then(|(_, s)| s.split_once(':'))
+                        && !name.is_empty()
+                    {
+                        namespace = ns.to_string();
+                        flag = format!("{ns}/{name}");
+                    }
+                    self.writable_namespaces.get().unwrap().contains(&namespace)
+                } else {
+                    write_policy::WRITABLE_PREFIXES
+                        .iter()
+                        .any(|prefix| flag.starts_with(prefix))
+                };
+                if !allowed && !write_policy::WRITABLE_FLAGS.contains(&flag.as_str()) {
+                    return Err(Exception::security(format!(
+                        "Permission denial for flag '{flag}'; allowlist permission granted, but must add flag to the allowlist"
+                    )));
+                }
+            }
         }
-        if self.has(caller, WRITE_ALLOWLISTED_DEVICE_CONFIG)? {
+        if caller.user() != 0 {
             return Err(self.host.unimplemented_named(
                 "settings provider",
-                "allowlisted DeviceConfig writes (#1776)",
+                "another user's DeviceConfig writes (#1523)",
             ));
         }
-        Err(Exception::security(
-            "Permission denial to mutate flag, must have root, WRITE_DEVICE_CONFIG, or WRITE_ALLOWLISTED_DEVICE_CONFIG",
-        ))
+        Ok(())
     }
 
     /// `insertConfigSetting`, as `mutateConfigSetting` inserts it: the
@@ -2324,7 +2360,7 @@ impl SettingsProvider {
         make_default: bool,
     ) -> Result<bool, Exception> {
         let package = self.resolve_calling_package(caller)?;
-        self.enforce_device_config_write(caller)?;
+        self.enforce_device_config_write(caller, [name.unwrap_or_default()])?;
         let name = name.unwrap_or_default();
         let settings = &self.host.platform()?.settings;
         let change = Change {
@@ -2354,7 +2390,7 @@ impl SettingsProvider {
     /// `deleteConfigSetting`.
     fn delete_config(&self, caller: &Caller, name: Option<&str>) -> Result<bool, Exception> {
         self.resolve_calling_package(caller)?;
-        self.enforce_device_config_write(caller)?;
+        self.enforce_device_config_write(caller, [name.unwrap_or_default()])?;
         let name = name.unwrap_or_default();
         if !self
             .host
@@ -2379,8 +2415,8 @@ impl SettingsProvider {
     ) -> Result<(), Exception> {
         let package = self.resolve_calling_package(caller)?;
         let settings = &self.host.platform()?.settings;
-        settings.config_flags(prefix)?;
-        self.enforce_device_config_write(caller)?;
+        let flags = settings.config_flags(prefix)?;
+        self.enforce_device_config_write(caller, flags.keys().map(String::as_str))?;
         if caller.app_id() != SHELL_UID {
             match prefix {
                 Some(prefix) => settings.ban_config(prefix, &settings.config_flags(Some(prefix))?),
@@ -2419,7 +2455,7 @@ impl SettingsProvider {
                 "Attempt to invoke interface method 'java.util.Set java.util.Map.keySet()' on a null object reference",
             ));
         };
-        self.enforce_device_config_write(caller)?;
+        self.enforce_device_config_write(caller, flags.iter().map(|(name, _)| name.as_str()))?;
         let package = self.resolve_calling_package(caller)?;
         if self.sync_disabled_mode()? != SYNC_DISABLED_MODE_NONE {
             eprintln!(
@@ -2768,6 +2804,182 @@ pub(crate) fn prepare_shell_test(host: &AppHost) {
 
 #[cfg(test)]
 mod tests {
+    /// CTS SafetyCenter setup's adopted WRITE_ALLOWLISTED_DEVICE_CONFIG;
+    /// SettingsProvider.java:2468–2532, 2595–2640 at android-16.0.0_r1.
+    #[test]
+    fn device_config_allowlisted_writes_follow_image_policy() {
+        for (protect, api) in [(true, true), (true, false), (false, false)] {
+            crate::system::with_discovery_session_flags(
+                &[
+                    ("android.security.protect_device_config_flags", protect),
+                    (
+                        "android.provider.flags.device_config_writable_namespaces_api",
+                        api,
+                    ),
+                ],
+                |host| {
+                    check_device_config_writes(host, protect);
+                },
+            );
+        }
+    }
+
+    fn check_device_config_writes(host: &Arc<AppHost>, protect: bool) {
+        use crate::package::{
+            bootstrap::ActiveApex,
+            permissions::{AccessSystem, Permission},
+        };
+        let access = host
+            .data()
+            .unwrap()
+            .join("misc_de/0/apexdata/com.android.permission/access.abx");
+        std::fs::create_dir_all(access.parent().unwrap()).unwrap();
+        let xml = format!(
+            "<access><app-id-permissions><app-id id='10100'><permission name='{WRITE_ALLOWLISTED_DEVICE_CONFIG}' flags='1'/></app-id><app-id id='10101'><permission name='{WRITE_DEVICE_CONFIG}' flags='1'/><permission name='{WRITE_ALLOWLISTED_DEVICE_CONFIG}' flags='1'/></app-id></app-id-permissions></access>"
+        );
+        std::fs::write(
+            access,
+            aim_android_xml::abx::write(&aim_android_xml::read(xml.as_bytes()).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let permissions = super::super::permission_manager::PermissionManager::with_system(
+            host.clone(),
+            AccessSystem {
+                permissions: [WRITE_DEVICE_CONFIG, WRITE_ALLOWLISTED_DEVICE_CONFIG]
+                    .into_iter()
+                    .map(|name| Permission {
+                        name: name.into(),
+                        package: "android".into(),
+                        protection_level: 2,
+                        dynamic: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        host.permission_manager
+            .set(Arc::new(permissions))
+            .ok()
+            .unwrap();
+        let caller = Caller {
+            uid: 10100,
+            package: Some("p".into()),
+        };
+        let full = Caller {
+            uid: 10101,
+            package: Some("q".into()),
+        };
+        let provider = SettingsProvider::new(host.clone());
+        assert!(provider.generations.set(GenerationRegistry::new(1)).is_ok());
+        assert!(!provider.has(&caller, WRITE_DEVICE_CONFIG).unwrap());
+        let put = |caller: &Caller, key: &str| {
+            provider.call(
+                caller,
+                "PUT_config",
+                Some(key),
+                &HashMap::from([(VALUE.into(), Value::String(Some("true".into())))]),
+                None,
+            )
+        };
+        let get = |key| host.platform().unwrap().settings.get(Table::Config, key);
+        let denial = |key| {
+            Exception::security(format!(
+                "Permission denial for flag '{key}'; allowlist permission granted, but must add flag to the allowlist"
+            ))
+        };
+        put(&caller, "testing/new_flag").unwrap();
+        assert_eq!(get("testing/new_flag").as_deref(), Some("true"));
+        provider
+            .delete_config(&caller, Some("testing/new_flag"))
+            .unwrap();
+        assert!(get("testing/new_flag").is_none());
+        let denied = "not_allowlisted/new_flag";
+        assert_eq!(put(&caller, denied).unwrap_err(), denial(denied));
+        assert!(provider.delete_config(&caller, Some(denied)).is_err());
+        assert!(get(denied).is_none());
+        // Individual flags remain writable even outside the namespace list.
+        put(&caller, "privacy/safety_center_is_enabled").unwrap();
+        if protect {
+            put(&caller, "device_config_overrides/testing:new_flag").unwrap();
+            assert_eq!(
+                put(&caller, "device_config_overrides/not_allowlisted:new_flag").unwrap_err(),
+                Exception::security(
+                    "Permission denial for flag 'not_allowlisted/new_flag'; allowlist permission granted, but must add flag to the allowlist"
+                )
+            );
+            assert!(put(&caller, "testing_extra/new_flag").is_err());
+        } else {
+            put(&caller, "testing_extra/new_flag").unwrap();
+        }
+        let batch = |keys: &[&str]| {
+            provider.set_all_config(
+                &caller,
+                Some("testing/"),
+                Some(
+                    keys.iter()
+                        .map(|key| (key.to_string(), Some("true".into())))
+                        .collect(),
+                ),
+            )
+        };
+        assert_eq!(
+            batch(&["testing/batch", denied]).unwrap_err(),
+            denial(denied)
+        );
+        assert!(get("testing/batch").is_none());
+        assert_eq!(batch(&["testing/batch"]).unwrap(), SET_ALL_RESULT_SUCCESS);
+        provider
+            .reset_config(&caller, ResetMode::UntrustedDefaults, Some("testing/"))
+            .unwrap();
+        put(&full, denied).unwrap();
+        assert!(
+            provider
+                .reset_config(&caller, ResetMode::UntrustedDefaults, None)
+                .is_err()
+        );
+        provider.delete_config(&full, Some(denied)).unwrap();
+        // Read only inventory-listed APEXes, with BufferedReader/trim/comment semantics.
+        let root = host.data().unwrap().join("namespace-image");
+        for module in ["accepted", "unlisted"] {
+            std::fs::create_dir_all(root.join(module).join("etc")).unwrap();
+            std::fs::write(
+                root.join(module).join("etc/writable_namespaces"),
+                format!("  # comment\r\n\n  {module}_namespace \r"),
+            )
+            .unwrap();
+        }
+        let (state, _) = host.packages().unwrap();
+        let mut state = (*state).clone();
+        state
+            .apex_inventory
+            .as_mut()
+            .unwrap()
+            .active
+            .push(ActiveApex {
+                module_name: Some("accepted".into()),
+                mount_path: "/accepted".into(),
+                preinstalled_path: String::new(),
+                module_path: String::new(),
+                factory: true,
+                active_changed: false,
+            });
+        let namespaces = device_config::writable_namespaces(&state, &root).unwrap();
+        assert!(namespaces.contains("accepted_namespace"));
+        assert!(!namespaces.contains("unlisted_namespace"));
+        if protect {
+            let apex_provider = SettingsProvider::new(host.clone());
+            apex_provider.writable_namespaces.set(namespaces).unwrap();
+            apex_provider
+                .insert_config(
+                    &caller,
+                    Some("accepted_namespace/new_flag"),
+                    Some("true"),
+                    false,
+                )
+                .unwrap();
+        }
+    }
+
     struct ValuesBridge(Mutex<(Vec<Vec<u8>>, Result<Option<String>, Exception>)>);
     impl Service for ValuesBridge {
         fn descriptor(&self) -> &str {
