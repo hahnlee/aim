@@ -325,7 +325,7 @@ Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHO
 `aimctl open` checks user readiness before opening a window shim, so an open during app-host startup returns the booting error before showing its splash (#1875; host regression, no guest boot rerun).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun). Pending-update reads now check Android 16 permissions/owners and return matching persisted OwnersData info (null when absent or stale); the provisioning-config read checks MANAGE_USERS and reads DevicePolicyData (#1521; host tests, no guest boot rerun, 2026-10-31).
-The image's original RoleService now owns role selection, grants, persistence and listeners (#2540, #1657), with live native local reads, legacy-browser persistence, user/account qualification, preferred-role forwarding and permission-checked UID termination. Safety Center CTS remains 475 pass / 1 fail / 52 assumption skips, preserving all 475 prior passes. Canceled PendingIntents retain their query metadata (#2545); instrumentation unstops its target through the package owner, with state-checked unhibernation and package-unstopped notifications, restoring refresh/dismiss/resolve receiver delivery (#2544). The sole remaining failure now advances past accessibility node transformation to UiAutomation scrolling at native window input-transaction synchronization (#2529); legacy fallback migration logs CancellationException (#1657, 2026-11-01).
+The image's original RoleService now owns role selection, grants, persistence and listeners (#2540, #1657), with live native local reads, legacy-browser persistence, user/account qualification, preferred-role forwarding and permission-checked UID termination. The latest en-US `-g` Safety Center CTS run is 476 pass / 0 fail / 52 assumption skips (#2560), preserving all prior passes. Canceled PendingIntents retain their query metadata (#2545); instrumentation unstops its target through the package owner, with state-checked unhibernation and package-unstopped notifications, restoring refresh/dismiss/resolve receiver delivery (#2544). The English title/scrolling test passes after the input-transaction and locale fixes; legacy fallback migration logs CancellationException (#1657, 2026-11-01).
 `device_policy` serves
 `isUsbDataSignalingEnabled` after package-identity validation, using the original
 Java policy readers over the retained engine XML, including a resolved disabled
@@ -485,9 +485,10 @@ title/scrolling UI test now passes.
 The 21 DeviceConfig-toggle skips follow the original fixed
 `safety_center_enabled_no_device_config` flag on Android 16; the 31 tests for unsupported devices skip because
 `config_enableSafetyCenter=true`. Neither policy changed.
-The final crash buffer, ANR and tombstone directories are empty. The #2555 fresh
-boot followed twenty quiet seconds; unrelated builds overlapped the run with no
-foreign guest overlap. Its frozen runtime stayed unchanged.
+The #2560 en-US `-g` Safety Center rerun remains 476/0/52. Its background GMS
+`libdroidguard.so` SIGSEGV produced one text/protobuf tombstone pair; no ANR.
+The fresh boots followed twenty quiet seconds without foreign guests; unrelated
+builds overlapped Accessibility. Frozen runtime hashes stayed unchanged (2026-11-01).
 Magnification and other unserved local operations remain explicit
 #2529 failures; full accessibility conformance is not established.
 
@@ -685,7 +686,13 @@ uses the boot policy's signature lineage, known-signer, allowlist and static
 protection decisions for non-system user-0 installs (#2161). Ungranted signature
 and internal permissions no longer abort installation; unavailable KnownPackages
 selections name the individual flag. Host branch tests include a signed APK whose
-own signature permission is granted and platform permission denied. Official
+own signature permission is granted and platform permission denied. Install candidates
+also apply `-g`, explicit permission states and restricted allowlists through boot
+runtime/split policy and the coalesced writer's synchronous lock, restoring access
+on commit failure (#2560; 94 host checks). A fresh en-US Accessibility CTS install
+now succeeds with storage grants; its single invocation starts no tests because
+`attachApplication` waits until the native ten-second start timeout (#2529).
+Official
 Safety Center CTS installation and instrumentation now run; current results are
 recorded above with the RoleService and native instrumentation owners. Fresh empty-data
 boots of main, print and 8bd9d5e64 all spend tens of seconds in synchronous default

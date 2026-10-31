@@ -54,6 +54,8 @@ fn evaluate(
             version: ps.version_code,
             code: ps.pkg.as_deref().unwrap().clone(),
             previous_code: None,
+            states: BTreeMap::new(),
+            allowlist: BTreeSet::new(),
         }],
         policy,
     )

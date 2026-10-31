@@ -41,7 +41,7 @@ pub(super) fn non_runtime_source(
     Ok(false)
 }
 
-pub(super) fn inherit(
+pub(in super::super) fn inherit(
     base: &permissions::AccessView,
     system: &AccessSystem,
     user: &mut AccessUser,
