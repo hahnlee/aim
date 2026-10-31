@@ -54,6 +54,26 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::GET_PACKAGE_INTERNAL_HOST => {
+                sp::GetPackageInternalHost::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let owner = self.host.package_system()?.package_internal_host()?;
+                    sp::write_get_package_internal_host_reply(&mut p, Some(owner));
+                    Ok(())
+                })
+            }
+            sp::ATTACH_ROLE_SERVICE => {
+                let a = sp::AttachRoleService::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    let Some(Binder::Handle(handle)) = a.service else {
+                        return Err(Exception::illegal_argument("role service not published"));
+                    };
+                    *self.host.original_role.lock().unwrap() =
+                        Some(Arc::new(self.host.process.strong(handle)));
+                    sp::write_attach_role_service_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::GET_ACCESSIBILITY_WINDOW_HOST => {
                 sp::GetAccessibilityWindowHost::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().map(|()| {

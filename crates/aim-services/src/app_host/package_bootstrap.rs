@@ -542,6 +542,12 @@ impl Service for PackageBootstrap {
                 a.write(&mut p);
                 return self.java(call.code, &p);
             }
+            bridge::SET_PREFERRED_ROLE_HOLDER => {
+                let a =
+                    bridge::SetPreferredRoleHolder::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                a.write(&mut p);
+                return self.java(call.code, &p);
+            }
             bridge::SEND_PREFERRED_ACTIVITY_CHANGED => {
                 let a = bridge::SendPreferredActivityChanged::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

@@ -641,6 +641,7 @@ pub struct AppHost {
     content_service: OnceLock<Arc<content_service::ContentService>>,
     account_manager: OnceLock<Arc<account_service::AccountManager>>,
     role_service: OnceLock<Arc<role_service::RoleManager>>,
+    original_role: Mutex<Option<Arc<Strong>>>,
     /// The window contexts attached, by their client token's handle.
     window_contexts: Arc<Mutex<HashMap<u32, window_manager::WindowContext>>>,
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
@@ -769,6 +770,7 @@ impl AppHost {
             content_service: OnceLock::new(),
             account_manager: OnceLock::new(),
             role_service: OnceLock::new(),
+            original_role: Mutex::new(None),
             window_contexts: Arc::new(Mutex::new(HashMap::new())),
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
@@ -900,6 +902,8 @@ impl AppHost {
         if let Some(system) = self.system.get() {
             system.set_native_permissions(&permission_manager);
         }
+        self.role_service
+            .get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone())));
         // Published together, as `StatsCompanion.Lifecycle` publishes them.
         let stats = self
             .stats
@@ -1154,12 +1158,6 @@ impl AppHost {
             (
                 "network_management",
                 Arc::new(network_management::NetworkManagement::new(self.clone())),
-            ),
-            (
-                "role",
-                self.role_service
-                    .get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone())))
-                    .clone(),
             ),
             (
                 "device_config",
@@ -5123,6 +5121,36 @@ impl Service for Activity {
                     eprintln!("app host: serviceDoneExecuting: {}", e.message);
                 }
                 Ok(Parcel::new())
+            }
+            am::KILL_UID => {
+                use exit_info::{REASON_OTHER, SUBREASON_KILL_UID};
+                let a = am::KillUid::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let host = &self.0;
+                let uid = call.sender_euid as i32;
+                reply((|| {
+                    if host.check_permission(Some("android.permission.KILL_UID"), uid)? != 0 {
+                        return Err(Exception::security("killUid requires KILL_UID"));
+                    }
+                    let apps = host.apps.lock().unwrap();
+                    let starts: Vec<_> = apps
+                        .iter()
+                        .filter(|(_, p)| {
+                            p.oom_adj >= -800 // ProcessList.PERSISTENT_PROC_ADJ.
+                                && (a.app_id < 0 || p.uid % PER_USER_RANGE == a.app_id as u32)
+                                && (a.user_id == -1 || p.uid / PER_USER_RANGE == a.user_id as u32)
+                        })
+                        .map(|(seq, _)| *seq)
+                        .collect();
+                    drop(apps);
+                    let reason = a.reason.as_deref().unwrap_or("kill uid");
+                    for seq in starts {
+                        host.kill_process(seq, REASON_OTHER, SUBREASON_KILL_UID, reason)
+                            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                    }
+                    let mut p = Parcel::new();
+                    am::write_kill_uid_reply(&mut p);
+                    Ok(p)
+                })())
             }
             am::CHECK_PERMISSION => {
                 let args = am::CheckPermission::read(&mut call.data).map_err(|_| BAD_VALUE)?;

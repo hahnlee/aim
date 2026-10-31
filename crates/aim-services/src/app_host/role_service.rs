@@ -1,11 +1,5 @@
-//! `role`: RoleService for the app host (the Permission module at
-//! `android-16.0.0_r1`): the roles and their holders that RoleUserState
-//! last persisted (`RolesPersistenceImpl`,
-//! `/data/misc_de/<user>/apexdata/com.android.permission/roles.xml`), as its
-//! queries answer them, and the listeners for their changes. Nothing
-//! changes a role's holders in the app host: the role controller
-//! (PermissionController) is not run and the writes are not implemented
-//! (#1657), so no listener is notified.
+//! Native local role reads use the retained original RoleService once attached.
+//! The persisted reader also serves package bootstrap before that attachment.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -133,6 +127,21 @@ impl RoleManager {
     /// The holders of `role` of user 0 (`RoleManager.getRoleHoldersAsUser`
     /// as the system asks it): none for a role that is not available.
     pub(super) fn holders_of(&self, role: &str) -> Result<Vec<String>, Exception> {
+        let owner = self.host.original_role.lock().unwrap().clone();
+        if let Some(owner) = owner {
+            let mut p = Parcel::new();
+            rm::GetRoleHoldersAsUser {
+                role_name: Some(role.into()),
+                user_id: 0,
+            }
+            .write(&mut p);
+            let result = owner
+                .transact(rm::GET_ROLE_HOLDERS_AS_USER, &p, false)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
+            let names = rm::read_get_role_holders_as_user_reply(&mut result.reader())
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))??;
+            return Ok(names.unwrap_or_default().into_iter().flatten().collect());
+        }
         Ok(self
             .roles()?
             .holders(role)
@@ -262,11 +271,7 @@ impl RoleManager {
             "getRoleHoldersAsUser",
         )?;
         let role = Self::not_empty(role, "roleName cannot be null or empty")?;
-        Ok(self
-            .roles()?
-            .holders(&role)
-            .map(<[String]>::to_vec)
-            .unwrap_or_default())
+        self.holders_of(&role)
     }
 
     /// `PackageUtils.canCallingOrSelfPackageQuery`: `getPackageInfo` of the

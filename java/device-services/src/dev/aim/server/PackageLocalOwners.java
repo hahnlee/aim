@@ -97,6 +97,7 @@ public final class PackageLocalOwners {
         @Override public void addUserLifecycleListener(UserLifecycleListener l) { throw unsupported(); }
         @Override public void removeUserLifecycleListener(UserLifecycleListener l) { throw unsupported(); }
         @Override public void addUserVisibilityListener(UserVisibilityListener l) { throw unsupported(); }
+        @Override public java.util.List<android.content.pm.UserInfo> getUsers(boolean dying) { return getUsers(true, dying, false); }
         @Override public int[] getUserIds() {
             return getUsers(true, false, true).stream().mapToInt(user -> user.id).toArray();
         }
@@ -126,6 +127,14 @@ public final class PackageLocalOwners {
         }
         @Override public android.content.ComponentName getSystemUiServiceComponent() {
             return com.android.server.pm.NativeUserManagerBridge.getSystemUiServiceComponent();
+        }
+        @Override public String removeLegacyDefaultBrowserPackageName(int user) {
+            try {
+                var host = ISystemProcess.Stub.asInterface(ServiceManager.getService("aim.system_process"));
+                return IPackageInternalHost.Stub.asInterface(host.getPackageInternalHost())
+                        .removeLegacyDefaultBrowserPackageName(user, android.os.Binder.getCallingUid(),
+                                android.os.Binder.getCallingPid());
+            } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
         }
         @Override public int getPackageUid(String name, long flags, int user) {
             try { return owner.getPackageUid(name, flags, user); }

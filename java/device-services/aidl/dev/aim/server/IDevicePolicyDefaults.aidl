@@ -4,4 +4,5 @@ package dev.aim.server;
 interface IDevicePolicyDefaults {
     int getContentProtectionPolicyDefault(int userId);
     boolean isUsbDataSignalingEnabled(in byte[] policies);
+    boolean shouldAllowRoleQualification();
 }

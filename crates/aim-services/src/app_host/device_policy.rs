@@ -146,6 +146,7 @@ struct UserData {
     /// `mUserProvisioningState`.
     provisioning_state: i32,
     provisioning_config_applied: bool,
+    bypass_role_qualifications: bool,
 }
 
 impl Default for UserData {
@@ -154,6 +155,7 @@ impl Default for UserData {
             setup_complete: false,
             provisioning_state: STATE_USER_UNMANAGED,
             provisioning_config_applied: false,
+            bypass_role_qualifications: false,
         }
     }
 }
@@ -306,6 +308,9 @@ impl Policies {
             policies.users.insert(
                 user,
                 UserData {
+                    bypass_role_qualifications: root
+                        .children()
+                        .any(|e| e.name == "bypass-role-qualifications"),
                     setup_complete: root.string("setup-complete").as_deref() == Some("true"),
                     provisioning_config_applied: root
                         .string("device-provisioning-config-applied")
@@ -583,6 +588,7 @@ fn encryption_status(crypto_type: Option<&str>, target_sdk: i32) -> i32 {
 
 /// What the service reads beside its own state.
 trait Device {
+    fn role_qualification(&self) -> Result<bool, Exception>;
     fn usb_data_signaling_enabled(&self) -> Result<bool, Exception>;
     fn content_protection_default(&self, user: i32) -> Result<i32, Exception>;
     fn string_array(&self, name: &str) -> Result<Vec<Option<String>>, Exception>;
@@ -1155,6 +1161,19 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 Ok(())
             })()
         }
+        dp::SHOULD_ALLOW_BYPASSING_DEVICE_POLICY_MANAGEMENT_ROLE_QUALIFICATION => {
+            dp::ShouldAllowBypassingDevicePolicyManagementRoleQualification::read(r)
+                .map_err(|_| BAD_VALUE)?;
+            (|| {
+                authorize(caller.permitted("android.permission.MANAGE_ROLE_HOLDERS")?)?;
+                let allowed = device.policies()?.user(0).bypass_role_qualifications
+                    || device.role_qualification()?;
+                dp::write_should_allow_bypassing_device_policy_management_role_qualification_reply(
+                    &mut p, allowed,
+                );
+                Ok(())
+            })()
+        }
         dp::IS_DEVICE_PROVISIONING_CONFIG_APPLIED => {
             dp::IsDeviceProvisioningConfigApplied::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
@@ -1541,6 +1560,15 @@ impl DevicePolicy {
 }
 
 impl Device for DevicePolicy {
+    fn role_qualification(&self) -> Result<bool, Exception> {
+        let mut data = Parcel::new();
+        defaults::ShouldAllowRoleQualification {}.write(&mut data);
+        let result = self
+            .host
+            .device_policy_default(defaults::SHOULD_ALLOW_ROLE_QUALIFICATION, &data)?;
+        defaults::read_should_allow_role_qualification_reply(&mut result.reader())
+            .map_err(default_transport)?
+    }
     fn usb_data_signaling_enabled(&self) -> Result<bool, Exception> {
         let mut data = Parcel::new();
         defaults::IsUsbDataSignalingEnabled {
@@ -1849,7 +1877,8 @@ mod tests {
             UserData {
                 setup_complete: false,
                 provisioning_state: STATE_USER_UNMANAGED,
-                provisioning_config_applied: false
+                provisioning_config_applied: false,
+                bypass_role_qualifications: false
             }
         );
         assert!(!policies.admins && !policies.policies);
@@ -1883,7 +1912,8 @@ mod tests {
             UserData {
                 setup_complete: true,
                 provisioning_state: 3,
-                provisioning_config_applied: true
+                provisioning_config_applied: true,
+                bypass_role_qualifications: false
             }
         );
         assert_eq!(
@@ -1891,7 +1921,8 @@ mod tests {
             UserData {
                 setup_complete: true,
                 provisioning_state: STATE_USER_UNMANAGED,
-                provisioning_config_applied: false
+                provisioning_config_applied: false,
+                bypass_role_qualifications: false
             }
         );
         assert_eq!(policies.user(11), UserData::default());
@@ -1987,6 +2018,9 @@ mod tests {
     }
 
     impl Device for Fake {
+        fn role_qualification(&self) -> Result<bool, Exception> {
+            Ok(self.update_role)
+        }
         fn usb_data_signaling_enabled(&self) -> Result<bool, Exception> {
             Ok(self.usb_enabled)
         }
@@ -3204,6 +3238,7 @@ mod tests {
                 setup_complete: true,
                 provisioning_state: 3,
                 provisioning_config_applied: false,
+                bypass_role_qualifications: false,
             },
         );
         let r = call(&device, APP, dp::IS_DEVICE_PROVISIONED, provisioned);

@@ -92,4 +92,7 @@ interface ISystemProcess {
     void attachActivityAnimations(IBinder animations);
     IDexUsePackages getDexUsePackages();
     void attachDexUseBridge(IDexUseBridge bridge);
+    /** Retained original RoleService; system UID only. */
+    void attachRoleService(IBinder service);
+    IBinder getPackageInternalHost();
 }
