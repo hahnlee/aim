@@ -378,6 +378,7 @@ dependencies = [
 name = "aim-storage"
 version = "0.1.0"
 dependencies = [
+ "aim-android-xml",
  "aim-paths",
  "libc",
  "sha2",

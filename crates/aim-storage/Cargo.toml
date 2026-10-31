@@ -7,6 +7,7 @@ publish = false
 description = "Case-sensitive APFS disk images for the guest: the compressed system image and the per-data-directory writable image (docs/storage.md)"
 
 [dependencies]
+aim-android-xml = { path = "../aim-android-xml" }
 libc.workspace = true
 sha2.workspace = true
 
