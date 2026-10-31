@@ -312,6 +312,7 @@ impl Shell {
                 "ro.build.version.codename" => Some("REL".into()),
                 "persist.sys.locale" => Some("en-US".into()),
                 "ro.sf.lcd_density" => Some("160".into()),
+                "ro.debuggable" => Some("1".into()),
                 _ => None,
             }),
         );
@@ -1045,4 +1046,86 @@ fn activity_shell_broadcast_completion_and_parser_failure() {
     assert_eq!(status, -1);
     assert!(out.is_empty());
     assert!(error.contains("java.lang.IllegalArgumentException: Unknown option: --bad"));
+}
+
+// DeviceConfigService.MyShellCommand, android-16.0.0_r1: actual Binder streams/status.
+#[test]
+fn device_config_shell_shares_provider_state_and_preserves_errors() {
+    let mut s = Shell::new();
+    s.package = lookup(&s.process, "device_config");
+    crate::app_host::settings_provider::prepare_shell_test(&s.session.host);
+    let (status, _, error) = s.command(&["set_sync_disabled_for_tests", "persistent"]);
+    assert_eq!(status, -1);
+    assert!(
+        error.contains("java.lang.SecurityException")
+            && error.contains("READ_WRITE_SYNC_DISABLED_MODE_CONFIG")
+    );
+    let system = &s.session.fixture.system;
+    let before = system.capture_package_queries().unwrap();
+    let mut context = (**before.context()).clone();
+    context.scan_version = before.scan().version() + 1;
+    context
+        .system
+        .system_permissions
+        .as_mut()
+        .unwrap()
+        .get_mut(&2000)
+        .unwrap()
+        .insert("android.permission.WRITE_DEVICE_CONFIG".into());
+    system
+        .publish_package_scan_with_queries(
+            &s.session.bridge,
+            Some(before.scan()),
+            before.scan().owner().clone(),
+            before.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    for mode in ["persistent", "until_reboot", "none"] {
+        s.check(&["set_sync_disabled_for_tests", mode], 0, "");
+        s.check(&["get_sync_disabled_for_tests"], 0, &format!("{mode}\n"));
+        s.package = lookup(&s.process, "settings");
+        s.check(
+            &["get", "global", "device_config_sync_disabled"],
+            0,
+            if mode == "persistent" { "1\n" } else { "0\n" },
+        );
+        s.package = lookup(&s.process, "device_config");
+    }
+    s.check(&["get", "ns", "missing"], 0, "null\n");
+    s.check(&["PUT", "ns", "z", "one", "default"], 0, "");
+    s.check(&["put", "ns", "a", "two"], 0, "");
+    s.check(&["override", "ns", "z", "sticky"], 0, "");
+    s.check(&["get", "ns", "z"], 0, "sticky\n");
+    s.check(&["list", "ns"], 0, "a=two\nz=sticky\n");
+    s.check(&["list"], 0, "ns/a=two\nns/z=sticky\n");
+    s.check(&["clear_override", "ns", "z"], 0, "");
+    s.check(&["get", "ns", "z"], 0, "one\n");
+    s.check(
+        &["delete", "ns", "a"],
+        0,
+        "Successfully deleted a from ns\n",
+    );
+    s.check(&["delete", "ns", "a"], 0, "Failed to delete a from ns\n");
+    s.check(&["put", "ns", "z", "changed"], 0, "");
+    s.check(&["reset", "untrusted_defaults", "ns"], 0, "");
+    s.check(&["get", "ns", "z"], 0, "one\n");
+    for (args, message) in [
+        ("get ns", "Bad arguments"),
+        ("list ns extra", "Too many arguments"),
+        (
+            "set_sync_disabled_for_tests bogus",
+            "Invalid sync disabled mode: bogus",
+        ),
+        ("reset bogus", "Invalid reset mode: bogus"),
+        ("monitor", "Invalid command: monitor"),
+    ] {
+        assert_eq!(
+            s.command(&args.split(' ').collect::<Vec<_>>()),
+            (-1, String::new(), format!("{message}\n"))
+        );
+    }
+    let (status, help, error) = s.command(&[]);
+    assert_eq!((status, error), (-1, String::new()));
+    assert!(help.starts_with("Device Config (device_config) commands:\n"));
 }

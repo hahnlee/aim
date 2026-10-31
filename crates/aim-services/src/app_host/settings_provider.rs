@@ -216,6 +216,7 @@ enum Op<'a> {
 /// The names `Settings.System`, `Secure` and `Global` declare: the values
 /// of their String fields (`getPublicSettingsForClass`, `Global.Wearable`'s
 /// only on a watch), read from the image's framework.
+#[derive(Default)]
 struct Declared {
     system: HashSet<String>,
     secure: HashSet<String>,
@@ -266,7 +267,7 @@ impl Declared {
 }
 
 pub struct SettingsProvider {
-    host: Arc<AppHost>,
+    pub(super) host: Arc<AppHost>,
     generations: OnceLock<GenerationRegistry>,
     declared: OnceLock<Declared>,
     /// `mSyncConfigDisabledUntilReboot`.
@@ -2756,6 +2757,13 @@ impl SettingsProvider {
             .generations
             .get_or_init(|| GenerationRegistry::new(max_users)))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_shell_test(host: &AppHost) {
+    let p = host.settings_provider().unwrap();
+    p.generations.get_or_init(|| GenerationRegistry::new(1));
+    p.declared.get_or_init(Default::default);
 }
 
 #[cfg(test)]
