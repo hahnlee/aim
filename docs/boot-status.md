@@ -462,8 +462,11 @@ request on-disk persistence at guest-init's property owner. Focused host checks
 pass; fresh locale/persistence and official CTS checks below pass (2026-11-01).
 
 The app host starts the original AccessibilityManagerService with native overlay
-and window callback ownership, ordered initial-user initialization and an
-ordinary-app binding barrier (#2529). Interaction connections now use native
+and window callback ownership and ordered initial-user initialization (#2529).
+App attach no longer waits for accessibility's user-initialization completion
+(#2564); its optional bindApplication cache entry follows publication/death,
+and the original framework can query ServiceManager when it is absent.
+Interaction connections now use native
 window display/owner-user/focus lookups and SurfaceFlinger accessibility-ID
 metadata, including registration before surface creation and removal (#2541).
 Display-space window transformations now come from native frames, with an
@@ -485,10 +488,17 @@ title/scrolling UI test now passes.
 The 21 DeviceConfig-toggle skips follow the original fixed
 `safety_center_enabled_no_device_config` flag on Android 16; the 31 tests for unsupported devices skip because
 `config_enableSafetyCenter=true`. Neither policy changed.
-The #2560 en-US `-g` Safety Center rerun remains 476/0/52. Its background GMS
-`libdroidguard.so` SIGSEGV produced one text/protobuf tombstone pair; no ANR.
-The fresh boots followed twenty quiet seconds without foreign guests; unrelated
-builds overlapped Accessibility. Frozen runtime hashes stayed unchanged (2026-11-01).
+The #2564 en-US `-g` Safety Center rerun remains 476/0/52, with all 476 prior
+passing test identities preserved. Accessibility instrumentation now attaches
+and records 2 pass / 1 fail / 0 skips before crashing on unimplemented
+`IActivityClientController.dismissKeyguard` (#62): 3/113 tests started, all paired.
+The diagnostic found the old attach barrier delaying RoleService's controller
+and PrintSpooler, whose background-thread waits delayed the initial-user receiver;
+readiness arrived at binder-trace +44.842 s. Neither fixed official boot has an
+attach timeout. The 1,016 app-host checks pass (3 ignored). Both official runs
+used fresh data after twenty quiet seconds, with no foreign guests and unchanged
+frozen runtime hashes; the formatter overlapped Safety's boot. No fatal signal,
+detected ANR or tombstone in either official run (2026-11-01).
 Magnification and other unserved local operations remain explicit
 #2529 failures; full accessibility conformance is not established.
 
@@ -690,8 +700,8 @@ own signature permission is granted and platform permission denied. Install cand
 also apply `-g`, explicit permission states and restricted allowlists through boot
 runtime/split policy and the coalesced writer's synchronous lock, restoring access
 on commit failure (#2560; 94 host checks). A fresh en-US Accessibility CTS install
-now succeeds with storage grants; its single invocation starts no tests because
-`attachApplication` waits until the native ten-second start timeout (#2529).
+succeeds with storage grants; #2564 removes the accessibility wait from native
+`attachApplication`, with official instrumentation results recorded above.
 Official
 Safety Center CTS installation and instrumentation now run; current results are
 recorded above with the RoleService and native instrumentation owners. Fresh empty-data

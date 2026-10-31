@@ -250,7 +250,7 @@ public final class SystemProcessHost extends RuntimeInit {
                 service.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
             }
             // This image initializes accessibility from USER_SWITCHED (its Lifecycle flag is off).
-            // The ordered completion keeps app admission behind the original receiver's work.
+            // Ordered completion publishes the optional bindApplication service-cache entry.
             context.sendOrderedBroadcastAsUser(new android.content.Intent(android.content.Intent.ACTION_USER_SWITCHED)
                     .putExtra(android.content.Intent.EXTRA_USER_HANDLE, UserHandle.USER_SYSTEM)
                     .addFlags(android.content.Intent.FLAG_RECEIVER_REGISTERED_ONLY | android.content.Intent.FLAG_RECEIVER_FOREGROUND),

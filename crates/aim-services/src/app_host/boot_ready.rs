@@ -2,7 +2,7 @@
 use super::AppHost;
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 /// Early boot failure also releases pending starts, with the boot failure.
 pub(super) struct BootReady<'a>(pub &'a AppHost);
@@ -45,13 +45,18 @@ impl AppHost {
 mod tests {
     use super::*;
     #[test]
-    fn accessibility_startup_failure_releases_waiters() {
-        let ready = Arc::new(AccessibilityReady::default());
-        let pending = ready.clone();
-        let waiter = std::thread::spawn(move || pending.wait().err().unwrap());
-        let failure = "construction failed (#2529)";
-        ready.failed(failure);
-        assert_eq!(waiter.join().unwrap().message, failure);
+    fn accessibility_bind_cache_tracks_publication_and_death_without_waiting() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let ready = &host.accessibility_ready;
+            assert!(ready.service().is_none());
+            let service = Arc::new(export(super::super::test_activity_service(host)));
+            ready.publish(service.clone(), |_| {});
+            assert!(Arc::ptr_eq(&ready.service().unwrap(), &service));
+            ready.failed("service died (#2529)");
+            assert!(ready.service().is_none());
+            ready.publish(service.clone(), |_| {});
+            assert!(Arc::ptr_eq(&ready.service().unwrap(), &service));
+        });
     }
     #[test]
     fn boot_failure_releases_pending_starts_with_an_error() {
@@ -79,34 +84,24 @@ mod tests {
     }
 }
 
-/// Publication barrier for the original service, including startup failure and later death.
+/// Optional bindApplication service-cache entry, invalidated on service death.
+/// AMS's addServiceToMap omits unavailable services; app attach never waits for
+/// accessibility's initial-user work. ActivityThread can query ServiceManager.
 #[derive(Default)]
 pub(crate) struct AccessibilityReady {
     result: Mutex<Option<Result<Arc<Strong>, Exception>>>,
-    changed: Condvar,
 }
 impl AccessibilityReady {
     pub(super) fn failed(&self, message: &str) {
         *self.result.lock().unwrap() = Some(Err(Exception::new(EX_ILLEGAL_STATE, message)));
-        self.changed.notify_all();
     }
     pub(crate) fn publish(&self, service: Arc<Strong>, observe: impl FnOnce(&Strong)) {
         let mut result = self.result.lock().unwrap();
         observe(&service);
         *result = Some(Ok(service));
-        self.changed.notify_all();
     }
-    pub(super) fn wait(&self) -> Result<Arc<Strong>, Exception> {
+    pub(super) fn service(&self) -> Option<Arc<Strong>> {
         let result = self.result.lock().unwrap();
-        let (mut result, _) = self
-            .changed
-            .wait_timeout_while(result, std::time::Duration::from_secs(60), |r| r.is_none())
-            .unwrap();
-        if result.is_none() {
-            let failure = Exception::new(EX_ILLEGAL_STATE, "accessibility start timed out (#2529)");
-            *result = Some(Err(failure));
-            self.changed.notify_all();
-        }
-        result.as_ref().unwrap().clone()
+        result.as_ref().and_then(|r| r.as_ref().ok()).cloned()
     }
 }

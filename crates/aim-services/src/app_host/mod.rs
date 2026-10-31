@@ -2141,14 +2141,6 @@ impl AppHost {
                 "attachApplication without a thread",
             ));
         };
-        let needs_accessibility = {
-            let apps = self.apps.lock().unwrap();
-            apps.get(&start_seq)
-                .is_some_and(|a| !a.isolated && a.entry_point.is_none())
-        };
-        if needs_accessibility {
-            self.accessibility_ready.wait()?;
-        }
         let mut apps = self.apps.lock().unwrap();
         let strong = self.process.strong(handle);
         let Some(app) = apps.get_mut(&start_seq).filter(|a| {
@@ -4427,8 +4419,8 @@ impl AppHost {
         let core_settings = kept::RawBundle::read_from(&mut settings_parcel.reader())
             .map_err(|e| state(format!("core settings: {e}")))?;
         let accessibility = (!is_isolated(app.uid as i32))
-            .then(|| self.accessibility_ready.wait())
-            .transpose()?;
+            .then(|| self.accessibility_ready.service())
+            .flatten();
         let published = self.published.lock().unwrap();
         // An isolated process gets only those it may use (`getCommonServicesLocked`).
         let isolated = is_isolated(app.uid as i32);

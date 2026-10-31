@@ -1580,8 +1580,6 @@ pub(crate) fn with_discovery_binders_flags(
         let binder = reply.reader().read_binder().unwrap().unwrap();
         reply.retain_remote_binder(binder).unwrap()
     };
-    let a11y = export(crate::app_host::test_activity_service(&host));
-    host.accessibility_ready.publish(Arc::new(a11y), |_| {});
     test(&host, &mut publish, &enabled, &export);
     drop(workers);
 }
