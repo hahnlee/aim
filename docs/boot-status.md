@@ -150,6 +150,10 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+SettingsProvider publishes `device_config` over its existing Config and sync-mode
+owners (#2531). Host Binder command/permission/state checks pass; full namespace
+and local-override enumeration remain explicitly unsupported. No guest/CTS/app run (2026-10-31).
+
 ActivityManager serves core instrumentation sessions, process binding, results and
 watcher retirement (#2511; host regressions only, no guest/CTS/app run, 2026-10-31).
 The activity shell now checks root/shell identity, preserves the original

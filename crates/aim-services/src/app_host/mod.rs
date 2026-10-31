@@ -60,6 +60,7 @@ pub mod credential;
 pub mod cross_profile_apps;
 pub mod cursor;
 pub mod device_config;
+mod device_config_service;
 pub mod device_identifiers;
 pub mod device_idle;
 pub mod device_policy;
@@ -1157,6 +1158,10 @@ impl AppHost {
                 self.role_service
                     .get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone())))
                     .clone(),
+            ),
+            (
+                "device_config",
+                Arc::new(device_config_service::DeviceConfigService(settings.clone())),
             ),
             (
                 "settings",
