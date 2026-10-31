@@ -5,16 +5,20 @@
 #include <string.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "line %d: %s (errno %d)\n", __LINE__, #x, errno); _exit(1); } } while (0)
 static int command[2], reply[2], work[2], done[2];
+static _Atomic unsigned *host_step;
+static _Atomic unsigned sequence;
 static const int policies[] = {SCHED_BATCH, SCHED_IDLE, SCHED_FIFO, SCHED_FIFO, SCHED_RR, SCHED_OTHER};
 static const int priorities[] = {0, 0, 3, 8, 7, 0};
 
@@ -31,8 +35,13 @@ static void step(const char *name, int want) {
     printf("%s %d\n", name, want);
   }
   fflush(stdout);
-  char line[16];
-  CHECK(fgets(line, sizeof line, stdin));
+  // Publish only after the write syscall and its scheduling epilogue have
+  // returned. Stay in guest code while the host samples our priority: a
+  // native lock waiter can temporarily promote even a background thread.
+  unsigned ready = (atomic_fetch_add_explicit(&sequence, 1, memory_order_relaxed) + 1) * 2 - 1;
+  atomic_store_explicit(host_step, ready, memory_order_release);
+  while (atomic_load_explicit(host_step, memory_order_acquire) != ready + 1) {
+  }
 }
 
 static void *inherited(void *unused) {
@@ -103,6 +112,11 @@ int main(int argc, char **argv) {
     CHECK(getpriority(PRIO_PROCESS, 0) == atoi(argv[1]));
     return 0;
   }
+  int fd = open("/data/local/tmp/priority-step", O_RDWR | O_CLOEXEC);
+  CHECK(fd >= 0);
+  host_step = mmap(NULL, sizeof *host_step, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHECK(host_step != MAP_FAILED);
+  CHECK(close(fd) == 0);
   CHECK(pipe(command) == 0 && pipe(reply) == 0 && pipe(work) == 0 && pipe(done) == 0);
   pid_t child = fork();
   CHECK(child >= 0);

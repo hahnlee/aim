@@ -76,6 +76,8 @@ pub struct Thread {
     reservation: Mutex<Option<super::pidns::tids::Reservation>>,
     /// The host pthread_t; 0 until the thread runs.
     pthread: AtomicUsize,
+    cpu_user: AtomicU64,
+    cpu_total: AtomicU64,
     ctx: *mut GuestContext,
     pub sig: ThreadSignals,
     pub park: Parker,
@@ -104,6 +106,8 @@ impl Thread {
             tid,
             reservation: Mutex::new(reservation),
             pthread: AtomicUsize::new(0),
+            cpu_user: AtomicU64::new(0),
+            cpu_total: AtomicU64::new(0),
             ctx,
             sig: ThreadSignals::new(mask),
             park: Parker::default(),
@@ -141,6 +145,8 @@ impl Thread {
 /// pthread_kill, so an exclusive lock let a signal flood starve the
 /// target's own lookups (sched_getscheduler) for good (#219).
 static THREADS: LazyLock<RwLock<HashMap<i32, Arc<Thread>>>> = LazyLock::new(Default::default);
+// Transferred under the thread table's write lock, before a joiner wakes.
+static EXITED_CPU: Mutex<(u64, u64)> = Mutex::new((0, 0));
 /// The main thread's exit code once it has called `exit` (the process
 /// exits with it when the last thread does), else -1.
 static LEADER_EXIT: AtomicI32 = AtomicI32::new(-1);
@@ -228,16 +234,55 @@ pub fn find(tid: i32) -> Option<Arc<Thread>> {
 }
 
 /// User and system CPU time of thread `tid` of this process, in
-/// nanoseconds; none yet for a thread whose host thread has not started.
+/// nanoseconds; zero for a thread whose host thread has not started.
 pub fn cpu_times(tid: i32) -> Option<(u64, u64)> {
-    with_table(|t| {
-        let p = t.get(&tid)?.pthread.load(SeqCst);
-        if p == 0 {
-            return Some((0, 0));
+    with_table(|t| sample_cpu_times(t.get(&tid)?))
+}
+
+/// Publish the exact calling-thread clock so a later remote sample, which
+/// Mach rounds to microseconds, cannot put the thread or process behind it.
+pub(super) fn note_cpu_time(total: u64) {
+    if let Some(th) = current() {
+        th.cpu_total.fetch_max(total, SeqCst);
+    }
+}
+
+// The table lock keeps the sampled pthread alive.
+fn sample_cpu_times(th: &Thread) -> Option<(u64, u64)> {
+    let p = th.pthread.load(SeqCst);
+    if p == 0 {
+        return Some((0, 0));
+    }
+    // SAFETY: the caller holds the table lock.
+    let (user, system) =
+        super::clock::thread_times(unsafe { libc::pthread_mach_thread_np(p as libc::pthread_t) })?;
+    let user = th.cpu_user.fetch_max(user, SeqCst).max(user);
+    let total = if is_current(th) {
+        super::clock::calling_thread_ns()
+    } else {
+        user + system
+    };
+    let total = th.cpu_total.fetch_max(total, SeqCst).max(total).max(user);
+    Some((user, total - user))
+}
+
+/// Linux process CPU time is the sum of its guest threads, including those
+/// that exited. Sample the caller last, without subtracting samples taken
+/// at different times; every other contribution is nondecreasing.
+pub(super) fn process_cpu_times() -> Option<(u64, u64)> {
+    with_table(|threads| {
+        let (mut user, mut system) = *EXITED_CPU.lock().unwrap();
+        for th in threads.values().filter(|th| !is_current(th)) {
+            let (u, s) = sample_cpu_times(th)?;
+            user += u;
+            system += s;
         }
-        // SAFETY: the pthread is alive while it is in the table (whose lock
-        // is held).
-        super::clock::thread_times(unsafe { libc::pthread_mach_thread_np(p as libc::pthread_t) })
+        if let Some(th) = current() {
+            let (u, s) = sample_cpu_times(th)?;
+            user += u;
+            system += s;
+        }
+        Some((user, system))
     })
 }
 
@@ -668,6 +713,10 @@ pub fn exit(a: [u64; 6]) -> ! {
     let main = th.tid == pid();
     // Out of the table before a joiner wakes: its tid is gone for tgkill.
     let left = with_table_mut(|t| {
+        let (user, system) = sample_cpu_times(th).expect("exiting thread CPU time");
+        let mut exited = EXITED_CPU.lock().unwrap();
+        exited.0 += user;
+        exited.1 += system;
         super::procrec::gone(th.tid);
         t.remove(&th.tid);
         super::cred::forget_nice(th.tid);

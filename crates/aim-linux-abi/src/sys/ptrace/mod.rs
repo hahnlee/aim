@@ -405,6 +405,13 @@ pub fn remote_priority(pid: i32, tid: i32, nice: Option<i32>) -> i64 {
     call(pid, &req).map_or_else(|e| e, |(r, _)| r)
 }
 
+/// Read the same guest-thread total as the owner's process CPU clock.
+pub(super) fn remote_cpu_times(pid: i32) -> Result<(u64, u64), i64> {
+    let rest = call_result(pid, &request(agent::CPU_TIMES, |_| {}))?;
+    let mut r = Reader::new(&rest);
+    Ok((r.u64(), r.u64()))
+}
+
 /// Read or change scheduling at the thread's owner. Getters return the
 /// scalar policy/priority so guest pointers stay in the calling process.
 pub(super) fn remote_sched(pid: i32, tid: i32, nr: u64, policy: i32, prio: i32) -> i64 {

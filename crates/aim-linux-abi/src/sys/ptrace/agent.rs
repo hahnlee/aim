@@ -42,6 +42,7 @@ pub(super) const MEM_IO: u32 = 20;
 pub(super) const PRIORITY: u32 = 22;
 pub(super) const CGROUP_POLICY: u32 = 23;
 pub(super) const SCHED: u32 = 24;
+pub(super) const CPU_TIMES: u32 = 25;
 
 const NT_PRSTATUS: u32 = 1;
 const NT_PRFPREG: u32 = 2;
@@ -565,6 +566,18 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
         }
         MAPS => reply(0, |w| w.str(&procfs::maps())),
         SMAPS => reply(0, |w| w.str(&smaps::smaps(r.bool()))),
+        CPU_TIMES => {
+            if !crate::sys::pidns::contains(peer) {
+                return err(ESRCH);
+            }
+            match thread::process_cpu_times() {
+                Some((user, system)) => reply(0, |w| {
+                    w.u64(user);
+                    w.u64(system);
+                }),
+                None => err(crate::errno::EIO),
+            }
+        }
         PRIORITY => {
             let (tid, nice) = (r.i32(), r.opt(|r| r.i32()));
             if !crate::sys::pidns::contains(peer) {
