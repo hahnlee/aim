@@ -8,4 +8,8 @@ interface IAccessibilityWindowHost {
     void computeWindows(int displayId);
     void setUiCallback(IAccessibilityWindowCallback callback);
     void setAccessibilityServiceUids(in int[] uids);
+    int getWindowOwnerUserId(IBinder token);
+    int getDisplayIdForWindow(IBinder token);
+    IBinder getFocusedWindowTokenFromWindowStates();
+    void setAccessibilityIdToSurfaceMetadata(IBinder token, int accessibilityWindowId);
 }

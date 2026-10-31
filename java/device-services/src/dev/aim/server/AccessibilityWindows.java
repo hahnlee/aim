@@ -98,7 +98,10 @@ final class AccessibilityWindows extends WindowManagerInternal {
     @Override public void getMagnificationRegion(int displayId, Region magnificationRegion) { throw unsupported(); }
     @Override public void setInputFilter(IInputFilter filter) { throw unsupported(); }
     @Override public IBinder getFocusedWindowToken() { throw unsupported(); }
-    @Override public IBinder getFocusedWindowTokenFromWindowStates() { throw unsupported(); }
+    @Override public IBinder getFocusedWindowTokenFromWindowStates() {
+        try { return host.getFocusedWindowTokenFromWindowStates(); }
+        catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
     @Override public void moveDisplayToTopIfAllowed(int displayId) { throw unsupported(); }
     @Override public void requestWindowFocus(IBinder windowToken) { throw unsupported(); }
     @Override public boolean isKeyguardLocked() { throw unsupported(); }
@@ -132,13 +135,19 @@ final class AccessibilityWindows extends WindowManagerInternal {
     @Override public void setVr2dDisplayId(int vr2dDisplayId) { throw unsupported(); }
     @Override public void registerDragDropControllerCallback(IDragDropCallback callback) { throw unsupported(); }
     @Override public void lockNow() { throw unsupported(); }
-    @Override public int getWindowOwnerUserId(IBinder windowToken) { throw unsupported(); }
+    @Override public int getWindowOwnerUserId(IBinder windowToken) {
+        try { return host.getWindowOwnerUserId(windowToken); }
+        catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
     @Override public void setWallpaperShowWhenLocked(IBinder windowToken, boolean showWhenLocked) { throw unsupported(); }
     @Override public void setWallpaperCropHints(IBinder windowToken, SparseArray<Rect> cropHints) { throw unsupported(); }
     @Override public boolean isUidFocused(int uid) { throw unsupported(); }
     @Override public int hasInputMethodClientFocus(IBinder windowToken, int uid, int pid, int displayId) { throw unsupported(); }
     @Override public boolean isUidAllowedOnDisplay(int displayId, int uid) { throw unsupported(); }
-    @Override public int getDisplayIdForWindow(IBinder windowToken) { throw unsupported(); }
+    @Override public int getDisplayIdForWindow(IBinder windowToken) {
+        try { return host.getDisplayIdForWindow(windowToken); }
+        catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
     @Override public int getTopFocusedDisplayId() { throw unsupported(); }
     @Override public Context getTopFocusedDisplayUiContext() { throw unsupported(); }
     @Override public void setNonDefaultDisplayRotation(int displayId, int rotation, String caller) { throw unsupported(); }
@@ -154,7 +163,9 @@ final class AccessibilityWindows extends WindowManagerInternal {
     @Override public boolean isTouchOrFaketouchDevice() { throw unsupported(); }
     @Override public KeyInterceptionInfo getKeyInterceptionInfoFromToken(IBinder inputToken) { throw unsupported(); }
     @Override public void clearSnapshotCache() { throw unsupported(); }
-    @Override public void setAccessibilityIdToSurfaceMetadata( IBinder windowToken, int accessibilityWindowId) { throw unsupported(); }
+    @Override public void setAccessibilityIdToSurfaceMetadata(IBinder windowToken, int accessibilityWindowId) {
+        call(() -> host.setAccessibilityIdToSurfaceMetadata(windowToken, accessibilityWindowId));
+    }
     @Override public String getWindowName(IBinder binder) { throw unsupported(); }
     @Override public ImeTargetInfo onToggleImeRequested(boolean show, IBinder focusedToken, IBinder requestToken, int displayId) { throw unsupported(); }
     @Override public IBinder getTargetWindowTokenFromInputToken(IBinder inputToken) { throw unsupported(); }
