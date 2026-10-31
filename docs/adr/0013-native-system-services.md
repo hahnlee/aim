@@ -432,6 +432,21 @@ The migration's state and conformance results are in
   modules (22 of 52 host-side, #701) and the decisions (#702) are in
   [m4-packagemanager.md](../m4-packagemanager.md).
 
+The sync owner seam (#1460, 2026-11-01) extends the explicit `services.jar`
+replacement with per-instance `SyncAccounts` dependencies in SyncManager and
+ContentService. Existing constructors delegate to the original account singleton;
+new typed constructors cover all six calls, including SyncHandler's two calls.
+ContentService also has a system-UID-only local-notify helper retaining the
+original scheduling user, reason, exemption and attribution. Static call redirects
+cannot add constructor state or change `getSingleton()`'s concrete return type.
+The smallest alternative is a pinned smali patch of the original DEX, with
+hash-checked AOSP source contracts, image jar/oat and disassembled classes, then
+original-image linkage and ART DEX file verification. No source rebuild, reflection
+or vendor shadow of an original class is introduced. The existing oat node
+recompiles the cohort; build/assembly reject mismatched jar/oat CRCs and SHA-1.
+Forwarding and private owner startup remain inactive; no boot or sync CTS claim
+is made by this slice.
+
 ### The redirect edit (2026-10-02)
 
 - Decided by the user (#702 D1, for #668 too): a second kind of

@@ -1,0 +1,31 @@
+# #1460: AOSP Android 16 (Apache-2.0) owner seam; source contracts, not rebuilt.
+AOSP_TAG=android-16.0.0_r1
+SOURCES=(
+  "platform/frameworks/base|services/core/java/com/android/server/content/SyncManager.java|ac8deedeeca97dadea2d9da8b7e2956305fd63e44d9fdb8d80222ddf76f1ed51"
+  "platform/frameworks/base|services/core/java/com/android/server/content/ContentService.java|4ebf7091eb00973f0a75011eca3a2868271d4abdc0651430c2d7a21291d11c24"
+)
+# The pinned original jar and its oat, never edited in place.
+IMAGE=(
+  "system/framework/services.jar|d82d6412c5843131f6992f53021dbcfbd368695bf5fd440edfb2c8a2046a0b5a"
+  "system/framework/oat/arm64/services.odex|9fd9e2e88297b6a314cbcf6a88bd6c2d16c5f6cc1c8918cf00f9441b847b4eb7"
+)
+# Exact baksmali 3.0.9 text, including debug info and all six singleton sites.
+DEX=(
+  "SyncManager|dc672556b6be8aecc5a8fdb0c49625e19788f34bf73cb5844341141020d87137"
+  "SyncManager.SyncHandler|216ea263b3280ccd2c978f9cd7f639df2c6b0f1be7755f3bad5fc46acfa4f303"
+  "ContentService|26131537f7b035c66cb2b85bbb0625730db4fb035eed87d6f1d53197e0a40b81"
+)
+# Google smali 3.0.9 (BSD-3-Clause), build tools only. Dependencies follow its
+# published Maven POM: ANTLR (BSD), StringTemplate (BSD), JCommander
+# (Apache-2.0), Guava (Apache-2.0). Nothing is installed in the guest.
+TOOLS=(
+  "https://dl.google.com/dl/android/maven2/com/android/tools/smali/smali/3.0.9/smali-3.0.9.jar|98e917b1b1e4f5aa48e74c97fee786645725e9b79e9842e3d7e50f65896553f1"
+  "https://dl.google.com/dl/android/maven2/com/android/tools/smali/smali-baksmali/3.0.9/smali-baksmali-3.0.9.jar|e7d0166945565a87f3997d1aea8779202dbb6cb0585a39ee20bab8a2f5ba87f6"
+  "https://dl.google.com/dl/android/maven2/com/android/tools/smali/smali-dexlib2/3.0.9/smali-dexlib2-3.0.9.jar|8b547506f62f91d74b70f4beb4989b99e1ff61fc50b2525e9796ca35f0a351dc"
+  "https://dl.google.com/dl/android/maven2/com/android/tools/smali/smali-util/3.0.9/smali-util-3.0.9.jar|4673762894ba4156081fc5c642f74d6e78aef8b1a9c7702d691e3171d8cc1153"
+  "https://repo.maven.apache.org/maven2/org/antlr/antlr/3.5.2/antlr-3.5.2.jar|5ac36c2acfb0a0f3d37dafe20b5b570f2643e2d000c648d44503c2738be643df"
+  "https://repo.maven.apache.org/maven2/org/antlr/antlr-runtime/3.5.2/antlr-runtime-3.5.2.jar|ce3fc8ecb10f39e9a3cddcbb2ce350d272d9cd3d0b1e18e6fe73c3b9389c8734"
+  "https://repo.maven.apache.org/maven2/org/antlr/stringtemplate/3.2.1/stringtemplate-3.2.1.jar|f66ce72e965e5301cb0f020e54d2ba6ad76feb91b3cbfc30dbbf00c06a6df6d7"
+  "https://repo.maven.apache.org/maven2/com/beust/jcommander/1.64/jcommander-1.64.jar|156be736199c990321d9ff77090b199629cfc9865e2d6c13f7cd291bb1641817"
+  "https://repo.maven.apache.org/maven2/com/google/guava/guava/31.1-android/guava-31.1-android.jar|32ac2ed709d96d278b5d2e3e5cea178fa4939939c525fb647532f013308db309"
+)

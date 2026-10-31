@@ -11,6 +11,7 @@ name = "cargo-aim"
 path = "src/main.rs"
 
 [dependencies]
+crc32fast = "1"
 aim-apps = { path = "../aim-apps" }
 android-image-extract = { path = "../../tools/android-image-extract" }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

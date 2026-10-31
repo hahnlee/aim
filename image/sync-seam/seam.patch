@@ -1,0 +1,135 @@
+--- a/com/android/server/content/SyncManager.smali
++++ b/com/android/server/content/SyncManager.smali
+@@ -22,0 +23,2 @@
++.field final mSyncAccounts:Lcom/android/server/content/SyncAccounts;
++
+@@ -1025 +1027,14 @@
+-    .registers 20
++    .registers 4
++    new-instance v0, Lcom/android/server/content/OriginalSyncAccounts;
++    invoke-direct {v0}, Lcom/android/server/content/OriginalSyncAccounts;-><init>()V
++    invoke-direct {p0, p1, p2, v0}, Lcom/android/server/content/SyncManager;-><init>(Landroid/content/Context;ZLcom/android/server/content/SyncAccounts;)V
++    return-void
++.end method
++
++.method public constructor <init>(Landroid/content/Context;ZLcom/android/server/content/SyncAccounts;)V
++    .registers 21
++
++    invoke-static/range {p3 .. p3}, Ljava/util/Objects;->requireNonNull(Ljava/lang/Object;)Ljava/lang/Object;
++    move-object/from16 v0, p3
++    move-object/from16 v1, p0
++    iput-object v0, v1, Lcom/android/server/content/SyncManager;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
+@@ -5167,5 +5182,4 @@
+-    invoke-static {}, Lcom/android/server/accounts/AccountManagerService;->getSingleton()Lcom/android/server/accounts/AccountManagerService;
+-
+-    move-result-object v3
+-
+-    invoke-virtual {v3}, Lcom/android/server/accounts/AccountManagerService;->getAllAccountsForSystemProcess()[Landroid/accounts/AccountAndUser;
++    move-object/from16 v3, p0
++    iget-object v3, v3, Lcom/android/server/content/SyncManager;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
++
++    invoke-interface {v3}, Lcom/android/server/content/SyncAccounts;->getAllAccountsForSystemProcess()[Landroid/accounts/AccountAndUser;
+@@ -8568,5 +8582,4 @@
+-    invoke-static {}, Lcom/android/server/accounts/AccountManagerService;->getSingleton()Lcom/android/server/accounts/AccountManagerService;
+-
+-    move-result-object v0
+-
+-    invoke-virtual {v0, p1}, Lcom/android/server/accounts/AccountManagerService;->validateAccounts(I)V
++    move-object/from16 v0, p0
++    iget-object v0, v0, Lcom/android/server/content/SyncManager;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
++
++    invoke-interface {v0, p1}, Lcom/android/server/content/SyncAccounts;->validateAccounts(I)V
+@@ -8590,3 +8603,2 @@
+-    invoke-static {}, Lcom/android/server/accounts/AccountManagerService;->getSingleton()Lcom/android/server/accounts/AccountManagerService;
+-
+-    move-result-object v0
++    move-object/from16 v0, p0
++    iget-object v0, v0, Lcom/android/server/content/SyncManager;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
+@@ -8602 +8614 @@
+-    invoke-virtual {v0, p1, v1}, Lcom/android/server/accounts/AccountManagerService;->getAccounts(ILjava/lang/String;)[Landroid/accounts/Account;
++    invoke-interface {v0, p1, v1}, Lcom/android/server/content/SyncAccounts;->getAccounts(ILjava/lang/String;)[Landroid/accounts/Account;
+@@ -8823,3 +8835,2 @@
+-    invoke-static {}, Lcom/android/server/accounts/AccountManagerService;->getSingleton()Lcom/android/server/accounts/AccountManagerService;
+-
+-    move-result-object v2
++    move-object/from16 v2, p0
++    iget-object v2, v2, Lcom/android/server/content/SyncManager;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
+@@ -8837 +8848 @@
+-    invoke-virtual {v2, v3, v4}, Lcom/android/server/accounts/AccountManagerService;->getAccounts(ILjava/lang/String;)[Landroid/accounts/Account;
++    invoke-interface {v2, v3, v4}, Lcom/android/server/content/SyncAccounts;->getAccounts(ILjava/lang/String;)[Landroid/accounts/Account;
+--- a/com/android/server/content/SyncManager$SyncHandler.smali
++++ b/com/android/server/content/SyncManager$SyncHandler.smali
+@@ -4293,5 +4293,4 @@
+-    invoke-static {}, Lcom/android/server/accounts/AccountManagerService;->getSingleton()Lcom/android/server/accounts/AccountManagerService;
+-
+-    move-result-object v5
+-
+-    invoke-virtual {v5}, Lcom/android/server/accounts/AccountManagerService;->getRunningAccountsForSystem()[Landroid/accounts/AccountAndUser;
++    iget-object v5, v0, Lcom/android/server/content/SyncManager$SyncHandler;->this$0:Lcom/android/server/content/SyncManager;
++    iget-object v5, v5, Lcom/android/server/content/SyncManager;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
++
++    invoke-interface {v5}, Lcom/android/server/content/SyncAccounts;->getRunningAccountsForSystem()[Landroid/accounts/AccountAndUser;
+@@ -4572,5 +4571,4 @@
+-    invoke-static {}, Lcom/android/server/accounts/AccountManagerService;->getSingleton()Lcom/android/server/accounts/AccountManagerService;
+-
+-    move-result-object v2
+-
+-    invoke-virtual {v2}, Lcom/android/server/accounts/AccountManagerService;->getAllAccountsForSystemProcess()[Landroid/accounts/AccountAndUser;
++    iget-object v2, v0, Lcom/android/server/content/SyncManager$SyncHandler;->this$0:Lcom/android/server/content/SyncManager;
++    iget-object v2, v2, Lcom/android/server/content/SyncManager;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
++
++    invoke-interface {v2}, Lcom/android/server/content/SyncAccounts;->getAllAccountsForSystemProcess()[Landroid/accounts/AccountAndUser;
+--- a/com/android/server/content/ContentService.smali
++++ b/com/android/server/content/ContentService.smali
+@@ -12,0 +13,2 @@
++.field final mSyncAccounts:Lcom/android/server/content/SyncAccounts;
++
+@@ -112 +114,14 @@
+-    .registers 13
++    .registers 4
++    new-instance v0, Lcom/android/server/content/OriginalSyncAccounts;
++    invoke-direct {v0}, Lcom/android/server/content/OriginalSyncAccounts;-><init>()V
++    invoke-direct {p0, p1, p2, v0}, Lcom/android/server/content/ContentService;-><init>(Landroid/content/Context;ZLcom/android/server/content/SyncAccounts;)V
++    return-void
++.end method
++
++.method public constructor <init>(Landroid/content/Context;ZLcom/android/server/content/SyncAccounts;)V
++    .registers 14
++
++    invoke-static/range {p3 .. p3}, Ljava/util/Objects;->requireNonNull(Ljava/lang/Object;)Ljava/lang/Object;
++    move-object/from16 v0, p3
++    move-object/from16 v1, p0
++    iput-object v0, v1, Lcom/android/server/content/ContentService;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
+@@ -2516 +2531 @@
+-    .registers 5
++    .registers 6
+@@ -2536 +2551,2 @@
+-    invoke-direct {v1, v2, v3}, Lcom/android/server/content/SyncManager;-><init>(Landroid/content/Context;Z)V
++    iget-object v4, p0, Lcom/android/server/content/ContentService;->mSyncAccounts:Lcom/android/server/content/SyncAccounts;
++    invoke-direct {v1, v2, v3, v4}, Lcom/android/server/content/SyncManager;-><init>(Landroid/content/Context;ZLcom/android/server/content/SyncAccounts;)V
+@@ -5073,0 +5090,25 @@
++
++.method final scheduleLocalSyncFromNotify(IILjava/lang/String;ILjava/lang/String;)V
++    .registers 15
++    invoke-static {}, Landroid/os/Binder;->getCallingUid()I
++    move-result v0
++    const/16 v1, 0x3e8
++    if-eq v0, v1, :system
++    new-instance v0, Ljava/lang/SecurityException;
++    invoke-direct {v0}, Ljava/lang/SecurityException;-><init>()V
++    throw v0
++    :system
++    invoke-virtual {p0}, Lcom/android/server/content/ContentService;->getSyncManager()Lcom/android/server/content/SyncManager;
++    move-result-object v0
++    invoke-virtual {p0, p2}, Lcom/android/server/content/ContentService;->getSyncExemptionForCaller(I)I
++    move-result v5
++    const/4 v1, 0x0
++    move v2, p1
++    move v3, p2
++    move-object v4, p3
++    move v6, p2
++    move v7, p4
++    move-object v8, p5
++    invoke-virtual/range {v0 .. v8}, Lcom/android/server/content/SyncManager;->scheduleLocalSync(Landroid/accounts/Account;IILjava/lang/String;IIILjava/lang/String;)V
++    return-void
++.end method

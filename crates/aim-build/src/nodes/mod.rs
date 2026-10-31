@@ -16,6 +16,7 @@ mod moltenvk;
 mod oat;
 mod product_properties;
 pub(crate) mod service_aidl;
+mod sync_seam;
 mod system_server;
 mod translation_cache;
 pub(crate) mod userdata;

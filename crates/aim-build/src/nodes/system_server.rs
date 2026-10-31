@@ -18,7 +18,6 @@ use std::path::PathBuf;
 
 const LIST: &str = "image/native-services";
 const REDIRECTS: &str = "image/system-server-redirects";
-const JAR: &str = "system/framework/services.jar";
 
 pub fn out() -> PathBuf {
     aim_paths::out().join("system-server")
@@ -28,10 +27,14 @@ pub fn node() -> Node {
     Node {
         name: "system-server".into(),
         deps: vec![Dep::on("image"), Dep::on("device-services")],
-        inputs: vec![repo(LIST), repo(REDIRECTS)],
+        inputs: [
+            vec![repo(LIST), repo(REDIRECTS)],
+            super::sync_seam::inputs(),
+        ]
+        .concat(),
         outputs: vec![out().join("services.jar")],
         tools: Vec::new(),
-        recipe: 4,
+        recipe: 5,
         action: Action::SystemServer,
         boot: true,
     }
@@ -52,7 +55,14 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let _ = force_remove(&work);
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let jar = work.join("services.jar");
-    patch_services_jar(&image.join(JAR), &jar, &classes)?;
+    let tools = Toolchain::fetch(log)?;
+    let seamed = work.join("seamed.jar");
+    fs::write(
+        &seamed,
+        super::sync_seam::generate(&image, &work, &tools, log)?,
+    )
+    .map_err(|e| e.to_string())?;
+    patch_services_jar(&seamed, &jar, &classes)?;
     let targets = fs::read(device_services::jar()).map_err(|e| e.to_string())?;
     let patched = fs::read(&jar).map_err(|e| e.to_string())?;
     let redirected = redirect::redirect_jar(&patched, &redirects, &dex_files(&targets)?)
