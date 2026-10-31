@@ -6,4 +6,5 @@ public class Matrix {
     public Matrix() { throw new RuntimeException("stub"); }
     public void setScale(float sx, float sy) { throw new RuntimeException("stub"); }
     public void getValues(float[] values) { throw new RuntimeException("stub"); }
+    public void setValues(float[] values) { throw new RuntimeException("stub"); }
 }

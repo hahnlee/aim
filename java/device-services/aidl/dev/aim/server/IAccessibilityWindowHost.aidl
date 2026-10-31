@@ -12,4 +12,5 @@ interface IAccessibilityWindowHost {
     int getDisplayIdForWindow(IBinder token);
     IBinder getFocusedWindowTokenFromWindowStates();
     void setAccessibilityIdToSurfaceMetadata(IBinder token, int accessibilityWindowId);
+    float[] getWindowTransformationMatrix(IBinder token);
 }

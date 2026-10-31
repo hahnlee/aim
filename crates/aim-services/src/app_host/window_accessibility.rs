@@ -234,6 +234,27 @@ impl Service for Host {
             let host = &self.0;
             let state = &host.windows.accessibility;
             match call.code {
+                api::GET_WINDOW_TRANSFORMATION_MATRIX => {
+                    let a = api::GetWindowTransformationMatrix::read(&mut call.data)
+                        .map_err(malformed)?;
+                    let windows = host.windows.windows.lock().unwrap();
+                    let window = match a.token {
+                        Some(Binder::Handle(h)) => windows.get(&h),
+                        _ => None,
+                    };
+                    // AccessibilityController / WindowState.getTransformationMatrix,
+                    // android-16.0.0_r1: missing windows have an identity transform.
+                    // Native windows have unit compatibility scale; place_window's
+                    // surface-inset subtraction cancels when mapping back to the frame.
+                    let (x, y) = window.map_or((0., 0.), |w| {
+                        (w.frames.frame.left as f32, w.frames.frame.top as f32)
+                    });
+                    api::write_get_window_transformation_matrix_reply(
+                        &mut p,
+                        &Some(vec![1., 0., x, 0., 1., y, 0., 0., 1.]),
+                    );
+                    return Ok(p);
+                }
                 api::GET_WINDOW_OWNER_USER_ID | api::GET_DISPLAY_ID_FOR_WINDOW => {
                     let token = if call.code == api::GET_WINDOW_OWNER_USER_ID {
                         api::GetWindowOwnerUserId::read(&mut call.data)
@@ -425,6 +446,61 @@ mod tests {
             .reader()
             .read_exception()
             .unwrap()
+    }
+    #[test]
+    fn node_query_transform_tracks_window_frames_and_removal() {
+        // AbstractAccessibilityServiceConnection.findAccessibilityNodeInfoByAccessibilityId
+        // passes this display-space matrix to the original ViewRootImpl connection.
+        let f = super::super::focus_tests::Fixture::new();
+        let service = Host(f.host.clone());
+        let query = |token, uid| {
+            let mut p = Parcel::new();
+            api::GetWindowTransformationMatrix { token }.write(&mut p);
+            let reply = service
+                .transact(&mut Call {
+                    code: api::GET_WINDOW_TRANSFORMATION_MATRIX,
+                    flags: 0,
+                    sender_pid: 98201,
+                    sender_euid: uid,
+                    data: p.reader(),
+                })
+                .unwrap();
+            api::read_get_window_transformation_matrix_reply(&mut reply.reader()).unwrap()
+        };
+        let identity = vec![1., 0., 0., 0., 1., 0., 0., 0., 1.];
+        let token = Some(Binder::Handle(1));
+        assert!(query(token, 10123).is_err());
+        for absent in [None, token, Some(Binder::Local(1))] {
+            assert_eq!(query(absent, 1000).unwrap(), Some(identity.clone()));
+        }
+        f.window(1, None, false);
+        f.window(2, None, false);
+        for (left, top) in [(35, 71), (-18, 24), (1280, 640)] {
+            let mut windows = f.host.windows.windows.lock().unwrap();
+            let w = windows.get_mut(&1).unwrap();
+            w.frames.frame = Rect {
+                left,
+                top,
+                right: left + 400,
+                bottom: top + 800,
+            };
+            w.attrs.surface_insets = [7, 9, 11, 13];
+            // Child frames are already absolute; neither parent nor insets add twice.
+            w.parent = Some(2);
+            windows.get_mut(&2).unwrap().frames.frame = Rect {
+                left: 100,
+                top: 200,
+                right: 900,
+                bottom: 1000,
+            };
+            drop(windows);
+            assert_eq!(
+                query(token, 1000).unwrap(),
+                Some(vec![1., 0., left as f32, 0., 1., top as f32, 0., 0., 1.,])
+            );
+        }
+        f.host.remove_window(1);
+        assert_eq!(query(token, 1000).unwrap(), Some(identity));
     }
     #[test]
     fn interaction_window_lookups_and_metadata_lifecycle() {

@@ -108,7 +108,14 @@ final class AccessibilityWindows extends WindowManagerInternal {
     @Override public boolean isKeyguardShowingAndNotOccluded() { throw unsupported(); }
     @Override public boolean isKeyguardSecure(int userId) { throw unsupported(); }
     @Override public void getWindowFrame(IBinder token, Rect outBounds) { throw unsupported(); }
-    @Override public Pair<Matrix, MagnificationSpec> getWindowTransformationMatrixAndMagnificationSpec(IBinder token) { throw unsupported(); }
+    @Override public Pair<Matrix, MagnificationSpec> getWindowTransformationMatrixAndMagnificationSpec(IBinder token) {
+        try {
+            Matrix matrix = new Matrix();
+            matrix.setValues(host.getWindowTransformationMatrix(token));
+            // No magnifier can be activated: setMagnificationCallbacks/Spec reject it above.
+            return new Pair<>(matrix, new MagnificationSpec());
+        } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
     @Override public void showGlobalActions() { throw unsupported(); }
     @Override public void waitForAllWindowsDrawn(Message message, long timeout, int displayId) { throw unsupported(); }
     @Override public void setForcedDisplaySize(int displayId, int width, int height) { throw unsupported(); }
