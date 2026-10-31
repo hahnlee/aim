@@ -32,8 +32,10 @@ public final class SystemProcessHostTest {
             for (int phase : new int[] {480, 500, 520}) {
                 for (String service : early) wanted.add(service+":phase="+phase);
             }
+            wanted.addAll(List.of("SafetyCenterService:construct", "SafetyCenterService:start", "safety_center:publish"));
             wanted.addAll(List.of("AppSearchModule$Lifecycle:construct", "AppSearchModule$Lifecycle:start"));
             List<String> services = new ArrayList<>(early);
+            services.add("SafetyCenterService");
             services.add("AppSearchModule$Lifecycle");
             if (deviceLock) {
                 wanted.addAll(List.of("DeviceLockService:construct", "DeviceLockService:start"));

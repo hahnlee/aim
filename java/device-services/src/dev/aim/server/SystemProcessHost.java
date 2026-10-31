@@ -20,6 +20,7 @@ import android.util.Slog;
 import com.android.internal.os.ApplicationSharedMemory;
 import com.android.internal.os.ClassLoaderFactory;
 import com.android.internal.os.RuntimeInit;
+import com.android.safetycenter.SafetyCenterService;
 import com.android.server.SystemService;
 import com.android.server.SystemService.TargetUser;
 import com.android.server.adservices.SystemProcessLifecycle;
@@ -80,7 +81,7 @@ public final class SystemProcessHost extends RuntimeInit {
      * PHASE_LOCK_SETTINGS_READY (the app host serves the initializer's
      * other services natively), then StatsPullAtomService and
      * AdServicesManagerService's Lifecycle ({@link SystemProcessLifecycle}),
-     * then AppSearch's Lifecycle
+     * then SafetyCenterService and AppSearch's Lifecycle
      * (after PHASE_DEVICE_SPECIFIC_SERVICES_READY), with user 0 started and
      * unlocked; DeviceLockService after AppSearch when FEATURE_DEVICE_LOCK
      * is declared; then TelecomLoaderService at PHASE_ACTIVITY_MANAGER_READY.
@@ -193,10 +194,12 @@ public final class SystemProcessHost extends RuntimeInit {
                 statsPull.onBootPhase(phase);
                 adServices.onBootPhase(phase);
             }
+            SystemService safetyCenter = new SafetyCenterService(context);
+            safetyCenter.onStart();
             SystemService appSearch = new AppSearchModule$Lifecycle(context);
             appSearch.onStart();
             List<SystemService> services = new ArrayList<>(
-                    List.of(pinner, nearby, statsPull, adServices, appSearch));
+                    List.of(pinner, nearby, statsPull, adServices, safetyCenter, appSearch));
             if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_DEVICE_LOCK)) {
                 ClassLoader deviceLockLoader = ClassLoaderFactory.createClassLoader(DEVICE_LOCK_JAR,
                         null, null, Server.class.getClassLoader(), Build.VERSION.SDK_INT,

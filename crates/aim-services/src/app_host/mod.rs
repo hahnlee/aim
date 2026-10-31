@@ -165,9 +165,6 @@ pub mod restrictions_service;
 pub mod role_service;
 pub mod rollback_service;
 mod safe_labels;
-pub mod safety_center;
-pub mod safety_center_config;
-pub mod safety_center_data;
 pub mod sensor_privacy;
 pub mod sensor_service;
 pub mod services;
@@ -1106,10 +1103,6 @@ impl AppHost {
             (
                 "media_session",
                 media_session::MediaSession::new(self.clone(), settings.clone()),
-            ),
-            (
-                "safety_center",
-                Arc::new(safety_center::SafetyCenter::new(self.clone())),
             ),
             (
                 "credential",
@@ -6178,3 +6171,17 @@ mod start_read_tests;
 
 #[cfg(test)]
 mod start_info_tests;
+
+#[cfg(test)]
+#[test]
+fn safety_center_has_no_native_publisher() {
+    crate::system::with_discovery_session(|host, _, _| {
+        assert!(
+            !host
+                .services()
+                .iter()
+                .any(|(name, service)| *name == "safety_center"
+                    || service.descriptor() == "android.safetycenter.ISafetyCenterManager")
+        );
+    });
+}

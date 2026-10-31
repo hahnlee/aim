@@ -1,5 +1,6 @@
 package android.os;
 public final class ServiceManager {
+    private static boolean safetyCenterPublished;
     public static void addService(String name, IBinder service) {
         if (service == null) throw new AssertionError(name);
         if (name.equals("graphicsstats")) {
@@ -7,6 +8,10 @@ public final class ServiceManager {
             dev.aim.server.SystemProcessHostTest.events.add("graphicsstats:publish");
         } else if (name.equals("aim.role_queries")) {
             dev.aim.server.SystemProcessHostTest.events.add("roles");
+        } else if (name.equals("safety_center")) {
+            if (safetyCenterPublished) throw new AssertionError("duplicate safety_center");
+            safetyCenterPublished = true;
+            dev.aim.server.SystemProcessHostTest.events.add("safety_center:publish");
         } else {
             throw new AssertionError(name);
         }

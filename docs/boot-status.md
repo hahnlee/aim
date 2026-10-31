@@ -562,7 +562,15 @@ their configuration changes answered and reported. Settings' home shows the stor
 ExtServices over the persisted usage stats); `system_update`, which its
 System page asks, is served (2026-10-20). Play services' persistent process gets its
 installed modules, Wi-Fi scan results (none, the Mac's radio being off),
-statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
+statsd, DeviceConfig writes, usb, Safety Center and app op mode watches.
+Safety Center now starts the original Permission APEX service in `aim-system`
+after phase 520 and before AppSearch, with subsequent boot/user-0 callbacks.
+The native publisher, config/source-data owners and history writer are removed
+(#2467, #1785). Host JVM lifecycle, Wi-Fi resource-filtering and pinned-image
+DEX/linkage checks cover the migration, including original disabled exits and
+API/state routes. They do not execute the original aggregate or establish live
+listener, persistence, stats, refresh/action or notification behavior. No guest
+boot, Settings app check or Safety Center CTS was run (2026-10-31).
 AppSearch is the original module, run by the app host's system process
 (`aim-system`, of the system uid), so Play services finds its
 `AppSearchManager`; so is the Connectivity module's NearbyService, which
