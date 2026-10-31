@@ -814,14 +814,20 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
             Ok(iov) => iov,
             Err(error) => return Some(error),
         };
-        return Some(description.rw(pin.descriptor(), &iov, None, true));
+        return Some(attrs::written(
+            actual,
+            description.rw(pin.descriptor(), &iov, None, true),
+        ));
     }
     Some(special_write_kernel(&pin, iov).unwrap_or_else(|| {
         let iov = match charge_iov(actual, iov) {
             Ok(iov) => iov,
             Err(error) => return error,
         };
-        errno::check(unsafe { libc::writev(actual, iov.as_ptr(), iov.len() as i32) } as i64)
+        attrs::written(
+            actual,
+            errno::check(unsafe { libc::writev(actual, iov.as_ptr(), iov.len() as i32) } as i64),
+        )
     }))
 }
 /// Whether the host descriptor is O_APPEND, as F_SETFL leaves it.
@@ -867,9 +873,17 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
             len
         };
         if write && appends(actual) {
-            return Some(description.append(pin.descriptor(), &one(buf, len)));
+            return Some(attrs::written(
+                actual,
+                description.append(pin.descriptor(), &one(buf, len)),
+            ));
         }
-        return Some(description.rw(pin.descriptor(), &one(buf, len), Some(pos), write));
+        let result = description.rw(pin.descriptor(), &one(buf, len), Some(pos), write);
+        return Some(if write {
+            attrs::written(actual, result)
+        } else {
+            result
+        });
     }
     if let Some(Kind::ProcMem(open)) = pin.kind() {
         return Some(super::proc_mem::rw(
@@ -895,13 +909,18 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
             } else {
                 len
             };
-            errno::check(unsafe {
+            let result = errno::check(unsafe {
                 if write {
                     libc::pwrite(actual, buf as *const _, len, pos)
                 } else {
                     libc::pread(actual, buf as *mut _, len, pos)
                 }
-            } as i64)
+            } as i64);
+            if write {
+                attrs::written(actual, result)
+            } else {
+                result
+            }
         }),
     )
 }
@@ -1330,7 +1349,7 @@ pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
                 Err(error) => return error,
             };
             let result = description.append(pin.descriptor(), &vectors);
-            return synced(fd, result, flags);
+            return synced(fd, attrs::written(actual, result), flags);
         }
     }
     if write && (flags & (RWF_APPEND | RWF_NOAPPEND) != 0 || pos != -1) {
@@ -1375,7 +1394,7 @@ pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
         }
     }
     if write {
-        return synced(fd, result, flags);
+        return synced(fd, attrs::written(actual, result), flags);
     }
     result
 }
@@ -2925,6 +2944,61 @@ mod dac_tests {
         ] {
             closed(fd);
         }
+    }
+
+    #[test]
+    fn write_setid() {
+        if fdtab::isolated_kernel_test("sys::fs::dac_tests::write_setid") {
+            return;
+        }
+        let (_view, root) = vfs::test_view();
+        let path = root.join("data/write-setid");
+        fs::write(&path, b"x").unwrap();
+        let fd = open("/data/write-setid", 2, 0, &Identity::default()) as u64;
+        assert!((fd as i64) >= 0);
+        let alias = dup([fd, 0, 0, 0, 0, 0]) as u64;
+        let io = [alias, b"x".as_ptr() as u64, 1, 0, 0, 0];
+        assert_eq!(write(io), 1); // Prime the no-set-ID cache before chmod.
+        assert_eq!(super::super::fsops::fchmod([fd, 0o6777, 0, 0, 0, 0]), 0);
+        assert_eq!(write(io), 1);
+        assert_eq!(stat_fd(fd as i32).unwrap().st_mode & 0o7777, 0o6777);
+        let header = [0x20080522u32, 0];
+        let mut caps = [[0u32; 3]; 2];
+        let cap_args = [header.as_ptr() as u64, caps.as_mut_ptr() as u64, 0, 0, 0, 0];
+        assert_eq!(super::super::cred::capget(cap_args), 0);
+        caps[0][0] &= !(1 << 4);
+        assert_eq!(super::super::cred::capset(cap_args), 0);
+        let vectors = [libc::iovec {
+            iov_base: b"x".as_ptr() as *mut _,
+            iov_len: 1,
+        }; 2];
+        let vectored = [alias, vectors.as_ptr() as u64, 2, 0, 0, 0];
+        for mode in [0o6777, 0o6767, 0o2777, 0o2767] {
+            for (call, args) in [
+                (write as fn([u64; 6]) -> i64, io),
+                (pwrite64, io),
+                (writev, vectored),
+                (|a| preadv(true, false, a), vectored),
+                (|a| preadv(true, true, a), vectored),
+            ] {
+                assert_eq!(super::super::fsops::fchmod([fd, mode, 0, 0, 0, 0]), 0);
+                assert_eq!(write([alias, 0, 0, 0, 0, 0]), 0);
+                assert_eq!(
+                    pwrite64([alias, io[1], 1, u64::MAX, 0, 0]),
+                    -(EINVAL as i64)
+                );
+                assert_eq!(stat_fd(fd as i32).unwrap().st_mode as u64 & 0o7777, mode);
+                assert!(call(args) > 0);
+                let expected = mode & !(0o4000 | if mode & 0o010 != 0 { 0o2000 } else { 0 });
+                assert_eq!(
+                    stat_fd(fd as i32).unwrap().st_mode as u64 & 0o7777,
+                    expected
+                );
+            }
+        }
+        closed(alias as i64);
+        closed(fd as i64);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

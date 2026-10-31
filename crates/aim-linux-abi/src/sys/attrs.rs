@@ -25,7 +25,10 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crate::vfs;
 
@@ -607,8 +610,9 @@ pub fn record_checked(
     if !recording() {
         return Ok(());
     }
+    let epoch = mode_epoch()?;
     let stat = host_stat(host)?;
-    with_inode_lock(host, &stat, || {
+    let result = with_inode_lock(host, &stat, || {
         if stat.st_mode & libc::S_IFMT == libc::S_IFCHR {
             let previous = table_lookup_key(&device_key(&stat));
             if previous != Attr::default() {
@@ -619,13 +623,97 @@ pub fn record_checked(
             return Ok(());
         }
         table_record(&guest(), a)
-    })
+    });
+    epoch.fetch_add(1, Ordering::Release);
+    result
 }
 
 pub fn record(host: Host, guest: impl FnOnce() -> String, a: Attr) {
     if let Err(error) = record_checked(host, guest, a) {
         eprintln!("guest inode metadata recording failed: errno={error}");
     }
+}
+
+// Shared metadata generation: ordinary writes need no stat or xattr read.
+fn mode_epoch() -> Result<&'static AtomicU64, crate::errno::Errno> {
+    static EPOCH: OnceLock<Result<usize, crate::errno::Errno>> = OnceLock::new();
+    let address = EPOCH.get_or_init(|| {
+        use std::os::fd::AsRawFd;
+        let file = aim_storage::private_fd::PrivateFile::allocate(|| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(vfs::runtime_dir().unwrap().join("inode-mode-epoch"))?;
+            file.set_len(8)?;
+            Ok(file)
+        })
+        .map_err(|e| crate::errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)))?;
+        let prot = libc::PROT_READ | libc::PROT_WRITE;
+        let fd = file.as_raw_fd();
+        // SAFETY: the shared file holds one aligned atomic for this process's lifetime.
+        let address = unsafe { libc::mmap(std::ptr::null_mut(), 8, prot, libc::MAP_SHARED, fd, 0) };
+        if address == libc::MAP_FAILED {
+            return Err(crate::errno::last());
+        }
+        Ok(address as usize)
+    });
+    let address = *address.as_ref().map_err(|e| *e)?;
+    Ok(unsafe { &*(address as *const AtomicU64) })
+}
+static WRITE_MODES: [AtomicU64; super::fdtab::SLOW_FDS] =
+    [const { AtomicU64::new(0) }; super::fdtab::SLOW_FDS];
+pub(super) fn forget_write_mode(fd: i32) {
+    if let Some(slot) = WRITE_MODES.get(fd as usize) {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
+/// Linux should_remove_suid: only positive writes to regular files, without
+/// CAP_FSETID, drop S_ISUID and executable S_ISGID. Zero and failed I/O keep them.
+pub(super) fn written(fd: i32, result: i64) -> i64 {
+    if result <= 0 || !recording() {
+        return result;
+    }
+    let stat = || super::fs::stat_fd_kernel(fd).map_err(|e| (-e) as i32);
+    let change = || {
+        let epoch = mode_epoch()?.load(Ordering::Acquire) << 16;
+        let slot = WRITE_MODES.get(fd as usize);
+        let mut cached = slot.map_or(0, |s| s.load(Ordering::Acquire));
+        if cached & !0xffff != epoch || cached & 0x8000 == 0 {
+            let stat = stat()?;
+            let mode = if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
+                stat.st_mode & 0o7777
+            } else {
+                0
+            };
+            cached = epoch | 0x8000 | mode as u64;
+            if let Some(slot) = slot {
+                slot.store(cached, Ordering::Release);
+            }
+        }
+        if cached & 0o6000 == 0 || super::cred::capable(4) {
+            return Ok(());
+        }
+        let initial = host_stat(Host::Fd(fd))?;
+        with_inode_lock(Host::Fd(fd), &initial, || {
+            let stat = stat()?;
+            let mode = stat.st_mode as u32 & 0o7777;
+            let clear = 0o4000 | if mode & 0o010 != 0 { 0o2000 } else { 0 };
+            if mode & clear == 0 {
+                return Ok(());
+            }
+            record_checked(
+                Host::Fd(fd),
+                || super::procfs::fd_guest_path(fd).unwrap_or_default(),
+                Attr {
+                    mode: Some(mode & !clear),
+                    ..Default::default()
+                },
+            )
+        })
+    };
+    change().map(|()| result).unwrap_or_else(|e| -(e as i64))
 }
 
 pub const REAL: usize = 0;
@@ -923,6 +1011,7 @@ mod tests {
                 || "/data/inode-child-alias".into(),
                 Attr {
                     gid: Some(10777),
+                    mode: Some(0o6777),
                     ..Default::default()
                 },
             )
@@ -991,6 +1080,7 @@ mod tests {
                     ..Default::default()
                 },
             )
+            .map(|()| assert_eq!(written(file.as_raw_fd(), 1), 1))
         })
         .unwrap();
         let output = child.wait_with_output().unwrap();
@@ -1002,6 +1092,9 @@ mod tests {
         let recorded = guest_attr(host).unwrap();
         assert_eq!(recorded.uid, Some(10666));
         assert_eq!(recorded.gid, Some(10777));
+        assert_eq!(written(file.as_raw_fd(), 1), 1);
+        let cached = WRITE_MODES[file.as_raw_fd() as usize].load(Ordering::Acquire);
+        assert_eq!(cached & 0o7777, 0o6777);
         std::fs::remove_file(alias).unwrap();
         std::fs::remove_file(first).unwrap();
     }
