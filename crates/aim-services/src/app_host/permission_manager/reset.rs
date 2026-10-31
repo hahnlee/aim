@@ -80,6 +80,7 @@ mod tests {
             dynamic: None,
         }];
         let access = Access {
+            delegate: None,
             state: &state,
             filter: &AppsFilter::default(),
             defined: &definitions,

@@ -13,6 +13,20 @@ pub(super) struct State {
     admission: Mutex<()>,
     active: Mutex<HashMap<i32, Arc<Session>>>,
     reporter: OnceLock<Sender<Report>>,
+    delegate: Mutex<Option<Arc<Delegate>>>,
+}
+/// AccessCheckDelegateImpl, android-16.0.0_r1 (AOSP, Apache-2.0).
+pub(super) struct Delegate {
+    pub uid: i32,
+    pub package: String,
+    pub permissions: Option<Vec<Option<String>>>,
+}
+impl Delegate {
+    pub fn permission(&self, name: &str) -> bool {
+        self.permissions
+            .as_ref()
+            .is_none_or(|p| p.iter().any(|p| p.as_deref() == Some(name)))
+    }
 }
 pub(super) struct Session {
     pub class: ComponentName,
@@ -80,6 +94,9 @@ struct Report {
     shutdown: Option<Arc<Strong>>,
 }
 impl State {
+    pub fn delegate(&self) -> Option<Arc<Delegate>> {
+        self.delegate.lock().unwrap().clone()
+    }
     fn report(&self, report: Report) {
         let sender = self.reporter.get_or_init(|| {
             let (tx, rx) = mpsc::channel::<Report>();
@@ -146,7 +163,29 @@ pub(super) fn transact(host: &AppHost, call: &mut Call<'_>) -> Reply {
             host.instrumentation_results(a.target, Some(a.result_code), a.results)
                 .map(|()| am::write_finish_instrumentation_reply(&mut p))
         }
-        _ => Err(host.unimplemented_named("activity", "shell permission delegation (#2511)")),
+        am::START_DELEGATE_SHELL_PERMISSION_IDENTITY => {
+            let a = am::StartDelegateShellPermissionIdentity::read(&mut call.data)?;
+            host.delegate_shell(call.sender_euid as i32, a.uid, a.permissions)
+                .map(|()| am::write_start_delegate_shell_permission_identity_reply(&mut p))
+        }
+        am::STOP_DELEGATE_SHELL_PERMISSION_IDENTITY => {
+            am::StopDelegateShellPermissionIdentity::read(&mut call.data)?;
+            shell_caller(call.sender_euid as i32).map(|()| {
+                *host.instrumentation.delegate.lock().unwrap() = None;
+                am::write_stop_delegate_shell_permission_identity_reply(&mut p);
+            })
+        }
+        am::GET_DELEGATED_SHELL_PERMISSIONS => {
+            am::GetDelegatedShellPermissions::read(&mut call.data)?;
+            shell_caller(call.sender_euid as i32).map(|()| {
+                let delegate = host.instrumentation.delegate();
+                let names = delegate
+                    .as_ref()
+                    .map_or(Some(Vec::new()), |d| d.permissions.clone());
+                am::write_get_delegated_shell_permissions_reply(&mut p, &names);
+            })
+        }
+        _ => unreachable!(),
     };
     reply(result.map(|()| p))
 }
@@ -185,7 +224,46 @@ fn strings(values: &[(&str, &str)]) -> RawBundle {
     crate::bundle::write(&mut p, &values);
     RawBundle::read_from(&mut p.reader()).unwrap()
 }
+fn shell_caller(uid: i32) -> Result<()> {
+    if matches!(uid % PER_USER_RANGE as i32, 0 | 2000) {
+        Ok(())
+    } else {
+        Err(Exception::security(
+            "Only the shell can delegate its permissions",
+        ))
+    }
+}
 impl AppHost {
+    fn delegate_shell(
+        &self,
+        caller: i32,
+        uid: i32,
+        permissions: Option<Vec<Option<String>>>,
+    ) -> Result<()> {
+        shell_caller(caller)?;
+        let active = self.instrumentation.active.lock().unwrap();
+        let mut delegate = self.instrumentation.delegate.lock().unwrap();
+        if delegate.as_ref().is_some_and(|d| d.uid != uid) {
+            return Err(Exception::security(
+                "Shell can delegate permissions only to one instrumentation at a time",
+            ));
+        }
+        let Some(session) = active.get(&uid).filter(|s| s.live()) else {
+            return Ok(()); // AccessCheckDelegateHelper: no matching active instrumentation.
+        };
+        if session.connection.is_none() {
+            return Err(Exception::security(
+                "Shell can delegate its permissions only to an instrumentation started from the shell",
+            ));
+        }
+        *delegate = Some(Arc::new(Delegate {
+            uid,
+            package: session.target.item.package_name.clone().unwrap(),
+            permissions,
+        }));
+        // No package-info cache nonce is published (package_bootstrap.rs).
+        Ok(())
+    }
     fn start_instrumentation(&self, call: &Call<'_>, a: Request) -> Result<bool> {
         let instrumentation = &self.instrumentation;
         let active = &instrumentation.active;
@@ -499,7 +577,17 @@ impl AppHost {
         };
         let stopped = self.stop_instrumentation_starts(starts);
         let active = &self.instrumentation.active;
-        active.lock().unwrap().remove(&session.target.uid);
+        let mut active = active.lock().unwrap();
+        let mut delegate = self.instrumentation.delegate.lock().unwrap();
+        if delegate
+            .as_ref()
+            .is_some_and(|d| d.uid == session.target.uid)
+        {
+            *delegate = None;
+        }
+        active.remove(&session.target.uid);
+        drop(delegate);
+        drop(active);
         self.instrumentation.report(Report {
             watcher: session.watcher.clone(),
             class: session.class.clone(),

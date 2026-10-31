@@ -213,6 +213,10 @@ const CAMERA_PRIVACY_ALLOWLIST: &str = "com.android.internal.camera.flags.camera
 
 /// What the decisions read of the system server.
 trait System {
+    fn shell_delegate(&self) -> Option<Arc<super::instrumentation::Delegate>> {
+        None
+    }
+
     /// An aconfig flag of the image.
     fn flag(&self, name: &str) -> Result<bool, Exception>;
     /// A guest property.
@@ -680,6 +684,10 @@ fn check_attribution(
     device: i32,
     raw: bool,
 ) -> Result<i32, Exception> {
+    let delegated = shell_uid(sys, code, uid)?;
+    let (caller, uid, package, tag) = delegated.map_or((caller, uid, package, tag), |uid| {
+        (SYSTEM_UID, uid, Some(SHELL_PACKAGE), None)
+    });
     let user = uid.div_euclid(PER_USER_RANGE);
     let validate = sys.flag(CHECK_OP_VALIDATE_PACKAGE)?;
     let info = verify_incoming_op(sys, caller, code)?;
@@ -892,6 +900,7 @@ impl WriteParcelable for SyncNoted {
 /// and `startOperationUnchecked` take it: the proxy's uid and package for a
 /// proxied one, its `OP_FLAG_*`, and the message it is collected with for
 /// the app (`shouldCollectAsyncNotedOp`).
+#[derive(Clone)]
 struct Unchecked<'a> {
     code: i32,
     uid: i32,
@@ -1060,6 +1069,7 @@ pub(super) struct Notice {
 /// (`collectAsyncNotedOp`).
 #[derive(Debug, PartialEq)]
 struct Collected {
+    noting_uid: i32,
     uid: i32,
     package: String,
     op: i32,
@@ -1488,6 +1498,16 @@ struct Ops<'a, L> {
 }
 
 impl<L> Ops<'_, L> {
+    fn as_shell<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
+        let caller = std::mem::replace(&mut self.caller, SYSTEM_UID);
+        let result = f(self);
+        self.caller = caller;
+        result
+    }
+
     /// Re-evaluate started ops after PermissionPolicy changes a switch mode.
     fn permission_mode_changed(&mut self, uid: i32, code: i32) -> Result<(), Exception> {
         let mut keys: Vec<_> = self
@@ -1618,6 +1638,17 @@ impl<L> Ops<'_, L> {
 
     /// `noteOperationImpl` behind `AppOpsPolicy.noteOperation`.
     fn note(&mut self, op: &Unchecked<'_>, device: i32) -> Result<SyncNoted, Exception> {
+        if let Some(uid) = shell_uid(self.sys, op.code, op.uid)? {
+            let op = Unchecked {
+                uid,
+                package: Some(SHELL_PACKAGE),
+                ..op.clone()
+            };
+            return self.as_shell(|ops| ops.note_impl(&op, device));
+        }
+        self.note_impl(op, device)
+    }
+    fn note_impl(&mut self, op: &Unchecked<'_>, device: i32) -> Result<SyncNoted, Exception> {
         let code = resolve_datasource_op(self.sys, op.code, op.uid, op.package, op.tag)?;
         let resolved =
             match validate_request(self.sys, self.caller, code, op.uid, op.package, device)? {
@@ -1689,6 +1720,7 @@ impl<L> Ops<'_, L> {
                 message.clone(),
             );
             self.effects.collected.push(Collected {
+                noting_uid: self.caller,
                 uid,
                 package,
                 op,
@@ -1703,6 +1735,20 @@ impl<L> Ops<'_, L> {
     /// without UPDATE_APP_OPS_STATS, but for the proxied's own call, is
     /// collected for itself.
     fn note_proxy(
+        &mut self,
+        code: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+        collect: bool,
+        message: Option<&str>,
+    ) -> Result<SyncNoted, Exception> {
+        if let Some(source) = shell_source(self.sys, code, source, true)? {
+            return self
+                .as_shell(|ops| ops.note_proxy_impl(code, &source, skip_proxy, collect, message));
+        }
+        self.note_proxy_impl(code, source, skip_proxy, collect, message)
+    }
+    fn note_proxy_impl(
         &mut self,
         code: i32,
         source: &AttributionSourceState,
@@ -1793,6 +1839,22 @@ impl<L> Ops<'_, L> {
     /// allowed, the sandboxed camera CAMERA; the package is started as
     /// given.
     fn start(
+        &mut self,
+        client: Option<Binder>,
+        op: &Unchecked<'_>,
+        attribution: Attribution,
+    ) -> Result<SyncNoted, Exception> {
+        if let Some(uid) = shell_uid(self.sys, op.code, op.uid)? {
+            let op = Unchecked {
+                uid,
+                package: Some(SHELL_PACKAGE),
+                ..op.clone()
+            };
+            return self.as_shell(|ops| ops.start_impl(client, &op, attribution));
+        }
+        self.start_impl(client, op, attribution)
+    }
+    fn start_impl(
         &mut self,
         client: Option<Binder>,
         op: &Unchecked<'_>,
@@ -1954,6 +2016,40 @@ impl<L> Ops<'_, L> {
         collect: bool,
         message: Option<&str>,
     ) -> Result<SyncNoted, Exception> {
+        if let Some(source) = shell_source(self.sys, code, source, false)? {
+            return self.as_shell(|ops| {
+                ops.start_proxy_impl(
+                    client,
+                    code,
+                    &source,
+                    skip_proxy,
+                    attribution,
+                    collect,
+                    message,
+                )
+            });
+        }
+        self.start_proxy_impl(
+            client,
+            code,
+            source,
+            skip_proxy,
+            attribution,
+            collect,
+            message,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn start_proxy_impl(
+        &mut self,
+        client: Option<Binder>,
+        code: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+        attribution: ProxyAttribution,
+        collect: bool,
+        message: Option<&str>,
+    ) -> Result<SyncNoted, Exception> {
         let (sys, caller) = (self.sys, self.caller);
         let code = resolve_datasource_op(
             sys,
@@ -2072,6 +2168,20 @@ impl<L> Ops<'_, L> {
         package: Option<&str>,
         tag: Option<&str>,
     ) -> Result<(), Exception> {
+        if let Some(uid) = shell_uid(self.sys, code, uid)? {
+            return self
+                .as_shell(|ops| ops.finish_impl(client, code, uid, Some(SHELL_PACKAGE), tag));
+        }
+        self.finish_impl(client, code, uid, package, tag)
+    }
+    fn finish_impl(
+        &mut self,
+        client: Option<Binder>,
+        code: i32,
+        uid: i32,
+        package: Option<&str>,
+        tag: Option<&str>,
+    ) -> Result<(), Exception> {
         let code = resolve_datasource_op(self.sys, code, uid, package, tag)?;
         verify_incoming_uid(self.sys, self.caller, uid)?;
         verify_incoming_op(self.sys, self.caller, code)?;
@@ -2121,6 +2231,18 @@ impl<L> Ops<'_, L> {
     /// `finishProxyOperationImpl` behind `AppOpsPolicy`: the proxy's op
     /// (unless a trusted caller skips it) and the proxied's.
     fn finish_proxy(
+        &mut self,
+        client: Option<Binder>,
+        code: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+    ) -> Result<(), Exception> {
+        if let Some(source) = shell_source(self.sys, code, source, false)? {
+            return self.as_shell(|ops| ops.finish_proxy_impl(client, code, &source, skip_proxy));
+        }
+        self.finish_proxy_impl(client, code, source, skip_proxy)
+    }
+    fn finish_proxy_impl(
         &mut self,
         client: Option<Binder>,
         code: i32,
@@ -2282,6 +2404,10 @@ fn start_dry_run(
 struct Host<'a>(&'a AppHost);
 
 impl System for Host<'_> {
+    fn shell_delegate(&self) -> Option<Arc<super::instrumentation::Delegate>> {
+        self.0.instrumentation.delegate()
+    }
+
     fn flag(&self, name: &str) -> Result<bool, Exception> {
         let (state, _) = self.0.packages()?;
         Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
@@ -2834,7 +2960,7 @@ fn with_ops<T>(
         (result, ops.effects, ops.ended)
     };
     unlink(host, ended);
-    dispatch(host, caller, effects);
+    dispatch(host, effects);
     result
 }
 
@@ -2863,7 +2989,7 @@ fn link_client(host: &AppHost, client: &Client) -> Link {
                 .unwrap()
                 .client_died(&client, &mut effects);
             unlink(&host, ended);
-            dispatch(&host, SYSTEM_UID, effects);
+            dispatch(&host, effects);
         }),
     );
     Some((strong, death))
@@ -2873,7 +2999,7 @@ fn link_client(host: &AppHost, client: &Client) -> Link {
 /// `notifyOpActiveChanged` and `notifyOpStarted` do (a restricted-read
 /// op's only with MANAGE_APPOPS), and collects the ops it left for their
 /// apps as noted by `caller`.
-fn dispatch(host: &AppHost, caller: i32, effects: Effects) {
+fn dispatch(host: &AppHost, effects: Effects) {
     for notice in effects.notices {
         let mut p = Parcel::new();
         let (op, uid, package_name, attribution_tag) =
@@ -2934,7 +3060,7 @@ fn dispatch(host: &AppHost, caller: i32, effects: Effects) {
         }
     }
     for collected in effects.collected {
-        collect(host, collected, caller);
+        collect(host, collected);
     }
 }
 
@@ -3120,6 +3246,62 @@ pub(super) fn finish_proxy(
     with_ops(host, caller, |ops| {
         ops.finish_proxy(client, code, source, skip_proxy)
     })
+}
+
+const SHELL_PACKAGE: &str = "com.android.shell";
+
+/// AccessCheckDelegateImpl, android-16.0.0_r1: ops without permissions are delegated too.
+fn delegate_op(
+    sys: &dyn System,
+    code: i32,
+) -> Result<Option<Arc<super::instrumentation::Delegate>>, Exception> {
+    let Some(delegate) = sys.shell_delegate() else {
+        return Ok(None);
+    };
+    let Some(info) = APP_OP_INFOS.get(code as usize) else {
+        return Ok(None);
+    };
+    let permission = match info.permission {
+        Some((_, Some(flag))) if !sys.flag(flag)? => None,
+        Some((name, _)) => Some(name),
+        None => None,
+    };
+    Ok(permission
+        .is_none_or(|p| delegate.permission(p))
+        .then_some(delegate))
+}
+fn shell_uid(sys: &dyn System, code: i32, uid: i32) -> Result<Option<i32>, Exception> {
+    Ok(delegate_op(sys, code)?
+        .filter(|d| d.uid == uid)
+        .map(|_| uid.div_euclid(PER_USER_RANGE) * PER_USER_RANGE + SHELL_UID))
+}
+fn shell_source(
+    sys: &dyn System,
+    code: i32,
+    source: &AttributionSourceState,
+    note: bool,
+) -> Result<Option<AttributionSourceState>, Exception> {
+    let Some(d) = delegate_op(sys, code)? else {
+        return Ok(None);
+    };
+    if !note && source.uid != d.uid {
+        return Ok(None);
+    }
+    let mut source = source.clone();
+    let uid = source.uid.div_euclid(PER_USER_RANGE) * PER_USER_RANGE + SHELL_UID;
+    let remap = |s: &mut AttributionSourceState| {
+        if s.uid == d.uid {
+            s.uid = uid;
+            s.pid = -1;
+            s.package = Some(SHELL_PACKAGE.into());
+            s.renounced = None;
+        }
+    };
+    if note && let Some(Some(next)) = source.next.as_mut().and_then(|n| n.first_mut()) {
+        remap(next);
+    }
+    remap(&mut source);
+    Ok(Some(source))
 }
 
 /// `AppOpsManager.NotedOp`, a batched note.
@@ -3363,11 +3545,12 @@ struct Async {
 
 /// `collectAsyncNotedOp`: the op noted for an app by `noting_uid`, to its
 /// watchers, else kept for `extractAsyncOps`.
-fn collect(host: &AppHost, collected: Collected, noting_uid: i32) {
+fn collect(host: &AppHost, collected: Collected) {
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
     let Collected {
+        noting_uid,
         uid,
         package,
         op,
@@ -5991,6 +6174,7 @@ mod tests {
         let proxied = started_with(OP_FLAG_UNTRUSTED_PROXIED);
         assert_eq!(heard, [(PRIV_APP, &proxy, 0x1), (APP, &proxied, 0x4)]);
         let collected = |uid, package: &str, message: &str| Collected {
+            noting_uid: PRIV_APP,
             uid,
             package: package.into(),
             op: OP_CAMERA,

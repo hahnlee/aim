@@ -363,3 +363,237 @@ fn instrumentation_restart_early_attach_and_failures_retire_once() {
         }
     });
 }
+
+fn adopt(
+    host: &Arc<AppHost>,
+    caller: u32,
+    uid: i32,
+    names: Option<&[&str]>,
+) -> Result<(), Exception> {
+    let mut p = Parcel::new();
+    am::StartDelegateShellPermissionIdentity {
+        uid,
+        permissions: names.map(|n| n.iter().map(|n| Some((*n).into())).collect()),
+    }
+    .write(&mut p);
+    call(
+        host,
+        caller,
+        am::START_DELEGATE_SHELL_PERMISSION_IDENTITY,
+        &p,
+    )
+    .reader()
+    .read_exception()
+    .unwrap()
+}
+fn adopted(host: &Arc<AppHost>, caller: u32) -> Result<Option<Vec<Option<String>>>, Exception> {
+    let mut p = Parcel::new();
+    am::GetDelegatedShellPermissions {}.write(&mut p);
+    am::read_get_delegated_shell_permissions_reply(
+        &mut call(host, caller, am::GET_DELEGATED_SHELL_PERMISSIONS, &p).reader(),
+    )
+    .unwrap()
+}
+fn drop_permissions(host: &Arc<AppHost>, caller: u32) -> Result<(), Exception> {
+    let mut p = Parcel::new();
+    am::StopDelegateShellPermissionIdentity {}.write(&mut p);
+    call(
+        host,
+        caller,
+        am::STOP_DELEGATE_SHELL_PERMISSION_IDENTITY,
+        &p,
+    )
+    .reader()
+    .read_exception()
+    .unwrap()
+}
+
+/// UiAutomationTest.testAdoptAllShellPermissions / testAdoptSomeShellPermissions,
+/// plus AccessCheckDelegateHelper admission and AppOps delegation (Android 16).
+#[test]
+fn instrumentation_shell_delegation_scope_and_cleanup() {
+    const BATTERY: &str = "android.permission.BATTERY_STATS";
+    const USAGE: &str = "android.permission.PACKAGE_USAGE_STATS";
+    with(|host, publish, export| {
+        publish(&mut |p| manifest(p, None));
+        let system = host.package_system().unwrap();
+        let base = system.capture_package_queries().unwrap();
+        let mut context = (**base.context()).clone();
+        context.scan_version = base.scan().version() + 1;
+        context.system.system_permissions =
+            Some([(2000, [BATTERY.into(), USAGE.into()].into())].into());
+        system
+            .publish_package_scan_with_queries(
+                &system.package_bootstrap().unwrap(),
+                Some(base.scan()),
+                base.scan().owner().clone(),
+                base.scan().usage().clone(),
+                context,
+            )
+            .unwrap();
+        let (w, ui, t, rx) = recorders(host, export);
+        let who = t.binder();
+        let perms = host.permission_manager.get().unwrap().clone();
+        let ops = appops_service::AppOps::new(host.clone(), perms.clone());
+        for (code, uid, mode) in [
+            (43, 10101, 0),
+            (43, 10100, 1),
+            (43, 2000, 0),
+            (26, 10100, 1),
+            (26, 2000, 2),
+            (2, 10100, 1),
+            (2, 2000, 0),
+        ] {
+            ops.set_mode(0, code, uid, None, mode).unwrap();
+        }
+        let checks = |battery, usage, mode| {
+            assert_eq!(
+                host.check_permission(Some(BATTERY), 10100).unwrap(),
+                battery
+            );
+            assert_eq!(host.check_permission(Some(USAGE), 10100).unwrap(), usage);
+            assert_eq!(
+                appops_service::check_from(host, 10100, 43, 10100, Some("p")).unwrap(),
+                mode
+            );
+            assert_eq!(
+                appops_service::note_from(host, 10100, 43, 10100, Some("p"), None).unwrap(),
+                mode
+            );
+            assert_eq!(host.check_permission(Some(BATTERY), 10101).unwrap(), -1);
+            assert_eq!(
+                host.check_permission(Some("not.a.shell.permission"), 10100)
+                    .unwrap(),
+                -1
+            );
+        };
+        assert_eq!(adopted(host, 2000).unwrap(), Some(vec![]));
+        adopt(host, 2000, 10100, None).unwrap(); // No active session: no delegation.
+        checks(-1, -1, 1);
+        insert(host, 100, Some(t), "p");
+        assert!(start(host, 2000, request(8, w.binder(), ui.binder())).unwrap());
+        recv(&rx);
+        for uid in [1000, 10100, 10101] {
+            assert_eq!(
+                adopt(host, uid, 10100, None).unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+            assert!(drop_permissions(host, uid).is_err());
+            assert!(adopted(host, uid).is_err());
+        }
+        adopt(host, 2000, 10100, Some(&[BATTERY])).unwrap();
+        checks(0, -1, 1);
+        assert_eq!(adopted(host, 0).unwrap(), Some(vec![Some(BATTERY.into())]));
+        adopt(host, 2000, 10100, None).unwrap();
+        checks(0, 0, 0);
+        assert_eq!(adopted(host, 2000).unwrap(), None);
+        assert_eq!(appops_service::mode(host, 26, 10100, Some("p")).unwrap(), 2);
+        assert!(adopt(host, 2000, 10101, None).is_err()); // One delegate globally.
+        adopt(host, 0, 10100, Some(&[USAGE])).unwrap();
+        checks(-1, 0, 0);
+        assert_eq!(appops_service::mode(host, 26, 10100, Some("p")).unwrap(), 1);
+        let client = Some(w.binder());
+        assert_eq!(
+            appops_service::start(
+                host,
+                10100,
+                client,
+                43,
+                10100,
+                Some("p"),
+                None,
+                appops_service::Attribution {
+                    start_if_mode_default: false,
+                    flags: 0,
+                    chain_id: -1
+                }
+            )
+            .unwrap(),
+            0
+        );
+        appops_service::finish(host, 10100, client, 43, 10100, Some("p"), None).unwrap();
+        let q = permission_checker::AttributionSourceState {
+            pid: -1,
+            uid: 10101,
+            device_id: 0,
+            package: Some("q".into()),
+            tag: None,
+            token: None,
+            renounced: None,
+            next: None,
+        };
+        let p = permission_checker::AttributionSourceState {
+            uid: 10100,
+            package: Some("p".into()),
+            ..q.clone()
+        };
+        assert_eq!(
+            appops_service::check_raw_from(host, 10100, 43, &p, "p").unwrap(),
+            0
+        );
+        let proxy = permission_checker::AttributionSourceState {
+            next: Some(vec![Some(p.clone())]),
+            ..q.clone()
+        };
+        assert_eq!(
+            appops_service::note_proxy(host, 1000, 43, &proxy, false, None).unwrap(),
+            0
+        );
+        let proxy = permission_checker::AttributionSourceState {
+            next: Some(vec![Some(q)]),
+            ..p
+        };
+        assert_eq!(
+            appops_service::start_proxy(
+                host,
+                10100,
+                client,
+                43,
+                &proxy,
+                false,
+                appops_service::ProxyAttribution {
+                    start_if_mode_default: false,
+                    proxy_flags: 0,
+                    proxied_flags: 0,
+                    chain_id: -1
+                },
+                None
+            )
+            .unwrap(),
+            0
+        );
+        appops_service::finish_proxy(host, 10100, client, 43, &proxy, false).unwrap();
+        adopt(host, 2000, 10100, Some(&[])).unwrap();
+        checks(-1, -1, 1);
+        assert_eq!(appops_service::mode(host, 2, 10100, Some("p")).unwrap(), 0); // No permission mapping.
+        drop_permissions(host, 2000).unwrap();
+        drop_permissions(host, 0).unwrap();
+        checks(-1, -1, 1);
+        assert_eq!(appops_service::mode(host, 2, 10100, Some("p")).unwrap(), 1);
+        adopt(host, 2000, 10100, None).unwrap();
+        results(host, who, Some(-1), None).unwrap();
+        checks(-1, -1, 1);
+        recv(&rx);
+        recv(&rx);
+        assert_eq!(adopted(host, 2000).unwrap(), Some(vec![]));
+        assert!(start(host, 0, request(8, w.binder(), ui.binder())).unwrap());
+        recv(&rx);
+        adopt(host, 2000, 10100, None).unwrap();
+        host.apps.lock().unwrap().get_mut(&100).unwrap().pid = 42;
+        host.process_died(100, 42);
+        checks(-1, -1, 1);
+        recv(&rx);
+        recv(&rx);
+        // A later session with no UiAutomationConnection cannot adopt shell state.
+        let (w, ui, t, rx) = recorders(host, export);
+        let who = t.binder();
+        insert(host, 101, Some(t), "p");
+        let mut a = request(8, w.binder(), ui.binder());
+        a.connection = None;
+        assert!(start(host, 0, a).unwrap());
+        recv(&rx);
+        assert!(adopt(host, 2000, 10100, None).is_err());
+        results(host, who, Some(0), None).unwrap();
+        recv(&rx);
+    });
+}

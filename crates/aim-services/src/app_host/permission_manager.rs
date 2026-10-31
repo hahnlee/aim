@@ -577,6 +577,7 @@ fn single_permission_granted(
 /// filter, the permissions defined, the permission groups and the access
 /// state of user 0, the model's one user.
 struct Access<'a> {
+    delegate: Option<&'a super::instrumentation::Delegate>,
     state: &'a State,
     filter: &'a AppsFilter,
     defined: &'a [Permission],
@@ -1039,6 +1040,13 @@ impl Access<'_> {
         permission: &str,
         user: i32,
     ) -> Result<i32, Exception> {
+        if package != "com.android.shell"
+            && self
+                .delegate
+                .is_some_and(|d| d.package == package && d.permission(permission))
+        {
+            return self.check_permission(SYSTEM_UID, "com.android.shell", permission, user);
+        }
         if !self.user_exists(user) {
             return Ok(DENIED);
         }
@@ -1057,6 +1065,13 @@ impl Access<'_> {
     /// shared uid's the first of its packages installed in the uid's
     /// user), else by SystemConfig's grants to the uid.
     fn check_uid_permission(&self, uid: i32, permission: &str) -> Result<i32, Exception> {
+        if uid != 2000
+            && self
+                .delegate
+                .is_some_and(|d| d.uid == uid && d.permission(permission))
+        {
+            return self.check_uid_permission(2000, permission);
+        }
         let user = apps_filter::user_id(uid);
         if !self.user_exists(user) {
             return Ok(DENIED);
@@ -1771,7 +1786,9 @@ impl PermissionManager {
         let state = capture.state();
         let resolution = super::package_resolution(capture, resolution_context)?;
         let groups = self.groups(state);
+        let delegate = self.host.instrumentation.delegate();
         f(&Access {
+            delegate: delegate.as_deref(),
             state,
             filter: &resolution.apps_filter,
             defined: &system.permissions,
@@ -3403,6 +3420,7 @@ mod tests {
         let filter = AppsFilter::default();
         let compat = CompatConfig::default();
         f(&Access {
+            delegate: None,
             state: &state,
             filter: &filter,
             defined: &defined,
@@ -3454,6 +3472,49 @@ mod tests {
                 .message,
                 "permission user owner differs"
             );
+        });
+    }
+
+    #[test]
+    fn instrumentation_package_permission_delegate_uses_shell_grants() {
+        with_access(|a| {
+            let mut state = a.state.clone();
+            let mut shell = state.packages["granted"].clone();
+            shell.name = "com.android.shell".into();
+            shell.app_id = 2000;
+            state.packages.insert(shell.name.clone(), shell);
+            let mut user = a.user0.clone();
+            user.app_id_permissions
+                .push((2000, vec![(CAMERA.into(), RUNTIME_GRANTED)]));
+            let d = super::super::instrumentation::Delegate {
+                uid: 10002,
+                package: "denied".into(),
+                permissions: Some(vec![Some(CAMERA.into())]),
+            };
+            let plain = Access {
+                state: &state,
+                user0: &user,
+                ..*a
+            };
+            let delegated = Access {
+                delegate: Some(&d),
+                ..plain
+            };
+            for (access, package, permission, user, expected) in [
+                (&plain, "denied", CAMERA, 0, DENIED),
+                (&delegated, "denied", CAMERA, 0, GRANTED),
+                (&delegated, "denied", INTERNET, 0, DENIED),
+                (&delegated, "shared.a", CAMERA, 0, DENIED),
+                (&delegated, "denied", CAMERA, 10, DENIED),
+            ] {
+                let result = access.check_permission(1000, package, permission, user);
+                assert_eq!(result.unwrap(), expected);
+            }
+            assert_eq!(
+                delegated.check_uid_permission(10002, CAMERA).unwrap(),
+                GRANTED
+            );
+            assert_eq!(plain.check_uid_permission(10002, CAMERA).unwrap(), DENIED);
         });
     }
 
@@ -3543,6 +3604,7 @@ mod tests {
         let groups = permission_groups(&state);
         let (filter, compat) = (AppsFilter::default(), CompatConfig::default());
         let a = Access {
+            delegate: None,
             state: &state,
             filter: &filter,
             defined: &defined,
@@ -3616,6 +3678,7 @@ mod tests {
         let groups = permission_groups(&state);
         let (filter, compat) = (AppsFilter::default(), CompatConfig::default());
         let a = Access {
+            delegate: None,
             state: &state,
             filter: &filter,
             defined: &defined,
@@ -3757,6 +3820,7 @@ mod tests {
         let mut new = user0.clone();
         f(
             &Access {
+                delegate: None,
                 state: &state,
                 filter: &filter,
                 defined: &defined,
@@ -3788,6 +3852,7 @@ mod tests {
         let filter = AppsFilter::default();
         let compat = CompatConfig::default();
         let a = Access {
+            delegate: None,
             state: &state,
             filter: &filter,
             defined: &defined,
@@ -3901,6 +3966,7 @@ mod tests {
                 PROTECTION_SIGNATURE | PROTECTION_FLAG_DEVELOPMENT,
             )];
             let access = Access {
+                delegate: None,
                 state: &state,
                 defined: &defined,
                 filter: base.filter,
@@ -3965,6 +4031,7 @@ mod tests {
             .requested_permissions
             .clear();
             let access = Access {
+                delegate: None,
                 state: &unrequested,
                 ..access
             };

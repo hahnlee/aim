@@ -85,6 +85,7 @@ impl Fixture {
         let filter = AppsFilter::default();
         let compat = CompatConfig::default();
         let access = Access {
+            delegate: None,
             state: &self.state,
             filter: &filter,
             defined: &self.defined,
@@ -453,6 +454,7 @@ fn permission_manager_grant_revoke_updates_persisted_modes() {
                     let mut state = access.state.clone();
                     state.system.permission_controller_package = Some(None);
                     Access {
+                        delegate: None,
                         state: &state,
                         ..*access
                     }
@@ -506,6 +508,7 @@ fn mode_writes_update_revoked_compat_for_granted_runtime_permissions() {
         let filter = AppsFilter::default();
         let compat = CompatConfig::default();
         let access = Access {
+            delegate: None,
             state: &f.state,
             filter: &filter,
             defined: &f.defined,
@@ -534,6 +537,7 @@ fn mode_writes_update_revoked_compat_for_granted_runtime_permissions() {
     let filter = AppsFilter::default();
     let compat = CompatConfig::default();
     let access = Access {
+        delegate: None,
         state: &f.state,
         filter: &filter,
         defined: &f.defined,
