@@ -197,6 +197,11 @@ if a runtime grant or context publication changed it (#2442). The mutation's
 longest bootstrap hold fell from 0.11-0.21 s to 0.02-0.06 s; persistence
 still runs under the lock.
 
+Native package effects now serve user-0 suspension eligibility through device
+policy, HOME/dialer roles, required-package, protection, uninstall-block and AppOps
+owners (#2154). Caller-owner UID admission also bypasses user suspension restrictions.
+Host exclusion/identity tests pass; profile roles remain #2015. No guest boot (2026-11-01).
+
 Enabled-only mutations project changed packages and UID/shared-UID aliases from
 that capture (#2478). Enabled-setting restrictions now coalesce for ten seconds;
 SYNCHRONOUS and shutdown flush pending state. Host timer/failure checks cover the
