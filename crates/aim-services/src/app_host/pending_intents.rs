@@ -711,6 +711,7 @@ impl AppHost {
         match kind {
             INTENT_SENDER_ACTIVITY => {
                 let args = StartArgs {
+                    calling_package: Some(package.clone()),
                     caller: None,
                     intent: Some(final_intent.clone()),
                     resolved_type: resolved,
@@ -719,7 +720,7 @@ impl AppHost {
                     request_code: sent.request_code,
                     options: sent.options,
                 };
-                res = match self.start_activity_in_package(uid, package.clone(), 0, args) {
+                res = match self.start_activity_in_package(uid, Some(package.clone()), 0, args) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!(

@@ -96,6 +96,7 @@ pub struct StartRequest {
     pub class: String,
     pub intent: LaunchIntent,
     pub referrer: String,
+    pub launched_from: super::activity::LaunchedFrom,
     pub result_to: Option<u64>,
     pub result_who: Option<String>,
     pub request_code: i32,
@@ -117,6 +118,11 @@ impl StartRequest {
             class: class.to_string(),
             intent: LaunchIntent::Component,
             referrer: "com.android.shell".into(),
+            launched_from: super::activity::LaunchedFrom {
+                uid: 2000,
+                package: Some("com.android.shell".into()),
+                share_identity: false,
+            },
             result_to: None,
             result_who: None,
             request_code: -1,
@@ -327,6 +333,7 @@ impl AppHost {
             style,
             intent: request.intent,
             referrer: request.referrer,
+            launched_from: request.launched_from,
             task,
             result_to: request.result_to,
             result_who: request.result_who,
@@ -409,6 +416,7 @@ impl AppHost {
                                 class: r.class.clone(),
                                 intent: r.intent.clone(),
                                 referrer: r.referrer.clone(),
+                                launched_from: r.launched_from.clone(),
                                 result_to: r.result_to,
                                 result_who: r.result_who.clone(),
                                 request_code: r.request_code,
@@ -697,10 +705,21 @@ impl AppHost {
         call: &Call<'_>,
         args: StartArgs,
     ) -> Result<i32, Exception> {
-        let Some((_, caller_package, _, caller_pid)) = self.app_of_thread(args.caller) else {
-            return Err(Exception::security("Unable to find app for caller"));
+        let sender = call.sender_euid as i32;
+        if !matches!(sender, 0 | 1000)
+            && !self.owns_package(sender, args.calling_package.as_deref().unwrap_or_default())?
+        {
+            return Err(Exception::security("Package does not belong to uid"));
+        }
+        let (uid, pid) = if args.caller.is_some() {
+            let Some((_, _, uid, pid)) = self.app_of_thread(args.caller) else {
+                return Err(Exception::security("Unable to find app for caller"));
+            };
+            (uid, pid)
+        } else {
+            (call.sender_euid as i32, call.sender_pid)
         };
-        self.start_activity_in_package(call.sender_euid as i32, caller_package, caller_pid, args)
+        self.start_activity_in_package(uid, args.calling_package.clone(), pid, args)
     }
 
     /// `ActivityStarter`'s start of `args` by `uid` of `caller_package`
@@ -709,7 +728,7 @@ impl AppHost {
     pub(super) fn start_activity_in_package(
         self: &Arc<Self>,
         uid: i32,
-        caller_package: String,
+        mut caller_package: Option<String>,
         caller_pid: i32,
         mut args: StartArgs,
     ) -> Result<i32, Exception> {
@@ -787,7 +806,7 @@ impl AppHost {
             info.info.exported,
         )? {
             let what = format!(
-                "Permission Denial: starting Intent {{ cmp={package}/{class} }} from {caller_package} (pid={caller_pid}, uid={uid})"
+                "Permission Denial: starting Intent {{ cmp={package}/{class} }} from {caller_package:?} (pid={caller_pid}, uid={uid})"
             );
             return Err(Exception::security(if info.info.exported {
                 format!(
@@ -826,6 +845,15 @@ impl AppHost {
             }
             let (forwarded, payload) = self.activities.stack.lock().unwrap().forward_result(source);
             result_to = forwarded;
+            if let Some(package) = self
+                .activities
+                .with(Some(Binder::Local(source)), |r| {
+                    (r.launched_from.uid == uid).then(|| r.launched_from.package.clone())
+                })
+                .flatten()
+            {
+                caller_package = package;
+            }
             if let Some(id) = payload
                 && let Some(Payload::Result {
                     who, request_code, ..
@@ -903,7 +931,7 @@ impl AppHost {
                 self.grant_from_intent(grants.as_ref(), Some(Owner::Activity(token)))?;
                 let payload = self.new_payload(Payload::NewIntent {
                     intent: kept,
-                    referrer: caller_package,
+                    referrer: caller_package.unwrap_or_default(),
                 });
                 commands.extend(self.activities.stack.lock().unwrap().apply(
                     &d,
@@ -933,7 +961,18 @@ impl AppHost {
             restart: None,
             class,
             intent: LaunchIntent::Raw(Box::new(kept)),
-            referrer: caller_package,
+            launched_from: super::activity::LaunchedFrom {
+                uid,
+                package: caller_package.clone(),
+                share_identity: args
+                    .options
+                    .as_ref()
+                    .map(|o| o.boolean("android:activity.shareIdentity", false))
+                    .transpose()
+                    .map_err(|_| Exception::illegal_argument("activity options"))?
+                    .unwrap_or(false),
+            },
+            referrer: caller_package.unwrap_or_default(),
             result_to: d.result_to,
             result_who: args.result_who,
             request_code: args.request_code,
@@ -1231,6 +1270,7 @@ pub enum Report {
 /// `startActivity`'s arguments the app host reads.
 pub struct StartArgs {
     pub caller: Option<Binder>,
+    pub calling_package: Option<String>,
     pub intent: Option<RawIntent>,
     pub resolved_type: Option<String>,
     pub result_to: Option<Binder>,
