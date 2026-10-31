@@ -8,7 +8,7 @@
 //! `device_policy_state.xml`), as the original persisted them, with the
 //! original's checks and its answers when none of them is set. A device
 //! that has an owner, an admin, a delegation or a policy, authorized policy
-//! writes and every other method are not implemented (#1521).
+//! writes and other methods are not implemented (#1521); pending-update reads also serve owners.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet};
@@ -56,6 +56,8 @@ const STATE_USER_UNMANAGED: i32 = 0;
 /// `DevicePolicyManager.PASSWORD_COMPLEXITY_NONE`.
 const PASSWORD_COMPLEXITY_NONE: i32 = 0;
 
+const NOTIFY_PENDING_SYSTEM_UPDATE: &str = "android.permission.NOTIFY_PENDING_SYSTEM_UPDATE";
+const QUERY_SYSTEM_UPDATES: &str = "android.permission.MANAGE_DEVICE_POLICY_QUERY_SYSTEM_UPDATES";
 const MANAGE_USERS: &str = "android.permission.MANAGE_USERS";
 const MANAGE_PROFILE_AND_DEVICE_OWNERS: &str =
     "android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS";
@@ -111,6 +113,31 @@ impl aim_service_aidl::WriteParcelable for ParcelableResource {
     }
 }
 
+/// `SystemUpdateInfo` (Android 16, lines 142–157, 166–168).
+#[derive(Debug)]
+struct PendingUpdate {
+    build: String,
+    received: i64,
+    security: i32,
+}
+
+impl PendingUpdate {
+    fn read(e: &Element) -> Option<Self> {
+        Some(Self {
+            build: e.string("original-build")?.into_owned(),
+            received: e.long("received-time").ok()??,
+            security: e.int("security-patch-state").ok()??,
+        })
+    }
+}
+
+impl aim_service_aidl::WriteParcelable for PendingUpdate {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i64(self.received);
+        p.write_i32(self.security);
+    }
+}
+
 /// One user's `DevicePolicyData`, as far as its reads need it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct UserData {
@@ -118,6 +145,7 @@ struct UserData {
     setup_complete: bool,
     /// `mUserProvisioningState`.
     provisioning_state: i32,
+    provisioning_config_applied: bool,
 }
 
 impl Default for UserData {
@@ -125,6 +153,7 @@ impl Default for UserData {
         UserData {
             setup_complete: false,
             provisioning_state: STATE_USER_UNMANAGED,
+            provisioning_config_applied: false,
         }
     }
 }
@@ -144,6 +173,7 @@ pub struct Policies {
     admin_packages: Vec<String>,
     /// The owners' system update policy (`OwnersData.mSystemUpdatePolicy`).
     system_update_policy: bool,
+    pending_update: Option<PendingUpdate>,
     /// An active admin or a delegation of a user.
     admins: bool,
     /// A policy the policy engine keeps.
@@ -183,7 +213,9 @@ impl Policies {
                 .children()
                 .take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str()))
             {
-                if e.name == "device-owner" {
+                if e.name == "pending-ota-info" {
+                    policies.pending_update = PendingUpdate::read(e);
+                } else if e.name == "device-owner" {
                     policies.device_owner_user = 0;
                 } else if e.name == "device-owner-context" {
                     policies.device_owner_user =
@@ -275,6 +307,10 @@ impl Policies {
                 user,
                 UserData {
                     setup_complete: root.string("setup-complete").as_deref() == Some("true"),
+                    provisioning_config_applied: root
+                        .string("device-provisioning-config-applied")
+                        .as_deref()
+                        == Some("true"),
                     provisioning_state: provisioning_state
                         .filter(|s| *s != -1)
                         .unwrap_or(STATE_USER_UNMANAGED),
@@ -421,6 +457,12 @@ impl Policies {
         &self.managed_users
     }
 
+    fn active_admin(&self, user: i32, admin: &ComponentName) -> bool {
+        self.active_admins
+            .get(&user)
+            .is_some_and(|v| v.contains(admin))
+    }
+
     /// `getUserData(user)`: a user without a file has the defaults.
     fn user(&self, user: i32) -> UserData {
         self.users.get(&user).copied().unwrap_or_default()
@@ -551,6 +593,7 @@ trait Device {
     fn permitted(&self, uid: i32, permission: &str) -> Result<bool, Exception>;
     /// The app id of `package`, if it is installed in `user`.
     fn app_id(&self, package: &str, user: i32) -> Result<Option<i32>, Exception>;
+    fn update_role_holder(&self, uid: i32) -> Result<bool, Exception>;
     fn target_sdk(&self, package: &str) -> Result<Option<i32>, Exception>;
     fn flag(&self, name: &str) -> Result<bool, Exception>;
     /// User 0's setting.
@@ -1052,6 +1095,77 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 Ok(())
             })()
         }
+        dp::GET_PENDING_SYSTEM_UPDATE => {
+            let a = dp::GetPendingSystemUpdate::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                let package = a.caller_package.as_deref();
+                if let Some(name) = package {
+                    caller.identity(None, Some(name))?;
+                } else if a.admin.is_none() {
+                    return Err(null("callerPackageName"));
+                }
+                let policies = device.policies()?;
+                if let Some(admin) = a.admin.as_ref() {
+                    if !policies.active_admin(caller.user(), admin)
+                        || !caller.is_package(&admin.package)?
+                    {
+                        return Err(caller.not_admin(admin));
+                    }
+                    if package.is_some_and(|p| p != admin.package) {
+                        return Err(Exception::illegal_argument(""));
+                    }
+                }
+                // DPMS 16769–16775, 23542–23555, 23638–23685: either
+                // permission, including the query permission of a default DO,
+                // any PO, or a role holder acting for such an owner.
+                let user = caller.user();
+                let owner = policies
+                    .profile_owners
+                    .get(&user)
+                    .filter(|c| policies.active_admin(user, c))
+                    .map(|c| c.package.as_str());
+                let device_owner = policies.device_owner.as_deref().filter(|_| {
+                    policies.device_owner_user == user && policies.device_owner_type == 0
+                });
+                let owns = || -> Result<bool, Exception> {
+                    for name in [device_owner, owner].into_iter().flatten() {
+                        if caller.is_package(name)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                };
+                if !caller.permitted(NOTIFY_PENDING_SYSTEM_UPDATE)?
+                    && !caller.permitted(QUERY_SYSTEM_UPDATES)?
+                    && !owns()?
+                    && !((device_owner.is_some() || policies.profile_owners.contains_key(&user))
+                        && device.update_role_holder(uid)?)
+                {
+                    return Err(Exception::security(format!(
+                        "Caller does not have the required permissions for this user. One of the following permission required: [{NOTIFY_PENDING_SYSTEM_UPDATE}, {QUERY_SYSTEM_UPDATES}]"
+                    )));
+                }
+                let fingerprint =
+                    super::package_bootstrap::build_fingerprint(|n| device.property(n));
+                let update = policies
+                    .pending_update
+                    .as_ref()
+                    .filter(|u| u.build == fingerprint);
+                dp::write_get_pending_system_update_reply(&mut p, update);
+                Ok(())
+            })()
+        }
+        dp::IS_DEVICE_PROVISIONING_CONFIG_APPLIED => {
+            dp::IsDeviceProvisioningConfigApplied::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                authorize(caller.manages_users()?)?;
+                dp::write_is_device_provisioning_config_applied_reply(
+                    &mut p,
+                    device.policies()?.user(0).provisioning_config_applied,
+                );
+                Ok(())
+            })()
+        }
         dp::GET_SYSTEM_UPDATE_POLICY => {
             dp::GetSystemUpdatePolicy::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
@@ -1485,6 +1599,19 @@ impl Device for DevicePolicy {
             .map(|ps| ps.app_id))
     }
 
+    fn update_role_holder(&self, uid: i32) -> Result<bool, Exception> {
+        let user = user_of(uid);
+        if user != 0 {
+            return Err(self.unimplemented("a device policy role holder on another user (#1521)"));
+        }
+        let holders = super::role_service::RoleManager::new(self.host.clone())
+            .holders_of("android.app.role.DEVICE_POLICY_MANAGEMENT")?;
+        match holders.first() {
+            Some(p) => Ok(self.app_id(p, user)? == Some(app_id(uid))),
+            None => Ok(false),
+        }
+    }
+
     fn target_sdk(&self, package: &str) -> Result<Option<i32>, Exception> {
         Ok(self
             .host
@@ -1721,7 +1848,8 @@ mod tests {
             policies.user(0),
             UserData {
                 setup_complete: false,
-                provisioning_state: STATE_USER_UNMANAGED
+                provisioning_state: STATE_USER_UNMANAGED,
+                provisioning_config_applied: false
             }
         );
         assert!(!policies.admins && !policies.policies);
@@ -1730,6 +1858,7 @@ mod tests {
             &[
                 ("setup-complete", Value::Bool(true)),
                 ("provisioning-state", Value::Int(3)),
+                ("device-provisioning-config-applied", Value::Bool(true)),
             ],
             vec![element(
                 "failed-password-attempts",
@@ -1753,14 +1882,16 @@ mod tests {
             policies.user(0),
             UserData {
                 setup_complete: true,
-                provisioning_state: 3
+                provisioning_state: 3,
+                provisioning_config_applied: true
             }
         );
         assert_eq!(
             policies.user(10),
             UserData {
                 setup_complete: true,
-                provisioning_state: STATE_USER_UNMANAGED
+                provisioning_state: STATE_USER_UNMANAGED,
+                provisioning_config_applied: false
             }
         );
         assert_eq!(policies.user(11), UserData::default());
@@ -1826,6 +1957,7 @@ mod tests {
     /// permissions by uid, user 0's settings and the flags on or off.
     struct Fake {
         usb_enabled: bool,
+        update_role: bool,
         content_protection: bool,
         keyguard_coexistence: bool,
         feature: bool,
@@ -1841,6 +1973,7 @@ mod tests {
         fn default() -> Self {
             Fake {
                 usb_enabled: true,
+                update_role: false,
                 content_protection: false,
                 keyguard_coexistence: true,
                 feature: true,
@@ -1883,6 +2016,10 @@ mod tests {
 
         fn app_id(&self, package: &str, _user: i32) -> Result<Option<i32>, Exception> {
             Ok((package == "com.example").then_some(APP))
+        }
+
+        fn update_role_holder(&self, _: i32) -> Result<bool, Exception> {
+            Ok(self.update_role)
         }
 
         fn target_sdk(&self, package: &str) -> Result<Option<i32>, Exception> {
@@ -2423,6 +2560,154 @@ mod tests {
         );
     }
 
+    fn pending(
+        device: &Fake,
+        uid: i32,
+        admin: Option<ComponentName>,
+        package: Option<String>,
+    ) -> Parcel {
+        call(device, uid, dp::GET_PENDING_SYSTEM_UPDATE, |p| {
+            dp::GetPendingSystemUpdate {
+                admin,
+                caller_package: package,
+            }
+            .write(p)
+        })
+    }
+
+    fn pending_allowed(reply: Parcel) -> bool {
+        reply.reader().read_exception().unwrap().is_ok()
+    }
+
+    /// DPMS android-16.0.0_r1: 2458–2491, 16769–16775, 23542–23685.
+    #[test]
+    fn pending_update_checks_identity_permissions_and_owners() {
+        let mut d = Fake::default();
+        let ask = |d: &Fake| pending(d, APP, None, Some("com.example".into()));
+        let denied = exception(&ask(&d));
+        assert_eq!(denied.code, aim_binder_host::parcel::EX_SECURITY);
+        assert_eq!(
+            denied.message,
+            format!(
+                "Caller does not have the required permissions for this user. One of the following permission required: [{NOTIFY_PENDING_SYSTEM_UPDATE}, {QUERY_SYSTEM_UPDATES}]"
+            )
+        );
+        d.feature = false;
+        for permission in [NOTIFY_PENDING_SYSTEM_UPDATE, QUERY_SYSTEM_UPDATES] {
+            d.permissions = vec![(APP, permission)];
+            assert!(pending_allowed(ask(&d)));
+            assert_eq!(
+                exception(&pending(&d, APP, None, Some("spoof".into()))).message,
+                format!("Caller with uid {APP} is not spoof")
+            );
+            assert_eq!(
+                exception(&pending(&d, APP, None, None)),
+                null("callerPackageName")
+            );
+        }
+        d.permissions.clear();
+        d.policies.device_owner = Some("com.example".into());
+        assert!(pending_allowed(ask(&d)));
+        d.policies.device_owner_type = 1;
+        assert_eq!(exception(&ask(&d)), denied);
+        d.policies.device_owner = None;
+        let admin = crate::package::preferred::unflatten("com.example/.Admin").unwrap();
+        d.policies.profile_owners.insert(0, admin.clone());
+        assert_eq!(exception(&ask(&d)), denied);
+        d.update_role = true;
+        assert!(pending_allowed(ask(&d)));
+        d.update_role = false;
+        d.policies.active_admins.insert(0, vec![admin.clone()]);
+        assert!(pending_allowed(ask(&d)));
+        assert!(pending_allowed(pending(&d, APP, Some(admin.clone()), None)));
+        assert_eq!(
+            exception(&pending(&d, OTHER_APP, Some(admin.clone()), None)).code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        let foreign = APP + 10 * PER_USER_RANGE as i32;
+        assert_eq!(
+            exception(&pending(&d, foreign, None, Some("com.example".into()))),
+            denied
+        );
+    }
+
+    /// OwnersData 447–465; SystemUpdateInfo 142–157, 166–168.
+    #[test]
+    fn pending_update_reads_owners_state_and_discards_stale_or_invalid_info() {
+        let dir = data("pending-update");
+        let path = dir.join("system").join(DEVICE_OWNER_XML);
+        let fingerprint = super::super::package_bootstrap::build_fingerprint(|_| None);
+        let mut d = Fake {
+            permissions: vec![(APP, QUERY_SYSTEM_UPDATES)],
+            ..Fake::default()
+        };
+        let check = |d: &Fake, expected: Option<(i64, i32)>| {
+            let r = pending(d, APP, None, Some("com.example".into()));
+            let mut r = r.reader();
+            assert!(r.read_exception().unwrap().is_ok());
+            assert_eq!(r.read_i32().unwrap(), i32::from(expected.is_some()));
+            if let Some((time, security)) = expected {
+                assert_eq!(r.read_i64().unwrap(), time);
+                assert_eq!(r.read_i32().unwrap(), security);
+            }
+            assert_eq!(r.remaining(), 0);
+        };
+        d.policies = Policies::load(&dir).unwrap();
+        check(&d, None);
+        let entry = |build: &str, time: &str| {
+            format!(
+                "<pending-ota-info original-build='{build}' received-time='{time}' security-patch-state='2'/>"
+            )
+        };
+        let write_xml =
+            |path: &Path, body: String| fs::write(path, format!("<root>{body}</root>")).unwrap();
+        for (build, time, expected) in [
+            (
+                fingerprint.as_str(),
+                "1700000000123",
+                Some((1_700_000_000_123, 2)),
+            ),
+            ("old-build", "1", None),
+            (fingerprint.as_str(), "invalid", None),
+            (fingerprint.as_str(), "-1", Some((-1, 2))),
+        ] {
+            write_xml(&path, entry(build, time));
+            d.policies = Policies::load(&dir).unwrap();
+            check(&d, expected);
+        }
+        write_xml(&path, format!("<unknown/>{}", entry(&fingerprint, "1")));
+        d.policies = Policies::load(&dir).unwrap();
+        check(&d, None);
+        write_xml(&suffixed(&path, ".bak"), entry(&fingerprint, "7"));
+        d.policies = Policies::load(&dir).unwrap();
+        check(&d, Some((7, 2)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn provisioning_config_read_checks_manage_users_and_persisted_state() {
+        let mut d = Fake::default();
+        let ask = |d: &Fake| {
+            call(d, APP, dp::IS_DEVICE_PROVISIONING_CONFIG_APPLIED, |p| {
+                dp::IsDeviceProvisioningConfigApplied {}.write(p)
+            })
+        };
+        assert_eq!(exception(&ask(&d)), not_authorized());
+        d.permissions.push((APP, MANAGE_USERS));
+        for applied in [false, true] {
+            d.policies
+                .users
+                .entry(0)
+                .or_default()
+                .provisioning_config_applied = applied;
+            assert_eq!(
+                dp::read_is_device_provisioning_config_applied_reply(&mut ask(&d).reader())
+                    .unwrap(),
+                Ok(applied)
+            );
+        }
+    }
+
     /// `getSystemUpdatePolicy`: none without a persisted one, which is not
     /// read yet.
     #[test]
@@ -2918,6 +3203,7 @@ mod tests {
             UserData {
                 setup_complete: true,
                 provisioning_state: 3,
+                provisioning_config_applied: false,
             },
         );
         let r = call(&device, APP, dp::IS_DEVICE_PROVISIONED, provisioned);
