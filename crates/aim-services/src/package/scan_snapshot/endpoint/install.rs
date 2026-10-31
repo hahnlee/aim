@@ -34,6 +34,14 @@ impl super::Endpoint {
     ) -> Result<(), String> {
         let mut computer = self.computer.lock().unwrap();
         let owner = computer.as_mut().ok_or("permission scope is retired")?;
+        if owner.capture.context().access.is_some() {
+            owner.capture = owner.capture.with_permission_delta(
+                owner.capture.scan().clone(),
+                access,
+                config,
+            )?;
+            return Ok(());
+        }
         let mut context = (**owner.capture.context()).clone();
         access.project_context(&mut context, owner.capture.state(), config);
         context.access = Some(access);

@@ -657,6 +657,13 @@ with no default-grant call; post-admission contention limits the warm conclusion
 Earlier independently evolved warm volumes measured
 6.956/7.781 s; both comparisons and the sampling limitation remain in the task
 report. The original image and vendor jar are unchanged (2026-10-31).
+Native permission definition changes now project requesting/defining packages,
+retained grant holders and their UID/shared-UID and factory aliases through the
+same delta, including install-candidate permission pinning (#2519). Registry-only
+dynamic changes preserve grant flags, as Android 16 does. Host delta/full parity
+checks cover add/replace/remove, instant eligibility and tree changes; native
+dynamic add/remove Binder APIs remain unsupported under #1508. No guest boot or
+warm-launch timing was rerun for this change (2026-10-31).
 
 The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
