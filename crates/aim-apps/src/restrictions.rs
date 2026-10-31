@@ -14,7 +14,7 @@ const DISABLED_STATES: [i32; 3] = [2, 3, 4];
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Package {
     pub installed: bool,
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     pub enabled_components: Vec<String>,
     pub disabled_components: Vec<String>,
 }
@@ -25,10 +25,15 @@ pub type Restrictions = HashMap<String, Package>;
 /// Read `path`; empty when it is missing or unreadable (every package
 /// installed and enabled, as PackageManager assumes then).
 pub fn read(path: &Path) -> Restrictions {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| parse(&b))
-        .unwrap_or_default()
+    // ResilientAtomicFile keeps the previous state in backup during a write.
+    [
+        path.with_file_name("package-restrictions-backup.xml"),
+        path.to_path_buf(),
+        path.with_file_name("package-restrictions.xml.reservecopy"),
+    ]
+    .iter()
+    .find_map(|p| std::fs::read(p).ok().and_then(|b| parse(&b)))
+    .unwrap_or_default()
 }
 
 /// Parse a document (binary or text XML) into package states.
@@ -48,7 +53,10 @@ fn parse(b: &[u8]) -> Option<Restrictions> {
         };
         let package = Package {
             installed: pkg.bool("inst").ok()?.unwrap_or(true),
-            enabled: !DISABLED_STATES.contains(&pkg.int("enabled").ok()?.unwrap_or(0)),
+            enabled: match pkg.int("enabled").ok()?.unwrap_or(0) {
+                0 => None,
+                n => Some(!DISABLED_STATES.contains(&n)),
+            },
             enabled_components: components("enabled-components"),
             disabled_components: components("disabled-components"),
         };
@@ -101,8 +109,8 @@ mod tests {
         let r = parse(&abx::write(&root).unwrap()).unwrap();
         assert!(!r["org.gone"].installed);
         assert_eq!(r["org.app"].disabled_components, ["org.app.Launcher"]);
-        assert!(r["org.app"].enabled && r["org.app"].installed);
-        assert!(!r["org.off"].enabled);
+        assert!(r["org.app"].enabled == Some(true) && r["org.app"].installed);
+        assert_eq!(r["org.off"].enabled, Some(false));
         assert_eq!(parse(b"<?xml"), None);
     }
 }

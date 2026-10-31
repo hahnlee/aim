@@ -31,6 +31,8 @@ pub struct App {
     /// else its first (in the manifest's order).
     pub primary: bool,
     pub version: i64,
+    pub application_enabled: bool,
+    pub enabled: bool,
     /// The launcher activity (or alias), its full class name.
     pub activity: String,
     /// The launcher activity's icon, else the application's.
@@ -98,6 +100,36 @@ pub fn read(
     framework: Option<&Apk>,
     state: Option<&restrictions::Package>,
 ) -> Result<Vec<App>> {
+    Ok(select(&candidates(apk, framework)?, state))
+}
+
+pub(crate) fn select(apps: &[App], state: Option<&restrictions::Package>) -> Vec<App> {
+    let mut apps: Vec<_> = apps
+        .iter()
+        .filter(|a| {
+            state.is_none_or(|s| s.installed)
+                && state
+                    .and_then(|s| s.enabled)
+                    .unwrap_or(a.application_enabled)
+                && match state {
+                    Some(s) if s.enabled_components.contains(&a.activity) => true,
+                    Some(s) if s.disabled_components.contains(&a.activity) => false,
+                    _ => a.enabled,
+                }
+        })
+        .cloned()
+        .collect();
+    let primary = apps
+        .iter()
+        .position(|a| a.label == a.app_label)
+        .unwrap_or(0);
+    for (i, a) in apps.iter_mut().enumerate() {
+        a.primary = i == primary;
+    }
+    apps
+}
+
+pub(crate) fn candidates(apk: &Apk, framework: Option<&Apk>) -> Result<Vec<App>> {
     let manifest = apk.manifest()?;
     let Some(Value::String(package)) = manifest.named("package") else {
         return Ok(Vec::new());
@@ -114,17 +146,6 @@ pub fn read(
         framework,
         theme,
         night: false,
-    };
-    if !enabled(&res, application) {
-        return Ok(Vec::new());
-    }
-    let on = |c: &Element| {
-        let name = class_name(package, c);
-        match state {
-            Some(s) if s.disabled_components.contains(&name) => false,
-            Some(s) if s.enabled_components.contains(&name) => true,
-            _ => enabled(&res, c),
-        }
     };
     let components: Vec<&Element> = application
         .children
@@ -151,7 +172,7 @@ pub fn read(
         _ => 0,
     };
     let mut apps = Vec::new();
-    for activity in components.iter().filter(|c| on(c) && launcher(c)) {
+    for activity in components.iter().filter(|c| launcher(c)) {
         let chain = [Some(*activity), target(activity)];
         let label = chain
             .iter()
@@ -173,6 +194,7 @@ pub fn read(
                 _ => None,
             })
             .unwrap_or(theme);
+        let component_enabled = enabled(&res, activity);
         let activity = class_name(package, activity);
         // A class listed twice (an activity and an alias of one name) is
         // one entry.
@@ -185,16 +207,13 @@ pub fn read(
             app_label: app_label.clone(),
             primary: false,
             version,
+            application_enabled: enabled(&res, application),
+            enabled: component_enabled,
             activity,
             icon,
             theme,
             activity_theme,
         });
-    }
-    // The one named as the application, else the first.
-    let primary = apps.iter().position(|a| a.label == app_label).unwrap_or(0);
-    if let Some(a) = apps.get_mut(primary) {
-        a.primary = true;
     }
     Ok(apps)
 }
@@ -235,6 +254,8 @@ pub fn system(framework: &Apk) -> Result<Option<App>> {
         primary: true,
         label,
         version,
+        application_enabled: true,
+        enabled: true,
         activity: String::new(),
         icon: application.attr(ATTR_ICON).cloned(),
         theme,
