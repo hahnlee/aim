@@ -1992,11 +1992,7 @@ impl Capture {
             .version()
             .checked_add(1)
             .ok_or("package version exhausted")?;
-        let store = if access
-            .as_ref()
-            .zip(self.context.access.as_ref())
-            .is_some_and(|(after, before)| Arc::ptr_eq(&after.system, &before.system))
-        {
+        let store = if access.as_ref().zip(self.context.access.as_ref()).is_some() {
             super::Store::prepare_unchanged_metadata_store(&self.scan)
         } else {
             super::Store::new_replica_after(
@@ -2017,10 +2013,13 @@ impl Capture {
         bridge: &crate::package::bootstrap::Bridge,
         access: Option<Arc<crate::package::permissions::AccessView>>,
     ) -> Result<Arc<Self>, String> {
-        if let (Some(after), Some(before)) = (&access, &self.context.access)
-            && Arc::ptr_eq(&after.system, &before.system)
-        {
-            return self.with_permission_delta(scan, after.clone());
+        if let (Some(after), Some(_)) = (&access, &self.context.access) {
+            let config = &self
+                .domains
+                .as_ref()
+                .ok_or("permission projection config absent")?
+                .config;
+            return self.with_permission_delta(scan, after.clone(), config);
         }
         let mut context = (*self.context).clone();
         context.scan_version = scan.version();
@@ -2453,21 +2452,48 @@ impl Capture {
 }
 
 impl Capture {
-    /// Runtime grants do not change the package scan or its Java replica.
-    fn with_permission_delta(
+    /// PermissionService/AppIdPermissionPolicy (android-16.0.0_r1): changed
+    /// definitions evaluate requesting app IDs, not every package's permissions.
+    fn permission_delta_packages(
         &self,
-        scan: Arc<super::Snapshot>,
-        access: Arc<crate::package::permissions::AccessView>,
-    ) -> Result<Arc<Self>, String> {
+        access: &crate::package::permissions::AccessView,
+    ) -> Result<BTreeSet<(String, bool)>, String> {
         let before = self
             .context
             .access
             .as_ref()
             .ok_or("permission access base absent")?;
-        if !Arc::ptr_eq(&before.system, &access.system) {
-            return Err("permission definitions changed during flag mutation".into());
-        }
-        let ids: BTreeSet<_> = before
+        let definitions = |system: &crate::package::permissions::AccessSystem| {
+            system
+                .permissions
+                .iter()
+                .map(|p| ((false, p.name.clone()), p.clone()))
+                .chain(
+                    system
+                        .permission_trees
+                        .iter()
+                        .map(|p| ((true, p.name.clone()), p.clone())),
+                )
+                .collect::<BTreeMap<_, _>>()
+        };
+        let (old, new) = if Arc::ptr_eq(&before.system, &access.system) {
+            (BTreeMap::new(), BTreeMap::new())
+        } else {
+            (definitions(&before.system), definitions(&access.system))
+        };
+        let changed: BTreeSet<_> = old
+            .keys()
+            .chain(new.keys())
+            .filter(|key| old.get(*key) != new.get(*key))
+            .collect();
+        let names: BTreeSet<_> = changed.iter().map(|(_, name)| name.as_str()).collect();
+        let definers: BTreeSet<_> = changed
+            .iter()
+            .flat_map(|key| [old.get(*key), new.get(*key)])
+            .flatten()
+            .map(|p| p.package.as_str())
+            .collect();
+        let mut ids: BTreeSet<_> = before
             .user0
             .app_id_permissions
             .iter()
@@ -2488,24 +2514,69 @@ impl Capture {
             })
             .map(|(id, _)| *id)
             .collect();
-        let mut context = (*self.context).clone();
-        let mut delta = context.clone();
-        delta.packages.retain(|(name, factory), inputs| {
+        let permission_id = |name: &String, factory: bool, inputs: &PackageInputs| {
+            let ps = if factory {
+                self.state.disabled_system_packages.get(name)
+            } else {
+                self.state.packages.get(name)
+            };
+            ps.and_then(|p| p.shared_user_app_id)
+                .unwrap_or(inputs.app_id)
+        };
+        for ((name, factory), inputs) in &self.context.packages {
+            if changed.is_empty() {
+                break;
+            }
             let ps = if *factory {
                 self.state.disabled_system_packages.get(name)
             } else {
                 self.state.packages.get(name)
             };
-            ids.contains(
-                &ps.and_then(|p| p.shared_user_app_id)
-                    .unwrap_or(inputs.app_id),
-            )
-        });
-        let config = &self
-            .domains
-            .as_ref()
-            .ok_or("permission projection config absent")?
-            .config;
+            let id = permission_id(name, *factory, inputs);
+            let requests_or_defines = ps.and_then(|p| p.pkg.as_ref()).is_some_and(|p| {
+                p.requested_permissions
+                    .iter()
+                    .any(|p| names.contains(p.as_str()))
+                    || p.permissions
+                        .iter()
+                        .any(|p| names.contains(p.component.name.as_str()))
+            });
+            // Include retained grants too: instant eligibility can change even
+            // without a flags delta or a current parsed request.
+            let holds = before
+                .user0
+                .app_id_permissions
+                .iter()
+                .chain(&access.user0.app_id_permissions)
+                .any(|(i, flags)| {
+                    *i == id && flags.iter().any(|(p, _)| names.contains(p.as_str()))
+                });
+            if definers.contains(name.as_str()) || requests_or_defines || holds {
+                ids.insert(id);
+            }
+        }
+        Ok(self
+            .context
+            .packages
+            .iter()
+            .filter(|((name, factory), inputs)| {
+                ids.contains(&permission_id(name, *factory, inputs))
+            })
+            .map(|(key, _)| key.clone())
+            .collect())
+    }
+
+    /// Definitions and grants leave the package scan and Java replica unchanged.
+    pub(super) fn with_permission_delta(
+        &self,
+        scan: Arc<super::Snapshot>,
+        access: Arc<crate::package::permissions::AccessView>,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<Arc<Self>, String> {
+        let affected = self.permission_delta_packages(&access)?;
+        let mut context = (*self.context).clone();
+        let mut delta = context.clone();
+        delta.packages.retain(|key, _| affected.contains(key));
         access.project_context(&mut delta, &self.state, config);
         let mut state = (*self.state).clone();
         for ((name, factory), inputs) in delta.packages {
@@ -2515,6 +2586,7 @@ impl Capture {
                 &mut state.packages
             };
             let ps = target.get_mut(&name).ok_or("permission package absent")?;
+            ps.installed_permissions = inputs.installed_permissions.clone();
             for (user, values) in &inputs.users {
                 let user = ps.users.get_mut(user).ok_or("permission user absent")?;
                 user.gids = values.gids.clone();
@@ -2551,5 +2623,325 @@ impl Capture {
             frozen: self.frozen.clone(),
             resolver: Default::default(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod permission_delta_tests {
+    use super::*;
+    use crate::package::{
+        permissions::{AccessSystem, AccessUser, AccessView, Permission},
+        scan::{CapturedUsers, SigningScan},
+        scan_snapshot::Store,
+    };
+    const NAME: &str = "p.tree.dynamic";
+
+    fn base(source: &Capture, shared: bool) -> Arc<Capture> {
+        let mut settings = source.scan.owner().settings.clone();
+        if shared {
+            settings
+                .shared_users
+                .push(crate::package::settings::SharedUser {
+                    name: "shared".into(),
+                    app_id: 10100,
+                    flags: 0,
+                    signatures: None,
+                });
+            for ps in &mut settings.packages {
+                ps.app_id = 10100;
+                ps.shared_user = true;
+            }
+        }
+        let mut factory = settings
+            .packages
+            .iter()
+            .find(|p| p.name == "p")
+            .unwrap()
+            .clone();
+        factory.code_path = "/system/app/p".into();
+        settings.disabled_system_packages.push(factory);
+        let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        for name in ["p", "q"] {
+            let mut code = (**source.state.packages[name].pkg.as_ref().unwrap()).clone();
+            if shared {
+                code.uid = 10100;
+                code.shared_user_id = Some("shared".into());
+            }
+            code.requested_permissions = if name == "p" {
+                vec![NAME.into()]
+            } else {
+                vec![]
+            };
+            owner.load_test_code(code);
+        }
+        let mut context = (*source.context).clone();
+        let mut factory = context.packages[&("p".into(), false)].clone();
+        factory.path = "/system/app/p".into();
+        context.packages.insert(("p".into(), true), factory);
+        if shared {
+            for inputs in context.packages.values_mut() {
+                inputs.app_id = 10100;
+            }
+        }
+        let keys: Vec<_> = context.packages.keys().cloned().collect();
+        owner
+            .capture_user_states(
+                keys.iter()
+                    .cloned()
+                    .map(|key| {
+                        (
+                            key,
+                            CapturedUsers {
+                                states: [(
+                                    0,
+                                    crate::package::restrictions::UserState {
+                                        instant_app: true,
+                                        ..Default::default()
+                                    },
+                                )]
+                                .into(),
+                                active_aliases: Default::default(),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let groups = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|n| (n.clone(), Default::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(
+                &[0],
+                keys.iter()
+                    .cloned()
+                    .map(|k| (k, Default::default()))
+                    .collect(),
+                groups,
+            )
+            .unwrap();
+        owner
+            .capture_install_permissions_fixed(keys.iter().cloned().map(|k| (k, false)).collect())
+            .unwrap();
+        owner
+            .rebuild_shared_processes_from_native_members()
+            .unwrap();
+        owner
+            .assign_seinfo_at_boot(
+                &crate::package::owner::seinfo::Policy::parse(&[]).unwrap(),
+                &mut |_: &crate::package::pkg::AndroidPackage| Ok(36),
+            )
+            .unwrap();
+        owner
+            .complete_library_dependencies(&|_, _| {
+                Ok(crate::package::libraries::Policy {
+                    enforce_native_dependencies: false,
+                    sdk_library_independence: false,
+                })
+            })
+            .unwrap();
+        owner
+            .capture_replica_runtime(
+                keys.iter()
+                    .map(|(name, factory)| {
+                        let mut value = source
+                            .scan
+                            .owner()
+                            .replica_runtime(name, false)
+                            .unwrap()
+                            .unwrap()
+                            .clone();
+                        if !factory {
+                            let labels = owner.seinfo_state(name).unwrap().unwrap();
+                            value.seinfo = labels.base.clone();
+                            value.override_seinfo = labels.override_label.clone();
+                        }
+                        ((name.clone(), *factory), value)
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let config = crate::package::system_config::SystemConfig::default();
+        let mut domains = crate::package::domain_verification::owner::Owner::new(
+            Default::default(),
+            Default::default(),
+        );
+        let mut policies = BTreeMap::new();
+        for ps in &settings.packages {
+            domains
+                .add(
+                    crate::package::domain_verification::owner::Input {
+                        id: ps.domain_set_id.as_deref().unwrap(),
+                        name: &ps.name,
+                        code: Some(owner.loaded_packages()[&ps.name].runtime_package()),
+                        signatures: &[],
+                        system: false,
+                        restrict_domains: true,
+                        pre_verified: None,
+                    },
+                    &config,
+                )
+                .unwrap();
+            policies.insert(ps.name.clone(), true);
+        }
+        context = context
+            .attach_boot_domains(
+                &owner,
+                crate::package::domain_verification::owner::Boot {
+                    owner: domains,
+                    changes: vec![],
+                },
+                &config,
+                &policies,
+            )
+            .unwrap();
+        let access = Arc::new(AccessView {
+            system: Arc::new(AccessSystem::default()),
+            user0: Arc::new(AccessUser {
+                app_id_permissions: vec![(10100, vec![(NAME.into(), 1 << 4)])],
+                ..Default::default()
+            }),
+        });
+        let store = Store::new_replica(owner, source.scan.usage().clone()).unwrap();
+        context.scan_version = store.capture().version();
+        let initial = Capture::new(store.capture(), context).unwrap();
+        let mut context = (*initial.context).clone();
+        access.project_context(&mut context, &initial.state, &config);
+        context.access = Some(access);
+        Capture::new(initial.scan.clone(), context).unwrap()
+    }
+
+    fn compare(
+        base: &Arc<Capture>,
+        bridge: &crate::package::bootstrap::Bridge,
+        access: Arc<AccessView>,
+        expected: &[(&str, bool)],
+    ) -> Arc<Capture> {
+        assert_eq!(
+            base.permission_delta_packages(&access).unwrap(),
+            expected.iter().map(|(n, f)| (n.to_string(), *f)).collect()
+        );
+        let old_resolution = base.resolution().unwrap();
+        let delta = base
+            .prepare_permission_refresh(bridge, Some(access.clone()))
+            .unwrap()
+            .capture;
+        let mut context = (*base.context).clone();
+        context.scan_version = delta.scan.version();
+        access.project_context(
+            &mut context,
+            &base.state,
+            &base.domains.as_ref().unwrap().config,
+        );
+        context.access = Some(access);
+        let full = Capture::new(delta.scan.clone(), context).unwrap();
+        assert_eq!(delta.state, full.state);
+        assert_eq!(delta.scan.owner(), base.scan.owner());
+        assert_eq!(
+            delta.scan.metadata_revision(),
+            base.scan.metadata_revision()
+        );
+        assert_eq!(delta.scan.version(), base.scan.version() + 1);
+        assert!(!Arc::ptr_eq(&old_resolution, &delta.resolution().unwrap()));
+        assert!(Arc::ptr_eq(&old_resolution, &base.resolution().unwrap()));
+        delta
+    }
+
+    #[test]
+    fn dynamic_definition_add_replace_remove_matches_full_and_scopes_aliases() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let source = host.package_capture().unwrap();
+            let bridge = host.package_system().unwrap().package_bootstrap().unwrap();
+            for shared in [false, true] {
+                let mut current = base(&source, shared);
+                let original = current.clone();
+                let mut affected = vec![("p", false), ("p", true)];
+                if shared {
+                    affected.push(("q", false));
+                }
+                for protection in [Some(1), Some(1 | 0x1000), None] {
+                    let access = Arc::new(AccessView {
+                        system: Arc::new(AccessSystem {
+                            permissions: protection
+                                .map(|level| Permission {
+                                    name: NAME.into(),
+                                    package: "p".into(),
+                                    protection_level: level,
+                                    dynamic: Some((7, Some("Dynamic".into()))),
+                                })
+                                .into_iter()
+                                .collect(),
+                            ..Default::default()
+                        }),
+                        user0: current.context.access.as_ref().unwrap().user0.clone(),
+                    });
+                    current = compare(&current, &bridge, access, &affected);
+                    assert_eq!(
+                        current.state.packages["p"].installed_permissions.is_empty(),
+                        protection.is_none()
+                    );
+                    assert_eq!(
+                        current.state.packages["p"].users[&0]
+                            .granted_permissions
+                            .contains(&NAME.into()),
+                        protection.is_some_and(|p| p & 0x1000 != 0)
+                    );
+                    if !shared {
+                        assert_eq!(current.state.packages["q"], original.state.packages["q"]);
+                    }
+                }
+                assert!(
+                    original.state.packages["p"]
+                        .installed_permissions
+                        .is_empty()
+                );
+                // A new Arc containing identical definitions projects no package.
+                let before = current.context.access.as_ref().unwrap();
+                let same = Arc::new(AccessView {
+                    system: Arc::new((*before.system).clone()),
+                    user0: before.user0.clone(),
+                });
+                current = compare(&current, &bridge, same, &[]);
+                let before = current.context.access.as_ref().unwrap();
+                let mut system = (*before.system).clone();
+                system.permission_trees.push(Permission {
+                    name: "p.tree".into(),
+                    package: "p".into(),
+                    protection_level: 0,
+                    dynamic: None,
+                });
+                let tree = Arc::new(AccessView {
+                    system: Arc::new(system),
+                    user0: before.user0.clone(),
+                });
+                current = compare(&current, &bridge, tree, &affected);
+                // Manifest ownership transfers update both definers; include a
+                // simultaneous flags change just as a package admission does.
+                for package in ["p", "q"] {
+                    let before = current.context.access.as_ref().unwrap();
+                    let mut system = (*before.system).clone();
+                    system.permissions = vec![Permission {
+                        name: NAME.into(),
+                        package: package.into(),
+                        protection_level: 1 | 0x1000,
+                        dynamic: None,
+                    }];
+                    let mut user = (*before.user0).clone();
+                    user.set_permission_flags(10100, NAME, if package == "p" { 0 } else { 1 << 4 });
+                    let access = Arc::new(AccessView {
+                        system: Arc::new(system),
+                        user0: Arc::new(user),
+                    });
+                    let mut expected = affected.clone();
+                    if !shared && package == "q" {
+                        expected.push(("q", false));
+                    }
+                    current = compare(&current, &bridge, access, &expected);
+                }
+            }
+        });
     }
 }
