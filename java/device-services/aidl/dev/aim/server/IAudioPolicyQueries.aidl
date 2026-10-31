@@ -6,4 +6,5 @@ import android.media.AudioAttributes;
 interface IAudioPolicyQueries {
     byte[] getAudioProductStrategies();
     byte[] getDevicesForAttributes(in AudioAttributes attributes, int callingUid);
+    int getDeviceMaskForStream(int streamType);
 }

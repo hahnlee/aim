@@ -6,7 +6,11 @@ import android.os.Binder;
 import android.os.Parcel;
 
 interface IAudioPolicyQueries {
-    abstract class Stub { public abstract byte[] getAudioProductStrategies(); }
+    abstract class Stub {
+        public abstract byte[] getAudioProductStrategies();
+        public abstract byte[] getDevicesForAttributes(android.media.AudioAttributes a, int uid);
+        public abstract int getDeviceMaskForStream(int stream);
+    }
 }
 interface ISyncAdapterQueries {
     abstract class Stub { public abstract byte[] getSyncAdapterTypes(int uid, int user) throws android.os.RemoteException; }
@@ -19,13 +23,14 @@ public class ReadQueriesTest {
         catch (SecurityException expected) {}
     }
     public static void main(String[] args) throws android.os.RemoteException {
-        var audio = new AudioPolicyQueries();
+        var audio = new AudioPolicyQueries(new Context());
         var sync = new SyncAdapterQueries(new Context(), (name, uid, user) -> {
             check(uid == 10100 && user == 10);
             return name.equals("hidden");
         });
         Binder.uid = 10100;
         denied(() -> audio.getAudioProductStrategies());
+        denied(() -> audio.getDeviceMaskForStream(3));
         try { sync.getSyncAdapterTypes(10100, 10); throw new AssertionError("accepted app uid"); }
         catch (SecurityException expected) {}
         check(SyncAdaptersCache.constructed == 0 && Parcel.recycled == 0);
@@ -48,6 +53,17 @@ public class ReadQueriesTest {
         SyncAdaptersCache.fail = true;
         try { sync.getSyncAdapterTypes(10100, 10); throw new AssertionError(); }
         catch (IllegalStateException expected) { check(expected.getMessage().equals("cache failure")); }
+        for (int stream : new int[] {-1, 12}) {
+            try { audio.getDeviceMaskForStream(stream); throw new AssertionError(); }
+            catch (IllegalArgumentException e) { check(e.getMessage().equals("Bad stream type " + stream)); }
+        }
+        for (int stream : new int[] {0, 3, 6, 11}) {
+            check(audio.getDeviceMaskForStream(stream) == 0x402);
+            check(AudioProductStrategy.stream == stream && Binder.cleared == 0);
+        }
+        android.media.AudioSystem.fail = true;
+        try { audio.getDeviceMaskForStream(3); throw new AssertionError(); }
+        catch (IllegalStateException expected) {}
         check(Binder.cleared == 0 && Parcel.recycled == 5);
     }
 }

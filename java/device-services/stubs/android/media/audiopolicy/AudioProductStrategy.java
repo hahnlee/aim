@@ -10,4 +10,6 @@ public class AudioProductStrategy implements android.os.Parcelable {
     public static java.util.List<AudioProductStrategy> getAudioProductStrategies() { throw new RuntimeException("stub"); }
     public int describeContents() { throw new RuntimeException("stub"); }
     public void writeToParcel(android.os.Parcel out, int flags) { throw new RuntimeException("stub"); }
+    public static android.media.AudioAttributes getAudioAttributesForStrategyWithLegacyStreamType(int stream) { throw new RuntimeException("stub"); }
+
 }
