@@ -45,6 +45,7 @@ const INVALID_VSYNC_ID: i64 = -1;
 /// `gui::METADATA_*`.
 pub const METADATA_OWNER_UID: i32 = 1;
 pub const METADATA_WINDOW_TYPE: i32 = 2;
+pub const METADATA_ACCESSIBILITY_ID: i32 = 5;
 pub const METADATA_OWNER_PID: i32 = 6;
 
 /// A layer SurfaceFlinger made (`CreateSurfaceResult`), alive while held.
@@ -76,6 +77,7 @@ pub struct Change {
     pub matrix: Option<[f32; 4]>,
     pub alpha: Option<f32>,
     pub z: Option<i32>,
+    pub metadata: Option<(i32, i32)>,
     /// Left, top, right, bottom, in the layer's space.
     pub crop: Option<[f32; 4]>,
     /// `remove`: reparented to none, so SurfaceFlinger destroys it and
@@ -282,6 +284,9 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
     if change.alpha.is_some() {
         what |= 0x8;
     }
+    if change.metadata.is_some() {
+        what |= 0x8_00000000; // eMetadataChanged, android-16.0.0_r1 LayerState.h
+    }
     p.write_binder(Some(handle));
     p.write_i32(id);
     p.write_i64(what as i64);
@@ -320,8 +325,13 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
     p.write_f32(0.0); // corner radius
     p.write_f32(0.0); // client drawn corner radius
     p.write_i32(0); // background blur radius
-    p.write_i32(1); // `LayerMetadata`: empty
-    p.write_i32(0);
+    p.write_i32(1); // `LayerMetadata`
+    p.write_i32(i32::from(change.metadata.is_some()));
+    if let Some((key, value)) = change.metadata {
+        p.write_i32(key);
+        p.write_i32(4);
+        p.write_i32(value);
+    }
     (0..4).for_each(|_| p.write_f32(0.0)); // background color
     p.write_i32(0); // its dataspace
     p.write_bool(false); // not color space agnostic
@@ -452,6 +462,39 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_metadata_changes_only_the_metadata_and_what() {
+        // LayerState.cpp::write and LayerMetadata.cpp::writeToParcel, Android 16 r1.
+        let mut empty = Parcel::new();
+        write_layer_state(&mut empty, Binder::Handle(9), 7, &Change::default());
+        for id in [42, -1] {
+            let mut p = Parcel::new();
+            write_layer_state(
+                &mut p,
+                Binder::Handle(9),
+                7,
+                &Change {
+                    metadata: Some((METADATA_ACCESSIBILITY_ID, id)),
+                    ..Default::default()
+                },
+            );
+            let mut bytes = p.data().to_vec();
+            assert_eq!(
+                u64::from_le_bytes(bytes[32..40].try_into().unwrap()),
+                0x8_00000000
+            );
+            let entry: Vec<_> = [1i32, 1, 5, 4, id]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect();
+            let offset = bytes.windows(entry.len()).position(|w| w == entry).unwrap();
+            bytes.drain(offset + 8..offset + 20);
+            bytes[offset + 4..offset + 8].copy_from_slice(&0i32.to_le_bytes());
+            bytes[32..40].copy_from_slice(&0u64.to_le_bytes());
+            assert_eq!(bytes, empty.data());
+        }
+    }
+
+    #[test]
     fn a_transaction_places_layers() {
         let change = Change {
             position: Some((100.0, 50.0)),
@@ -460,6 +503,7 @@ mod tests {
             remove: false,
             matrix: Some([0.5, 0., 0.5, 0.]),
             alpha: Some(0.25),
+            ..Default::default()
         };
         let p = transaction(5, Binder::Local(1), &[(Binder::Handle(9), 7, change)]);
         let data = p.data();

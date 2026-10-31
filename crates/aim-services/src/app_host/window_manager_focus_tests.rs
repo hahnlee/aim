@@ -242,6 +242,7 @@ impl Fixture {
                 insets_seq: FIRST_SEQ,
                 requested_visible_types: 0,
                 window_id: None,
+                accessibility_id: -1,
                 focus_callbacks: Arc::default(),
             },
         );

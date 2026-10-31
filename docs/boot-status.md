@@ -443,7 +443,21 @@ odrefresh's cache metadata (no dex2oat): app-open admission at about 8.5 s,
 against 16.1 s before; warm second boots reach it at about 5.9 s (three boots
 each, 2026-10-30).
 
-The app host now starts the original AccessibilityManagerService with native overlay-token and window callback ownership (#2529), ordered initial-user initialization and an ordinary-app binding barrier. The final disposable image reaches boot_completed in 14.118 s; 14 targeted host/JVM tests and 12 unmodified-framework instrumentation checks pass (default/DONT_USE connections, reconnect IDs, permission rejection, state/focus/timeouts/service reads), with empty final crash/ANR/tombstone captures. The single Safety Center CTS run on the preceding candidate completed with 356 pass / 141 fail / 31 assumption skips: all failures first stop at shell permission delegation (#2511); CTS was not repeated after the package-visibility correction verified by the final probe. Both successful boot intervals and the final probe had no observed foreign build activity; later foreign builds overlapped the retained sessions. Window content introspection, interaction-window metadata and magnification remain explicit unsupported paths; this verifies the lifecycle slice, not full accessibility conformance.
+The app host starts the original AccessibilityManagerService with native overlay
+and window callback ownership, ordered initial-user initialization and an
+ordinary-app binding barrier (#2529). Interaction connections now use native
+window display/owner-user/focus lookups and SurfaceFlinger accessibility-ID
+metadata, including registration before surface creation and removal (#2541).
+Twelve native window/surface checks pass. A fresh disposable app-host boot
+reached boot_completed in 16.462 s (2026-10-31); the single Safety Center CTS
+run completed with 356 pass / 141 fail / 31 assumption skips. All failures first
+stop at aim-system's adopted MANAGE_SAFETY_CENTER permission check (#2540).
+PermissionController crashes fell from the preceding CTS run's five to zero;
+crash buffers stayed empty after CTS and opening Settings and Clock, with no
+ANRs or tombstones. Foreign builds overlapped this boot and CTS, so the timing
+is not an isolated benchmark. Window content introspection, magnification and
+other unserved local operations remain explicit #2529 failures; full
+accessibility conformance is not established.
 
 The app host image ([app-host.md](app-host.md)) boots without
 system_server. In the original measurement, `--only` selected 33 services and

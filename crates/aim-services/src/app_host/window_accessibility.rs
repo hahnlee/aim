@@ -234,6 +234,81 @@ impl Service for Host {
             let host = &self.0;
             let state = &host.windows.accessibility;
             match call.code {
+                api::GET_WINDOW_OWNER_USER_ID | api::GET_DISPLAY_ID_FOR_WINDOW => {
+                    let token = if call.code == api::GET_WINDOW_OWNER_USER_ID {
+                        api::GetWindowOwnerUserId::read(&mut call.data)
+                            .map_err(malformed)?
+                            .token
+                    } else {
+                        api::GetDisplayIdForWindow::read(&mut call.data)
+                            .map_err(malformed)?
+                            .token
+                    };
+                    let windows = host.windows.windows.lock().unwrap();
+                    let window = match token {
+                        Some(Binder::Handle(h)) => windows.get(&h),
+                        _ => None,
+                    };
+                    // WMS.LocalService: USER_NULL / INVALID_DISPLAY for absent windows.
+                    if call.code == api::GET_WINDOW_OWNER_USER_ID {
+                        api::write_get_window_owner_user_id_reply(
+                            &mut p,
+                            window
+                                .map_or(-10000, |w| (w.uid / super::super::PER_USER_RANGE) as i32),
+                        );
+                    } else {
+                        api::write_get_display_id_for_window_reply(
+                            &mut p,
+                            window.map_or(-1, |_| 0),
+                        );
+                    }
+                    return Ok(p);
+                }
+                api::GET_FOCUSED_WINDOW_TOKEN_FROM_WINDOW_STATES => {
+                    api::GetFocusedWindowTokenFromWindowStates::read(&mut call.data)
+                        .map_err(malformed)?;
+                    let focused = host
+                        .windows
+                        .focus
+                        .lock()
+                        .unwrap()
+                        .current
+                        .as_ref()
+                        .map(|(id, _)| *id);
+                    let windows = host.windows.windows.lock().unwrap();
+                    let token = windows
+                        .values()
+                        .find(|w| Some(w.id) == focused)
+                        .map(|w| w._client.binder());
+                    api::write_get_focused_window_token_from_window_states_reply(&mut p, token);
+                    return Ok(p);
+                }
+                api::SET_ACCESSIBILITY_ID_TO_SURFACE_METADATA => {
+                    let a = api::SetAccessibilityIdToSurfaceMetadata::read(&mut call.data)
+                        .map_err(malformed)?;
+                    let mut windows = host.windows.windows.lock().unwrap();
+                    if let Some(w) = a.token.and_then(|t| match t {
+                        Binder::Handle(h) => windows.get_mut(&h),
+                        _ => None,
+                    }) {
+                        if let Some(layer) = &w.container {
+                            host.composer()?
+                                .apply(&[(
+                                    layer,
+                                    surface::Change {
+                                        metadata: Some((
+                                            surface::METADATA_ACCESSIBILITY_ID,
+                                            a.accessibility_window_id,
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )])
+                                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                        }
+                        // ViewRootImpl registers before the first relayout creates the surface.
+                        w.accessibility_id = a.accessibility_window_id;
+                    }
+                }
                 api::ADD_OVERLAY_TOKEN => {
                     let a = api::AddOverlayToken::read(&mut call.data).map_err(malformed)?;
                     host.accessibility_display(a.display_id)?;
@@ -350,6 +425,159 @@ mod tests {
             .reader()
             .read_exception()
             .unwrap()
+    }
+    #[test]
+    fn interaction_window_lookups_and_metadata_lifecycle() {
+        // WMS.LocalService at android-16.0.0_r1; AccessibilityWindowManagerTest's
+        // add/remove connection tests require display lookup and surface metadata.
+        let f = super::super::focus_tests::Fixture::new();
+        let service = Host(f.host.clone());
+        let query = |code, token| {
+            let mut p = Parcel::new();
+            if code == api::GET_WINDOW_OWNER_USER_ID {
+                api::GetWindowOwnerUserId { token }.write(&mut p);
+            } else {
+                api::GetDisplayIdForWindow { token }.write(&mut p);
+            }
+            let reply = service
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 98201,
+                    sender_euid: 1000,
+                    data: p.reader(),
+                })
+                .unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            r.read_i32().unwrap()
+        };
+        let token = Some(Binder::Handle(1));
+        for absent in [None, token, Some(Binder::Local(1))] {
+            assert_eq!(query(api::GET_WINDOW_OWNER_USER_ID, absent), -10000);
+            assert_eq!(query(api::GET_DISPLAY_ID_FOR_WINDOW, absent), -1);
+        }
+        let focus = || {
+            let mut p = Parcel::new();
+            api::GetFocusedWindowTokenFromWindowStates {}.write(&mut p);
+            let reply = service
+                .transact(&mut Call {
+                    code: api::GET_FOCUSED_WINDOW_TOKEN_FROM_WINDOW_STATES,
+                    flags: 0,
+                    sender_pid: 98201,
+                    sender_euid: 1000,
+                    data: p.reader(),
+                })
+                .unwrap();
+            api::read_get_focused_window_token_from_window_states_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(focus(), None);
+        f.window(1, None, false);
+        {
+            let mut windows = f.host.windows.windows.lock().unwrap();
+            let w = windows.get_mut(&1).unwrap();
+            w.uid = 210123;
+            f.host.windows.focus.lock().unwrap().current = Some((w.id, w.focus_callbacks.clone()));
+        }
+        assert_eq!(query(api::GET_WINDOW_OWNER_USER_ID, token), 2);
+        assert_eq!(query(api::GET_DISPLAY_ID_FOR_WINDOW, token), 0);
+        assert_eq!(focus(), Some(f.observer.binder()));
+        let metadata = |token, accessibility_window_id, uid| {
+            let mut p = Parcel::new();
+            api::SetAccessibilityIdToSurfaceMetadata {
+                token,
+                accessibility_window_id,
+            }
+            .write(&mut p);
+            invoke(
+                &service,
+                api::SET_ACCESSIBILITY_ID_TO_SURFACE_METADATA,
+                &p,
+                uid,
+            )
+        };
+        assert!(metadata(token, 42, 10123).is_err());
+        for id in [42, -1, 43] {
+            metadata(token, id, 1000).unwrap();
+            assert_eq!(
+                f.host.windows.windows.lock().unwrap()[&1].accessibility_id,
+                id
+            );
+        }
+        struct Surface(
+            std::sync::mpsc::Sender<Vec<u8>>,
+            Arc<std::sync::atomic::AtomicBool>,
+        );
+        impl Service for Surface {
+            fn descriptor(&self) -> &str {
+                "android.ui.ISurfaceComposer"
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.code, 8);
+                call.data.enforce_interface(self.descriptor()).unwrap();
+                let start = call.data.position();
+                call.data.skip(call.data.remaining()).unwrap();
+                self.0.send(call.data.since(start).0.to_vec()).unwrap();
+                if self.1.load(std::sync::atomic::Ordering::Relaxed) {
+                    return reply(Err(Exception::illegal_argument("surface rejected")));
+                }
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                Ok(p)
+            }
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let Binder::Local(ptr) = f.remote.add_service(Arc::new(Surface(send, fail.clone()))) else {
+            unreachable!()
+        };
+        let mut p = Parcel::new();
+        p.write_i64(ptr as i64);
+        let received = f.host.process.transact(0, 1, &p, false).unwrap();
+        let remote = received
+            .retain_remote_binder(received.reader().read_binder().unwrap().unwrap())
+            .unwrap();
+        assert!(
+            f.host
+                .composer
+                .set(surface::Composer::for_test(&f.host.process, remote.handle))
+                .is_ok()
+        );
+        f.host
+            .windows
+            .windows
+            .lock()
+            .unwrap()
+            .get_mut(&1)
+            .unwrap()
+            .container = Some(surface::Layer::animation_test_layer(
+            f.host.process.strong(f.observer.handle),
+            1,
+        ));
+        for id in [44, -1] {
+            metadata(token, id, 1000).unwrap();
+            let bytes = receive.recv_timeout(Duration::from_secs(2)).unwrap();
+            let entry: Vec<_> = [1i32, 1, surface::METADATA_ACCESSIBILITY_ID, 4, id]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect();
+            assert!(bytes.windows(entry.len()).any(|w| w == entry));
+        }
+        fail.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(metadata(token, 45, 1000).is_err());
+        assert_eq!(
+            f.host.windows.windows.lock().unwrap()[&1].accessibility_id,
+            -1
+        );
+        // A dead/removed window is absent, and late unregister is harmless in WMS.
+        f.host.remove_window(1);
+        assert_eq!(focus(), None);
+        assert_eq!(query(api::GET_WINDOW_OWNER_USER_ID, token), -10000);
+        assert_eq!(query(api::GET_DISPLAY_ID_FOR_WINDOW, token), -1);
+        metadata(token, -1, 1000).unwrap();
+        assert!(f.host.windows.windows.lock().unwrap().is_empty());
     }
     #[test]
     fn native_tokens_window_snapshots_unsubscribe_and_binder_death() {

@@ -83,6 +83,7 @@ struct Window {
     requested_visible_types: i32,
     /// Its `IWindowId`, made at the first `getWindowId`.
     window_id: Option<Binder>,
+    accessibility_id: i32,
     focus_callbacks: Arc<FocusCallbacks>,
 }
 
@@ -771,6 +772,7 @@ impl Session {
                 insets_seq: FIRST_SEQ,
                 requested_visible_types: 0,
                 window_id: None,
+                accessibility_id: -1,
                 focus_callbacks: Arc::default(),
             },
         );
@@ -847,7 +849,7 @@ impl Session {
                         &w.name,
                         surface::CONTAINER,
                         parent,
-                        &[],
+                        &[(surface::METADATA_ACCESSIBILITY_ID, w.accessibility_id)],
                     )
                 };
                 let container = match task {
@@ -1918,6 +1920,7 @@ mod tests {
                 insets_seq: FIRST_SEQ,
                 requested_visible_types: 0,
                 window_id: None,
+                accessibility_id: -1,
                 focus_callbacks: Arc::default(),
             },
         );
@@ -2054,6 +2057,7 @@ impl AppHost {
                 insets_seq: FIRST_SEQ,
                 requested_visible_types: 0,
                 window_id: None,
+                accessibility_id: -1,
                 focus_callbacks: Arc::default(),
             },
         );
