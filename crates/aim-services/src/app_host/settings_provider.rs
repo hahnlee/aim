@@ -2219,6 +2219,13 @@ impl SettingsProvider {
     /// the running users (the app host's one) of a global setting.
     fn notify(&self, table: Table, user: i32, name: &str) -> Result<(), Exception> {
         self.generations()?.increment(table, user, name);
+        if table == Table::Secure
+            && user == 0
+            && name == "location_mode"
+            && let Some(detector) = self.host.time_zone_detector.get()
+        {
+            detector.location_changed()?;
+        }
         self.notify_uri(table, user, name);
         self.data_changed();
         Ok(())
