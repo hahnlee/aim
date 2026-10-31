@@ -103,6 +103,9 @@ pub struct ActivityRecord {
     pub start_seq: i64,
     pub started: Instant,
     pub resumed: bool,
+    pub show_when_locked: bool,
+    pub inherit_show_when_locked: bool,
+    pub turn_screen_on: bool,
     /// Whether it reported itself fully drawn (`reportFullyDrawn`).
     pub fully_drawn: bool,
     pub requested_orientation: i32,
@@ -1084,7 +1087,79 @@ impl AppHost {
 /// `IActivityClientController`: the activity's reports and questions.
 pub struct ActivityClientController(pub Arc<AppHost>);
 
+struct KeyguardMessage(Option<String>);
+impl aim_service_aidl::ReadParcelable for KeyguardMessage {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
+        crate::clip::char_sequence(r).map(Self)
+    }
+}
+
 impl ActivityClientController {
+    fn set_keyguard_flag(&self, token: Option<Binder>, f: impl FnOnce(&mut ActivityRecord)) {
+        if let Some(Binder::Local(t)) = token
+            && self.0.activities.stack.lock().unwrap().get(t).is_some()
+        {
+            self.0.activities.with(token, f);
+        }
+    }
+
+    /// Android 16 ActivityClientController -> KeyguardController -> PhoneWindowManager.
+    fn dismiss_keyguard(
+        &self,
+        call: &Call<'_>,
+        a: acc::DismissKeyguard<KeyguardMessage>,
+    ) -> Result<(), Exception> {
+        let token = a.token;
+        let callback = a.callback;
+        let message = a.message.is_some_and(|m| m.0.is_some());
+        let uid = call.sender_euid;
+        const PERMISSION: &str = "android.permission.SHOW_KEYGUARD_MESSAGE";
+        if message && self.0.check_permission(Some(PERMISSION), uid as i32)? != 0 {
+            return Err(Exception::security(format!(
+                "Permission Denial: dismissKeyguard from pid={}, uid={uid} requires {PERMISSION}",
+                call.sender_pid
+            )));
+        }
+        let _system = aim_binder_host::local::clear_calling_identity();
+        let visible = self.0.activities.with(token, |_| ()).is_some() && {
+            let stack = self.0.activities.stack.lock().unwrap();
+            match token {
+                Some(Binder::Local(t)) => stack.get(t).is_some_and(|a| stack.shown(a)),
+                _ => false,
+            }
+        };
+        if !visible && callback.is_none() {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "null IKeyguardDismissCallback",
+            ));
+        }
+        // No Android keyguard is showing, consistent with window.isKeyguardLocked
+        // and trust.isDeviceLocked. The Mac owns its lock (#1887); power reports
+        // an interactive display, so the top activity has no screen to wake.
+        // Both an invalid/invisible activity and a non-showing keyguard report error.
+        if let Some(callback) = callback {
+            use aim_service_aidl::com_android_internal_policy_ikeyguarddismisscallback as cb;
+            let mut p = Parcel::new();
+            cb::OnDismissError {}.write(&mut p);
+            let sent = match callback {
+                Binder::Handle(h) => self.0.process.transact(h, cb::ON_DISMISS_ERROR, &p, true),
+                Binder::Local(t) => self
+                    .0
+                    .process
+                    .local_service(t)
+                    .ok_or(BAD_VALUE)
+                    .and_then(|s| s.transact(cb::ON_DISMISS_ERROR, &p, true)),
+            };
+            if let Err(status) = sent {
+                eprintln!("app host: dismissKeyguard callback: status {status}");
+            }
+        }
+        Ok(())
+    }
+
     /// The token of a call whose first argument is one.
     fn token(call: &mut Call<'_>) -> Result<Option<Binder>, i32> {
         call.data
@@ -1212,11 +1287,33 @@ impl Service for ActivityClientController {
                 self.0.top_resumed_lost();
                 empty()
             }
-            // `setShowWhenLocked`, `setInheritShowWhenLocked` (one-way) and
-            // `setTurnScreenOn` matter to a locked or sleeping display; the
-            // app host's is never locked and always on (`power`), so
-            // nothing follows, as on the original's awake, unlocked one.
-            acc::SET_SHOW_WHEN_LOCKED | acc::SET_INHERIT_SHOW_WHEN_LOCKED => Ok(Parcel::new()),
+            acc::SET_SHOW_WHEN_LOCKED => {
+                let a = acc::SetShowWhenLocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.set_keyguard_flag(a.token, |r| r.show_when_locked = a.show_when_locked);
+                Ok(Parcel::new())
+            }
+            acc::SET_INHERIT_SHOW_WHEN_LOCKED => {
+                let a =
+                    acc::SetInheritShowWhenLocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.set_keyguard_flag(a.token, |r| {
+                    r.inherit_show_when_locked = a.set_inherit_shown_when_locked
+                });
+                Ok(Parcel::new())
+            }
+            acc::SET_TURN_SCREEN_ON => {
+                let a = acc::SetTurnScreenOn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.set_keyguard_flag(a.token, |r| r.turn_screen_on = a.turn_screen_on);
+                empty()
+            }
+            acc::DISMISS_KEYGUARD => {
+                let a = acc::DismissKeyguard::<KeyguardMessage>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(self.dismiss_keyguard(call, a).map(|()| {
+                    let mut p = Parcel::new();
+                    acc::write_dismiss_keyguard_reply(&mut p);
+                    p
+                }))
+            }
             // `setRecentsScreenshotEnabled` (one-way) chooses between a
             // screenshot and the app's theme for its task's snapshot in
             // recents (`shouldUseAppThemeSnapshot`); the app host takes no
@@ -1275,7 +1372,6 @@ impl Service for ActivityClientController {
                 acc::write_enable_task_locale_override_reply(&mut p);
                 Ok(p)
             }
-            acc::SET_TURN_SCREEN_ON => empty(),
             acc::GET_TASK_FOR_ACTIVITY => {
                 let token = Self::token(call)?;
                 let only_root = call.data.read_bool().map_err(|_| BAD_VALUE)?;
@@ -1682,3 +1778,7 @@ mod launched_from_tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "keyguard_tests.rs"]
+mod keyguard_tests;
