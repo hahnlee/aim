@@ -128,6 +128,19 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    /// Publish live membership under the same lock as geometry, focus and
+    /// dispatch, including removals whose channel closure has not arrived.
+    pub fn sync_windows(&self, live: &[i32]) {
+        let mut windows = self.windows.lock().unwrap();
+        let previous = windows.stack.last().map(|t| t.index);
+        windows.stack.retain(|t| live.contains(&t.index));
+        windows.interactions.retain(|i| live.contains(i));
+        if windows.gesture.is_some_and(|i| !live.contains(&i)) {
+            windows.gesture = None;
+        }
+        self.refocus(&mut windows, previous);
+    }
+
     pub fn new() -> Arc<Dispatcher> {
         let keyboard = match open_keyboard() {
             Ok(found) => found,
@@ -541,7 +554,13 @@ fn ioctl_string(fd: libc::c_int, request: u64) -> String {
 fn property(name: &std::ffi::CStr) -> String {
     let mut value = [0u8; 92];
     // SAFETY: `PROP_VALUE_MAX` bytes for the value.
-    let n = unsafe { libc::__system_property_get(name.as_ptr(), value.as_mut_ptr().cast()) };
+    unsafe extern "C" {
+        fn __system_property_get(
+            name: *const libc::c_char,
+            value: *mut libc::c_char,
+        ) -> libc::c_int;
+    }
+    let n = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr().cast()) };
     String::from_utf8_lossy(&value[..n.max(0) as usize]).into_owned()
 }
 

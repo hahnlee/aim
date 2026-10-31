@@ -452,17 +452,22 @@ window display/owner-user/focus lookups and SurfaceFlinger accessibility-ID
 metadata, including registration before surface creation and removal (#2541).
 Display-space window transformations now come from native frames, with an
 identity matrix for absent windows and the inactive magnifier's default spec
-(#2546, #2529). Three native accessibility-window checks pass. One fresh full
+(#2546, #2529). Native `syncInputTransactions` now waits for activity transitions
+when requested, serializes with eager placement/input updates, and commits live
+channel membership under the agent dispatch lock (#2549). Both original
+five-second waits remain; input timeout is silent and animation timeout logs.
+Fifteen focused native window/animation checks pass. One fresh full
 Safety Center CTS run remains 475 pass / 1 fail / 52 assumption skips, with
 all 475 prior passes preserved (2026-11-01). The sole failure now reaches
-`IWindowManager.syncInputTransactions` during UiAutomation scrolling; that
-input/SurfaceFlinger reporting and animation synchronization is still unserved.
+`IInputManager.injectInputEventToTarget` (`input#12`) during UiAutomation scrolling;
+that input-injection API remains unserved. The input-sync call and its native
+dispatcher acknowledgment both complete before that failure.
 The 21 DeviceConfig-toggle skips follow the original fixed
 `safety_center_enabled_no_device_config` flag on Android 16; the 31 tests for unsupported devices skip because
 `config_enableSafetyCenter=true`. Neither policy changed.
-The final crash buffer, ANR and tombstone directories are empty. Foreign builds
-overlapped CTS after quiet boot admission, so timing is not an isolated
-benchmark. Magnification and other unserved local operations remain explicit
+The final crash buffer, ANR and tombstone directories are empty. Both fresh CTS
+boots followed twenty quiet seconds, with no observed foreign guest/build overlap.
+Magnification and other unserved local operations remain explicit
 #2529 failures; full accessibility conformance is not established.
 
 The app host image ([app-host.md](app-host.md)) boots without

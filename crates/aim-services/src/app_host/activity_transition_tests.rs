@@ -249,6 +249,15 @@ fn vsync_playback_replacement_and_window_removal_preserve_new_collection() {
                     assert!((f[6] - alpha).abs() < 0.001);
                 }
             }
+            assert!(!host.wait_for_window_animations(Duration::ZERO));
+            let (finished, waiting) = mpsc::channel();
+            let animating = host.clone();
+            let waiter = std::thread::spawn(move || {
+                finished
+                    .send(animating.wait_for_window_animations(Duration::from_secs(5)))
+                    .unwrap();
+            });
+            assert!(waiting.recv_timeout(Duration::from_millis(30)).is_err());
             host.collect_transition(7, Transition::new(token, 3, true));
             let reset = receive(&frames);
             assert!(reset.iter().all(|(_, f)| *f == IDENTITY));
@@ -269,6 +278,8 @@ fn vsync_playback_replacement_and_window_removal_preserve_new_collection() {
             );
             host.remove_animation_test_window(1);
             receive(&frames);
+            assert!(receive(&waiting));
+            waiter.join().unwrap();
             assert_empty(host);
             assert!(
                 !host

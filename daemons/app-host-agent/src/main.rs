@@ -114,6 +114,8 @@ const RESTORECON: u32 = 15;
 const RELEASE_COMPRESSED_BLOCKS: u32 = 16;
 /// `IAppHostAgent.writeEvent(int tag, byte[] payload)`.
 const WRITE_EVENT: u32 = 17;
+/// `IAppHostAgent.syncInputWindows(int[] liveChannels)`: input commit barrier.
+const SYNC_INPUT_WINDOWS: u32 = 18;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -361,6 +363,12 @@ fn on_transact(
     reply: &mut BorrowedParcel<'_>,
 ) -> Result<(), StatusCode> {
     match code {
+        SYNC_INPUT_WINDOWS => {
+            let dispatcher = agent.dispatcher().ok_or(StatusCode::INVALID_OPERATION)?;
+            let live: Vec<i32> = data.read()?;
+            dispatcher.sync_windows(&live);
+            reply.write(&Status::ok())
+        }
         WRITE_EVENT => {
             if !matches!(binder::ThreadState::get_calling_uid(), 0 | 1000) {
                 reply.write(&Status::new_exception_str(

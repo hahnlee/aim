@@ -258,6 +258,8 @@ const OPEN_INPUT_CHANNEL: u32 = 1;
 const AGENT_CHANNEL_FD: usize = 8;
 const FOCUS_INPUT_CHANNEL: u32 = 2;
 const SET_INPUT_CHANNEL_FRAME: u32 = 3;
+/// `IAppHostAgent.syncInputWindows(int[] liveChannels)`: dispatch-lock acknowledgment.
+const SYNC_INPUT_WINDOWS: u32 = 18;
 const KILL_PROCESS: u32 = 4;
 
 /// `Process.FIRST_APPLICATION_UID`, `UserHandle.PER_USER_RANGE`.
