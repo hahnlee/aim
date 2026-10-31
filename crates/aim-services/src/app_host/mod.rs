@@ -189,6 +189,7 @@ pub mod task_info;
 pub mod tasks;
 pub mod telephony_registry;
 pub mod text_services;
+pub mod time_zone_detector;
 pub mod trust_service;
 pub mod uid_observers;
 pub mod uri_grants;
@@ -638,6 +639,7 @@ pub struct AppHost {
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
+    time_zone_detector: OnceLock<Arc<time_zone_detector::TimeZoneDetector>>,
     battery_service: OnceLock<Arc<battery_service::BatteryService>>,
     battery_stats: OnceLock<Arc<battery_stats::BatteryStats>>,
     /// `mStrictModeCallbacks`.
@@ -762,6 +764,7 @@ impl AppHost {
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
             alarm_service: OnceLock::new(),
+            time_zone_detector: OnceLock::new(),
             battery_service: OnceLock::new(),
             battery_stats: OnceLock::new(),
             strict_mode_callbacks: Default::default(),
@@ -1029,6 +1032,14 @@ impl AppHost {
                     .clone(),
             ),
             ("sensorservice", Arc::new(sensor_service::SensorService)),
+            (
+                "time_zone_detector",
+                self.time_zone_detector
+                    .get_or_init(|| {
+                        Arc::new(time_zone_detector::TimeZoneDetector::new(self.clone()))
+                    })
+                    .clone(),
+            ),
             (
                 "virtualdevice",
                 Arc::new(virtual_device::VirtualDeviceManager(self.clone())),

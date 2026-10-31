@@ -16,6 +16,8 @@ TEST_SOURCE_FILES=(
 
 # project|path|sha256
 SOURCE_FILES=(
+  "platform/frameworks/base|core/java/android/app/time/ITimeZoneDetectorListener.aidl|d7ebe47768db29bbe4693d73b01c9eec5a200f7e2b5749bc69573860ba79bca5"
+  "platform/frameworks/base|core/java/android/app/timezonedetector/ITimeZoneDetectorService.aidl|f137138bec579434ea2cf34ccdb65274ee20c8f038620de1fef7515cff471637"
   "platform/frameworks/base|core/java/android/companion/virtual/IVirtualDeviceManager.aidl|e786d33da9995d27a0d28ccb86e9fbd072edd5a52518d4aae6e78230573dfbd8"
   "platform/frameworks/base|core/java/android/content/pm/IBackgroundInstallControlService.aidl|d0f1e7892919cd816b4fc459d995667d373432540007af97c0c60355c9441e9f"
   "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmManager.aidl|78d732d32eb4f06bc5c6fe24bdaea98888eed17cc73605060827063e6b39a15a"
@@ -221,6 +223,8 @@ SOURCE_FILES=(
 # Every method's code is generated and checked; only these get Rust for
 # their arguments and replies.
 INTERFACES=(
+  "android.app.time.ITimeZoneDetectorListener|system/framework/framework.jar|*"
+  "android.app.timezonedetector.ITimeZoneDetectorService|system/framework/framework.jar|getCapabilitiesAndConfig,addListener,removeListener,updateConfiguration,getTimeZoneState,confirmTimeZone,setManualTimeZone,suggestManualTimeZone"
   "android.companion.virtual.IVirtualDeviceManager|system/framework/framework.jar|getVirtualDevices,getVirtualDevice,getDeviceIdForDisplayId,getDevicePolicy,isValidVirtualDeviceId,getAudioPlaybackSessionId,getAudioRecordingSessionId,isVirtualDeviceOwnedMirrorDisplay,getDisplayNameForPersistentDeviceId,getAllPersistentDeviceIds"
   "android.content.pm.IStagedApexObserver|system/framework/framework.jar|*"
   "android.content.IClipboard|system/framework/framework.jar|*"

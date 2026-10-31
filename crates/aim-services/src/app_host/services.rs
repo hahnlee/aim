@@ -550,6 +550,8 @@ pub struct Services {
     /// The handler (`mAm.mHandler`) the services' notifications are posted
     /// and cancelled on, in order and outside their lock.
     handler: Mutex<Option<mpsc::Sender<Job>>>,
+    #[cfg(test)]
+    handler_worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     process_starts: Mutex<Option<mpsc::Sender<Job>>>,
 }
 
@@ -2850,15 +2852,30 @@ impl AppHost {
         let sender = handler.get_or_insert_with(|| {
             let (sender, jobs) = mpsc::channel::<Job>();
             let me = self.me.clone();
-            std::thread::spawn(move || {
+            let _worker = std::thread::spawn(move || {
                 for job in jobs {
                     let Some(host) = me.upgrade() else { return };
                     job(&host);
                 }
             });
+            #[cfg(test)]
+            self.services
+                .handler_worker
+                .lock()
+                .unwrap()
+                .replace(_worker);
             sender
         });
         let _ = sender.send(Box::new(job));
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish_jobs_for_test(&self) {
+        self.services.handler.lock().unwrap().take();
+        let worker = self.services.handler_worker.lock().unwrap().take();
+        if let Some(worker) = worker {
+            worker.join().unwrap();
+        }
     }
 
     /// Whether an aconfig flag of the image is on.

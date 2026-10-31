@@ -307,7 +307,12 @@ reads and guards persistent-ID reads through the companion-association owner;
 persisted associations retain its explicit #1790 error. Creation and other
 unserved calls retain named UnsupportedOperation errors. Both focused host tests
 and four AIDL integration tests pass. No guest boot, Settings check or CTS was
-run; `time_zone_detector` and `print` remain unserved (2026-10-31).
+run (2026-10-31).
+The native `time_zone_detector` (#2490) serves Android 16 AIDL using the Mac's
+passive automatic-source slot and the alarm owner's zone/confidence. Host tests
+cover forbidden user configuration, distinct grants, confidence writes and location
+callbacks with duplicate/unregister/death/already-dead cleanup. No guest boot,
+Settings check or CTS was run; `print` remains unserved (2026-10-31).
 
 Cold app-host reads now serve `window.isKeyguardSecure` through the existing
 lock credential owner, display-content window contexts through the window-context
