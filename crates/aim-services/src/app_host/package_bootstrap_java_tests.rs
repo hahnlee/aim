@@ -79,6 +79,14 @@ impl Service for Java {
                 assert_eq!((a.user_id, a.install_flags), (0, 0x00400000));
                 bridge::write_on_existing_package_installed_reply(&mut p, &Some(vec![3, -1, 99]));
             }
+            bridge::SET_PREFERRED_ROLE_HOLDER => {
+                let a = bridge::SetPreferredRoleHolder::read(&mut call.data)?;
+                assert_eq!(a.role.as_deref(), Some("test.role"));
+                assert_eq!(a.package_name.as_deref(), Some("a.b"));
+                assert_eq!(a.user_id, 0);
+                assert!(a.broadcast_on_success);
+                bridge::write_set_preferred_role_holder_reply(&mut p);
+            }
             bridge::SEND_PREFERRED_ACTIVITY_CHANGED => {
                 let a = bridge::SendPreferredActivityChanged::read(&mut call.data)?;
                 assert_eq!(a.user_id, -1);
@@ -157,6 +165,14 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
         setup.write_binder(Some(diagnostic.binder()));
         setup.write_binder(Some(shutdown.binder()));
         owner.transact(u32::MAX, &setup, false).unwrap();
+        let mut role = Parcel::new();
+        bridge::SetPreferredRoleHolder {
+            role: Some("test.role".into()),
+            package_name: Some("a.b".into()),
+            user_id: 0,
+            broadcast_on_success: true,
+        }
+        .write(&mut role);
         let mut broadcast = Parcel::new();
         bridge::SendPreferredActivityChanged { user_id: -1 }.write(&mut broadcast);
         let mut wait = Parcel::new();
@@ -193,6 +209,7 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
         let mut shutdown = Parcel::new();
         bridge::GetPackageShutdownBridge {}.write(&mut shutdown);
         let requests = [
+            (bridge::SET_PREFERRED_ROLE_HOLDER, role),
             (bridge::GET_PACKAGE_SHUTDOWN_BRIDGE, shutdown),
             (bridge::LOG_PACKAGE_PROCESS_START, logging),
             (bridge::GET_PACKAGE_DIAGNOSTIC_INPUTS, diagnostics),
@@ -312,6 +329,9 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
                         20
                     );
                 }
+                bridge::SET_PREFERRED_ROLE_HOLDER => {
+                    r.read_exception().unwrap().unwrap();
+                }
                 bridge::RESET_PREFERRED_RUNTIME_PERMISSIONS => {
                     bridge::read_reset_preferred_runtime_permissions_reply(&mut r)
                         .unwrap()
@@ -355,7 +375,7 @@ fn retained_helpers_preserve_arguments_replies_and_owner_failures() {
             );
             mode.store(0, Ordering::SeqCst);
         }
-        assert_eq!(calls.lock().unwrap().len(), 27);
+        assert_eq!(calls.lock().unwrap().len(), 30);
         let mut wait = Parcel::new();
         bridge::WaitPackageBackgroundHandler {
             timeout_millis: i64::MAX,

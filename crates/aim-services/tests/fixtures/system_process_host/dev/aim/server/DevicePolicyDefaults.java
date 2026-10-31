@@ -1,2 +1,2 @@
 package dev.aim.server;
-final class DevicePolicyDefaults {}
+final class DevicePolicyDefaults { DevicePolicyDefaults(android.content.Context context) {} }

@@ -2,6 +2,8 @@ package dev.aim.server;
 import android.os.IBinder;
 interface ISystemProcess {
     IBinder getInternalServiceRepository();
+    IBinder getPackageInternalHost();
+    void attachRoleService(IBinder service);
     void attachDomainVerification(IBinder frontend);
     void attachSystemProcess(IBinder thread, IForegroundServicePolicy foreground, SafeLabels labels, BatteryHealthStats battery);
     void attachNetworkActivityBridge(IBinder bridge);
@@ -29,6 +31,12 @@ interface ISystemProcess {
         public static ISystemProcess asInterface(IBinder binder) {
             return new ISystemProcess() {
                 public IBinder getInternalServiceRepository() { throw new AssertionError(); }
+                public IBinder getPackageInternalHost() { throw new AssertionError(); }
+                public void attachRoleService(IBinder service) {
+                    if (service != android.os.ServiceManager.getService("role") || service == null)
+                        throw new AssertionError("wrong role owner");
+                    SystemProcessHostTest.events.add("attachRole");
+                }
                 public void attachDomainVerification(IBinder frontend) {
                     if (frontend == null) throw new AssertionError("missing domain front end");
                     SystemProcessHostTest.events.add("attachDomain");

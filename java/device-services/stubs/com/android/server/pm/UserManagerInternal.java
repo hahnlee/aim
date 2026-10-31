@@ -17,6 +17,7 @@ public abstract class UserManagerInternal {
     public abstract void removeUserLifecycleListener(UserLifecycleListener listener);
     public abstract void addUserVisibilityListener(UserVisibilityListener listener);
     public abstract int[] getUserIds();
+    public abstract java.util.List<android.content.pm.UserInfo> getUsers(boolean excludeDying);
     public abstract java.util.List<android.content.pm.UserInfo> getUsers(boolean excludePartial, boolean excludeDying, boolean excludePreCreated);
     public abstract android.content.pm.UserInfo[] getUserInfos();
     public abstract android.content.pm.UserInfo getUserInfo(int userId);

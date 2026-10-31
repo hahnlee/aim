@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.UserHandle;
 
 public abstract class Context {
+    public static final String ROLE_SERVICE = "role";
     public static final String ACCESSIBILITY_SERVICE = "accessibility";
     public Context getApplicationContext() { throw new RuntimeException("stub"); }
     public abstract void startActivityAsUser(Intent intent, UserHandle user);

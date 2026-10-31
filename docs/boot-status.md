@@ -176,7 +176,7 @@ permission and AppOps checks, with shell/root admission and finish/death cleanup
 invalidate aim-system's private permission-cache nonce through the retained
 PackageManager Java owner (#2540); Context cache misses already reach the native
 delegate through activity's checkPermissionForDevice. Host Binder/cache-model
-regressions only; no guest/CTS/app run (2026-10-31).
+regressions and live Safety Center validation are recorded below (2026-10-31).
 SDK sandbox instrumentation still explicitly fails with #2511.
 
 Launcher package/UID reads on both ActivityClientController and ActivityManager
@@ -315,10 +315,8 @@ Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHO
 `aimctl open` checks user readiness before opening a window shim, so an open during app-host startup returns the booting error before showing its splash (#1875; host regression, no guest boot rerun).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun). Pending-update reads now check Android 16 permissions/owners and return matching persisted OwnersData info (null when absent or stale); the provisioning-config read checks MANAGE_USERS and reads DevicePolicyData (#1521; host tests, no guest boot rerun, 2026-10-31).
-The role owner serves `getActiveUserForRoleAsUser` from persisted active-user
-assignments, with original Java role-definition checks and native caller checks
-(#1657). The system process loads the image's Permission service jar for those
-definitions; it does not start the role controller. `device_policy` serves
+The image's original RoleService now owns role selection, grants, persistence and listeners (#2540, #1657), with live native local reads, legacy-browser persistence, user/account qualification, preferred-role forwarding and permission-checked UID termination. Safety Center CTS: 468 pass / 8 fail / 52 assumption skips; all adopted MANAGE_SAFETY_CENTER reset denials are gone, with 5 callback timeouts, 2 PendingIntent-type errors and 1 #2529 accessibility error remaining; legacy fallback migration logs CancellationException (#1657, 2026-10-31).
+`device_policy` serves
 `isUsbDataSignalingEnabled` after package-identity validation, using the original
 Java policy readers over the retained engine XML, including a resolved disabled
 global policy (#1521). Host tests and pinned-image Java linkage cover these

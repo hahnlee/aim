@@ -138,7 +138,7 @@ public final class SystemProcessHost extends RuntimeInit {
                     context, new Handler(Looper.getMainLooper()), host));
             host.attachActivityAnimations(new ActivityAnimations(context));
             host.attachWifiBridge(new WifiBridge(new Handler(Looper.getMainLooper())));
-            host.attachDevicePolicyDefaults(new DevicePolicyDefaults());
+            host.attachDevicePolicyDefaults(new DevicePolicyDefaults(context));
             ServiceManager.addService("aim.role_queries", new RoleQueries(context));
             host.attachSettingsValues(new SettingsValues());
             host.attachProviderQueries(new ProviderQueries(context));
@@ -173,6 +173,12 @@ public final class SystemProcessHost extends RuntimeInit {
             ActivityStats.publish(host);
             TaskManagerLocal.publish(host);
             AccessibilityWindows.publish(host);
+            com.android.server.LocalManagerRegistry.addManager(
+                    com.android.server.role.RoleServicePlatformHelper.class,
+                    new com.android.server.policy.role.RoleServicePlatformHelperImpl(context));
+            SystemService role = new com.android.role.RoleService(context);
+            role.onStart();
+            host.attachRoleService(ServiceManager.getService(Context.ROLE_SERVICE));
             SystemService accessibility = new com.android.server.accessibility.AccessibilityManagerService$Lifecycle(context);
             accessibility.onStart();
             SystemService pinner = new PinnerService(context);
@@ -190,7 +196,7 @@ public final class SystemProcessHost extends RuntimeInit {
             startService("dev.aim.server.nearby.ConnectivityDumpInitializer", nearbyLoader, context);
             startService("dev.aim.server.nearby.NetworkStatsInitializer", nearbyLoader, context);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
-            List<SystemService> services = new ArrayList<>(List.of(pinner, nearby, accessibility));
+            List<SystemService> services = new ArrayList<>(List.of(pinner, nearby, accessibility, role));
             if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_PRINTING)) {
                 SystemService print = new PrintManagerService(context);
                 print.onStart();
