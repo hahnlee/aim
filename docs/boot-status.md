@@ -402,17 +402,26 @@ frame, so `vendor.power-default` stays too. audioserver (with its HAL)
 starts beside them: it takes wake locks of `system_suspend` and registers
 listeners with the app host's `activity` and `sensor_privacy`, and aborts unless the app host's
 `audio` gives it `getNativeInterface`; the app host then initializes the
-stream volumes in it. Native package readiness now separates the complete initial
-scan publication (including roles and reconciled permissions), runtime-owner
-construction, and deferred app-data reconciliation (#2405, continuing #2399).
-AppOps/permission metadata reads and scan-only package queries wait only for the
-first stage. Runtime-owner calls and aim-system's pre-attach ApplicationInfo
-query retain the construction result barrier (#2392); storage startup waits for
+stream volumes in it. Native package readiness separates restored UID ownership,
+the complete initial scan publication (including roles and reconciled permissions),
+runtime-owner construction, and deferred app-data reconciliation (#2405, #2399).
+SystemConfig grants for native UIDs without a package/shared/OEM/factory owner
+slot are available after Settings restores the UID inventory; root/system and
+isolated component-permission decisions need no package state. Before scan
+publication AppOps reads immutable image flags. Package-owned permission reads
+and scan-only package queries still wait for the complete initial scan. Runtime-owner
+calls and aim-system's pre-attach ApplicationInfo query retain the construction result barrier (#2392); storage startup waits for
 reconciliation and application forks still wait for default grants. The
 WebView relro creator's isolated uid is recorded before its zygote start, as
 `newProcessRecordLocked` does, so the child no longer attaches before the app
 host knows it; registering every pending start before the zygote start is
-#2416. AudioPolicy's load time fell from 3.3–3.8 s to 2.6–2.8 s (2026-10-29).
+#2416. Three warm-data baseline boots show a median 1,012 ms AudioPolicy ctor,
+with 920 ms in `activity.registerUidObserver` waiting for the initial scan.
+Three complete warm-data after boots reduce those medians to 79 ms and 2.30 ms;
+125 targeted permission/AppOps/readiness tests pass (2026-10-31).
+Observed boot-completion medians are 5.360 s before and 7.335 s after; Clock
+first-present medians are 974 ms and 1,023 ms. Concurrent host builds limit those
+comparisons; no overall boot or Clock-first-open improvement is established.
 Package boot now shares immutable image inputs across scanning, initial projection
 and construction (#2421): three matched warm second boots reduce median raw scan
 from 2.028 to 1.214 s; median `boot_completed` is 6.216 s

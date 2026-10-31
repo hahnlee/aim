@@ -2283,8 +2283,16 @@ struct Host<'a>(&'a AppHost);
 
 impl System for Host<'_> {
     fn flag(&self, name: &str) -> Result<bool, Exception> {
-        let (state, _) = self.0.packages()?;
-        Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
+        if self.0.package_boot.scan.get().is_some() {
+            let (state, _) = self.0.packages()?;
+            return Ok(state.system.flags.iter().any(|(n, on)| n == name && *on));
+        }
+        let platform = self
+            .0
+            .image_inputs()?
+            .platform()
+            .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))?;
+        Ok(platform.flags.get(name).copied().unwrap_or(false))
     }
 
     fn property(&self, name: &str) -> Option<String> {

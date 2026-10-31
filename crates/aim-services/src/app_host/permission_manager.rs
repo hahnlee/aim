@@ -26,6 +26,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 mod boot;
+mod boot_uids;
 mod existing;
 mod install;
 mod migration;
@@ -2172,6 +2173,23 @@ impl PermissionManager {
     /// `Context.checkPermission(permission, INVALID_PID, uid)` in the
     /// system server, of the default device.
     pub(super) fn holds(&self, uid: i32, permission: &str) -> Result<bool, Exception> {
+        if matches!(apps_filter::app_id(uid), ROOT_UID | SYSTEM_UID) {
+            return Ok(true);
+        }
+        if apps_filter::is_isolated(uid) {
+            return Ok(false);
+        }
+        if (0..crate::package::owner::app_ids::FIRST_APPLICATION_UID).contains(&uid)
+            && self.host.configured.get().is_some()
+            && self.host.package_boot.scan.get().is_none()
+        {
+            self.host.package_system()?;
+            let grants = self.host.package_boot.system_permissions.wait();
+            if let Some(grants) = grants.as_ref().map_err(Clone::clone)?.get(&uid) {
+                return Ok(grants.contains(permission)
+                    || fuller(permission).is_some_and(|name| grants.contains(name)));
+            }
+        }
         self.access(|access| access.holds(uid, permission))
     }
 

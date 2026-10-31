@@ -4,6 +4,7 @@
 //! the boot session begun, its scans and construction finished, then its
 //! deferred app-data preparation joined. Each stage publishes its result.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
 use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
@@ -13,9 +14,12 @@ use super::AppHost;
 use super::package_bootstrap::PackageBootstrap;
 use crate::system::{ServiceOwner, System};
 
+pub(super) type SystemPermissions = BTreeMap<i32, BTreeSet<String>>;
+
 /// Each result releases only consumers of the state that stage publishes.
 #[derive(Default)]
 pub(super) struct Readiness {
+    pub system_permissions: OnceLock<Result<Arc<SystemPermissions>, Exception>>,
     pub scan: OnceLock<Result<(), Exception>>,
     pub runtime: OnceLock<Result<(), Exception>>,
     pub storage: OnceLock<Result<(), Exception>>,
@@ -41,6 +45,13 @@ pub(super) fn prepare<T>(
 ) -> Result<(), Exception> {
     let runtime = ready.runtime.get_or_init(|| {
         let scanned = scan();
+        // A failed boot must also release readers of the pre-scan UID inventory.
+        let _ = ready.system_permissions.set(
+            scanned
+                .as_ref()
+                .map(|_| Arc::new(BTreeMap::new()))
+                .map_err(Clone::clone),
+        );
         let _ = ready
             .scan
             .set(scanned.as_ref().map(|_| ()).map_err(Clone::clone));
@@ -354,6 +365,9 @@ mod tests {
                     Ok(())
                 })
             );
+            if scan_fails {
+                assert_eq!(ready.system_permissions.wait(), &Err(error.clone()));
+            }
             assert_eq!(ready.runtime.get(), Some(&Err(error.clone())));
             assert_eq!(ready.storage.get(), Some(&Err(error.clone())));
             assert_eq!(

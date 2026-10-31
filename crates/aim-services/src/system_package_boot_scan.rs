@@ -396,6 +396,23 @@ impl System {
         image_inputs: Arc<crate::package::boot_image::Inputs>,
     ) -> Result<Begun> {
         self.check_package_bootstrap(bridge)?;
+        let system_config = image_inputs.config(&|name| initial.property_value(name));
+        initial.check()?;
+        if let Some(permissions) = self.native_permissions() {
+            permissions.publish_boot_system_permissions(
+                &system_config,
+                &prepared.ids,
+                &prepared.settings,
+                prepared
+                    .disk
+                    .lock()
+                    .unwrap()
+                    .state()
+                    .users
+                    .iter()
+                    .any(|(id, _)| *id == 0),
+            );
+        }
         let original = prepared.settings.clone();
         let restored = Restored::capture(&original, &prepared.report);
         let live = initial.clone();
@@ -406,7 +423,6 @@ impl System {
         )?;
         let values = initial.clone();
         let property = |name: &str| values.property_value(name);
-        let system_config = image_inputs.config(&property);
         let framework = crate::package::system_config::Framework::from_platform(
             image,
             image_inputs.platform().map_err(failure)?,
