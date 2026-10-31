@@ -4,9 +4,9 @@
 //! and `packages/<package>.xml`), the limits, and the throttling state
 //! (`/data/system/shortcut_service.xml`), each kept as the original keeps
 //! it; and the dynamic shortcut writes (set, add, update, remove, disable
-//! and enable), saved as `ShortcutPackage.saveToXml` saves them. A state that needs its packages
-//! rescanned (a package gone, updated, or new with manifest shortcuts; a
-//! new OS build or locale), a package's first shortcuts, bitmap and URI
+//! and enable), saved as `ShortcutPackage.saveToXml` saves them, and manifest
+//! rescans after package/activity changes and OTAs. A state that needs its packages
+//! cleaned up after removal or relabelled for a new locale, bitmap and URI
 //! icons, persons and capability bindings, the other writes and the
 //! launcher and sharing calls are not implemented (#1669).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -31,6 +31,10 @@ use crate::package::intent::ComponentName;
 use crate::package::intent_uri::FullIntent;
 use crate::package::list_slice::Slice;
 use crate::statusbar::parcels::Text;
+
+mod manifest;
+#[cfg(test)]
+mod manifest_tests;
 
 /// `RoleManager.ROLE_HOME`; `LauncherApps.PinItemRequest.REQUEST_TYPE_SHORTCUT`,
 /// `ACTION_CONFIRM_PIN_SHORTCUT`, `ACTION_CONFIRM_PIN_APPWIDGET`.
@@ -62,6 +66,7 @@ const MATCH_PINNED: i32 = 1 << 2;
 const MATCH_CACHED: i32 = 1 << 3;
 /// `ShortcutInfo.DISABLED_REASON_BY_APP`, `DISABLED_REASON_RESTORE_ISSUE_START`.
 const DISABLED_REASON_BY_APP: i32 = 1;
+const DISABLED_REASON_APP_CHANGED: i32 = 2;
 const DISABLED_REASON_RESTORE_ISSUE_START: i32 = 100;
 /// `ShortcutService`'s defaults.
 const DEFAULT_RESET_INTERVAL_SEC: i64 = 24 * 60 * 60;
@@ -117,7 +122,20 @@ fn now_ms() -> i64 {
 /// ShortcutService.getInstalledPackages uses PACKAGE_MATCH_FLAGS without
 /// MATCH_APEX. Native package inventory also contains the APEX containers.
 fn installed_shortcut_package(ps: &crate::package::model::PackageState) -> bool {
-    !ps.is.apex && ps.users.get(&0).is_none_or(|u| u.installed)
+    !ps.is.apex
+        && ps.users.get(&0).is_none_or(|u| u.installed)
+        && match ps.users.get(&0).map_or(0, |u| u.enabled) {
+            1 => true,
+            2..=4 => false,
+            _ => ps
+                .pkg
+                .as_ref()
+                .is_none_or(|pkg| pkg.is(crate::package::pkg::booleans::ENABLED)),
+        }
+}
+
+fn needs_scan(ps: &crate::package::model::PackageState, after_ota: bool, scanned: i64) -> bool {
+    installed_shortcut_package(ps) && (after_ota || ps.last_update_time >= scanned)
 }
 
 /// `PersistableBundle.restoreFromXml` of `e`'s children: its entries in
@@ -894,6 +912,7 @@ impl Shortcut {
 /// A `ShortcutPackage`: its document (written back as read, its counters
 /// updated), its package info and its shortcuts in their `ArrayMap`
 /// order.
+#[derive(Clone)]
 struct Package {
     file: PathBuf,
     root: Element,
@@ -903,6 +922,126 @@ struct Package {
 }
 
 impl Package {
+    /// `publishManifestShortcuts` and `pushOutExcessShortcuts`. Only this
+    /// path may disable immutable shortcuts. Existing disabled reasons win.
+    fn reconcile_manifest(
+        &mut self,
+        manifest: manifest::Manifest,
+        version: i64,
+        updated: i64,
+        max: usize,
+        max_app: i64,
+        enabled: impl Fn(&ComponentName) -> bool,
+    ) -> Result<(), Exception> {
+        let backup = self
+            .root
+            .children()
+            .find(|e| e.name == "package-info")
+            .and_then(|info| info.long("bk_src_version").ok().flatten())
+            .unwrap_or(-1);
+        for s in &mut self.shortcuts {
+            if s.disabled_reason == 100 && backup <= version {
+                s.flags &= !FLAG_DISABLED;
+                s.disabled_reason = 0;
+                s.touched();
+            }
+        }
+        let stale: Vec<String> = self
+            .shortcuts
+            .iter()
+            .filter(|s| s.flags & FLAG_MANIFEST != 0)
+            .map(|s| s.id.clone())
+            .collect();
+        let invalid: Vec<String> = self
+            .shortcuts
+            .iter()
+            .filter(|s| {
+                s.flags & FLAG_DYNAMIC != 0 && s.activity.as_ref().is_some_and(|a| !enabled(a))
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        for id in invalid {
+            self.delete_or_disable_inner(
+                &id,
+                Some(DISABLED_REASON_APP_CHANGED),
+                false,
+                false,
+                |a| a.class == DUMMY_MAIN_ACTIVITY,
+            )?;
+        }
+        let mut stale = stale;
+        for mut new in manifest.shortcuts {
+            if let Some(old) = self.find(&new.id) {
+                if !old.is_immutable() {
+                    continue;
+                }
+                new.flags |= old.flags & FLAG_PINNED;
+            }
+            if new.flags & FLAG_DISABLED != 0 && new.flags & FLAG_PINNED == 0 {
+                continue;
+            }
+            if new.flags & FLAG_DISABLED == 0 {
+                stale.retain(|id| *id != new.id);
+            }
+            self.force_delete(&new.id);
+            self.ensure_count_before_push(max_app)?;
+            self.put(new);
+        }
+        for id in stale {
+            self.delete_or_disable_inner(
+                &id,
+                Some(DISABLED_REASON_APP_CHANGED),
+                true,
+                false,
+                |a| a.class == DUMMY_MAIN_ACTIVITY,
+            )?;
+        }
+        self.remove_orphans();
+        let mut by_activity: HashMap<ComponentName, Vec<Shortcut>> = HashMap::new();
+        for s in self.shortcuts.iter().filter(|s| !s.is_floating()) {
+            if let Some(a) = &s.activity {
+                by_activity.entry(a.clone()).or_default().push(s.clone());
+            }
+        }
+        for list in by_activity.values_mut() {
+            list.sort_by_key(|s| (s.flags & FLAG_MANIFEST == 0, s.rank));
+            for s in list
+                .iter()
+                .skip(max)
+                .rev()
+                .filter(|s| s.flags & FLAG_MANIFEST == 0)
+            {
+                self.delete_dynamic(&s.id, |a| a.class == DUMMY_MAIN_ACTIVITY)?;
+            }
+        }
+        // Save package-info in the original format (including its historical typo).
+        let mut info = self
+            .root
+            .children()
+            .find(|e| e.name == "package-info")
+            .cloned()
+            .unwrap_or_else(|| Element {
+                name: "package-info".into(),
+                attrs: Vec::new(),
+                content: Vec::new(),
+            });
+        info.attrs
+            .retain(|(n, _)| n != "version" && n != "last_udpate_time");
+        info.attrs.extend([
+            ("version".into(), Xml::Long(version)),
+            ("last_udpate_time".into(), Xml::Long(updated)),
+        ]);
+        self.root.content.retain(|n| !matches!(n, Node::Element(e) if e.name == "package-info" || e.name == "share-target"));
+        self.root.content.push(Node::Element(info));
+        self.root
+            .content
+            .extend(manifest.share_targets.into_iter().map(Node::Element));
+        self.version = version;
+        self.last_update_time = updated;
+        self.adjust_ranks();
+        Ok(())
+    }
+
     fn load(file: PathBuf, root: Element) -> Result<Package, String> {
         if root.name != "package" {
             return Err(format!("<{}>", root.name));
@@ -1058,13 +1197,26 @@ impl Package {
         disable: Option<i32>,
         dummy_main: impl Fn(&ComponentName) -> bool,
     ) -> Result<Option<Shortcut>, Exception> {
+        self.delete_or_disable_inner(id, disable, false, true, dummy_main)
+    }
+
+    fn delete_or_disable_inner(
+        &mut self,
+        id: &str,
+        disable: Option<i32>,
+        override_immutable: bool,
+        ignore_invisible: bool,
+        dummy_main: impl Fn(&ComponentName) -> bool,
+    ) -> Result<Option<Shortcut>, Exception> {
         let Some(old) = self.find(id) else {
             return Ok(None);
         };
-        if old.flags & FLAG_DISABLED != 0 && !old.is_visible_to_publisher() {
+        if ignore_invisible && old.flags & FLAG_DISABLED != 0 && !old.is_visible_to_publisher() {
             return Ok(None);
         }
-        self.ensure_not_immutable(id)?;
+        if !override_immutable {
+            self.ensure_not_immutable(id)?;
+        }
         if old.flags & (FLAG_PINNED | FLAG_CACHED_ALL) != 0 {
             let s = self.shortcuts.iter_mut().find(|s| s.id == id).unwrap();
             s.rank = 0;
@@ -2171,14 +2323,12 @@ impl ShortcutManager {
             .unwrap_or(0);
         // `ShortcutUser.loadFromXml`: a scan time in the future is none.
         let scanned = if scanned < now { scanned } else { 0 };
-        let updated = state.packages.values().any(|ps| {
-            installed_shortcut_package(ps)
-                && ((after_ota && ps.is.system) || ps.last_update_time >= scanned)
-        });
-        if updated {
-            return Err(not_modelled(
-                "rescanning an updated package's manifest shortcuts",
-            ));
+        for ps in state
+            .packages
+            .values()
+            .filter(|ps| needs_scan(ps, after_ota, scanned))
+        {
+            self.rescan_package(user, ps, true)?;
         }
         user.root
             .attrs
@@ -2189,13 +2339,15 @@ impl ShortcutManager {
         user.root
             .attrs
             .push(("last-app-scan-fp".into(), Xml::String(fingerprint)));
+        std::fs::create_dir_all(user.file.parent().unwrap())
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
         write_resilient(&user.file, std::slice::from_ref(&user.root), 0o600)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", user.file.display())))
     }
 
     /// `ShortcutUser.onCalledByPublisher`: `detectLocaleChange`, then
     /// `rescanPackageIfNeeded(package, false)`.
-    fn on_called_by_publisher(&self, user: &User, package: &str) -> Result<(), Exception> {
+    fn on_called_by_publisher(&self, user: &mut User, package: &str) -> Result<(), Exception> {
         let locales = self.host.inputs()?.locale_tags();
         if user
             .root
@@ -2205,50 +2357,179 @@ impl ShortcutManager {
             return Err(not_modelled("relabelling shortcuts for a new locale"));
         }
         let (state, _) = self.host.packages()?;
-        let Some(ps) = state.packages.get(package) else {
+        if let Some(ps) = state.packages.get(package) {
+            self.rescan_package(user, ps, false)?;
+        }
+        Ok(())
+    }
+
+    /// `ShortcutPackage.rescanPackageIfNeeded`, sharing package/resource
+    /// ownership with publisher writes. Scan markers advance only after saves.
+    fn rescan_package(
+        &self,
+        user: &mut User,
+        ps: &crate::package::model::PackageState,
+        force: bool,
+    ) -> Result<(), Exception> {
+        let Some(pkg) = ps.pkg.as_deref().filter(|_| installed_shortcut_package(ps)) else {
             return Ok(());
         };
-        let pkg = ps.pkg.as_deref();
-        match user.packages.get(package) {
-            Some(p) => {
-                // `areAllActivitiesStillEnabled`.
-                let enabled = p
-                    .shortcuts
-                    .iter()
-                    .filter_map(|s| s.activity.as_ref())
-                    .all(|a| {
-                        pkg.is_some_and(|pkg| {
-                            pkg.activities.iter().any(|act| {
-                                act.main.component.name == a.class
-                                    && act.main.exported
-                                    && act.main.enabled
-                            })
-                        })
-                    });
-                if p.version != ps.version_code
-                    || p.last_update_time != ps.last_update_time
-                    || !enabled
-                {
-                    return Err(not_modelled("rescanning a package's manifest shortcuts"));
-                }
-            }
-            None => {
-                let manifest = pkg.is_some_and(|pkg| {
-                    pkg.activities.iter().any(|a| {
-                        a.main
-                            .component
-                            .meta_data
-                            .as_ref()
-                            .is_some_and(|m| m.0.iter().any(|(k, _)| k == SHORTCUTS_METADATA))
-                    })
-                });
-                if manifest {
-                    return Err(not_modelled(
-                        "publishing a new package's manifest shortcuts",
-                    ));
+        let name = &ps.name;
+        let main = self.main_activities(name, None, 0)?;
+        let old = user.packages.get(name);
+        let mut all_enabled = true;
+        if let Some(p) = old {
+            for a in p.shortcuts.iter().filter_map(|s| s.activity.as_ref()) {
+                let intent = crate::package::intent::Intent {
+                    component: Some(a.clone()),
+                    ..Default::default()
+                };
+                if self.query_activities(&intent, 0, true)?.is_empty() {
+                    all_enabled = false;
+                    break;
                 }
             }
         }
+        if !force
+            && old.is_some_and(|p| {
+                p.version == ps.version_code
+                    && p.last_update_time == ps.last_update_time
+                    && all_enabled
+            })
+        {
+            return Ok(());
+        }
+        let max = self
+            .constant("max_shortcuts", DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY)?
+            .max(0) as usize;
+        let now = now_ms();
+        let mut parsed = manifest::Manifest::default();
+        if main.is_empty()
+            && let Some(p) = old
+        {
+            // parseShortcuts returns before clearing outShareTargets in this case.
+            parsed.share_targets = p
+                .root
+                .children()
+                .filter(|e| e.name == "share-target")
+                .cloned()
+                .collect();
+        }
+        let inputs = self.host.platform()?;
+        let framework = self.host.framework()?;
+        for a in &main {
+            let id = pkg
+                .activities
+                .iter()
+                .find(|act| act.main.component.name == a.class)
+                .and_then(|act| act.main.component.meta_data.as_ref())
+                .and_then(|m| m.0.iter().find(|(k, _)| k == SHORTCUTS_METADATA))
+                .and_then(|(_, v)| match v {
+                    crate::package::pkg::Value::Int(id) if *id != 0 => Some(*id as u32),
+                    _ => None,
+                });
+            let Some(id) = id else { continue };
+            if let Err(e) = framework
+                .xml_resource(self.host.root()?, &inputs.data, pkg, id, |e, ctx| {
+                    parsed.read(e, ctx, a, max, now)
+                })
+                .and_then(|r| r)
+            {
+                // The pinned service logs parser failures and publishes a null
+                // manifest list, disabling stale entries rather than crashing.
+                eprintln!("app host: shortcut: Failed to load manifest shortcuts for {name}: {e}");
+                parsed.shortcuts.clear();
+                break;
+            }
+        }
+        if old.is_none() && parsed.shortcuts.is_empty() {
+            return Ok(());
+        }
+        let mut p = match old {
+            Some(p) => p.clone(),
+            None => Package::load(
+                user.file
+                    .parent()
+                    .unwrap()
+                    .join("packages")
+                    .join(format!("{name}.xml")),
+                Element {
+                    name: "package".into(),
+                    attrs: vec![("name".into(), Xml::String(name.clone()))],
+                    content: Vec::new(),
+                },
+            )
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?,
+        };
+        for s in &mut p.shortcuts {
+            let has_resources = s.has_string_resources() || s.flags & FLAG_HAS_ICON_RES != 0;
+            if !s.is_immutable() && has_resources {
+                let names = [
+                    &s.title_res_name,
+                    &s.text_res_name,
+                    &s.disabled_message_res_name,
+                    &s.icon_res_name,
+                ];
+                if names.iter().any(|n| n.is_some()) {
+                    let mut ids = [0; 4];
+                    for (i, name) in names.into_iter().enumerate() {
+                        if let Some(n) = name {
+                            let full = if n.parse::<i32>().is_ok() {
+                                n.clone()
+                            } else {
+                                format!("{}:{}{}", ps.name, if i == 3 { "" } else { "string/" }, n)
+                            };
+                            ids[i] = framework
+                                .named_identifier(self.host.root()?, &inputs.data, pkg, &full)
+                                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+                                as i32;
+                        }
+                    }
+                    [
+                        s.title_res_id,
+                        s.text_res_id,
+                        s.disabled_message_res_id,
+                        s.icon_res_id,
+                    ] = ids;
+                }
+            }
+            if has_resources {
+                s.timestamp = now;
+                s.touched();
+            }
+        }
+        for s in &mut parsed.shortcuts {
+            self.fix_up_resource_names_and_values(s, name)?;
+        }
+        p.reconcile_manifest(
+            parsed,
+            ps.version_code,
+            ps.last_update_time,
+            max,
+            self.constant("max_shortcuts_per_app", DEFAULT_MAX_SHORTCUTS_PER_APP)?
+                .max(1),
+            |a| main.contains(a),
+        )?;
+        if let Some(Node::Element(info)) = p
+            .root
+            .content
+            .iter_mut()
+            .find(|n| matches!(n, Node::Element(e) if e.name == "package-info"))
+        {
+            info.attrs
+                .retain(|(n, _)| n != "allow-backup" && n != "allow-backup-initialized");
+            info.attrs.extend([
+                (
+                    "allow-backup".into(),
+                    Xml::Bool(pkg.is(crate::package::pkg::booleans::ALLOW_BACKUP)),
+                ),
+                ("allow-backup-initialized".into(), Xml::Bool(true)),
+            ]);
+        }
+        std::fs::create_dir_all(p.file.parent().unwrap())
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.to_string()))?;
+        p.save()?;
+        user.packages.insert(name.clone(), p);
         Ok(())
     }
 
@@ -2596,6 +2877,11 @@ mod tests {
         assert!(installed_shortcut_package(&package));
         package.users.entry(0).or_default().installed = false;
         assert!(!installed_shortcut_package(&package));
+        package.users.entry(0).or_default().installed = true;
+        package.users.entry(0).or_default().enabled = 2;
+        assert!(!installed_shortcut_package(&package));
+        package.users.entry(0).or_default().enabled = 1;
+        assert!(installed_shortcut_package(&package));
     }
 
     /// A manifest shortcut and its intent's extras, read as

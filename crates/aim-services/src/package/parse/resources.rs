@@ -1100,6 +1100,19 @@ impl Resources<'_> {
         self.tables.iter().find_map(|t| t.entry_name(id))
     }
 
+    /// `getResourceName`, including the declaring package of shared resources.
+    pub fn resource_name(&self, id: u32) -> Option<String> {
+        self.tables.iter().find_map(|t| {
+            let t = t.eager()?;
+            let (pid, kind, name) = t.entry_name(id)?;
+            let package = t
+                .packages
+                .iter()
+                .find(|p| p.id == pid || (p.id == 0 && pid == SHARED_LIBRARY_ID))?;
+            Some(format!("{}:{kind}/{name}", package.name))
+        })
+    }
+
     /// `getIdentifier(name, kind, package)` over the tables.
     pub fn identifier(&self, package: &str, kind: &str, name: &str) -> Option<u32> {
         self.tables
@@ -1296,6 +1309,27 @@ mod tests {
                 names: HashMap::new(),
             }]),
         }
+    }
+
+    #[test]
+    fn resource_names_use_the_declaring_shared_package() {
+        let mut t = table(Config::default(), 0, 0);
+        let p = &mut Arc::get_mut(&mut t.packages).unwrap()[0];
+        p.id = 0;
+        p.name = "shared.resources".into();
+        p.type_names.insert(1, "style".into());
+        p.names.insert((1, 0), "Splash".into());
+        let res = Resources {
+            tables: vec![&t],
+            overlays: &[],
+            config: Config::default(),
+        };
+        assert_eq!(
+            res.resource_name((SHARED_LIBRARY_ID as u32) << 24 | 0x10000)
+                .as_deref(),
+            Some("shared.resources:style/Splash")
+        );
+        assert_eq!(res.resource_name(0x7f010001), None);
     }
 
     /// A style's attribute: its own, its parent's, else the theme's, a
