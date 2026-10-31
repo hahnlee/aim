@@ -140,12 +140,8 @@ mod tests {
             let capture = self.0.package_capture().unwrap();
             let access = capture.context().access.as_ref().unwrap();
             assert_eq!(access.user0.permission_flags(a.uid, CAMERA), 0);
-            let disk = std::fs::read(self.0.data().unwrap().join(USER0_ACCESS)).unwrap();
-            let saved = AccessUser::parse(&aim_android_xml::read(&disk).unwrap()).unwrap();
-            assert_eq!(saved.permission_flags(a.uid, CAMERA), 0);
             for ps in capture.state().packages.values().filter(|ps| !ps.is.apex) {
                 assert_eq!(access.user0.permission_flags(ps.app_id, CAMERA), 0);
-                assert_eq!(saved.permission_flags(ps.app_id, CAMERA), 0);
             }
             self.1.send(a.uid).unwrap();
             Ok(Parcel::new())
@@ -272,18 +268,25 @@ mod tests {
             }
             assert!(owner.access_writes.lock().unwrap().is_empty());
             let before = host.package_capture().unwrap();
-            // A persistence failure must leave all grants and effects untouched.
-            let file = host.data().unwrap().join(USER0_ACCESS);
-            std::fs::create_dir_all(&file).unwrap();
-            assert_eq!(call(1000, 0).unwrap_err().code, EX_ILLEGAL_STATE);
-            std::fs::remove_dir(&file).unwrap();
-            assert!(Arc::ptr_eq(&before, &host.package_capture().unwrap()));
-            assert!(owner.access_writes.lock().unwrap().is_empty());
-            assert!(owner.permission_kills.lock().unwrap().is_empty());
-            assert!(rx.try_recv().is_err());
             call(1000, 0).unwrap();
-            // PermissionPolicy's normal app-op synchronization can write
-            // this same file after the batched grant mutation.
+            let published = host.package_capture().unwrap();
+            assert_eq!(before.scan().version() + 1, published.scan().version());
+            assert_eq!(before.scan().owner(), published.scan().owner());
+            let mut context = (**published.context()).clone();
+            owner.retained_access().unwrap().project_context(
+                &mut context,
+                published.state(),
+                &config,
+            );
+            let full = crate::package::scan_snapshot::query_state::Capture::new(
+                published.scan().clone(),
+                context,
+            )
+            .unwrap();
+            assert_eq!(published.state(), full.state());
+            owner.user_writes.flush().unwrap();
+            let reload = PermissionManager::new(host.clone()).user0().unwrap();
+            assert_eq!(*reload, *owner.user0().unwrap());
             let writes = owner.access_writes.lock().unwrap().clone();
             assert!(!writes.is_empty());
             assert!(writes.iter().all(|path| path == USER0_ACCESS));

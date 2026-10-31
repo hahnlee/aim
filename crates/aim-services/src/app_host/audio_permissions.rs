@@ -20,7 +20,7 @@ const POPULATE_PACKAGES_FOR_UIDS: u32 = 1;
 const POPULATE_PERMISSION_STATE: u32 = 3;
 
 /// `MONITORED_PERMS`, by `PermissionEnum`.
-const MONITORED_PERMS: [&str; 16] = [
+pub(super) const MONITORED_PERMS: [&str; 16] = [
     "android.permission.RECORD_AUDIO",
     "android.permission.MODIFY_AUDIO_ROUTING",
     "android.permission.MODIFY_AUDIO_SETTINGS",

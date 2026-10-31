@@ -33,6 +33,7 @@ mod policy;
 mod ready;
 mod removal;
 mod reset;
+mod writeback;
 
 pub(super) use policy::PermissionPolicy;
 
@@ -1502,8 +1503,9 @@ pub struct PermissionManager {
     host: Arc<AppHost>,
     /// The sole mutable access owner; readers retain immutable states.
     owner: Mutex<AccessOwner>,
+    user_writes: writeback::Writer,
     #[cfg(test)]
-    access_writes: Mutex<Vec<String>>,
+    access_writes: Arc<Mutex<Vec<String>>>,
     #[cfg(test)]
     permission_kills: Mutex<Vec<(i32, String)>>,
     installs: Mutex<BTreeMap<u64, install::Candidate>>,
@@ -1514,13 +1516,22 @@ pub struct PermissionManager {
     delayed_backup_finished: Mutex<BTreeSet<i32>>,
 }
 
+impl Drop for PermissionManager {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown() {
+            eprintln!("app host: permission shutdown: {}", error.message);
+        }
+    }
+}
+
 impl PermissionManager {
     pub fn new(host: Arc<AppHost>) -> Self {
         PermissionManager {
             host,
             owner: Mutex::new(AccessOwner::default()),
+            user_writes: Default::default(),
             #[cfg(test)]
-            access_writes: Mutex::new(Vec::new()),
+            access_writes: Arc::default(),
             #[cfg(test)]
             permission_kills: Mutex::new(Vec::new()),
             installs: Mutex::new(BTreeMap::new()),
@@ -1781,7 +1792,7 @@ impl PermissionManager {
     }
 
     /// `service.mutateState` of user 0's state: `change` decides the new
-    /// state from the current one; a changed state is written
+    /// state from the current one; a changed state requests a delayed write
     /// (`AccessPersistence`), the package model's grants follow it, and
     /// the flags-changed listener's effects run (`onStateMutated`): the
     /// listeners told of each uid whose runtime permissions changed, and
@@ -1805,13 +1816,20 @@ impl PermissionManager {
             return Ok(());
         }
         self.gid_permissions()?;
-        self.write_user0(&after)?;
         let after = Arc::new(after);
-        held.user0 = Some(after.clone());
+        self.write_user0_async(after.clone())?;
+        held.user0 = Some(after);
         drop(held);
         self.grants_changed()?;
         let effects = self.on_state_mutated(&changes, kill);
-        let audio = self.host.refresh_audio_permissions();
+        let audio = if changes.iter().any(|c| {
+            permission_granted(c.old) != permission_granted(c.new)
+                && super::audio_permissions::MONITORED_PERMS.contains(&c.permission.as_str())
+        }) {
+            self.host.refresh_audio_permissions()
+        } else {
+            Ok(())
+        };
         effects?;
         audio
     }
@@ -1896,13 +1914,41 @@ impl PermissionManager {
     /// with its reserve copy: the document as read with its
     /// `<app-id-permissions>` written anew.
     fn write_user0(&self, state: &AccessUser) -> Result<(), Exception> {
-        self.write_user(USER0_ACCESS, state)
+        self.user_writes
+            .synchronize(|| self.write_user(USER0_ACCESS, state))
+    }
+
+    fn write_user0_async(&self, state: Arc<AccessUser>) -> Result<(), Exception> {
+        let host = Arc::downgrade(&self.host);
+        #[cfg(test)]
+        let writes = self.access_writes.clone();
+        self.user_writes.schedule(Box::new(move || {
+            let host = host
+                .upgrade()
+                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission host gone"))?;
+            Self::write_user_at(&host, USER0_ACCESS, &state)?;
+            #[cfg(test)]
+            writes.lock().unwrap().push(USER0_ACCESS.into());
+            Ok(())
+        }))
+    }
+
+    pub(crate) fn shutdown(&self) -> Result<(), Exception> {
+        self.user_writes.close()
     }
 
     fn write_user(&self, relative: &str, state: &AccessUser) -> Result<(), Exception> {
+        Self::write_user_at(&self.host, relative, state)?;
+        #[cfg(test)]
+        self.access_writes.lock().unwrap().push(relative.to_owned());
+        Ok(())
+    }
+
+    fn write_user_at(host: &AppHost, relative: &str, state: &AccessUser) -> Result<(), Exception> {
         let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/{relative}: {e}"));
-        let root = self
-            .read_access(relative, |root| Ok(root.clone()))?
+        let data = host.data()?;
+        let root = crate::package::atomic(data, &data.join(relative), |root| Ok(root.clone()))
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
             .unwrap_or_else(|| {
                 aim_android_xml::read(
                     b"<access><app-id-permissions/><app-id-device-permissions/></access>",
@@ -1920,7 +1966,7 @@ impl PermissionManager {
             })
             .map_err(fail)?;
         let bytes = aim_android_xml::abx::write(&root).map_err(fail)?;
-        self.write_access(relative, &bytes)
+        Self::write_access_at(host, relative, &bytes)
     }
 
     fn write_system(&self, state: &AccessSystem) -> Result<(), Exception> {
@@ -1938,8 +1984,15 @@ impl PermissionManager {
     }
 
     fn write_access(&self, relative: &str, bytes: &[u8]) -> Result<(), Exception> {
+        Self::write_access_at(&self.host, relative, bytes)?;
+        #[cfg(test)]
+        self.access_writes.lock().unwrap().push(relative.to_owned());
+        Ok(())
+    }
+
+    fn write_access_at(host: &AppHost, relative: &str, bytes: &[u8]) -> Result<(), Exception> {
         let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("/data/{relative}: {e}"));
-        let path = self.host.data()?.join(relative);
+        let path = host.data()?.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| fail(e.to_string()))?;
         let backup = path.with_extension("abx.bak");
         // New files of the system's, under system_server's umask (077).
@@ -1976,8 +2029,6 @@ impl PermissionManager {
         if let Err(e) = write(&path.with_extension("abx.reservecopy")) {
             eprintln!("app host: permissionmgr: Failed to write the reserve copy: {e}");
         }
-        #[cfg(test)]
-        self.access_writes.lock().unwrap().push(relative.to_owned());
         Ok(())
     }
 
@@ -2102,7 +2153,7 @@ impl PermissionManager {
             .push((uid, reason.to_owned()));
         let host = self.host.clone();
         let reason = reason.to_owned();
-        // `handler.post`: after persistence and query publication.
+        // `handler.post`: after the write request and query publication.
         std::thread::spawn(move || host.kill_uid_for_permission_change(uid as u32, &reason));
     }
 

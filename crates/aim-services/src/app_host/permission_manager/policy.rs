@@ -234,8 +234,9 @@ impl PermissionManager {
         if after == *before {
             return Ok(());
         }
-        self.write_user0(&after)?;
-        held.user0 = Some(Arc::new(after));
+        let after = Arc::new(after);
+        self.write_user0_async(after.clone())?;
+        held.user0 = Some(after);
         drop(held);
         appops_service::permission_modes_changed(&self.host, app_id, &codes, &packages)
     }

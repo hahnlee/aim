@@ -414,6 +414,13 @@ impl NativeServices {
         }
         shutdown.phase = ShutdownPhase::Closing;
         if !shutdown.package {
+            if let Some(owner) = self.system.native_permissions() {
+                if let Err(error) = owner.shutdown() {
+                    shutdown
+                        .errors
+                        .push(format!("permission shutdown: {}", error.message));
+                }
+            }
             if let Ok(bridge) = self.system.package_bootstrap() {
                 if let Err(error) = self.system.close_package_boot_session(&bridge) {
                     shutdown.errors.push(format!(

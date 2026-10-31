@@ -374,6 +374,7 @@ fn registry_callbacks_persist_and_reload_the_live_access_owner() {
             Some(MODE_IGNORED)
         );
         let before = manager.retained_access().unwrap();
+        manager.user_writes.flush().unwrap();
         assert_eq!(
             PermissionManager::new(host.clone())
                 .uid_mode(APP, "android:camera")
@@ -388,11 +389,14 @@ fn registry_callbacks_persist_and_reload_the_live_access_owner() {
         let path = host.data().unwrap().join(USER0_ACCESS);
         let pending = path.with_extension("abx.new");
         std::fs::create_dir(&pending).unwrap();
-        let error = event(events::PACKAGE_CHANGED).unwrap_err();
-        assert_eq!(error.code, EX_ILLEGAL_STATE);
-        assert!(before.same_base(&manager.retained_access().unwrap()));
+        event(events::PACKAGE_CHANGED).unwrap();
+        assert_eq!(
+            manager.user_writes.flush().unwrap_err().code,
+            EX_ILLEGAL_STATE
+        );
         std::fs::remove_dir(pending).unwrap();
         event(events::PACKAGE_CHANGED).unwrap();
+        manager.user_writes.flush().unwrap();
         assert_eq!(manager.uid_mode(APP, "android:camera").unwrap(), None);
         assert_eq!(before.user0.app_id_app_ops[0].1[0].1, MODE_IGNORED);
         assert_eq!(
@@ -463,6 +467,7 @@ fn permission_manager_grant_revoke_updates_persisted_modes() {
                     )
                 })
                 .unwrap();
+            manager.user_writes.flush().unwrap();
             let expected = if granted { None } else { Some(MODE_IGNORED) };
             assert_eq!(manager.uid_mode(APP, "android:camera").unwrap(), expected);
             assert_eq!(
