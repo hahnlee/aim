@@ -282,6 +282,11 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         }
     }
     fs::write(staged.join("overlay.toml"), manifest).map_err(|e| e.to_string())?;
+    super::sync_seam::check_oat(
+        &fs::read(super::system_server::out().join("services.jar")).map_err(|e| e.to_string())?,
+        &fs::read(staged.join("root/system/framework/oat/arm64/services.odex"))
+            .map_err(|e| e.to_string())?,
+    )?;
 
     let _ = force_remove(&out);
     fs::rename(&staged, &out).map_err(|e| e.to_string())?;

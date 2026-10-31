@@ -116,6 +116,11 @@ pub fn node(others: &[Node]) -> Result<Node, String> {
 }
 
 pub fn run(log: &mut Log) -> Result<(), String> {
+    super::sync_seam::check_oat(
+        &fs::read(super::system_server::out().join("services.jar")).map_err(|e| e.to_string())?,
+        &fs::read(oat::out().join("root/system/framework/oat/arm64/services.odex"))
+            .map_err(|e| e.to_string())?,
+    )?;
     let original = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
     let mut manifest = manifest()?;
     manifest::expand(&mut manifest, aim_paths::root()).map_err(|p| problems(OVERLAY, p))?;

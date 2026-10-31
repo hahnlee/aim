@@ -223,6 +223,14 @@ pub fn redirect_jar(
     replace_entries(jar, &replaced)
 }
 
+/// Replace one DEX entry, preserving the other entries and their alignment.
+pub fn replace_dex(jar: &[u8], index: usize, dex: Vec<u8>) -> Result<Vec<u8>, String> {
+    let entries = stored_dex_entries(jar)?;
+    let entry = entries.get(index).ok_or("no such dex entry")?;
+    Dex::parse(&dex)?;
+    replace_entries(jar, &[(entry.local, dex)])
+}
+
 /// `jar` with the data of the stored entries whose local headers are at
 /// the given offsets replaced. Every entry after one moves; dex files are
 /// a multiple of 4 bytes long, so stored entries stay aligned.

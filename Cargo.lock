@@ -95,6 +95,7 @@ dependencies = [
  "aim-paths",
  "aim-storage",
  "android-image-extract",
+ "crc32fast",
  "flate2",
  "libc",
  "n2",

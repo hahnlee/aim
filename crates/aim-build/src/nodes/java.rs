@@ -126,7 +126,7 @@ impl Toolchain {
         })
     }
 
-    fn java(&self) -> Command {
+    pub(super) fn java(&self) -> Command {
         Command::new(self.jdk.join("bin/java"))
     }
 
