@@ -5,7 +5,8 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
-Regular-file writes clear set-ID modes without CAP_FSETID (#779); a shared generation invalidates
+Regular-file writes and admitted fallocate allocation/in-file hole punching clear
+set-ID modes without CAP_FSETID (#779, #2515); a shared generation invalidates
 cached modes. Host syscall/metadata checks pass; no guest boot was run (2026-10-31).
 
 Native verified-code preparation now reads associated dex metadata and applies

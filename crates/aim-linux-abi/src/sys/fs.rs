@@ -3002,6 +3002,78 @@ mod dac_tests {
     }
 
     #[test]
+    fn fallocate_setid() {
+        if fdtab::isolated_kernel_test("sys::fs::dac_tests::fallocate_setid") {
+            return;
+        }
+        use super::super::fsops::{fallocate, fchmod, ftruncate};
+        let (_view, root) = vfs::test_view();
+        let path = root.join("data/fallocate-setid");
+        fs::write(&path, vec![b'x'; 65536]).unwrap();
+        let fd = open("/data/fallocate-setid", 2, 0, &Identity::default()) as u64;
+        let ro = open("/data/fallocate-setid", 0, 0, &Identity::default()) as u64;
+        assert!((fd as i64) >= 0);
+        assert!((ro as i64) >= 0);
+        let alias = dup([fd, 0, 0, 0, 0, 0]) as u64;
+        assert!((alias as i64) >= 0);
+        assert_eq!(fallocate([alias, 1, 0, 16384, 0, 0]), 0); // Prime mode cache.
+        let header = [0x20080522u32, 0];
+        let mut caps = [[0u32; 3]; 2];
+        let cap_args = [header.as_ptr() as u64, caps.as_mut_ptr() as u64, 0, 0, 0, 0];
+        assert_eq!(super::super::cred::capget(cap_args), 0);
+        for privileged in [true, false] {
+            if !privileged {
+                caps[0][0] &= !(1 << 4);
+                assert_eq!(super::super::cred::capset(cap_args), 0);
+            }
+            for mode in [0o6777, 0o6767, 0o2777, 0o2767] {
+                let clear = if privileged {
+                    0
+                } else {
+                    0o4000 | if mode & 0o010 != 0 { 0o2000 } else { 0 }
+                };
+                let expected = mode & !clear;
+                for (flags, off) in [(0, 0), (0, 65536), (1, 0), (1, 65536), (3, 0)] {
+                    assert_eq!(ftruncate([fd, 65536, 0, 0, 0, 0]), 0);
+                    assert_eq!(fchmod([fd, mode, 0, 0, 0, 0]), 0);
+                    assert_eq!(fallocate([ro, flags, off, 16384, 0, 0]), -(EBADF as i64));
+                    for (flags, off, len, error) in [
+                        (0, 0, 0, EINVAL),
+                        (0, u64::MAX, 1, EINVAL),
+                        (0, i64::MAX as u64, 1, libc::EFBIG),
+                        (8, 0, 16384, errno::EOPNOTSUPP),
+                        (16, 0, 16384, errno::EOPNOTSUPP),
+                        (32, 0, 16384, errno::EOPNOTSUPP),
+                    ] {
+                        assert_eq!(fallocate([alias, flags, off, len, 0, 0]), -(error as i64));
+                    }
+                    // ext4 skips file_modified when the punched range starts at EOF.
+                    assert_eq!(fallocate([alias, 3, 65536, 16384, 0, 0]), 0);
+                    assert_eq!(stat_fd(fd as i32).unwrap().st_mode as u64 & 0o7777, mode);
+                    assert_eq!(fallocate([alias, flags, off, 16384, 0, 0]), 0);
+                    assert_eq!(
+                        stat_fd(fd as i32).unwrap().st_mode as u64 & 0o7777,
+                        expected
+                    );
+                }
+                assert_eq!(fchmod([fd, mode, 0, 0, 0, 0]), 0);
+                assert_eq!(
+                    fallocate([alias, 1, 0, 1 << 40, 0, 0]),
+                    -(errno::ENOSPC as i64)
+                );
+                assert_eq!(
+                    stat_fd(fd as i32).unwrap().st_mode as u64 & 0o7777,
+                    expected
+                );
+            }
+        }
+        closed(ro as i64);
+        closed(alias as i64);
+        closed(fd as i64);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn regular_io_borrow_survives_concurrent_replacement() {
         if fdtab::isolated_kernel_test(
             "sys::fs::dac_tests::regular_io_borrow_survives_concurrent_replacement",
