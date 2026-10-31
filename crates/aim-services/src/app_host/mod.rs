@@ -609,7 +609,7 @@ pub struct AppHost {
     system: OnceLock<Arc<crate::system::System>>,
     /// Published scan, constructed owners, then reconciled app storage.
     package_boot: package_boot::Readiness,
-    /// AMS.mProcessesReady: default grants committed before application forks.
+    /// AMS.mProcessesReady: package settings and default grants before app forks.
     processes_ready: OnceLock<Result<(), Exception>>,
     /// Retained verifier API in the current system process; replaced on attach.
     domain_frontend: Mutex<Option<Arc<crate::system::ServiceOwner>>>,

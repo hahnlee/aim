@@ -580,7 +580,9 @@ mod tests {
             }));
             *host.package_bootstrap_java.lock().unwrap() = Some(Arc::new(policy));
             let boot = host.clone();
-            let worker = std::thread::spawn(move || boot.system_ready());
+            // This fixture publishes constructed package state without a boot
+            // lifecycle; exercise the real default-grant/startup boundary.
+            let worker = std::thread::spawn(move || boot.complete_system_ready(|| Ok(())));
             waiting.recv().unwrap();
             assert!(host.processes_ready.get().is_none());
             assert!(register(host, 1002, observer).is_err());
@@ -642,7 +644,8 @@ mod tests {
                 let reload = PermissionManager::new(host.clone()).user0().unwrap();
                 assert_eq!(*reload, *owner.user0().unwrap());
                 let writes = owner.access_writes.lock().unwrap().len();
-                host.system_ready().unwrap();
+                host.complete_system_ready(|| panic!("package readiness repeated"))
+                    .unwrap();
                 assert_eq!(owner.access_writes.lock().unwrap().len(), writes);
             }
         });
