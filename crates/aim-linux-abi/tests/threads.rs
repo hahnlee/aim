@@ -202,3 +202,16 @@ fn directed_blocked_sigquit_wakes_and_joins_its_original_bionic_target() {
     );
     eprintln!("{text}");
 }
+
+#[test]
+fn sigwait_consumes_signals_without_a_late_host_carrier() {
+    let r = root().expect("required pinned original image and NDK: NOT RUN if missing");
+    let (status, out) = run(r, &["sigwait_fault_race", "sigwait_bad_info"]);
+    assert!(
+        status.success()
+            && out.contains("ok sigwait_fault_race (4096 faults)")
+            && out.contains("ok sigwait_bad_info")
+            && out.contains("ALL PASSED"),
+        "{status:?}\n{out}"
+    );
+}

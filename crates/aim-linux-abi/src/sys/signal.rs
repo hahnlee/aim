@@ -97,6 +97,7 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 /// The guest's default action for a fatal signal: the process dies of the
 /// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
 pub fn die(sig: i32) -> ! {
+    thread::begin_group_exit();
     crate::diag::report_death(sig);
     super::ptrace::process_ending(sig);
     super::fork::spawn::wait_handovers();
@@ -269,7 +270,10 @@ fn thread_of(ctx: &GuestContext) -> Option<&'static Thread> {
 
 /// Set `th`'s attention flag and interrupt whatever it is doing. The table
 /// lock must be held (the host thread cannot finish exiting meanwhile).
-fn poke_locked(th: &Thread) {
+fn wake_locked(th: &Thread, interrupt_host: bool) {
+    if !th.accepts_signals() {
+        return;
+    }
     th.sig.attn.store(1, SeqCst);
     th.park.unpark();
     if let Some(w) = lock(&th.sig.waker).as_ref() {
@@ -277,9 +281,20 @@ fn poke_locked(th: &Thread) {
         // lock) before the closure ends.
         unsafe { (*w.0)() };
     }
-    if !thread::is_current(th) {
+    if interrupt_host && !thread::is_current(th) {
         th.raise_host_locked(CARRIER);
     }
+}
+
+fn poke_locked(th: &Thread) {
+    wake_locked(th, true);
+}
+
+fn poke_signal_locked(th: &Thread, sig: i32) {
+    // sigwaitinfo(2) accepts a waited signal without a handler. Its parker
+    // is enough to wake it; a carrier can arrive after the wait returned.
+    let interrupt_host = (th.sig.mask() | th.sig.waitset.load(SeqCst)) & bit(sig) == 0;
+    wake_locked(th, interrupt_host);
 }
 
 /// Interrupt this process's thread `tid` for a ptrace stop (`ptrace`).
@@ -298,6 +313,9 @@ fn host_self(sig: i32) -> i64 {
 }
 
 fn send_thread(th: &Thread, info: Siginfo) -> i64 {
+    if !th.accepts_signals() {
+        return 0;
+    }
     let sig = info.signo;
     if sig == SIGKILL || sig == SIGSTOP {
         return host_self(sig);
@@ -308,7 +326,7 @@ fn send_thread(th: &Thread, info: Siginfo) -> i64 {
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
             if t.contains_key(&th.tid) {
-                poke_locked(th)
+                poke_signal_locked(th, sig)
             }
         });
     }
@@ -316,6 +334,9 @@ fn send_thread(th: &Thread, info: Siginfo) -> i64 {
 }
 
 fn send_process(info: Siginfo) -> i64 {
+    if thread::group_exiting() {
+        return 0;
+    }
     let sig = info.signo;
     if sig == SIGKILL || sig == SIGSTOP {
         return host_self(sig);
@@ -335,6 +356,9 @@ fn send_process(info: Siginfo) -> i64 {
 /// pending, a full queue, the thread gone): the timer counts an overrun
 /// instead of waiting for it.
 pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
+    if thread::group_exiting() {
+        return false;
+    }
     let sig = info.signo;
     let Some(tid) = tid else {
         let queued = process().push(info) == Ok(true);
@@ -346,13 +370,16 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
     let Some(th) = thread::find(tid) else {
         return false;
     };
+    if !th.accepts_signals() {
+        return false;
+    }
     if lock(&th.sig.pending).push(info) != Ok(true) {
         return false;
     }
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
             if t.contains_key(&th.tid) {
-                poke_locked(&th)
+                poke_signal_locked(&th, sig)
             }
         });
     }
@@ -366,10 +393,13 @@ fn route(sig: i32) {
         let main = thread::main_tid();
         let target = t
             .get(&main)
-            .filter(|th| th.sig.eligible(sig))
-            .or_else(|| t.values().find(|th| th.sig.eligible(sig)));
+            .filter(|th| th.accepts_signals() && th.sig.eligible(sig))
+            .or_else(|| {
+                t.values()
+                    .find(|th| th.accepts_signals() && th.sig.eligible(sig))
+            });
         if let Some(th) = target {
-            poke_locked(th);
+            poke_signal_locked(th, sig);
         }
     });
 }
@@ -475,6 +505,9 @@ fn drain_external() {
 /// first, so a sender racing with the scan sets it again.
 fn take(th: &Thread) -> Option<Taken> {
     th.sig.attn.store(0, SeqCst);
+    if !th.accepts_signals() {
+        return None;
+    }
     drain_external();
     let own = th.sig.own.swap(0, SeqCst);
     for sig in 1..32 {
@@ -486,7 +519,7 @@ fn take(th: &Thread) -> Option<Taken> {
         let (info, more) = {
             let mut tp = lock(&th.sig.pending);
             let mut pp = process();
-            let allow = !th.sig.mask.load(SeqCst);
+            let allow = !(th.sig.mask.load(SeqCst) | th.sig.waitset.load(SeqCst));
             let (t, p) = (tp.set & allow, pp.set & allow);
             if t | p == 0 {
                 return None;
@@ -617,7 +650,10 @@ pub fn interruptible<R>(wake: &(dyn Fn() + Sync), f: impl FnOnce() -> R) -> Opti
 }
 
 /// Build the frame for `t` and apply Linux's mask and SA_RESETHAND rules.
-fn frame(th: &Thread, cpu: &Cpu, t: &Taken, uc_mask: u64, esr: u64, fault: u64) -> Entry {
+fn frame(th: &Thread, cpu: &Cpu, t: &Taken, uc_mask: u64, esr: u64, fault: u64) -> Option<Entry> {
+    if !th.accepts_signals() {
+        return None;
+    }
     let sig = t.info.signo;
     let d = sigframe::Delivery {
         info: &t.info,
@@ -639,7 +675,7 @@ fn frame(th: &Thread, cpu: &Cpu, t: &Taken, uc_mask: u64, esr: u64, fault: u64) 
     if t.act.flags & SA_RESETHAND != 0 {
         ACTIONS.lock().unwrap_or_else(|e| e.into_inner())[sig as usize - 1].handler = SIG_DFL;
     }
-    e
+    Some(e)
 }
 
 /// Syscalls Linux never restarts after a handler, even with SA_RESTART.
@@ -732,6 +768,10 @@ extern "C" fn linux_abi_deliver(ctx: *mut GuestContext) {
         let Some(th) = thread_of(ctx) else {
             return;
         };
+        if !th.accepts_signals() {
+            th.sig.attn.store(0, SeqCst);
+            return;
+        }
         super::ptrace::trap_stop(th.tid, &Cpu::from_ctx(ctx));
         let taken = lock(&th.sig.stash).take().or_else(|| take(th));
         let restart = th.sig.restart_nr.swap(0, Relaxed);
@@ -758,7 +798,9 @@ extern "C" fn linux_abi_deliver(ctx: *mut GuestContext) {
         let uc_mask = lock(&th.sig.saved_mask)
             .take()
             .unwrap_or_else(|| th.sig.mask());
-        frame(th, &cpu, &t, uc_mask, 0, 0).to_ctx(ctx);
+        if let Some(entry) = frame(th, &cpu, &t, uc_mask, 0, 0) {
+            entry.to_ctx(ctx);
+        }
     };
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_err() {
         crate::diag!("[linux-abi] panic in signal delivery; aborting");
@@ -771,7 +813,10 @@ fn deliver_to_mc(th: &Thread, m: &mut DarwinMcontext) {
     super::ptrace::trap_stop(th.tid, &Cpu::from_mc(m));
     while let Some(t) = take(th) {
         let cpu = Cpu::from_mc(m);
-        frame(th, &cpu, &t, th.sig.mask(), 0, 0).to_mc(m);
+        let Some(entry) = frame(th, &cpu, &t, th.sig.mask(), 0, 0) else {
+            break;
+        };
+        entry.to_mc(m);
     }
 }
 
@@ -780,6 +825,9 @@ fn deliver_to_mc(th: &Thread, m: &mut DarwinMcontext) {
 /// # Safety
 /// `ctx` is this thread's live context and `m` its interrupted state.
 unsafe fn act_now(ctx: *mut GuestContext, m: &mut DarwinMcontext) {
+    if !unsafe { thread_of(&*ctx) }.is_some_and(Thread::accepts_signals) {
+        return;
+    }
     let pc = m.pc;
     match context::region(pc) {
         // Re-run the lean exit check, which will see the flag.
@@ -912,7 +960,10 @@ extern "C" fn finish_verity_fault() -> ! {
         die(info.signo);
     }
     let cpu = Cpu::from_ctx(ctx);
-    frame(th, &cpu, &Taken { info, act }, mask, esr, address).to_ctx(ctx);
+    let Some(entry) = frame(th, &cpu, &Taken { info, act }, mask, esr, address) else {
+        die(info.signo);
+    };
+    entry.to_ctx(ctx);
     context::resume_trap()
 }
 
@@ -1007,6 +1058,9 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
     if sig == 0 {
         return None;
     }
+    if thread::group_exiting() {
+        return None;
+    }
     // SAFETY: this thread's context, if any.
     let th = unsafe { ctx.as_ref() }.and_then(thread_of);
     match th {
@@ -1060,6 +1114,9 @@ fn guest_fault(
         );
     }
     let th = thread_of(ctx)?;
+    if !th.accepts_signals() {
+        return Some(sig);
+    }
     let act = action(sig);
     let mask = th.sig.mask();
     if act.handler == SIG_DFL || act.handler == SIG_IGN || mask & bit(sig) != 0 {
@@ -1076,7 +1133,10 @@ fn guest_fault(
     });
     let cpu = Cpu::from_mc(m);
     let t = Taken { info: f.info, act };
-    frame(th, &cpu, &t, mask, f.esr, f.fault_address).to_mc(m);
+    let Some(entry) = frame(th, &cpu, &t, mask, f.esr, f.fault_address) else {
+        return Some(sig);
+    };
+    entry.to_mc(m);
     None
 }
 
@@ -1308,7 +1368,9 @@ pub fn rt_sigtimedwait(a: [u64; 6]) -> i64 {
         if let Some(i) = dequeue(th, set) {
             if info != 0 {
                 // SAFETY: guest siginfo buffer.
-                user_try!(unsafe { i.write(info) });
+                if let Err(error) = unsafe { i.write(info) } {
+                    break -(error as i64);
+                }
             }
             break i.signo as i64;
         }
@@ -1883,6 +1945,70 @@ mod host_errno_tests {
         assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 0);
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+
+    #[test]
+    fn retired_guest_state_never_receives_a_handler() {
+        const TEST: &str = "sys::signal::exit_tests::retired_guest_state_never_receives_a_handler";
+        let mode = std::env::args().find(|a| a == "__thread_exit" || a == "__group_exit");
+        let Some(mode) = mode else {
+            for mode in ["__thread_exit", "__group_exit"] {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--skip", mode, "--nocapture"])
+                    .spawn()
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        assert!(status.success(), "{mode}: {status}");
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        child.kill().unwrap();
+                        child.wait().unwrap();
+                        panic!("{mode}: delivery onto retired state hung");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            return;
+        };
+
+        let ctx = context::init_thread();
+        install_host_handlers();
+        let th = thread::current().unwrap();
+        // A pending handler was already taken by an interrupted syscall.
+        ACTIONS.lock().unwrap()[9].handler = 0x1234;
+        ACTIONS.lock().unwrap()[10].handler = 0x1234;
+        assert_eq!(send_thread(th, Siginfo::new(10, sigframe::SI_TKILL)), 0);
+        assert!(interrupted(th));
+        if mode == "__thread_exit" {
+            th.begin_exit();
+        } else {
+            thread::begin_group_exit();
+        }
+        // The guest stack is gone. Both syscall-exit and real host-carrier
+        // delivery must leave it untouched, including the stashed handler.
+        unsafe {
+            (*ctx).sp = 1;
+            (*ctx).pc = 0x5678;
+            (*ctx).in_host = 0;
+            linux_abi_deliver(ctx);
+            assert_eq!(libc::pthread_kill(libc::pthread_self(), CARRIER), 0);
+            assert_eq!(((*ctx).sp, (*ctx).pc), (1, 0x5678));
+            let mut mc: DarwinMcontext = std::mem::zeroed();
+            mc.pc = 0x5678;
+            mc.sp = 1;
+            mc.esr = 0x9200_0006;
+            // A genuine fault still takes the fatal path, never a guest
+            // handler or an ignored/retried SIGSEGV.
+            assert_eq!(guest_fault(&*ctx, libc::SIGSEGV, 1, 0, &mut mc), Some(11));
+        }
     }
 }
 

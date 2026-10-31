@@ -73,6 +73,7 @@ pub struct Sched {
 
 pub struct Thread {
     pub tid: i32,
+    exiting: AtomicBool,
     reservation: Mutex<Option<super::pidns::tids::Reservation>>,
     /// The host pthread_t; 0 until the thread runs.
     pthread: AtomicUsize,
@@ -104,6 +105,7 @@ impl Thread {
     ) -> Self {
         Thread {
             tid,
+            exiting: AtomicBool::new(false),
             reservation: Mutex::new(reservation),
             pthread: AtomicUsize::new(0),
             cpu_user: AtomicU64::new(0),
@@ -134,10 +136,18 @@ impl Thread {
     /// so the host thread cannot finish exiting meanwhile.
     pub fn raise_host_locked(&self, sig: i32) {
         let p = self.pthread.load(SeqCst);
-        if p != 0 {
+        if p != 0 && self.accepts_signals() {
             // SAFETY: the pthread is alive while it is in the table.
             unsafe { libc::pthread_kill(p as libc::pthread_t, sig) };
         }
+    }
+
+    pub fn accepts_signals(&self) -> bool {
+        !self.exiting.load(SeqCst) && !group_exiting()
+    }
+
+    pub fn begin_exit(&self) {
+        self.exiting.store(true, SeqCst);
     }
 }
 
@@ -150,10 +160,21 @@ static EXITED_CPU: Mutex<(u64, u64)> = Mutex::new((0, 0));
 /// The main thread's exit code once it has called `exit` (the process
 /// exits with it when the last thread does), else -1.
 static LEADER_EXIT: AtomicI32 = AtomicI32::new(-1);
+static GROUP_EXIT: AtomicBool = AtomicBool::new(false);
 /// For host signals that land on a non-guest thread: the main thread's
 /// pthread and record, reachable without locks.
 static MAIN_PTHREAD: AtomicUsize = AtomicUsize::new(0);
 static MAIN_THREAD: AtomicUsize = AtomicUsize::new(0);
+
+pub fn group_exiting() -> bool {
+    GROUP_EXIT.load(SeqCst)
+}
+
+pub fn begin_group_exit() {
+    // exit_group(2) ends the whole group; signal(7) handlers must not enter
+    // guest state while process teardown is in progress.
+    GROUP_EXIT.store(true, SeqCst);
+}
 
 pub fn with_table<R>(f: impl FnOnce(&HashMap<i32, Arc<Thread>>) -> R) -> R {
     f(&THREADS.read().unwrap_or_else(|e| e.into_inner()))
@@ -445,6 +466,9 @@ pub fn poke_main_from_handler(sig: i32) {
     let main = MAIN_THREAD.load(SeqCst) as *const Thread;
     // SAFETY: the main thread's record is never freed (see `exit`).
     if let Some(th) = unsafe { main.as_ref() } {
+        if !th.accepts_signals() {
+            return;
+        }
         th.sig.attn.store(1, SeqCst);
         th.park.unpark();
     }
@@ -699,6 +723,7 @@ extern "C" fn thread_start(arg: *mut libc::c_void) -> *mut libc::c_void {
 pub fn exit(a: [u64; 6]) -> ! {
     let code = a[0] as i32 & 0xff;
     let Some(th) = current() else { exit_group(a) };
+    th.begin_exit();
     // No host signal handler may run on this thread from here on.
     // SAFETY: blocking signals for the calling thread.
     unsafe {
@@ -761,6 +786,7 @@ pub fn exit_group(a: [u64; 6]) -> ! {
 }
 
 fn end_process(code: i32) -> ! {
+    begin_group_exit();
     if let Err(error) = super::fuse_cache::shutdown_writeback() {
         crate::diag!("FUSE exit writeback failed: Linux errno {error}");
     }

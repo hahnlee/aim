@@ -737,6 +737,85 @@ static void test_sigwait(void) {
   printf("ok %s\n", t);
 }
 
+// A consumed signal must not leave a host carrier racing the next guest
+// fault (ART's implicit null checks use this same sigreturn path).
+enum { WAIT_FAULT_ROUNDS = 4096 };
+static _Atomic int wait_fault_ready, wait_fault_done, wait_fault_count;
+extern char wait_fault_pc[], wait_fault_resume[];
+
+static void wait_fault_handler(int sig, siginfo_t *si, void *arg) {
+  (void)sig;
+  ucontext_t *uc = arg;
+  if (uc->uc_mcontext.pc != (uintptr_t)wait_fault_pc || si->si_addr != NULL) _exit(77);
+  atomic_fetch_add(&wait_fault_count, 1);
+  uc->uc_mcontext.pc = (uintptr_t)wait_fault_resume;
+}
+
+static void *wait_then_fault(void *arg) {
+  (void)arg;
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGQUIT);
+  for (int i = 1; i <= WAIT_FAULT_ROUNDS; i++) {
+    atomic_store(&wait_fault_ready, i);
+    int sig;
+    if (sigwait(&set, &sig) || sig != SIGQUIT) _exit(78);
+    __asm__ volatile("mov x9, #0\n.globl wait_fault_pc\nwait_fault_pc:\nldr x9, [x9]\n"
+                     ".globl wait_fault_resume\nwait_fault_resume:" ::: "x9", "memory");
+    atomic_store(&wait_fault_done, i);
+  }
+  return NULL;
+}
+
+static void test_sigwait_fault_race(void) {
+  const char *t = "sigwait_fault_race";
+  alarm(15);
+  struct sigaction sa = {.sa_sigaction = wait_fault_handler, .sa_flags = SA_SIGINFO}, old_action;
+  CHECK(t, sigaction(SIGSEGV, &sa, &old_action) == 0, "sigaction");
+  sigset_t set, old_mask;
+  sigemptyset(&set);
+  sigaddset(&set, SIGQUIT);
+  CHECK(t, pthread_sigmask(SIG_BLOCK, &set, &old_mask) == 0, "block");
+  atomic_store(&wait_fault_ready, 0);
+  atomic_store(&wait_fault_done, 0);
+  atomic_store(&wait_fault_count, 0);
+  pthread_t th;
+  CHECK(t, pthread_create(&th, NULL, wait_then_fault, NULL) == 0, "create");
+  for (int i = 1; i <= WAIT_FAULT_ROUNDS; i++) {
+    while (atomic_load(&wait_fault_ready) < i) sched_yield();
+    usleep(10);
+    CHECK(t, pthread_kill(th, SIGQUIT) == 0, "send");
+    while (atomic_load(&wait_fault_done) < i) sched_yield();
+  }
+  CHECK(t, pthread_join(th, NULL) == 0, "join");
+  CHECK(t, atomic_load(&wait_fault_count) == WAIT_FAULT_ROUNDS, "lost a synchronous fault");
+  pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+  sigaction(SIGSEGV, &old_action, NULL);
+  alarm(0);
+  printf("ok %s (%d faults)\n", t, WAIT_FAULT_ROUNDS);
+}
+
+static void test_sigwait_bad_info(void) {
+  const char *t = "sigwait_bad_info";
+  struct sigaction sa = {.sa_handler = usr2_handler}, old_action;
+  CHECK(t, sigaction(SIGUSR2, &sa, &old_action) == 0, "sigaction");
+  sigset_t set, old_mask;
+  sigemptyset(&set);
+  sigaddset(&set, SIGUSR2);
+  CHECK(t, pthread_sigmask(SIG_BLOCK, &set, &old_mask) == 0, "block");
+  atomic_store(&usr2_count, 0);
+  CHECK(t, raise(SIGUSR2) == 0, "queue");
+  struct timespec poll = {0, 0};
+  long r = syscall(SYS_rt_sigtimedwait, &set, (void *)1, &poll, sizeof(set));
+  CHECK(t, r == -1 && errno == EFAULT, "bad info: %ld errno %d", r, errno);
+  CHECK(t, raise(SIGUSR2) == 0, "queue again");
+  CHECK(t, pthread_sigmask(SIG_UNBLOCK, &set, NULL) == 0, "unblock");
+  CHECK(t, atomic_load(&usr2_count) == 1, "wait state survived EFAULT");
+  pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+  sigaction(SIGUSR2, &old_action, NULL);
+  printf("ok %s\n", t);
+}
+
 // Thread-directed blocked signals stay with their target, including before wait.
 struct directed_wait {
   _Atomic int ready, release;
@@ -1083,6 +1162,8 @@ static const struct test tests[] = {
     {"signal_storm_delayed", test_signal_storm_delayed},
     {"signal_pending_storm", test_signal_pending_storm},
     {"sigwait_sigqueue", test_sigwait},
+    {"sigwait_fault_race", test_sigwait_fault_race},
+    {"sigwait_bad_info", test_sigwait_bad_info},
     {"directed_sigquit_join", test_directed_sigquit_join},
     {"sigsuspend", test_sigsuspend},
     {"sa_restart", test_sa_restart},
