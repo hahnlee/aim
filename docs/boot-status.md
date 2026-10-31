@@ -247,7 +247,7 @@ permission owner persists and publishes restricted exemptions with its usual
 revocation effects. Host Java, transport, permission-publication and lifecycle
 checks pass; no guest boot was run. Preferred per-user runtime permission reset
 also uses the Java bridge's local adapter and the native permission owner: one
-mutation over non-APEX packages persists and publishes grants before callbacks
+mutation over non-APEX packages requests persistence and publishes grants before callbacks
 and revocation kills. Cross-profile preferred access retains UserManagerService's
 Java maximum-access rule over the user owner's UserProperties (user 0 on this
 device; absent users contribute ACCESS_LEVEL_ALL). Both boundaries admit only
@@ -631,6 +631,19 @@ all four policy reads, dead query owners, early bindings, failed readiness and
 the shared-UID contacts grant. Normal boots take 10.263 s from a fresh
 template clone and 6.863 s on its second boot, with one uid-1000 RuntimeInit
 start each. The forcing code is removed (2026-10-29).
+Permission flag mutations retain live access and publish grant/GID deltas with
+native snapshot version advancement before their per-change listeners and effects.
+Access writes coalesce for one second, bounded by two seconds from the first
+pending change; synchronous replacements and shutdown flush them. Audio refreshes
+only when a monitored effective grant changes (#2510). Owner/query host checks
+and three alternating empty-userdata boots per cohort pass: median boot completion
+falls from 57.496 to 12.516 s and default grants from 47.518 to 2.892 s. Two warm
+boots each from identical warmed-data clones have medians 7.944/7.098 s before/after,
+with no default-grant call; post-admission contention limits the warm conclusion.
+Earlier independently evolved warm volumes measured
+6.956/7.781 s; both comparisons and the sampling limitation remain in the task
+report. The original image and vendor jar are unchanged (2026-10-31).
+
 The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to

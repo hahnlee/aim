@@ -1992,12 +1992,20 @@ impl Capture {
             .version()
             .checked_add(1)
             .ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_after(
-            &self.scan,
-            self.scan.owner().clone(),
-            self.scan.usage().clone(),
-            version,
-        )
+        let store = if access
+            .as_ref()
+            .zip(self.context.access.as_ref())
+            .is_some_and(|(after, before)| Arc::ptr_eq(&after.system, &before.system))
+        {
+            super::Store::prepare_unchanged_metadata_store(&self.scan)
+        } else {
+            super::Store::new_replica_after(
+                &self.scan,
+                self.scan.owner().clone(),
+                self.scan.usage().clone(),
+                version,
+            )
+        }
         .map_err(|error| format!("permission refresh replica: {error:?}"))?;
         let capture = self.permission_view(store.capture(), bridge, access)?;
         Ok(PackageUpdate { store, capture })
@@ -2009,6 +2017,11 @@ impl Capture {
         bridge: &crate::package::bootstrap::Bridge,
         access: Option<Arc<crate::package::permissions::AccessView>>,
     ) -> Result<Arc<Self>, String> {
+        if let (Some(after), Some(before)) = (&access, &self.context.access)
+            && Arc::ptr_eq(&after.system, &before.system)
+        {
+            return self.with_permission_delta(scan, after.clone());
+        }
         let mut context = (*self.context).clone();
         context.scan_version = scan.version();
         let mut context = bridge
@@ -2428,6 +2441,108 @@ impl Capture {
             .ok_or("runtime query user identity differs")?;
         entry.unlocking_or_unlocked = true;
         state.generation = scan.version();
+        Ok(Arc::new(Self {
+            scan,
+            state: Arc::new(state),
+            context: Arc::new(context),
+            domains: self.domains.clone(),
+            frozen: self.frozen.clone(),
+            resolver: Default::default(),
+        }))
+    }
+}
+
+impl Capture {
+    /// Runtime grants do not change the package scan or its Java replica.
+    fn with_permission_delta(
+        &self,
+        scan: Arc<super::Snapshot>,
+        access: Arc<crate::package::permissions::AccessView>,
+    ) -> Result<Arc<Self>, String> {
+        let before = self
+            .context
+            .access
+            .as_ref()
+            .ok_or("permission access base absent")?;
+        if !Arc::ptr_eq(&before.system, &access.system) {
+            return Err("permission definitions changed during flag mutation".into());
+        }
+        let ids: BTreeSet<_> = before
+            .user0
+            .app_id_permissions
+            .iter()
+            .chain(&access.user0.app_id_permissions)
+            .filter(|(id, _)| {
+                before
+                    .user0
+                    .app_id_permissions
+                    .iter()
+                    .find(|(i, _)| i == id)
+                    .map(|(_, f)| f)
+                    != access
+                        .user0
+                        .app_id_permissions
+                        .iter()
+                        .find(|(i, _)| i == id)
+                        .map(|(_, f)| f)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let mut context = (*self.context).clone();
+        let mut delta = context.clone();
+        delta.packages.retain(|(name, factory), inputs| {
+            let ps = if *factory {
+                self.state.disabled_system_packages.get(name)
+            } else {
+                self.state.packages.get(name)
+            };
+            ids.contains(
+                &ps.and_then(|p| p.shared_user_app_id)
+                    .unwrap_or(inputs.app_id),
+            )
+        });
+        let config = &self
+            .domains
+            .as_ref()
+            .ok_or("permission projection config absent")?
+            .config;
+        access.project_context(&mut delta, &self.state, config);
+        let mut state = (*self.state).clone();
+        for ((name, factory), inputs) in delta.packages {
+            let target = if factory {
+                &mut state.disabled_system_packages
+            } else {
+                &mut state.packages
+            };
+            let ps = target.get_mut(&name).ok_or("permission package absent")?;
+            for (user, values) in &inputs.users {
+                let user = ps.users.get_mut(user).ok_or("permission user absent")?;
+                user.gids = values.gids.clone();
+                user.granted_permissions = values.granted_permissions.clone();
+            }
+            context.packages.insert((name, factory), inputs);
+        }
+        if let Some(owners) = &mut state.uid_owners {
+            for owner in owners.values_mut() {
+                if let model::UidOwner::Package(ps) = owner {
+                    if self.state.packages.get(&ps.name) == Some(ps.as_ref()) {
+                        **ps = state.packages[&ps.name].clone();
+                    }
+                }
+            }
+        }
+        for group in state.shared_users.values_mut() {
+            if let Some(members) = &mut group.native_packages {
+                for ps in members {
+                    if self.state.packages.get(&ps.name) == Some(ps) {
+                        *ps = state.packages[&ps.name].clone();
+                    }
+                }
+            }
+        }
+        context.scan_version = scan.version();
+        state.generation = scan.version();
+        context.access = Some(access);
         Ok(Arc::new(Self {
             scan,
             state: Arc::new(state),
