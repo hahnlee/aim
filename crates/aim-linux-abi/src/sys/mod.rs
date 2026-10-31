@@ -96,6 +96,7 @@ mod procrec;
 mod proxy_file;
 mod pstate;
 mod pty_owner;
+mod tracefs;
 pub(crate) mod verity_control;
 pub(crate) use pstate::initialize_umask;
 mod ptimer;
