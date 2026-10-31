@@ -3,7 +3,6 @@
 use super::*;
 use crate::package::scan::permission_admissions::Admission;
 mod implicit;
-mod signature;
 #[cfg(test)]
 mod update_tests;
 mod upgrade;
@@ -392,7 +391,7 @@ fn reconcile(
                         // AppIdPermissionPolicy.kt:1026-1030.
                         true
                     } else {
-                        policy.grant(state, &requesters, permission, declaration)?
+                        policy.grant(state, &requesters, permission, declaration, unsupported)?
                     };
                     let flags = if granted { PROTECTION_GRANTED } else { 0 };
                     if is_development(permission) {
@@ -632,7 +631,7 @@ fn runtime_flags(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::PersistedAccess;
     use super::*;
     use crate::package::{
@@ -641,7 +640,11 @@ mod tests {
         settings::Signatures,
     };
 
-    pub(super) fn declaration(name: &str, level: i32, tree: bool) -> Declaration {
+    pub(in crate::app_host::permission_manager) fn declaration(
+        name: &str,
+        level: i32,
+        tree: bool,
+    ) -> Declaration {
         Declaration {
             component: Component {
                 name: name.into(),
@@ -653,7 +656,7 @@ mod tests {
             ..Default::default()
         }
     }
-    pub(super) fn package(
+    pub(in crate::app_host::permission_manager) fn package(
         name: &str,
         id: i32,
         definitions: Vec<Declaration>,
@@ -1075,7 +1078,8 @@ mod tests {
                     &state,
                     &[&state.packages["client"]],
                     &permission,
-                    Some(&declaration)
+                    Some(&declaration),
+                    unsupported,
                 )
                 .unwrap()
         );
@@ -1092,7 +1096,8 @@ mod tests {
                     &state,
                     &[&state.packages["client"]],
                     &permission,
-                    Some(&declaration)
+                    Some(&declaration),
+                    unsupported,
                 )
                 .unwrap()
         );

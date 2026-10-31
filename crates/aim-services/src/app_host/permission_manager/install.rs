@@ -60,11 +60,20 @@ impl PermissionManager {
         }
         let base = self.retained_access()?;
         let installs = decode(&capture, &before, installation)?;
-        let access = prepare(&base, capture.state(), &installs)?;
         let config =
             crate::package::system_config::SystemConfig::read(self.host.root()?, &|name| {
                 self.host.property(name)
             });
+        let policy = signature::Policy {
+            allowlist: config.permission_allowlist.clone(),
+            debuggable: self.host.property("ro.debuggable").as_deref() == Some("1"),
+            control_privapp_permissions: self
+                .host
+                .property("ro.control_privapp_permissions")
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+        let access = prepare(&base, capture.state(), &installs, &policy)?;
         let mut out = Parcel::new();
         aim_service_aidl::write_int_array(&mut out, Some(&[0]));
         out.write_i32(installs.len() as i32);
@@ -236,6 +245,7 @@ fn prepare(
     base: &permissions::AccessView,
     state: &State,
     installs: &[Install],
+    policy: &signature::Policy,
 ) -> Result<Arc<permissions::AccessView>, Exception> {
     let mut system = (*base.system).clone();
     let mut user = (*base.user0).clone();
@@ -368,7 +378,7 @@ fn prepare(
             }) {
                 return Err(unsupported("restricted permission policy"));
             }
-            if is_role(permission) {
+            if is_runtime(permission) && is_role(permission) {
                 return Err(unsupported("role permission grants"));
             }
             let flags = match permission.protection_level & PROTECTION_MASK_BASE {
@@ -390,7 +400,18 @@ fn prepare(
                     old & (((1 << 24) - 1)
                         & !(INSTALL_GRANTED | INSTALL_REVOKED | PROTECTION_GRANTED))
                 }
-                _ => return Err(unsupported("signature/internal protection policy")),
+                PROTECTION_SIGNATURE | 4 => {
+                    let granted = policy.grant(state, &[ps], permission, declared, unsupported)?;
+                    let mut flags = if granted { PROTECTION_GRANTED } else { 0 };
+                    if is_development(permission) {
+                        flags |= old & RUNTIME_GRANTED;
+                    }
+                    if is_role(permission) {
+                        flags |= old & (ROLE | RUNTIME_GRANTED);
+                    }
+                    flags
+                }
+                _ => return Err(unsupported("unknown protection level")),
             };
             let flags = if permission.protection_level & 0x40 != 0 && !is_runtime(permission) {
                 flags | (old & (ROLE | USER_SET))
@@ -499,6 +520,10 @@ impl permissions::AccessView {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "install_protection_tests.rs"]
+mod protection_tests;
 
 #[cfg(test)]
 mod tests {
