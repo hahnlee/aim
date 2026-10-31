@@ -246,7 +246,6 @@ impl Fixture {
                 focus_callbacks: Arc::default(),
             },
         );
-        self.host.update_window_focus();
         let session = Session {
             host: self.host.clone(),
             uid: 10100,
@@ -258,6 +257,8 @@ impl Fixture {
         p.write_i32(handle as i32);
         p.write_binder(Some(id));
         self.host.process.transact(0, 2, &p, false).unwrap();
+        // Finish setup before publishing callbacks that can reenter windows.
+        self.host.update_window_focus();
         if registered {
             self.register(id, true);
         }
@@ -322,8 +323,68 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.remote.shutdown().unwrap();
-        self.host.process.shutdown().unwrap();
+        let remote = self.remote.shutdown();
+        let host = self.host.process.shutdown();
+        for result in [remote, host] {
+            if let Err(error) = result {
+                if std::thread::panicking() {
+                    eprintln!("window fixture cleanup: {error}");
+                } else {
+                    panic!("window fixture cleanup: {error}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fixture_cleanup_reports_looper_failure_and_preserves_unwinding() {
+    struct Panics(Sender<()>);
+    impl Service for Panics {
+        fn descriptor(&self) -> &str {
+            "test.focus.Panics"
+        }
+        fn transact(&self, _: &mut Call<'_>) -> Reply {
+            self.0.send(()).unwrap();
+            panic!("original callback failure");
+        }
+    }
+    for unwinding in [false, true] {
+        let f = Fixture::new();
+        let remote = f.remote.clone();
+        let host = f.host.process.clone();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (send, entered) = mpsc::channel();
+            let Binder::Local(ptr) = remote.add_service(Arc::new(Panics(send))) else {
+                unreachable!()
+            };
+            let mut p = Parcel::new();
+            p.write_i64(ptr as i64);
+            let received = host.transact(0, 1, &p, false).unwrap();
+            let callback = received
+                .retain_remote_binder(received.reader().read_binder().unwrap().unwrap())
+                .unwrap();
+            callback.transact(1, &Parcel::new(), true).unwrap();
+            entered.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(remote.shutdown().is_err());
+            if unwinding {
+                panic!("original fixture failure");
+            }
+            drop(f);
+        }))
+        .unwrap_err();
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .unwrap();
+        if unwinding {
+            assert_eq!(message, "original fixture failure");
+        } else {
+            assert!(message.contains("native Binder looper panicked"));
+        }
+        assert!(remote.shutdown().is_err());
+        assert!(host.shutdown().is_ok());
     }
 }
 
