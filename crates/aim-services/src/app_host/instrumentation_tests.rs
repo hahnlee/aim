@@ -408,6 +408,196 @@ fn drop_permissions(host: &Arc<AppHost>, caller: u32) -> Result<(), Exception> {
     .unwrap()
 }
 
+/// ContextImpl -> PermissionManager.sPermissionCache -> activity#258,
+/// android-16.0.0_r1. Model the client cache; exercise the real Binder handlers
+/// and the synchronous nonce-invalidation callback, including session cleanup.
+#[test]
+fn system_context_permission_cache_follows_shell_delegation() {
+    use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    const MANAGE: &str = "android.permission.MANAGE_SAFETY_CENTER";
+    const UID: i32 = 10213;
+    struct Nonce(Arc<AtomicU64>);
+    impl Service for Nonce {
+        fn descriptor(&self) -> &str {
+            bridge::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!((call.sender_euid, call.flags & 1), (1000, 0));
+            assert_eq!(call.code, bridge::INVALIDATE_PACKAGE_INFO_CACHE);
+            bridge::InvalidatePackageInfoCache::read(&mut call.data)?;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let mut p = Parcel::new();
+            bridge::write_invalidate_package_info_cache_reply(&mut p);
+            Ok(p)
+        }
+    }
+    with(|host, publish, export| {
+        publish(&mut |p| manifest(p, None));
+        let system = host.package_system().unwrap();
+        let base = system.capture_package_queries().unwrap();
+        let mut owner = base.scan().owner().clone();
+        owner
+            .settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "p")
+            .unwrap()
+            .app_id = UID;
+        let identity = owner.identities.ids.remove(10100).unwrap();
+        owner
+            .identities
+            .ids
+            .register_existing(UID, identity)
+            .unwrap();
+        let mut code = (**base.state().packages["p"].pkg.as_ref().unwrap()).clone();
+        code.uid = UID;
+        owner.load_test_code(code);
+        let groups = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Default::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(
+                &[0],
+                ["p", "q"]
+                    .map(|name| ((name.into(), false), Default::default()))
+                    .into(),
+                groups,
+            )
+            .unwrap();
+        owner
+            .capture_install_permissions_fixed(
+                ["p", "q"].map(|name| ((name.into(), false), false)).into(),
+            )
+            .unwrap();
+        owner
+            .assign_seinfo_at_boot(
+                &crate::package::owner::seinfo::Policy::parse(&[]).unwrap(),
+                &mut |_: &pkg::AndroidPackage| Ok(36),
+            )
+            .unwrap();
+        owner
+            .complete_library_dependencies(&|_, _| {
+                Ok(crate::package::libraries::Policy {
+                    enforce_native_dependencies: false,
+                    sdk_library_independence: false,
+                })
+            })
+            .unwrap();
+        owner
+            .rebuild_shared_processes_from_native_members()
+            .unwrap();
+        owner
+            .capture_replica_runtime(
+                ["p", "q"]
+                    .map(|name| {
+                        (
+                            (name.into(), false),
+                            crate::package::scan::ReplicaRuntime {
+                                usage: [0; 8],
+                                seinfo: owner.seinfo(name).unwrap().map(str::to_owned),
+                                override_seinfo: None,
+                                library_files: vec![],
+                                libraries: vec![],
+                            },
+                        )
+                    })
+                    .into(),
+            )
+            .unwrap();
+        let mut context = (**base.context()).clone();
+        context.scan_version = base.scan().version() + 1;
+        context
+            .packages
+            .get_mut(&("p".into(), false))
+            .unwrap()
+            .app_id = UID;
+        context.system.system_permissions = Some([(2000, [MANAGE.into()].into())].into());
+        system
+            .publish_package_scan_with_queries(
+                &system.package_bootstrap().unwrap(),
+                Some(base.scan()),
+                owner,
+                base.scan().usage().clone(),
+                context,
+            )
+            .unwrap();
+        let nonce = Arc::new(AtomicU64::new(4));
+        let java = export(Arc::new(Nonce(nonce.clone())));
+        host.attach_package_bootstrap_java(Some(java.binder()))
+            .unwrap();
+        let cached = RefCell::new(HashMap::new());
+        let check = |permission: &str, uid| {
+            let key = (permission.to_owned(), uid);
+            let generation = nonce.load(Ordering::SeqCst);
+            if let Some(&(n, result)) = cached.borrow().get(&key) {
+                if n == generation {
+                    return result;
+                }
+            }
+            let mut p = Parcel::new();
+            am::CheckPermissionForDevice {
+                permission: Some(permission.into()),
+                pid: 42,
+                uid,
+                device_id: 0,
+            }
+            .write(&mut p);
+            let reply = call(host, 1000, am::CHECK_PERMISSION_FOR_DEVICE, &p);
+            let result = am::read_check_permission_for_device_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap();
+            cached.borrow_mut().insert(key, (generation, result));
+            result
+        };
+        let (w, ui, t, rx) = recorders(host, export);
+        let who = t.binder();
+        insert(host, 100, Some(t), "p");
+        {
+            let mut apps = host.apps.lock().unwrap();
+            let app = apps.get_mut(&100).unwrap();
+            app.uid = UID as u32;
+            app.package_uid = UID as u32;
+        }
+        assert!(start(host, 2000, request(8, w.binder(), ui.binder())).unwrap());
+        recv(&rx);
+        assert_eq!(check(MANAGE, UID), -1); // Seed the denial before adoption.
+        for names in [None, Some(&[MANAGE][..])] {
+            adopt(host, 2000, UID, names).unwrap();
+            assert_eq!(check(MANAGE, UID), 0);
+            assert_eq!(check(MANAGE, UID + 1), -1);
+            assert_eq!(check("not.a.shell.permission", UID), -1);
+            adopt(host, 2000, UID, Some(&[])).unwrap();
+            assert_eq!(check(MANAGE, UID), -1); // Replacing the list invalidates too.
+            adopt(host, 2000, UID, names).unwrap();
+            assert_eq!(check(MANAGE, UID), 0);
+            drop_permissions(host, 2000).unwrap();
+            assert_eq!(check(MANAGE, UID), -1);
+        }
+        for death in [false, true] {
+            adopt(host, 2000, UID, None).unwrap();
+            assert_eq!(check(MANAGE, UID), 0);
+            if death {
+                host.apps.lock().unwrap().get_mut(&100).unwrap().pid = 42;
+                host.process_died(100, 42);
+            } else {
+                results(host, who, Some(-1), None).unwrap();
+            }
+            assert_eq!(check(MANAGE, UID), -1);
+            recv(&rx);
+            recv(&rx);
+            if !death {
+                assert!(start(host, 2000, request(8, w.binder(), ui.binder())).unwrap());
+                recv(&rx);
+            }
+        }
+    });
+}
+
 /// UiAutomationTest.testAdoptAllShellPermissions / testAdoptSomeShellPermissions,
 /// plus AccessCheckDelegateHelper admission and AppOps delegation (Android 16).
 #[test]
