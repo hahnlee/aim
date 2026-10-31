@@ -145,6 +145,9 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+Launcher package/UID reads retain the starting caller and Android 16 access rules
+(#2508; host Binder regressions, no guest boot rerun, 2026-10-31).
+
 A launching activity's window theme is read through file-only APK access and
 an indexed resource table that decodes only the entries it needs (#2441),
 with resolved styles keyed by package, user, code version, theme and

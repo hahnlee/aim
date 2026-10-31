@@ -87,6 +87,14 @@ impl Service for Token {
     }
 }
 
+/// `ActivityRecord`'s starting caller, retained across process restarts.
+#[derive(Clone)]
+pub struct LaunchedFrom {
+    pub uid: i32,
+    pub package: Option<String>,
+    pub share_identity: bool,
+}
+
 /// An activity started in an app's process.
 pub struct ActivityRecord {
     pub package: String,
@@ -110,6 +118,7 @@ pub struct ActivityRecord {
     pub style: WindowStyle,
     pub intent: super::activity_start::LaunchIntent,
     pub referrer: String,
+    pub launched_from: LaunchedFrom,
     /// Its task (the stack's key).
     pub task: i32,
     /// Who asked for its result, and how (`resultTo`, `resultWho`,
@@ -833,6 +842,7 @@ impl Service for ActivityTaskManager {
                 }
                 let args = super::activity_start::StartArgs {
                     caller: a.caller,
+                    calling_package: a.calling_package,
                     intent: a.intent,
                     resolved_type: a.resolved_type,
                     result_to: a.result_to,
@@ -1083,6 +1093,56 @@ impl ActivityClientController {
         call.data.read_binder().map_err(|_| BAD_VALUE)
     }
 
+    /// Android 16 `getUid/getPackage`, `isInternalCallerGetLaunchedFrom`.
+    fn launched_from(
+        &self,
+        uid: i32,
+        token: Option<Binder>,
+    ) -> Result<Option<LaunchedFrom>, Exception> {
+        const ACCESS_SHARED_IDENTITY: i64 = 259_743_961;
+        let Some(from) = self.0.activities.with(token, |r| r.launched_from.clone()) else {
+            return Ok(None);
+        };
+        if uid.rem_euclid(100_000) == 1000 {
+            return Ok(Some(from));
+        }
+        let (state, resolution) = self.0.packages()?;
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let names = query
+            .packages_for_uid(uid)
+            .map_err(|e| self.0.unimplemented_named("activity", e.0))?;
+        let package = names
+            .iter()
+            .flatten()
+            .flatten()
+            .find_map(|n| state.packages.get(n)?.pkg.as_deref());
+        let signed =
+            package.is_some_and(|p| p.is(crate::package::pkg::booleans::SIGNED_WITH_PLATFORM_KEY));
+        let installer = if signed || package.is_none() {
+            false
+        } else {
+            let roles = state.system.roles.as_ref().ok_or_else(|| {
+                self.0
+                    .unimplemented_named("activity", "KnownPackages owner unavailable")
+            })?;
+            roles
+                .known_packages(&query, 2, uid / 100_000)
+                .map_err(|e| self.0.unimplemented_named("activity", e.0))?
+                .first()
+                .and_then(|n| n.as_deref())
+                == package.map(|p| p.package_name.as_str())
+        };
+        Ok((signed
+            || installer
+            || (self.0.change_enabled(ACCESS_SHARED_IDENTITY, uid)?
+                && (from.share_identity || from.uid == uid)))
+            .then_some(from))
+    }
+
     fn report(&self, token: Option<Binder>, what: &str, f: impl FnOnce(&mut ActivityRecord)) {
         let host = &self.0;
         let elapsed = host.activities.with(token, |r| {
@@ -1292,6 +1352,27 @@ impl Service for ActivityClientController {
                         }),
                 )
             }
+            acc::GET_LAUNCHED_FROM_UID | acc::GET_LAUNCHED_FROM_PACKAGE => {
+                let token = Self::token(call)?;
+                reply(
+                    self.launched_from(call.sender_euid as i32, token)
+                        .map(|from| {
+                            let mut p = Parcel::new();
+                            if call.code == acc::GET_LAUNCHED_FROM_UID {
+                                acc::write_get_launched_from_uid_reply(
+                                    &mut p,
+                                    from.map_or(-1, |f| f.uid),
+                                );
+                            } else {
+                                acc::write_get_launched_from_package_reply(
+                                    &mut p,
+                                    &from.and_then(|f| f.package),
+                                );
+                            }
+                            p
+                        }),
+                )
+            }
             acc::GET_CALLING_ACTIVITY | acc::GET_CALLING_PACKAGE => {
                 let token = Self::token(call)?;
                 let calling = self.0.calling_activity(token);
@@ -1491,5 +1572,89 @@ mod tests {
         let mut p = Parcel::new();
         ConfigurationChangeItem { config }.write_fields(&mut p);
         assert_eq!(p.data(), expected.data());
+    }
+}
+
+#[cfg(test)]
+mod launched_from_tests {
+    use super::super::activity_start::StartRequest;
+    use super::*;
+
+    fn read(host: &Arc<AppHost>, token: Option<Binder>, uid: u32) -> (i32, Option<String>) {
+        let service = ActivityClientController(host.clone());
+        let mut data = Parcel::new();
+        data.write_interface_token(acc::DESCRIPTOR);
+        data.write_binder(token);
+        let invoke = |code| {
+            service
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 71,
+                    sender_euid: uid,
+                    data: data.reader(),
+                })
+                .unwrap()
+        };
+        let uid =
+            acc::read_get_launched_from_uid_reply(&mut invoke(acc::GET_LAUNCHED_FROM_UID).reader())
+                .unwrap();
+        let package = acc::read_get_launched_from_package_reply(
+            &mut invoke(acc::GET_LAUNCHED_FROM_PACKAGE).reader(),
+        )
+        .unwrap();
+        (uid.unwrap(), package.unwrap())
+    }
+
+    #[test]
+    fn launched_from_records_starting_identity_and_masks_it() {
+        crate::system::with_discovery_session(|host, publish, _| {
+            publish(&mut |p| p.booleans |= crate::package::pkg::booleans::SYSTEM);
+            super::super::package_effects::effect_tests::install_owners(host);
+            let mut last = None;
+            for (uid, package) in [
+                (10101, Some("q")),
+                (1000, Some("android")),
+                (1000, None),
+                (2000, Some("com.android.shell")),
+            ] {
+                let mut request = StartRequest::launcher("p.Main");
+                request.launched_from.uid = uid;
+                request.launched_from.package = package.map(str::to_string);
+                let token = host.new_activity(
+                    1,
+                    10100,
+                    "p",
+                    host.activity_info_of("p", "p.Main").unwrap(),
+                    Default::default(),
+                    7,
+                    request,
+                );
+                let token = Some(Binder::Local(token));
+                last = token;
+                let expected = (uid, package.map(str::to_string));
+                assert_eq!(read(host, token, 1000), expected);
+                assert_eq!(read(host, token, 101000), expected);
+                assert_eq!(read(host, token, 10100), (-1, None));
+                assert_eq!(read(host, token, uid as u32), expected);
+                host.activities
+                    .with(token, |r| r.launched_from.share_identity = true);
+                assert_eq!(read(host, token, 10100), expected);
+            }
+            host.activities
+                .with(last, |r| r.launched_from.share_identity = false);
+            assert_eq!(
+                read(host, last, 10101),
+                (2000, Some("com.android.shell".into()))
+            );
+            publish(&mut |p| p.booleans |= crate::package::pkg::booleans::SIGNED_WITH_PLATFORM_KEY);
+            assert_eq!(
+                read(host, last, 10100),
+                (2000, Some("com.android.shell".into()))
+            );
+            for token in [None, Some(Binder::Local(u64::MAX))] {
+                assert_eq!(read(host, token, 1000), (-1, None));
+            }
+        });
     }
 }

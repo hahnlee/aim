@@ -26,7 +26,7 @@ fn install(replacing: bool) -> bridge::PostInstallPackage {
     }
 }
 
-fn install_owners(host: &Arc<AppHost>) {
+pub(in crate::app_host) fn install_owners(host: &Arc<AppHost>) {
     let system = host.package_system().unwrap();
     let capture = host.package_capture().unwrap();
     let mut context = (**capture.context()).clone();

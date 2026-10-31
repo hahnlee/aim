@@ -677,6 +677,24 @@ impl RawBundle {
         }
     }
 
+    /// `Bundle.getBoolean(key, default)`, including its wrong-type default.
+    pub fn boolean(&self, key: &str, default: bool) -> Result<bool> {
+        let Some((_, parts, _)) = self.entries()? else {
+            return Ok(default);
+        };
+        let Some((_, entry)) = parts.iter().find(|(k, _)| k == key) else {
+            return Ok(default);
+        };
+        let p = entry.parcel();
+        let mut r = p.reader();
+        r.read_string16()?;
+        if r.read_i32()? == 9 {
+            r.read_bool()
+        } else {
+            Ok(default)
+        }
+    }
+
     /// The string `key` holds (`getString`); none for another type.
     pub fn string(&self, key: &str) -> Result<Option<String>> {
         let Some((_, parts, _)) = self.entries()? else {

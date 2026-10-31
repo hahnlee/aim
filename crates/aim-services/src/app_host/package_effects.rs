@@ -1095,4 +1095,4 @@ fn deliver(
 
 #[cfg(test)]
 #[path = "package_effects_tests.rs"]
-mod effect_tests;
+pub(super) mod effect_tests;
