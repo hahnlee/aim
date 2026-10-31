@@ -170,9 +170,12 @@ pub(super) fn transact(host: &AppHost, call: &mut Call<'_>) -> Reply {
         }
         am::STOP_DELEGATE_SHELL_PERMISSION_IDENTITY => {
             am::StopDelegateShellPermissionIdentity::read(&mut call.data)?;
-            shell_caller(call.sender_euid as i32).map(|()| {
-                *host.instrumentation.delegate.lock().unwrap() = None;
+            shell_caller(call.sender_euid as i32).and_then(|()| {
+                let mut delegate = host.instrumentation.delegate.lock().unwrap();
+                *delegate = None;
+                host.notify_permission_cache_changed()?;
                 am::write_stop_delegate_shell_permission_identity_reply(&mut p);
+                Ok(())
             })
         }
         am::GET_DELEGATED_SHELL_PERMISSIONS => {
@@ -234,6 +237,22 @@ fn shell_caller(uid: i32) -> Result<()> {
     }
 }
 impl AppHost {
+    /// AccessCheckDelegateImpl invalidates PackageManager's permission-cache
+    /// nonce on adoption/removal. Apps' native shared memory has no such nonce,
+    /// but aim-system owns a mutable store, so invalidate through its owner.
+    fn notify_permission_cache_changed(&self) -> Result<()> {
+        use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
+        let owner = self.package_bootstrap_java.lock().unwrap().clone();
+        // Without aim-system there is no mutable store or cached answer to retire.
+        let Some(owner) = owner else { return Ok(()) };
+        let mut p = Parcel::new();
+        bridge::InvalidatePackageInfoCache {}.write(&mut p);
+        let p = owner
+            .transact(bridge::INVALIDATE_PACKAGE_INFO_CACHE, &p, false)
+            .map_err(state_error)?;
+        bridge::read_invalidate_package_info_cache_reply(&mut p.reader()).map_err(state_error)?
+    }
+
     fn delegate_shell(
         &self,
         caller: i32,
@@ -261,8 +280,7 @@ impl AppHost {
             package: session.target.item.package_name.clone().unwrap(),
             permissions,
         }));
-        // No package-info cache nonce is published (package_bootstrap.rs).
-        Ok(())
+        self.notify_permission_cache_changed()
     }
     fn start_instrumentation(&self, call: &Call<'_>, a: Request) -> Result<bool> {
         let instrumentation = &self.instrumentation;
@@ -579,12 +597,15 @@ impl AppHost {
         let active = &self.instrumentation.active;
         let mut active = active.lock().unwrap();
         let mut delegate = self.instrumentation.delegate.lock().unwrap();
-        if delegate
+        let invalidated = if delegate
             .as_ref()
             .is_some_and(|d| d.uid == session.target.uid)
         {
             *delegate = None;
-        }
+            self.notify_permission_cache_changed()
+        } else {
+            Ok(())
+        };
         active.remove(&session.target.uid);
         drop(delegate);
         drop(active);
@@ -596,7 +617,7 @@ impl AppHost {
             finished: true,
             shutdown: session.connection.clone(),
         });
-        reset.and(stopped)
+        reset.and(stopped).and(invalidated)
     }
     pub(super) fn retire_instrumentation(&self, session: &Arc<Session>, message: &str) {
         if let Err(e) =

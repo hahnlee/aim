@@ -172,7 +172,11 @@ Other subcommands (including `start`) and wait flush options explicitly fail
 with #2511. Host validation only; no guest/CTS/app run (2026-10-31).
 Shell permission adoption now shares one session-scoped delegate across native
 permission and AppOps checks, with shell/root admission and finish/death cleanup
-(#2511, slice C). Host regressions only; no guest/CTS/app run (2026-10-31).
+(#2511, slice C). Adoption, replacement, drop and finish/death cleanup now
+invalidate aim-system's private permission-cache nonce through the retained
+PackageManager Java owner (#2540); Context cache misses already reach the native
+delegate through activity's checkPermissionForDevice. Host Binder/cache-model
+regressions only; no guest/CTS/app run (2026-10-31).
 SDK sandbox instrumentation still explicitly fails with #2511.
 
 Launcher package/UID reads on both ActivityClientController and ActivityManager
