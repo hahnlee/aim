@@ -200,6 +200,7 @@ impl AppHost {
                 if self.apps.lock().unwrap().values().any(|a| {
                     a.process == super::SYSTEM_PROCESS
                         && a.uid == super::SYSTEM_UID
+                        && a.pid > 0
                         && a.pid == call.sender_pid
                 }) {
                     return Ok(None);

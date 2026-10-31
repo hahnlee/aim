@@ -426,6 +426,7 @@ struct App {
     /// (`ProcessRecord.info`): an external service's, the defining
     /// package's under the client's name and uid.
     application_info: Option<Arc<package::info::ApplicationInfo>>,
+    /// Zero until the zygote result or an early attach supplies the pid.
     pid: i32,
     started: Instant,
     /// `SystemClock.elapsedRealtime` and `uptimeMillis` at the start.
@@ -441,7 +442,7 @@ struct App {
     providers: Vec<package::info::ProviderInfo>,
     /// Whether its services go with it: it crashed too often to keep
     /// them (`ProcessRecord.setRemoved`, without `allowRestart`), or its
-    /// start timed out.
+    /// start timed out, or its pending start was killed.
     removed: bool,
     /// Its start's first frame (`ApplicationStartInfo
     /// .TIMESTAMP_INITIAL_RENDERTHREAD_FRAME`,
@@ -1368,7 +1369,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .values()
-            .find(|a| a.process == process && a.uid == uid)
+            .find(|a| !a.removed && a.process == process && a.uid == uid)
             .map_or(0, |a| a.pid))
     }
 
@@ -1418,7 +1419,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, a)| a.pid == pid)
+            .find(|(_, a)| a.pid > 0 && a.pid == pid)
             .map(|(seq, _)| *seq)
     }
 
@@ -1429,7 +1430,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, a)| a.process == process && a.uid == uid)
+            .find(|(_, a)| !a.removed && a.process == process && a.uid == uid)
             .map(|(seq, a)| (*seq, a.thread.is_some()))
     }
 
@@ -1518,29 +1519,6 @@ impl AppHost {
         let system = self.package_system()?;
         system.internal_add_isolated_uid(uid as i32, SYSTEM_UID as i32, SYSTEM_UID as i32, 0)?;
         let started = Instant::now();
-        let pid = (|| {
-            let mut zygote = self.zygote.lock().unwrap();
-            if zygote.is_none() {
-                let stream = (configured.connect)()
-                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("zygote relay: {e}")))?;
-                *zygote = Some(zygote::Session::new(stream));
-            }
-            zygote.as_mut().unwrap().start(&start).map_err(|e| {
-                *zygote = None;
-                Exception::new(EX_ILLEGAL_STATE, format!("zygote: {e}"))
-            })
-        })();
-        let pid = match pid {
-            Ok(pid) => pid,
-            Err(e) => {
-                system.internal_remove_isolated_uid(uid as i32, SYSTEM_UID as i32, 0)?;
-                return Err(e);
-            }
-        };
-        eprintln!(
-            "app host: Start proc {pid}:{process}/{uid} for {entry} in {:?}",
-            started.elapsed()
-        );
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
@@ -1553,7 +1531,7 @@ impl AppHost {
                 entry_point: Some((entry.to_string(), args.to_vec())),
                 crash_handler: Some(crash_handler),
                 application_info: None,
-                pid,
+                pid: 0,
                 started,
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
@@ -1570,6 +1548,29 @@ impl AppHost {
                 proc_state: PROCESS_STATE_NONEXISTENT,
                 oom_adj: 0,
             },
+        );
+        let pid = (|| {
+            let mut zygote = self.zygote.lock().unwrap();
+            if zygote.is_none() {
+                let stream = (configured.connect)()
+                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("zygote relay: {e}")))?;
+                *zygote = Some(zygote::Session::new(stream));
+            }
+            zygote.as_mut().unwrap().start(&start).map_err(|e| {
+                *zygote = None;
+                Exception::new(EX_ILLEGAL_STATE, format!("zygote: {e}"))
+            })
+        })();
+        let pid = match self.process_start_result(start_seq, pid) {
+            Ok(pid) => pid,
+            Err(e) => {
+                system.internal_remove_isolated_uid(uid as i32, SYSTEM_UID as i32, 0)?;
+                return Err(e);
+            }
+        };
+        eprintln!(
+            "app host: Start proc {pid}:{process}/{uid} for {entry} in {:?}",
+            started.elapsed()
         );
         self.watch_start(start_seq)?;
         Ok(pid)
@@ -1641,17 +1642,6 @@ impl AppHost {
             extra_args: vec![zygote::start_seq_arg(start_seq)],
         };
         let started = Instant::now();
-        let pid = match self.start_webview(&start) {
-            Ok(pid) => pid,
-            Err(e) => {
-                self.isolated_uids.lock().unwrap().used.remove(&uid);
-                return Err(e);
-            }
-        };
-        eprintln!(
-            "app host: Start proc {pid}:{process}/{uid} by the WebView zygote in {:?}",
-            started.elapsed()
-        );
         self.package_system()?.internal_add_isolated_uid(
             uid as i32,
             owner as i32,
@@ -1670,7 +1660,7 @@ impl AppHost {
                 entry_point: None,
                 crash_handler: None,
                 application_info: Some(info),
-                pid,
+                pid: 0,
                 started,
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
@@ -1687,6 +1677,17 @@ impl AppHost {
                 proc_state: PROCESS_STATE_NONEXISTENT,
                 oom_adj: 0,
             },
+        );
+        let pid = match self.process_start_result(start_seq, self.start_webview(&start)) {
+            Ok(pid) => pid,
+            Err(e) => {
+                self.free_isolated_uid(uid)?;
+                return Err(e);
+            }
+        };
+        eprintln!(
+            "app host: Start proc {pid}:{process}/{uid} by the WebView zygote in {:?}",
+            started.elapsed()
         );
         self.watch_start(start_seq)?;
         Ok((start_seq, pid))
@@ -1890,7 +1891,7 @@ impl AppHost {
         let joined = {
             let mut apps = self.apps.lock().unwrap();
             apps.iter_mut()
-                .find(|(_, a)| a.process == process && a.uid == uid)
+                .find(|(_, a)| !a.removed && a.process == process && a.uid == uid)
                 .map(|(seq, a)| {
                     a.add_package(name);
                     if a.thread.is_none() {
@@ -1906,24 +1907,6 @@ impl AppHost {
             }
             return Ok((seq, pid));
         }
-        let pid = {
-            if zygote.is_none() {
-                let stream = (self.configured.get().unwrap().connect)()
-                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("zygote relay: {e}")))?;
-                *zygote = Some(zygote::Session::new(stream));
-            }
-            match zygote.as_mut().unwrap().start(&start) {
-                Ok(pid) => pid,
-                Err(e) => {
-                    *zygote = None;
-                    return Err(Exception::new(EX_ILLEGAL_STATE, format!("zygote: {e}")));
-                }
-            }
-        };
-        eprintln!(
-            "app host: Start proc {pid}:{process}/{uid} in {:?}",
-            started.elapsed()
-        );
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
@@ -1936,7 +1919,7 @@ impl AppHost {
                 entry_point: None,
                 crash_handler: None,
                 application_info: None,
-                pid,
+                pid: 0,
                 started,
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
@@ -1957,9 +1940,58 @@ impl AppHost {
                 oom_adj: 0,
             },
         );
+        let result = (|| {
+            if zygote.is_none() {
+                let stream = (self.configured.get().unwrap().connect)()
+                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("zygote relay: {e}")))?;
+                *zygote = Some(zygote::Session::new(stream));
+            }
+            zygote.as_mut().unwrap().start(&start).map_err(|e| {
+                *zygote = None;
+                Exception::new(EX_ILLEGAL_STATE, format!("zygote: {e}"))
+            })
+        })();
+        let pid = self.process_start_result(start_seq, result)?;
+        eprintln!(
+            "app host: Start proc {pid}:{process}/{uid} in {:?}",
+            started.elapsed()
+        );
         drop(zygote);
         self.watch_start(start_seq)?;
         Ok((start_seq, pid))
+    }
+
+    /// `ProcessList.handleProcessStartedLocked` / `handleProcessStart` at
+    /// android-16.0.0_r1: finish the pending start, or retire a failed one.
+    fn process_start_result(
+        &self,
+        start_seq: i64,
+        result: Result<i32, Exception>,
+    ) -> Result<i32, Exception> {
+        let mut apps = self.apps.lock().unwrap();
+        let mut cancelled = false;
+        if let Ok(pid) = &result {
+            if let Some(app) = apps.get_mut(&start_seq) {
+                if app.pid == 0 {
+                    app.pid = *pid;
+                    cancelled = app.removed;
+                }
+            }
+        } else {
+            apps.remove(&start_seq);
+        }
+        drop(apps);
+        if cancelled {
+            // ProcessList.handleProcessStartedLocked: a killed pending start is invalid.
+            self.kill_process(
+                start_seq,
+                exit_info::REASON_OTHER,
+                exit_info::SUBREASON_INVALID_START,
+                "pending start killed",
+            )
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        }
+        result
     }
 
     /// `ProcessList.startProcess`'s app data isolation for `package`'s
@@ -2078,12 +2110,15 @@ impl AppHost {
         };
         let mut apps = self.apps.lock().unwrap();
         let strong = self.process.strong(handle);
-        let Some(app) = apps
-            .get_mut(&start_seq)
-            .filter(|a| a.uid == call.sender_euid && a.thread.is_none())
-        else {
-            // As the original drops a process it has no pending start of
-            // (its pid is the guest's, so it is told to exit).
+        let Some(app) = apps.get_mut(&start_seq).filter(|a| {
+            call.sender_pid > 0
+                && !a.removed
+                && a.uid == call.sender_euid
+                && (a.pid == 0 || a.pid == call.sender_pid)
+                && a.thread.is_none()
+        }) else {
+            // As the original drops a process it has no pending start of;
+            // retain the app host's scheduleExit path for an unknown caller.
             eprintln!(
                 "app host: no pending start {start_seq} for pid {}; dropping process",
                 call.sender_pid
@@ -2097,6 +2132,8 @@ impl AppHost {
             );
             return Ok(());
         };
+        // AMS's pending fallback matches seq and Binder uid, then records the caller's host pid.
+        app.pid = call.sender_pid;
         let seq = start_seq;
         let pid = app.pid;
         let uid = app.uid;
@@ -2273,7 +2310,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .values()
-            .filter(|a| a.isolated && a.package_uid as i32 == uid)
+            .filter(|a| !a.removed && a.isolated && a.package_uid as i32 == uid)
             .map(|a| a.pid)
             .collect();
         (!pids.is_empty()).then_some(pids)
@@ -2285,7 +2322,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .values()
-            .any(|a| a.uid as i32 == uid)
+            .any(|a| !a.removed && a.uid as i32 == uid)
     }
 
     /// `PROC_START_TIMEOUT_MSG` for the start `start_seq`, posted once it
@@ -2367,6 +2404,9 @@ impl AppHost {
     /// The process of `start_seq`, `pid`, died: what it had goes, and its
     /// exit is noted (`noteProcessDiedLocked`).
     fn process_died(&self, start_seq: i64, pid: i32) {
+        if pid <= 0 {
+            return;
+        }
         let (removed, gone, exit, isolated) = {
             let mut apps = self.apps.lock().unwrap();
             if !apps.get(&start_seq).is_some_and(|app| app.pid == pid) {
@@ -2438,7 +2478,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, a)| a.pid == pid && a.uid == uid)
+            .find(|(_, a)| a.pid > 0 && a.pid == pid && a.uid == uid)
             .map(|(seq, a)| {
                 (
                     *seq,
@@ -2711,7 +2751,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .values_mut()
-            .find(|a| a.pid == call.sender_pid)
+            .find(|a| a.pid > 0 && a.pid == call.sender_pid)
         {
             if !app.package_deps.contains(&package) {
                 app.package_deps.push(package);
@@ -3055,22 +3095,27 @@ impl AppHost {
         sub_reason: i32,
         description: &str,
     ) -> Result<(), String> {
-        let exit = self
-            .apps
-            .lock()
-            .unwrap()
-            .get(&start_seq)
+        let mut apps = self.apps.lock().unwrap();
+        let exit = apps
+            .get_mut(&start_seq)
             .map(|a| {
-                exit_info::ExitInfo::raw(
+                if a.pid <= 0 {
+                    // ProcessRecord.killLocked cancels a pending start without a signal or exit info.
+                    a.removed = true;
+                    return None;
+                }
+                Some(exit_info::ExitInfo::raw(
                     &a.package,
                     &a.process,
                     a.uid,
                     a.package_uid,
                     a.pid,
                     a.thread.is_some(),
-                )
+                ))
             })
             .ok_or_else(|| format!("no process of start {start_seq}"))?;
+        drop(apps);
+        let Some(exit) = exit else { return Ok(()) };
         let pid = exit.pid;
         self.note_exit(
             &exit_info::ExitInfo {
@@ -3861,7 +3906,7 @@ impl AppHost {
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|(_, a)| a.pid == call.sender_pid && a.uid == call.sender_euid)
+                .find(|(_, a)| a.pid > 0 && a.pid == call.sender_pid && a.uid == call.sender_euid)
                 .map(|(seq, _)| *seq)
                 .ok_or_else(|| Exception::security(format!("Unable to find app for caller (pid={}) when getting content provider {name}", call.sender_pid)))?;
             return self.provider(Some(client), uid, name, user, stable);
@@ -5105,7 +5150,7 @@ impl Service for Activity {
                     .lock()
                     .unwrap()
                     .values()
-                    .find(|app| app.pid == a.debug_pid)
+                    .find(|app| app.pid > 0 && app.pid == a.debug_pid)
                     .map(|app| app.process.clone());
                 eprintln!(
                     "app host: pid {} {} sent binder code {} with flags {} to frozen apps and got error {}",

@@ -192,7 +192,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, a)| a.pid == call.sender_pid && a.uid == call.sender_euid)
+            .find(|(_, a)| a.pid > 0 && a.pid == call.sender_pid && a.uid == call.sender_euid)
             .map(|(seq, a)| (*seq, a.providers.clone()))
             .ok_or_else(|| {
                 Exception::security("publishContentProviders from an unknown process")

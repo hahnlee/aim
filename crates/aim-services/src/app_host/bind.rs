@@ -245,6 +245,11 @@ const MAX_BYTE: usize = 8192;
 const SIZE: usize = 8 + FEATURES_CACHE + NONCE_STORE_HEADER + MAX_NONCE * 8 + MAX_BYTE;
 
 impl ApplicationSharedMemory {
+    #[cfg(test)]
+    pub(super) fn for_test(reader: OwnedFd) -> Self {
+        Self { reader }
+    }
+
     pub fn new() -> std::io::Result<Self> {
         let mut bytes = vec![0u8; SIZE];
         bytes[..8].copy_from_slice(&INVALID_NETWORK_TIME.to_le_bytes());

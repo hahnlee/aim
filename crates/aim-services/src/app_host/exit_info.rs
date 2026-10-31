@@ -40,9 +40,11 @@ pub(super) const REASON_INITIALIZATION_FAILURE: i32 = 7;
 pub(super) const REASON_PERMISSION_CHANGE: i32 = 8;
 pub(super) const REASON_USER_REQUESTED: i32 = 10;
 pub(super) const REASON_DEPENDENCY_DIED: i32 = 12;
+pub(super) const REASON_OTHER: i32 = 13;
 pub(super) const REASON_PACKAGE_STATE_CHANGE: i32 = 15;
 /// `ApplicationExitInfo.SUBREASON_*`.
 pub(super) const SUBREASON_UNKNOWN: i32 = 0;
+pub(super) const SUBREASON_INVALID_START: i32 = 13;
 pub(super) const SUBREASON_FORCE_STOP: i32 = 21;
 pub(super) const SUBREASON_REMOVE_TASK: i32 = 22;
 /// `RunningAppProcessInfo.IMPORTANCE_FOREGROUND`, `IMPORTANCE_GONE`.

@@ -262,6 +262,9 @@ impl AppHost {
         let all_uids = self.get_tasks_allowed(uid)?;
         let mut infos = vec![Some(ProcessMemoryInfo::default()); pids.len()];
         for (i, &pid) in pids.iter().enumerate().rev() {
+            if pid <= 0 {
+                continue;
+            }
             let (target, last) = match self.apps.lock().unwrap().values().find(|a| a.pid == pid) {
                 Some(a) => (Some(a.uid as i32), a.last_mem_info.clone()),
                 None => (None, None),
