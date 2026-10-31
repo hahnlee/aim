@@ -46,6 +46,8 @@ pub enum Kind {
     /// A synthesized kernel file: an unlinked file holding its contents
     /// (`procfs::content_fd`).
     Content,
+    /// An empty tracefs event stream, backed by a datagram receive queue.
+    TracePipe(Arc<super::tracefs::Open>),
     ProcMem(super::proc_mem::Open),
     /// A kernel file whose writes act (`knob`); also a content file.
     Knob(Arc<knob::Knob>),
@@ -1367,6 +1369,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Memfd(_)
             | Kind::Path(_)
             | Kind::Content
+            | Kind::TracePipe(_)
             | Kind::ProcMem(_)
             | Kind::Knob(_)
             | Kind::Random
@@ -1827,6 +1830,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Kmsg(a) => Arc::as_ptr(a) as *const (),
             Kind::Cgroup(a) => Arc::as_ptr(a) as *const (),
             Kind::Knob(a) => Arc::as_ptr(a) as *const (),
+            Kind::TracePipe(a) => Arc::as_ptr(a) as *const (),
             Kind::Memfd(_)
             | Kind::SyncFile
             | Kind::Random
@@ -1919,6 +1923,10 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                     w.bytes(&reference.encode())
                 });
             }
+            Kind::TracePipe(open) => {
+                w.u32(20);
+                open.save(w);
+            }
             Kind::Kmsg(open) => {
                 w.u32(14);
                 w.bool(matches!(**open, super::kmsg::Open::Proc));
@@ -1964,6 +1972,13 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             9 => Kind::ProxyFile,
             16 => match super::proc_mem::Open::load(fd) {
                 Ok(open) => Kind::ProcMem(open),
+                Err(_) => {
+                    r.invalidate();
+                    return (fd, None);
+                }
+            },
+            20 => match super::tracefs::Open::load(r) {
+                Ok(open) => Kind::TracePipe(open),
                 Err(_) => {
                     r.invalidate();
                     return (fd, None);

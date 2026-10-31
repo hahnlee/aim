@@ -945,7 +945,8 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
         Kind::Sock(_) => net::read_pinned(pin, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) | Kind::SyncFile | Kind::Binder(_) => Some(-(EINVAL as i64)),
-        Kind::Content | Kind::Knob(_) | Kind::Random | Kind::Ashmem => None,
+        Kind::TracePipe(_) if iov.iter().all(|v| v.iov_len == 0) => Some(0),
+        Kind::TracePipe(_) | Kind::Content | Kind::Knob(_) | Kind::Random | Kind::Ashmem => None,
         Kind::Memfd(_) => {
             let mut total = 0i64;
             for v in iov {
@@ -1004,6 +1005,7 @@ fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64>
         Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile | Kind::Binder(_) => {
             Some(-(EINVAL as i64))
         }
+        Kind::TracePipe(_) => Some(-(EBADF as i64)),
         Kind::Content => None,
         Kind::Knob(k) => Some(super::knob::write(fd, &k, iov)),
         Kind::Random => Some(super::random::write(iov)),
@@ -1635,6 +1637,11 @@ pub(super) fn stat_fd_kernel(fd: i32) -> Result<libc::stat, i64> {
             &mut stat,
         );
         return Ok(stat);
+    }
+    if let Some(Kind::TracePipe(open)) = fdtab::get(fd) {
+        return procfs::stat(&open.path, true)
+            .unwrap()
+            .map_err(|e| -(e as i64));
     }
     if let Some(Kind::ProcMem(open)) = fdtab::get(fd) {
         return Ok(open.stat());
@@ -2574,6 +2581,9 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                     }
                     if let Some(Kind::ProcMem(open)) = fdtab::get(fd) {
                         flags = (flags & !O_ACCMODE) | open.mode as u64;
+                    }
+                    if matches!(fdtab::get(fd), Some(Kind::TracePipe(_))) {
+                        flags &= !O_ACCMODE;
                     }
                     flags as i64
                 }

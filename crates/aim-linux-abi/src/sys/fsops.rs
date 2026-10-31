@@ -48,6 +48,9 @@ pub fn mkdirat(a: [u64; 6]) -> i64 {
                     .map(|_| 0)
                     .unwrap_or_else(|error| -(error as i64));
             }
+            if let Err(error) = super::tracefs::prepare_mkdir(&r.guest) {
+                return -(error as i64);
+            }
             // The owner keeps access on the host (see host_mode), and
             // macOS drops S_ISVTX; the guest's mode is recorded when the
             // host's differs.
@@ -358,6 +361,9 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             }
             let host = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
             if let Some(result) = super::cgroup::remove(&r.guest, host, directory) {
+                return result;
+            }
+            if let Some(result) = super::tracefs::remove(&r.guest, host, directory) {
                 return result;
             }
             // SAFETY: resolved host path.

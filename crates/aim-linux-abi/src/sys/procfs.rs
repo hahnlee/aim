@@ -102,6 +102,9 @@ fn pid() -> i32 {
 
 /// Guest path of an open host fd.
 pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
+    if let Some(Kind::TracePipe(open)) = fdtab::get(fd) {
+        return Ok(open.path.clone());
+    }
     if let Some(reference) = fdtab::character_reference(fd) {
         reference
             .stat(fd)
@@ -128,6 +131,9 @@ pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
 pub(super) fn fd_link(fd: i32) -> Option<String> {
     if !fdtab::visible(fd) {
         return None;
+    }
+    if let Some(Kind::TracePipe(open)) = fdtab::get(fd) {
+        return Some(open.path.clone());
     }
     if fdtab::character_reference(fd).is_some() {
         return fd_guest_path(fd).ok();
@@ -1001,7 +1007,7 @@ pub(super) fn tids(p: i32) -> Vec<i32> {
     if t.is_empty() { vec![p] } else { t }
 }
 
-fn entries(names: &[(&str, u8)]) -> Vec<Entry> {
+pub(super) fn entries(names: &[(&str, u8)]) -> Vec<Entry> {
     names
         .iter()
         .map(|(n, t)| Entry::new(1, *t, n.as_bytes()))
@@ -1366,6 +1372,12 @@ pub fn node(guest: &str) -> Option<Node> {
     {
         return super::selinuxfs::node(t);
     }
+    if guest == "/sys/kernel/debug/tracing" {
+        return Some(Node::Link("/sys/kernel/tracing".to_string()));
+    }
+    if let Some(tail) = super::tracefs::tail(guest) {
+        return super::tracefs::node(tail);
+    }
     Some(match rest {
         "" => Node::Dir(entries(&[
             ("class", dir::DT_DIR),
@@ -1383,16 +1395,6 @@ pub fn node(guest: &str) -> Option<Node> {
         // `uevent_seqnum_show`.
         "kernel/uevent_seqnum" => Node::File(format!("{}\n", super::uevent::seqnum()).into_bytes()),
         "kernel/debug" => Node::Dir(entries(&[("tracing", dir::DT_DIR)])),
-        "kernel/tracing" | "kernel/debug/tracing" => Node::Dir(entries(&[
-            ("trace_marker", dir::DT_REG),
-            ("tracing_on", dir::DT_REG),
-        ])),
-        "kernel/tracing/tracing_on" | "kernel/debug/tracing/tracing_on" => {
-            Node::File(b"0\n".to_vec())
-        }
-        "kernel/tracing/trace_marker" | "kernel/debug/tracing/trace_marker" => {
-            Node::File(Vec::new())
-        }
         "devices" => Node::Dir(entries(&[
             ("system", dir::DT_DIR),
             ("virtual", dir::DT_DIR),
@@ -1858,6 +1860,9 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
             Err(error) => -(error as i64),
         });
     }
+    if let Some(result) = super::tracefs::open(guest, flags) {
+        return Some(result);
+    }
     let cloexec = flags & O_CLOEXEC != 0;
     let write = flags & O_ACCMODE != 0;
     if canonical(guest) == super::memfd::NOEXEC_SYSCTL {
@@ -2079,7 +2084,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
             }
         }
         // sysfs creates no files: a missing device attribute stays missing.
-        None if device_tree(&canon) => {
+        None if device_tree(&canon) || super::tracefs::tail(&canon).is_some() => {
             let parent = canon.rsplit_once('/').map_or("", |(p, _)| p);
             if flags & O_CREAT != 0 && matches!(node(parent), Some(Node::Dir(_))) {
                 -(EACCES as i64)
@@ -2169,7 +2174,16 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     if conf6.is_none()
         && let Some((_, mut st)) = recorded(guest)
     {
-        (st.st_uid, st.st_gid) = owner;
+        if super::tracefs::tail(guest).is_some() {
+            let (host, _) = vfs::lookup(guest);
+            super::attrs::apply(
+                super::attrs::Host::Path(&CString::new(host.as_os_str().as_encoded_bytes()).ok()?),
+                || guest.to_string(),
+                &mut st,
+            );
+        } else {
+            (st.st_uid, st.st_gid) = owner;
+        }
         return Some(Ok(st));
     }
     let mut st: libc::stat = unsafe { std::mem::zeroed() };

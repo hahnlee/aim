@@ -602,7 +602,17 @@ home and the Wi-Fi page alive for over 30 seconds each, with no fatal entry in
 the accepted boots. The Wi-Fi intent is sent by an ordinary SDK fixture because
 the app host lacks ActivityManager's am-start shell route. Contaminated attempts
 are discarded; powered-on scan, connection and capability support remains incomplete.
-Manifest receivers of process `system` and uid 1000, including framework-res's BootReceiver and CertPinInstallReceiver, now route to `aim-system`'s original ActivityThread with the system-server class loader; host delivery/finish tests and linkage are checked without a guest boot, while unserved framework services and providers remain explicit UnsupportedOperation (#1518).
+Manifest receivers of process `system` and uid 1000, including framework-res's
+BootReceiver and CertPinInstallReceiver, route to `aim-system`'s original
+ActivityThread with the system-server class loader (#1518). The original init
+creates BootReceiver's tracefs instance; synthesized instance controls and the
+`error_report/error_report_end` enable now accept its configuration (#2493).
+Its `trace_pipe` has no host event producer: nonblocking reads return EAGAIN,
+blocking descriptors remain unreadable to poll/epoll, and open pipes prevent
+instance removal with EBUSY, including dup/fork lifetimes. Host syscall checks
+pass; NDK execution and guest boot remain unverified. Receiver delivery/finish
+and linkage were checked without a boot; unserved framework services and
+providers remain explicit UnsupportedOperation.
 The app host's domain-verification front end keeps verifier-status persistence native and handles URI group set/get with original Java permission, Bundle, validation and conversion helpers over runtime-only native state; paired host tests, pinned-image linkage and a fresh-data app-host boot pass (#1763). Verifier status writes retry persistence acquisition after concurrent package publications and revalidate against current package code (#2259; deterministic host regression, no guest boot rerun). Its `pm` and `cmd domain_verification` shell routes now serve all DomainVerificationShell verbs (#2187), retaining the original internal permission checks and parser. `set-app-links` and `reset-app-links` use the durable native writer; `verify-app-links` selects default/re-verify eligibility from native attached state and sends through the existing domain owner's selected original verifier proxy. The original modern proxy builds the domain-verification request broadcast; the original unavailable proxy handles an absent verifier. Host tests cover eligibility, filtering, state writes and delivery errors; pinned Java methods, exact shell output and the original modern proxy/request path over recorded JVM boundaries pass without a guest boot. Android 16's verification package argument is positional; `--package` retains the original unknown-option error.
 Telecom is loaded in the system process: TelecomLoaderService's part
 there binds its TelecomService and creates and publishes `telecom` on that

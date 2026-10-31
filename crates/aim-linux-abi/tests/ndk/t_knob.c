@@ -1,6 +1,9 @@
 // fork(2)'s inherited open file descriptions retain their kernel handlers.
 #include <fcntl.h>
 #include <stdlib.h>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -96,7 +99,56 @@ static void proc_targets(void) {
   close(oom);
 }
 
+static void tracefs_instances(void) {
+  const char* instance = "/sys/kernel/tracing/instances/ndk";
+  const char* stream = "/sys/kernel/tracing/instances/ndk/trace_pipe";
+  CHECK(open(stream, O_RDONLY) == -1 && errno == ENOENT);
+  CHECK(mkdir(instance, 0700) == 0);
+  CHECK(mkdir(instance, 0700) == -1 && errno == EEXIST);
+  int enable = open("/sys/kernel/tracing/instances/ndk/events/error_report/error_report_end/enable", O_WRONLY);
+  CHECK(enable >= 0 && write(enable, "1", 1) == 1);
+  close(enable);
+  int fd = open(stream, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  CHECK(fd >= 0);
+  char byte;
+  CHECK(read(fd, &byte, 1) == -1 && errno == EAGAIN);
+  struct pollfd p = { .fd = fd, .events = POLLIN };
+  CHECK(poll(&p, 1, 0) == 0 && p.revents == 0);
+  int ep = epoll_create1(EPOLL_CLOEXEC);
+  struct epoll_event e = { .events = EPOLLIN, .data.fd = fd };
+  CHECK(ep >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, fd, &e) == 0);
+  CHECK(epoll_wait(ep, &e, 1, 0) == 0);
+  CHECK(fcntl(fd, F_SETFL, 0) == 0);
+  CHECK((fcntl(fd, F_GETFL) & O_NONBLOCK) == 0);
+  CHECK(poll(&p, 1, 0) == 0 && p.revents == 0);
+  CHECK(epoll_wait(ep, &e, 1, 0) == 0);
+  close(ep);
+  CHECK(rmdir(instance) == -1 && errno == EBUSY);
+  int alias = dup(fd);
+  CHECK(alias >= 0);
+  close(fd);
+  CHECK(rmdir(instance) == -1 && errno == EBUSY);
+  int gate[2];
+  CHECK(pipe(gate) == 0);
+  pid_t child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    close(gate[1]);
+    _exit(read(gate[0], &byte, 1) == 1 ? 0 : 1);
+  }
+  close(gate[0]);
+  close(alias);
+  CHECK(rmdir(instance) == -1 && errno == EBUSY);
+  CHECK(write(gate[1], "x", 1) == 1);
+  close(gate[1]);
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(rmdir(instance) == 0);
+  CHECK(open(stream, O_RDONLY) == -1 && errno == ENOENT);
+}
+
 int main(void) {
+  RUN(tracefs_instances);
   RUN(ipv6_sysctl);
   RUN(selinux_transaction);
   RUN(proc_targets);
