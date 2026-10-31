@@ -489,17 +489,16 @@ title/scrolling UI test now passes.
 The 21 DeviceConfig-toggle skips follow the original fixed
 `safety_center_enabled_no_device_config` flag on Android 16; the 31 tests for unsupported devices skip because
 `config_enableSafetyCenter=true`. Neither policy changed.
-The #2564 en-US `-g` Safety Center rerun remains 476/0/52, with all 476 prior
-passing test identities preserved. Accessibility instrumentation now attaches
-and records 2 pass / 1 fail / 0 skips before crashing on unimplemented
-`IActivityClientController.dismissKeyguard` (#62): 3/113 tests started, all paired.
-The diagnostic found the old attach barrier delaying RoleService's controller
-and PrintSpooler, whose background-thread waits delayed the initial-user receiver;
-readiness arrived at binder-trace +44.842 s. Neither fixed official boot has an
-attach timeout. The 1,016 app-host checks pass (3 ignored). Both official runs
-used fresh data after twenty quiet seconds, with no foreign guests and unchanged
-frozen runtime hashes; the formatter overlapped Safety's boot. No fatal signal,
-detected ANR or tombstone in either official run (2026-11-01).
+The #2566 controller serves `dismissKeyguard` with message permission checks and
+`onDismissError` for the native not-showing keyguard. The three activity screen/
+lock flag setters decode and retain their state. Fresh en-US `-g` Accessibility
+CTS records 23 pass / 90 fail / 0 skips, with all 113 starts/results paired, then
+crashes in UiAutomation cleanup. Service binding exposes missing local
+`TaskManagerLocal.setAllowAppSwitches`; the run also has Java system/GMS crashes.
+Safety Center remains 476/0/52, preserving every prior pass/skip identity.
+The 1,017 app-host checks pass (3 ignored). Both official runs have no foreign
+guests or native fatal signals, ANRs or tombstones; Safety has foreign host-build
+overlap after quiet admission and no Java fatal (2026-11-01).
 Magnification and other unserved local operations remain explicit
 #2529 failures; full accessibility conformance is not established.
 
