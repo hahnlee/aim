@@ -4,6 +4,7 @@
 // through syscall(2); `vdso` checks bionic's vDSO path against them.
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
@@ -101,7 +102,7 @@ static void uptime(void) {
   CHECK(llabs((int64_t)si.uptime - ns_of(CLOCK_BOOTTIME) / 1000000000) <= 1);
 }
 
-static volatile int stop;
+static _Atomic int stop;
 
 static void* spinner(void* arg) {
   (void)arg;
@@ -128,6 +129,19 @@ static void cpu_clocks(void) {
   CHECK(p1 - p0 >= t1 - t0);
   CHECK(p1 >= t1);
 
+  // Short nested intervals expose skew between separately sampled host
+  // task/thread counters, without depending on elapsed wall time.
+  for (int i = 0; i < 128; ++i) {
+    p0 = ns_of(CLOCK_PROCESS_CPUTIME_ID);
+    t0 = ns_of(CLOCK_THREAD_CPUTIME_ID);
+    do {
+      t1 = ns_of(CLOCK_THREAD_CPUTIME_ID);
+    } while (t1 - t0 < 100000);
+    p1 = ns_of(CLOCK_PROCESS_CPUTIME_ID);
+    CHECK(p1 - p0 >= t1 - t0);
+    CHECK(p1 >= t1);
+  }
+
   clockid_t self;
   CHECK(pthread_getcpuclockid(pthread_self(), &self) == 0);
   CHECK(llabs(ns_of(self) - ns_of(CLOCK_THREAD_CPUTIME_ID)) < 5000000);
@@ -151,9 +165,15 @@ static void cpu_clocks(void) {
   while ((o = ns_of(other)) >= 0 && o < 10000000 && ns_of(CLOCK_MONOTONIC) < deadline) {
     usleep(10000);
   }
+  int64_t own = ns_of(CLOCK_THREAD_CPUTIME_ID);
+  int64_t live = ns_of(CLOCK_PROCESS_CPUTIME_ID);
+  CHECK(live >= own + o);
   stop = 1;
   pthread_join(th, NULL);
   CHECK(o >= 10000000 && res == 1);
+  // Exiting transfers the thread's time to the process's dead-thread
+  // accounting; the process clock must retain all of the live total.
+  CHECK(ns_of(CLOCK_PROCESS_CPUTIME_ID) >= live);
   // A thread that exited has no clock.
   CHECK(syscall(SYS_clock_getres, other, &r) == -1 && errno == EINVAL);
 
@@ -166,6 +186,47 @@ static void cpu_clocks(void) {
   CHECK(gettime(CPU_CLOCK(0, 3), &ts) == -1 && errno == EINVAL);
   CHECK(gettime(CPU_CLOCK(0x3ffffff, 2), &ts) == -1 && errno == EINVAL);
   CHECK(gettime(CPU_CLOCK(0x3ffffff, 4 | 2), &ts) == -1 && errno == EINVAL);
+}
+
+static void process_clock_peer(void) {
+  int ready[2], done[2];
+  CHECK(pipe(ready) == 0 && pipe(done) == 0);
+  pid_t child = fork();
+  CHECK(child >= 0);
+  if (!child) {
+    close(ready[0]);
+    close(done[1]);
+    pthread_t th;
+    stop = 0;
+    CHECK(pthread_create(&th, NULL, spinner, NULL) == 0);
+    clockid_t other;
+    CHECK(pthread_getcpuclockid(th, &other) == 0);
+    int64_t deadline = ns_of(CLOCK_MONOTONIC) + 5000000000LL;
+    int64_t used;
+    do {
+      used = ns_of(other);
+    } while (used < 10000000 && ns_of(CLOCK_MONOTONIC) < deadline);
+    CHECK(used >= 10000000);
+    stop = 1;
+    CHECK(pthread_join(th, NULL) == 0);
+    int64_t own = ns_of(CLOCK_PROCESS_CPUTIME_ID);
+    CHECK(write(ready[1], &own, sizeof own) == sizeof own);
+    char ack;
+    CHECK(read(done[0], &ack, 1) == 1);
+    _exit(0);
+  }
+  close(ready[1]);
+  close(done[0]);
+  int64_t reported;
+  CHECK(read(ready[0], &reported, sizeof reported) == sizeof reported);
+  clockid_t clock;
+  CHECK(clock_getcpuclockid(child, &clock) == 0);
+  CHECK(ns_of(clock) >= reported);
+  CHECK(write(done[1], "r", 1) == 1);
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  close(ready[0]);
+  close(done[1]);
 }
 
 static int64_t nsleep(clockid_t id, int flags, int64_t ns) {
@@ -302,6 +363,7 @@ int main(void) {
   RUN(order);
   RUN(uptime);
   RUN(cpu_clocks);
+  RUN(process_clock_peer);
   RUN(nanosleep_clocks);
   RUN(timerfd_clocks);
   RUN(alarm_capability);

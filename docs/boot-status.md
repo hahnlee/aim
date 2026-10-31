@@ -8080,6 +8080,17 @@ host load 3-25:
 
 ## Guest kernel time (2026-09-30, #446)
 
+Process CPU clocks now sum guest-thread samples under the thread lifecycle
+lock and retain each exited thread's total before waking joiners (#2497).
+Precise calling-thread readings are published so later rounded Mach samples
+cannot lose already observed CPU time; remote process clocks read the same
+owner through agent opcode 25. Short nested intervals reproduce the old
+calculation's undercount in 26/50 loaded runs and pass 50/50 after the fix,
+including live-thread sums, exited-thread retention and remote readback.
+The load was 12 owned CPU workers. The complete original-bionic NDK binary
+passes 59/59 tests, with no missing-input skips; no guest boot was run
+(2026-10-31).
+
 On a settled boot of a reused data image, main (80965c99) against the
 fixes of #446, measured 7 minutes after `sys.boot_completed`, then over
 the next 60 s of idle:
@@ -8859,9 +8870,14 @@ SCHED_BATCH runs at utility, 19 or SCHED_IDLE at background.
 QoS application compares the pthread's live requested class and relative
 priority before entering Darwin's setter (#2391); Linux nice values and
 permission checks remain synchronous. Host scheduling regressions pass;
-the original-bionic scheduling checks fail before their assertions on both
-the starting and changed code (namespace watcher startup and spawn permission
-failures in the restricted runner). No guest boot was run (2026-10-29).
+the original-bionic remote-nice/cgroup check passes 50/50 runs with 12 CPU
+workers. The original gate failure did not recur in the 50-run baseline.
+Its host-priority observation now uses an atomic guest-code rendezvous:
+stdout can become readable before syscall cleanup finishes, and native-lock
+priority inheritance can temporarily raise a background thread from 4 to 20
+without changing its requested policy (a bounded native probe, #2495).
+Expected priorities and Linux readback assertions are unchanged. No guest
+boot was run (2026-10-31).
 Cross-process `setpriority` and `sched_setparam`/`sched_setscheduler` record
 each thread's state through its agent (opcodes 22 and 24), with caller
 credentials checked at the owner; getters read that state back. The target

@@ -28,7 +28,6 @@ use crate::errno::{EINVAL, EPERM};
 unsafe extern "C" {
     fn clock_gettime_nsec_np(clock: libc::clockid_t) -> u64;
     fn mach_absolute_time() -> u64;
-    static mach_task_self_: libc::mach_port_t;
 }
 
 const REALTIME: u64 = 0;
@@ -325,83 +324,20 @@ pub fn thread_times(port: libc::mach_port_t) -> Option<(u64, u64)> {
     }
 }
 
-/// User and system time of host process `pid`, in nanoseconds.
+/// User and system time of guest process `pid`, in nanoseconds.
 fn process_times(pid: i32) -> Option<(u64, u64)> {
-    // SAFETY: PROC_PIDTASKINFO into a local of the right size. Its total
-    // times include live and exited threads, in Mach absolute ticks.
-    unsafe {
-        let mut info: libc::proc_taskinfo = std::mem::zeroed();
-        let size = size_of::<libc::proc_taskinfo>() as i32;
-        let r = libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size);
-        (r == size).then(|| {
-            (
-                ticks_to_ns(info.pti_total_user) as u64,
-                ticks_to_ns(info.pti_total_system) as u64,
-            )
-        })
-    }
+    super::ptrace::remote_cpu_times(pid).ok()
 }
 
-/// `TASK_ABSOLUTETIME_INFO`, in host ticks.
-#[repr(C)]
-#[derive(Default)]
-struct TaskAbsolutetimeInfo {
-    total_user: u64,
-    total_system: u64,
-    threads_user: u64,
-    threads_system: u64,
-}
-
-const TASK_ABSOLUTETIME_INFO: u32 = 1;
-
-/// This process's user and system time: its live threads' (current, and
-/// like Linux's counting what a thread ran before exec) and its exited
-/// threads'. Mach reports live threads in microseconds; the caller's own
-/// share, read before the total, is replaced by its exact time, read
-/// after it, so the total is never behind the caller's thread clock.
+/// This process's live and exited guest-thread CPU time, from the same
+/// lifetime accounting as the individual thread clocks.
 pub(super) fn own_process_times() -> Option<(u64, u64)> {
-    let mut abs = TaskAbsolutetimeInfo::default();
-    // SAFETY: all-zero Mach info structs are valid.
-    let (mut live, mut me): (libc::task_thread_times_info, libc::thread_basic_info) =
-        unsafe { std::mem::zeroed() };
-    // SAFETY: Mach info calls into locals of the flavours' sizes.
-    let ok = unsafe {
-        let mut n = libc::THREAD_BASIC_INFO_COUNT;
-        let port = libc::pthread_mach_thread_np(libc::pthread_self());
-        let r = libc::thread_info(
-            port,
-            libc::THREAD_BASIC_INFO as u32,
-            (&raw mut me).cast(),
-            &mut n,
-        );
-        let task = mach_task_self_;
-        let mut n = (size_of::<TaskAbsolutetimeInfo>() / 4) as u32;
-        let a = libc::task_info(task, TASK_ABSOLUTETIME_INFO, (&raw mut abs).cast(), &mut n);
-        let mut n = libc::TASK_THREAD_TIMES_INFO_COUNT;
-        let b = libc::task_info(
-            task,
-            libc::TASK_THREAD_TIMES_INFO,
-            (&raw mut live).cast(),
-            &mut n,
-        );
-        r == 0 && a == 0 && b == 0
-    };
-    // SAFETY: reads the clock.
-    let exact = unsafe { clock_gettime_nsec_np(libc::CLOCK_THREAD_CPUTIME_ID) };
-    let ns =
-        |t: libc::time_value_t| t.seconds as u64 * 1_000_000_000 + t.microseconds as u64 * 1000;
-    let others_user = ns(live.user_time).saturating_sub(ns(me.user_time));
-    let others_system = ns(live.system_time).saturating_sub(ns(me.system_time));
-    ok.then(|| {
-        (
-            ticks_to_ns(abs.total_user - abs.threads_user) as u64
-                + others_user
-                + exact.saturating_sub(ns(me.system_time)),
-            ticks_to_ns(abs.total_system - abs.threads_system) as u64
-                + others_system
-                + ns(me.system_time),
-        )
-    })
+    super::thread::process_cpu_times()
+}
+
+pub(super) fn calling_thread_ns() -> u64 {
+    // SAFETY: reads the calling thread's clock.
+    unsafe { clock_gettime_nsec_np(libc::CLOCK_THREAD_CPUTIME_ID) }
 }
 
 /// The time on CPU clock `c`, or EINVAL when it names no process or no
@@ -414,8 +350,9 @@ fn cpu_ns((id, thread, which): (i32, bool, i64), gettime: bool) -> Result<u64, i
         (true, 0) => {
             if which == CPUCLOCK_SCHED {
                 // Full resolution for the common case.
-                // SAFETY: reads the clock.
-                return Ok(unsafe { clock_gettime_nsec_np(libc::CLOCK_THREAD_CPUTIME_ID) });
+                let total = calling_thread_ns();
+                super::thread::note_cpu_time(total);
+                return Ok(total);
             }
             // SAFETY: the calling thread's own port.
             thread_times(unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) })

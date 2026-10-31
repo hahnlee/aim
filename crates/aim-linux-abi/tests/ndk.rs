@@ -947,8 +947,50 @@ fn remote_nice_steps(
     profile: Option<(&str, &str, [i32; 5], [i32; 6])>,
 ) {
     use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicU32, Ordering};
     let g = Guest::new(image, "t_remote_nice");
     let prog = g.build(clang, "t_remote_nice");
+    let step_path = g.runtime.join("data/local/tmp/priority-step");
+    std::fs::write(&step_path, [0u8; 4]).unwrap();
+    let step_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(step_path)
+        .unwrap();
+    struct Step(*mut libc::c_void);
+    impl Drop for Step {
+        fn drop(&mut self) {
+            // SAFETY: the mapping below, no longer accessed by the test.
+            unsafe { libc::munmap(self.0, 4) };
+        }
+    }
+    // SAFETY: a shared, aligned atomic word backed by the fixture file.
+    let step = Step(unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            4,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            step_file.as_raw_fd(),
+            0,
+        )
+    });
+    assert_ne!(step.0, libc::MAP_FAILED);
+    // SAFETY: this live shared mapping contains an initialized atomic u32.
+    let step_word = unsafe { &*step.0.cast::<AtomicU32>() };
+    let mut sequence = 0;
+    let mut ready = || {
+        sequence += 1;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while step_word.load(Ordering::Acquire) != sequence * 2 - 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "priority step {sequence} timed out"
+            );
+            std::hint::spin_loop();
+        }
+        sequence * 2
+    };
     if let Some((name, value, _, _)) = profile {
         use aim_storage::cgroup_v1::{Controller, populate};
         let root = g.runtime.join("cpu");
@@ -973,13 +1015,17 @@ fn remote_nice_steps(
     if profile.is_some() {
         command.arg("--cgroup");
     }
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    struct Target(std::process::Child);
+    impl Drop for Target {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Target(command.stdout(Stdio::piped()).spawn().unwrap());
+    let mut out = std::io::BufReader::new(child.0.stdout.take().unwrap());
     let mut line = String::new();
     out.read_line(&mut line).unwrap();
     let pid: u32 = line
@@ -994,11 +1040,12 @@ fn remote_nice_steps(
         for (nice, want) in [19, 10, -2, -19, 0].into_iter().zip(priorities) {
             line.clear();
             out.read_line(&mut line).unwrap();
+            let ack = ready();
             let got = thread_priority(pid, &format!("remote-{name}"));
             if line.trim() != format!("{name} {nice}") || got != Some(want) {
                 differences.push(format!("{line:?}: host {got:?}, expected {want}"));
             }
-            writeln!(stdin).unwrap();
+            step_word.store(ack, Ordering::Release);
         }
     }
     for name in ["main", "worker"] {
@@ -1010,17 +1057,18 @@ fn remote_nice_steps(
         {
             line.clear();
             out.read_line(&mut line).unwrap();
+            let ack = ready();
             let got = thread_priority(pid, &format!("remote-{name}"));
             if line.trim() != format!("{name} sched {policy} {prio}") || got != Some(want) {
                 differences.push(format!("{line:?}: host {got:?}, expected {want}"));
             }
-            writeln!(stdin).unwrap();
+            step_word.store(ack, Ordering::Release);
         }
     }
     let mut rest = String::new();
     out.read_to_string(&mut rest).unwrap();
     assert!(
-        child.wait().unwrap().success() && rest.contains("PASS"),
+        child.0.wait().unwrap().success() && rest.contains("PASS"),
         "{rest}"
     );
     assert!(differences.is_empty(), "{}", differences.join("\n"));
