@@ -76,6 +76,7 @@ public class Intent implements android.os.Parcelable {
     public Intent putExtra(String name, int[] value) { throw new RuntimeException("stub"); }
     public Intent(String action, android.net.Uri uri) { throw new RuntimeException("stub"); }
     public static String EXTRA_UID;
+    public static String ACTION_USER_SWITCHED;
     public static String EXTRA_USER_HANDLE;
     public static String EXTRA_USER;
     public static String EXTRA_VISIBILITY_ALLOW_LIST;

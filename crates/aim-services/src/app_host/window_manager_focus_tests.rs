@@ -105,15 +105,15 @@ impl GuestProcess for NoMemory {
     }
 }
 
-struct Fixture {
-    host: Arc<AppHost>,
-    remote: Arc<LocalProcess>,
-    observer: Strong,
+pub(super) struct Fixture {
+    pub(super) host: Arc<AppHost>,
+    pub(super) remote: Arc<LocalProcess>,
+    pub(super) observer: Strong,
     events: Receiver<(u32, u32)>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let driver = Driver::new();
         let open = |pid| {
             LocalProcess::open(
@@ -210,7 +210,7 @@ impl Fixture {
         self.host.run(Vec::new());
     }
 
-    fn window(&self, handle: u32, activity: Option<u64>, registered: bool) -> Binder {
+    pub(super) fn window(&self, handle: u32, activity: Option<u64>, registered: bool) -> Binder {
         let (task, uid) = {
             let stack = self.host.activities.stack.lock().unwrap();
             let task = activity.and_then(|t| stack.get(t)).map(|a| a.task);

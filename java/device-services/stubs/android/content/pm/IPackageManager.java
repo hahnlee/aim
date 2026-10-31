@@ -5,6 +5,7 @@ package android.content.pm;
 import android.os.RemoteException;
 
 public interface IPackageManager extends android.os.IInterface {
+    int getPackageUid(String name, long flags, int user) throws android.os.RemoteException;
 
     void setPackageStoppedState(String packageName, boolean stopped, int userId) throws RemoteException;
     void setComponentEnabledSetting(android.content.ComponentName component, int state, int flags, int userId, String callingPackage) throws RemoteException;

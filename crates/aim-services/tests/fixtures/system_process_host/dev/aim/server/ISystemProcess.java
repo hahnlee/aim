@@ -22,6 +22,7 @@ interface ISystemProcess {
     void initializeCameraPrivacyAllowlist(java.util.List<String> packages);
     void attachAudioPolicyQueries(AudioPolicyQueries queries);
     void attachSyncAdapterQueries(SyncAdapterQueries queries);
+    void accessibilityReady(IBinder service) throws android.os.RemoteException;
     Object getDexUsePackages();
     void attachDexUseBridge(com.android.server.art.AppHostDexUse bridge);
     abstract class Stub {
@@ -32,6 +33,7 @@ interface ISystemProcess {
                     if (frontend == null) throw new AssertionError("missing domain front end");
                     SystemProcessHostTest.events.add("attachDomain");
                 }
+                public void accessibilityReady(IBinder service) { SystemProcessHostTest.events.add("accessibilityReady"); }
                 public Object getDexUsePackages() { return this; }
                 public void attachDexUseBridge(com.android.server.art.AppHostDexUse bridge) { SystemProcessHostTest.events.add("dex"); }
                 public void attachWifiBridge(WifiBridge bridge) {}

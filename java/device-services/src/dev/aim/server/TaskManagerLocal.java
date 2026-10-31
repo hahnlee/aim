@@ -6,8 +6,15 @@ import com.android.server.wm.ActivityTaskManagerInternal;
 
 /** Cold local queries for the app host's normal (non-factory-test) boot. */
 final class TaskManagerLocal extends ActivityTaskManagerInternal {
-    static void publish() {
-        LocalServices.addService(ActivityTaskManagerInternal.class, new TaskManagerLocal());
+    private final IAccessibilityWindowHost host;
+    TaskManagerLocal(IAccessibilityWindowHost host) { this.host = host; }
+    static void publish(ISystemProcess system) throws android.os.RemoteException {
+        LocalServices.addService(ActivityTaskManagerInternal.class, new TaskManagerLocal(system.getAccessibilityWindowHost()));
+    }
+
+    @Override public void setAccessibilityServiceUids(android.util.IntArray uids) {
+        try { host.setAccessibilityServiceUids(uids.toArray()); }
+        catch (android.os.RemoteException e) { throw e.rethrowFromSystemServer(); }
     }
 
     // ActivityTaskManagerService.getHomeIntent, android-16.0.0_r1 (Apache-2.0).

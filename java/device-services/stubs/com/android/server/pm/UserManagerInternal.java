@@ -3,6 +3,7 @@
 package com.android.server.pm;
 
 public abstract class UserManagerInternal {
+    public abstract boolean isVisibleBackgroundFullUser(int user);
     public interface UserVisibilityListener {
         void onUserVisibilityChanged(int userId, boolean visible);
     }

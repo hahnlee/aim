@@ -7,6 +7,7 @@ public class UserInfo implements android.os.Parcelable {
     public int describeContents() { throw new RuntimeException("stub"); }
     public static final android.os.Parcelable.Creator<UserInfo> CREATOR = null;
     public boolean supportsSwitchToByUser() { throw new RuntimeException("stub"); }
+    public boolean isFull() { throw new RuntimeException("stub"); }
     public boolean isManagedProfile() { throw new RuntimeException("stub"); }
     public int id;
     public int flags;

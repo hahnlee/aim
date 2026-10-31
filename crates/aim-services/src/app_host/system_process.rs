@@ -54,6 +54,51 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::GET_ACCESSIBILITY_WINDOW_HOST => {
+                sp::GetAccessibilityWindowHost::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().map(|()| {
+                    let binder = self
+                        .host
+                        .process
+                        .add_service(super::window_manager::accessibility_host(self.host.clone()));
+                    sp::write_get_accessibility_window_host_reply(&mut p, Some(binder));
+                })
+            }
+            sp::ACCESSIBILITY_READY => {
+                let a = sp::AccessibilityReady::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                system().and_then(|()| {
+                    if !self
+                        .host
+                        .apps
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .any(|a| a.process == super::SYSTEM_PROCESS && a.pid == call.sender_pid)
+                    {
+                        return Err(Exception::security(
+                            "accessibility publication belongs to the attached system process",
+                        ));
+                    }
+                    let Some(Binder::Handle(handle)) = a.service else {
+                        return Err(Exception::illegal_argument("accessibility not published"));
+                    };
+                    let remote = Arc::new(self.host.process.strong(handle));
+                    let weak = Arc::downgrade(&self.host);
+                    self.host.accessibility_ready.publish(remote, |remote| {
+                        self.host.process.link_to_death(
+                            remote,
+                            Box::new(move || {
+                                if let Some(host) = weak.upgrade() {
+                                    host.accessibility_ready
+                                        .failed("accessibility service died (#2529)");
+                                }
+                            }),
+                        );
+                    });
+                    sp::write_accessibility_ready_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::ATTACH_ACTIVITY_ANIMATIONS => {
                 let a =
                     sp::AttachActivityAnimations::read(&mut call.data).map_err(|_| BAD_VALUE)?;

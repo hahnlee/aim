@@ -16,7 +16,8 @@ public final class ServiceManager {
             throw new AssertionError(name);
         }
     }
-    public static IBinder getService(String name) { throw new AssertionError(); }
+    public static void requireSafetyCenter() { if (!safetyCenterPublished) throw new AssertionError("Safety Center must precede accessibility phase 600"); }
+    public static IBinder getService(String name) { if (!name.equals("accessibility")) throw new AssertionError(name); return null; }
     public static IBinder waitForService(String name) {
         if (!name.equals("aim.system_process")) throw new AssertionError(name);
         return null;

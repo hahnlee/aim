@@ -85,6 +85,11 @@ public final class PackageLocalOwners {
             try { return owner.isUserRunning(user); }
             catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
         }
+        @Override public boolean isVisibleBackgroundFullUser(int user) {
+            var info = getUserInfo(user);
+            try { return info != null && info.isFull() && !owner.isUserForeground(user) && owner.isUserVisible(user); }
+            catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+        }
         @Override public boolean isUserUnlockingOrUnlocked(int user) {
             try { return owner.isUserUnlockingOrUnlocked(user); }
             catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
@@ -118,6 +123,22 @@ public final class PackageLocalOwners {
         Packages(android.content.pm.IPackageManager owner, PackageSnapshots.Source scans) {
             this.owner = java.util.Objects.requireNonNull(owner);
             this.scans = java.util.Objects.requireNonNull(scans);
+        }
+        @Override public android.content.ComponentName getSystemUiServiceComponent() {
+            return com.android.server.pm.NativeUserManagerBridge.getSystemUiServiceComponent();
+        }
+        @Override public int getPackageUid(String name, long flags, int user) {
+            try { return owner.getPackageUid(name, flags, user); }
+            catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+        }
+        @Override public boolean isSameApp(String name, long flags, int uid, int user) {
+            return getPackageUid(name, flags, user) == uid;
+        }
+        @Override public boolean filterAppAccess(String name, int uid, int user, boolean uninstalled) {
+            if (!uninstalled) throw unsupported();
+            try { return ISystemProcess.Stub.asInterface(ServiceManager.getService("aim.system_process"))
+                    .filterSyncAdapterPackageAccess(name, uid, user); }
+            catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
         }
         java.util.List<android.content.pm.PackageInfo> installedPackages(int user) {
             try { return owner.getInstalledPackages(0, user).getList(); }

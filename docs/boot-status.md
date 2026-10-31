@@ -439,6 +439,8 @@ odrefresh's cache metadata (no dex2oat): app-open admission at about 8.5 s,
 against 16.1 s before; warm second boots reach it at about 5.9 s (three boots
 each, 2026-10-30).
 
+The app host now starts the original AccessibilityManagerService with native overlay-token and window callback ownership (#2529), ordered initial-user initialization and an ordinary-app binding barrier. The final disposable image reaches boot_completed in 14.118 s; 14 targeted host/JVM tests and 12 unmodified-framework instrumentation checks pass (default/DONT_USE connections, reconnect IDs, permission rejection, state/focus/timeouts/service reads), with empty final crash/ANR/tombstone captures. The single Safety Center CTS run on the preceding candidate completed with 356 pass / 141 fail / 31 assumption skips: all failures first stop at shell permission delegation (#2511); CTS was not repeated after the package-visibility correction verified by the final probe. Both successful boot intervals and the final probe had no observed foreign build activity; later foreign builds overlapped the retained sessions. Window content introspection, interaction-window metadata and magnification remain explicit unsupported paths; this verifies the lifecycle slice, not full accessibility conformance.
+
 The app host image ([app-host.md](app-host.md)) boots without
 system_server. In the original measurement, `--only` selected 33 services and
 one-shots (the current selection has 44 entries), and zygote accepted

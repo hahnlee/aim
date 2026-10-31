@@ -10,6 +10,7 @@ public final class ActivityStatsTest {
     static IActivityStatsSnapshot collector;
     static ActivityStatsPendingIntent[] pending;
     static CachedAppsWatermark watermark = new CachedAppsWatermark();
+    static int[] accessibilityUids;
     static boolean reset;
     static void check(boolean value) { if (!value) throw new AssertionError(); }
     public static void main(String[] args) throws Exception {
@@ -25,13 +26,31 @@ public final class ActivityStatsTest {
                     case "getCachedAppsWatermark" -> { reset = (boolean)values[0]; yield watermark; }
                     default -> throw new AssertionError(method);
                 });
-        ActivityStats.publish(snapshot -> { collector = snapshot; return host; });
-        TaskManagerLocal.publish();
+        IAccessibilityWindowHost windows = (IAccessibilityWindowHost) Proxy.newProxyInstance(
+                ActivityStatsTest.class.getClassLoader(), new Class<?>[]{IAccessibilityWindowHost.class},
+                (proxy, method, values) -> {
+                    check(method.getName().equals("setAccessibilityServiceUids"));
+                    accessibilityUids = (int[])values[0];
+                    return null;
+                });
+        ISystemProcess system = (ISystemProcess) Proxy.newProxyInstance(
+                ActivityStatsTest.class.getClassLoader(), new Class<?>[]{ISystemProcess.class},
+                (proxy, method, values) -> switch (method.getName()) {
+                    case "getActivityStatsHost" -> { collector = (IActivityStatsSnapshot)values[0]; yield host; }
+                    case "getAccessibilityWindowHost" -> windows;
+                    default -> throw new AssertionError(method);
+                });
+        ActivityStats.publish(system);
+        TaskManagerLocal.publish(system);
         var tasks = LocalServices.getService(com.android.server.wm.ActivityTaskManagerInternal.class);
         var home = tasks.getHomeIntent();
         check(home.action.equals("android.intent.action.MAIN")
                 && home.category.equals("android.intent.category.HOME") && home.flags == 256);
         check(home != tasks.getHomeIntent());
+        tasks.setAccessibilityServiceUids(new android.util.IntArray() {
+            @Override public int[] toArray() { return new int[]{10123, 10124}; }
+        });
+        check(Arrays.equals(accessibilityUids, new int[]{10123, 10124}));
         ActivityManagerInternal service = LocalServices.getService(ActivityManagerInternal.class);
         android.app.ActivityManager.service = (android.app.IActivityManager) Proxy.newProxyInstance(
                 ActivityStatsTest.class.getClassLoader(), new Class<?>[]{android.app.IActivityManager.class},
