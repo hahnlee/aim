@@ -505,7 +505,7 @@ impl System {
             } else {
                 match (
                     result,
-                    store.user_states(user_id, receipts.into_iter().collect()),
+                    store.reconcile_user_states(user_id, receipts.into_iter().collect()),
                 ) {
                     (result, Ok(_)) => result,
                     (Ok(()), Err(error)) => Err(error),

@@ -1556,6 +1556,38 @@ impl NativeStore {
     ) -> Result<Arc<Snapshot>, Exception> {
         self.user_states(user, vec![(name.to_owned(), state)])
     }
+    /// Reconciliation holds the install gate and has already prepared the data.
+    /// Identical receipts need neither a restrictions write nor republication.
+    /// Explicit user_states commits retain their persistence/retry contract.
+    pub(crate) fn reconcile_user_states(
+        &self,
+        user: i32,
+        states: Vec<(String, UserState)>,
+    ) -> Result<Arc<Snapshot>, Exception> {
+        if user < 0 {
+            return Err(illegal("Negative app-data receipt user"));
+        }
+        let base = self.snapshots.capture();
+        let mut names = BTreeSet::new();
+        let mut changed = Vec::new();
+        for (name, state) in states {
+            if !names.insert(name.clone()) {
+                return Err(illegal("Duplicate app-data receipt package"));
+            }
+            if base
+                .owner()
+                .scanned_user_states(&name)
+                .and_then(|s| s.get(&user))
+                != Some(&state)
+            {
+                changed.push((name, state));
+            }
+        }
+        if changed.is_empty() {
+            return Ok(base);
+        }
+        self.user_states(user, changed)
+    }
     /// One reconciliation volume publishes its actual installd inode receipts
     /// together. Physical creation has already happened, even if another member
     /// subsequently failed; the caller still returns those operation failures.
@@ -2062,17 +2094,47 @@ mod batch_user_state_tests {
         assert_eq!(written["core.one"].de_data_inode, 112);
         assert_eq!(written["core.two"].ce_data_inode, 221);
         assert_eq!(written["core.two"].de_data_inode, 222);
+        {
+            // A warm reconciliation must return without even acquiring the
+            // disk writer, changing the canonical capture or calling publish.
+            let _disk = store.disk.lock().unwrap();
+            let same = store
+                .reconcile_user_states(
+                    0,
+                    vec![
+                        ("core.one".into(), first.clone()),
+                        ("core.two".into(), second.clone()),
+                    ],
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(&same, &committed));
+            assert!(Arc::ptr_eq(&same, &snapshots.capture()));
+            assert_eq!(publications.load(Ordering::SeqCst), 1);
+            assert!(store.reconcile_user_states(-1, vec![]).is_err());
+            assert!(
+                store
+                    .reconcile_user_states(
+                        0,
+                        vec![
+                            ("core.one".into(), first.clone()),
+                            ("core.one".into(), first.clone()),
+                        ],
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let changed = UserState {
             de_data_inode: 999,
-            ..first
+            ..first.clone()
         };
         assert!(
             store
-                .user_states(
+                .reconcile_user_states(
                     0,
                     vec![
                         ("core.one".into(), changed),
-                        ("unaccepted.package".into(), second)
+                        ("unaccepted.package".into(), second.clone())
                     ]
                 )
                 .is_err()
@@ -2080,6 +2142,39 @@ mod batch_user_state_tests {
         assert!(Arc::ptr_eq(&committed, &snapshots.capture()));
         assert_eq!(publications.load(Ordering::SeqCst), 1);
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let mixed = store
+            .reconcile_user_states(
+                0,
+                vec![
+                    (
+                        "core.one".into(),
+                        UserState {
+                            ce_data_inode: 113,
+                            ..first
+                        },
+                    ),
+                    ("core.two".into(), second.clone()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(mixed.version(), committed.version() + 1);
+        assert_eq!(publications.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            mixed.owner().scanned_user_states("core.two").unwrap()[&0],
+            second
+        );
+        let disk = store.disk.lock().unwrap();
+        let persisted = &disk.state().users[0].1.restrictions.packages;
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|(name, _)| name == "core.one")
+                .unwrap()
+                .1
+                .ce_data_inode,
+            113
+        );
+        drop(disk);
         store.finish_after_unlock(before.version(), Ok(())).unwrap();
         assert_eq!(invalidations.load(Ordering::SeqCst), 1);
         store.clear_domain_user("core.one", 0).unwrap();
@@ -2094,7 +2189,7 @@ mod batch_user_state_tests {
         };
         store.user_state("core.two", 0, uninstalled).unwrap();
         store.remove_setting("core.two").unwrap();
-        assert_eq!(publications.load(Ordering::SeqCst), 4);
+        assert_eq!(publications.load(Ordering::SeqCst), 5);
     }
 }
 fn illegal(message: impl Into<String>) -> Exception {
