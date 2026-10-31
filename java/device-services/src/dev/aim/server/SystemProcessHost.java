@@ -184,6 +184,7 @@ public final class SystemProcessHost extends RuntimeInit {
             ClassLoader nearbyLoader = ClassLoaderFactory.createClassLoader(NEARBY_JAR, null,
                     null, connectivity, Build.VERSION.SDK_INT, true /* isNamespaceShared */,
                     null /* classLoaderName */);
+            startService("dev.aim.server.nearby.ConnectivityDumpInitializer", nearbyLoader, context);
             startService("dev.aim.server.nearby.NetworkStatsInitializer", nearbyLoader, context);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
             List<SystemService> services = new ArrayList<>(List.of(pinner, nearby));

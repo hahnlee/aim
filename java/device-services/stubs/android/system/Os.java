@@ -23,4 +23,6 @@ public final class Os {
     public static long lseek(java.io.FileDescriptor fd,long offset,int whence) throws ErrnoException {throw new RuntimeException("stub");}
     public static int write(java.io.FileDescriptor fd,byte[] data,int offset,int length) throws ErrnoException {throw new RuntimeException("stub");}
     public static int pread(java.io.FileDescriptor fd,byte[] data,int offset,int length,long position) throws ErrnoException {throw new RuntimeException("stub");}
+public static String strerror(int errno){throw new RuntimeException("stub");}
+public static String if_indextoname(int index){throw new RuntimeException("stub");}
 }

@@ -28,16 +28,16 @@ public final class ConnectivityDumpTest {
         s.legacyTypes = new int[]{9, 17};
         var dir = Path.of(args[0]);
         String shortDump = Files.readString(dir.resolve("short.txt"));
-        equal(shortDump, ConnectivityDump.format(s, new String[]{"--short"}));
+        equal(shortDump, format(s, new String[]{"--short"}));
         String networks = Files.readString(dir.resolve("networks.txt"));
-        equal(networks, ConnectivityDump.format(s, new String[]{"networks", "--short"}));
+        equal(networks, format(s, new String[]{"networks", "--short"}));
         String request = Files.readString(dir.resolve("requests.txt"));
-        equal(request, ConnectivityDump.format(s, new String[]{"requests", "-a"}));
-        equal("Error: BpfNetMaps/TrafficController owner unavailable in app host (#2333)\n",
-                ConnectivityDump.format(s, new String[]{"trafficcontroller", "--short"}));
+        equal(request, format(s, new String[]{"requests", "-a"}));
+        equal("TrafficController\n\n",
+                format(s, new String[]{"trafficcontroller", "--short"}));
         String full = Files.readString(dir.resolve("full.txt"));
-        equal(full, ConnectivityDump.format(s, new String[]{"-a"}));
-        equal(full, ConnectivityDump.format(s, null));
+        equal(full, format(s, new String[]{"-a"}));
+        equal(full, format(s, null));
         // NAI omits connected time and zero lifecycle events; factory identity
         // and score are carried by the snapshot, not reconstructed by formatting.
         s.createdTime = 0; s.firstValidationTime = 0; s.lastValidationTime = 0;
@@ -50,20 +50,56 @@ public final class ConnectivityDumpTest {
                         + "&AVOIDED_WHEN_UNVALIDATED&ACCEPT_UNVALIDATED&EVER_USER_SELECTED&IS_VPN")
                 .replace("KeepConnected : 0", "KeepConnected : 2")
                 .replace("factorySerialNumber=1", "factorySerialNumber=8"),
-                ConnectivityDump.format(s, new String[]{"networks"}));
+                format(s, new String[]{"networks"}));
         s.createdTime = 1200; s.firstValidationTime = 1150; s.lastValidationTime = 1250;
         s.scorePolicies = s.offerScorePolicies; s.keepConnectedReason = 0; s.factorySerialNumber = 1;
-        equal("Error: NetworkDiagnostics owner unavailable in app host (#2333)\n" + shortDump,
-                ConnectivityDump.format(s, new String[]{"--dump-priority", "HIGH"}));
+        equal(shortDump,
+                format(s, new String[]{"--dump-priority", "HIGH"}));
+        var selected = new java.util.ArrayList<Integer>();
+        java.util.function.BiFunction<Integer,Boolean,String> leaf = (section, verbose) -> {
+            selected.add(section); return "";
+        };
+        equal("", ConnectivityDump.format(s, new String[]{"networks", "--diag"}, leaf));
+        equal("[0]", selected.toString()); selected.clear();
+        ConnectivityDump.format(s, new String[]{"--dump-priority", "HIGH", "requests"}, leaf);
+        equal("[0, 2, 3, 4, 5]", selected.toString()); selected.clear();
+        equal(request, ConnectivityDump.format(s, new String[]{"--dump-priority", "HIGH",
+                "--dump-priority", "NORMAL", "requests"}, leaf));
+        equal("[]", selected.toString());
+        equal(full, format(s, new String[]{"unknown", "--dump-priority"}));
+        equal("", format(s, new String[]{"clatEgress4RawBpfMap"}));
+        equal("", format(s, new String[]{"clatIngress6RawBpfMap"}));
+        n.request.type = NetworkRequest.Type.LISTEN;
+        equal(networks.replace("REQUEST:1 LISTEN:0", "REQUEST:0 LISTEN:1"),
+                format(s, new String[]{"networks"}));
+        equal(request.replace("activeRequest: 7", "activeRequest: null"),
+                format(s, new String[]{"requests"}));
+        n.request.type = NetworkRequest.Type.REQUEST;
         n.asUid = 10101; n.declared = (1 << 9) | (1 << 13) | (1 << 8);
         equal(request.replace("10100/42", "10100/42 asUid: 10101")
-                .replace("ALL", "SUSP|RES|0x100"), ConnectivityDump.format(s, new String[]{"requests"}));
+                .replace("ALL", "SUSP|RES|0x100"), format(s, new String[]{"requests"}));
         s.netId = -1;
-        equal("", ConnectivityDump.format(s, new String[]{"networks"}));
+        equal("", format(s, new String[]{"networks"}));
         n.asUid = n.uid; n.declared = -1; n.satisfier = -1;
         s.offerCapabilities = null; s.offerNeeded = new int[0];
         equal(Files.readString(dir.resolve("down.txt")),
-                ConnectivityDump.format(s, new String[]{"--short"}));
+                format(s, new String[]{"--short"}));
+    }
+    // android-16.0.0_r1 ConnectivityService.java:4342-4524 (order/spacing),
+    // 4526-4619 (requests/preferences); Nat464Xlat.java:603-617 (inactive CLAT).
+    // Parcelables and module leaves are boundary doubles; these tests assert their
+    // text is forwarded verbatim, not that host Java executes Android networking.
+    private static String format(ConnectivityDumpSnapshot s, String[] args) {
+        return ConnectivityDump.format(s, args, (section, verbose) -> switch (section) {
+            case IConnectivityDumpLeaf.DIAGNOSTICS -> "";
+            case IConnectivityDumpLeaf.TRAFFIC -> "TrafficController\n\n";
+            case IConnectivityDumpLeaf.KEEPALIVE -> "Socket keepalives:\n";
+            case IConnectivityDumpLeaf.POLICY -> "Bad Wi-Fi avoidance: unrestricted\n";
+            case IConnectivityDumpLeaf.BPF_STATUS -> "Bpf Program Status:\n  CGROUP_INET_INGRESS:   IOException\n";
+            case IConnectivityDumpLeaf.ACTIVITY -> "  mTrackMultiNetworkActivities=true\n"
+                    + "  mDefaultCellularDataInactivityTimeout=10\n  mDefaultWifiDataInactivityTimeout=15\n";
+            default -> throw new AssertionError(section);
+        });
     }
     private static void equal(String expected, String actual) {
         if (!expected.equals(actual)) throw new AssertionError("expected:\n" + expected + "actual:\n" + actual);

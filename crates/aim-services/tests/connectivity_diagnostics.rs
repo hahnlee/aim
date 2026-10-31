@@ -45,8 +45,12 @@ fn original_diagnostics_policy_matches_permissions_requests_and_callback_lifetim
             .arg("-o")
             .arg(&generated)
             .args(
-                ["ConnectivityDumpSnapshot", "ConnectivityDumpRequest"]
-                    .map(|name| aidl.join(format!("dev/aim/server/{name}.aidl"))),
+                [
+                    "ConnectivityDumpSnapshot",
+                    "ConnectivityDumpRequest",
+                    "IConnectivityDumpLeaf",
+                ]
+                .map(|name| aidl.join(format!("dev/aim/server/{name}.aidl"))),
             ),
     );
     run(Command::new(jdk.join("bin/javac"))

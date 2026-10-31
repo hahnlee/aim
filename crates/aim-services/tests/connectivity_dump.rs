@@ -74,18 +74,20 @@ fn connectivity_dump_exact_output() {
         inputs.push(path);
     }
     let aidl = source.join("aidl");
+    let dump_types = [
+        "ConnectivityDumpSnapshot",
+        "ConnectivityDumpRequest",
+        "IConnectivityDumpLeaf",
+    ];
     run(
         Command::new(aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"))
             .args(["--lang=java", "--min_sdk_version", "36"])
             .arg(format!("-I{}", aidl.display()))
             .arg("-o")
             .arg(&dir)
-            .args(
-                ["ConnectivityDumpSnapshot", "ConnectivityDumpRequest"]
-                    .map(|n| aidl.join(format!("dev/aim/server/{n}.aidl"))),
-            ),
+            .args(dump_types.map(|n| aidl.join(format!("dev/aim/server/{n}.aidl")))),
     );
-    for name in ["ConnectivityDumpSnapshot", "ConnectivityDumpRequest"] {
+    for name in dump_types {
         inputs.push(dir.join(format!("dev/aim/server/{name}.java")));
     }
     inputs.push(source.join("src/dev/aim/server/ConnectivityDump.java"));

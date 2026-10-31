@@ -4,20 +4,18 @@ NetworkProviders for:
 Active default network: 100
 
 Current network preferences: 
-  Error: profile/OEM/default network preferences owner unavailable in app host (#2333)
+  Default requests:
 
 Current Networks:
   NetworkAgentInfo{network{100}  handle{432902426637}  ni{Ethernet CONNECTED extra: 02:61:69:6d:00:02} created=2025-10-09T08:53:20.123Z Score(Policies : EVER_EVALUATED&IS_UNMETERED&EVER_VALIDATED&IS_VALIDATED ; KeepConnected : 0)  created 1200 firstValidated 1150 lastValidated 1250  lp{{InterfaceName: eth0 LinkAddresses: [ 192.0.2.2/24 ] DnsAddresses: [ /192.0.2.1 ] MTU: 1500}}  nc{[ Transports: ETHERNET Capabilities: INTERNET&VALIDATED&FOREGROUND ]}  factorySerialNumber=1}
     Nat464Xlat:
-      Error: Nat464Xlat owner unavailable in app host (#2333)
+      <not started>
     Requests: REQUEST:1 LISTEN:0 BACKGROUND_REQUEST:0 total:1
       NetworkRequest [ REQUEST id=7, [ Capabilities: INTERNET ] ]
     Inactivity Timers:
-      Error: NetworkAgentInfo inactivity timers owner unavailable in app host (#2333)
 
 Status for known UIDs:
   UID=10100 blockedReasons=100
-  Error: NetworkPolicyManager firewall/data saver blocked reasons owner unavailable in app host (#2333)
 
 Network Requests:
   uid/pid:10100/42 activeRequest: 7 callbackRequest: 7 [NetworkRequest [ REQUEST id=7, [ Capabilities: INTERNET ] ]] callback flags: 0 order: 2147483647 isUidTracked: true declaredMethods: ALL
@@ -31,41 +29,50 @@ mLegacyTypeTracker:
     9 [100 ETHERNET]
 
 
-KeepaliveTracker:
-  Error: KeepaliveTracker owner unavailable in app host (#2333)
+Socket keepalives:
 
-Error: MultinetworkPolicyTracker avoid bad Wi-Fi settings owner unavailable in app host (#2333)
+Bad Wi-Fi avoidance: unrestricted
 
-Error: ConnectivityService socket destruction policy owner unavailable in app host (#2333)
-
-Error: ConnectivityService BPF program status owner unavailable in app host (#2333)
-
-Error: CarrierPrivilegeAuthenticator owner unavailable in app host (#2333)
+DestroySockets:
+  mDestroyFrozenSockets=false
+  mDelayDestroySockets=false
+  mDestroySocketPendingUids:
+Bpf Program Status:
+  CGROUP_INET_INGRESS:   IOException
 
 
 mNetworkRequestInfoLogs (most recent first):
-  Error: request history owner unavailable in app host (#2333)
 
 mNetworkInfoBlockingLogs (most recent first):
-  Error: blocking history owner unavailable in app host (#2333)
 
 NetTransition WakeLock activity (most recent first):
-  Error: transition wakelock owner unavailable in app host (#2333)
+  total acquisitions: 0
+  total releases: 0
+  cumulative duration: 0s
+  longest duration: 0s
 
   bandwidth update requests (by uid):
-  Error: bandwidth request counters owner unavailable in app host (#2333)
 
 mOemNetworkPreferencesLogs (most recent first):
-  Error: OEM preference history owner unavailable in app host (#2333)
 
 
 Permission Monitor:
-  Error: PermissionMonitor owner unavailable in app host (#2333)
+  Interface filtering rules:
+
+  Lockdown filtering rules:
+
+  Update logs:
 
 Legacy network activity:
+  mTrackMultiNetworkActivities=true
+  mDefaultCellularDataInactivityTimeout=10
+  mDefaultWifiDataInactivityTimeout=15
   mIsDefaultNetworkActive=true
-  Error: NetworkActivityTracker cellular/Wi-Fi idle timers owner unavailable in app host (#2333)
+  mDefaultNetwork=100
+  Idle timers:
+  WiFi active networks: []
+  Cellular active networks: []
 
-Error: MulticastRoutingCoordinatorService owner unavailable in app host (#2333)
-Error: ConnectivityService background firewall chain owner unavailable in app host (#2333)
-Error: ConnectivityService ingress-to-VPN filtering owner unavailable in app host (#2333)
+Multicast routing supported: false
+Background firewall chain enabled: false
+IngressToVpnAddressFiltering: false
