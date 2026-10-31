@@ -3749,13 +3749,15 @@ impl AppHost {
     ) -> Result<aim_binder_host::local::Received, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let agent = self.agent.lock().unwrap();
-        let agent = agent
+        let owner = agent
             .as_ref()
             .ok_or_else(|| state("the app host agent has not attached".into()))?;
+        let owner = self.process.strong(owner.handle);
+        drop(agent); // FINISHED waits must allow concurrent window updates and removal.
         let mut data = Parcel::new();
         data.write_interface_token(AGENT_DESCRIPTOR);
         write(&mut data);
-        let reply = agent
+        let reply = owner
             .transact(code, &data, false)
             .map_err(|s| state(format!("{name}: {s}")))?;
         let status = reply.reader().read_exception();

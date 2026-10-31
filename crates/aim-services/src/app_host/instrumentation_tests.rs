@@ -236,7 +236,13 @@ fn instrumentation_admission_and_no_restart_results_cleanup() {
             assert!(results(host, who, code, Some(fd_bundle.clone())).is_err());
         }
         insert(host, 100, Some(t), "p");
+        let probe = super::input_manager::injection_tests::permission_probe;
+        assert_eq!(probe(host, 10100), -1); // no INJECT_EVENTS grant
         assert!(start(host, 0, request(10, w.binder(), ui.binder())).unwrap());
+        assert_eq!(host.instrumentation_source(10100), Some(0));
+        assert_eq!(probe(host, 10100), -4); // source grant passes permission, then rejects null
+
+        assert_eq!(host.instrumentation_source(110100), None);
         assert_eq!(appops_service::mode(host, 99, 10100, Some("p")).unwrap(), 0);
         assert_eq!(recv(&rx).0, thread::INSTRUMENT_WITHOUT_RESTART);
         let sessions = &host.instrumentation;
@@ -269,6 +275,9 @@ fn instrumentation_admission_and_no_restart_results_cleanup() {
         assert_eq!(recv(&rx).0, ui::SHUTDOWN);
         assert_eq!(appops_service::mode(host, 99, 10100, Some("p")).unwrap(), 2);
         results(host, who, Some(1), None).unwrap();
+        assert_eq!(host.instrumentation_source(10100), None);
+        assert_eq!(probe(host, 10100), -1); // retired instrumentation cannot grant injection
+
         assert!(host.apps.lock().unwrap()[&100].instrumentation.is_none());
         assert!(host.instrumentation.matching("p", "p", 10100).is_none());
         assert!(host.apps.lock().unwrap()[&100].thread.is_some());

@@ -63,7 +63,7 @@ impl AppHost {
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../../daemons/app-host-agent/src/input.rs"]
-mod dispatcher;
+pub(crate) mod dispatcher;
 
 #[cfg(test)]
 mod tests {
@@ -245,7 +245,7 @@ mod tests {
             dispatcher.inject(&motion);
             assert_eq!(
                 client.recv(&mut bytes).unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock
+                std::io::ErrorKind::ConnectionReset // removal closes the channel publisher
             );
             // Transport/owner errors remain errors, rather than successful syncs.
             *host.agent.lock().unwrap() = None;

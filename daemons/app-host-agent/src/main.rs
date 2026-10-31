@@ -116,6 +116,7 @@ const RELEASE_COMPRESSED_BLOCKS: u32 = 16;
 const WRITE_EVENT: u32 = 17;
 /// `IAppHostAgent.syncInputWindows(int[] liveChannels)`: input commit barrier.
 const SYNC_INPUT_WINDOWS: u32 = 18;
+const INJECT_INPUT_EVENT_TO_TARGET: u32 = 19;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -446,6 +447,20 @@ fn on_transact(
                 }
             })?;
             Ok(())
+        }
+        INJECT_INPUT_EVENT_TO_TARGET => {
+            let bytes: Vec<u8> = data.read()?;
+            let (mode, uid): (i32, i32) = (data.read()?, data.read()?);
+            let dispatcher = agent.dispatcher().ok_or(StatusCode::UNKNOWN_TRANSACTION)?;
+            let (event, used) = aim_input_transport::injection::Event::decode(&bytes)
+                .ok_or(StatusCode::BAD_VALUE)?;
+            if used != bytes.len() {
+                return Err(StatusCode::BAD_VALUE);
+            }
+            let result =
+                dispatcher.inject_event(event, mode, uid, std::time::Duration::from_secs(30));
+            reply.write(&Status::ok())?;
+            reply.write(&result)
         }
         INJECT_MOTION => {
             let action: i32 = data.read()?;
