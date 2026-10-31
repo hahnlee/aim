@@ -419,9 +419,19 @@ mod tests {
         }
         fn transact(&self, call: &mut Call<'_>) -> Reply {
             assert!(call.is_oneway());
-            // Reentrant access must never run under either window owner lock.
+            // The fixture waits for delivery before its next mutation, so these
+            // checks cannot observe an unrelated writer's lock (#2554).
             assert!(self.0.windows.windows.try_lock().is_ok());
             assert!(self.0.windows.focus.try_lock().is_ok());
+            let mut p = Parcel::new();
+            api::GetFocusedWindowTokenFromWindowStates {}.write(&mut p);
+            invoke(
+                &Host(self.0.clone()),
+                api::GET_FOCUSED_WINDOW_TOKEN_FROM_WINDOW_STATES,
+                &p,
+                1000,
+            )
+            .unwrap();
             let a = callback::OnWindowsChanged::<Row>::read(&mut call.data).unwrap();
             let rows = a
                 .windows
@@ -711,6 +721,9 @@ mod tests {
         subscribe(0, Some(callback.binder())).unwrap();
         assert!(next().is_empty());
         f.window(1, None, false);
+        // The add's oneway callback must finish its reentrant lookups before
+        // this independent edit takes the window lock.
+        assert!(next().is_empty());
         {
             let mut windows = f.host.windows.windows.lock().unwrap();
             let w = windows.get_mut(&1).unwrap();
@@ -725,8 +738,7 @@ mod tests {
                 1,
             ));
         }
-        // Drain the add report, then the actual visible window snapshot and its removal.
-        next();
+        // Report the visible window snapshot, then its removal.
         f.host.accessibility_windows_changed().unwrap();
         let rows = next();
         assert_eq!(&rows[0][4..8], &[10, 20, 110, 220]);
