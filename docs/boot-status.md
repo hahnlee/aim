@@ -389,6 +389,17 @@ ambient results, quota hints and owner errors; successful public quota and Mac
 lock reads remain unverified. No guest boot or app-open check was run for this slice.
 
 The audio owner serves product strategies through the original Java AudioProductStrategy and audioserver policy configuration, with MODIFY_AUDIO_ROUTING checks. It also routes arbitrary AudioAttributes through AudioSystem, retaining full typed device lists and anonymizing Bluetooth addresses according to the caller’s BLUETOOTH_CONNECT grant or system UID (#2468; host Binder/JVM checks, no guest boot, 2026-10-31). Its device spatializer query checks MODIFY_DEFAULT_AUDIO_EFFECTS and rejects null devices; the HAL has no effects or supported spatialization modes, so availability is false. ContentService's sync-adapter type reads retain the original SyncAdaptersCache's package-scan metadata, UID ownership, persistence and package-change receivers, and filter packages for the Binder caller; cross-user reads require INTERACT_ACROSS_USERS_FULL (#1460). Focused native/JVM tests and pinned-image Java linkage pass; no guest boot was run (2026-10-29). The derived services.jar now adds pinned typed account constructor seams and a local-notify helper for the retained sync owner (#1460 slice 1, 2026-11-01). Focused DEX/linkage and source/image/oat rejection checks pass; forwarding and private startup remain inactive. The full build stops in oat compilation with PID-namespace watcher EADDRINUSE; the matched compiled cohort and derived image remain unverified. No guest boot or new CTS run was performed.
+The slice-2 local adapters now use the existing native package capture for
+stopped/launched reads and the native visibility bridge for the retained PMI
+overloads. Both grant/package startup orders retain one package facade and one
+original default-grant policy, including its sync-provider registration.
+ActivityStats delegates active/process/start queries to native owners; restriction
+levels remain explicitly unsupported because native restriction settings are not
+owned yet (#2274). Device-services and AIDL builds pass, including pinned-image
+linkage and concrete-method checks for these retained calls. Adapter JVM fixtures
+and the missing-abstract-method regression pass. These are scoped method checks,
+not completeness checks of all ActivityManagerInternal methods. Sync forwarding
+and private startup remain inactive; no guest boot or new CTS run (#1460).
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 Appwidget provider metadata now uses indexed resource entries and a shared XML/label
 resource context instead of repeatedly decoding whole APK tables under its group

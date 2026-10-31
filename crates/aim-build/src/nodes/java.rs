@@ -336,7 +336,49 @@ pub fn check_linkage(
         Some(stubs) => classpath.stub_mismatches(&read(stubs)?)?,
         None => Vec::new(),
     };
-    problems.extend(classpath.unresolved(&read(dex)?)?);
+    let code = read(dex)?;
+    problems.extend(classpath.unresolved(&code)?);
+    for (adapter, parent, methods) in [
+        (
+            "Ldev/aim/server/ActivityStats;",
+            "Landroid/app/ActivityManagerInternal;",
+            &[
+                ("isUidActive", "(I)Z"),
+                ("getUidProcessState", "(I)I"),
+                ("isAppStartModeDisabled", "(ILjava/lang/String;)Z"),
+                ("getRestrictionLevel", "(I)I"),
+            ][..],
+        ),
+        (
+            "Ldev/aim/server/PackageLocalOwners$Packages;",
+            "Landroid/content/pm/PackageManagerInternal;",
+            &[
+                ("filterAppAccess", "(Ljava/lang/String;II)Z"),
+                ("filterAppAccess", "(Ljava/lang/String;IIZ)Z"),
+                (
+                    "filterAppAccess",
+                    "(Lcom/android/server/pm/pkg/AndroidPackage;II)Z",
+                ),
+                ("wasPackageEverLaunched", "(Ljava/lang/String;I)Z"),
+                ("isPackageStopped", "(Ljava/lang/String;I)Z"),
+            ][..],
+        ),
+        (
+            "Lcom/android/server/pm/permission/AppHostDefaultPermissionGrants$Local;",
+            "Lcom/android/server/pm/permission/LegacyPermissionManagerInternal;",
+            &[(
+                "setSyncAdapterPackagesProvider",
+                "(Lcom/android/server/pm/permission/LegacyPermissionManagerInternal$SyncAdapterPackagesProvider;)V",
+            )][..],
+        ),
+    ] {
+        if aim_android_image::dex::Dex::parse(&code)?
+            .class(adapter)
+            .is_some()
+        {
+            problems.extend(classpath.local_contract(&code, adapter, parent, methods)?);
+        }
+    }
     if !problems.is_empty() {
         return Err(format!(
             "{} does not link against the image:\n  {}",
@@ -350,4 +392,91 @@ pub fn check_linkage(
 fn join(paths: &[PathBuf]) -> String {
     let paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     paths.join(":")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_contract_rejects_inherited_abstract_methods_and_wrong_overloads() {
+        let work = aim_paths::scratch_dir("local-contract");
+        let source = work.join("source");
+        fs::create_dir_all(&source).unwrap();
+        let mut log = Log::create(work.join("test.log"), false).unwrap();
+        let tools = Toolchain::fetch(&mut log).unwrap();
+        // Compile against the incomplete API, then link against its real shape.
+        fs::write(
+            source.join("Base.java"),
+            "public abstract class Base { public Base() {} }",
+        )
+        .unwrap();
+        fs::write(
+            source.join("Missing.java"),
+            "public class Missing extends Base {}",
+        )
+        .unwrap();
+        fs::write(
+            source.join("Good.java"),
+            "public class Good extends Base { public int query(int uid) { return uid; } }",
+        )
+        .unwrap();
+        fs::write(
+            source.join("Inherited.java"),
+            "public class Inherited extends Good {}",
+        )
+        .unwrap();
+        fs::write(
+            source.join("Wrong.java"),
+            "public class Wrong extends Base { public int query(String uid) { return 0; } }",
+        )
+        .unwrap();
+        let classes = work.join("classes");
+        tools
+            .javac(&mut log, &[source.clone()], &[], &classes, false)
+            .unwrap();
+        fs::remove_file(classes.join("Base.class")).unwrap();
+        let adapters = tools
+            .d8(&mut log, &classes, None, &work.join("adapters"))
+            .unwrap();
+        let real = work.join("real");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(
+            real.join("Base.java"),
+            "public abstract class Base { public abstract int query(int uid); }",
+        )
+        .unwrap();
+        let api = work.join("api");
+        // Only the real base is compiled; incomplete adapters would fail javac here.
+        tools.javac(&mut log, &[real], &[], &api, false).unwrap();
+        let api_dex = tools
+            .d8(&mut log, &api, None, &work.join("api-dex"))
+            .unwrap();
+        tools
+            .jar(&mut log, &api_dex, &work.join("api.jar"))
+            .unwrap();
+        let path = ClassPath::read(&work, &["api.jar".into()]).unwrap();
+        let dex = fs::read(adapters).unwrap();
+        let methods = &[("query", "(I)I")];
+        for adapter in ["LGood;", "LInherited;"] {
+            assert!(
+                path.local_contract(&dex, adapter, "LBase;", methods)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        for adapter in ["LMissing;", "LWrong;", "LBase;"] {
+            assert!(
+                path.local_contract(&dex, adapter, "LBase;", methods)
+                    .unwrap()[0]
+                    .contains("no concrete local method")
+            );
+        }
+        assert!(
+            path.local_contract(&dex, "LGood;", "LBase;", &[("absent", "()V")])
+                .unwrap()
+                .iter()
+                .any(|s| s.contains("no local API"))
+        );
+    }
 }

@@ -29,6 +29,21 @@ final class ActivityStats extends ActivityManagerInternal {
         } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
     }
 
+    @Override public int getUidProcessState(int uid) {
+        try { return android.app.ActivityManager.getService().getUidProcessState(uid, "android"); }
+        catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
+
+    @Override public boolean isAppStartModeDisabled(int uid, String packageName) {
+        try { return host.isAppStartModeDisabled(uid, packageName); }
+        catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
+
+    @Override public int getRestrictionLevel(int uid) {
+        try { return host.getRestrictionLevel(uid); }
+        catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
+
     static void publish(ISystemProcess system) throws RemoteException {
         IActivityStatsSnapshot snapshot = new IActivityStatsSnapshot.Stub() {
             @Override public CachedAppsWatermark snapshot(int[] liveUids) {

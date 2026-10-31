@@ -254,6 +254,57 @@ impl ClassPath {
         Ok(missing)
     }
 
+    /// Required local calls must resolve to concrete instance methods, not an
+    /// inherited abstract image declaration (which unresolved() accepts).
+    pub fn local_contract(
+        &self,
+        dex: &[u8],
+        adapter: &str,
+        parent: &str,
+        methods: &[(&str, &str)],
+    ) -> Result<Vec<String>, String> {
+        let mut classes = self.classes(Some(dex))?;
+        let mut out = Vec::new();
+        for &(name, signature) in methods {
+            let member = (name.to_string(), signature.to_string());
+            if !classes.resolves(parent, &member, true)? {
+                out.push(format!("no local API {parent}->{name}{signature}"));
+            }
+            let mut next = Some(adapter.to_string());
+            let mut seen = HashSet::new();
+            let mut concrete = false;
+            while let Some(owner) = next {
+                if !seen.insert(owner.clone()) {
+                    break;
+                }
+                let Some(&(d, c)) = classes.index.get(&owner) else {
+                    break;
+                };
+                let source = &classes.dexes[d];
+                let class = &source.classes[c];
+                let mut declared = false;
+                for (id, flags) in source.virtual_methods(class)? {
+                    let (_, n, s) = source.method(id)?;
+                    if n == name && s == signature {
+                        concrete = flags & 0x400 == 0;
+                        declared = true;
+                        break;
+                    }
+                }
+                if declared {
+                    break;
+                }
+                next = class.superclass.clone();
+            }
+            if !concrete {
+                out.push(format!(
+                    "{adapter}: no concrete local method {name}{signature}"
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     /// Where the classes of `stubs` differ from the class path's: a class,
     /// superclass, member or constant a stub declares that the image's
     /// class does not. A stub may leave members out.
