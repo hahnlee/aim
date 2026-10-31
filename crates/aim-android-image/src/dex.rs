@@ -248,6 +248,35 @@ impl<'a> Dex<'a> {
         Ok(out)
     }
 
+    /// Virtual method ids and access flags, including abstract declarations.
+    pub fn virtual_methods(&self, class: &ClassDef) -> Result<Vec<(u32, u32)>> {
+        if class.class_data_off == 0 {
+            return Ok(Vec::new());
+        }
+        let mut at = class.class_data_off as usize;
+        let counts = (0..4)
+            .map(|_| uleb128(self.data, &mut at))
+            .collect::<Result<Vec<_>>>()?;
+        for _ in 0..counts[0] + counts[1] {
+            uleb128(self.data, &mut at)?;
+            uleb128(self.data, &mut at)?;
+        }
+        for _ in 0..counts[2] {
+            uleb128(self.data, &mut at)?;
+            uleb128(self.data, &mut at)?;
+            uleb128(self.data, &mut at)?;
+        }
+        let mut index = 0;
+        (0..counts[3])
+            .map(|_| {
+                index += uleb128(self.data, &mut at)?;
+                let access = uleb128(self.data, &mut at)?;
+                uleb128(self.data, &mut at)?;
+                Ok((index, access))
+            })
+            .collect()
+    }
+
     pub fn class(&self, descriptor: &str) -> Option<&ClassDef> {
         self.classes.iter().find(|c| c.descriptor == descriptor)
     }

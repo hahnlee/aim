@@ -81,6 +81,14 @@ final class PackageDiagnosticsJavaTest {
                     check(m.getName().equals("getUserInfo"));
                     return (int) a[0] == 0 ? new UserInfo(0) : null;
                 })));
+        check(!packages.isPackageStopped("p", 0) && packages.wasPackageEverLaunched("p", 0));
+        state.stopped = true; state.notLaunched = true;
+        check(packages.isPackageStopped("p", 0) && !packages.wasPackageEverLaunched("p", 0));
+        try { packages.isPackageStopped("absent", 0); throw new AssertionError(); }
+        catch (PackageManager.NameNotFoundException expected) {}
+        try { packages.wasPackageEverLaunched("absent", 0); throw new AssertionError(); }
+        catch (IllegalArgumentException expected) {}
+        captures[0] = 0; PackageScanLease.closed = 0;
         String first = diagnostic.computeRolePackageStateHash(0);
         check(captures[0] == 1 && PackageScanLease.closed == 1);
         state.enabled = 2; state.off = new String[] {"p.Disabled"};

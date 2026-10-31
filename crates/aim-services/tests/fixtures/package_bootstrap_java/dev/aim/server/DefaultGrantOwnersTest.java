@@ -13,7 +13,8 @@ final class DefaultGrantOwnersTest {
             for (Class<?> type : List.of(PackageManagerInternal.class,
                     com.android.server.pm.UserManagerInternal.class,
                     com.android.server.pm.permission.PermissionManagerServiceInternal.class,
-                    android.os.storage.StorageManagerInternal.class)) LocalServices.removeServiceForTest(type);
+                    android.os.storage.StorageManagerInternal.class,
+                    com.android.server.pm.permission.LegacyPermissionManagerInternal.class)) LocalServices.removeServiceForTest(type);
             int before = LocalServices.packageRegistrations;
             android.os.IUserManager.Stub.service = owner(android.os.IUserManager.class, (proxy, method, args) -> {
                 if (!method.getName().equals("getUsers")) throw new AssertionError(method);
@@ -44,13 +45,20 @@ final class DefaultGrantOwnersTest {
             var bridge = new PackageBootstrapBridge();
             if (grantFirst) bridge.grantDefaultPermissions(queries, 0);
             else PackageLocalOwners.publish(backend, context, new com.android.server.pm.Installer(context));
+            var legacy = LocalServices.getService(com.android.server.pm.permission.LegacyPermissionManagerInternal.class);
+            int[] providerCalls = {0};
+            legacy.setSyncAdapterPackagesProvider((authority, user) -> {
+                if (!authority.equals("calendar") || (user != 0 && user != 10)) throw new AssertionError();
+                providerCalls[0]++; return new String[]{"sync.adapter"};
+            });
             var retained = LocalServices.getService(PackageManagerInternal.class);
             if (grantFirst) PackageLocalOwners.publish(backend, context, new com.android.server.pm.Installer(context));
             else bridge.grantDefaultPermissions(queries, 0);
             bridge.grantDefaultPermissions(queries, 10);
             if (retained != LocalServices.getService(PackageManagerInternal.class)
                     || LocalServices.packageRegistrations != before + 1
-                    || retained.getDynamicCodeLogger() == null || calls.size() != 8) throw new AssertionError(calls);
+                    || legacy != LocalServices.getService(com.android.server.pm.permission.LegacyPermissionManagerInternal.class)
+                    || providerCalls[0] != (grantFirst ? 1 : 2) || retained.getDynamicCodeLogger() == null || calls.size() != 8) throw new AssertionError(calls);
             dead[0] = true;
             try { bridge.grantDefaultPermissions(queries, 0); throw new AssertionError("dead query accepted"); }
             catch (RuntimeException expected) {

@@ -21,6 +21,12 @@ public final class ActivityStatsTest {
         IActivityStatsHost host = (IActivityStatsHost) Proxy.newProxyInstance(
                 ActivityStatsTest.class.getClassLoader(), new Class<?>[]{IActivityStatsHost.class},
                 (proxy, method, values) -> switch (method.getName()) {
+                    case "isAppStartModeDisabled" -> {
+                        check(values[1].equals("adapter"));
+                        if ((int)values[0] == -1) throw new android.os.RemoteException();
+                        yield (int)values[0] == 10124;
+                    }
+                    case "getRestrictionLevel" -> throw new UnsupportedOperationException("native restriction owner unavailable");
                     case "getProcesses" -> new ActivityStatsProcess[]{process};
                     case "getPendingIntents" -> pending;
                     case "getCachedAppsWatermark" -> { reset = (boolean)values[0]; yield watermark; }
@@ -55,13 +61,26 @@ public final class ActivityStatsTest {
         android.app.ActivityManager.service = (android.app.IActivityManager) Proxy.newProxyInstance(
                 ActivityStatsTest.class.getClassLoader(), new Class<?>[]{android.app.IActivityManager.class},
                 (proxy, method, values) -> {
-                    check(method.getName().equals("isUidActive") && values[1].equals("android"));
+                    check(values[1].equals("android"));
+                    if (method.getName().equals("getUidProcessState")) {
+                        if ((int)values[0] == -1) throw new android.os.RemoteException();
+                        return (int)values[0] == 10123 ? 2 : 20;
+                    }
+                    check(method.getName().equals("isUidActive"));
                     if ((int)values[0] == -1) throw new android.os.RemoteException();
                     return (int)values[0] == 10123;
                 });
         check(service.isUidActive(10123) && !service.isUidActive(10124));
         try { service.isUidActive(-1); throw new AssertionError(); }
         catch (IllegalStateException expected) { check(expected.getCause() instanceof android.os.RemoteException); }
+        check(service.getUidProcessState(10123) == 2 && service.getUidProcessState(10124) == 20);
+        check(!service.isAppStartModeDisabled(10123, "adapter") && service.isAppStartModeDisabled(10124, "adapter"));
+        try { service.getUidProcessState(-1); throw new AssertionError(); }
+        catch (IllegalStateException expected) { check(expected.getCause() instanceof android.os.RemoteException); }
+        try { service.isAppStartModeDisabled(-1, "adapter"); throw new AssertionError(); }
+        catch (IllegalStateException expected) { check(expected.getCause() instanceof android.os.RemoteException); }
+        try { service.getRestrictionLevel(10123); throw new AssertionError(); }
+        catch (UnsupportedOperationException expected) {}
         check(service.getClass().getSuperclass() == ActivityManagerInternal.class);
         var p = service.getMemoryStateForProcesses().get(0);
         check(p.uid == 10123 && p.pid == 42 && p.oomScore == 900 && p.hasForegroundServices
