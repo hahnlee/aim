@@ -9189,7 +9189,13 @@ composition (`CLIENT`). On a first boot PackageManager installs GMS about
 (`DynamiteLoaderV2Impl: Module config changed, forcing restart`) and its
 window closes with its task.
 
-**App shims** (same boots): `aim-apps shims --watch` wrote 19 shims into
+**App shims**: the keeper now reselects cached launcher entries when user-0
+package restrictions change, honoring component overrides and manifest defaults
+(#2527; fixture selection/bundle checks, 2026-10-31). It polls the main, backup
+and reserve paths every two seconds; the app host can defer its write for ten
+seconds. No guest boot or live launcher-query comparison was run for this change.
+
+In the 2026-10-01 boots, `aim-apps shims --watch` wrote 19 shims into
 `target/aim/boot/apps`, the packages `cmd package query-activities -a MAIN
 -c LAUNCHER` lists (Gboard's launcher activity, disabled at run time, and
 GMS's, disabled by a resource, left out). Opening Calculator.app,

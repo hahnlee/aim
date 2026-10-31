@@ -12,7 +12,8 @@
 //!   one for the platform (`android`, which shows the notifications of
 //!   packages without a shim of their own); with
 //!   `--watch` it follows installs and uninstalls (`DATA/system/
-//!   packages.list` changing), and a rebuilt `AIM_DISPLAY`, until it is
+//!   packages.list` changing), user-0 package/component restrictions,
+//!   and a rebuilt `AIM_DISPLAY`, until it is
 //!   stopped. `--scoped` gives the shims bundle identifiers of their own
 //!   (`shim::scope` of `DATA`), for a guest beside the user's, whose shims
 //!   keep the stable ones.
@@ -149,8 +150,10 @@ fn icon_command(a: &Args) -> Result<(), String> {
     std::fs::write(out, bytes).map_err(|e| format!("{}: {e}", out.display()))
 }
 
-fn modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+fn modified(path: &Path) -> Option<(SystemTime, u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.ino(), m.len()))
 }
 
 fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
@@ -166,19 +169,30 @@ fn shims(a: &Args, dir: PathBuf) -> Result<(), String> {
         }
         (true, None) => return Err(USAGE.into()),
     };
+    let platform = aim_apps::app::system(&framework).ok().flatten();
     let mut seen = None;
+    let mut scan = None;
     loop {
-        // The guest's package list, and the window host binary.
+        // Stat paths afresh: both package files are replaced during writes.
         let now = (
             data.and_then(|d| modified(&d.join("system/packages.list"))),
             modified(host),
+            [
+                "package-restrictions.xml",
+                "package-restrictions-backup.xml",
+                "package-restrictions.xml.reservecopy",
+            ]
+            .map(|name| data.and_then(|d| modified(&d.join("system/users/0").join(name)))),
         );
         if seen != Some(now) {
-            let mut apps = aim_apps::installed::scan(root, data, &framework);
+            if scan.is_none() || seen.is_some_and(|old: (_, _, _)| old.0 != now.0) {
+                scan = Some(aim_apps::installed::scan_all(root, data, &framework));
+            }
+            let mut apps = scan.as_ref().unwrap().enabled(data);
             // The platform's own shim shows notifications of packages
             // without one.
             let framework_path = root.join("system/framework/framework-res.apk");
-            if let Ok(Some(app)) = aim_apps::app::system(&framework) {
+            if let Some(app) = platform.clone() {
                 apps.push(aim_apps::installed::Installed {
                     apk: framework_path,
                     app,
