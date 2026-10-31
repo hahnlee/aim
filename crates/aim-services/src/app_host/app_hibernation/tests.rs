@@ -68,6 +68,7 @@ fn published_manager_reads_fresh_state_and_enforces_original_permissions() {
             .unwrap()
             .1
             .as_ref();
+        AppHibernation(host.clone()).unhibernate(0).unwrap();
         for package in [Some("p"), Some("uninstalled.package"), None] {
             let p = call(s, ah::IS_HIBERNATING_FOR_USER, 2901, 0, package);
             let mut r = p.reader();
@@ -97,6 +98,13 @@ fn published_manager_reads_fresh_state_and_enforces_original_permissions() {
         let path = host.data().unwrap().join("system_ce/0/hibernation/states");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, [0x0a, 0]).unwrap();
+        assert_eq!(
+            AppHibernation(host.clone())
+                .unhibernate(0)
+                .unwrap_err()
+                .code,
+            EX_UNSUPPORTED_OPERATION
+        );
         let p = call(s, ah::IS_HIBERNATING_FOR_USER, 1000, 0, Some("p"));
         assert_eq!(error(&p), EX_UNSUPPORTED_OPERATION);
         host.platform()

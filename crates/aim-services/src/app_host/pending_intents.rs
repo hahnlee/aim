@@ -365,8 +365,7 @@ impl AppHost {
                 }
                 return Ok(Some(rec.binder));
             }
-            let rec = records.remove(at);
-            cancel(rec);
+            cancel(&mut records[at]);
         }
         if no_create {
             return Ok(None);
@@ -400,7 +399,7 @@ impl AppHost {
                 records[at].package
             )));
         }
-        cancel(records.remove(at));
+        cancel(&mut records[at]);
         Ok(())
     }
 
@@ -529,9 +528,12 @@ impl AppHost {
     ) -> bool {
         let mut records = self.pending_intents.records.lock().unwrap();
         let Some(r) = records.iter_mut().find(|r| Some(r.binder) == target) else {
-            // Cancelled records are gone.
+            // Another implementation of IIntentSender.
             return false;
         };
+        if r.canceled {
+            return false;
+        }
         if let Some(Binder::Handle(h)) = receiver {
             r.cancel_listeners.push(self.process.strong(h));
         }
@@ -661,7 +663,10 @@ impl AppHost {
     ) -> Result<i32, Exception> {
         let (kind, package, feature, uid, user, final_intent, resolved) = {
             let mut records = self.pending_intents.records.lock().unwrap();
-            let Some(at) = records.iter().position(|r| r.binder == target) else {
+            let Some(at) = records
+                .iter()
+                .position(|r| !r.canceled && r.binder == target)
+            else {
                 return Ok(START_CANCELED);
             };
             let r = &records[at];
@@ -699,7 +704,7 @@ impl AppHost {
             let (kind, package, feature, uid, user) =
                 (r.kind, r.package.clone(), r.feature.clone(), r.uid, r.user);
             if r.flags & FLAG_ONE_SHOT != 0 {
-                cancel(records.remove(at));
+                cancel(&mut records[at]);
             }
             (kind, package, feature, uid, user, final_intent, resolved)
         };
@@ -798,8 +803,11 @@ impl AppHost {
 }
 
 /// `makeIntentSenderCanceled`: its cancel listeners are told.
-fn cancel(r: Record) {
-    for l in &r.cancel_listeners {
+fn cancel(r: &mut Record) {
+    // Cancellation removes the key from the active index, not the Binder object:
+    // PendingIntentRecord retains its key/uid for queries after cancellation.
+    r.canceled = true;
+    for l in std::mem::take(&mut r.cancel_listeners) {
         let mut p = Parcel::new();
         p.write_interface_token(RESULT_RECEIVER_DESCRIPTOR);
         p.write_i32(RESULT_CANCELED);
@@ -827,6 +835,113 @@ fn perform_receive(receiver: &Strong, intent: &RawIntent, user: i32) {
 #[cfg(test)]
 mod stats_tests {
     use super::*;
+    // AMS.getInfoForIntentSender queries PendingIntentRecord.key even after
+    // PendingIntentController cancels/removes its active key (Android 16 r1).
+    // CTS SafetyCenterManagerTest cancels a shared activity status/action token.
+    #[test]
+    fn canceled_tokens_keep_metadata_but_cannot_send_or_match_an_active_key() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let request = |kind, flags| Request {
+                kind,
+                package: Some("android".into()),
+                feature: None,
+                token: None,
+                result_who: None,
+                request_code: 37,
+                intents: Some(vec![Some(RawIntent::new("test.token", 0, &[]))]),
+                resolved_types: None,
+                flags: FLAG_IMMUTABLE | flags,
+                options: None,
+                user: 0,
+            };
+            let info = |target, uid| {
+                let mut p = Parcel::new();
+                am::GetInfoForIntentSender {
+                    sender: Some(target),
+                }
+                .write(&mut p);
+                let reply = super::super::Activity(host.clone())
+                    .transact(&mut Call {
+                        code: am::GET_INFO_FOR_INTENT_SENDER,
+                        flags: 0,
+                        sender_pid: 77,
+                        sender_euid: uid,
+                        data: p.reader(),
+                    })
+                    .unwrap();
+                let mut r = reply.reader();
+                r.read_exception().unwrap().unwrap();
+                assert_eq!(r.read_i32().unwrap(), 1);
+                let result = (
+                    r.read_string16().unwrap(),
+                    r.read_i32().unwrap(),
+                    r.read_bool().unwrap(),
+                    r.read_i32().unwrap(),
+                );
+                assert_eq!(r.remaining(), 0);
+                result
+            };
+            let send = |target| {
+                host.send_record(None, target, 0, None, None, None, None, Sent::default())
+                    .unwrap()
+            };
+            for kind in [
+                INTENT_SENDER_ACTIVITY,
+                INTENT_SENDER_BROADCAST,
+                INTENT_SENDER_SERVICE,
+            ] {
+                let target = host
+                    .get_intent_sender(1000, request(kind, 0))
+                    .unwrap()
+                    .unwrap();
+                let expected = (Some("android".into()), 1000, true, kind);
+                assert_eq!(info(target, 1000), expected);
+                host.cancel_intent_sender(1000, Some(target)).unwrap();
+                host.cancel_intent_sender(1000, Some(target)).unwrap();
+                for uid in [1000, 10123] {
+                    assert_eq!(info(target, uid), expected);
+                }
+                assert_eq!(send(target), START_CANCELED);
+                assert!(!host.listen_for_cancel(Some(target), None));
+                assert!(
+                    host.get_intent_sender(1000, request(kind, FLAG_NO_CREATE))
+                        .unwrap()
+                        .is_none()
+                );
+                let next = host
+                    .get_intent_sender(1000, request(kind, 0))
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(next, target);
+                let replacement = host
+                    .get_intent_sender(1000, request(kind, FLAG_CANCEL_CURRENT))
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(replacement, next);
+                assert_eq!(info(next, 1000), expected);
+                assert_eq!(send(next), START_CANCELED);
+                host.cancel_intent_sender(1000, Some(replacement)).unwrap();
+            }
+            assert!(host.pending_intents.stats().unwrap().is_empty());
+            assert_eq!(
+                info(Binder::Local(u64::MAX), 1000),
+                (None, INVALID_UID, false, INTENT_SENDER_UNKNOWN)
+            );
+            let once = host
+                .get_intent_sender(1000, request(INTENT_SENDER_BROADCAST, FLAG_ONE_SHOT))
+                .unwrap()
+                .unwrap();
+            assert_eq!(send(once), START_SUCCESS);
+            assert_eq!(send(once), START_CANCELED);
+            assert_eq!(
+                info(once, 1000),
+                (Some("android".into()), 1000, true, INTENT_SENDER_BROADCAST)
+            );
+            assert!(!host.listen_for_cancel(Some(once), None));
+            assert!(host.pending_intents.stats().unwrap().is_empty());
+        });
+    }
+
     #[test]
     fn stats_follow_the_live_requests_updates_and_cancellation() {
         let process = crate::test_process(1000);

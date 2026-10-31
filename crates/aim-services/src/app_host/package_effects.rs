@@ -195,6 +195,49 @@ impl PackageEffects {
         })
     }
 
+    fn unstopped_events(&self, a: bridge::PackageUnstopped) -> Result<Vec<Event>, Exception> {
+        if self
+            .host
+            .framework()?
+            .0
+            .flags
+            .get("android.content.pm.stay_stopped")
+            != Some(&true)
+        {
+            return Ok(Vec::new());
+        }
+        let name = required(a.package_name.as_deref(), "packageName")?;
+        let (state, resolution) = self.host.packages()?;
+        let package = state
+            .packages
+            .get(name)
+            .ok_or_else(|| state_error("unstopped package absent"))?;
+        let allow = resolution
+            .apps_filter
+            .visibility_allow_list(&state, package, a.user_id);
+        let mut events = Vec::new();
+        deliver(
+            &mut events,
+            "android.intent.action.PACKAGE_UNSTOPPED",
+            Some(name),
+            &[
+                (UID, Value::Int(package.app_id)),
+                (
+                    "android.intent.extra.TIME",
+                    Value::Long(super::clock_ms(libc::CLOCK_MONOTONIC)),
+                ),
+            ],
+            0x4000_0000,
+            None,
+            &[a.user_id],
+            false,
+            allow.as_deref(),
+            true,
+            None,
+        );
+        Ok(events)
+    }
+
     fn first_launch(&self, a: bridge::FirstLaunch) -> Result<(), Exception> {
         let name = required(a.package_name.as_deref(), "packageName")?;
         let (state, _) = self.host.packages()?;
@@ -826,6 +869,18 @@ impl Service for PackageEffects {
                 self.package_added(a)
                     .map(|()| bridge::write_package_added_reply(&mut p))
             }
+            bridge::UNHIBERNATE => {
+                let a = bridge::Unhibernate::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                super::app_hibernation::AppHibernation(self.host.clone())
+                    .unhibernate(a.user_id)
+                    .map(|()| bridge::write_unhibernate_reply(&mut p))
+            }
+            bridge::PACKAGE_UNSTOPPED => {
+                let a = bridge::PackageUnstopped::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.unstopped_events(a)
+                    .and_then(|events| self.post(events, Vec::new()))
+                    .map(|()| bridge::write_package_unstopped_reply(&mut p))
+            }
             bridge::FIRST_LAUNCH => {
                 let a = bridge::FirstLaunch::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.first_launch(a)
@@ -899,6 +954,58 @@ impl Service for PackageEffects {
 mod tests {
     use super::*;
     use crate::system::ServiceOwner;
+
+    #[test]
+    fn unstopped_notification_follows_the_flag_and_retained_visibility() {
+        for enabled in [false, true] {
+            crate::system::with_discovery_session(|host, _, _| {
+                let mut framework = super::super::resources::Framework::load(
+                    &aim_paths::original_image(),
+                    160,
+                    "en-US",
+                )
+                .unwrap();
+                framework
+                    .0
+                    .flags
+                    .insert("android.content.pm.stay_stopped".into(), enabled);
+                assert!(host.framework.set(framework).is_ok());
+                let events = PackageEffects::new(host.clone())
+                    .unstopped_events(bridge::PackageUnstopped {
+                        package_name: Some("p".into()),
+                        user_id: 0,
+                    })
+                    .unwrap();
+                assert_eq!(events.len(), usize::from(enabled));
+                if let Some(event) = events.first() {
+                    assert_eq!(
+                        event.intent.intent.action.as_deref(),
+                        Some("android.intent.action.PACKAGE_UNSTOPPED")
+                    );
+                    assert_eq!(
+                        event.intent.intent.data.as_ref().unwrap().as_str(),
+                        "package:p"
+                    );
+                    assert_eq!(event.intent.intent.flags, 0x4400_0000);
+                    assert_eq!(event.intent.int_extra(UID, -1).unwrap(), 10100);
+                    assert_eq!(event.intent.int_extra(USER, -1).unwrap(), 0);
+                    assert!(
+                        matches!(event.intent.test_extras()["android.intent.extra.TIME"], Value::Long(t) if t > 0)
+                    );
+                    let (state, resolution) = host.packages().unwrap();
+                    assert_eq!(
+                        event.allow,
+                        resolution.apps_filter.visibility_allow_list(
+                            &state,
+                            &state.packages["p"],
+                            0
+                        )
+                    );
+                    assert!(event.notify);
+                }
+            });
+        }
+    }
 
     /// The writer's effects owner takes the bridge; an effect not ported
     /// names its issue, and no package is protected without a name.

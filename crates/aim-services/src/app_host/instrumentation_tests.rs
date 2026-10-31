@@ -291,6 +291,11 @@ fn instrumentation_restart_early_attach_and_failures_retire_once() {
         assert!(host.platform().unwrap().shared_memory.set(memory).is_ok());
         let (w, ui, t, rx) = recorders(host, export);
         for outcome in 0..4 {
+            host.package_system()
+                .unwrap()
+                .internal_set_package_stopped_state(Some("p".into()), true, 0, 1000, 0)
+                .unwrap();
+            assert!(host.packages().unwrap().0.packages["p"].users[&0].stopped);
             insert(host, 9001, None, "q");
             insert(host, 9000, None, "p"); // restart cancels a pending predecessor, never joining it.
             let (socket, relay) = UnixStream::pair().unwrap();
@@ -316,6 +321,7 @@ fn instrumentation_restart_early_attach_and_failures_retire_once() {
                     .parse()
                     .unwrap();
                 assert_ne!(seq, 9000);
+                assert!(!host.packages().unwrap().0.packages["p"].users[&0].stopped);
                 assert!(!host.apps.lock().unwrap()[&9001].removed);
                 assert!(host.apps.lock().unwrap()[&9000].removed);
                 let flags: i32 = args
