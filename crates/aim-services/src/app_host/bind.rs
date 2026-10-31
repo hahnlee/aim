@@ -208,8 +208,7 @@ impl WriteParcelable for ProviderInfoList {
     }
 }
 
-/// A parcelable the app host never sends (no instrumentation, profiler,
-/// autofill or content capture service, font map).
+/// A parcelable the app host never sends (autofill, content capture, font map).
 pub enum Absent {}
 
 impl WriteParcelable for Absent {

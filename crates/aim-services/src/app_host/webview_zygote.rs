@@ -203,4 +203,4 @@ impl AppHost {
 
 #[cfg(test)]
 #[path = "pending_start_tests.rs"]
-mod pending_start_tests;
+pub(super) mod pending_start_tests;

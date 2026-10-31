@@ -71,6 +71,7 @@ pub(in crate::app_host) fn register_filter(
             last_mem_info: None,
             proc_state: PROCESS_STATE_TOP,
             oom_adj: 0,
+            instrumentation: None,
         },
     );
     let mut filter = IntentFilter::default();

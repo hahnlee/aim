@@ -170,7 +170,7 @@ fn pending_starts_attach_fail_or_are_killed_without_signalling_zero() {
     }
 }
 
-fn attach(host: &AppHost, binder: Binder, seq: i64, uid: u32, pid: i32) {
+pub(in crate::app_host) fn attach(host: &AppHost, binder: Binder, seq: i64, uid: u32, pid: i32) {
     let data = Parcel::new();
     let call = Call {
         code: am::ATTACH_APPLICATION,

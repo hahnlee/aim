@@ -611,6 +611,22 @@ impl RawBundle {
         entries(&self.0, (0, self.0.parcel().data().len()))
     }
 
+    /// `Bundle.putAll`: replace complete entries, retaining their objects and types.
+    pub fn put_all(&self, other: &RawBundle) -> Result<RawBundle> {
+        let (magic, mut mine, has_intent) =
+            self.entries()?
+                .unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
+        let Some((_, theirs, other_intent)) = other.entries()? else {
+            return Ok(self.clone());
+        };
+        for (key, value) in theirs {
+            mine.retain(|(k, _)| k != &key);
+            mine.push((key, value));
+        }
+        let has_intent = has_intent || other_intent;
+        Ok(RawBundle(bundle_of(magic, mine, has_intent)))
+    }
+
     /// The bundle with `key` removed (`Bundle.remove`).
     pub fn without(&self, key: &str) -> Result<RawBundle> {
         let Some((magic, parts, has_intent)) = self.entries()? else {

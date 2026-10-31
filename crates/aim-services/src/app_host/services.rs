@@ -2943,7 +2943,7 @@ impl AppHost {
     /// `shouldAllowFgsWhileInUsePermissionLocked` for `calling_uid`. A uid
     /// with a process is top in the app host, and so visible and within
     /// its activities' grace period. No while-in-use temporary allowlist
-    /// (MediaSession's, telephony's) and no instrumentation runs, and the
+    /// (MediaSession's, telephony's), and the
     /// allowlisted packages are the attention and system captions
     /// services', which the app host does not run.
     fn fgs_while_in_use_reason(&self, calling_uid: i32) -> Result<i32, Exception> {
@@ -2957,6 +2957,9 @@ impl AppHost {
         ) {
             return Ok(REASON_SYSTEM_UID);
         }
+        if self.instrumentation_background(calling_uid, false) {
+            return Ok(60);
+        } // REASON_INSTR_BACKGROUND_ACTIVITY_PERMISSION.
         if self.check_permission(
             Some("android.permission.START_ACTIVITIES_FROM_BACKGROUND"),
             calling_uid,
@@ -2986,6 +2989,9 @@ impl AppHost {
             return Ok(wiu);
         }
         let held = |p: &str| self.check_permission(Some(p), calling_uid).map(|r| r == 0);
+        if self.instrumentation_background(calling_uid, true) {
+            return Ok(61);
+        } // REASON_INSTR_BACKGROUND_FGS_PERMISSION.
         if held("android.permission.START_FOREGROUND_SERVICES_FROM_BACKGROUND")? {
             return Ok(REASON_BACKGROUND_FGS_PERMISSION);
         }

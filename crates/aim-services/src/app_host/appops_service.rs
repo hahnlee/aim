@@ -3431,7 +3431,7 @@ impl AppOps {
 
     /// AppOpsService.setMode / setUidMode at android-16.0.0_r1. With no
     /// profile owner, enforceManageAppOpsModes requires MANAGE_APP_OPS_MODES.
-    fn set_mode(
+    pub(super) fn set_mode(
         &self,
         caller: i32,
         code: i32,
