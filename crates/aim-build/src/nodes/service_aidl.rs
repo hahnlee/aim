@@ -1450,6 +1450,21 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         codes += "}\n\n";
         modules.push(module_name(descriptor));
     }
+    // libgui's C++-only interfaces have no Java stub to compare against.
+    for descriptor in lock.array("NATIVE_INTERFACES") {
+        let file = format!("/{}.aidl", descriptor.replace('.', "/"));
+        let (path, origin) = files
+            .iter()
+            .find(|(p, _)| p.to_string_lossy().ends_with(&file))
+            .ok_or_else(|| format!("{LOCK}: no SOURCE_FILES entry for {descriptor}"))?;
+        let iface = parse(&fs::read_to_string(path).map_err(|e| e.to_string())?)?;
+        if iface.descriptor() != descriptor.as_str() {
+            return Err(format!("wrong descriptor: {descriptor}"));
+        }
+        code += &interface_code(&iface, &[], origin)?;
+        codes += &interface_codes(&iface, origin);
+        codes += "}\n\n";
+    }
     for (mut iface, selected, file) in own_interfaces(&lock)? {
         let text = fs::read_to_string(aim_paths::root().join(&file))
             .map_err(|e| format!("{file}: {e}"))?;

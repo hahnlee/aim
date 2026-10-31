@@ -90,6 +90,7 @@ struct Window {
 /// The app host's windows, by their `IWindow`.
 #[derive(Default)]
 pub struct Windows {
+    display_layer: Mutex<Option<Layer>>,
     accessibility: accessibility::Accessibility,
     pub(super) transitions: Mutex<super::activity_transitions::Transitions>,
     pub(super) transitions_changed: Condvar,
@@ -296,6 +297,9 @@ pub struct WindowManager(pub Arc<AppHost>);
 #[path = "window_input_sync.rs"]
 pub(super) mod input_sync;
 
+#[path = "window_capture.rs"]
+mod capture;
+
 impl Service for WindowManager {
     fn descriptor(&self) -> &str {
         wm::DESCRIPTOR
@@ -308,6 +312,7 @@ impl Service for WindowManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            wm::CAPTURE_DISPLAY => return self.0.capture_display(call),
             wm::SYNC_INPUT_TRANSACTIONS => {
                 let a = wm::SyncInputTransactions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 return reply(self.0.sync_input_transactions(a.wait_for_animations));
@@ -864,7 +869,7 @@ impl Session {
                 };
                 let container = match task {
                     Some((id, _)) => self.host.task_layer(id, |parent| create(Some(parent))),
-                    None => create(None),
+                    None => self.host.with_display_layer(|parent| create(Some(parent))),
                 }
                 .map_err(state)?;
                 // A later window is in front of an earlier one.
