@@ -4,13 +4,12 @@ NetworkProviders for:
 Active default network: none
 
 Current network preferences: 
-  Error: profile/OEM/default network preferences owner unavailable in app host (#2333)
+  Default requests:
 
 Current Networks:
 
 Status for known UIDs:
   UID=10100 blockedReasons=100
-  Error: NetworkPolicyManager firewall/data saver blocked reasons owner unavailable in app host (#2333)
 
 Network Requests:
   uid/pid:10100/42 activeRequest: null callbackRequest: 7 [NetworkRequest [ REQUEST id=7, [ Capabilities: INTERNET ] ]] callback flags: 0 order: 2147483647 isUidTracked: true declaredMethods: ALL
@@ -22,26 +21,36 @@ mLegacyTypeTracker:
   Current state:
 
 
-KeepaliveTracker:
-  Error: KeepaliveTracker owner unavailable in app host (#2333)
+Socket keepalives:
 
-Error: MultinetworkPolicyTracker avoid bad Wi-Fi settings owner unavailable in app host (#2333)
+Bad Wi-Fi avoidance: unrestricted
 
-Error: ConnectivityService socket destruction policy owner unavailable in app host (#2333)
-
-Error: ConnectivityService BPF program status owner unavailable in app host (#2333)
-
-Error: CarrierPrivilegeAuthenticator owner unavailable in app host (#2333)
+DestroySockets:
+  mDestroyFrozenSockets=false
+  mDelayDestroySockets=false
+  mDestroySocketPendingUids:
+Bpf Program Status:
+  CGROUP_INET_INGRESS:   IOException
 
 
 
 Permission Monitor:
-  Error: PermissionMonitor owner unavailable in app host (#2333)
+  Interface filtering rules:
+
+  Lockdown filtering rules:
+
+  Update logs:
 
 Legacy network activity:
+  mTrackMultiNetworkActivities=true
+  mDefaultCellularDataInactivityTimeout=10
+  mDefaultWifiDataInactivityTimeout=15
   mIsDefaultNetworkActive=true
-  Error: NetworkActivityTracker cellular/Wi-Fi idle timers owner unavailable in app host (#2333)
+  mDefaultNetwork=null
+  Idle timers:
+  WiFi active networks: []
+  Cellular active networks: []
 
-Error: MulticastRoutingCoordinatorService owner unavailable in app host (#2333)
-Error: ConnectivityService background firewall chain owner unavailable in app host (#2333)
-Error: ConnectivityService ingress-to-VPN filtering owner unavailable in app host (#2333)
+Multicast routing supported: false
+Background firewall chain enabled: false
+IngressToVpnAddressFiltering: false

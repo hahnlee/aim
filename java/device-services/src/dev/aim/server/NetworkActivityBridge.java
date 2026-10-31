@@ -87,7 +87,16 @@ public final class NetworkActivityBridge extends INetworkActivityBridge.Stub {
     @Override
     public String formatConnectivityDump(ConnectivityDumpSnapshot snapshot, String[] args) {
         Bridge.enforceSystemUid();
-        return ConnectivityDump.format(snapshot, args);
+        return ConnectivityDump.format(snapshot, args, (section, verbose) -> {
+            var leaf = IConnectivityDumpLeaf.Stub.asInterface(
+                    android.os.ServiceManager.getService("aim.connectivity_dump"));
+            if (leaf == null) throw new IllegalStateException("Connectivity dump leaf unavailable");
+            try {
+                return leaf.dump(section, snapshot.netId, snapshot.links, verbose);
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Connectivity dump leaf died", e);
+            }
+        });
     }
 
     /** LegacyNetworkActivityTracker.reportNetworkActive, on the owning handler. */

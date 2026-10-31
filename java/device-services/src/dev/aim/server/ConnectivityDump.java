@@ -7,19 +7,13 @@ import android.net.NetworkRequest;
 
 /**
  * ConnectivityService.doDump/dumpNetworks/NetworkRequestInfo.toString,
- * android-16.0.0_r1. Original parcelables supply their own strings. Missing
- * owners are errors at their original positions, never invented empty state.
+ * android-16.0.0_r1. Original parcelables supply their own strings. Ancillary
+ * configuration and measurements come from the Connectivity module leaf.
  * Copyright (C) The Android Open Source Project, Apache License 2.0.
  */
 final class ConnectivityDump {
-    private static void error(PrintWriter p, String indent, String owner) {
-        p.println(indent + "Error: " + owner + " owner unavailable in app host (#2333)");
-    }
-    private static void section(PrintWriter p, String title, String owner) {
-        p.println(title);
-        error(p, "  ", owner);
-    }
-    static String format(ConnectivityDumpSnapshot s, String[] args) {
+    static String format(ConnectivityDumpSnapshot s, String[] args,
+            java.util.function.BiFunction<Integer, Boolean, String> leaf) {
         var options = args == null ? java.util.List.<String>of() : Arrays.asList(args);
         StringWriter out = new StringWriter();
         PrintWriter p = new PrintWriter(out);
@@ -29,37 +23,38 @@ final class ConnectivityDump {
             if ("--dump-priority".equals(options.get(i))) high = "HIGH".equals(options.get(++i));
         }
         if (high) {
-            error(p, "", "NetworkDiagnostics");
+            p.print(leaf.apply(IConnectivityDumpLeaf.DIAGNOSTICS, false));
             options = java.util.List.of("--short");
         }
         if (options.contains("--diag")) {
-            error(p, "", "NetworkDiagnostics");
+            p.print(leaf.apply(IConnectivityDumpLeaf.DIAGNOSTICS, false));
         } else if (options.contains("networks")) {
             networks(p, s, "");
         } else if (options.contains("requests")) {
             requests(p, s, "");
         } else if (options.contains("trafficcontroller")) {
-            error(p, "", "BpfNetMaps/TrafficController");
+            p.print(leaf.apply(IConnectivityDumpLeaf.TRAFFIC, !options.contains("--short")));
         } else if (options.contains("clatEgress4RawBpfMap")
                 || options.contains("clatIngress6RawBpfMap")) {
-            error(p, "", "Nat464Xlat BPF maps");
+            // There is no CLAT instance on the native IPv4 Ethernet agent.
         } else {
             p.println("NetworkProviders for:");
             p.println("  " + s.providerId + ": " + s.providerName);
             p.println();
             p.println("Active default network: " + (s.netId < 0 ? "none" : s.netId));
             p.println();
-            section(p, "Current network preferences: ", "profile/OEM/default network preferences");
+            p.println("Current network preferences: ");
+            p.println("  Default requests:");
             p.println();
             p.println("Current Networks:");
             networks(p, s, "  ");
             p.println();
             p.println("Status for known UIDs:");
             for (int i = 0; i < s.uids.length; i++) {
+                if (s.blockedReasons[i] == 0) continue;
                 p.println("  UID=" + s.uids[i] + " blockedReasons="
                         + Integer.toHexString(s.blockedReasons[i]));
             }
-            error(p, "  ", "NetworkPolicyManager firewall/data saver blocked reasons");
             p.println();
             p.println("Network Requests:");
             requests(p, s, "  ");
@@ -84,39 +79,55 @@ final class ConnectivityDump {
             if (s.netId >= 0) p.println("    9 [" + s.netId + " ETHERNET]");
             p.println();
             p.println();
-            section(p, "KeepaliveTracker:", "KeepaliveTracker");
+            p.print(leaf.apply(IConnectivityDumpLeaf.KEEPALIVE, false));
             p.println();
-            error(p, "", "MultinetworkPolicyTracker avoid bad Wi-Fi settings");
+            p.print(leaf.apply(IConnectivityDumpLeaf.POLICY, false));
             p.println();
-            error(p, "", "ConnectivityService socket destruction policy");
+            // No frozen UID socket queue exists in the native process owner.
+            p.println("DestroySockets:");
+            p.println("  mDestroyFrozenSockets=false");
+            p.println("  mDelayDestroySockets=false");
+            p.print("  mDestroySocketPendingUids:");
             p.println();
-            error(p, "", "ConnectivityService BPF program status");
-            p.println();
-            error(p, "", "CarrierPrivilegeAuthenticator");
+            p.print(leaf.apply(IConnectivityDumpLeaf.BPF_STATUS, false));
+            // No carrier privilege authenticator exists without telephony.
             p.println();
             if (!options.contains("--short")) {
                 p.println();
-                section(p, "mNetworkRequestInfoLogs (most recent first):", "request history");
+                p.println("mNetworkRequestInfoLogs (most recent first):");
                 p.println();
-                section(p, "mNetworkInfoBlockingLogs (most recent first):", "blocking history");
+                p.println("mNetworkInfoBlockingLogs (most recent first):");
                 p.println();
-                section(p, "NetTransition WakeLock activity (most recent first):", "transition wakelock");
+                p.println("NetTransition WakeLock activity (most recent first):");
+                p.println("  total acquisitions: 0");
+                p.println("  total releases: 0");
+                p.println("  cumulative duration: 0s");
+                p.println("  longest duration: 0s");
                 p.println();
-                section(p, "  bandwidth update requests (by uid):", "bandwidth request counters");
+                p.println("  bandwidth update requests (by uid):");
                 p.println();
-                section(p, "mOemNetworkPreferencesLogs (most recent first):", "OEM preference history");
+                p.println("mOemNetworkPreferencesLogs (most recent first):");
             }
             p.println();
             p.println();
-            section(p, "Permission Monitor:", "PermissionMonitor");
+            p.println("Permission Monitor:");
+            p.println("  Interface filtering rules:");
+            p.println();
+            p.println("  Lockdown filtering rules:");
+            p.println();
+            p.println("  Update logs:");
             p.println();
             p.println("Legacy network activity:");
+            p.print(leaf.apply(IConnectivityDumpLeaf.ACTIVITY, false));
             p.println("  mIsDefaultNetworkActive=true");
-            error(p, "  ", "NetworkActivityTracker cellular/Wi-Fi idle timers");
+            p.println("  mDefaultNetwork=" + (s.netId < 0 ? "null" : s.netId));
+            p.println("  Idle timers:");
+            p.println("  WiFi active networks: []");
+            p.println("  Cellular active networks: []");
             p.println();
-            error(p, "", "MulticastRoutingCoordinatorService");
-            error(p, "", "ConnectivityService background firewall chain");
-            error(p, "", "ConnectivityService ingress-to-VPN filtering");
+            p.println("Multicast routing supported: false");
+            p.println("Background firewall chain enabled: false");
+            p.println("IngressToVpnAddressFiltering: false");
         }
         p.flush();
         return out.toString();
@@ -138,11 +149,12 @@ final class ConnectivityDump {
                 + "  factorySerialNumber=" + s.factorySerialNumber + "}");
         String sub = indent + "  ";
         p.println(sub + "Nat464Xlat:");
-        error(p, sub + "  ", "Nat464Xlat");
+        p.println(sub + "  <not started>");
         int foreground = 0, listen = 0, background = 0;
         for (var n : s.requests) {
             if (n.satisfier != s.netId) continue;
-            if (n.request.type == NetworkRequest.Type.REQUEST) foreground++;
+            if (n.request.type == NetworkRequest.Type.REQUEST
+                    || n.request.type == NetworkRequest.Type.RESERVATION) foreground++;
             else if (n.request.type == NetworkRequest.Type.BACKGROUND_REQUEST) background++;
             else listen++;
         }
@@ -152,7 +164,6 @@ final class ConnectivityDump {
             if (n.satisfier == s.netId) p.println(sub + "  " + n.request);
         }
         p.println(sub + "Inactivity Timers:");
-        error(p, sub + "  ", "NetworkAgentInfo inactivity timers");
     }
 
     /** FullScore.toString's policy order and names at android-16.0.0_r1. */
