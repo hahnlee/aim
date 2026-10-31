@@ -243,7 +243,7 @@ mod tests {
             host.windows.windows.lock().unwrap().clear();
             sync(host, true);
             dispatcher.inject(&motion);
-            // The publisher closes asynchronously after removal.
+            // Removal closes the server fd before acknowledging the barrier.
             client.set_nonblocking(false).unwrap();
             client.set_read_timeout(Some(TIMEOUT)).unwrap();
             assert_eq!(

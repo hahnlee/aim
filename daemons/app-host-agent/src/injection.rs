@@ -11,6 +11,7 @@ pub(super) struct Injection {
     state: Mutex<(Option<i32>, usize)>,
     changed: Condvar,
 }
+
 type Job = (Event, i32, Arc<Injection>);
 pub(super) fn queue() -> (mpsc::Sender<Job>, mpsc::Receiver<Job>) {
     mpsc::channel()
@@ -146,14 +147,14 @@ struct Outbound {
     closed: bool,
 }
 pub(super) struct Channel {
-    pub(super) socket: OwnedFd,
+    pub(super) socket: std::sync::RwLock<Option<OwnedFd>>,
     state: Mutex<Outbound>,
     changed: Condvar,
 }
 impl Channel {
     pub(super) fn new(socket: OwnedFd) -> Arc<Self> {
         let c = Arc::new(Self {
-            socket,
+            socket: std::sync::RwLock::new(Some(socket)),
             state: Mutex::new(Outbound::default()),
             changed: Condvar::new(),
         });
@@ -174,6 +175,9 @@ impl Channel {
     }
     pub(super) fn close(&self) {
         let mut s = self.state.lock().unwrap();
+        if s.closed {
+            return;
+        }
         s.closed = true;
         for (_, i) in s.queue.drain(..) {
             finish(i);
@@ -181,10 +185,15 @@ impl Channel {
         for (_, i) in s.pending.drain() {
             finish(Some(i));
         }
-        // Wake both the consumer reader and a publisher waiting for writability.
-        unsafe {
-            libc::shutdown(self.socket.as_raw_fd(), libc::SHUT_RDWR);
+        // Shutdown wakes local recv/poll; only close signals a Darwin datagram
+        // peer. Wait for socket users, not the threads' later window callbacks.
+        {
+            let socket = self.socket.read().unwrap();
+            unsafe {
+                libc::shutdown(socket.as_ref().unwrap().as_raw_fd(), libc::SHUT_RDWR);
+            }
         }
+        self.socket.write().unwrap().take();
         self.changed.notify_all();
     }
     fn publish(&self) {
@@ -196,10 +205,12 @@ impl Channel {
             if s.closed {
                 return;
             }
+            let socket = self.socket.read().unwrap();
+            let fd = socket.as_ref().unwrap().as_raw_fd();
             let (m, _) = s.queue.front().unwrap();
             let n = unsafe {
                 libc::send(
-                    self.socket.as_raw_fd(),
+                    fd,
                     m.as_ptr().cast(),
                     m.len(),
                     libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
@@ -222,16 +233,18 @@ impl Channel {
                 && error.raw_os_error() != Some(libc::ENOBUFS)
             {
                 log::warn!("input channel: {error}");
+                drop(socket);
                 self.close();
                 return;
             }
             let mut fd = libc::pollfd {
-                fd: self.socket.as_raw_fd(),
+                fd,
                 events: libc::POLLOUT,
                 revents: 0,
             };
             // Retain the outbound head until the nonblocking socket is writable.
             let result = unsafe { libc::poll(&mut fd, 1, -1) };
+            drop(socket);
             if result < 0
                 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
             {
@@ -287,4 +300,63 @@ fn result_and_finished_share_deadline_and_removal_releases_completion() {
         d.sync_windows(&[]);
         assert_eq!(waiting.join().unwrap(), 0);
     });
+}
+
+#[cfg(test)]
+#[test]
+fn removal_closes_socket_while_channel_references_survive() {
+    use std::os::unix::net::UnixDatagram;
+    for full in [false, true] {
+        let d = Dispatcher::new();
+        let (server, client) = UnixDatagram::pair().unwrap();
+        if full {
+            while unsafe {
+                libc::send(
+                    server.as_raw_fd(),
+                    [0u8; 512].as_ptr().cast(),
+                    512,
+                    libc::MSG_DONTWAIT,
+                )
+            } >= 0
+            {}
+            let error = std::io::Error::last_os_error();
+            assert!(
+                error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(libc::ENOBUFS)
+            );
+        }
+        d.add_window(
+            0,
+            server.into(),
+            (100, 100),
+            Region {
+                frame: [0, 0, 100, 100],
+                touchable: [0, 0, 100, 100],
+                watch_outside: false,
+                owner: 10100,
+                owner_pid: 42,
+            },
+        );
+        let channel = d.windows.lock().unwrap().stack[0].channel.clone();
+        d.sync_windows(&[]);
+        assert!(channel.socket.read().unwrap().is_none());
+        channel.close(); // Closing again must neither touch a reused fd nor finish twice.
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = [0; 512];
+        let error = loop {
+            if let Err(error) = client.recv(&mut buffer) {
+                break error;
+            }
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        let workers = Arc::downgrade(&channel);
+        drop(channel);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while workers.strong_count() != 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(workers.strong_count(), 0);
+    }
 }

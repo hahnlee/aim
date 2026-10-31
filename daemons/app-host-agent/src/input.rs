@@ -311,7 +311,7 @@ impl Dispatcher {
         let drained = channel.clone();
         let dispatcher = self.clone();
         std::thread::spawn(move || {
-            drain(&drained.socket, &dispatcher, index);
+            drain(&drained, &dispatcher, index);
             dispatcher.remove_window(index);
         });
         let mut windows = self.windows.lock().unwrap();
@@ -708,17 +708,23 @@ fn send(channel: &injection::Channel, message: &[u8]) {
 }
 
 /// Reads what the window sends back until it closes its end.
-fn drain(channel: &OwnedFd, dispatcher: &Dispatcher, index: i32) {
+fn drain(channel: &injection::Channel, dispatcher: &Dispatcher, index: i32) {
     let mut buffer = [0u8; 256];
     loop {
-        // SAFETY: a receive into a local buffer.
-        let n = unsafe {
-            libc::recv(
-                channel.as_raw_fd(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                0,
-            )
+        let n = {
+            let socket = channel.socket.read().unwrap();
+            let Some(socket) = socket.as_ref() else {
+                return;
+            };
+            // SAFETY: a receive into a local buffer; close waits for this borrow.
+            unsafe {
+                libc::recv(
+                    socket.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    0,
+                )
+            }
         };
         if n == 24 && u32::from_ne_bytes(buffer[..4].try_into().unwrap()) == 2 {
             dispatcher.finished(index, u32::from_ne_bytes(buffer[4..8].try_into().unwrap()));
