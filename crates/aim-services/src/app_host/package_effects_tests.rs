@@ -4,6 +4,288 @@ use super::*;
 use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_SECURITY, Reader};
 use std::sync::{Mutex, mpsc};
 
+fn suspension_owners(host: &Arc<AppHost>, kind: i32, blocked: bool) {
+    let system = host.package_system().unwrap();
+    let capture = host.package_capture().unwrap();
+    let mut context = (**capture.context()).clone();
+    context.system.security_policy = Some(Arc::new(
+        crate::package::security_policy::Owner::protection_fixture("provisioning"),
+    ));
+    let mut known: BTreeMap<_, _> = [2, 3, 4, 7].map(|role| (role, vec![])).into();
+    if kind != 0 {
+        known.insert(kind, vec![Some("p".into()), Some("q".into())]);
+    }
+    context.system.roles = Some(crate::package::roles::Owner::known_packages_fixture(known));
+    let blocks = [(
+        0,
+        if blocked {
+            vec![Some("p".into())]
+        } else {
+            vec![]
+        },
+    )]
+    .into();
+    context.system.uninstall_blocks =
+        Some(Arc::new(crate::package::mutations::UninstallBlocks(blocks)));
+    context.system.flags.push((
+        "android.permission.flags.appop_mode_caching_enabled".into(),
+        true,
+    ));
+    context.scan_version = capture.scan().version() + 1;
+    system
+        .publish_package_scan_with_queries(
+            &system.package_bootstrap().unwrap(),
+            Some(capture.scan()),
+            capture.scan().owner().clone(),
+            capture.scan().usage().clone(),
+            context,
+        )
+        .unwrap();
+    host.permission_manager
+        .set(Arc::new(
+            super::super::permission_manager::PermissionManager::with_system(
+                host.clone(),
+                Default::default(),
+            ),
+        ))
+        .ok()
+        .unwrap();
+}
+
+fn suspension_call(
+    effects: &PackageEffects,
+    sender: u32,
+    uid: i32,
+    names: Option<Vec<Option<String>>>,
+) -> Result<Option<Vec<bool>>, Exception> {
+    let mut data = Parcel::new();
+    bridge::CanSuspendPackages {
+        packages: names,
+        user_id: 0,
+        calling_uid: uid,
+    }
+    .write(&mut data);
+    let p = effects
+        .transact(&mut Call {
+            code: bridge::CAN_SUSPEND_PACKAGES,
+            flags: 0,
+            sender_pid: 42,
+            sender_euid: sender,
+            data: data.reader(),
+        })
+        .unwrap();
+    let mut r = p.reader();
+    let result = bridge::read_can_suspend_packages_reply(&mut r).unwrap();
+    assert_eq!(r.remaining(), 0);
+    result
+}
+
+#[test]
+fn suspension_exclusions_use_native_policy_roles_libraries_and_appops() {
+    let reasons = "ordinary home dialer installer uninstaller verifier permissions admin
+        other-user-admin device-owner profile-owner protected sdk static blocked
+        allowed-op ignored-op errored-op default-op foreground-op uid-op";
+    for reason in reasons.split_whitespace() {
+        crate::system::with_discovery_session(|host, publish, _| {
+            publish(&mut |pkg| {
+                pkg.booleans |= crate::package::pkg::booleans::SYSTEM;
+                if pkg.package_name == "p" {
+                    if reason == "sdk" {
+                        pkg.sdk_library_name = Some("sdk".into());
+                    }
+                    if reason == "static" {
+                        pkg.static_shared_library_name = Some("static".into());
+                    }
+                }
+            });
+            let data = host.data().unwrap();
+            let dir = data.join("misc_de/0/apexdata/com.android.permission");
+            std::fs::create_dir_all(&dir).unwrap();
+            let role = match reason {
+                "home" => "android.app.role.HOME",
+                "dialer" => "android.app.role.DIALER",
+                _ => "unused",
+            };
+            std::fs::write(
+                dir.join("roles.xml"),
+                format!("<roles version='1'><role name='{role}'><holder name='p'/></role></roles>"),
+            )
+            .unwrap();
+            let mode = match reason {
+                "allowed-op" | "uid-op" => 0,
+                "errored-op" => 2,
+                "foreground-op" => 4,
+                "default-op" => 3,
+                _ => 1,
+            };
+            let op = "<app-op name='android:system_exempt_from_suspension'";
+            let access = if reason == "uid-op" {
+                format!(
+                    "<app-id-app-ops><app-id id='10100'>{op} mode='{mode}'/></app-id></app-id-app-ops>"
+                )
+            } else {
+                format!(
+                    "<package-app-ops><package name='p'>{op} mode='{mode}'/></package></package-app-ops>"
+                )
+            };
+            std::fs::write(
+                dir.join("access.abx"),
+                aim_android_xml::abx::write(
+                    &aim_android_xml::read(format!("<access>{access}</access>").as_bytes())
+                        .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            if reason == "admin" {
+                std::fs::write(
+                    data.join("system/device_policies.xml"),
+                    "<policies><admin name='p/.Admin'/></policies>",
+                )
+                .unwrap();
+            }
+            if matches!(reason, "other-user-admin" | "device-owner") {
+                std::fs::create_dir_all(data.join("system/users/10")).unwrap();
+                std::fs::write(
+                    data.join("system/users/10/device_policies.xml"),
+                    "<policies><admin name='p/.Admin'/></policies>",
+                )
+                .unwrap();
+            }
+            if reason == "device-owner" {
+                std::fs::write(data.join("system/device_owner_2.xml"), "<root><device-owner component='p/.Admin'/><device-owner-context userId='10'/></root>").unwrap();
+            }
+            if reason == "profile-owner" {
+                std::fs::create_dir_all(data.join("system/users/0")).unwrap();
+                std::fs::write(
+                    data.join("system/users/0/profile_owner.xml"),
+                    "<root><profile-owner component='p/.Admin'/></root>",
+                )
+                .unwrap();
+            }
+            let kind = match reason {
+                "installer" => 2,
+                "uninstaller" => 3,
+                "verifier" => 4,
+                "permissions" => 7,
+                _ => 0,
+            };
+            suspension_owners(host, kind, reason == "blocked");
+            if reason == "protected" {
+                host.packages()
+                    .unwrap()
+                    .0
+                    .system
+                    .security_policy
+                    .as_ref()
+                    .unwrap()
+                    .set_owner_protected(0, Some(vec![Some("p".into())]));
+            }
+            let effects = PackageEffects::new(host.clone());
+            let names = || {
+                Some(
+                    ["p", "q", "absent", "android", "p", "provisioning"]
+                        .map(|s| Some(s.into()))
+                        .to_vec(),
+                )
+            };
+            let allowed = matches!(
+                reason,
+                "ordinary"
+                    | "other-user-admin"
+                    | "ignored-op"
+                    | "errored-op"
+                    | "default-op"
+                    | "foreground-op"
+            );
+            assert_eq!(
+                suspension_call(&effects, 1000, 10101, names()).unwrap(),
+                Some(vec![allowed, true, true, false, allowed, false]),
+                "{reason}"
+            );
+            if reason == "blocked" {
+                assert_eq!(
+                    suspension_call(&effects, 1000, 1000, names())
+                        .unwrap()
+                        .unwrap()[0],
+                    true
+                );
+            }
+            if reason == "ordinary" {
+                assert_eq!(
+                    suspension_call(&effects, 1000, 1000, Some(vec![])).unwrap(),
+                    Some(vec![])
+                );
+                assert_eq!(
+                    suspension_call(&effects, 2000, 1000, names())
+                        .unwrap_err()
+                        .code,
+                    EX_SECURITY
+                );
+                for names in [None, Some(vec![None])] {
+                    assert_eq!(
+                        suspension_call(&effects, 1000, 1000, names)
+                            .unwrap_err()
+                            .code,
+                        aim_binder_host::parcel::EX_NULL_POINTER
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn suspension_owner_identity_bypasses_restrictions_and_only_uninstall_blocks() {
+    for profile in [false, true] {
+        for restriction in ["", "no_control_apps", "no_uninstall_apps"] {
+            crate::system::with_discovery_session(|host, _, _| {
+                let data = host.data().unwrap();
+                let (path, xml) = if profile {
+                    (
+                        "system/users/0/profile_owner.xml",
+                        "<root><profile-owner component='q/.Admin'/></root>",
+                    )
+                } else {
+                    (
+                        "system/device_owner_2.xml",
+                        "<root><device-owner component='q/.Admin'/><device-owner-context userId='0'/></root>",
+                    )
+                };
+                std::fs::create_dir_all(data.join(path).parent().unwrap()).unwrap();
+                std::fs::write(data.join(path), xml).unwrap();
+                host.user_restrictions
+                    .set(if restriction.is_empty() {
+                        BTreeSet::new()
+                    } else {
+                        [restriction.into()].into()
+                    })
+                    .unwrap();
+                suspension_owners(host, 0, true);
+                let effects = PackageEffects::new(host.clone());
+                for (uid, expected) in [
+                    (1000, true),
+                    (10101, true),
+                    (10100, restriction.is_empty()),
+                    (1010101, restriction.is_empty()),
+                ] {
+                    assert_eq!(effects.suspension_allowed(0, uid).unwrap(), expected);
+                }
+                // p's uninstall block is bypassed by the owner; q stays protected.
+                let names = || Some(vec![Some("p".into()), Some("q".into())]);
+                assert_eq!(
+                    suspension_call(&effects, 1000, 10101, names()).unwrap(),
+                    Some(vec![true, false])
+                );
+                assert_eq!(
+                    suspension_call(&effects, 1000, 10100, names()).unwrap(),
+                    Some(vec![false, false])
+                );
+            });
+        }
+    }
+}
+
 fn install(replacing: bool) -> bridge::PostInstallPackage {
     bridge::PostInstallPackage {
         name: Some("p".into()),

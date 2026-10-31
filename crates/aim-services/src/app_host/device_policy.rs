@@ -457,6 +457,24 @@ impl Policies {
             || self.admin_packages.iter().any(|p| p == package)
     }
 
+    /// `ProtectedPackages.getDeviceOwnerOrProfileOwnerPackage`.
+    pub(super) fn owner_package(&self, user: i32) -> Option<&str> {
+        if self.device_owner_user == user && self.device_owner.is_some() {
+            return self.device_owner.as_deref();
+        }
+        self.profile_owners.get(&user).map(|c| c.package.as_str())
+    }
+
+    /// PMS checks the device owner on every user, active admins on the target.
+    pub(super) fn package_is_admin_for_user(&self, package: &str, user: i32) -> bool {
+        self.device_owner.as_deref() == Some(package)
+            || self.package_has_active_admins(Some(package), user)
+            || self
+                .profile_owners
+                .get(&user)
+                .is_some_and(|c| c.package == package)
+    }
+
     /// `isUserOrganizationManaged`: a device or profile owner owns the user.
     pub(super) fn managed_users(&self) -> &[i32] {
         &self.managed_users

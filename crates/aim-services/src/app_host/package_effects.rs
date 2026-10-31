@@ -1,8 +1,8 @@
 //! `IPackageMutationBridge` for the app host: the native package writer's
 //! effects, answered as system_server's `NativePackageEffectsBridge`
 //! answers them (`android-16.0.0_r1`), to the system uid only. The
-//! packages' protection is `ProtectedPackages`' as the app host keeps it
-//! (`data_protected`). Install effects retain the session capture and use
+//! protection and suspension policy use native package/device-policy owners.
+//! Install effects retain the session capture and use
 //! the activity, broadcast and package-monitor owners.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -24,6 +24,8 @@ use aim_service_aidl::dev_aim_server_ipackagemutationbridge as bridge;
 use super::{AppHost, reply};
 
 const SYSTEM_UID: u32 = 1000;
+/// `AppOpsManager.OP_SYSTEM_EXEMPT_FROM_SUSPENSION`.
+const OP_SYSTEM_EXEMPT_FROM_SUSPENSION: i32 = 124;
 
 pub struct PackageEffects {
     host: Arc<AppHost>,
@@ -797,20 +799,121 @@ impl PackageEffects {
         Ok(())
     }
 
-    /// `PackageManagerService.isSuspensionAllowed`: the system or the
-    /// user's device or profile owner, or no `no_control_apps` /
-    /// `no_uninstall_apps` restriction. The app host has no owner (#1521).
-    fn suspension_allowed(&self, user: i32, uid: i32) -> Result<bool, Exception> {
+    /// `SuspendPackageHelper.isCallerDeviceOrProfileOwner`.
+    fn caller_owns_user(&self, user: i32, uid: i32) -> Result<bool, Exception> {
         if uid == SYSTEM_UID as i32 {
             return Ok(true);
         }
-        if self.host.device_policies()?.owned() {
-            return Err(self
-                .host
-                .unimplemented_named("package effects", "a device or profile owner (#1521)"));
+        let (state, resolution) = self.host.packages()?;
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: uid,
+        };
+        let policies = self.host.device_policies()?;
+        let owner = policies.owner_package(user);
+        owner.map_or(Ok(false), |name| {
+            query
+                .package_uid_internal(name, 0, user, uid)
+                .map(|owner_uid| owner_uid == uid)
+                .map_err(unavailable)
+        })
+    }
+
+    /// Only caller ownership is shared with the per-package predicates.
+    fn suspension_allowed(&self, user: i32, uid: i32) -> Result<bool, Exception> {
+        if self.caller_owns_user(user, uid)? {
+            return Ok(true);
         }
         Ok(!self.host.has_user_restriction("no_control_apps", user)?
             && !self.host.has_user_restriction("no_uninstall_apps", user)?)
+    }
+
+    /// `SuspendPackageHelper.canSuspendPackageForUser`, android-16.0.0_r1.
+    fn can_suspend(&self, a: bridge::CanSuspendPackages) -> Result<Vec<bool>, Exception> {
+        let names = a
+            .packages
+            .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "packages"))?;
+        let user = a.user_id;
+        let owner = self.caller_owns_user(user, a.calling_uid)?;
+        // The role owner currently serves user 0 only; never substitute empty
+        // HOME/dialer roles for a running profile's policy.
+        if user != 0 {
+            return Err(self
+                .host
+                .unimplemented_named("package suspension", "profile roles (#2015)"));
+        }
+        let roles = super::role_service::RoleManager::new(self.host.clone());
+        let mut excluded = BTreeSet::new();
+        for role in ["android.app.role.HOME", "android.app.role.DIALER"] {
+            if let Some(name) = roles.role_holders(1000, Some(role.into()), user)?.first() {
+                excluded.insert(name.clone());
+            }
+        }
+        let (state, resolution) = self.host.packages()?;
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let known = state
+            .system
+            .roles
+            .as_ref()
+            .ok_or_else(|| state_error("known packages absent"))?;
+        for kind in [2, 3, 4, 7] {
+            if let Some(Some(name)) = known
+                .known_packages(&query, kind, user)
+                .map_err(unavailable)?
+                .first()
+            {
+                excluded.insert(name.clone());
+            }
+        }
+        let protection = query.security_policy().map_err(unavailable)?;
+        let policies = self.host.device_policies()?;
+        let mut result = Vec::with_capacity(names.len());
+        for name in names {
+            let name = required(name.as_deref(), "packageName")?;
+            let ps = state.packages.get(name);
+            let mut admin = policies.package_is_admin_for_user(name, user);
+            for &managed in policies.managed_users() {
+                if (managed == user || ps.is_some_and(|ps| ps.is.system))
+                    && roles
+                        .role_holders(
+                            1000,
+                            Some("android.app.role.DEVICE_POLICY_MANAGEMENT".into()),
+                            managed,
+                        )?
+                        .first()
+                        .is_some_and(|holder| holder == name)
+                {
+                    admin = true;
+                }
+            }
+            let mut allowed = !(admin
+                || excluded.contains(name)
+                || protection.protected(user, Some(name))
+                || !owner
+                    && query
+                        .internal_block_uninstall(user, Some(name))
+                        .map_err(unavailable)?);
+            if allowed
+                && let Some(ps) = ps
+                && let Some(pkg) = &ps.pkg
+            {
+                allowed = pkg.sdk_library_name.is_none()
+                    && pkg.static_shared_library_name.is_none()
+                    && super::appops_service::mode(
+                        &self.host,
+                        OP_SYSTEM_EXEMPT_FROM_SUSPENSION,
+                        uid(user, ps.app_id),
+                        Some(name),
+                    )? != super::appops_service::MODE_ALLOWED;
+            }
+            result.push(allowed && name != "android");
+        }
+        Ok(result)
     }
 }
 
@@ -837,6 +940,11 @@ impl Service for PackageEffects {
                 let a = bridge::IsSuspensionAllowed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.suspension_allowed(a.user_id, a.calling_uid)
                     .map(|v| bridge::write_is_suspension_allowed_reply(&mut p, v))
+            }
+            bridge::CAN_SUSPEND_PACKAGES => {
+                let a = bridge::CanSuspendPackages::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.can_suspend(a)
+                    .map(|v| bridge::write_can_suspend_packages_reply(&mut p, &Some(v)))
             }
             bridge::KILL_PACKAGE => {
                 let a = bridge::KillPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;

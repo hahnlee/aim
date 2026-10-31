@@ -39,6 +39,18 @@ pub struct Owner {
     location: InstallLocation,
 }
 impl Owner {
+    #[cfg(test)]
+    pub(crate) fn protection_fixture(provisioning: &str) -> Self {
+        Self {
+            provisioning: provisioning.into(),
+            protected: Mutex::new(Protected::default()),
+            disabled: Box::new(|_, _, _| panic!("install policy")),
+            auto_revoke: Box::new(|_, _| panic!("auto revoke")),
+            admin: Box::new(|_| panic!("admin facts")),
+            location: Box::new(|| panic!("install location")),
+        }
+    }
+
     pub fn new(
         platform: &Platform,
         config: Config,
