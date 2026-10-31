@@ -1803,7 +1803,7 @@ impl Query<'_> {
         Ok(Ok(result))
     }
 
-    pub(super) fn instrumentation_info(
+    pub(crate) fn instrumentation_info(
         &self,
         component: Option<&ComponentName>,
         flags: i64,

@@ -2502,7 +2502,7 @@ impl Query<'_> {
     }
 
     /// `checkSignatures`.
-    fn check_signatures(&self, pkg1: &str, pkg2: &str, user: i32) -> Thrown<i32> {
+    pub(crate) fn check_signatures(&self, pkg1: &str, pkg2: &str, user: i32) -> Thrown<i32> {
         if let Err(e) = self.enforce_cross_user(user, false, false, "checkSignatures")? {
             return Ok(Err(e));
         }

@@ -148,6 +148,10 @@ guest-init --image <derived> --data <data> --run \
 
 ## The app host boot (2026-10-16)
 
+ActivityManager serves core instrumentation sessions, process binding, results and
+watcher retirement (#2511; host regressions only, no guest/CTS/app run, 2026-10-31).
+SDK sandbox and shell permission delegation explicitly fail with #2511; activity shell is a later slice.
+
 Launcher package/UID reads retain the starting caller and Android 16 access rules
 (#2508; host Binder regressions, no guest boot rerun, 2026-10-31).
 

@@ -430,6 +430,7 @@ fn kill_package_scopes_app_id_and_user_and_preserves_the_exit_reason() {
                     last_mem_info: None,
                     proc_state: crate::app_host::PROCESS_STATE_TOP,
                     oom_adj: 0,
+                    instrumentation: None,
                 },
             );
         }

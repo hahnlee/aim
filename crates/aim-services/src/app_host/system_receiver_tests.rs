@@ -115,6 +115,7 @@ fn system_manifest_receivers_are_delivered_and_finished_in_the_attached_process(
                 last_mem_info: None,
                 proc_state: PROCESS_STATE_TOP,
                 oom_adj: 0,
+                instrumentation: None,
             },
         );
         let record = Arc::new(Record {

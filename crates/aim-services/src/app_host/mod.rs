@@ -91,6 +91,9 @@ mod installer_permissions;
 mod installer_preparation;
 mod installer_recovery;
 mod installer_removal;
+mod instrumentation;
+#[cfg(test)]
+mod instrumentation_tests;
 pub mod job_content;
 pub mod job_info;
 pub mod job_scheduler;
@@ -229,7 +232,7 @@ use aim_binder_host::parcel::{
 };
 use aim_service_aidl::android_app_iactivitymanager as am;
 use aim_service_aidl::android_app_iapplicationthread as thread;
-use aim_service_aidl::{ParcelValue, WriteParcelable};
+use aim_service_aidl::{ParcelValue, ReadParcelable, WriteParcelable};
 
 use crate::package;
 
@@ -462,6 +465,7 @@ struct App {
     /// State assigned by this process owner (also used by stats pulls).
     proc_state: i32,
     oom_adj: i32,
+    instrumentation: Option<Arc<instrumentation::Session>>,
 }
 
 impl App {
@@ -560,6 +564,7 @@ pub struct AppHost {
     next_seq: AtomicI64,
     apps: Mutex<HashMap<i64, App>>,
     process_stats: activity_stats::ProcessStats,
+    instrumentation: instrumentation::State,
     /// The services of this host, by name, once registered.
     published: Mutex<Vec<(String, Binder)>>,
     /// The global configuration's sequence number.
@@ -706,6 +711,7 @@ impl AppHost {
             next_seq: AtomicI64::new(1),
             apps: Mutex::new(HashMap::new()),
             process_stats: activity_stats::ProcessStats::default(),
+            instrumentation: instrumentation::State::default(),
             published: Mutex::new(Vec::new()),
             config_seq: AtomicI64::new(1),
             grammatical_genders: Mutex::new(HashMap::new()),
@@ -1545,6 +1551,7 @@ impl AppHost {
                 last_mem_info: None,
                 proc_state: PROCESS_STATE_NONEXISTENT,
                 oom_adj: 0,
+                instrumentation: None,
             },
         );
         let pid = (|| {
@@ -1674,6 +1681,7 @@ impl AppHost {
                 last_mem_info: None,
                 proc_state: PROCESS_STATE_NONEXISTENT,
                 oom_adj: 0,
+                instrumentation: None,
             },
         );
         let pid = match self.process_start_result(start_seq, self.start_webview(&start)) {
@@ -1847,7 +1855,7 @@ impl AppHost {
             isolation.packages.clear();
             isolation.allowlisted.clear();
         }
-        let start = zygote::Start {
+        let mut start = zygote::Start {
             uid,
             gids,
             runtime_flags: hidden_api_policy(
@@ -1905,7 +1913,16 @@ impl AppHost {
             }
             return Ok((seq, pid));
         }
-        self.apps.lock().unwrap().insert(
+        let mut apps = self.apps.lock().unwrap();
+        let instrumentation = if isolated {
+            None
+        } else {
+            self.instrumentation.matching(name, process, uid)
+        };
+        if let Some(session) = &instrumentation {
+            session.configure(&mut start);
+        }
+        apps.insert(
             start_seq,
             App {
                 package: name.to_string(),
@@ -1936,8 +1953,10 @@ impl AppHost {
                 last_mem_info: None,
                 proc_state: PROCESS_STATE_NONEXISTENT,
                 oom_adj: 0,
+                instrumentation,
             },
         );
+        drop(apps);
         let result = (|| {
             if zygote.is_none() {
                 let stream = (self.configured.get().unwrap().connect)()
@@ -1966,6 +1985,9 @@ impl AppHost {
         start_seq: i64,
         result: Result<i32, Exception>,
     ) -> Result<i32, Exception> {
+        if result.is_err() {
+            self.instrumentation_failed(start_seq, "failed to start");
+        }
         let mut apps = self.apps.lock().unwrap();
         let mut cancelled = false;
         if let Ok(pid) = &result {
@@ -2276,6 +2298,7 @@ impl AppHost {
                 last_mem_info: None,
                 proc_state: PROCESS_STATE_TOP,
                 oom_adj: 0,
+                instrumentation: None,
             },
         );
         for provider in &providers {
@@ -2388,6 +2411,11 @@ impl AppHost {
             app.removed = true;
             app.pid
         };
+        // Claim the pending start before retiring it: attach must not beat the timeout.
+        self.instrumentation_failed(start_seq, "failed to attach");
+        if !self.apps.lock().unwrap().contains_key(&start_seq) {
+            return;
+        }
         if let Err(e) = self.kill_process(
             start_seq,
             exit_info::REASON_INITIALIZATION_FAILURE,
@@ -2405,7 +2433,7 @@ impl AppHost {
         if pid <= 0 {
             return;
         }
-        let (removed, gone, exit, isolated) = {
+        let (removed, gone, exit, isolated, instrumentation) = {
             let mut apps = self.apps.lock().unwrap();
             if !apps.get(&start_seq).is_some_and(|app| app.pid == pid) {
                 return;
@@ -2430,8 +2458,12 @@ impl AppHost {
                 gone.map(|a| a.uid),
                 exit,
                 isolated,
+                app.as_ref().and_then(|a| a.instrumentation.clone()),
             )
         };
+        if let Some(session) = instrumentation {
+            self.retire_instrumentation(&session, "Process crashed.");
+        }
         self.forget_stats_process(start_seq);
         if let Err(e) = self.observe_cached_apps() {
             eprintln!("app host: cached-app accounting: {}", e.message);
@@ -2501,6 +2533,7 @@ impl AppHost {
         } else {
             exit_info::REASON_CRASH
         };
+        self.instrumentation_failed(start_seq, "Process crashed.");
         exit.description = Some("crash".into());
         self.note_exit(&exit, true);
         let try_again = self.services_crashed(start_seq);
@@ -4345,6 +4378,10 @@ impl AppHost {
             .ok_or_else(|| state("no config_defaultAnalogClockSecondsHandFps".into()))?;
         let core_settings =
             bind::core_settings(&inputs.settings, analog_clock_fps).map_err(state)?;
+        let mut settings_parcel = Parcel::new();
+        bind::Bundle(core_settings).write_to(&mut settings_parcel);
+        let core_settings = kept::RawBundle::read_from(&mut settings_parcel.reader())
+            .map_err(|e| state(format!("core settings: {e}")))?;
         let published = self.published.lock().unwrap();
         // An isolated process gets only those it may use (`getCommonServicesLocked`).
         let isolated = is_isolated(app.uid as i32);
@@ -4362,12 +4399,13 @@ impl AppHost {
         let target_sdk = info.target_sdk_version;
         let app_package = info.item.package_name.clone().unwrap_or_default();
         let mut p = Parcel::new();
+        let instr = app.instrumentation.as_ref().filter(|s| s.live());
         thread::BindApplication::<
             package::info::ApplicationInfo,
             bind::ProviderInfoList,
-            bind::Absent,
-            bind::Absent,
-            bind::Bundle,
+            package::intent::ComponentName,
+            kept::By<'_, instrumentation::Profile>,
+            kept::RawBundle,
             config::Configuration,
             config::CompatibilityInfo,
             bind::Absent,
@@ -4382,11 +4420,15 @@ impl AppHost {
             sdk_sandbox_client_app_package: None,
             is_sdk_in_sandbox: false,
             provider_list: Some(bind::ProviderInfoList(providers)),
-            test_name: None,
-            profiler_info: None,
-            test_arguments: None,
-            test_watcher: None,
-            ui_automation_connection: None,
+            test_name: instr.map(|s| s.class.clone()),
+            profiler_info: instr.and_then(|s| s.profile.as_ref()).map(kept::By),
+            test_arguments: instr
+                .and_then(|s| s.arguments.as_ref())
+                .map(|b| b.bundle.clone()),
+            test_watcher: instr.and_then(|s| s.watcher.as_ref()).map(|s| s.binder()),
+            ui_automation_connection: instr
+                .and_then(|s| s.connection.as_ref())
+                .map(|s| s.binder()),
             debug_mode: 0,
             enable_binder_tracking: false,
             track_allocation: false,
@@ -4395,7 +4437,7 @@ impl AppHost {
             config: Some(config.clone()),
             compat_info: Some(compat_info),
             services: Some(services),
-            core_settings: Some(bind::Bundle(core_settings)),
+            core_settings: Some(core_settings),
             build_serial: Some(if target_sdk < P {
                 inputs.serial.clone()
             } else {
@@ -4670,12 +4712,35 @@ impl Service for Activity {
     fn descriptor(&self) -> &str {
         am::DESCRIPTOR
     }
+    fn accepts_fds(&self) -> bool {
+        true
+    }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
+            am::START_INSTRUMENTATION
+            | am::ADD_INSTRUMENTATION_RESULTS
+            | am::FINISH_INSTRUMENTATION
+            | am::START_DELEGATE_SHELL_PERMISSION_IDENTITY
+            | am::STOP_DELEGATE_SHELL_PERMISSION_IDENTITY
+            | am::GET_DELEGATED_SHELL_PERMISSIONS => instrumentation::transact(&self.0, call),
             am::ATTACH_APPLICATION => {
                 let args = am::AttachApplication::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.attach(call, args.app, args.start_seq).map(|()| {
+                let host = &self.0;
+                let attached = host.attach(call, args.app, args.start_seq);
+                if attached.is_err()
+                    && host
+                        .apps
+                        .lock()
+                        .unwrap()
+                        .get(&args.start_seq)
+                        .is_some_and(|a| {
+                            a.uid == call.sender_euid && a.pid > 0 && a.pid == call.sender_pid
+                        })
+                {
+                    host.instrumentation_failed(args.start_seq, "failed to attach");
+                }
+                reply(attached.map(|()| {
                     // The services waiting for the process
                     // (`ActiveServices.attachApplicationLocked`).
                     self.0.services_attached(args.start_seq);
@@ -6135,6 +6200,7 @@ mod tests {
                 last_mem_info: None,
                 proc_state: PROCESS_STATE_NONEXISTENT,
                 oom_adj: 0,
+                instrumentation: None,
             },
         );
         host
