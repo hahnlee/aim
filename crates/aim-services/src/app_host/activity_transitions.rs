@@ -19,6 +19,7 @@ pub(super) struct Transitions {
     pub owner: Option<Arc<Strong>>,
     pub socket: Option<PathBuf>,
     collecting: HashMap<i32, Transition>,
+    retiring: usize,
     next_id: u64,
     // Serialize retirement with frame submission, without nesting the windows/state locks.
     playback: Arc<Mutex<()>>,
@@ -95,7 +96,9 @@ impl AppHost {
                 t.to = next.to;
                 return;
             }
-            state.collecting.remove(&task)
+            let old = state.collecting.remove(&task);
+            state.retiring += usize::from(old.is_some());
+            old
         };
         // DefaultTransitionHandler.mergeAnimation ends the previous animators first.
         if let Some(t) = old.as_ref() {
@@ -110,6 +113,7 @@ impl AppHost {
         drop(guard);
         if let Some(t) = old {
             self.release_transition(t);
+            self.transition_retired();
         }
     }
 
@@ -188,11 +192,39 @@ impl AppHost {
             if !state.collecting.get(&task).is_some_and(|t| t.id == id) {
                 return;
             }
+            state.retiring += 1;
             state.collecting.remove(&task).unwrap()
         };
         self.reset_transition(&old);
         drop(guard);
         self.release_transition(old);
+        self.transition_retired();
+    }
+
+    fn transition_retired(&self) {
+        self.windows.transitions.lock().unwrap().retiring -= 1;
+        self.windows.transitions_changed.notify_all();
+    }
+
+    /// WMS.waitForAnimationsToComplete, android-16.0.0_r1. Collection,
+    /// playback and final reset/deferred window operations must all finish.
+    pub(super) fn wait_for_window_animations(&self, timeout: std::time::Duration) -> bool {
+        let (state, _) = self
+            .windows
+            .transitions_changed
+            .wait_timeout_while(self.windows.transitions.lock().unwrap(), timeout, |s| {
+                !s.collecting.is_empty() || s.retiring != 0
+            })
+            .unwrap();
+        let complete = state.collecting.is_empty() && state.retiring == 0;
+        if !complete {
+            eprintln!(
+                "app host: Timed out waiting for animations to complete, collecting={} retiring={}",
+                state.collecting.len(),
+                state.retiring
+            );
+        }
+        complete
     }
 
     pub(super) fn cancel_activity_transition(&self, token: u64) {

@@ -362,6 +362,7 @@ dependencies = [
  "dsa",
  "flate2",
  "libc",
+ "log",
  "md-5",
  "p256",
  "p384",

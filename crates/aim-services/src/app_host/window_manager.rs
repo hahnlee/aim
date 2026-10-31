@@ -10,7 +10,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
@@ -92,6 +92,7 @@ struct Window {
 pub struct Windows {
     accessibility: accessibility::Accessibility,
     pub(super) transitions: Mutex<super::activity_transitions::Transitions>,
+    pub(super) transitions_changed: Condvar,
     windows: Mutex<HashMap<u32, Window>>,
     next: Mutex<u32>,
     focus: Mutex<WindowFocus>,
@@ -292,6 +293,9 @@ impl AppHost {
 /// `window`.
 pub struct WindowManager(pub Arc<AppHost>);
 
+#[path = "window_input_sync.rs"]
+mod input_sync;
+
 impl Service for WindowManager {
     fn descriptor(&self) -> &str {
         wm::DESCRIPTOR
@@ -304,6 +308,10 @@ impl Service for WindowManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            wm::SYNC_INPUT_TRANSACTIONS => {
+                let a = wm::SyncInputTransactions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                return reply(self.0.sync_input_transactions(a.wait_for_animations));
+            }
             // `onShellCommand`, with the caller's identity.
             SHELL_COMMAND_TRANSACTION => {
                 let mut command =
@@ -704,6 +712,7 @@ impl Session {
         let frames =
             window_layout::compute_frames(&attrs, bounds, attached, freeform.is_some(), requested);
         let input = Input::of(&attrs, frames.frame, bounds, (self.uid, self.pid));
+        let mut windows = self.host.windows.windows.lock().unwrap();
         let (index, channel) =
             self.host
                 .open_input_channel(&channel_name, (display.width, display.height), &input)?;
@@ -751,7 +760,7 @@ impl Session {
         }
         p.write_i32(1);
         p.write_f32(1.0); // the size compatibility scale
-        self.host.windows.windows.lock().unwrap().insert(
+        windows.insert(
             window,
             Window {
                 _client: self.host.process.strong(window),
@@ -776,6 +785,7 @@ impl Session {
                 focus_callbacks: Arc::default(),
             },
         );
+        drop(windows);
         self.host.update_window_focus();
         eprintln!("app host: window {channel_name} added");
         Ok(p)
