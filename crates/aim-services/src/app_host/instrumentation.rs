@@ -481,6 +481,14 @@ impl AppHost {
                     .transact(thread::INSTRUMENT_WITHOUT_RESTART, &p, true)
                     .map_err(state_error)?;
             } else {
+                // AMS.addAppLocked unstops the target before starting instrumentation.
+                self.package_system()?.internal_set_package_stopped_state(
+                    Some(target.into()),
+                    false,
+                    user,
+                    1000,
+                    0,
+                )?;
                 self.start_package_process(target, &process, None, false, false)?;
             }
             Ok(())

@@ -17,6 +17,12 @@ const MANAGE: &str = "android.permission.MANAGE_APP_HIBERNATION";
 pub struct AppHibernation(pub Arc<AppHost>);
 
 impl AppHibernation {
+    /// NativePackageEffectsBridge only transitions packages that are hibernating.
+    /// Empty stores mean the initial awake state; persisted states still fail.
+    pub(super) fn unhibernate(&self, user: i32) -> Result<(), Exception> {
+        self.enforce(1000, user, "isHibernatingForUser")
+    }
+
     fn enforce(&self, uid: i32, user: i32, method: &str) -> Result<(), Exception> {
         let host = &self.0;
         // isDeviceConfigAppHibernationEnabled: disabled reads return before permissions.

@@ -315,7 +315,7 @@ Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHO
 `aimctl open` checks user readiness before opening a window shim, so an open during app-host startup returns the booting error before showing its splash (#1875; host regression, no guest boot rerun).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun). Pending-update reads now check Android 16 permissions/owners and return matching persisted OwnersData info (null when absent or stale); the provisioning-config read checks MANAGE_USERS and reads DevicePolicyData (#1521; host tests, no guest boot rerun, 2026-10-31).
-The image's original RoleService now owns role selection, grants, persistence and listeners (#2540, #1657), with live native local reads, legacy-browser persistence, user/account qualification, preferred-role forwarding and permission-checked UID termination. Safety Center CTS: 468 pass / 8 fail / 52 assumption skips; all adopted MANAGE_SAFETY_CENTER reset denials are gone, with 5 callback timeouts, 2 PendingIntent-type errors and 1 #2529 accessibility error remaining; legacy fallback migration logs CancellationException (#1657, 2026-10-31).
+The image's original RoleService now owns role selection, grants, persistence and listeners (#2540, #1657), with live native local reads, legacy-browser persistence, user/account qualification, preferred-role forwarding and permission-checked UID termination. Safety Center CTS: 475 pass / 1 fail / 52 assumption skips, preserving all 468 prior passes. Canceled PendingIntents retain their query metadata (#2545); instrumentation unstops its target through the package owner, with state-checked unhibernation and package-unstopped notifications, restoring refresh/dismiss/resolve receiver delivery (#2544). The sole remaining failure is #2529 accessibility; legacy fallback migration logs CancellationException (#1657, 2026-11-01).
 `device_policy` serves
 `isUsbDataSignalingEnabled` after package-identity validation, using the original
 Java policy readers over the retained engine XML, including a resolved disabled
@@ -656,8 +656,8 @@ protection decisions for non-system user-0 installs (#2161). Ungranted signature
 and internal permissions no longer abort installation; unavailable KnownPackages
 selections name the individual flag. Host branch tests include a signed APK whose
 own signature permission is granted and platform permission denied. Official
-Safety Center CTS still has no executed results: installation has not been rerun,
-and the module command reaches unsupported activity.startInstrumentation. Fresh empty-data
+Safety Center CTS installation and instrumentation now run; current results are
+recorded above with the RoleService and native instrumentation owners. Fresh empty-data
 boots of main, print and 8bd9d5e64 all spend tens of seconds in synchronous default
 permission mutations; print starts after that attach returns (2026-10-31).
 AppSearch is the original module, run by the app host's system process
