@@ -46,11 +46,13 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
         p.ends_with("IForegroundServicePolicy.java")
             || p.ends_with("IForegroundServiceTypeHost.java")
     }));
-    for (missing_memory, missing_art, device_lock) in [
-        (false, false, true),
-        (false, false, false),
-        (true, false, true),
-        (false, true, true),
+    for (missing_memory, missing_art, device_lock, printing) in [
+        (false, false, true, true),
+        (false, false, false, true),
+        (false, false, true, false),
+        (false, false, false, false),
+        (true, false, true, true),
+        (false, true, true, true),
     ] {
         let server = data.0.join("SystemProcessHost.java");
         let mut source =
@@ -86,6 +88,7 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
             .arg(format!("{}:{}", classes.display(), stubs.display()))
             .arg("dev.aim.server.SystemProcessHostTest")
             .arg(device_lock.to_string())
+            .arg(printing.to_string())
             .output()
             .unwrap();
         if missing_art {

@@ -25,6 +25,7 @@ import com.android.server.SystemService.TargetUser;
 import com.android.server.adservices.SystemProcessLifecycle;
 import com.android.server.appsearch.AppSearchModule$Lifecycle;
 import com.android.server.pinner.PinnerService;
+import com.android.server.print.PrintManagerService;
 import com.android.server.stats.pull.StatsPullAtomService;
 
 import dalvik.system.VMRuntime;
@@ -39,7 +40,8 @@ import java.util.List;
  * module, the Connectivity module's NearbyService, the AdServices module's
  * AdServicesManagerService, DeviceLockService, TelecomLoaderService's
  * part ({@link TelecomLoader}), StatsCompanionService's UID-map/receiver
- * lifecycle ({@link StatsCompanionUidMap}), the original PinnerService and StatsPullAtomService,
+ * lifecycle ({@link StatsCompanionUidMap}), the original PinnerService,
+ * PrintManagerService and StatsPullAtomService,
  * and the components declared in
  * `android:process="system"`, such as Telecom's.
  * This class plays ZygoteInit's part for the system server
@@ -78,7 +80,8 @@ public final class SystemProcessHost extends RuntimeInit {
      * given the boot phases from where SystemServer starts each: Pinner, then Nearby,
      * which ConnectivityServiceInitializer starts before
      * PHASE_LOCK_SETTINGS_READY (the app host serves the initializer's
-     * other services natively), then StatsPullAtomService and
+     * other services natively), then PrintManagerService when FEATURE_PRINTING
+     * is declared, then StatsPullAtomService and
      * AdServicesManagerService's Lifecycle ({@link SystemProcessLifecycle}),
      * then AppSearch's Lifecycle
      * (after PHASE_DEVICE_SPECIFIC_SERVICES_READY), with user 0 started and
@@ -182,21 +185,27 @@ public final class SystemProcessHost extends RuntimeInit {
                     null /* classLoaderName */);
             startService("dev.aim.server.nearby.NetworkStatsInitializer", nearbyLoader, context);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
+            List<SystemService> services = new ArrayList<>(List.of(pinner, nearby));
+            if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_PRINTING)) {
+                SystemService print = new PrintManagerService(context);
+                print.onStart();
+                services.add(print);
+            }
             SystemService statsPull = new StatsPullAtomService(context);
             statsPull.onStart();
             SystemService adServices = SystemProcessLifecycle.start(context);
+            services.add(statsPull);
+            services.add(adServices);
             for (int phase : new int[] {SystemService.PHASE_LOCK_SETTINGS_READY,
                     SystemService.PHASE_SYSTEM_SERVICES_READY,
                     SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY}) {
-                pinner.onBootPhase(phase);
-                nearby.onBootPhase(phase);
-                statsPull.onBootPhase(phase);
-                adServices.onBootPhase(phase);
+                for (SystemService service : services) {
+                    service.onBootPhase(phase);
+                }
             }
             SystemService appSearch = new AppSearchModule$Lifecycle(context);
             appSearch.onStart();
-            List<SystemService> services = new ArrayList<>(
-                    List.of(pinner, nearby, statsPull, adServices, appSearch));
+            services.add(appSearch);
             if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_DEVICE_LOCK)) {
                 ClassLoader deviceLockLoader = ClassLoaderFactory.createClassLoader(DEVICE_LOCK_JAR,
                         null, null, Server.class.getClassLoader(), Build.VERSION.SDK_INT,
