@@ -5274,6 +5274,44 @@ impl Service for Activity {
                         }),
                 )
             }
+            am::GET_LAUNCHED_FROM_UID | am::GET_LAUNCHED_FROM_PACKAGE => {
+                // AMS delegates to ActivityClient at android-16.0.0_r1.
+                call.data
+                    .enforce_interface(am::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let token = call.data.read_binder().map_err(|_| BAD_VALUE)?;
+                reply(
+                    activity::ActivityClientController(self.0.clone())
+                        .launched_from(call.sender_euid as i32, token)
+                        .map(|from| {
+                            let mut p = Parcel::new();
+                            if call.code == am::GET_LAUNCHED_FROM_UID {
+                                am::write_get_launched_from_uid_reply(
+                                    &mut p,
+                                    from.map_or(-1, |f| f.uid),
+                                );
+                            } else {
+                                am::write_get_launched_from_package_reply(
+                                    &mut p,
+                                    &from.and_then(|f| f.package),
+                                );
+                            }
+                            p
+                        }),
+                )
+            }
+            am::FORCE_STOP_PACKAGE => {
+                let a = am::ForceStopPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .force_stop_package_as_caller(call, a.package_name.as_deref(), a.user_id)
+                        .map(|()| {
+                            let mut p = Parcel::new();
+                            am::write_force_stop_package_reply(&mut p);
+                            p
+                        }),
+                )
+            }
             am::CLEAR_APPLICATION_USER_DATA => {
                 let a =
                     am::ClearApplicationUserData::read(&mut call.data).map_err(|_| BAD_VALUE)?;

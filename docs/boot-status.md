@@ -159,8 +159,11 @@ Other subcommands (including `start`) and wait flush options explicitly fail
 with #2511. Host validation only; no guest/CTS/app run (2026-10-31).
 SDK sandbox and shell permission delegation still explicitly fail with #2511.
 
-Launcher package/UID reads retain the starting caller and Android 16 access rules
-(#2508; host Binder regressions, no guest boot rerun, 2026-10-31).
+Launcher package/UID reads on both ActivityClientController and ActivityManager
+retain the starting caller and Android 16 access rules (#2508, #2528).
+ActivityManager force-stop checks FORCE_STOP_PACKAGES and full cross-user access,
+sets stopped state and invokes the existing kill owner; lifecycle cleanup remains
+#1570. Host Binder regressions only, no guest/CTS/app rerun (2026-10-31).
 
 A launching activity's window theme is read through file-only APK access and
 an indexed resource table that decodes only the entries it needs (#2441),

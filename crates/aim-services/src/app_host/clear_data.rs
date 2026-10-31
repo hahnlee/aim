@@ -86,6 +86,83 @@ impl AppHost {
         })
     }
 
+    /// AMS.forceStopPackage, android-16.0.0_r1: permission and user admission,
+    /// protected-package/UID lookup, stopped state, then the existing kill owner.
+    pub(super) fn force_stop_package_as_caller(
+        &self,
+        call: &aim_binder_host::local::Call<'_>,
+        package: Option<&str>,
+        user: i32,
+    ) -> Result<(), Exception> {
+        const PERMISSION: &str = "android.permission.FORCE_STOP_PACKAGES";
+        let pid = call.sender_pid;
+        let uid = call.sender_euid as i32;
+        if self.check_permission(Some(PERMISSION), uid)? != 0 {
+            return Err(Exception::security(format!(
+                "Permission Denial: forceStopPackage() from pid={pid}, uid={uid} requires {PERMISSION}"
+            )));
+        }
+        let user = self.handle_incoming_user(
+            uid,
+            user,
+            true,
+            AllowMode::FullOnly,
+            Some("forceStopPackage"),
+            None,
+        )?;
+        let users = if user == super::USER_ALL {
+            super::user_service::user_ids(self, true)?
+        } else {
+            vec![user]
+        };
+        let Some(package) = package else {
+            return Ok(());
+        };
+        for user in users {
+            if self.data_protected(package)? {
+                return Ok(());
+            }
+            let package_uid = {
+                let (state, resolution) = self.packages()?;
+                Query {
+                    state: &state,
+                    filter: &resolution.apps_filter,
+                    calling_uid: SYSTEM_UID,
+                }
+                .package_uid(package, 0x1000_0000, user)
+                .map_err(|e| self.not_modelled(e))??
+            };
+            if package_uid == INVALID_UID {
+                continue;
+            }
+            self.package_system()?.internal_set_package_stopped_state(
+                Some(package.into()),
+                true,
+                user,
+                SYSTEM_UID,
+                0,
+            )?;
+            // UserController starts only user 0 on this host.
+            if user == 0 {
+                let mut reason = format!("from pid {pid}");
+                let apps = self.apps.lock().unwrap();
+                if let Some(app) = apps.values().find(|a| a.pid == pid) {
+                    reason.push_str(&format!(" ({})", app.process));
+                }
+                drop(apps);
+                self.kill_application(
+                    package,
+                    package_uid % PER_USER_RANGE as i32,
+                    user,
+                    &reason,
+                    super::exit_info::REASON_USER_REQUESTED,
+                )?;
+                self.writes()?.package_restarted(package, package_uid);
+            }
+        }
+        Ok(())
+    }
+
     /// `IActivityManager.clearApplicationUserData(package, keepState,
     /// observer, user)` of the caller `uid` (of `pid`): whether the clear
     /// was started; `done` learns its outcome.
@@ -301,5 +378,55 @@ impl AppHost {
         if let Some(e) = failure {
             eprintln!("app host: keystore: clearNamespace failed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod force_stop_tests {
+    use super::super::{Activity, am};
+    use super::*;
+    use aim_binder_host::local::{Call, Service};
+
+    #[test]
+    fn force_stop_checks_permission_and_resolves_users_before_killing() {
+        crate::system::with_discovery_session(|host, publish, _| {
+            publish(&mut |_| {});
+            host.services();
+            host.ensure_system_user().unwrap();
+            let service = Activity(host.clone());
+            let stop = |uid, package: &str, user| {
+                let mut data = Parcel::new();
+                am::ForceStopPackage {
+                    package_name: Some(package.into()),
+                    user_id: user,
+                }
+                .write(&mut data);
+                let result = service
+                    .transact(&mut Call {
+                        code: am::FORCE_STOP_PACKAGE,
+                        flags: 0,
+                        sender_pid: 71,
+                        sender_euid: uid,
+                        data: data.reader(),
+                    })
+                    .unwrap();
+                am::read_force_stop_package_reply(&mut result.reader()).unwrap()
+            };
+            assert_eq!(
+                stop(10100, "absent", 10).unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+            assert!(stop(1000, "absent", 0).is_ok());
+            assert!(stop(1000, "p", 10).is_ok());
+            let errors = &host.app_errors;
+            let key = ("p".into(), 10100);
+            for user in [super::super::activity::USER_CURRENT, super::super::USER_ALL] {
+                let now = std::time::Instant::now();
+                errors.lock().unwrap().crash_times.insert(key.clone(), now);
+                stop(1000, "p", user).unwrap();
+                assert!(host.packages().unwrap().0.packages["p"].users[&0].stopped);
+                assert!(!errors.lock().unwrap().crash_times.contains_key(&key));
+            }
+        });
     }
 }

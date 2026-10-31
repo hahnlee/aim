@@ -1094,7 +1094,7 @@ impl ActivityClientController {
     }
 
     /// Android 16 `getUid/getPackage`, `isInternalCallerGetLaunchedFrom`.
-    fn launched_from(
+    pub(super) fn launched_from(
         &self,
         uid: i32,
         token: Option<Binder>,
@@ -1581,6 +1581,7 @@ mod launched_from_tests {
     use super::*;
 
     fn read(host: &Arc<AppHost>, token: Option<Binder>, uid: u32) -> (i32, Option<String>) {
+        let uid_caller = uid;
         let service = ActivityClientController(host.clone());
         let mut data = Parcel::new();
         data.write_interface_token(acc::DESCRIPTOR);
@@ -1603,6 +1604,29 @@ mod launched_from_tests {
             &mut invoke(acc::GET_LAUNCHED_FROM_PACKAGE).reader(),
         )
         .unwrap();
+        use super::super::am;
+        let service = super::super::Activity(host.clone());
+        for (code, original) in [
+            (am::GET_LAUNCHED_FROM_UID, acc::GET_LAUNCHED_FROM_UID),
+            (
+                am::GET_LAUNCHED_FROM_PACKAGE,
+                acc::GET_LAUNCHED_FROM_PACKAGE,
+            ),
+        ] {
+            let mut data = Parcel::new();
+            data.write_interface_token(am::DESCRIPTOR);
+            data.write_binder(token);
+            let result = service
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 71,
+                    sender_euid: uid_caller,
+                    data: data.reader(),
+                })
+                .unwrap();
+            assert_eq!(result.data(), invoke(original).data());
+        }
         (uid.unwrap(), package.unwrap())
     }
 
