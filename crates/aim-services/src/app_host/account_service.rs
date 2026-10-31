@@ -704,7 +704,7 @@ impl AccountManager {
         let mut db = AccountsDb::open(
             &data.join(format!("system_de/{user}/accounts_de.db")),
             &data.join(format!("system/users/{user}/accounts.db")),
-            &super::lock_settings::java_locale(&inputs.locales),
+            &super::lock_settings::java_locale(&inputs.locale_tags()),
         )?;
         self.purge_old_grants(&db)?;
         if self.unlocked(user).map_err(Failure::Thrown)? {

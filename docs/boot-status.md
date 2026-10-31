@@ -445,6 +445,12 @@ odrefresh's cache metadata (no dex2oat): app-open admission at about 8.5 s,
 against 16.1 s before; warm second boots reach it at about 5.9 s (three boots
 each, 2026-10-30).
 
+ActivityManager now decodes and merges persistent locale, font-scale and layout
+updates with permission/attribution checks, settings/property persistence and the
+existing process/activity/broadcast path (#2555). Native-service property writes
+request on-disk persistence at guest-init's property owner. Focused host checks
+pass; fresh locale/persistence and official CTS checks below pass (2026-11-01).
+
 The app host starts the original AccessibilityManagerService with native overlay
 and window callback ownership, ordered initial-user initialization and an
 ordinary-app binding barrier (#2529). Interaction connections now use native
@@ -462,18 +468,16 @@ fallback, and dispatches through the agent's window owner (#2551). UID targeting
 display selection and all three modes use one injection deadline; foreground
 FINISHED sequences are tracked separately from selection and queued publication.
 Full socket buffers retain outbound messages until writable. Forty focused
-transport/input/instrumentation checks pass. One fresh full Safety Center CTS
-run remains 475 pass / 1 fail / 52 assumption skips, preserving every prior pass
-(2026-11-01). The targeted and full runs now complete input injection and scrolling,
-then time out finding the English title description `Security & privacy`; the UI
-dump's collapsing toolbar instead describes `보안 및 개인 정보 보호` in Korean.
-This subsequent title-selector/localization boundary remains unresolved.
+transport/input/instrumentation checks pass. With #2555's verified en-US
+precondition, one fresh full Safety Center CTS run is 476 pass / 0 fail / 52
+assumption skips (2026-11-01), preserving all 475 prior passes. The English
+title/scrolling UI test now passes.
 The 21 DeviceConfig-toggle skips follow the original fixed
 `safety_center_enabled_no_device_config` flag on Android 16; the 31 tests for unsupported devices skip because
 `config_enableSafetyCenter=true`. Neither policy changed.
-The final crash buffer, ANR and tombstone directories are empty. Both fresh CTS
-boots followed twenty quiet seconds; unrelated builds overlapped parts of each
-run, with no observed foreign guest overlap. The frozen runtime stayed unchanged.
+The final crash buffer, ANR and tombstone directories are empty. The #2555 fresh
+boot followed twenty quiet seconds; unrelated builds overlapped the run with no
+foreign guest overlap. Its frozen runtime stayed unchanged.
 Magnification and other unserved local operations remain explicit
 #2529 failures; full accessibility conformance is not established.
 

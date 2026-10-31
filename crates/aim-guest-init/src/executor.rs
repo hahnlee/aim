@@ -24,8 +24,8 @@ use aim_android_init::engine::{
     Command, CommandExecutor, CommandFlow, ExecSpec, InitAction, InitProperties, Invocation,
     PERSISTENT_PROPERTIES_READY_PROP,
 };
-use aim_android_init::props::SetEffect;
 use aim_android_init::props::service::ControlMessage;
+use aim_android_init::props::{SetEffect, SetOutcome};
 use aim_android_init::rc::{CommandSpec, Rlimit, Service, expand_props};
 
 use crate::fsops::{Effect, FsOps, parse_mode};
@@ -162,14 +162,31 @@ impl GuestExecutor {
     /// init setting a property (`SetProperty` from init's main thread).
     pub fn set_property(&mut self, name: &str, value: &str) -> Result<(), String> {
         let outcome = self.props.borrow_mut().init_set(name, value);
+        self.finish_property_set(outcome)
+    }
+
+    /// A native service's SystemProperties.set, including persistent storage.
+    pub fn set_host_property(&mut self, name: &str, value: &str) -> Result<(), String> {
+        let outcome = self.props.borrow_mut().builtin_set(name, value);
+        self.finish_property_set(outcome)
+    }
+
+    fn finish_property_set(&mut self, outcome: SetOutcome) -> Result<(), String> {
         if !outcome.is_success() {
             return Err(outcome.error.unwrap_or_default());
         }
+        let persist = outcome
+            .effects
+            .iter()
+            .any(|e| matches!(e, SetEffect::Persist { .. }));
         for effect in outcome.effects {
             if let SetEffect::Changed { name, value } = effect {
                 self.outbox
                     .push_back(Outgoing::PropertyChanged(name, value));
             }
+        }
+        if persist {
+            self.write_persistent_properties()?;
         }
         Ok(())
     }

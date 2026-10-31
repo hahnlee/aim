@@ -1,6 +1,7 @@
 package dev.aim.server;
 
-/** ContentValues.getAsString's original scalar conversion; system UID only. */
+/** Original system-settings value conversions; system UID only. */
 interface ISettingsValues {
     String getAsString(in byte[] value);
+    String bestPersistentLocale(String tags);
 }

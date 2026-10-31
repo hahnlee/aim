@@ -26,6 +26,16 @@ public final class SettingsValues extends ISettingsValues.Stub {
         }
     }
 
+    /** ActivityTaskManagerService.updateGlobalConfigurationLocked locale selection. */
+    @Override
+    public String bestPersistentLocale(String tags) {
+        Bridge.enforceSystemUid();
+        var locales = android.os.LocaleList.forLanguageTags(tags);
+        int index = Math.max(0, locales.getFirstMatchIndex(
+                android.content.res.Resources.getSystem().getAssets().getLocales()));
+        return locales.get(index).toLanguageTag();
+    }
+
     // ContentValues.getAsString after its map lookup.
     static String asString(Object value) {
         return value != null ? value.toString() : null;

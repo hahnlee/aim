@@ -783,6 +783,11 @@ load recording, atomic save and separate-process reload, with package snapshots
 and the debounce clock supplied by the test. These checks do not establish
 whole-process boot reliability or CTS acceptance.
 
+The native persistent-configuration owner (#2555) shares the system-UID settings
+bridge for the original LocaleList/system-asset supported-locale selection used
+by pinned ATMS. Configuration state, persistence and propagation stay native;
+this adds vendor methods and compile-only declarations, with no original replacement.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

@@ -72,6 +72,17 @@ host applies the list through the system_server bridge
   `persist.sys.locale`, the Mac's first language, or a list chosen in
   Android before.
 
+The app host serves `getConfiguration` and both persistent-update methods
+natively (#2555). Android updates check CHANGE_CONFIGURATION and the attributed
+WRITE_SETTINGS app-op, merge locales/font scale/layout direction, persist
+`system_locales` and `persist.sys.locale`, then use the existing configuration
+path for processes, activities and CONFIGURATION_CHANGED/LOCALE_CHANGED.
+For multiple tags, the system-UID settings bridge uses the original LocaleList
+and system asset locales to choose the supported tag ATMS would persist.
+The Mac supplies the initial list and the same locale watcher applies later
+changes through this owner. An Android change holds until that list changes or
+the next boot; an unchanged Mac notification does not overwrite it.
+
 ## Verified: the language list (2026-10-01)
 
 Device boots of the working tree with the Mac on `("ko-KR")`, `ko_KR`

@@ -9,5 +9,6 @@ public final class LocaleList {
     public static LocaleList forLanguageTags(String list) { throw new RuntimeException("stub"); }
     public String toLanguageTags() { throw new RuntimeException("stub"); }
     public boolean isEmpty() { throw new RuntimeException("stub"); }
+    public int getFirstMatchIndex(String[] supported) { throw new RuntimeException("stub"); }
     public Locale get(int index) { throw new RuntimeException("stub"); }
 }

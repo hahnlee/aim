@@ -513,6 +513,24 @@ impl SettingsProvider {
         Ok(())
     }
 
+    pub(super) fn best_persistent_locale(&self, tags: &str) -> Result<String, Exception> {
+        let owner = self.values_bridge.lock().unwrap().clone().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "settings values bridge is not attached")
+        })?;
+        let mut data = Parcel::new();
+        settings_values::BestPersistentLocale {
+            tags: Some(tags.into()),
+        }
+        .write(&mut data);
+        let transport = |s| Exception::new(EX_ILLEGAL_STATE, format!("locale selection: {s}"));
+        let result = owner
+            .transact(settings_values::BEST_PERSISTENT_LOCALE, &data, false)
+            .map_err(transport)?;
+        settings_values::read_best_persistent_locale_reply(&mut result.reader())
+            .map_err(transport)??
+            .ok_or_else(|| transport(BAD_VALUE))
+    }
+
     /// `ContentValues.getAsString(key)`.
     fn content_string(
         &self,
@@ -2221,7 +2239,7 @@ impl SettingsProvider {
     /// `notifyForSettingsChange`: the setting's generation first, so
     /// observers always see the new value, then its URI's observers, for
     /// the running users (the app host's one) of a global setting.
-    fn notify(&self, table: Table, user: i32, name: &str) -> Result<(), Exception> {
+    pub(super) fn notify(&self, table: Table, user: i32, name: &str) -> Result<(), Exception> {
         self.generations()?.increment(table, user, name);
         if table == Table::Secure
             && user == 0
