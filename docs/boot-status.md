@@ -321,6 +321,7 @@ observers. Host checks cover lifecycle, task focus, removal, ordered delivery
 and callback reentry. No guest boot was run (2026-10-28).
 
 Foreground services follow the original Java type policy, with native timers for shortService and the time-limited types (onTimeout, then stop or ANR).
+Manifest shortcut rescans now parse launcher activity metadata through the native resource owner and reconcile updates, pinned removals, share targets and count limits, persisting package state before scan markers (#1669, 2026-11-01). OTA scans force all installed, enabled apps as the pinned Android 16 code does. Capability tags retain the pinned parser's null-binding behavior. Host regressions cover parsing, update/removal, reload and OTA selection; no guest boot or CTS rerun was performed. Locale relabelling, removed-package cleanup and the other open #1669 surfaces remain unsupported.
 Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHORTCUTS or its package is user 0's HOME role holder; package-scoped queries retain their events (#1870; host tests only, no guest boot rerun).
 `aimctl open` checks user readiness before opening a window shim, so an open during app-host startup returns the booting error before showing its splash (#1875; host regression, no guest boot rerun).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
