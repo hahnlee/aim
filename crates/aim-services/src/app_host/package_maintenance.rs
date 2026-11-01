@@ -3,14 +3,16 @@
 //! system_server's `NativePackageMaintenanceBridge` answers them
 //! (`android-16.0.0_r1`), to the system uid only. Its ART methods are ART
 //! Service's (#2063), except dex-use recording in aim-system's original
-//! DexUseManagerLocal; its storage and cache owners are not ported
-//! (#2156).
+//! DexUseManagerLocal. Package caches stay owned by installd; profile
+//! cleanup and the external storage session cache remain explicit gaps.
+//! Storage policy follows AOSP android-16.0.0_r1 PMS/AppDataHelper (Apache-2.0).
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, Exception, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
+use aim_service_aidl::android_os_iinstalld as installd;
 use aim_service_aidl::dev_aim_server_ipackagemaintenancebridge as bridge;
 use aim_service_aidl::{
     dev_aim_server_idexusebridge as dex, dev_aim_server_idexusepackages as packages,
@@ -52,6 +54,66 @@ impl PackageMaintenance {
             permission.unwrap_or_default()
         )))
     }
+
+    fn clear_cache_files(
+        &self,
+        name: Option<&str>,
+        user: i32,
+        instant: bool,
+        caller: i32,
+    ) -> Result<(), Exception> {
+        let capture = self.host.package_capture()?;
+        if cache_package(capture.state(), name, instant, caller).is_none() {
+            return Ok(());
+        }
+        let system = self.host.package_system()?;
+        let _install = system.package_install_guard();
+        let capture = self.host.package_capture()?;
+        let Some(package) = cache_package(capture.state(), name, instant, caller) else {
+            return Ok(());
+        };
+        let owner = self
+            .host
+            .installd()
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        self.clear_cache_storage(&owner, package, user)?;
+        // No ArtManagerLocal is constructed in aim-system (#2063). Do not
+        // report a completed clear while its profile effect is unavailable.
+        Err(self
+            .host
+            .unimplemented_named("package maintenance", "clearAppProfiles (#2063)"))
+    }
+
+    fn clear_cache_storage(
+        &self,
+        owner: &aim_binder_host::local::Strong,
+        package: &crate::package::model::PackageState,
+        user: i32,
+    ) -> Result<(), Exception> {
+        // Installd owns CE inode resolution (including locked CE), DE,
+        // external cache and SDK sandbox caches. External has no code cache.
+        for cache in [0x10, 0x20] {
+            self.host
+                .clear_app_data(owner, package, user, 1 | 2 | 4 | cache)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        }
+        Ok(())
+    }
+}
+
+fn cache_package<'a>(
+    state: &'a crate::package::model::State,
+    name: Option<&str>,
+    instant: bool,
+    caller: i32,
+) -> Option<&'a crate::package::model::PackageState> {
+    let package = state.packages.get(name?)?;
+    if package.pkg.is_none()
+        || crate::package::info::user_state(package, caller / 100_000).instant_app && !instant
+    {
+        return None;
+    }
+    Some(package)
 }
 
 impl Service for PackageMaintenance {
@@ -78,6 +140,142 @@ impl Service for PackageMaintenance {
         let host = &self.host;
         let mut p = Parcel::new();
         let result = match call.code {
+            bridge::CLEAR_CACHE_FILES => {
+                let a = bridge::ClearCacheFiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.clear_cache_files(
+                    a.package_name.as_deref(),
+                    a.user_id,
+                    a.can_access_instant_apps,
+                    a.calling_uid,
+                )
+                .map(|()| bridge::write_clear_cache_files_reply(&mut p))
+            }
+            bridge::STORAGE_SPACE => {
+                let a = bridge::StorageSpace::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut record = Parcel::new();
+                match AppHost::find_path_for_uuid(a.volume_uuid.as_deref())
+                    .and_then(|()| host.data_space())
+                {
+                    Ok((_, usable)) => {
+                        record.write_bool(true);
+                        record.write_i64(usable);
+                        record.write_string16(None);
+                    }
+                    Err(error) => {
+                        record.write_bool(false);
+                        record.write_i64(0);
+                        record.write_string16(Some(&error.message));
+                    }
+                }
+                bridge::write_storage_space_reply(&mut p, &Some(record.data().to_vec()));
+                Ok(())
+            }
+            bridge::DELETE_PRELOADS_FILE_CACHE => {
+                bridge::DeletePreloadsFileCache::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                host.data().map(|data| {
+                    super::app_data::delete_contents(&data.join("preloads/file_cache"), false);
+                    bridge::write_delete_preloads_file_cache_reply(&mut p);
+                })
+            }
+            bridge::DELETE_PARSER_CACHE => {
+                bridge::DeleteParserCache::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    let cache = host.package_parser_cache.get().ok_or_else(|| {
+                        Exception::new(EX_ILLEGAL_STATE, "package parser cache not initialized")
+                    })?;
+                    if let Some(cache) = cache {
+                        super::app_data::delete_contents(
+                            &host
+                                .data()?
+                                .join(cache.strip_prefix("/data/").ok_or_else(|| {
+                                    Exception::new(
+                                        EX_ILLEGAL_STATE,
+                                        "package parser cache outside data",
+                                    )
+                                })?),
+                            false,
+                        );
+                    }
+                    bridge::write_delete_parser_cache_reply(&mut p);
+                    Ok(())
+                })()
+            }
+            bridge::NOTE_CACHE_CLEAR_CALLER => {
+                let a =
+                    bridge::NoteCacheClearCaller::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                use super::event_log::Value;
+                host.write_event(
+                    3132,
+                    Value::List(&[
+                        Value::Int(a.calling_pid),
+                        Value::Int(a.calling_uid),
+                        Value::String(a.package_name.as_deref().unwrap_or("NULL")),
+                    ]),
+                )
+                .map(|()| bridge::write_note_cache_clear_caller_reply(&mut p))
+            }
+            bridge::SEND_FREE_STORAGE_RESULT => {
+                let a = bridge::SendFreeStorageResult::<
+                    crate::package::installer::existing::IntentSender,
+                >::read(&mut call.data)
+                .map_err(|_| BAD_VALUE)?;
+                (|| {
+                    if let Some(sender) = a.sender {
+                        let options = super::kept::RawBundle::empty()
+                            .with_ints(&[("android.pendingIntent.backgroundActivityAllowed", 2)])
+                            .map_err(|e| {
+                                Exception::new(
+                                    EX_ILLEGAL_STATE,
+                                    format!("free storage options: {e}"),
+                                )
+                            })?;
+                        let result = host.send_intent_sender(
+                            SYSTEM_UID as i32,
+                            None,
+                            sender.0,
+                            i32::from(a.success),
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(options),
+                        )?;
+                        if result < 0 {
+                            eprintln!("app host: Free storage IntentSender failed");
+                        }
+                    }
+                    bridge::write_send_free_storage_result_reply(&mut p);
+                    Ok(())
+                })()
+            }
+            bridge::FREE_INSTALLD_CACHE => {
+                let a = bridge::FreeInstalldCache::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    let system = host.package_system()?;
+                    let _install = system.package_install_guard();
+                    let mut request = Parcel::new();
+                    installd::FreeCache {
+                        uuid: a.volume_uuid,
+                        target_free_bytes: a.target_bytes,
+                        flags: if a.v2 { 0x100 } else { 0 } | if a.defy_quota { 0x200 } else { 0 },
+                    }
+                    .write(&mut request);
+                    // InstallerException is deliberately ignored by the pinned
+                    // free-storage policy; acquisition/transport errors are not.
+                    let owner = host
+                        .installd()
+                        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                    let response = owner
+                        .transact(installd::FREE_CACHE, &request, false)
+                        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("freeCache: {e}")))?;
+                    let _installer_result = installd::read_free_cache_reply(&mut response.reader())
+                        .map_err(|e| {
+                            Exception::new(EX_ILLEGAL_STATE, format!("freeCache reply: {e}"))
+                        })?;
+                    bridge::write_free_installd_cache_reply(&mut p);
+                    Ok(())
+                })()
+            }
             bridge::NOTIFY_DEX_LOAD => {
                 let a = bridge::NotifyDexLoad::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let owner = host.dex_use_bridge.lock().unwrap().clone();
@@ -243,6 +441,332 @@ impl Service for DexUsePackages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_deletion_uses_installd_under_the_shared_lock_even_with_ce_locked() {
+        use aim_binder_host::parcel::{Binder, EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+        use aim_service_aidl::android_os_iservicemanager as sm;
+        use std::sync::{
+            Mutex, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        };
+        type Calls = Arc<Mutex<Vec<(Option<String>, Option<String>, i32, i32, i64)>>>;
+        struct Installer {
+            calls: Calls,
+            gate: Arc<OnceLock<Arc<Mutex<()>>>>,
+            fail: Arc<AtomicBool>,
+        }
+        impl Service for Installer {
+            fn descriptor(&self) -> &str {
+                installd::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, SYSTEM_UID);
+                assert!(self.gate.get().unwrap().try_lock().is_err());
+                let mut p = Parcel::new();
+                match call.code {
+                    installd::CLEAR_APP_DATA => {
+                        let a = installd::ClearAppData::read(&mut call.data)?;
+                        self.calls.lock().unwrap().push((
+                            a.uuid,
+                            a.package_name,
+                            a.user_id,
+                            a.flags,
+                            a.ce_data_inode,
+                        ));
+                        if self.fail.load(Ordering::SeqCst) {
+                            return reply(Err(Exception::new(
+                                EX_ILLEGAL_STATE,
+                                "cache deletion failed",
+                            )));
+                        }
+                        installd::write_clear_app_data_reply(&mut p);
+                    }
+                    installd::FREE_CACHE => {
+                        let a = installd::FreeCache::read(&mut call.data)?;
+                        assert_eq!(a.uuid.as_deref(), Some("volume"));
+                        assert_eq!(a.target_free_bytes, 1i64 << 40);
+                        assert_eq!(a.flags, 0x300);
+                        return reply(Err(Exception::new(EX_ILLEGAL_STATE, "free cache failed")));
+                    }
+                    _ => panic!("unexpected installd method"),
+                }
+                assert_eq!(call.data.remaining(), 0);
+                Ok(p)
+            }
+        }
+        struct Manager {
+            process: std::sync::Weak<aim_binder_host::local::LocalProcess>,
+            fallback: Mutex<Option<aim_binder_host::local::Strong>>,
+            installer: Binder,
+        }
+        impl Service for Manager {
+            fn descriptor(&self) -> &str {
+                sm::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                if call.code == 0x00ff_ff00 {
+                    let Some(Binder::Handle(handle)) = call.data.read_binder()? else {
+                        panic!("remote host");
+                    };
+                    *self.fallback.lock().unwrap() =
+                        Some(self.process.upgrade().unwrap().strong(handle));
+                    return Ok(Parcel::new());
+                }
+                let at = call.data.position();
+                let lookup = call.data.enforce_interface(sm::DESCRIPTOR).is_ok();
+                call.data.set_position(at);
+                if !lookup {
+                    call.data.skip(call.data.remaining())?;
+                    let (bytes, objects) = call.data.since(at);
+                    let mut p = Parcel::new();
+                    p.write_raw(bytes, &objects);
+                    return self
+                        .fallback
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .transact(call.code, &p, call.is_oneway())
+                        .map(|r| r.into_parcel());
+                }
+                assert_eq!(call.code, sm::CHECK_SERVICE);
+                let a = sm::CheckService::read(&mut call.data)?;
+                assert_eq!(a.name.as_deref(), Some("installd"));
+                let mut p = Parcel::new();
+                sm::write_check_service_reply(&mut p, Some(self.installer));
+                Ok(p)
+            }
+        }
+        let calls: Calls = Arc::default();
+        let gate = Arc::new(OnceLock::new());
+        let fail = Arc::new(AtomicBool::new(false));
+        let (record, lock, failure) = (calls.clone(), gate.clone(), fail.clone());
+        crate::system::with_discovery_context(
+            &[],
+            true,
+            true,
+            move |_, process, _| {
+                let installer = process.add_service(Arc::new(Installer {
+                    calls: record,
+                    gate: lock,
+                    fail: failure,
+                }));
+                Arc::new(Manager {
+                    process: Arc::downgrade(process),
+                    fallback: Mutex::new(None),
+                    installer,
+                })
+            },
+            |host, _, _, _, _| {
+                gate.set(host.package_system().unwrap().package_install_gate())
+                    .unwrap();
+                assert!(!host.ce_storage_prepared(0));
+                let permissions = Arc::new(
+                    super::super::permission_manager::PermissionManager::with_system(
+                        host.clone(),
+                        crate::package::permissions::AccessSystem::default(),
+                    ),
+                );
+                assert!(host.permission_manager.set(permissions).is_ok());
+                let leaf = PackageMaintenance::new(host.clone());
+                for (uid, granted) in [(1000, true), (99_001, false)] {
+                    let mut p = Parcel::new();
+                    bridge::CheckPermission {
+                        permission: Some("android.permission.INTERNAL_DELETE_CACHE_FILES".into()),
+                        calling_uid: uid,
+                        calling_pid: 77,
+                    }
+                    .write(&mut p);
+                    let response = leaf
+                        .transact(&mut Call {
+                            code: bridge::CHECK_PERMISSION,
+                            flags: 0,
+                            sender_pid: 77,
+                            sender_euid: SYSTEM_UID,
+                            data: p.reader(),
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        bridge::read_check_permission_reply(&mut response.reader())
+                            .unwrap()
+                            .unwrap(),
+                        granted
+                    );
+                    let mut p = Parcel::new();
+                    bridge::EnforcePermission {
+                        permission: Some("android.permission.INTERNAL_DELETE_CACHE_FILES".into()),
+                        calling_uid: uid,
+                        calling_pid: 77,
+                    }
+                    .write(&mut p);
+                    let response = leaf
+                        .transact(&mut Call {
+                            code: bridge::ENFORCE_PERMISSION,
+                            flags: 0,
+                            sender_pid: 77,
+                            sender_euid: SYSTEM_UID,
+                            data: p.reader(),
+                        })
+                        .unwrap();
+                    let result =
+                        bridge::read_enforce_permission_reply(&mut response.reader()).unwrap();
+                    assert_eq!(result.is_ok(), granted);
+                    if let Err(error) = result {
+                        assert_eq!(error.code, EX_SECURITY);
+                    }
+                }
+                let clear = |uid, package| {
+                    let mut p = Parcel::new();
+                    bridge::ClearCacheFiles {
+                        package_name: Some(package),
+                        user_id: 0,
+                        can_access_instant_apps: false,
+                        calling_uid: 1000,
+                    }
+                    .write(&mut p);
+                    let response = leaf
+                        .transact(&mut Call {
+                            code: bridge::CLEAR_CACHE_FILES,
+                            flags: 0,
+                            sender_pid: 77,
+                            sender_euid: uid,
+                            data: p.reader(),
+                        })
+                        .unwrap();
+                    bridge::read_clear_cache_files_reply(&mut response.reader()).unwrap()
+                };
+                for uid in [0, 2000, 10100] {
+                    assert_eq!(clear(uid, "p".into()).unwrap_err().code, EX_SECURITY);
+                }
+                assert!(calls.lock().unwrap().is_empty());
+                clear(SYSTEM_UID, "absent".into()).unwrap();
+                let error = clear(SYSTEM_UID, "p".into()).unwrap_err();
+                assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
+                assert!(error.message.contains("#2063"));
+                assert_eq!(
+                    *calls.lock().unwrap(),
+                    vec![
+                        (None, Some("p".into()), 0, 0x17, 991),
+                        (None, Some("p".into()), 0, 0x27, 991),
+                    ]
+                );
+                let capture = host.package_capture().unwrap();
+                let mut state = (**capture.state()).clone();
+                state
+                    .packages
+                    .get_mut("p")
+                    .unwrap()
+                    .users
+                    .entry(10)
+                    .or_default()
+                    .instant_app = true;
+                assert!(cache_package(&state, Some("p"), false, 1_001_000).is_none());
+                assert!(cache_package(&state, Some("p"), true, 1_001_000).is_some());
+                assert!(cache_package(&state, Some("p"), false, 1000).is_some());
+                fail.store(true, Ordering::SeqCst);
+                assert!(
+                    clear(SYSTEM_UID, "p".into())
+                        .unwrap_err()
+                        .message
+                        .contains("cache deletion failed")
+                );
+                let mut p = Parcel::new();
+                bridge::FreeInstalldCache {
+                    volume_uuid: Some("volume".into()),
+                    target_bytes: 1i64 << 40,
+                    v2: true,
+                    defy_quota: true,
+                }
+                .write(&mut p);
+                let response = leaf
+                    .transact(&mut Call {
+                        code: bridge::FREE_INSTALLD_CACHE,
+                        flags: 0,
+                        sender_pid: 77,
+                        sender_euid: SYSTEM_UID,
+                        data: p.reader(),
+                    })
+                    .unwrap();
+                bridge::read_free_installd_cache_reply(&mut response.reader())
+                    .unwrap()
+                    .unwrap();
+                assert!(gate.get().unwrap().try_lock().is_ok());
+            },
+        );
+    }
+
+    #[test]
+    fn storage_records_and_cache_roots_keep_the_original_scope() {
+        let data = super::super::test_temp_dir("maintenance-cache");
+        let host = AppHost::new(crate::test_process(SYSTEM_UID));
+        super::super::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        host.package_parser_cache
+            .set(Some("/data/system/package_cache/fingerprint".into()))
+            .unwrap();
+        let leaf = PackageMaintenance::new(host.clone());
+        let request = |code, p: &Parcel| {
+            leaf.transact(&mut Call {
+                code,
+                flags: 0,
+                sender_pid: 77,
+                sender_euid: SYSTEM_UID,
+                data: p.reader(),
+            })
+            .unwrap()
+        };
+        for (uuid, success) in [(None, true), (Some("absent"), false)] {
+            let mut p = Parcel::new();
+            bridge::StorageSpace {
+                volume_uuid: uuid.map(str::to_owned),
+            }
+            .write(&mut p);
+            let response = request(bridge::STORAGE_SPACE, &p);
+            let bytes = bridge::read_storage_space_reply(&mut response.reader())
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+            assert_eq!(r.read_bool().unwrap(), success);
+            assert_eq!(r.read_i64().unwrap() > 0, success);
+            let error = r.read_string16().unwrap();
+            assert_eq!(error.is_none(), success);
+            if let Some(error) = error {
+                assert!(error.contains("java.io.FileNotFoundException"));
+            }
+            assert_eq!(r.remaining(), 0);
+        }
+        for path in [
+            "preloads/file_cache/nested/remove",
+            "preloads/keep",
+            "system/package_cache/fingerprint/nested/remove",
+            "system/package_cache/sibling/keep",
+        ] {
+            let path = data.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let mut p = Parcel::new();
+        bridge::DeletePreloadsFileCache {}.write(&mut p);
+        let response = request(bridge::DELETE_PRELOADS_FILE_CACHE, &p);
+        bridge::read_delete_preloads_file_cache_reply(&mut response.reader())
+            .unwrap()
+            .unwrap();
+        let mut p = Parcel::new();
+        bridge::DeleteParserCache {}.write(&mut p);
+        let response = request(bridge::DELETE_PARSER_CACHE, &p);
+        bridge::read_delete_parser_cache_reply(&mut response.reader())
+            .unwrap()
+            .unwrap();
+        for root in ["preloads/file_cache", "system/package_cache/fingerprint"] {
+            assert_eq!(std::fs::read_dir(data.join(root)).unwrap().count(), 0);
+        }
+        for sibling in ["preloads/keep", "system/package_cache/sibling/keep"] {
+            assert_eq!(std::fs::read(data.join(sibling)).unwrap(), b"fixture");
+        }
+        host.process.shutdown().unwrap();
+        std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn dex_use_requires_the_owner_and_preserves_the_report_and_original_failure() {
@@ -411,7 +935,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(
-            e.message.contains("deleteParserCache (#2156)"),
+            e.message.contains("package parser cache not initialized"),
             "{}",
             e.message
         );

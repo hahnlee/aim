@@ -400,8 +400,7 @@ impl AppHost {
     /// The data volume's total and usable bytes (`File.getTotalSpace`,
     /// `getUsableSpace` of `/data`).
     pub(super) fn data_space(&self) -> Result<(i64, i64), Exception> {
-        let inputs = self.inputs()?;
-        let path = std::ffi::CString::new(inputs.data.as_os_str().as_encoded_bytes())
+        let path = std::ffi::CString::new(self.data()?.as_os_str().as_encoded_bytes())
             .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "data directory"))?;
         // SAFETY: statvfs into a local struct.
         let mut st: libc::statvfs = unsafe { std::mem::zeroed() };

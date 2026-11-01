@@ -199,7 +199,6 @@ impl Runtime {
         let errors = Arc::new(Mutex::new(Vec::new()));
         let callback_errors = errors.clone();
         let storage_bridge = bridge.clone();
-        let storage_serial = install_serial.clone();
         let free_storage = storage.clone();
         let worker=thread::Builder::new().name("package-maintenance-callbacks".into()).spawn(move|| {
             while let Ok(job)=rx.recv() {
@@ -225,13 +224,11 @@ impl Runtime {
                         }
                     }
                     Job::Cache(cache) => {
-                        let _install=storage_serial.lock().unwrap();
                         let mut request=Parcel::new();
                         bridge::ClearCacheFiles {package_name:cache.package.clone(),user_id:cache.user,can_access_instant_apps:cache.instant,calling_uid:cache.caller}.write(&mut request);
                         let cleared=storage_bridge.transact_as_owner(bridge::CLEAR_CACHE_FILES,&request,false)
                             .map_err(|status|format!("cache owner transport: {status}"))
                             .and_then(|reply|bridge::read_clear_cache_files_reply(&mut reply.reader()).map_err(|status|format!("cache owner reply: {status}")).and_then(|result|result.map_err(|error|error.message)));
-                        drop(_install);
                         match cleared {
                             Err(error)=>callback_errors.lock().unwrap().push(error),
                             Ok(())=>if let Some(observer)=cache.observer {

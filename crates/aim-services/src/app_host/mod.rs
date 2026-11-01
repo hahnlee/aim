@@ -621,6 +621,7 @@ pub struct AppHost {
     background_install_control: OnceLock<Arc<background_install_control::BackgroundInstallControl>>,
     /// The native services' system, whose package boot the app host runs.
     system: OnceLock<Arc<crate::system::System>>,
+    package_parser_cache: OnceLock<Option<String>>,
     /// Published scan, constructed owners, then reconciled app storage.
     package_boot: package_boot::Readiness,
     /// AMS.mProcessesReady: package settings and default grants before app forks.
@@ -771,6 +772,7 @@ impl AppHost {
             uri_grants: Default::default(),
             permission_manager: OnceLock::new(),
             system: OnceLock::new(),
+            package_parser_cache: OnceLock::new(),
             package_boot: Default::default(),
             processes_ready: OnceLock::new(),
             accessibility_ready: Default::default(),
