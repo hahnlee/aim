@@ -1140,7 +1140,14 @@ registration. Cargo library/startup checks are blocked by stale generated AIDL;
 regeneration is denied at the shared original-image lease. The device-services
 build stops at an upstream incremental `linux-translate` link failure, so current
 image linkage is unverified. No guest boot was run (2026-10-29).
-ArtManagerLocal and its cleanup/dexopt lifecycle remain #2063.
+The app-host allowlist now permits original artd on `ctl.interface_start`
+requests (#2063, slice 1). Its original rc remains disabled and oneshot with
+the artd UID/group and DAC_OVERRIDE/DAC_READ_SEARCH/FOWNER/CHOWN capabilities;
+class startup does not eagerly launch it. Synthetic host init tests cover
+filtering, launch identity, duplicate requests, idle exit and death/restart.
+No guest boot, live Binder registration, filesystem access or idle reconnect
+was verified for this change (2026-11-02). ArtManagerLocal and its
+cleanup/dexopt lifecycle remain #2063.
 The native maintenance endpoint now routes cache/code-cache deletion to installd
 with DE/CE/external flags and the published CE inode under the shared install lock
 (#2156, incomplete host-only candidate, 2026-11-01). It returns an explicit #2063

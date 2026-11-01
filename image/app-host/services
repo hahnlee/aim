@@ -34,6 +34,8 @@ hwservicemanager
 derive_classpath
 derive_sdk
 art_boot
+# Original rc keeps artd disabled and oneshot for lazy AIDL requests.
+artd
 zygote
 surfaceflinger
 vendor.graphics.allocator
