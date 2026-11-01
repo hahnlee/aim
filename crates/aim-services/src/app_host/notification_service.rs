@@ -3153,6 +3153,7 @@ mod tests {
     /// first save; a persisted `<zen>` replaces them, even with no rules.
     #[test]
     fn fresh_zen_config_is_retained_and_saved_with_the_policy() {
+        let _image = aim_storage::system::ImageLease::read(&aim_paths::system_image()).unwrap();
         let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
             return;
         };
@@ -3217,6 +3218,7 @@ mod tests {
     /// NotificationManagerService's permission, policy reload and flag/receiver gates.
     #[test]
     fn private_notifications_policy_persists_and_broadcasts_only_changes() {
+        let _image = aim_storage::system::ImageLease::read(&aim_paths::system_image()).unwrap();
         let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
             return;
         };
@@ -3350,6 +3352,7 @@ mod tests {
     /// NMS null/ownership order and ManagedServices exact, per-user approval lookup.
     #[test]
     fn listener_access_checks_caller_and_approved_component() {
+        let _image = aim_storage::system::ImageLease::read(&aim_paths::system_image()).unwrap();
         use super::super::{
             resources::Framework,
             settings::{Change, Table},

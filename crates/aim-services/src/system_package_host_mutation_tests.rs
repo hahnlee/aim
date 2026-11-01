@@ -466,6 +466,7 @@ fn session() -> Session {
 }
 fn session_with_fixture(mut fixture: Fixture) -> Session {
     let host = AppHost::new(fixture.native.clone());
+    fixture.host = Some(host.clone());
     let cached = PackageService::new(host.clone());
     host.set_system(fixture.system.clone());
     host.package_booted_for_test();

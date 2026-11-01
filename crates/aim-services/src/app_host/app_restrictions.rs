@@ -180,9 +180,29 @@ pub(super) struct AppRestrictions(
     Mutex<Option<Settings>>,
     Mutex<Option<Exception>>,
     std::sync::atomic::AtomicBool,
+    std::sync::atomic::AtomicBool,
 );
 
 impl AppHost {
+    pub(crate) fn shutdown_restriction_persistence(&self) {
+        // Wait for the current save and reject callbacks still queued by standby.
+        let _settings = self.app_restrictions.0.lock().unwrap();
+        self.app_restrictions
+            .3
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn restriction_persistence_open(&self) -> Result<()> {
+        if self
+            .app_restrictions
+            .3
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(error("persistence stopped"));
+        }
+        Ok(())
+    }
+
     pub(super) fn restriction_locked_boot_completed(&self) {
         self.app_restrictions
             .2
@@ -258,6 +278,7 @@ impl AppHost {
     /// Initialize defaults first, restore only stricter matching rows, then save.
     pub(super) fn start_app_restrictions(self: &Arc<Self>) -> Result<()> {
         let mut guard = self.app_restrictions.0.lock().unwrap();
+        self.restriction_persistence_open()?;
         if guard.is_some() {
             return Ok(());
         }
@@ -362,6 +383,7 @@ impl AppHost {
 
     fn update_restrictions(&self, appops: Option<i32>) -> Result<()> {
         let mut guard = self.app_restrictions.0.lock().unwrap();
+        self.restriction_persistence_open()?;
         let Some(current) = guard.as_ref() else {
             return Ok(());
         };

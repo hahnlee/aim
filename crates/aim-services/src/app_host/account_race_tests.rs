@@ -8,17 +8,15 @@ use std::sync::{Barrier, mpsc};
 use std::time::Duration;
 
 thread_local! {
-    static PAUSE: RefCell<Option<(&'static str, Box<dyn FnOnce()>)>> = RefCell::default();
+    static PAUSE: RefCell<Vec<(&'static str, Box<dyn FnOnce()>)>> = RefCell::default();
 }
 
 pub(super) fn checkpoint(phase: &str) {
     let pause = PAUSE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.as_ref().is_some_and(|(at, _)| *at == phase) {
-            p.take()
-        } else {
-            None
-        }
+        p.iter()
+            .position(|(at, _)| *at == phase)
+            .map(|i| p.remove(i))
     });
     if let Some((_, pause)) = pause {
         pause();
@@ -31,7 +29,7 @@ fn pause_at(phase: &'static str) -> (mpsc::Receiver<()>, mpsc::Sender<()>, impl 
     let (release, resume) = mpsc::channel();
     (waiting, release, move || {
         PAUSE.with(|p| {
-            *p.borrow_mut() = Some((
+            p.borrow_mut().push((
                 phase,
                 Box::new(move || {
                     entered.send(()).unwrap();
@@ -213,8 +211,10 @@ fn sync_accounts_race_failed_validation_and_overlapping_commit() {
         let start = Barrier::new(3);
         std::thread::scope(|scope| {
             let (waiting, release, install) = pause_at("commit");
+            let (delivering, deliver, install_delivery) = pause_at("delivery");
             let validation = scope.spawn(|| {
                 install();
+                install_delivery();
                 invoke(&manager, sync::VALIDATE_ACCOUNTS).unwrap();
             });
             waiting.recv_timeout(Duration::from_secs(20)).unwrap();
@@ -243,12 +243,16 @@ fn sync_accounts_race_failed_validation_and_overlapping_commit() {
             .collect();
             start.wait();
             release.send(()).unwrap();
-            validation.join().unwrap();
+            delivering.recv_timeout(Duration::from_secs(20)).unwrap();
             for snapshot in snapshots {
                 snapshot.join().unwrap();
             }
+            // Keep the callback's try_lock probe free of unrelated snapshot readers.
+            // Delivery still reenters the committed owner with the original assertions.
+            deliver.send(()).unwrap();
+            validation.join().unwrap();
         });
-        check(&manager, true);
         transitions(host, &receive);
+        check(&manager, true);
     });
 }

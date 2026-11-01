@@ -712,6 +712,14 @@ pub struct AppHost {
 }
 
 impl AppHost {
+    pub(crate) fn shutdown_persistence(&self) -> Result<(), Exception> {
+        self.shutdown_restriction_persistence();
+        if let Some(owner) = self.permission_manager.get() {
+            owner.shutdown()?;
+        }
+        Ok(())
+    }
+
     pub fn new(process: Arc<LocalProcess>) -> Arc<Self> {
         Arc::new_cyclic(|me| AppHost {
             me: me.clone(),
