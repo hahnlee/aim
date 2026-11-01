@@ -167,7 +167,12 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     fs::create_dir_all(&seam_work).map_err(|e| e.to_string())?;
     let seam = super::sync_seam::generate(&image, &seam_work, &tools, log)?;
     java::check_linkage_on(
-        aim_android_image::linkage::ClassPath::read(&image, &policy_jars)?.with_jar(seam.clone()),
+        aim_android_image::linkage::ClassPath::read_replacing(
+            &image,
+            &policy_jars,
+            "/system/framework/services.jar",
+            seam.clone(),
+        )?,
         Some(&stubs_dex),
         &dex,
     )?;
@@ -212,7 +217,12 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let mut nearby_jars = jars.clone();
     nearby_jars.push(CONNECTIVITY_JAR.into());
     java::check_linkage_on(
-        aim_android_image::linkage::ClassPath::read(&image, &nearby_jars)?.with_jar(seam),
+        aim_android_image::linkage::ClassPath::read_replacing(
+            &image,
+            &nearby_jars,
+            "/system/framework/services.jar",
+            seam,
+        )?,
         Some(&nearby_stubs_dex),
         &nearby_dex,
     )?;

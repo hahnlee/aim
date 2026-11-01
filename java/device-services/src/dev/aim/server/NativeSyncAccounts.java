@@ -6,7 +6,7 @@ import android.os.RemoteException;
 import com.android.server.content.SyncAccounts;
 import java.util.Objects;
 
-/** Inactive typed adapter for the image sync seam (#1460). */
+/** Typed adapter for the image sync seam (#1460). */
 final class NativeSyncAccounts implements SyncAccounts {
     private final ISyncAccounts owner;
     NativeSyncAccounts(ISyncAccounts owner) { this.owner = Objects.requireNonNull(owner); }

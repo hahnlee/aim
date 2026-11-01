@@ -1,8 +1,6 @@
 package dev.aim.server;
 
-import android.content.Context;
 import android.content.SyncAdapterType;
-import android.content.SyncAdaptersCache;
 import android.os.Binder;
 import android.os.Parcel;
 import android.os.RemoteException;
@@ -11,21 +9,16 @@ import java.util.ArrayList;
 
 /** SyncManager.getSyncAdapterTypes, android-16.0.0_r1. ContentService's native
  * endpoint checks cross-user access. Retain the original cache (metadata,
- * persisted UID ownership and package/user receivers), without running syncs.
+ * persisted UID ownership and package/user receivers) from the private owner.
  * Copyright (C) The Android Open Source Project, Apache License 2.0. */
 public final class SyncAdapterQueries extends ISyncAdapterQueries.Stub {
-    private final Context context;
     private final ISystemProcess host;
-    private SyncAdaptersCache adapters;
+    private final java.util.function.IntFunction<SyncAdapterType[]> adapters;
 
-    public SyncAdapterQueries(Context context, ISystemProcess host) {
-        this.context = context;
+    public SyncAdapterQueries(ISystemProcess host,
+            java.util.function.IntFunction<SyncAdapterType[]> adapters) {
         this.host = host;
-    }
-
-    private synchronized SyncAdaptersCache adapters() {
-        if (adapters == null) adapters = new SyncAdaptersCache(context);
-        return adapters;
+        this.adapters = java.util.Objects.requireNonNull(adapters);
     }
 
     @Override public byte[] getSyncAdapterTypes(int callingUid, int userId) throws RemoteException {
@@ -33,13 +26,13 @@ public final class SyncAdapterQueries extends ISyncAdapterQueries.Stub {
         long token = Binder.clearCallingIdentity();
         Parcel out = Parcel.obtain();
         try {
-            var serviceInfos = adapters().getAllServices(userId);
-            var types = new ArrayList<SyncAdapterType>(serviceInfos.size());
+            var serviceInfos = adapters.apply(userId);
+            var types = new ArrayList<SyncAdapterType>(serviceInfos.length);
             for (var serviceInfo : serviceInfos) {
-                String packageName = serviceInfo.type.getPackageName();
+                String packageName = serviceInfo.getPackageName();
                 if (!TextUtils.isEmpty(packageName)
                         && host.filterSyncAdapterPackageAccess(packageName, callingUid, userId)) continue;
-                types.add(serviceInfo.type);
+                types.add(serviceInfo);
             }
             out.writeTypedArray(types.toArray(new SyncAdapterType[] {}), 0);
             return out.marshall();

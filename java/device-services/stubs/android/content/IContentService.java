@@ -7,6 +7,9 @@ import android.net.Uri;
 import android.os.RemoteException;
 
 public interface IContentService extends android.os.IInterface {
+    abstract class Stub extends android.os.Binder implements IContentService {
+        public android.os.IBinder asBinder() { throw new RuntimeException("stub"); }
+    }
     void registerContentObserver(Uri uri, boolean notifyForDescendants,
             IContentObserver observer, int userHandle, int targetSdkVersion)
             throws RemoteException;
