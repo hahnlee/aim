@@ -89,6 +89,15 @@ impl BootConfiguration {
     /// `/data/system/package_cache`, the others deleted, made again on a
     /// userdebug `eng.` build when the framework is newer.
     fn parser_cache(&self) -> Result<Option<String>, Exception> {
+        if let Some(cache) = self.host.package_parser_cache.get() {
+            return Ok(cache.clone());
+        }
+        let cache = self.prepare_parser_cache()?;
+        let _ = self.host.package_parser_cache.set(cache);
+        Ok(self.host.package_parser_cache.get().unwrap().clone())
+    }
+
+    fn prepare_parser_cache(&self) -> Result<Option<String>, Exception> {
         let property = |name: &str| self.host.property(name);
         if property("ro.build.type").as_deref() == Some("eng")
             || matches!(

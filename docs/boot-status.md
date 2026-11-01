@@ -1112,6 +1112,14 @@ regeneration is denied at the shared original-image lease. The device-services
 build stops at an upstream incremental `linux-translate` link failure, so current
 image linkage is unverified. No guest boot was run (2026-10-29).
 ArtManagerLocal and its cleanup/dexopt lifecycle remain #2063.
+The native maintenance endpoint now routes cache/code-cache deletion to installd
+with DE/CE/external flags and the published CE inode under the shared install lock
+(#2156, incomplete host-only candidate, 2026-11-01). It returns an explicit #2063
+error after storage deletion because profile cleanup has no owner. Storage-space,
+preload/parser-cache pruning, installd free-cache, caller logging and result delivery
+have native routes; external storage session cache reclamation remains unsupported.
+Host tests cover request scope, locked-CE forwarding, lock ownership and pruning
+siblings. Physical package deletion, guest boot and CTS were not run.
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions
