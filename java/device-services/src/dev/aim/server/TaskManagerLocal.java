@@ -4,7 +4,7 @@ import android.content.Intent;
 import com.android.server.LocalServices;
 import com.android.server.wm.ActivityTaskManagerInternal;
 
-/** Cold local queries for the app host's normal (non-factory-test) boot. */
+/** Local task queries and lifecycle updates backed by the native app host. */
 final class TaskManagerLocal extends ActivityTaskManagerInternal {
     private final IAccessibilityWindowHost host;
     TaskManagerLocal(IAccessibilityWindowHost host) { this.host = host; }
@@ -14,6 +14,16 @@ final class TaskManagerLocal extends ActivityTaskManagerInternal {
 
     @Override public void setAccessibilityServiceUids(android.util.IntArray uids) {
         try { host.setAccessibilityServiceUids(uids.toArray()); }
+        catch (android.os.RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
+
+    @Override public void setAllowAppSwitches(String type, int uid, int userId) {
+        try { host.setAllowAppSwitches(type, uid, userId); }
+        catch (android.os.RemoteException e) { throw e.rethrowFromSystemServer(); }
+    }
+
+    @Override public void onUserStopped(int userId) {
+        try { host.onUserStopped(userId); }
         catch (android.os.RemoteException e) { throw e.rethrowFromSystemServer(); }
     }
 

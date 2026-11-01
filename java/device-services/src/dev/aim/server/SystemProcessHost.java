@@ -172,7 +172,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachStorageCrates(new StorageCrates(context));
             ActivityStats.publish(host);
             TaskManagerLocal.publish(host);
-            AccessibilityWindows.publish(host);
+            AccessibilityWindows.publish(context, host);
             com.android.server.LocalManagerRegistry.addManager(
                     com.android.server.role.RoleServicePlatformHelper.class,
                     new com.android.server.policy.role.RoleServicePlatformHelperImpl(context));

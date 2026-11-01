@@ -12,6 +12,8 @@ public final class ActivityStatsTest {
     static CachedAppsWatermark watermark = new CachedAppsWatermark();
     static int[] accessibilityUids;
     static boolean reset;
+    static int allowedUid, allowedUser;
+    static String allowedType;
     static void check(boolean value) { if (!value) throw new AssertionError(); }
     public static void main(String[] args) throws Exception {
         ActivityStatsProcess process = new ActivityStatsProcess();
@@ -38,6 +40,10 @@ public final class ActivityStatsTest {
         IAccessibilityWindowHost windows = (IAccessibilityWindowHost) Proxy.newProxyInstance(
                 ActivityStatsTest.class.getClassLoader(), new Class<?>[]{IAccessibilityWindowHost.class},
                 (proxy, method, values) -> {
+                    if (method.getName().equals("setAllowAppSwitches")) {
+                        allowedType=(String)values[0]; allowedUid=(int)values[1]; allowedUser=(int)values[2];
+                        return null;
+                    }
                     check(method.getName().equals("setAccessibilityServiceUids"));
                     accessibilityUids = (int[])values[0];
                     return null;
@@ -60,6 +66,14 @@ public final class ActivityStatsTest {
             @Override public int[] toArray() { return new int[]{10123, 10124}; }
         });
         check(Arrays.equals(accessibilityUids, new int[]{10123, 10124}));
+        var user = new com.android.server.accessibility.AccessibilityServiceConnection.AccessibilityUserState();
+        var connection = new com.android.server.accessibility.AccessibilityServiceConnection(tasks, user);
+        connection.bindLocked();
+        check(allowedType.equals("service") && allowedUid == 10123 && allowedUser == 0);
+        check(user.binding.size() == 1);
+        connection.unbindLocked(); check(allowedUid == -1 && user.binding.isEmpty());
+        user.mUserId = 10; connection.bindLocked(); check(allowedUser == 10 && allowedUid == 10123);
+        connection.unbindLocked(); check(allowedUid == -1 && allowedUser == 10);
         ActivityManagerInternal service = LocalServices.getService(ActivityManagerInternal.class);
         android.app.ActivityManager.service = (android.app.IActivityManager) Proxy.newProxyInstance(
                 ActivityStatsTest.class.getClassLoader(), new Class<?>[]{android.app.IActivityManager.class},

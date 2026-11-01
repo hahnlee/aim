@@ -1470,6 +1470,8 @@ pub fn run(log: &mut Log) -> Result<(), String> {
             .map_err(|e| format!("{file}: {e}"))?;
         resolve_enums(&mut iface, &text, &enums)?;
         code += &interface_code(&iface, &selected, &file)?;
+        codes += &interface_codes(&iface, &file);
+        codes += "}\n\n";
         modules.push(module_name(&iface.descriptor()));
     }
     code += &method_name_code(&modules);

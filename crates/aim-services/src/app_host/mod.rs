@@ -26,6 +26,7 @@ mod app_hibernation;
 mod app_op_infos;
 mod app_restrictions;
 mod app_standby;
+mod app_switches;
 pub mod app_widget;
 mod application_data;
 pub mod appops_history;
@@ -2278,6 +2279,11 @@ impl AppHost {
             Box::new(move || {
                 eprintln!("app host: the system process (pid {pid}) died");
                 if let Some(host) = host.upgrade() {
+                    host.tasks.app_switches.lock().unwrap().clear_allowances();
+                    if let Err(e) = host.call_agent(20, "setInputFilter", |p| p.write_binder(None))
+                    {
+                        eprintln!("app host: disconnect input filter: {e:?}");
+                    }
                     host.accessibility_ready
                         .failed("system process died (#2529)");
                     host.process_died(seq, pid);
@@ -5906,6 +5912,10 @@ impl Service for Activity {
                     am::write_set_process_state_summary_reply(&mut p);
                     p
                 }))
+            }
+            am::STOP_APP_SWITCHES | am::RESUME_APP_SWITCHES => {
+                self.0
+                    .app_switches_reply(am::DESCRIPTOR, call.code == am::STOP_APP_SWITCHES, call)
             }
             am::REGISTER_STRICT_MODE_CALLBACK => {
                 let a =

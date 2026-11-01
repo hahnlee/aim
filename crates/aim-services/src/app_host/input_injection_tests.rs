@@ -241,3 +241,66 @@ pub(crate) fn permission_probe(host: &Arc<AppHost>, uid: i32) -> i32 {
         .unwrap_err()
         .code
 }
+
+#[test]
+fn filter_install_routes_hardware_reinjects_once_and_uninstalls() {
+    let d = Dispatcher::new();
+    let (server, client) = UnixDatagram::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(150)))
+        .unwrap();
+    d.add_window(
+        0,
+        server.into(),
+        (100, 100),
+        aim_input_transport::Region {
+            frame: [0, 0, 100, 100],
+            touchable: [0, 0, 100, 100],
+            watch_outside: false,
+            owner: 10100,
+            owner_pid: 42,
+        },
+    );
+    let mut buffer = [0; 512];
+    client.recv(&mut buffer).unwrap(); // focus
+    let (tx, rx) = std::sync::mpsc::channel();
+    d.set_input_filter(Some(Arc::new(move |bytes, flags| {
+        tx.send((bytes.to_vec(), flags)).unwrap();
+    })));
+    let key = aim_input_transport::keyboard::KeyEvent {
+        device: 3,
+        source: 0x101,
+        display: 0,
+        action: 0,
+        flags: 8,
+        key_code: 29,
+        scan_code: 30,
+        meta_state: 1,
+        repeat_count: 0,
+        down_time: 100,
+        event_time: 200,
+    }
+    .message(0, 123);
+    let motion = aim_input_transport::Motion::injected(0, 10, 20, 15., 25., 1.)
+        .unwrap()
+        .message(0, 124, (0., 0.));
+    for mut m in [key, motion] {
+        assert!(d.filter_input(&m));
+        let (bytes, flags) = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(flags, 0x46000000);
+        assert!(client.recv(&mut buffer).is_err()); // filter consumes until re-send
+        let (mut event, used) = Event::decode(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        event.filtered(flags);
+        if aim_input_transport::injection::int(&m, 0) == 1 {
+            m[120..128].fill(0); // Injection normalizes negative-zero translations.
+        }
+        assert_eq!(event.messages[0], m);
+        assert_eq!(d.inject_event(event, 1, -1, Duration::from_secs(1)), 0);
+        client.recv(&mut buffer).unwrap();
+        assert!(rx.try_recv().is_err()); // reinjection never loops through filter
+    }
+    d.set_input_filter(None);
+    assert!(!d.filter_input(&buffer));
+    d.sync_windows(&[]);
+}

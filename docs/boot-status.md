@@ -511,17 +511,22 @@ The 21 DeviceConfig-toggle skips follow the original fixed
 `safety_center_enabled_no_device_config` flag on Android 16; the 31 tests for unsupported devices skip because
 `config_enableSafetyCenter=true`. Neither policy changed.
 The #2566 controller serves `dismissKeyguard` with message permission checks and
-`onDismissError` for the native not-showing keyguard. The three activity screen/
-lock flag setters decode and retain their state. Fresh en-US `-g` Accessibility
-CTS records 23 pass / 90 fail / 0 skips, with all 113 starts/results paired, then
-crashes in UiAutomation cleanup. Service binding exposes missing local
-`TaskManagerLocal.setAllowAppSwitches`; the run also has Java system/GMS crashes.
-Safety Center remains 476/0/52, preserving every prior pass/skip identity.
-The 1,017 app-host checks pass (3 ignored). Both official runs have no foreign
-guests or native fatal signals, ANRs or tombstones; Safety has foreign host-build
-overlap after quiet admission and no Java fatal (2026-11-01).
-Magnification and other unserved local operations remain explicit
-#2529 failures; full accessibility conformance is not established.
+`onDismissError` for the native not-showing keyguard; its screen/lock flags retain
+state. App-switch allowances follow Android 16's store-only contract, including
+user-stop and system-process-death clearing (#2569). Stop/resume remains shared;
+the all-top process model remains #1738. `setInputFilter` now installs/uninstalls
+the original filter through a Java host. The native agent routes hardware key/touch
+events with policy flags and re-injects asynchronously. Stream cancellation/queue
+retirement and the separate accessibility-tool motion marker remain #2529 gaps.
+Fresh en-US `-g` Accessibility CTS is 99 pass / 10 fail / 4 flag-assumption skips;
+all 113 starts/results pair, followed by a UiAutomation cleanup crash. All 23 prior
+passes remain. The setInputFilter fatal is gone; one aim-system fatal now comes
+from native `activity_task.startActivityAsUser` during a shortcut launch, with
+shortcut/captioning cascades. Two descriptor-publication errno-9 lines recur (#2571).
+Safety Center remains 476/0/52 and has no captured Java fatal. Build/image, 1,025
+app-host checks (3 ignored, not run), JVM and 18 transport checks pass. Both official
+runs have no foreign guest/build overlap, native fatal signal, ANR or tombstone.
+Unserved local operations remain explicit #2529 errors; conformance is partial (2026-11-01).
 
 The app host image ([app-host.md](app-host.md)) boots without
 system_server. In the original measurement, `--only` selected 33 services and

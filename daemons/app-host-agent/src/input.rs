@@ -126,7 +126,10 @@ struct OpenKeyboard {
     map: KeyMap,
 }
 
+pub type InputFilter = Arc<dyn Fn(&[u8], i32) + Send + Sync>;
+
 pub struct Dispatcher {
+    filter: Mutex<Option<InputFilter>>,
     windows: Mutex<Windows>,
     next_seq: Mutex<(u32, i32)>,
     keyboard: Option<KeyboardInfo>,
@@ -142,6 +145,27 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    pub fn set_input_filter(&self, filter: Option<InputFilter>) {
+        *self.filter.lock().unwrap() = filter;
+        self.repeat.lock().unwrap().0.reset();
+        self.repeat_changed.notify_all();
+    }
+
+    /// notifyKey/notifyMotion call the filter before normal dispatch. Public
+    /// injections bypass it, as InputDispatcher.injectInputEvent does.
+    pub fn filter_input(&self, message: &[u8]) -> bool {
+        let filter = self.filter.lock().unwrap().clone();
+        if let Some(filter) = filter {
+            filter(
+                &aim_input_transport::injection::Event::from_message(message),
+                0x02000000 | 0x04000000 | 0x40000000,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Publish live membership under the same lock as geometry, focus and
     /// dispatch, including removals whose channel closure has not arrived.
     pub fn sync_windows(&self, live: &[i32]) {
@@ -175,6 +199,7 @@ impl Dispatcher {
             repeat: Mutex::new((Repeat::default(), RepeatConfiguration::default())),
             repeat_changed: Condvar::new(),
             injections,
+            filter: Mutex::new(None),
         });
         let injector = dispatcher.clone();
         std::thread::spawn(move || injector.inject_queue(jobs));
@@ -204,12 +229,19 @@ impl Dispatcher {
     /// the virtual keyboard, dispatched as the keyboard's are.
     pub fn inject_key(&self, mut event: KeyEvent) {
         event.device = keyboard::VIRTUAL_KEYBOARD_ID;
-        self.dispatch_key(event);
+        self.dispatch_unfiltered_key(event);
     }
 
     /// A key goes to the focused window (`dispatchKeyLocked`), its repeat
     /// state kept.
     fn dispatch_key(&self, event: KeyEvent) {
+        if self.filter_input(&event.message(0, self.ids().1)) {
+            return;
+        }
+        self.dispatch_unfiltered_key(event);
+    }
+
+    fn dispatch_unfiltered_key(&self, event: KeyEvent) {
         let event = {
             let mut repeat = self.repeat.lock().unwrap();
             let config = repeat.1;
@@ -489,7 +521,9 @@ impl Dispatcher {
                             windows.display.1 / y_axis.1 as f32,
                         );
                         for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
-                            self.dispatch(&mut windows, &motion);
+                            if !self.filter_input(&motion.message(0, self.ids().1, (0., 0.))) {
+                                self.dispatch(&mut windows, &motion);
+                            }
                         }
                     }
                 }

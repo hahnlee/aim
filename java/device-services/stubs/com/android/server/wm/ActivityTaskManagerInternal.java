@@ -5,6 +5,8 @@ package com.android.server.wm;
 public abstract class ActivityTaskManagerInternal {
     public ActivityTaskManagerInternal() { throw new RuntimeException("stub"); }
     public abstract void setAccessibilityServiceUids(android.util.IntArray uids);
+    public abstract void onUserStopped(int userId);
+    public abstract void setAllowAppSwitches(String type, int uid, int userId);
     public abstract android.content.Intent getHomeIntent();
     public abstract void registerActivityStartInterceptor(int id, ActivityInterceptorCallback callback);
     public abstract PackageConfigurationUpdater createPackageConfigurationUpdater(String packageName, int userId);

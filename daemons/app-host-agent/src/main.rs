@@ -46,6 +46,7 @@ use binder::{
 mod effects;
 mod event_log;
 mod input;
+mod input_filter;
 mod storage;
 
 /// init's socket for this service (`socket aim_zygote_relay` in its rc).
@@ -448,6 +449,8 @@ fn on_transact(
             })?;
             Ok(())
         }
+        20 => input_filter::set(agent, data, reply),
+        21 => input_filter::resend(agent, data, reply),
         INJECT_INPUT_EVENT_TO_TARGET => {
             let bytes: Vec<u8> = data.read()?;
             let (mode, uid): (i32, i32) = (data.read()?, data.read()?);
