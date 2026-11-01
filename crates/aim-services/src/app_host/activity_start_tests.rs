@@ -335,7 +335,7 @@ fn system_thread_start_creates_activity_and_returns_start_success() {
 }
 
 #[test]
-fn config_and_delegated_starts_fail_explicitly_when_outside_shared_path() {
+fn configuration_changes_stay_explicit_outside_shared_path() {
     crate::system::with_discovery_binders(|host, _, _, _| {
         permissions(host);
         let unchanged = host.global_configuration().unwrap();
@@ -347,7 +347,6 @@ fn config_and_delegated_starts_fail_explicitly_when_outside_shared_path() {
             (atm::START_ACTIVITY_WITH_CONFIG, None, -2),
             (atm::START_ACTIVITY_WITH_CONFIG, Some(unchanged), -2),
             (atm::START_ACTIVITY_WITH_CONFIG, Some(changed), -96),
-            (atm::START_ACTIVITY_AS_CALLER, None, -96),
         ] {
             let mut p = Parcel::new();
             p.write_interface_token(atm::DESCRIPTOR);

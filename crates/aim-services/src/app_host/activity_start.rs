@@ -807,7 +807,7 @@ impl AppHost {
     }
 
     /// A start cancelled for `reason`, which the owner does not implement.
-    fn cancel_activity_start(&self, reason: &str) -> i32 {
+    pub(super) fn cancel_activity_start(&self, reason: &str) -> i32 {
         self.unimplemented_named("activity_task", reason);
         START_CANCELED
     }
@@ -845,6 +845,18 @@ impl AppHost {
         intent: &RawIntent,
         resolved_type: Option<&str>,
     ) -> Result<PreparedStart, Exception> {
+        self.prepare_activity_start_filtered(uid, caller_pid, user, intent, resolved_type, uid)
+    }
+
+    pub(super) fn prepare_activity_start_filtered(
+        &self,
+        uid: i32,
+        caller_pid: i32,
+        user: i32,
+        intent: &RawIntent,
+        resolved_type: Option<&str>,
+        filter_uid: i32,
+    ) -> Result<PreparedStart, Exception> {
         if intent.has_fds() {
             return Err(Exception::illegal_argument(
                 "File descriptors passed in Intent",
@@ -853,7 +865,7 @@ impl AppHost {
         // `ActivityTaskSupervisor.resolveIntent`.
         let (_, resolution) = self.packages()?;
         let only_exported =
-            self.change_enabled(IMPLICIT_INTENTS_ONLY_MATCH_EXPORTED_COMPONENTS, uid)?;
+            self.change_enabled(IMPLICIT_INTENTS_ONLY_MATCH_EXPORTED_COMPONENTS, filter_uid)?;
         let report = std::cell::RefCell::new(Vec::new());
         let found = resolution
             .resolve_intent_for_start(
@@ -861,7 +873,7 @@ impl AppHost {
                 resolved_type,
                 super::STOCK_PM_FLAGS | MATCH_DEFAULT_ONLY,
                 user,
-                uid,
+                filter_uid,
                 only_exported,
                 &report,
             )
@@ -882,7 +894,12 @@ impl AppHost {
         } else {
             None
         };
-        Ok(PreparedStart { info, grants })
+        Ok(PreparedStart {
+            info,
+            grants,
+            ignore_security: false,
+            real_caller_uid: None,
+        })
     }
 
     pub(super) fn execute_activity_start(
@@ -897,7 +914,12 @@ impl AppHost {
             .intent
             .take()
             .ok_or_else(|| Exception::illegal_argument("intent"))?;
-        let PreparedStart { info, grants } = prepared;
+        let PreparedStart {
+            info,
+            grants,
+            ignore_security,
+            real_caller_uid,
+        } = prepared;
         let Some(info) = info else {
             return Ok((
                 if intent.intent.component.is_some() {
@@ -934,12 +956,14 @@ impl AppHost {
             ));
         }
         // `checkStartAnyActivityPermission`.
-        if !self.check_component_permission(
-            info.permission.as_deref(),
-            uid,
-            target_uid,
-            info.info.exported,
-        )? {
+        if !ignore_security
+            && !self.check_component_permission(
+                info.permission.as_deref(),
+                uid,
+                target_uid,
+                info.info.exported,
+            )?
+        {
             let what = format!(
                 "Permission Denial: starting Intent {{ cmp={package}/{class} }} from {caller_package:?} (pid={caller_pid}, uid={uid})"
             );
@@ -952,7 +976,12 @@ impl AppHost {
                 format!("{what} not exported from uid {target_uid}")
             }));
         }
-        if !self.background_activity_start_allowed(uid)? {
+        if !match real_caller_uid {
+            Some(real_uid) => {
+                self.as_caller_background_allowed(uid, real_uid, args.options.as_ref())?
+            }
+            None => self.background_activity_start_allowed(uid)?,
+        } {
             // WaitResult retains START_ABORTED; getExternalResult exposes success.
             return Ok((
                 if args.launch.is_some() {
@@ -1450,6 +1479,8 @@ pub enum Report {
 pub(super) struct PreparedStart {
     pub info: Option<ActivityInfo>,
     pub grants: Option<NeededUriGrants>,
+    pub ignore_security: bool,
+    pub real_caller_uid: Option<i32>,
 }
 
 /// `startActivity`'s arguments the app host reads.
