@@ -3678,4 +3678,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "sync_job_tests.rs"]
-mod sync_job_tests;
+pub(in crate::app_host) mod sync_job_tests;

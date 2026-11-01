@@ -11,7 +11,7 @@ use crate::package::restrictions::persistable::{Bundle, Double, Value as V};
 use aim_service_aidl::{ReadParcelable, WriteParcelable, dev_aim_server_isystemprocess as sp};
 use std::sync::mpsc;
 
-fn same_extras(a: &Bundle, b: &Bundle) {
+pub(in crate::app_host) fn same_extras(a: &Bundle, b: &Bundle) {
     fn sorted(mut b: Bundle) -> Bundle {
         for (_, value) in &mut b.entries {
             if let V::Bundle(child) = value {
@@ -23,7 +23,7 @@ fn same_extras(a: &Bundle, b: &Bundle) {
     }
     assert_eq!(sorted(a.clone()), sorted(b.clone()));
 }
-fn scheduler(host: &Arc<AppHost>) -> Arc<JobScheduler> {
+pub(in crate::app_host) fn scheduler(host: &Arc<AppHost>) -> Arc<JobScheduler> {
     Arc::new_cyclic(|me| JobScheduler {
         me: me.clone(),
         host: host.clone(),
@@ -33,7 +33,7 @@ fn scheduler(host: &Arc<AppHost>) -> Arc<JobScheduler> {
         limit: 1,
     })
 }
-fn sync_job() -> JobInfo {
+pub(in crate::app_host) fn sync_job() -> JobInfo {
     let mut job = JobInfo::persisted_builder(
         42,
         "android".into(),
@@ -366,7 +366,7 @@ fn sync_job_start_finish_stop_preserve_system_binder_identity() {
 }
 
 // A disposable scan with the framework's manifest service and two adapter apps.
-fn install_sync_manifest(host: &Arc<AppHost>) {
+pub(in crate::app_host) fn install_sync_manifest(host: &Arc<AppHost>) {
     use crate::package::{pkg, scan, settings};
     assert!(
         host.permission_manager
