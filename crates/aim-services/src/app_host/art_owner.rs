@@ -1,4 +1,4 @@
-//! Construction acknowledgement only; no maintenance/lifecycle callers are routed yet.
+//! Generation-bound original ART attachment and deletion forwarding.
 use super::{AppHost, SYSTEM_PROCESS, SYSTEM_UID};
 use crate::package::boot_captures::Captures;
 use aim_binder_host::local::{LocalProcess, Strong};
@@ -11,9 +11,10 @@ pub(super) struct State {
     owner: Option<Attachment>,
 }
 struct Attachment {
+    pid: i32,
     epoch: Arc<Captures>,
     process: Arc<LocalProcess>,
-    strong: Strong,
+    strong: Arc<Strong>,
     death: u64,
 }
 impl Drop for Attachment {
@@ -68,7 +69,7 @@ impl AppHost {
         if generation <= state.generation {
             return Err(unavailable());
         }
-        let strong = self.process.strong(handle);
+        let strong = Arc::new(self.process.strong(handle));
         let host = self.me.clone();
         let death = self.process.link_to_death(
             &strong,
@@ -81,6 +82,7 @@ impl AppHost {
         *state = State {
             generation,
             owner: Some(Attachment {
+                pid,
                 epoch,
                 process: self.process.clone(),
                 strong,
@@ -120,6 +122,55 @@ impl AppHost {
             state.owner.take();
         }
     }
+
+    pub(super) fn art_deletion_owner(&self) -> Result<(i64, Arc<Strong>), Exception> {
+        let (pid, generation, epoch, strong) = {
+            let state = self.art_owner.lock().unwrap();
+            let owner = state.owner.as_ref().ok_or_else(unavailable)?;
+            (
+                owner.pid,
+                state.generation,
+                owner.epoch.clone(),
+                owner.strong.clone(),
+            )
+        };
+        self.check_art_owner(pid, generation, &epoch)?;
+        Ok((generation, strong))
+    }
+
+    /// AppDataHelper.destroyAppProfilesLIF: only a disappearing package is ignored.
+    pub(super) fn clear_art_profiles(
+        &self,
+        owner: &(i64, Arc<Strong>),
+        name: Option<&str>,
+    ) -> Result<(), Exception> {
+        use aim_service_aidl::dev_aim_server_iartdeletion as art;
+        let mut request = aim_binder_host::parcel::Parcel::new();
+        art::ClearAppProfiles {
+            generation: owner.0,
+            package_name: name.map(str::to_owned),
+        }
+        .write(&mut request);
+        // No native state lock spans the Java call or its snapshot callback.
+        let response = owner
+            .1
+            .transact(art::CLEAR_APP_PROFILES, &request, false)
+            .map_err(|status| {
+                Exception::new(EX_ILLEGAL_STATE, format!("ART profile transport: {status}"))
+            })?;
+        match art::read_clear_app_profiles_reply(&mut response.reader()).map_err(|status| {
+            Exception::new(EX_ILLEGAL_STATE, format!("ART profile reply: {status}"))
+        })? {
+            Err(error) if error.code == aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT => {
+                eprintln!(
+                    "PackageManager: Package disappeared while clearing profiles: {}",
+                    error.message
+                );
+                Ok(())
+            }
+            result => result,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +200,7 @@ mod tests {
                 .unwrap();
             system.detach_package_bootstrap(&bridge).unwrap();
             assert!(host.check_art_owner(42, 100, &epoch).is_err());
+            assert!(host.art_deletion_owner().is_err());
             assert!(host.art_owner.lock().unwrap().owner.is_none());
             assert!(
                 host.attach_art_owner(42, 100, epoch, Some(owner.binder()))
@@ -227,6 +279,7 @@ mod tests {
                     host.attach_art_owner(42, 100, epoch.clone(), Some(owner.binder()))
                         .unwrap();
                     host.check_art_owner(42, 100, &epoch).unwrap();
+                    assert_eq!(host.art_deletion_owner().unwrap().0, 100);
                 }
                 assert!(
                     host.attach_art_owner(42, 100, epoch.clone(), Some(owner.binder()))
@@ -239,6 +292,7 @@ mod tests {
                 host.check_art_owner(42, 100, &epoch).unwrap();
                 host.art_owner_died(100);
                 assert!(host.check_art_owner(42, 100, &epoch).is_err());
+                assert!(host.art_deletion_owner().is_err());
                 assert!(
                     host.attach_art_owner(42, 100, epoch.clone(), Some(owner.binder()))
                         .is_err()
@@ -262,6 +316,7 @@ mod tests {
                     std::thread::yield_now();
                 }
                 assert!(host.check_art_owner(43, 101, &epoch).is_err());
+                assert!(host.art_deletion_owner().is_err());
                 assert!(
                     host.attach_art_owner(43, 102, epoch, Some(owner.binder()))
                         .is_err()
