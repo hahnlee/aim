@@ -186,6 +186,15 @@ fn uplink() -> aim_uplink::Uplink {
 fn native_owner_constraint_loss_stops_and_restoration_readies_sync_jobs() {
     crate::system::with_discovery_binders(|host, _, _, export| {
         install_sync_manifest(host);
+        super::super::super::sync_owner::tests::install(
+            host,
+            export(super::super::super::test_activity_service(host)),
+        );
+        let owner = export(super::super::super::test_activity_service(host));
+        host.attach_sync_owner(42, 100, Some(owner.binder()))
+            .unwrap();
+        host.set_user_unlocked_for_package_test(0, true);
+        host.complete_sync_owner_replay(42, 100).unwrap();
         let battery = Arc::new(super::super::super::battery_service::BatteryService::new(
             host.clone(),
         ));
@@ -398,7 +407,24 @@ fn expedited_sync_is_admitted_and_runs_with_preserved_extras() {
         let mut state = reopened.state.lock().unwrap();
         state.running = true;
         let key = *state.jobs.keys().next().unwrap();
+        assert!(!reopened.ready_to_execute(&mut state, key, elapsed_ms()));
+        assert!(!reopened.execute(&mut state, key, elapsed_ms()));
+        assert!(state.contexts.is_empty());
+        assert_eq!(state.next_callback, 0); // No bind/callback allocated before completion.
+        super::super::super::sync_owner::tests::install(
+            host,
+            export(super::super::super::test_activity_service(host)),
+        );
+        let owner = export(super::super::super::test_activity_service(host));
+        host.attach_sync_owner(42, 100, Some(owner.binder()))
+            .unwrap();
+        host.set_user_unlocked_for_package_test(0, true);
+        assert!(!reopened.ready_to_execute(&mut state, key, elapsed_ms()));
+        host.complete_sync_owner_replay(42, 100).unwrap();
         assert!(reopened.ready_to_execute(&mut state, key, elapsed_ms()));
+        host.sync_owner_died(100);
+        assert!(!reopened.ready_to_execute(&mut state, key, elapsed_ms()));
+        assert!(!reopened.execute(&mut state, key, elapsed_ms()));
         state.running = false;
         let j = state.jobs.remove(&key).unwrap();
         assert!(j.expedited());

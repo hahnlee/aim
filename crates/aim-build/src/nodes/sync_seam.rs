@@ -326,6 +326,14 @@ mod tests {
                 .iter()
                 .any(|(_, call)| call.ends_with(&format!("Z{ACCOUNTS})V")))
         );
+        let replay = calls(data, "SyncManager", "replaySyncState");
+        assert!(replay[0].1.ends_with("->onUserUnlocked(I)V"));
+        assert!(replay[1].1.ends_with("->post(Ljava/lang/Runnable;)Z"));
+        assert!(
+            calls(data, "ContentService", "replaySyncState")
+                .iter()
+                .any(|(_, call)| call.ends_with("->replaySyncState(ILjava/lang/Runnable;)V"))
+        );
         let notify = calls(data, "ContentService", "scheduleLocalSyncFromNotify");
         assert!(
             notify

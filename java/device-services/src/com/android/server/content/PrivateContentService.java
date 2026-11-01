@@ -5,7 +5,7 @@ import android.content.SyncAdapterType;
 import android.os.Binder;
 import android.os.Parcel;
 
-/** Private construction capability. Lifecycle and public sync activation remain #1460. */
+/** Private lifecycle capability; public sync forwarding remains inactive (#1460). */
 public final class PrivateContentService extends Binder {
     private final ContentService content;
     public PrivateContentService(Context context, SyncAccounts accounts) {
@@ -13,6 +13,10 @@ public final class PrivateContentService extends Binder {
         // Force the original lazy manager after all local owners, without phase/unlock admission.
         content.getSyncAdapterTypesAsUser(0);
     }
+    public void onBootPhase(int phase) { content.onBootPhase(phase); }
+    public void onStartUser(int user) { content.onStartUser(user); }
+    public void onUnlockUser(int user) { content.onUnlockUser(user); }
+    public void replaySyncState(int user, Runnable complete) { content.replaySyncState(user, complete); }
     public SyncAdapterType[] getSyncAdapterTypes(int userId) {
         return content.getSyncAdapterTypesAsUser(userId);
     }

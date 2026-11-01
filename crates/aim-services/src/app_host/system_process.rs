@@ -643,6 +643,25 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::IS_SYNC_OWNER_USER_UNLOCKED => {
+                let a = sp::IsSyncOwnerUserUnlocked::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let unlocked = self
+                        .host
+                        .sync_owner_user_unlocked(call.sender_pid, a.generation)?;
+                    sp::write_is_sync_owner_user_unlocked_reply(&mut p, unlocked);
+                    Ok(())
+                })
+            }
+            sp::COMPLETE_SYNC_OWNER_REPLAY => {
+                let a = sp::CompleteSyncOwnerReplay::read(&mut call.data)?;
+                system().and_then(|()| {
+                    self.host
+                        .complete_sync_owner_replay(call.sender_pid, a.generation)?;
+                    sp::write_complete_sync_owner_replay_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::GET_INTERNAL_SERVICE_REPOSITORY => {
                 sp::GetInternalServiceRepository::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().map(|()| {

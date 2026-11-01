@@ -40,6 +40,7 @@ public final class SystemProcessHostTest {
                     "AdServices:construct", "AdServices:start"));
             early.addAll(List.of("StatsPullAtomService", "AdServices"));
             for (int phase : new int[] {480, 500, 520}) {
+                wanted.add("sync:phase="+phase);
                 for (String service : early) wanted.add(service+":phase="+phase);
             }
             wanted.addAll(List.of("SafetyCenterService:construct", "SafetyCenterService:start", "safety_center:publish"));
@@ -52,17 +53,22 @@ public final class SystemProcessHostTest {
                 services.add("DeviceLockService");
             }
             for (int phase : new int[] {550, 600}) {
+                wanted.add("sync:phase="+phase);
                 for (String service : services) wanted.add(service+":phase="+phase);
             }
+            wanted.add("sync:start=0");
             for (String service : services) wanted.add(service+":starting");
             wanted.add("PinnerService:switching");
             wanted.add("AccessibilityManagerService$Lifecycle:switching");
             for (String state : List.of("unlocking", "unlocked", "phase=1000")) {
+                if (state.equals("phase=1000")) wanted.add("sync:phase=1000");
                 for (String service : services) wanted.add(service+":"+state);
             }
             wanted.add("accessibilityReady");
             wanted.add("telecom");
             if (!events.equals(wanted)) throw new AssertionError("actual="+events+" expected="+wanted);
+            SyncOwnerLifecycleTest.run(android.app.ActivityThread.context,
+                    ISystemProcess.Stub.asInterface(null));
         }
     }
 }
