@@ -119,11 +119,20 @@ pub(super) fn listen(
     export: &dyn Fn(Arc<dyn Service>) -> Strong,
     manager: Arc<AccountManager>,
 ) -> mpsc::Receiver<(RawIntent, i32)> {
+    let (send, receive) = mpsc::channel();
+    register_probe(host, export, Arc::new(Probe(manager, send)));
+    receive
+}
+
+pub(super) fn register_probe(
+    host: &Arc<AppHost>,
+    export: &dyn Fn(Arc<dyn Service>) -> Strong,
+    probe: Arc<dyn Service>,
+) {
     // Reuse the real loaded-process fixture, then register an all-user receiver.
     let _unused =
         broadcasts::internal_package_tests::register_filter(host, export, "p", 1000, false);
-    let (send, receive) = mpsc::channel();
-    let probe = export(Arc::new(Probe(manager, send)));
+    let probe = export(probe);
     let binder = probe.binder();
     host.apps.lock().unwrap().get_mut(&1000).unwrap().thread = Some(probe);
     let mut filter = crate::package::intent_filter::IntentFilter::default();
@@ -157,7 +166,6 @@ pub(super) fn listen(
             },
         )
         .unwrap();
-    receive
 }
 
 #[test]

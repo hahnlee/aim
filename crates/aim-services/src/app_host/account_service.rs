@@ -12,7 +12,8 @@
 //! passwords, user data, auth tokens and previous names for the
 //! authenticator's apps, and the listeners apps register by type. The
 //! one user is a full user, never restricted, so shared accounts are not
-//! filtered. Adding, removing and changing accounts, the authenticator
+//! filtered. Explicit add/remove and visibility writes share this owner.
+//! Other account changes, the authenticator
 //! sessions (`getAuthToken`, `addAccount` and the rest), access grants
 //! and devices with a device or profile owner
 //! are not implemented (#1504).
@@ -889,22 +890,42 @@ impl AccountManager {
         account: &Account,
         user: i32,
     ) -> Result<Vec<RawIntent>, Exception> {
+        self.mutation_notices(owner, accounts, account, user, None)
+    }
+
+    /// Stage recipients against old and proposed visibility; deliver after commit.
+    fn mutation_notices(
+        &self,
+        owner: &UserAccounts,
+        accounts: &Accounts,
+        account: &Account,
+        user: i32,
+        after: Option<(&HashMap<String, i32>, Option<&str>)>,
+    ) -> Result<Vec<RawIntent>, Exception> {
         let visibility = accounts
             .db
             .find_all_visibility_values()
             .map_err(db_failed)?;
-        let visible = |package: &str| -> Result<bool, Exception> {
+        let visible = |package: &str, new: bool| -> Result<bool, Exception> {
+            if new && after.is_none()
+                || !new && !accounts.exists(account) && accounts.authenticators.is_some()
+            {
+                return Ok(false);
+            }
             let value = resolve_visibility(
                 &UserPackages {
                     manager: self,
                     user,
                 },
                 &mut |key| {
-                    visibility
-                        .get(account)
-                        .and_then(|v| v.get(key))
-                        .copied()
-                        .unwrap_or(0)
+                    (if new {
+                        after.map(|(v, _)| v)
+                    } else {
+                        visibility.get(account)
+                    })
+                    .and_then(|v| v.get(key))
+                    .copied()
+                    .unwrap_or(0)
                 },
                 account,
                 package,
@@ -915,15 +936,21 @@ impl AccountManager {
             ))
         };
         let receivers = owner.receivers.lock().unwrap();
-        let packages: HashSet<_> = [Some(account.kind.clone()), None]
+        let mut packages: HashSet<_> = [Some(account.kind.clone()), None]
             .iter()
             .filter_map(|kind| receivers.get(kind))
             .flat_map(|r| r.keys().cloned())
             .collect();
         drop(receivers);
+        let target = after.and_then(|(_, target)| target);
+        let concrete = target.filter(|p| ![LEGACY_VISIBLE, LEGACY_NOT_VISIBLE].contains(p));
+        if let Some(package) = concrete {
+            packages = HashSet::from([package.to_string()]);
+        }
         let mut notices = Vec::new();
         for package in packages {
-            if visible(&package)? {
+            // Android 16 compares the requested key, including the legacy keys.
+            if visible(&package, false)? != visible(target.unwrap_or(&package), true)? {
                 notices.push(RawIntent::with_data(
                     Some("android.accounts.action.VISIBLE_ACCOUNTS_CHANGED"),
                     None,
@@ -948,7 +975,10 @@ impl AccountManager {
                 continue;
             };
             let package = info.info.item.package_name.unwrap_or_default();
-            if visible(&package)? {
+            if concrete.is_none_or(|p| p == package)
+                && visible(&package, false)?
+                && !visible(&package, true)?
+            {
                 notices.push(RawIntent::with_data(
                     intent.intent.action.as_deref(),
                     None,
@@ -968,6 +998,176 @@ impl AccountManager {
             }
         }
         Ok(notices)
+    }
+
+    fn deliver_mutation(&self, user: i32, mut notices: Vec<RawIntent>) {
+        notices.push(RawIntent::new(
+            "android.accounts.LOGIN_ACCOUNTS_CHANGED",
+            0x0500_0000,
+            &[],
+        ));
+        self.deliver(user, notices);
+    }
+
+    fn explicit_add(
+        &self,
+        uid: i32,
+        account: Account,
+        password: Option<&str>,
+        extras: HashMap<String, Option<String>>,
+        visibility: HashMap<String, i32>,
+    ) -> Result<bool, Exception> {
+        let user = user_of(uid);
+        if !self.managed_by_caller(Some(&account.kind), uid, user)? {
+            return Err(Exception::security(format!(
+                "uid {uid} cannot explicitly add accounts of type: {}",
+                account.kind
+            )));
+        }
+        let owner = self.accounts(user)?;
+        if !self.unlocked(user)?
+            || account.name.encode_utf16().count() > 200
+            || account.kind.encode_utf16().count() > 200
+        {
+            return Ok(false);
+        }
+        let mut initial = HashMap::new();
+        for (package, value) in visibility {
+            if [LEGACY_VISIBLE, LEGACY_NOT_VISIBLE].contains(&package.as_str())
+                || self.can_access_package(Some(&package), uid, user)?
+            {
+                initial.insert(package, value);
+            }
+        }
+        let mut state = owner.state.lock().unwrap();
+        if state.exists(&account) || state.of(None).len() > 100 {
+            return Ok(false);
+        }
+        let notices =
+            self.mutation_notices(&owner, &state, &account, user, Some((&initial, None)))?;
+        state
+            .db
+            .transaction(|db| {
+                let id = db.insert_account(&account, password, &extras)?;
+                for (package, value) in &initial {
+                    db.set_visibility(id, package, *value)?;
+                }
+                Ok(())
+            })
+            .map_err(db_failed)?;
+        let cached = Account {
+            access_id: Some(random_uuid()),
+            ..account.clone()
+        };
+        if let Some((_, list)) = state
+            .accounts
+            .iter_mut()
+            .find(|(kind, _)| *kind == account.kind)
+        {
+            list.push(cached);
+        } else {
+            state.accounts.push((account.kind.clone(), vec![cached]));
+        }
+        state.visibility.insert(account, initial);
+        drop(state);
+        self.deliver_mutation(user, notices);
+        Ok(true)
+    }
+
+    fn explicit_remove(&self, uid: i32, account: Option<Account>) -> Result<bool, Exception> {
+        let Some(account) = account else {
+            return Ok(false);
+        };
+        let user = user_of(uid);
+        if !self.managed_by_caller(Some(&account.kind), uid, user)? {
+            return Err(Exception::security(format!(
+                "uid {uid} cannot explicitly remove accounts of type: {}",
+                account.kind
+            )));
+        }
+        let owner = self.accounts(user)?;
+        let unlocked = self.unlocked(user)?;
+        let mut state = owner.state.lock().unwrap();
+        let Some(id) = state.db.account_id(&account).map_err(db_failed)? else {
+            return Ok(false);
+        };
+        let notices = self.removal_notices(&owner, &state, &account, user)?;
+        state
+            .db
+            .transaction(|db| {
+                if unlocked {
+                    db.delete_account(id)
+                } else {
+                    db.delete_de_account(id)
+                }
+            })
+            .map_err(db_failed)?;
+        for (_, list) in &mut state.accounts {
+            list.retain(|a| a != &account);
+        }
+        state.user_data.remove(&account);
+        state.auth_tokens.remove(&account);
+        state.previous_names.remove(&account);
+        state.visibility.remove(&account);
+        drop(state);
+        self.deliver_mutation(user, notices);
+        Ok(true)
+    }
+
+    fn set_visibility(
+        &self,
+        uid: i32,
+        account: Account,
+        package: String,
+        value: i32,
+    ) -> Result<bool, Exception> {
+        let user = user_of(uid);
+        if !is_same_app(uid, SYSTEM_UID)
+            && !self.managed_by_caller(Some(&account.kind), uid, user)?
+        {
+            return Err(Exception::security(format!(
+                "uid {uid} cannot get secrets for accounts of type: {}",
+                account.kind
+            )));
+        }
+        let owner = self.accounts(user)?;
+        if ![LEGACY_VISIBLE, LEGACY_NOT_VISIBLE].contains(&package.as_str())
+            && !self.can_access_package(Some(&package), uid, user)?
+        {
+            return Ok(false);
+        }
+        let mut state = owner.state.lock().unwrap();
+        let Some(id) = state.db.account_id(&account).map_err(db_failed)? else {
+            return Ok(false);
+        };
+        let mut initial = state.visibility.get(&account).cloned().unwrap_or_default();
+        let changed = initial.insert(package.clone(), value) != Some(value);
+        let mut notices = if changed {
+            self.mutation_notices(
+                &owner,
+                &state,
+                &account,
+                user,
+                Some((&initial, Some(&package))),
+            )?
+        } else {
+            Vec::new()
+        };
+        state
+            .db
+            .transaction(|db| db.set_visibility(id, &package, value))
+            .map_err(db_failed)?;
+        state.visibility.insert(account, initial);
+        if changed {
+            notices.push(RawIntent::new(
+                "android.accounts.LOGIN_ACCOUNTS_CHANGED",
+                0x0500_0000,
+                &[],
+            ));
+        }
+        drop(state);
+        self.deliver(user, notices);
+        Ok(true)
     }
 
     /// `resolveAccountVisibility` of `account` to `package` in `user`.
@@ -1528,6 +1728,83 @@ impl Service for AccountManager {
         let uid = call.sender_euid as i32;
         let user = user_of(uid);
         match call.code {
+            am::ADD_ACCOUNT_EXPLICITLY | am::ADD_ACCOUNT_EXPLICITLY_WITH_VISIBILITY => {
+                let (account, password, extras, visibility) =
+                    if call.code == am::ADD_ACCOUNT_EXPLICITLY {
+                        let a = am::AddAccountExplicitly::<Account, super::kept::RawBundle>::read(
+                            &mut call.data,
+                        )?;
+                        (a.account, a.password, a.extras, None)
+                    } else {
+                        let a = am::AddAccountExplicitlyWithVisibility::<
+                            Account,
+                            super::kept::RawBundle,
+                        >::read(&mut call.data)?;
+                        (a.account, a.password, a.extras, a.visibility)
+                    };
+                let mut initial = HashMap::new();
+                for (key, value) in visibility.unwrap_or_default() {
+                    let (ParcelValue::String(Some(key)), ParcelValue::Integer(value)) =
+                        (key, value)
+                    else {
+                        return Err(BAD_VALUE);
+                    };
+                    initial.insert(key, value);
+                }
+                let mut values = Parcel::new();
+                let extras = if let Some(extras) = extras {
+                    extras.write_to(&mut values);
+                    crate::bundle::read(&mut values.reader())?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(key, value)| {
+                            (
+                                key,
+                                match value {
+                                    crate::bundle::Value::String(value) => value,
+                                    _ => None,
+                                },
+                            )
+                        })
+                        .collect()
+                } else {
+                    HashMap::new()
+                };
+                reply((|| {
+                    let added = self.explicit_add(
+                        uid,
+                        account.ok_or_else(|| null("account"))?,
+                        password.as_deref(),
+                        extras,
+                        initial,
+                    )?;
+                    let mut p = Parcel::new();
+                    am::write_add_account_explicitly_reply(&mut p, added);
+                    Ok(p)
+                })())
+            }
+            am::REMOVE_ACCOUNT_EXPLICITLY => {
+                let a = am::RemoveAccountExplicitly::<Account>::read(&mut call.data)?;
+                reply(self.explicit_remove(uid, a.account).map(|removed| {
+                    let mut p = Parcel::new();
+                    am::write_remove_account_explicitly_reply(&mut p, removed);
+                    p
+                }))
+            }
+            am::SET_ACCOUNT_VISIBILITY => {
+                let a = am::SetAccountVisibility::<Account>::read(&mut call.data)?;
+                reply((|| {
+                    let changed = self.set_visibility(
+                        uid,
+                        a.a.ok_or_else(|| null("account"))?,
+                        a.package_name.ok_or_else(|| null("packageName"))?,
+                        a.new_visibility,
+                    )?;
+                    let mut p = Parcel::new();
+                    am::write_set_account_visibility_reply(&mut p, changed);
+                    Ok(p)
+                })())
+            }
             am::GET_PASSWORD => {
                 let a = am::GetPassword::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
@@ -2408,3 +2685,7 @@ mod validation_tests;
 #[cfg(test)]
 #[path = "account_race_tests.rs"]
 mod race_tests;
+
+#[cfg(test)]
+#[path = "account_mutation_tests.rs"]
+mod mutation_tests;
