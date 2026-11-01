@@ -638,6 +638,12 @@ The native JobScheduler now supplies aim-system's JobSchedulerInternal own-job
 and persistence reads, with source/namespace selection. Framework services use
 their attached system process, including the original manifest SyncJobService
 (#1460 slice 4a; host/JVM/linkage checks, 2026-11-01; no guest boot).
+Its pending-job lists now commit prior scheduler writes before returning, so
+retained SyncManager can confirm namespace/attribution migration only after the
+jobs are durable. Source UID lookup uses installed package/user state and proxy
+quota uses the target user. Host restart and failed-write checks cover slice 4b
+(#1460/#1490, 2026-11-01); retained verifyJobScheduler and matched-image sync
+execution remain unverified.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which

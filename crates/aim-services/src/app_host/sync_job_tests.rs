@@ -204,7 +204,7 @@ fn local_jobs_select_source_and_namespace_and_expose_real_load_counts() {
             .unwrap()
             .unwrap()
             .unwrap(),
-            [1, 1, 1, -1, -1, -1]
+            [1, 1, 1, 1, 1, 1]
         );
         assert!(
             sp::read_get_job_persist_stats_reply(
@@ -351,5 +351,447 @@ fn sync_job_start_finish_stop_preserve_system_binder_identity() {
             assert!(jobs.state.lock().unwrap().contexts.is_empty());
             assert!(jobs.state.lock().unwrap().jobs.is_empty());
         }
+    });
+}
+
+// A disposable scan with the framework's manifest service and two adapter apps.
+fn install_sync_manifest(host: &Arc<AppHost>) {
+    use crate::package::{pkg, scan, settings};
+    assert!(
+        host.permission_manager
+            .set(Arc::new(
+                super::super::permission_manager::PermissionManager::new(host.clone())
+            ))
+            .is_ok()
+    );
+    let system = host.package_system().unwrap();
+    let bridge = system.package_bootstrap().unwrap();
+    let base = system.capture_package_queries().unwrap();
+    let mut settings = base.scan().owner().settings.clone();
+    let mut android = settings.packages[0].clone();
+    android.name = "android".into();
+    android.app_id = 1000;
+    android.shared_user = true;
+    android.shared_user_app_id = Some(1000);
+    android.code_path = "/system/framework/framework-res.apk".into();
+    android.flags |= settings::FLAG_SYSTEM;
+    settings.packages.push(android);
+    let mut owner = scan::SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    let names = ["p", "q", "android"];
+    owner
+        .capture_user_states(
+            names
+                .map(|name| {
+                    (
+                        (name.into(), false),
+                        scan::CapturedUsers {
+                            states: BTreeMap::from([(0, Default::default())]),
+                            active_aliases: Default::default(),
+                        },
+                    )
+                })
+                .into(),
+        )
+        .unwrap();
+    owner
+        .capture_legacy_permissions(
+            &[0],
+            names
+                .map(|n| ((n.into(), false), Default::default()))
+                .into(),
+            owner
+                .identities
+                .shared_users
+                .keys()
+                .map(|n| (n.clone(), Default::default()))
+                .collect(),
+        )
+        .unwrap();
+    owner
+        .capture_install_permissions_fixed(names.map(|n| ((n.into(), false), false)).into())
+        .unwrap();
+    for package in base
+        .state()
+        .packages
+        .values()
+        .filter_map(|p| p.pkg.as_deref())
+    {
+        owner.load_test_code(package.clone());
+    }
+    let mut service = pkg::Service::default();
+    service.main.component.name = sync_job().service.1;
+    service.main.component.package_name = "android".into();
+    service.main.process_name = Some("system".into());
+    service.main.enabled = true;
+    service.permission = Some("android.permission.BIND_JOB_SERVICE".into());
+    owner.load_test_code(pkg::AndroidPackage {
+        package_name: "android".into(),
+        shared_user_id: Some("android.uid.system".into()),
+        uid: 1000,
+        path: Some("/system/framework/framework-res.apk".into()),
+        booleans: pkg::booleans::SYSTEM | pkg::booleans::ENABLED,
+        services: vec![service],
+        feature_flag_state: Some(vec![]),
+        ..Default::default()
+    });
+    owner
+        .assign_seinfo_at_boot(
+            &crate::package::owner::seinfo::Policy::parse(&[]).unwrap(),
+            &mut |_: &pkg::AndroidPackage| Ok(36),
+        )
+        .unwrap();
+    owner
+        .complete_library_dependencies(&|_, _| {
+            Ok(crate::package::libraries::Policy {
+                enforce_native_dependencies: false,
+                sdk_library_independence: false,
+            })
+        })
+        .unwrap();
+    owner
+        .rebuild_shared_processes_from_native_members()
+        .unwrap();
+    owner
+        .capture_replica_runtime(
+            names
+                .map(|name| {
+                    let labels = owner.seinfo_state(name).unwrap().unwrap();
+                    (
+                        (name.into(), false),
+                        scan::ReplicaRuntime {
+                            usage: [0; 8],
+                            seinfo: labels.base.clone(),
+                            override_seinfo: labels.override_label.clone(),
+                            library_files: vec![],
+                            libraries: vec![],
+                        },
+                    )
+                })
+                .into(),
+        )
+        .unwrap();
+    let mut context = (**base.context()).clone();
+    let mut android = context.packages[&("p".into(), false)].clone();
+    android.app_id = 1000;
+    android.path = "/system/framework/framework-res.apk".into();
+    context.packages.insert(("android".into(), false), android);
+    context.scan_version = base.scan().version() + 1;
+    system
+        .publish_package_scan_with_queries(
+            &bridge,
+            Some(base.scan()),
+            owner,
+            crate::package::owner::usage::Usage::new(names),
+            context,
+        )
+        .unwrap();
+}
+fn schedule_sync(jobs: &JobScheduler, ns: Option<&str>, proxy: Option<(&str, i32, &str)>) {
+    let mut p = Parcel::new();
+    let code = if let Some((package, user, tag)) = proxy {
+        js::ScheduleAsPackage {
+            namespace: ns.map(Into::into),
+            job: Some(sync_job()),
+            package_name: Some(package.into()),
+            user_id: user,
+            tag: Some(tag.into()),
+        }
+        .write(&mut p);
+        js::SCHEDULE_AS_PACKAGE
+    } else {
+        js::Schedule {
+            namespace: ns.map(Into::into),
+            job: Some(sync_job()),
+        }
+        .write(&mut p);
+        js::SCHEDULE
+    };
+    let reply = invoke(jobs, 1000, code, &p);
+    let mut r = reply.reader();
+    r.read_exception().unwrap().unwrap();
+    assert_eq!(r.read_i32().unwrap(), RESULT_SUCCESS);
+}
+fn cancel_sync(jobs: &JobScheduler, ns: Option<&str>) {
+    let mut p = Parcel::new();
+    js::Cancel {
+        namespace: ns.map(Into::into),
+        job_id: 42,
+    }
+    .write(&mut p);
+    invoke(jobs, 1000, js::CANCEL, &p)
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+}
+fn assert_source(
+    jobs: &JobScheduler,
+    ns: Option<&str>,
+    package: &str,
+    uid: i32,
+    tag: Option<&str>,
+) {
+    let mut state = jobs.state.lock().unwrap();
+    jobs.ensure_loaded(&mut state).unwrap();
+    let key = JobScheduler::find(&state, 1000, ns, 42).unwrap();
+    let j = &state.jobs[&key];
+    assert_eq!(
+        (
+            j.source_package.as_str(),
+            j.source_uid,
+            j.source_tag.as_deref()
+        ),
+        (package, uid, tag)
+    );
+    same_extras(&j.job.extras, &sync_job().extras);
+}
+// The retained SyncManager owns these two marker values. Reproduce its
+// reverse-order reads/schedule/cancel sequence; do not add a second native owner.
+fn migrate(jobs: &JobScheduler, markers: &mut (bool, bool)) {
+    if markers.0 && markers.1 {
+        return;
+    }
+    if !markers.0 {
+        let pending = jobs.jobs_of(1000).unwrap();
+        let mut complete = true;
+        for (ns, job) in pending.into_iter().rev() {
+            if ns.is_none()
+                && job
+                    .extras
+                    .entries
+                    .iter()
+                    .any(|(k, v)| k.as_deref() == Some("SyncManagerJob") && *v == V::Bool(true))
+            {
+                schedule_sync(jobs, Some("SyncManager"), Some(("p", 0, "sync-tag")));
+                cancel_sync(jobs, None);
+                complete = false;
+            }
+        }
+        markers.0 = complete;
+    }
+    let own = jobs.system_scheduled_own_jobs(Some("SyncManager")).unwrap();
+    let mut complete = true;
+    for _ in own.into_iter().rev() {
+        schedule_sync(jobs, Some("SyncManager"), Some(("p", 0, "sync-tag")));
+        complete = false;
+    }
+    markers.1 = complete;
+}
+#[test]
+fn sync_namespace_migration_and_proxy_replacement_are_isolated_and_repeatable() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        install_sync_manifest(host);
+        let jobs = scheduler(host);
+        schedule_sync(&jobs, None, None);
+        schedule_sync(&jobs, Some("other"), None);
+        schedule_sync(&jobs, Some("SyncManager"), None);
+        // A default non-sync job must survive the migration too.
+        let mut other = sync_job();
+        other.id = 7;
+        other.extras = Default::default();
+        jobs.schedule(1000, None, Some(Ok(other)), None, None)
+            .unwrap();
+        let mut markers = (false, false);
+        migrate(&jobs, &mut markers);
+        assert_eq!(markers, (false, true));
+        assert_eq!(jobs.jobs_of(1000).unwrap().len(), 3);
+        assert_source(&jobs, Some("SyncManager"), "p", 10100, Some("sync-tag"));
+        assert_source(&jobs, Some("other"), "android", 1000, None);
+        migrate(&jobs, &mut markers);
+        assert_eq!(markers, (true, true));
+        let reopened = scheduler(host);
+        assert_source(&reopened, Some("SyncManager"), "p", 10100, Some("sync-tag"));
+        schedule_sync(&reopened, Some("SyncManager"), Some(("q", 0, "other-tag")));
+        assert_source(
+            &reopened,
+            Some("SyncManager"),
+            "q",
+            10101,
+            Some("other-tag"),
+        );
+        schedule_sync(&reopened, Some("SyncManager"), None);
+        assert_source(&reopened, Some("SyncManager"), "android", 1000, None);
+        let mut markers = (true, false);
+        migrate(&reopened, &mut markers);
+        assert_eq!(markers, (true, false));
+        migrate(&reopened, &mut markers);
+        assert_eq!(markers, (true, true));
+        cancel_sync(&reopened, Some("SyncManager"));
+        assert_eq!(reopened.jobs_of(1000).unwrap().len(), 2);
+        assert_eq!(scheduler(host).jobs_of(1000).unwrap().len(), 2);
+    });
+}
+#[test]
+fn sync_migration_restarts_between_schedule_cancel_and_marker_writes() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        install_sync_manifest(host);
+        for phase in 0..5 {
+            let jobs = scheduler(host);
+            schedule_sync(&jobs, None, None);
+            jobs.jobs_of(1000).unwrap(); // Initial disk state.
+            schedule_sync(&jobs, Some("SyncManager"), Some(("p", 0, "sync-tag")));
+            if phase >= 1 {
+                jobs.jobs_of(1000).unwrap();
+            } // schedule durable
+            cancel_sync(&jobs, None);
+            if phase >= 2 {
+                jobs.jobs_of(1000).unwrap();
+            } // cancel durable
+            let mut markers = (false, false);
+            if phase >= 3 {
+                migrate(&jobs, &mut markers);
+            }
+            if phase == 4 {
+                assert_eq!(markers, (true, true));
+            } else {
+                markers = (false, false);
+            } // status write not yet durable
+            // No worker runs in this harness: dropping the owner loses pending writes.
+            drop(jobs);
+            let reopened = scheduler(host);
+            migrate(&reopened, &mut markers);
+            migrate(&reopened, &mut markers);
+            assert_eq!(markers, (true, true));
+            let reopened = scheduler(host);
+            assert_source(&reopened, Some("SyncManager"), "p", 10100, Some("sync-tag"));
+            assert_eq!(reopened.jobs_of(1000).unwrap().len(), 1);
+            cancel_sync(&reopened, Some("SyncManager"));
+            reopened.jobs_of(1000).unwrap();
+        }
+    });
+}
+#[test]
+fn failed_job_commit_prevents_migration_confirmation_and_retries() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        install_sync_manifest(host);
+        let jobs = scheduler(host);
+        schedule_sync(&jobs, Some("SyncManager"), None);
+        jobs.jobs_of(1000).unwrap();
+        schedule_sync(&jobs, Some("SyncManager"), Some(("p", 0, "sync-tag")));
+        let blocker = host
+            .inputs()
+            .unwrap()
+            .data
+            .join("system/job/jobs_1000.xml.new");
+        std::fs::create_dir(&blocker).unwrap();
+        assert!(jobs.system_scheduled_own_jobs(Some("SyncManager")).is_err());
+        assert!(jobs.jobs_of(1000).is_err());
+        assert!(jobs.state.lock().unwrap().dirty.contains(&1000));
+        std::fs::remove_dir(blocker).unwrap();
+        assert!(
+            jobs.system_scheduled_own_jobs(Some("SyncManager"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_source(
+            &scheduler(host),
+            Some("SyncManager"),
+            "p",
+            10100,
+            Some("sync-tag"),
+        );
+        cancel_sync(&jobs, Some("SyncManager"));
+        let blocker = host
+            .inputs()
+            .unwrap()
+            .data
+            .join("system/job/jobs_1000.xml.new");
+        std::fs::create_dir(&blocker).unwrap();
+        assert!(jobs.jobs_of(1000).is_err());
+        assert_source(
+            &scheduler(host),
+            Some("SyncManager"),
+            "p",
+            10100,
+            Some("sync-tag"),
+        );
+        std::fs::remove_dir(blocker).unwrap();
+        assert!(jobs.jobs_of(1000).unwrap().is_empty());
+        assert!(scheduler(host).jobs_of(1000).unwrap().is_empty());
+    });
+}
+
+#[test]
+fn sync_attribution_repair_survives_restart_before_and_after_confirmation() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        install_sync_manifest(host);
+        for phase in 0..3 {
+            let jobs = scheduler(host);
+            schedule_sync(&jobs, Some("SyncManager"), None);
+            jobs.jobs_of(1000).unwrap();
+            let mut markers = (true, false);
+            migrate(&jobs, &mut markers);
+            assert_eq!(markers, (true, false));
+            if phase >= 1 {
+                migrate(&jobs, &mut markers);
+            }
+            if phase < 2 {
+                markers.1 = false;
+            } // uncommitted status marker
+            drop(jobs);
+            let reopened = scheduler(host);
+            migrate(&reopened, &mut markers);
+            migrate(&reopened, &mut markers);
+            assert_eq!(markers, (true, true));
+            assert_source(
+                &scheduler(host),
+                Some("SyncManager"),
+                "p",
+                10100,
+                // JobStore repairs an uncommitted old job's package from extras,
+                // without inventing a tag; committed scheduleAsPackage keeps it.
+                (phase != 0).then_some("sync-tag"),
+            );
+            cancel_sync(&reopened, Some("SyncManager"));
+            reopened.jobs_of(1000).unwrap();
+        }
+    });
+}
+#[test]
+fn proxy_attribution_uses_installed_source_and_target_user_quota() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        install_sync_manifest(host);
+        let jobs = scheduler(host);
+        for (package, user) in [("missing", 0), ("p", 10), ("android", 10)] {
+            schedule_sync(
+                &jobs,
+                Some("SyncManager"),
+                Some((package, user, "discarded")),
+            );
+            assert_source(&jobs, Some("SyncManager"), "android", 1000, None);
+        }
+        assert!(
+            jobs.state
+                .lock()
+                .unwrap()
+                .schedule_calls
+                .contains_key(&(10, "android".into()))
+        );
+        schedule_sync(&jobs, Some("SyncManager"), Some(("p", 0, "kept")));
+        jobs.jobs_of(1000).unwrap();
+        assert_source(
+            &scheduler(host),
+            Some("SyncManager"),
+            "p",
+            10100,
+            Some("kept"),
+        );
+        // The proxy API still enforces the real Binder caller's privilege.
+        let mut p = Parcel::new();
+        js::ScheduleAsPackage {
+            namespace: Some("SyncManager".into()),
+            job: Some(sync_job()),
+            package_name: Some("p".into()),
+            user_id: 0,
+            tag: None,
+        }
+        .write(&mut p);
+        assert!(
+            invoke(jobs.as_ref(), 10100, js::SCHEDULE_AS_PACKAGE, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+                .is_err()
+        );
     });
 }
