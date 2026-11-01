@@ -106,4 +106,8 @@ interface ISystemProcess {
     void reportExemptedSyncStart(String packageName, int userId);
     void addSyncTempAllowlist(int callingUid, String packageName, long durationMs,
             int type, int userId, boolean sync, int reasonCode, String reason);
+    /** Construction readiness only; public sync forwarding remains inactive (#1460). */
+    long getSyncOwnerGeneration();
+    void attachSyncOwner(long generation, IBinder owner);
+    boolean isSyncOwnerAttached(long generation);
 }

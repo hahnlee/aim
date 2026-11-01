@@ -408,7 +408,7 @@ its original identity/permission checks. Host checks cover denials, window/audio
 ambient results, quota hints and owner errors; successful public quota and Mac
 lock reads remain unverified. No guest boot or app-open check was run for this slice.
 
-The audio owner serves product strategies through the original Java AudioProductStrategy and audioserver policy configuration, with MODIFY_AUDIO_ROUTING checks. It also routes arbitrary AudioAttributes through AudioSystem, retaining full typed device lists and anonymizing Bluetooth addresses according to the caller’s BLUETOOTH_CONNECT grant or system UID (#2468; host Binder/JVM checks, no guest boot, 2026-10-31). Its device spatializer query checks MODIFY_DEFAULT_AUDIO_EFFECTS and rejects null devices; the HAL has no effects or supported spatialization modes, so availability is false. ContentService's sync-adapter type reads retain the original SyncAdaptersCache's package-scan metadata, UID ownership, persistence and package-change receivers, and filter packages for the Binder caller; cross-user reads require INTERACT_ACROSS_USERS_FULL (#1460). Focused native/JVM tests and pinned-image Java linkage pass; no guest boot was run (2026-10-29). The derived services.jar now adds pinned typed account constructor seams and a local-notify helper for the retained sync owner (#1460 slice 1, 2026-11-01). Focused DEX/linkage and source/image/oat rejection checks pass; forwarding and private startup remain inactive. The full build stops in oat compilation with PID-namespace watcher EADDRINUSE; the matched compiled cohort and derived image remain unverified. No guest boot or new CTS run was performed.
+The audio owner serves product strategies through the original Java AudioProductStrategy and audioserver policy configuration, with MODIFY_AUDIO_ROUTING checks. It also routes arbitrary AudioAttributes through AudioSystem, retaining full typed device lists and anonymizing Bluetooth addresses according to the caller’s BLUETOOTH_CONNECT grant or system UID (#2468; host Binder/JVM checks, no guest boot, 2026-10-31). Its device spatializer query checks MODIFY_DEFAULT_AUDIO_EFFECTS and rejects null devices; the HAL has no effects or supported spatialization modes, so availability is false. ContentService's sync-adapter type reads retain the original SyncAdaptersCache's package-scan metadata, UID ownership, persistence and package-change receivers, and filter packages for the Binder caller; cross-user reads require INTERACT_ACROSS_USERS_FULL (#1460). Focused native/JVM tests and pinned-image Java linkage pass; no guest boot was run (2026-10-29). The derived services.jar now adds pinned typed account constructor seams and a local-notify helper for the retained sync owner (#1460 slice 1, 2026-11-01). Focused DEX/linkage and source/image/oat rejection checks pass; forwarding remains inactive; private construction is described below. The full build stops in oat compilation with PID-namespace watcher EADDRINUSE; the matched compiled cohort and derived image remain unverified. No guest boot or new CTS run was performed.
 The slice-2 local adapters now use the existing native package capture for
 stopped/launched reads and the native visibility bridge for the retained PMI
 overloads. Both grant/package startup orders retain one package facade and one
@@ -421,8 +421,7 @@ effects. Public restriction writes and abuse trackers remain outside this slice;
 persisted hibernation remains explicit (#2064). Device-services and AIDL builds pass, including pinned-image
 linkage and concrete-method checks for these retained calls. Adapter JVM fixtures
 and the missing-abstract-method regression pass. These are scoped method checks,
-not completeness checks of all ActivityManagerInternal methods. Sync forwarding
-and private startup remain inactive; no guest boot or new CTS run (#1460).
+not completeness checks of all ActivityManagerInternal methods. Sync forwarding remains inactive; no guest boot or new CTS run (#1460).
 Package and appwidget labels are made safe for presentation by the original TextUtils.
 Appwidget provider metadata now uses indexed resource entries and a shared XML/label
 resource context instead of repeatedly decoding whole APK tables under its group
@@ -649,10 +648,10 @@ Signed-caller, locked-user, rollback/reopen, cascade and CTS-derived setup/teard
 host checks pass; no guest boot or real CTS run was performed (2026-11-01).
 Explicit grant/revoke now require a live account and installed target UID, persist
 in DE, and deliver app-permission callbacks after commit (#1504/#1460 3c).
-The inactive AccountManagerInternal adapter shares the SyncAccounts capability;
+The AccountManagerInternal adapter, now published before private sync construction, shares the SyncAccounts capability;
 access, listeners and consent delegate to the native owner (#1504/#1460 3d).
 Consent retains the platform Activity; host lifecycle/API and Java linkage checks pass, with no guest boot or CTS run.
-The inactive typed SyncAccounts adapter uses a system-UID-only capability
+The typed SyncAccounts adapter, now injected into the private sync owner, uses a system-UID-only capability
 on that same native owner (#1460/#1504 3a.2). Snapshots propagate owner/database
 failures, and both Java linkage cohorts check the image's injected seam.
 The native JobScheduler now supplies aim-system's JobSchedulerInternal own-job
@@ -739,8 +738,17 @@ job persistence and unsupported-owner errors to those cleanup owners
 (#1460 slice 5j/#1723/#2016/#1509/#1928). Host JVM/native tests cover this scope;
 matched-image adapter accounting, restoration and sync CTS remain unverified.
 No guest boot was run.
-Private ContentService startup and sync forwarding remain inactive; no guest
-boot or CTS run was performed.
+Private ContentService/SyncManager construction now follows publication of the
+native local owners in aim-system (#1460 slice 6a). Its inactive capability is
+attached to the actual system-process generation and withdrawn on death; the
+existing native discovery bridge borrows its sole cache. Construction attachment
+is separate from unlock/handler completion and job admission. Public sync
+forwarding remains inactive. Native attachment/death/restart and JVM startup,
+failure and discovery checks pass, as do device-services image linkage and the
+replacement-classpath regression (#1460, 2026-11-01). Debug and release libraries
+each have 2,322 passes, eight baseline failures and 20 ignored tests; three
+failures show sandbox EPERM, while five template-readiness failures remain
+unconfirmed as sandbox-only. No guest boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
 `/data/data` did not exist when the package side's start asked for the
 core apps' data. A second boot of the same data directory keeps the

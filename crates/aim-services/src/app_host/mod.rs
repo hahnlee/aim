@@ -193,6 +193,7 @@ pub mod storage;
 pub mod storage_stats;
 mod strict_mode;
 pub mod surface;
+mod sync_owner;
 pub mod system_process;
 pub mod system_update;
 pub mod task_info;
@@ -631,6 +632,7 @@ pub struct AppHost {
     /// Cold staged APEX inventory from the original ApexManager in aim-system.
     native_staging_bridge: Mutex<Option<Arc<Strong>>>,
     audio_policy_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
+    sync_owner: Mutex<sync_owner::State>,
     sync_adapter_queries: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     package_intent_parser: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
     dex_use_bridge: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
@@ -775,6 +777,7 @@ impl AppHost {
             system_route_queries: Mutex::new(None),
             native_staging_bridge: Mutex::new(None),
             audio_policy_queries: Mutex::new(None),
+            sync_owner: Mutex::new(sync_owner::State::default()),
             sync_adapter_queries: Mutex::new(None),
             package_intent_parser: Mutex::new(None),
             dex_use_bridge: Mutex::new(None),
@@ -2503,6 +2506,7 @@ impl AppHost {
                 app.as_ref().and_then(|a| a.instrumentation.clone()),
             )
         };
+        self.sync_owner_died(start_seq);
         if let Some(session) = instrumentation {
             self.retire_instrumentation(&session, "Process crashed.");
         }

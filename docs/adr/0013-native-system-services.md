@@ -444,8 +444,12 @@ hash-checked AOSP source contracts, image jar/oat and disassembled classes, then
 original-image linkage and ART DEX file verification. No source rebuild, reflection
 or vendor shadow of an original class is introduced. The existing oat node
 recompiles the cohort; build/assembly reject mismatched jar/oat CRCs and SHA-1.
-Forwarding and private owner startup remain inactive; no boot or sync CTS claim
-is made by this slice.
+The private owner is now constructed in aim-system after native local owners
+are published (#1460 slice 6a), using those typed account dependencies. A private
+inactive Binder is attached to the actual system-process generation with death
+invalidation. The existing discovery bridge borrows its cache, avoiding a second
+SyncAdaptersCache. Public sync forwarding, user-unlock readiness and job admission
+are not activated by construction; no guest boot or sync CTS claim is made.
 
 ### The redirect edit (2026-10-02)
 

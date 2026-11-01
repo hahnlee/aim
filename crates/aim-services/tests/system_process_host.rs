@@ -36,9 +36,16 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
             ),
     )
     .unwrap();
+    let binder_source = fs::read_to_string(&binder).unwrap().replace(
+        "public final boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException { throw new RuntimeException(\"stub\"); }",
+        "public final boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException { return onTransact(code, data, reply, flags); }",
+    );
+    fs::write(&binder, binder_source).unwrap();
     // Only compile dependencies here; the class under test is always production source.
     let mut sources = common::java::sources(&fixtures);
     sources.push(binder);
+    sources.push(production.join("src/dev/aim/server/SyncOwnerStartup.java"));
+    sources.push(production.join("src/com/android/server/content/PrivateContentService.java"));
     sources.push(production.join("src/dev/aim/server/ProviderQueries.java"));
     sources.push(aim_paths::root().join("crates/aim-services/tests/fixtures/dex_use/com/android/server/art/ArtModuleServiceInitializer.java"));
     let generated = common::java::private_aidl_sources(&data.0);
@@ -46,13 +53,14 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
         p.ends_with("IForegroundServicePolicy.java")
             || p.ends_with("IForegroundServiceTypeHost.java")
     }));
-    for (missing_memory, missing_art, device_lock, printing) in [
-        (false, false, true, true),
-        (false, false, false, true),
-        (false, false, true, false),
-        (false, false, false, false),
-        (true, false, true, true),
-        (false, true, true, true),
+    for (missing_memory, missing_art, device_lock, printing, fail_sync) in [
+        (false, false, true, true, false),
+        (false, false, false, true, false),
+        (false, false, true, false, false),
+        (false, false, false, false, false),
+        (true, false, true, true, false),
+        (false, true, true, true, false),
+        (false, false, true, true, true),
     ] {
         let server = data.0.join("SystemProcessHost.java");
         let mut source =
@@ -89,9 +97,16 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
             .arg("dev.aim.server.SystemProcessHostTest")
             .arg(device_lock.to_string())
             .arg(printing.to_string())
+            .arg(fail_sync.to_string())
             .output()
             .unwrap();
-        if missing_art {
+        if fail_sync {
+            assert!(
+                !output.status.success(),
+                "accepted failed sync construction"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("sync construction failed"));
+        } else if missing_art {
             assert!(
                 !output.status.success(),
                 "control accepted missing ART initialization"
