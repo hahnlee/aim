@@ -2715,7 +2715,7 @@ impl SettingsProvider {
 
     /// `Settings.checkAndNoteWriteSettingsOperation(…, true)`: the
     /// WRITE_SETTINGS op noted, its default mode WRITE_SETTINGS'.
-    fn check_and_note_write_settings(
+    pub(super) fn check_and_note_write_settings(
         &self,
         caller: &Caller,
         package: Option<&str>,
