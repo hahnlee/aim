@@ -2664,6 +2664,9 @@ pub(super) fn written_mode_changed(
     update_started: bool,
     packages: &[String],
 ) -> Result<(), Exception> {
+    if code == 70 {
+        host.restrictions_changed(Some(uid))?;
+    }
     if mode != MODE_ERRORED && update_started {
         with_ops(host, SYSTEM_UID, |ops| {
             ops.update_started_mode_for_uid(code, mode == MODE_IGNORED, USER_ALL, Some(uid))
@@ -3062,6 +3065,11 @@ fn dispatch(host: &AppHost, effects: Effects) {
     for collected in effects.collected {
         collect(host, collected);
     }
+}
+
+/// AppStateTracker's startup inventory uses stored, unevaluated modes.
+pub(super) fn restriction_mode(host: &AppHost, uid: i32, package: &str) -> Result<i32, Exception> {
+    persisted_mode(&Host(host), uid, package, &APP_OP_INFOS[70])
 }
 
 /// `checkOperation` as the system server asks it.

@@ -2241,6 +2241,15 @@ impl SettingsProvider {
     /// the running users (the app host's one) of a global setting.
     pub(super) fn notify(&self, table: Table, user: i32, name: &str) -> Result<(), Exception> {
         self.generations()?.increment(table, user, name);
+        if (table == Table::Config && name.starts_with("activity_manager/"))
+            || (table == Table::Global
+                && matches!(
+                    name,
+                    "app_standby_enabled" | "adaptive_battery_management_enabled"
+                ))
+        {
+            self.host.restrictions_changed(None)?;
+        }
         if table == Table::Secure
             && user == 0
             && name == "location_mode"
@@ -2282,6 +2291,9 @@ impl SettingsProvider {
     /// its namespace (`split("/")[1]`).
     fn notify_config_change(&self, prefix: &str, changed: &[String]) -> Result<(), Exception> {
         self.generations()?.increment(Table::Config, 0, prefix);
+        if prefix == "activity_manager/" {
+            self.host.restrictions_changed(None)?;
+        }
         let mut path = prefix.to_string();
         for name in changed {
             let flag = java_split(name, '/').get(1).copied().ok_or_else(|| {

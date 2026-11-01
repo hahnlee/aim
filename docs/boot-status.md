@@ -393,9 +393,12 @@ The slice-2 local adapters now use the existing native package capture for
 stopped/launched reads and the native visibility bridge for the retained PMI
 overloads. Both grant/package startup orders retain one package facade and one
 original default-grant policy, including its sync-provider registration.
-ActivityStats delegates active/process/start queries to native owners; restriction
-levels remain explicitly unsupported because native restriction settings are not
-owned yet (#2274). Device-services and AIDL builds pass, including pinned-image
+ActivityStats delegates active/process/start queries to native owners. Its UID
+restriction getter now reads native AppRestrictionController settings initialized
+from standby and AppOps, then restored from the pinned per-user XML (#2575).
+AppOps, bucket, package and UID notifications update that state and its standby
+effects. Public restriction writes and abuse trackers remain outside this slice;
+persisted hibernation remains explicit (#2064). Device-services and AIDL builds pass, including pinned-image
 linkage and concrete-method checks for these retained calls. Adapter JVM fixtures
 and the missing-abstract-method regression pass. These are scoped method checks,
 not completeness checks of all ActivityManagerInternal methods. Sync forwarding

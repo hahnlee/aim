@@ -385,5 +385,8 @@ impl AppHost {
         // AppOpsService's own observer: the uid crosses the foreground
         // either way.
         appops_service::uid_state_changed(self, uid);
+        if let Err(e) = self.restrictions_changed(None) {
+            eprintln!("app host: app restrictions: {}", e.message);
+        }
     }
 }
