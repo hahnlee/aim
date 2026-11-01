@@ -1171,9 +1171,16 @@ identity and UID; invalid static declarations reject before allocation (#806).
 Focused host admission and pinned-image policy checks cover these gates;
 guest boot and CTS were not rerun for this change (2026-10-28).
 App-host `notifyDexLoad` now reaches the image's original DexUseManagerLocal
-in aim-system through a typed system-UID-only bridge (#1425). Native leased
-snapshots supply package visibility; an Injector preserves the authenticated
-calling UID and user for isolated-loader records and secondary dex ownership.
+in aim-system through a typed system-UID-only bridge (#1425). Its single canonical
+PackageManagerLocal is now registered before dex-use,
+using native epoch-bound captures, the shared version page and the existing
+SDK/signing delegates (#2063 slice 2, host-only, 2026-11-02). New snapshots refresh
+on publication without notifyDexLoad; retained snapshots keep their old data.
+The backend waits for initial scan/query publication, independently of runtime
+construction and storage readiness. Source death or epoch retirement closes the
+local Store and requests aim-system restart; managers are never replaced in place.
+Native visibility retains captured version, caller UID/user and aliases; the
+Injector preserves authenticated isolated-loader and secondary-dex identities.
 SystemProcessHost now installs ArtModuleServiceManager through the original
 ArtModuleServiceInitializer before constructing that owner, as SystemServer does
 separately from ActivityThread.initializeMainlineModules. Omitting this made the
@@ -1187,10 +1194,12 @@ These checks use disposable paths and an accelerated debounce clock; they do not
 establish aim-system boot reliability. After merging current main, the startup
 JVM test passes when compiled directly against local dependencies, preserving
 main's service order and checking settings/pre-boot publication as well as ART
-registration. Cargo library/startup checks are blocked by stale generated AIDL;
-regeneration is denied at the shared original-image lease. The device-services
-build stops at an upstream incremental `linux-translate` link failure, so current
-image linkage is unverified. No guest boot was run (2026-10-29).
+registration. Current JVM startup, dex-use and canonical package-local fixtures
+pass, including
+refresh, scope close and source/epoch invalidation. Native focused tests pass;
+the complete library runs retain sandbox shared-memory and Binder-readiness
+failures. Current image linkage, actual process restart and install/update/remove
+snapshot acceptance remain unverified; no guest boot was run (2026-11-02).
 The app-host allowlist now permits original artd on `ctl.interface_start`
 requests (#2063, slice 1). Its original rc remains disabled and oneshot with
 the artd UID/group and DAC_OVERRIDE/DAC_READ_SEARCH/FOWNER/CHOWN capabilities;

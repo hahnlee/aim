@@ -303,6 +303,53 @@ mod tests {
     }
 
     #[test]
+    fn art_package_backend_waits_for_scan_but_not_runtime_or_storage() {
+        use aim_service_aidl::dev_aim_server_isystemprocess as api;
+        crate::system::with_late_package_construction(|host, publish| {
+            let (send, receive) = mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let owner = super::super::system_process::SystemProcess::new(host.clone());
+                    let mut request = Parcel::new();
+                    api::GetDexUsePackages {}.write(&mut request);
+                    let reply = owner
+                        .transact(&mut Call {
+                            code: api::GET_DEX_USE_PACKAGES,
+                            flags: 0,
+                            sender_pid: 42,
+                            sender_euid: 1000,
+                            data: request.reader(),
+                        })
+                        .unwrap();
+                    send.send(
+                        api::read_get_dex_use_packages_reply(&mut reply.reader())
+                            .unwrap()
+                            .is_ok(),
+                    )
+                    .unwrap();
+                });
+                let early = receive.recv_timeout(Duration::from_millis(50));
+                let mut during = None;
+                prepare(
+                    &host.package_boot,
+                    || {
+                        publish();
+                        Ok(())
+                    },
+                    |()| {
+                        during = Some(receive.recv_timeout(Duration::from_secs(5)));
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+                assert_eq!(early, Err(mpsc::RecvTimeoutError::Timeout));
+                assert_eq!(during, Some(Ok(true)));
+            });
+        });
+    }
+
+    #[test]
     fn published_scan_does_not_hide_a_known_construction_failure() {
         crate::system::with_late_package_construction(|host, publish| {
             let error = Exception::new(EX_ILLEGAL_STATE, "construction failure");

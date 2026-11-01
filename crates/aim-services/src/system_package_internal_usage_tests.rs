@@ -966,6 +966,112 @@ fn prepared_transition_rebases_over_deferred_canonical_usage() {
     drop(install);
 }
 #[test]
+fn art_package_captures_refresh_without_dex_load_and_reject_dead_or_replaced_sources() {
+    use aim_service_aidl::dev_aim_server_ipackagescansnapshot as snapshot;
+    for death in [false, true] {
+        let mut fixture = Fixture::new();
+        let bridge = fixture.attach();
+        let initial = publish(&fixture, &bridge);
+        let mut owner = initial.scan().owner().clone();
+        owner
+            .settings
+            .renamed_packages
+            .push(("alias".into(), "p".into()));
+        let mut context = (**initial.context()).clone();
+        context.scan_version = initial.scan().version() + 1;
+        let before = fixture
+            .system
+            .publish_package_scan_with_queries(
+                &bridge,
+                Some(initial.scan()),
+                owner,
+                initial.scan().usage().clone(),
+                context,
+            )
+            .unwrap();
+        let captures =
+            crate::package::boot_captures::Captures::new(&fixture.system, bridge.clone());
+        let Binder::Local(ptr) = captures.snapshot().unwrap() else {
+            panic!("local snapshot")
+        };
+        let lease = fixture.native.local_service(ptr).unwrap();
+        let version = before.scan().version() as i64;
+        assert_eq!(
+            captures
+                .filter_package_name(version, "alias", 10100, 0)
+                .unwrap()
+                .as_deref(),
+            Some("p")
+        );
+        assert!(!captures.should_filter(version, "p", 10100, 0).unwrap());
+        assert_eq!(
+            captures
+                .filter_package_name(version, "missing", 10100, 10)
+                .unwrap(),
+            None
+        );
+        fixture
+            .system
+            .internal_notify_package_use(Some("p".into()), 2, 1000, 0)
+            .unwrap();
+        let after = captures.current().unwrap();
+        assert!(after.scan().version() > before.scan().version());
+        assert_eq!(before.scan().usage().times("p").unwrap()[2], 0);
+        assert!(after.scan().usage().times("p").unwrap()[2] > 0);
+        assert!(Arc::ptr_eq(&before, &captures.capture(version).unwrap()));
+        drop(before);
+        let mut close = Parcel::new();
+        snapshot::Close {}.write(&mut close);
+        lease
+            .transact(snapshot::CLOSE, &close, false)
+            .unwrap()
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        assert!(
+            captures.capture(version).is_err(),
+            "closed lease retained old capture"
+        );
+        let mut get = Parcel::new();
+        snapshot::GetVersion {}.write(&mut get);
+        let response = lease.transact(snapshot::GET_VERSION, &get, false).unwrap();
+        assert!(
+            snapshot::read_get_version_reply(&mut response.reader())
+                .unwrap()
+                .is_err()
+        );
+        if death {
+            fixture
+                .driver
+                .release(fixture.original.last().unwrap().proc_handle());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while fixture.system.package_bootstrap().is_ok() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "source death did not detach"
+                );
+                std::thread::yield_now();
+            }
+        }
+        if death {
+            assert!(captures.current().is_err());
+            assert!(captures.snapshot().is_err());
+        }
+        let replacement = fixture.attach();
+        let fresh = publish(&fixture, &replacement);
+        for rejected in [
+            captures.current(),
+            captures.capture(after.scan().version() as i64),
+            captures.capture(fresh.scan().version() as i64),
+        ] {
+            assert!(rejected.is_err_and(|error| error.message.contains("epoch changed")));
+        }
+        assert!(captures.snapshot().is_err());
+    }
+}
+
+#[test]
 fn prepared_usage_cannot_publish_into_retired_bootstrap_epoch() {
     let mut fixture = Fixture::new();
     let old_bridge = fixture.attach();

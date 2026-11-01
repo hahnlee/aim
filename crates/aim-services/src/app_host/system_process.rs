@@ -386,6 +386,7 @@ impl Service for SystemProcess {
             sp::GET_DEX_USE_PACKAGES => {
                 sp::GetDexUsePackages::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {
+                    self.host.package_scan_capture()?;
                     let owner = self.host.package_system()?;
                     let captures = crate::package::boot_captures::Captures::new(
                         owner,
