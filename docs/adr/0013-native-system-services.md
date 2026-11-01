@@ -762,6 +762,16 @@ Its scalar `toString` calls use the original libcore formatting and object
 identity; the native provider retains validation, permissions and storage.
 This adds vendor classes only, without replacing original framework classes.
 
+The original SettingsProvider uses the same provisioned-device defaults as the
+native provider (#713): a static vendor resource overlay sets
+`def_device_provisioned` and `def_user_setup_complete` to true. AIM uses the
+Mac's setup rather than the emulator's provisioning pass. On fresh original
+SystemServer data, GoogleSdkSetup's inherited `ProvisionActivity.provisionAdb`
+otherwise writes `adb_enabled=1` after AdbService's `systemReady` writes 0.
+The resource defaults apply when the original provider creates its tables;
+existing settings, AdbService and the SDK setup APK remain original. This is a
+vendor resource addition, with no original-class or APK replacement.
+
 Connectivity diagnostics (#1509) uses the existing system-UID network-activity
 bridge for the pinned ConnectivityService's callback policy and Binder lifetimes.
 The image's original NetworkCapabilities matching/redaction and ConnectivityReport
