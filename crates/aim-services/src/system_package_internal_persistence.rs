@@ -568,6 +568,40 @@ mod latest_settings_tests {
     };
     use std::collections::BTreeMap;
     #[test]
+    fn direct_non_system_persistence_calls_still_require_system_uid() {
+        use aim_binder_driver::{Credentials, Device, Driver};
+        let driver = Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 97002,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let system = System::new(process.clone(), &[]);
+        for uid in [2000, 10194, 110194] {
+            let errors = [
+                system.internal_write_settings(true, uid, 987).unwrap_err(),
+                system
+                    .internal_write_permission_settings(Some(vec![0]), true, uid, 987)
+                    .unwrap_err(),
+                system
+                    .internal_remove_legacy_default_browser_package_name(0, uid, 987)
+                    .unwrap_err(),
+            ];
+            for error in errors {
+                assert_eq!(error.code, aim_binder_host::parcel::EX_SECURITY);
+                assert_eq!(
+                    error.message,
+                    "Package internal persistence requires system UID"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn permission_definition_merge_retains_latest_package_and_app_data_fields() {
         let mut latest = SigningScan::new(
             &Default::default(),

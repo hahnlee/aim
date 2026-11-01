@@ -135,8 +135,16 @@ public final class NativePMMutationProducer implements NativePackageManagerInter
         catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
     }
     @Override public String removeLegacyDefaultBrowserPackageName(int userId) {
+        return removeLegacyDefaultBrowserPackageName(nativeOwner, userId);
+    }
+    static String removeLegacyDefaultBrowserPackageName(IPackageInternalHost nativeOwner, int userId) {
+        // PMS.PackageManagerInternalImpl performs this trusted local operation
+        // without a caller check (android-16.0.0_r1:7025-7028). The remote owner
+        // must see system identity even during RoleUserState's lazy migration.
+        long identity = Binder.clearCallingIdentity();
         try { return nativeOwner.removeLegacyDefaultBrowserPackageName(userId, Binder.getCallingUid(), Binder.getCallingPid()); }
         catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        finally { Binder.restoreCallingIdentity(identity); }
     }
     @Override public void uninstallApex(String packageName, long versionCode, int userId, IntentSender intentSender, int installFlags) {
         try { nativeOwner.uninstallApex(packageName, versionCode, userId, intentSender, installFlags, Binder.getCallingUid(), Binder.getCallingPid()); }
