@@ -711,7 +711,10 @@ CONNECTIVITY_ACTION broadcasts for the actual Mac default-network transitions,
 including initial connection, loss, reconnect and replacement; duplicates and
 DNS-only updates stay silent (#1460 slice 5e/#1509). Native receiver/query tests
 and a pinned retained SyncManager receiver/backoff JVM fixture cover this path.
-Battery sync timers and full wake-lock attribution remain under their owner issues. Matched-image
+Native battery-stats now keeps per-UID named sync DualTimers with original
+nesting, name overflow and battery/background time bases (#1460 slice 5f/#1928).
+Generated Binder permission and host timer checks cover this path. Sync history
+and full wake-lock attribution remain #1928. Matched-image adapter accounting,
 restoration and sync CTS remain unverified; no guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.

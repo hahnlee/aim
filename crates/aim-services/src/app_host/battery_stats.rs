@@ -22,7 +22,9 @@
 //! process state (`noteUidProcessStateLocked`, from the uid's first
 //! process to its last) runs its process state timers and background time
 //! base, and is recorded in the history. Camera and flashlight on/off/reset
-//! notes keep their history and timers. Health snapshots project these
+//! notes keep their history and timers. Sync notes keep per-uid named,
+//! unpooled DualTimers with the original name overflow and nesting.
+//! Health snapshots project these
 //! recorded counters through the retained original Java health writer and
 //! parceler, with the original BATTERY_STATS check. The other notes, the
 //! readers, the counters a process state change switches and
@@ -397,6 +399,51 @@ struct DualTimer {
     background: DurationTimer,
 }
 
+/// `Uid.mSyncStats`: `OverflowArrayMap<DualTimer>` (android-16.0.0_r1).
+#[derive(Debug, Default)]
+struct SyncTimers {
+    timers: BTreeMap<String, DualTimer>,
+    active_overflow: BTreeMap<String, i32>,
+    overflow: bool,
+}
+
+const OVERFLOW_NAME: &str = "*overflow*";
+
+impl SyncTimers {
+    /// `startObject` / `stopObject`. Null and empty names identify the same timer.
+    fn timer(&mut self, name: Option<&str>, start: bool, limit: usize) -> Option<&mut DualTimer> {
+        let name = name.unwrap_or_default();
+        if self.timers.contains_key(name) {
+            return self.timers.get_mut(name);
+        }
+        if start {
+            if let Some(count) = self.active_overflow.get_mut(name) {
+                *count += 1;
+            } else if self.timers.len() >= limit {
+                if !self.overflow {
+                    // Like mCurOverflow, distinguish an overflow allocation from a
+                    // caller's earlier literal "*overflow*" name.
+                    self.timers
+                        .insert(OVERFLOW_NAME.into(), DualTimer::default());
+                    self.overflow = true;
+                }
+                self.active_overflow.insert(name.into(), 1);
+            } else {
+                return Some(self.timers.entry(name.into()).or_default());
+            }
+        } else if let Some(count) = self.active_overflow.get_mut(name) {
+            *count -= 1;
+            if *count <= 0 {
+                self.active_overflow.remove(name);
+            }
+        } else {
+            eprintln!("app host: batterystats: unable to find sync timer for {name:?}");
+            return None;
+        }
+        self.timers.get_mut(OVERFLOW_NAME)
+    }
+}
+
 /// A `Counter`: what is added while its time base runs.
 #[derive(Debug, Default)]
 struct Counter {
@@ -479,6 +526,7 @@ struct Uid {
     process_state_timers: [Option<StopwatchTimer>; NUM_PROCESS_STATE],
     /// `mOnBatteryBackgroundTimeBase`.
     background: TimeBase,
+    sync: SyncTimers,
     /// `mBluetoothScanTimer`: its battery time is pooled with the other
     /// uids' (`mBluetoothScanOnTimers`).
     bluetooth_scan: Option<DualTimer>,
@@ -499,6 +547,7 @@ impl Uid {
                 ..TimeBase::default()
             },
             camera: None,
+            sync: SyncTimers::default(),
             bluetooth_scan: None,
             bluetooth_unoptimized_scan: None,
             bluetooth_scan_results: None,
@@ -524,6 +573,7 @@ impl Uid {
         ]
         .into_iter()
         .flatten()
+        .chain(self.sync.timers.values_mut())
         {
             if running {
                 t.background.time_started(base_us);
@@ -889,6 +939,7 @@ impl Stats {
                 for t in [&mut u.bluetooth_scan, &mut u.bluetooth_unoptimized_scan]
                     .into_iter()
                     .flatten()
+                    .chain(u.sync.timers.values_mut())
                 {
                     t.timer.time_started(base_us);
                 }
@@ -913,6 +964,9 @@ impl Stats {
                 for t in u.process_state_timers.iter_mut().flatten() {
                     t.time_stopped(base_us);
                 }
+                for t in u.sync.timers.values_mut() {
+                    t.timer.time_stopped_in(base_us, 0);
+                }
             }
         }
         for u in self.uids.values_mut() {
@@ -923,6 +977,20 @@ impl Stats {
     /// `getUidStatsLocked`.
     fn uid(&mut self, uid: i32, now: i64) -> &mut Uid {
         self.uids.entry(uid).or_insert_with(|| Uid::new(now))
+    }
+
+    /// `noteSyncStartLocked` / `noteSyncFinishLocked`'s mapped uid timers.
+    fn note_sync(&mut self, start: bool, name: Option<&str>, uid: i32, now: i64, limit: usize) {
+        let u = self.uids.entry(uid).or_insert_with(|| Uid::new(now));
+        if let Some(t) = u.sync.timer(name, start, limit) {
+            if start {
+                t.timer.start(&self.on_battery_time_base, now);
+                t.background.start(&u.background, now);
+            } else {
+                t.timer.stop(&self.on_battery_time_base, now);
+                t.background.stop(&u.background, now);
+            }
+        }
     }
 
     /// `noteUidProcessStateLocked` of the mapped `uid` (an isolated uid's
@@ -1296,6 +1364,7 @@ pub struct BatteryStats {
     stats: Mutex<Stats>,
     config: OnceLock<Config>,
     health: Mutex<Option<Arc<Strong>>>,
+    sync_name_limit: usize,
 }
 
 impl BatteryStats {
@@ -1329,6 +1398,8 @@ impl BatteryStats {
             stats: Mutex::new(stats),
             config: OnceLock::new(),
             health: Mutex::new(None),
+            // `BatteryStatsImpl.MAX_WAKELOCKS_PER_UID`.
+            sync_name_limit: if low_ram(host) { 40 } else { 200 },
         }
     }
 
@@ -1428,10 +1499,7 @@ impl BatteryStats {
         let framework = host.framework().ok()?;
         let resource = |name: &str| framework.framework_bool(name).unwrap_or(false);
         // `ActivityManager.isLowRamDeviceStatic`.
-        let low_ram = super::system_boolean(host.property("ro.config.low_ram").as_deref(), false)
-            || host.property("ro.debuggable").as_deref() == Some("1")
-                && super::system_boolean(host.property("debug.force_low_ram").as_deref(), false);
-        let max_history_buffer = constant("max_history_buffer_kb").unwrap_or(if low_ram {
+        let max_history_buffer = constant("max_history_buffer_kb").unwrap_or(if low_ram(host) {
             DEFAULT_MAX_HISTORY_BUFFER_LOW_RAM_DEVICE_KB
         } else {
             DEFAULT_MAX_HISTORY_BUFFER_KB
@@ -1652,6 +1720,13 @@ fn elapsed_realtime() -> i64 {
     super::clock_ms(libc::CLOCK_MONOTONIC_RAW)
 }
 
+/// `ActivityManager.isLowRamDeviceStatic`.
+fn low_ram(host: &AppHost) -> bool {
+    super::system_boolean(host.property("ro.config.low_ram").as_deref(), false)
+        || host.property("ro.debuggable").as_deref() == Some("1")
+            && super::system_boolean(host.property("debug.force_low_ram").as_deref(), false)
+}
+
 /// `mapUid`: an SDK sandbox's app, an isolated uid's owner
 /// (`PowerStatsUidResolver`), else the uid.
 fn map_uid(isolated_owners: &[(i32, i32)], uid: i32) -> i32 {
@@ -1676,6 +1751,32 @@ impl Service for BatteryStats {
         let bad = |_| BAD_VALUE;
         // The notes; the audio ones are one-way.
         let noted = match call.code {
+            bs::NOTE_SYNC_START => {
+                let a = bs::NoteSyncStart::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, map, now| {
+                    s.note_sync(
+                        true,
+                        a.name.as_deref(),
+                        map(a.uid),
+                        now,
+                        self.sync_name_limit,
+                    );
+                });
+                Some(r.map(|()| bs::write_note_sync_start_reply(&mut p)))
+            }
+            bs::NOTE_SYNC_FINISH => {
+                let a = bs::NoteSyncFinish::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, map, now| {
+                    s.note_sync(
+                        false,
+                        a.name.as_deref(),
+                        map(a.uid),
+                        now,
+                        self.sync_name_limit,
+                    );
+                });
+                Some(r.map(|()| bs::write_note_sync_finish_reply(&mut p)))
+            }
             bs::NOTE_START_CAMERA => {
                 let a = bs::NoteStartCamera::read(&mut call.data).map_err(bad)?;
                 let r = self.note(caller, |s, map, now| {
@@ -2264,3 +2365,7 @@ mod tests {
 #[cfg(test)]
 #[path = "battery_stats_tests.rs"]
 mod contract_tests;
+
+#[cfg(test)]
+#[path = "battery_sync_tests.rs"]
+mod sync_tests;
