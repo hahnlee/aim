@@ -6058,6 +6058,9 @@ impl Service for Control {
                 if let Err(e) = host.system_ready() {
                     return eprintln!("app host: system ready: {e:?}");
                 }
+                if let Some(connectivity) = host.connectivity_service.get() {
+                    connectivity.system_ready();
+                }
                 let weak = Arc::downgrade(&host);
                 crate::locale::start_native(move |tags| {
                     if let Some(host) = weak.upgrade()

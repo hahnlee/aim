@@ -692,8 +692,12 @@ elapsed/screen durations through atomic files, including scheduled and
 exempted-start sync holds (#1460 slice 5b/#1723, 2026-11-01). Host tests cover
 round trips, hold extension/expiry after reopening, disabled/restricted apps and
 write faults. Writes join the usage-stats flush and shutdown paths; late standby
-writes are rejected after shutdown. Reconnect broadcasts, battery sync timers
-and full wake-lock attribution remain under their owner issues. Matched-image
+writes are rejected after shutdown. Native connectivity now sends sticky
+CONNECTIVITY_ACTION broadcasts for the actual Mac default-network transitions,
+including initial connection, loss, reconnect and replacement; duplicates and
+DNS-only updates stay silent (#1460 slice 5e/#1509). Native receiver/query tests
+and a pinned retained SyncManager receiver/backoff JVM fixture cover this path.
+Battery sync timers and full wake-lock attribution remain under their owner issues. Matched-image
 restoration and sync CTS remain unverified; no guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
