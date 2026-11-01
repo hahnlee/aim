@@ -17,10 +17,13 @@ import com.android.server.wm.WindowManagerInternal;
 /** Typed local adapter to the native window owner; original accessibility policy stays in services.jar. */
 final class AccessibilityWindows extends WindowManagerInternal {
     private final IAccessibilityWindowHost host;
-    AccessibilityWindows(IAccessibilityWindowHost host) { this.host = host; }
-    static void publish(ISystemProcess system) throws RemoteException {
+    private final InputFilters filters;
+    AccessibilityWindows(Context context, IAccessibilityWindowHost host) {
+        this.host = host; filters = new InputFilters(context, host);
+    }
+    static void publish(Context context, ISystemProcess system) throws RemoteException {
         LocalServices.addService(WindowManagerInternal.class,
-                new AccessibilityWindows(system.getAccessibilityWindowHost()));
+                new AccessibilityWindows(context, system.getAccessibilityWindowHost()));
     }
     private static UnsupportedOperationException unsupported() {
         return new UnsupportedOperationException("WindowManagerInternal outside accessibility lifecycle (#2529)");
@@ -96,7 +99,7 @@ final class AccessibilityWindows extends WindowManagerInternal {
     @Override public void setMagnificationSpec(int displayId, MagnificationSpec spec) { throw unsupported(); }
     @Override public void setFullscreenMagnificationActivated(int displayId, boolean activated) { throw unsupported(); }
     @Override public void getMagnificationRegion(int displayId, Region magnificationRegion) { throw unsupported(); }
-    @Override public void setInputFilter(IInputFilter filter) { throw unsupported(); }
+    @Override public void setInputFilter(IInputFilter filter) { call(() -> filters.set(filter)); }
     @Override public IBinder getFocusedWindowToken() { throw unsupported(); }
     @Override public IBinder getFocusedWindowTokenFromWindowStates() {
         try { return host.getFocusedWindowTokenFromWindowStates(); }

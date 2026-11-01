@@ -58,6 +58,7 @@ impl Task {
 /// The tasks, back to front, and the server's connection.
 #[derive(Default)]
 pub struct Tasks {
+    pub(super) app_switches: Mutex<super::app_switches::Policy>,
     pub(super) accessibility_uids: Mutex<Vec<i32>>,
     /// Whether the display server shows a window per task, once it said.
     pub(super) windows: OnceLock<bool>,

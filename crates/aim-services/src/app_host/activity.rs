@@ -970,6 +970,11 @@ impl Service for ActivityTaskManager {
                 atm::write_get_activity_client_controller_reply(&mut p, Some(self.1));
                 Ok(p)
             }
+            atm::STOP_APP_SWITCHES | atm::RESUME_APP_SWITCHES => self.0.app_switches_reply(
+                atm::DESCRIPTOR,
+                call.code == atm::STOP_APP_SWITCHES,
+                call,
+            ),
             atm::REGISTER_BACKGROUND_ACTIVITY_START_CALLBACK => {
                 let a = atm::RegisterBackgroundActivityStartCallback::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

@@ -234,6 +234,40 @@ impl Service for Host {
             let host = &self.0;
             let state = &host.windows.accessibility;
             match call.code {
+                api::ON_USER_STOPPED => {
+                    let a = api::OnUserStopped::read(&mut call.data).map_err(malformed)?;
+                    host.tasks
+                        .app_switches
+                        .lock()
+                        .unwrap()
+                        .allowances
+                        .remove(&a.user_id);
+                }
+                api::SET_INPUT_FILTER => {
+                    let a = api::SetInputFilter::read(&mut call.data).map_err(malformed)?;
+                    host.call_agent(20, "setInputFilter", |p| p.write_binder(a.filter))?;
+                }
+                api::SEND_INPUT_EVENT => {
+                    let a = api::SendInputEvent::read(&mut call.data).map_err(malformed)?;
+                    let event = a
+                        .event
+                        .ok_or_else(|| Exception::illegal_argument("event"))?;
+                    host.call_agent(21, "sendInputEvent", |p| {
+                        aim_service_aidl::write_byte_array(p, Some(&event));
+                        p.write_i32(a.policy_flags | 0x04000000);
+                    })?;
+                }
+                api::SET_ALLOW_APP_SWITCHES => {
+                    let a = api::SetAllowAppSwitches::read(&mut call.data).map_err(malformed)?;
+                    // UserController.isUserRunning(FLAG_OR_STOPPED): only user 0 runs here.
+                    host.tasks.app_switches.lock().unwrap().set(
+                        a.r#type
+                            .ok_or_else(|| Exception::illegal_argument("type"))?,
+                        a.uid,
+                        a.user_id,
+                        a.user_id == super::super::user_service::SYSTEM_USER,
+                    );
+                }
                 api::GET_WINDOW_TRANSFORMATION_MATRIX => {
                     let a = api::GetWindowTransformationMatrix::read(&mut call.data)
                         .map_err(malformed)?;
@@ -457,6 +491,125 @@ mod tests {
             .read_exception()
             .unwrap()
     }
+    #[test]
+    fn system_bridge_stores_allowances_without_launch_effect_and_rejects_other_uids() {
+        use aim_binder_host::{local::Call, parcel::Parcel};
+        use aim_service_aidl::dev_aim_server_iaccessibilitywindowhost as api;
+        let f = super::super::focus_tests::Fixture::new();
+        let service = super::service(f.host.clone());
+        let set = |uid, user_id, sender_euid| {
+            let mut p = Parcel::new();
+            api::SetAllowAppSwitches {
+                r#type: Some("service".into()),
+                uid,
+                user_id,
+            }
+            .write(&mut p);
+            service
+                .transact(&mut Call {
+                    code: api::SET_ALLOW_APP_SWITCHES,
+                    flags: 0,
+                    sender_pid: 98201,
+                    sender_euid,
+                    data: p.reader(),
+                })
+                .unwrap()
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        assert!(set(10123, 0, 10123).is_err());
+        set(10123, 0, 1000).unwrap();
+        assert_eq!(
+            f.host
+                .background_activity_start_allowed(10123)
+                .unwrap_err()
+                .message,
+            "no permissionmgr"
+        );
+        set(110123, 1, 1000).unwrap(); // Non-running users are ignored.
+        let allows = |uid| {
+            f.host
+                .tasks
+                .app_switches
+                .lock()
+                .unwrap()
+                .allows(uid, false, false, Instant::now())
+        };
+        assert!(!allows(110123));
+        assert!(
+            !f.host
+                .tasks
+                .app_switches
+                .lock()
+                .unwrap()
+                .allowances
+                .contains_key(&1)
+        );
+        set(-1, 0, 1000).unwrap();
+        assert!(!allows(10123));
+        set(10123, 0, 1000).unwrap();
+        let mut p = Parcel::new();
+        api::OnUserStopped { user_id: 0 }.write(&mut p);
+        invoke(service.as_ref(), api::ON_USER_STOPPED, &p, 1000).unwrap();
+        assert!(
+            !f.host
+                .tasks
+                .app_switches
+                .lock()
+                .unwrap()
+                .allowances
+                .contains_key(&0)
+        );
+        // Both public Binder routes share ATMS's switch-state owner.
+        let am = super::super::super::Activity(f.host.clone());
+        let atm =
+            super::super::super::activity::ActivityTaskManager(f.host.clone(), Binder::Local(0));
+        use aim_service_aidl::{
+            android_app_iactivitymanager as am_api, android_app_iactivitytaskmanager as atm_api,
+        };
+        for (service, descriptor, stop, resume) in [
+            (
+                &am as &dyn Service,
+                am_api::DESCRIPTOR,
+                am_api::STOP_APP_SWITCHES,
+                am_api::RESUME_APP_SWITCHES,
+            ),
+            (
+                &atm as &dyn Service,
+                atm_api::DESCRIPTOR,
+                atm_api::STOP_APP_SWITCHES,
+                atm_api::RESUME_APP_SWITCHES,
+            ),
+        ] {
+            for code in [stop, resume] {
+                let mut p = Parcel::new();
+                p.write_interface_token(descriptor);
+                invoke(service, code, &p, 1000).unwrap();
+                assert_eq!(
+                    f.host.tasks.app_switches.lock().unwrap().allows(
+                        10123,
+                        true,
+                        false,
+                        Instant::now()
+                    ),
+                    code == resume
+                );
+            }
+        }
+        f.host.set_app_switches(1000, true).unwrap();
+        set(10123, 0, 1000).unwrap();
+        assert_eq!(
+            f.host
+                .background_activity_start_allowed(10123)
+                .unwrap_err()
+                .message,
+            "no permissionmgr"
+        );
+        f.host.tasks.app_switches.lock().unwrap().clear_allowances();
+        assert!(!allows(10123));
+    }
+
     #[test]
     fn node_query_transform_tracks_window_frames_and_removal() {
         // AbstractAccessibilityServiceConnection.findAccessibilityNodeInfoByAccessibilityId

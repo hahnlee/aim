@@ -65,6 +65,7 @@ fn activity_stats_publishes_original_local_shape_and_formats_owner_snapshots() {
                     "CachedAppsWatermark",
                     "IAccessibilityWindowHost",
                     "IAccessibilityWindowCallback",
+                    "IInputFilterCallback",
                     "AccessibilityWindowData",
                 ]
                 .map(|name| input.join(format!("dev/aim/server/{name}.aidl"))),
@@ -76,6 +77,54 @@ fn activity_stats_publishes_original_local_shape_and_formats_owner_snapshots() {
         fs::write(&path, body).unwrap();
         java_sources.push(path);
     };
+    let original = fs::read_to_string(aim_paths::aosp().join(
+        "frameworks/base/services/accessibility/java/com/android/server/accessibility/AccessibilityServiceConnection.java")).unwrap();
+    let bind = &original[original.find("    public void bindLocked()").unwrap()
+        ..original
+            .find("    public boolean canRetrieveInteractiveWindowsLocked()")
+            .unwrap()];
+    // Execute the original bind/unbind bodies, with only their Android boundaries doubled.
+    shadow(
+        "AccessibilityServiceConnection.java",
+        format!(
+            r#"
+package com.android.server.accessibility;
+import android.content.Intent;
+import com.android.server.wm.ActivityTaskManagerInternal;
+public class AccessibilityServiceConnection {{
+    public static class AccessibilityUserState {{
+        public int mUserId; public java.util.Set<Object> binding=new java.util.HashSet<>();
+        boolean getBindInstantServiceAllowedLocked(){{return false;}}
+        java.util.Set<Object> getBindingServicesLocked(){{return binding;}}
+        void removeServiceLocked(Object service){{binding.clear();}}
+    }}
+    static class Binder {{static long clearCallingIdentity(){{return 0;}} static void restoreCallingIdentity(long id){{}}}}
+    static class UserHandle {{UserHandle(int user){{}}}}
+    static class Context {{
+        static final int BIND_AUTO_CREATE=1, BIND_FOREGROUND_SERVICE_WHILE_AWAKE=2,
+            BIND_ALLOW_BACKGROUND_ACTIVITY_STARTS=4, BIND_INCLUDE_CAPABILITIES=8, BIND_ALLOW_INSTANT=16;
+        boolean bindServiceAsUser(Object intent,Object service,int flags,UserHandle user){{return true;}}
+        void unbindService(Object service){{}}
+    }}
+    static class Component {{String flattenToString(){{return "service";}}}}
+    static class AppInfo {{public int uid=10123;}}
+    static class ServiceInfo {{public AppInfo applicationInfo=new AppInfo();}}
+    static class ResolveInfo {{public ServiceInfo serviceInfo=new ServiceInfo();}}
+    static class AccessibilityServiceInfo {{ResolveInfo getResolveInfo(){{return new ResolveInfo();}}}}
+    static class Support {{void unbindImeLocked(Object service){{}} Support getMagnificationProcessor(){{return this;}} void resetAllIfNeeded(int id){{}}}}
+    java.lang.ref.WeakReference<AccessibilityUserState> mUserStateWeakReference;
+    Context mContext=new Context(); Object mClientBinder; Component mComponentName=new Component();
+    Intent mIntent=new Intent("bind"); AccessibilityServiceInfo mAccessibilityServiceInfo=new AccessibilityServiceInfo();
+    ActivityTaskManagerInternal mActivityTaskManagerService; Support mSystemSupport=new Support(); int mId;
+    boolean requestImeApis(){{return false;}} void resetLocked(){{}}
+    public AccessibilityServiceConnection(ActivityTaskManagerInternal tasks,AccessibilityUserState user){{
+        mActivityTaskManagerService=tasks;mUserStateWeakReference=new java.lang.ref.WeakReference<>(user);
+    }}
+{bind}
+}}
+"#
+        ),
+    );
     let binder = fs::read_to_string(production.join("stubs/android/os/Binder.java")).unwrap()
         .replace("public Binder() { throw new RuntimeException(\"stub\"); }", "public Binder() {}")
         .replace("public static final int getCallingUid() { throw new RuntimeException(\"stub\"); }",
@@ -119,6 +168,17 @@ fn activity_stats_publishes_original_local_shape_and_formats_owner_snapshots() {
     shadow("MemInfoReader.java", "package com.android.internal.util; public final class MemInfoReader { public void readMemInfo(){} public long getFreeSizeKb(){return 21;} public long getCachedSizeKb(){return 22;} public long getZramTotalSizeKb(){return 23;} public long getKernelUsedSizeKb(){return 24;} }".into());
     shadow("SparseIntArray.java", "package android.util; public class SparseIntArray { public int size(){return 2;} public int keyAt(int i){return i==0?10123:10124;} public int valueAt(int i){return i==0?5:11;} }".into());
     shadow("BinderInternal.java", "package com.android.internal.os; public class BinderInternal { public static android.util.SparseIntArray nGetBinderProxyPerUidCounts(){return new android.util.SparseIntArray();} }".into());
+    shadow("Context.java", "package android.content; public class Context { public static boolean allowed=true; public void enforceCallingOrSelfPermission(String p,String m){if(!allowed)throw new SecurityException();} }".into());
+    shadow("InputEvent.java", "package android.view; public class InputEvent implements android.os.Parcelable { public static final Creator<InputEvent> CREATOR=new Creator<>() { public InputEvent createFromParcel(android.os.Parcel p){return new InputEvent();} public InputEvent[] newArray(int n){return new InputEvent[n];} }; public void writeToParcel(android.os.Parcel p,int f){} public int describeContents(){return 0;} }".into());
+    let parcel = fs::read_to_string(production.join("stubs/android/os/Parcel.java")).unwrap()
+        .replace("private Parcel(long nativePtr) { throw new RuntimeException(\"stub\"); }", "private Parcel(long nativePtr) {}")
+        .replace("public static Parcel obtain() { throw new RuntimeException(\"stub\"); }", "public static Parcel obtain() { return new Parcel(0); }")
+        .replace("public final byte[] marshall() { throw new RuntimeException(\"stub\"); }", "public final byte[] marshall() { return new byte[0]; }")
+        .replace("public final void unmarshall(byte[] data, int offset, int length) { throw new RuntimeException(\"stub\"); }", "public final void unmarshall(byte[] data, int offset, int length) {}")
+        .replace("public final void setDataPosition(int pos) { throw new RuntimeException(\"stub\"); }", "public final void setDataPosition(int pos) {}")
+        .replace("public final void recycle() { throw new RuntimeException(\"stub\"); }", "public final void recycle() {}");
+    shadow("Parcel.java", parcel);
+    java_sources.push(production.join("src/dev/aim/server/InputFilters.java"));
     java_sources.extend(sources(
         &aim_paths::root().join("crates/aim-services/tests/fixtures/activity_stats"),
     ));
@@ -135,4 +195,8 @@ fn activity_stats_publishes_original_local_shape_and_formats_owner_snapshots() {
         .arg("-cp")
         .arg(format!("{}:{}", classes.display(), stubs.display()))
         .arg("dev.aim.server.ActivityStatsTest"));
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(format!("{}:{}", classes.display(), stubs.display()))
+        .arg("dev.aim.server.InputFiltersTest"));
 }

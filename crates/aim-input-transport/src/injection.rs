@@ -58,6 +58,64 @@ fn xy(t: [f32; 6], x: f32, y: f32, offset: bool) -> (f32, f32) {
     )
 }
 impl Event {
+    /// InputReader's cooked InputMessage as the pinned Java InputEvent parcel.
+    /// Messages here have display-space coordinates and identity transforms.
+    pub fn from_message(m: &[u8]) -> Vec<u8> {
+        let motion = int(m, 0) == 1;
+        let mut p = Vec::new();
+        let mut word = |v: i32| p.extend_from_slice(&v.to_le_bytes());
+        word(if motion { 1 } else { 2 });
+        if motion {
+            word(int(m, 12));
+            word(1);
+        }
+        for at in [8, 24, 28, 32] {
+            word(int(m, at));
+        }
+        word(32);
+        p.extend_from_slice(&m[36..68]);
+        if !motion {
+            for at in [68, 76, 88, 84, 80, 72, 96, 100, 16, 20] {
+                p.extend_from_slice(&m[at..at + 4]);
+            }
+            p.extend_from_slice(&(-1i32).to_le_bytes()); // null characters
+        } else {
+            p.extend_from_slice(&m[68..96]);
+            // Native parcel Transform is [a,b,tx,c,d,ty], unlike InputMessage.
+            for at in [
+                104, 108, 120, 112, 116, 124, 128, 132, 136, 140, 144, 148, 160, 152, 156, 164, 96,
+                100,
+            ] {
+                p.extend_from_slice(&m[at..at + 4]);
+            }
+            let count = int(m, 12) as usize;
+            for i in 0..count {
+                p.extend_from_slice(&m[168 + i * 144..176 + i * 144]);
+            }
+            p.extend_from_slice(&m[16..24]);
+            for i in 0..count {
+                let at = 168 + i * 144;
+                let bits = u64::from_le_bytes(m[at + 8..at + 16].try_into().unwrap());
+                p.extend_from_slice(&m[at + 8..at + 16 + bits.count_ones() as usize * 4]);
+                p.extend_from_slice(&(m[at + 136] as i32).to_le_bytes());
+            }
+        }
+        p
+    }
+
+    /// Filter re-injection preserves the device and accessibility-origin flags.
+    pub fn filtered(&mut self, flags: i32) {
+        let device = int(&self.parcel, if self.motion() { 16 } else { 8 });
+        let motion = self.motion();
+        for m in &mut self.messages {
+            put(m, 24, device);
+            if flags & 0x20000 != 0 {
+                let at = if motion { 76 } else { 72 };
+                let value = int(m, at) | 0x800;
+                put(m, at, value);
+            }
+        }
+    }
     /// Consume one parcel body, retaining every original byte, including key
     /// characters, HMAC, history, sparse axes, resampling and both transforms.
     pub fn decode(bytes: &[u8]) -> Option<(Self, usize)> {

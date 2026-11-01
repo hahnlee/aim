@@ -820,6 +820,9 @@ impl AppHost {
                 format!("{what} not exported from uid {target_uid}")
             }));
         }
+        if !self.background_activity_start_allowed(uid)? {
+            return Ok(102); // ActivityManager.START_ABORTED.
+        }
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.
         let (source, source_task, mut result_to) = {

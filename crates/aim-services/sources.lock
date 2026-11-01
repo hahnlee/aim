@@ -9,6 +9,7 @@ AOSP_TAG=android-16.0.0_r1
 # Original Java sources for the offline package shell intent parser tests.
 # Fetched and hash-checked by aidl-gen alongside the service sources.
 TEST_SOURCE_FILES=(
+  "platform/frameworks/base|services/accessibility/java/com/android/server/accessibility/AccessibilityServiceConnection.java|fc0f8c7c2303a81d66eeedfb3d9ea93da4f902a8cc7019acaf47d22e20dda8df"
   "platform/frameworks/base|services/accessibility/java/com/android/server/accessibility/UiAutomationManager.java|146cd14823da86a405b4641181acdb32d71540a07b520c35bf309bde924c6985"
   "platform/frameworks/base|core/java/android/content/Intent.java|4dc0215006dff72017b05a18451e4090385271bd511d0c399f0a15782e3d79d1"
   "platform/frameworks/base|core/java/android/content/ComponentName.java|8077358457df668ce7d2f92c058ceaab6562e13d9026ccf85f98ca85d62e1ad4"
@@ -534,6 +535,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IActivityStatsHost|java/device-services/aidl/dev/aim/server/IActivityStatsHost.aidl|*"
   "dev.aim.server.IActivityStatsSnapshot|java/device-services/aidl/dev/aim/server/IActivityStatsSnapshot.aidl|*"
   "dev.aim.server.IAccessibilityWindowHost|java/device-services/aidl/dev/aim/server/IAccessibilityWindowHost.aidl|*"
+  "dev.aim.server.IInputFilterCallback|java/device-services/aidl/dev/aim/server/IInputFilterCallback.aidl|*"
   "dev.aim.server.IAccessibilityWindowCallback|java/device-services/aidl/dev/aim/server/IAccessibilityWindowCallback.aidl|*"
   "dev.aim.server.ISystemProcess|java/device-services/aidl/dev/aim/server/ISystemProcess.aidl|*"
   "dev.aim.server.IProviderQueries|java/device-services/aidl/dev/aim/server/IProviderQueries.aidl|*"

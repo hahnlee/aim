@@ -46,6 +46,7 @@ version = "0.1.0"
 dependencies = [
  "aim-emulated-storage",
  "aim-f2fs",
+ "aim-framework-aidl",
  "aim-input-transport",
  "aim-meminfo",
  "android_os_vold",
