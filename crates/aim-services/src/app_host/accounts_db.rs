@@ -194,12 +194,61 @@ impl AccountsDb {
 
     /// `deleteDeAccount` / `deleteCeAccount`, including their delete triggers.
     pub fn delete_account(&self, id: i64) -> Result<()> {
-        self.db
-            .execute("DELETE FROM main.accounts WHERE _id=?", [id])?;
+        self.delete_de_account(id)?;
         if self.ce_attached {
             self.db
                 .execute("DELETE FROM ceDb.accounts WHERE _id=?", [id])?;
         }
+        Ok(())
+    }
+
+    pub fn delete_de_account(&self, id: i64) -> Result<()> {
+        self.db
+            .execute("DELETE FROM main.accounts WHERE _id=?", [id])?;
+        Ok(())
+    }
+
+    pub fn account_id(&self, account: &Account) -> Result<Option<i64>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT _id FROM accounts WHERE name=? AND type=?",
+                params![account.name, account.kind],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// `insertCeAccount` allocates the identity shared by DE and CE.
+    pub fn insert_account(
+        &self,
+        account: &Account,
+        password: Option<&str>,
+        extras: &HashMap<String, Option<String>>,
+    ) -> Result<i64> {
+        self.db.execute(
+            "INSERT INTO ceDb.accounts (name,type,password) VALUES (?,?,?)",
+            params![account.name, account.kind, password],
+        )?;
+        let id = self.db.last_insert_rowid();
+        self.db.execute(
+            "INSERT INTO main.accounts (_id,name,type) VALUES (?,?,?)",
+            params![id, account.name, account.kind],
+        )?;
+        for (key, value) in extras {
+            self.db.execute(
+                "INSERT INTO ceDb.extras (accounts_id,key,value) VALUES (?,?,?)",
+                params![id, key, value],
+            )?;
+        }
+        Ok(id)
+    }
+
+    pub fn set_visibility(&self, id: i64, package: &str, value: i32) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO visibility (accounts_id,_package,value) VALUES (?,?,?)",
+            params![id, package, value],
+        )?;
         Ok(())
     }
 

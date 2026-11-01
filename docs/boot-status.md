@@ -610,6 +610,10 @@ attachment on unlock and removes obsolete-authenticator accounts transactionally
 retaining installed UIDs during updates. Committed caches precede visibility,
 removal and account-list broadcasts, with the sender user preserved (#1504,
 #1460 3a.1; host persistence/rollback/reentry checks, 2026-11-01; no guest boot).
+Explicit add (including initial visibility/extras), remove and visibility writes
+now share that DE/CE owner and commit-before-publication delivery (#1504/#1460 3b).
+Signed-caller, locked-user, rollback/reopen, cascade and CTS-derived setup/teardown
+host checks pass; no guest boot or real CTS run was performed (2026-11-01).
 The inactive typed SyncAccounts adapter now uses a system-UID-only capability
 on that same native owner (#1460/#1504 3a.2). Snapshots propagate owner/database
 failures, and both Java linkage cohorts check the image's injected seam.
