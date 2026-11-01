@@ -291,10 +291,13 @@ impl AppHost {
         if notified.updated {
             std::thread::spawn(move || {
                 std::thread::sleep(FLUSH_INTERVAL);
-                if let Some(host) = me.upgrade()
-                    && let Err(e) = host.with_usage(|user, _, _| user.persist())
-                {
-                    eprintln!("app host: usagestats: {}", e.message);
+                if let Some(host) = me.upgrade() {
+                    if let Err(e) = host.with_usage(|user, _, _| user.persist()) {
+                        eprintln!("app host: usagestats: {}", e.message);
+                    }
+                    if let Err(e) = host.flush_standby() {
+                        eprintln!("app host: {}", e.message);
+                    }
                 }
             });
         }

@@ -13,7 +13,8 @@
 //! holds its app active for the strong usage timeout, and its bucket is
 //! checked again when that ends. The display, the Mac's, is on.
 //!
-//! What the app host does not do: write the history back, other usage
+//! History is flushed with usage stats and at shutdown, in the original format.
+//! What the app host does not do: other usage
 //! events (notifications seen, foreground services, slices, content
 //! providers, user interaction), predictions, cross-profile
 //! apps, and the lowest bucket of an app a device admin or the active
@@ -22,12 +23,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
 use super::settings::Table;
+use super::usage_database::{atomic_read, atomic_write, mkdirs};
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::query::Query;
 
@@ -126,6 +129,8 @@ struct Usage {
     expiry: BTreeMap<i32, i64>,
     last_restrict_attempt_elapsed: i64,
     last_restrict_reason: i32,
+    last_job_run_time: i64,
+    next_estimated_launch_time: i64,
 }
 
 impl Usage {
@@ -142,6 +147,8 @@ impl Usage {
             expiry: BTreeMap::new(),
             last_restrict_attempt_elapsed: 0,
             last_restrict_reason: 0,
+            last_job_run_time: i64::MIN,
+            next_estimated_launch_time: 0,
         }
     }
 }
@@ -170,7 +177,9 @@ impl History {
             screen_on_duration: 0,
             screen_on: false,
         };
-        if let Ok(text) = std::fs::read_to_string(dir.join("screen_on_time")) {
+        if let Ok(bytes) = atomic_read(&dir.join("screen_on_time"))
+            && let Ok(text) = std::str::from_utf8(&bytes)
+        {
             let mut lines = text.lines().map(|l| l.parse::<i64>());
             if let (Some(Ok(screen)), Some(Ok(elapsed))) = (lines.next(), lines.next()) {
                 h.screen_on_duration = screen;
@@ -217,7 +226,7 @@ impl History {
     /// `getUserHistory`, read when first asked for.
     fn user(&mut self, user: i32) -> &mut BTreeMap<String, Usage> {
         if !self.users.contains_key(&user) {
-            let read = match std::fs::read(self.user_file(user)) {
+            let read = match atomic_read(&self.user_file(user)) {
                 Ok(bytes) => read_app_idle_times(&bytes).unwrap_or_else(|e| {
                     eprintln!(
                         "app host: app standby: unable to read app idle file for user {user}: {e}"
@@ -328,6 +337,115 @@ impl History {
             .get(package)
             .map_or(STANDBY_BUCKET_NEVER, |u| u.current_bucket)
     }
+
+    /// `writeAppIdleTimes(userId, elapsedRealtimeMs)`; only loaded users are flushed.
+    fn write_user(&self, user: i32, now: i64) -> std::io::Result<()> {
+        let bytes = write_app_idle_times(&self.users[&user], self.elapsed_time(now));
+        write_history_file(&self.user_file(user), bytes.as_bytes())
+    }
+
+    /// `flushToDisk`: per-file atomicity, followed by `writeAppIdleDurations`.
+    fn flush(&mut self, now: i64) -> std::io::Result<()> {
+        let mut errors = Vec::new();
+        for &user in self.users.keys() {
+            if let Err(e) = self.write_user(user, now) {
+                errors.push(format!("user {user}: {e}"));
+            }
+        }
+        // The original snapshots elapsed time only. Screen duration advances
+        // at screen-off, not at a flush while the display is still on.
+        self.elapsed_duration += now - self.elapsed_snapshot;
+        self.elapsed_snapshot = now;
+        if let Err(e) = write_history_file(
+            &self.dir.join("screen_on_time"),
+            format!("{}\n{}\n", self.screen_on_duration, self.elapsed_duration).as_bytes(),
+        ) {
+            errors.push(format!("screen_on_time: {e}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(errors.join("; ")))
+        }
+    }
+}
+
+fn write_history_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    mkdirs(path.parent().unwrap())?;
+    let result = atomic_write(path, bytes);
+    if result.is_err() {
+        // AtomicFile.failWrite: never replace the committed base on failure.
+        let mut new = path.as_os_str().to_os_string();
+        new.push(".new");
+        if let Err(e) = std::fs::remove_file(new)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("app host: app standby: failWrite {}: {e}", path.display());
+        }
+    }
+    result
+}
+
+/// `writeAppIdleTimes`' version-1 text XML, using FastXmlSerializer's attributes.
+fn write_app_idle_times(apps: &BTreeMap<String, Usage>, elapsed: i64) -> String {
+    use std::fmt::Write;
+    let mut out = String::from(
+        "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<packages version=\"1\">\n",
+    );
+    for (name, u) in apps {
+        out.push_str("    <package name=\"");
+        for c in name.chars() {
+            match c {
+                '"' => out.push_str("&quot;"),
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                c if (c as u32) < 32 => write!(out, "&#{};", c as u32).unwrap(),
+                c => out.push(c),
+            }
+        }
+        write!(out, "\" elapsedIdleTime=\"{}\" lastUsedByUserElapsedTime=\"{}\" screenIdleTime=\"{}\" lastPredictedTime=\"{}\" appLimitBucket=\"{}\" bucketReason=\"{:x}\"",
+            u.last_used_elapsed, u.last_used_by_user_elapsed, u.last_used_screen,
+            u.last_predicted_time, u.current_bucket, u.bucketing_reason).unwrap();
+        if u.last_job_run_time != i64::MIN {
+            write!(out, " lastJobRunTime=\"{}\"", u.last_job_run_time).unwrap();
+        }
+        if u.last_restrict_attempt_elapsed > 0 {
+            write!(
+                out,
+                " lastRestrictionAttemptElapsedTime=\"{}\"",
+                u.last_restrict_attempt_elapsed
+            )
+            .unwrap();
+        }
+        write!(
+            out,
+            " lastRestrictionAttemptReason=\"{:x}\"",
+            u.last_restrict_reason
+        )
+        .unwrap();
+        if u.next_estimated_launch_time > 0 {
+            write!(
+                out,
+                " nextEstimatedAppLaunchTime=\"{}\"",
+                u.next_estimated_launch_time
+            )
+            .unwrap();
+        }
+        out.push_str(">\n        <expiryTimes>\n");
+        for (bucket, expiry) in &u.expiry {
+            if *expiry >= elapsed {
+                writeln!(
+                    out,
+                    "            <item bucket=\"{bucket}\" expiry=\"{expiry}\" />"
+                )
+                .unwrap();
+            }
+        }
+        out.push_str("        </expiryTimes>\n    </package>\n");
+    }
+    out.push_str("</packages>\n");
+    out
 }
 
 /// `AppStandbyController.isUserUsage`.
@@ -372,6 +490,8 @@ fn read_app_idle_times(bytes: &[u8]) -> Result<BTreeMap<String, Usage>, String> 
                 .ok()
                 .flatten()
                 .unwrap_or(0),
+            last_job_run_time: long("lastJobRunTime")?.unwrap_or(i64::MIN),
+            next_estimated_launch_time: long("nextEstimatedAppLaunchTime")?.unwrap_or(0),
             ..Usage::new()
         };
         if version >= 1 {
@@ -385,14 +505,21 @@ fn read_app_idle_times(bytes: &[u8]) -> Result<BTreeMap<String, Usage>, String> 
                 if bucket == STANDBY_BUCKET_UNKNOWN {
                     continue;
                 }
-                u.expiry.insert(bucket, item.long("expiry")?.unwrap_or(0));
+                let expiry = item.long("expiry")?.unwrap_or(0);
+                if expiry != 0 {
+                    u.expiry.insert(bucket, expiry);
+                }
             }
         } else {
             let active = long("activeTimeoutTime")?.unwrap_or(0);
             let working_set = long("workingSetTimeoutTime")?.unwrap_or(0);
             if active != 0 || working_set != 0 {
-                u.expiry.insert(STANDBY_BUCKET_ACTIVE, active);
-                u.expiry.insert(STANDBY_BUCKET_WORKING_SET, working_set);
+                if active != 0 {
+                    u.expiry.insert(STANDBY_BUCKET_ACTIVE, active);
+                }
+                if working_set != 0 {
+                    u.expiry.insert(STANDBY_BUCKET_WORKING_SET, working_set);
+                }
             }
         }
         users.insert(name.into_owned(), u);
@@ -544,6 +671,7 @@ impl Controller {
 pub(super) struct AppStandby {
     controller: Mutex<Option<Controller>>,
     checks: Mutex<()>,
+    closed: AtomicBool,
 }
 
 /// An app usage event AppStandbyController takes (`onUsageEvent`).
@@ -554,6 +682,30 @@ pub(super) enum Event {
 }
 
 impl AppHost {
+    pub(super) fn flush_standby(&self) -> Result<(), Exception> {
+        let mut guard = self.app_standby.controller.lock().unwrap();
+        if !self.app_standby.closed.load(Ordering::Relaxed)
+            && let Some(c) = guard.as_mut()
+        {
+            c.history
+                .flush(elapsed_realtime())
+                .map_err(persistence_error)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn shutdown_standby(&self) -> Result<(), Exception> {
+        let mut guard = self.app_standby.controller.lock().unwrap();
+        if !self.app_standby.closed.swap(true, Ordering::Relaxed)
+            && let Some(c) = guard.as_mut()
+        {
+            c.history
+                .flush(elapsed_realtime())
+                .map_err(persistence_error)?;
+        }
+        Ok(())
+    }
+
     /// `AppStandbyController.Injector.isAppIdleEnabled`.
     pub(super) fn app_idle_enabled(&self) -> Result<bool, Exception> {
         let inputs = self.platform()?;
@@ -585,6 +737,9 @@ impl AppHost {
         f: impl FnOnce(&AppHost, &mut Controller) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
         let mut guard = self.app_standby.controller.lock().unwrap();
+        if self.app_standby.closed.load(Ordering::Relaxed) {
+            return Err(Exception::new(EX_ILLEGAL_STATE, "app standby is shut down"));
+        }
         if guard.is_none() {
             let controller = self.start_standby()?;
             *guard = Some(controller);
@@ -667,7 +822,8 @@ impl AppHost {
                 );
             }
         }
-        Ok(())
+        c.history.user(user);
+        c.history.write_user(user, now).map_err(persistence_error)
     }
 
     /// The packages installed for `user` with `flags`: name, uid and
@@ -1237,6 +1393,9 @@ fn check_idle_states_periodically(host: Weak<AppHost>, interval: i64) {
     loop {
         {
             let Some(host) = host.upgrade() else { return };
+            if host.app_standby.closed.load(Ordering::Relaxed) {
+                return;
+            }
             if let Err(e) = host.check_idle_states() {
                 eprintln!("app host: app standby: {}", e.message);
             }
@@ -1244,6 +1403,14 @@ fn check_idle_states_periodically(host: Weak<AppHost>, interval: i64) {
         std::thread::sleep(Duration::from_millis(interval as u64));
     }
 }
+
+fn persistence_error(e: std::io::Error) -> Exception {
+    Exception::new(EX_ILLEGAL_STATE, format!("app standby persistence: {e}"))
+}
+
+#[cfg(test)]
+#[path = "app_standby_persistence_tests.rs"]
+mod persistence_tests;
 
 #[cfg(test)]
 mod tests {
