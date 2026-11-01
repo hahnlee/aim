@@ -27,17 +27,10 @@ impl PermissionManager {
                 "removal permission app ID differs",
             ));
         }
-        if !matches!(user, -1 | 0)
-            || package.shared_user.is_some()
-            || state
-                .packages
-                .values()
-                .any(|ps| ps.app_id == app_id && ps.name != package.name)
-        {
-            return Err(self.host.unimplemented_named(
-                "installer removal",
-                "shared UID or non-user-0 permissions (#1996)",
-            ));
+        if !matches!(user, -1 | 0) {
+            return Err(self
+                .host
+                .unimplemented_named("installer removal", "non-user-0 permissions (#1996)"));
         }
         // Validate the session's permission projection before the deletion
         // coordinator destroys data. This is a read-only preparation, not a
@@ -72,12 +65,28 @@ impl PermissionManager {
         let removed = !state.packages.contains_key(&package.name);
         let clear_user0 = user == 0
             || (user == -1 && super::super::user_service::user_ids(&self.host, true)?.contains(&0));
+        let remaining: Vec<_> = state
+            .packages
+            .values()
+            .filter(|p| p.name != package.name && p.app_id == package.app_id)
+            .collect();
+        let requests: BTreeSet<_> = remaining
+            .iter()
+            .filter_map(|p| p.pkg.as_ref())
+            .flat_map(|p| p.requested_permissions.iter().cloned())
+            .collect();
+        if !removed && !remaining.is_empty() && clear_user0 {
+            return self.mutate(Some(KILL_APP_REASON_PERMISSIONS_REVOKED), |access, new| {
+                access.reset_runtime_permissions(new, &package.name, 0)
+            });
+        }
+        let trim = removed && remaining.iter().any(|p| p.pkg.is_some());
         let (before_system, changes) = self.commit_removal(
             &package.name,
             package.app_id,
             removed,
-            clear_user0,
-            None,
+            clear_user0 && remaining.is_empty(),
+            trim.then_some(&requests),
             &[],
         )?;
         self.grants_changed()?;
@@ -564,6 +573,43 @@ mod tests {
             assert!(!disk.settings.packages.iter().any(|p| p.name == "p"));
         });
     }
+    #[test]
+    fn shared_removal_trims_only_departing_requests_and_persists_last_uid_removal() {
+        let fixture = super::super::tests::PersistedAccess::new();
+        let manager = PermissionManager::new(fixture.host.clone());
+        manager.write_system(&AccessSystem::default()).unwrap();
+        let mut user = AccessUser::default();
+        user.package_versions = vec![("a".into(), 17), ("b".into(), 17)];
+        user.set_permission_flags(10100, "camera", RUNTIME_GRANTED | USER_SET);
+        user.set_permission_flags(10100, "other", INSTALL_GRANTED);
+        manager.write_user0(&user).unwrap();
+        manager
+            .commit_removal(
+                "a",
+                10100,
+                true,
+                false,
+                Some(&["camera".into()].into()),
+                &[],
+            )
+            .unwrap();
+        let after = manager.retained_access().unwrap();
+        assert_eq!(
+            after.user0.permission_flags(10100, "camera"),
+            RUNTIME_GRANTED | USER_SET
+        );
+        assert_eq!(after.user0.permission_flags(10100, "other"), 0);
+        assert_eq!(after.user0.package_versions, [("b".into(), 17)]);
+        manager
+            .commit_removal("b", 10100, true, true, Some(&BTreeSet::new()), &[])
+            .unwrap();
+        let reload = PermissionManager::new(fixture.host.clone())
+            .retained_access()
+            .unwrap();
+        assert!(reload.user0.app_id_permissions.is_empty());
+        assert!(reload.user0.package_versions.is_empty());
+    }
+
     #[test]
     fn boot_removal_migrates_other_user_before_trimming() {
         let fixture = super::super::migration::tests::user_fixture();

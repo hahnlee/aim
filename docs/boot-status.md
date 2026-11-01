@@ -3163,14 +3163,14 @@ but not provided types. Missing splits retain legacy -28, malformed type syntax
 retains MANIFEST_MALFORMED -108 through typed storage/native failure mapping.
 Thirteen focused split regressions pass, including unchanged official APKs and
 real inherited-copy admission. Actual affected CTS replay remains pending.
-C111 first-valid shared UID install also fails before the intended foreign-cert
-negative phase because candidate process-group assignments retain the old group
-inventory (#1173); the original exact test passes. Candidate runtime completion
-now rebuilds ordered process groups from actual finalized native member owners
-transactionally before Store validation. Three focused checks pass without skips:
-first/second null process maps, real-DER shared signer admission and foreign-cert
-atomic rejection, and candidate validation/failure atomicity. Actual CTS replay
-remains pending.
+Shared-UID live installs now pass the native permission preparer (#1173):
+first/matching members retain the shared appId, signer/lineage checks and rebuilt
+process-group inventory. Permission evaluation and trimming use the shared user's
+request union; removal preserves surviving requests and deletes the last UID.
+Six new host regressions cover the C111 foreign-cert sequence, matching members,
+lineage capabilities, grants, removal and settings/access persistence/reload.
+This is sandbox-only source validation (2026-11-01); no guest boot or actual
+SharedUserIdTest/CtsWindowManagerDevice* replay was run.
 C111 also exposes retained updated-system-app state after factory restore rejects
 an APK inside APEX (#1171). Native restore resolves the actual original APEX
 inventory before parsing, retains its partition, application privilege and
