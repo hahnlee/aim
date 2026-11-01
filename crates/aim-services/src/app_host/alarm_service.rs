@@ -698,6 +698,7 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
                 if let (Some(reason), Some(uid)) = (fgs_allowlist, host.intent_sender_uid(op)) {
                     let duration = super::services::ALLOW_WHILE_IDLE_ALLOWLIST_DURATION;
                     if let Err(e) = host.device_idle().add_temp_direct(
+                        super::SYSTEM_UID as i32,
                         uid,
                         duration.as_millis() as i64,
                         super::device_idle::TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,

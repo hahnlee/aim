@@ -95,11 +95,10 @@ impl Service for SystemProcess {
             sp::ADD_SYNC_TEMP_ALLOWLIST => {
                 let a = sp::AddSyncTempAllowlist::read(&mut call.data)?;
                 system().and_then(|()| {
-                    if a.calling_uid != SYSTEM_UID as i32 || a.sync || !(0..=1).contains(&a.r#type)
-                    {
+                    if a.sync || !(0..=1).contains(&a.r#type) {
                         return Err(self.host.unimplemented_named(
                             "deviceidle",
-                            "local allowlist caller/sync/type (#2016)",
+                            "local allowlist sync/type (#2016)",
                         ));
                     }
                     let kind = super::device_idle::DeviceIdle::temp_allowlist_type(
@@ -109,6 +108,7 @@ impl Service for SystemProcess {
                     .map_err(|e| self.host.unimplemented_named("deviceidle", &e))?;
                     if kind != -1 {
                         self.host.device_idle().add_temp(
+                            a.calling_uid,
                             a.package_name.as_deref(),
                             a.duration_ms,
                             kind,
@@ -728,6 +728,7 @@ impl Service for IdleAdapter {
                         .0
                         .device_idle()
                         .add_temp(
+                            SYSTEM_UID as i32,
                             Some(package),
                             a.duration,
                             super::device_idle::TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,

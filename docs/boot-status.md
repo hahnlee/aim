@@ -674,6 +674,12 @@ acceptance.
 Typed usage/idle locals now delegate retained sync scheduling to native owners
 (#1460 slice 5a/#1723/#2016). Host/JVM and image-link checks cover bucket reads,
 non-doze promotion/hold and temporary allowlisting without FGS privilege.
+Temporary allowlisting now retains caller/reason/type attribution, caps durations,
+resets membership deadlines while preserving the first reason and pending timeout,
+and delivers ordered native listener transitions (#1460 slice 5c/#2016).
+Type 1 never creates or extends an FGS allowance. Host tests cover missing
+packages/users, boundary expiry, renewal and listener reentry; consumer integration
+remains slice 5d. No guest boot or matched-image sync/CTS acceptance was run.
 Standby history now writes the original version-1 XML, expiry records and
 elapsed/screen durations through atomic files, including scheduled and
 exempted-start sync holds (#1460 slice 5b/#1723, 2026-11-01). Host tests cover
