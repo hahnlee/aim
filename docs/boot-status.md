@@ -96,6 +96,13 @@ AIDL generators as inputs, so restoring sources cannot leave an externally
 replaced runtime binary marked fresh (#1429). Host build-graph regressions pass;
 no guest boot was run (2026-10-28).
 
+Descriptor creation now initializes CLOEXEC even when clear, including kqueue
+backends; Linux F_GETFD reports only the descriptor's current CLOEXEC bit, never
+Darwin's CLOFORK (#2646). Host creator/round-trip and exec-close selection checks
+pass (2026-11-02). Actual epoll inheritance across exec remains #2571;
+signalfd4 is unimplemented (#2648), so its flag coverage is not run. No guest boot
+was run.
+
 Fork child descriptor reconstruction propagates epoll, inotify and pidfd
 kqueue creation and installation failures to the restore owner before guest
 resume (#1209). Inotify watch and queued-event restoration also rejects failed
