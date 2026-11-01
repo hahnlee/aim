@@ -300,6 +300,9 @@ pub(super) mod input_sync;
 #[path = "window_capture.rs"]
 mod capture;
 
+#[path = "window_dump.rs"]
+mod dump;
+
 impl Service for WindowManager {
     fn descriptor(&self) -> &str {
         wm::DESCRIPTOR
@@ -312,6 +315,7 @@ impl Service for WindowManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            aim_binder_host::local::DUMP_TRANSACTION => return self.dump(call),
             wm::CAPTURE_DISPLAY => return self.0.capture_display(call),
             wm::SYNC_INPUT_TRANSACTIONS => {
                 let a = wm::SyncInputTransactions::read(&mut call.data).map_err(|_| BAD_VALUE)?;

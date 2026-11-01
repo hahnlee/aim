@@ -517,7 +517,7 @@ impl Configuration {
 /// A `ProtoOutputStream` as far as `Configuration.dumpDebug` writes:
 /// scalars that are 0 and empty strings and messages are left out.
 #[derive(Default)]
-struct ProtoOut(Vec<u8>);
+pub(super) struct ProtoOut(pub Vec<u8>);
 
 impl ProtoOut {
     fn raw_varint(&mut self, mut v: u64) {
@@ -537,11 +537,18 @@ impl ProtoOut {
     }
 
     /// An `int32` field: a negative value takes ten bytes.
-    fn int32(&mut self, field: u64, v: i32) {
+    pub(super) fn int32(&mut self, field: u64, v: i32) {
         if v != 0 {
             self.raw_varint(field << 3);
             self.raw_varint(v as i64 as u64);
         }
+    }
+
+    /// Unlike a string, an empty submessage still has presence.
+    pub(super) fn message(&mut self, field: u64, v: &[u8]) {
+        self.raw_varint(field << 3 | 2);
+        self.raw_varint(v.len() as u64);
+        self.0.extend_from_slice(v);
     }
 
     fn float(&mut self, field: u64, v: f32) {
@@ -551,7 +558,7 @@ impl ProtoOut {
         }
     }
 
-    fn bytes(&mut self, field: u64, v: &[u8]) {
+    pub(super) fn bytes(&mut self, field: u64, v: &[u8]) {
         if !v.is_empty() {
             self.raw_varint(field << 3 | 2);
             self.raw_varint(v.len() as u64);
@@ -562,7 +569,7 @@ impl ProtoOut {
 
 impl Rect {
     /// `Rect.dumpDebug`.
-    fn to_proto(self) -> Vec<u8> {
+    pub(super) fn to_proto(self) -> Vec<u8> {
         let mut o = ProtoOut::default();
         o.int32(1, self.left);
         o.int32(2, self.top);
