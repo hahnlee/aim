@@ -444,6 +444,15 @@ impl Store {
         self.current.lock().unwrap().clone()
     }
 
+    /// A writer already holding disk/publication locks must retry rather than
+    /// wait for a canonical commit whose persistence callback can need them.
+    pub(crate) fn try_capture(&self) -> Option<Arc<Snapshot>> {
+        match self.current.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            result => Some(result.unwrap().clone()),
+        }
+    }
+
     /// Persist while the exact base remains locked. The callback performs disk
     /// work only; Binder calls and cache/broadcast effects happen after return.
     #[track_caller]
