@@ -149,6 +149,26 @@ impl RawIntent {
         RawIntent::read_from(&mut Reader::new(p.data(), &[])).expect("a written intent reads")
     }
 
+    /// NextMatching keeps the source's data/type and resets the explicit component.
+    pub(super) fn for_next_match(&self, source: &Self) -> Result<Self> {
+        let a = Spans::of(&self.raw)?;
+        let b = Spans::of(&source.raw)?;
+        let mut none = Parcel::new();
+        none.write_string16(None);
+        let raw = Raw::concat(&[
+            self.raw.slice(0, a.data.0),
+            source.raw.slice(b.data.0, b.ty.1),
+            self.raw.slice(a.ty.1, a.component.0),
+            Raw::of(&none),
+            self.raw
+                .slice(a.component.1, self.raw.parcel().data().len()),
+        ]);
+        let intent = Self::read_from(&mut raw.parcel().reader())?;
+        let mut intent = Self { raw, ..intent };
+        intent.set_flags(intent.intent.flags, intent.intent.extended_flags & !1);
+        Ok(intent)
+    }
+
     /// The intent with its component set (`Intent.setComponent`).
     pub fn with_component(&self, package: &str, class: &str) -> RawIntent {
         let mut p = Parcel::new();

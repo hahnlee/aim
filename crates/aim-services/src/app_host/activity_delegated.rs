@@ -2,7 +2,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::{
     AppHost,
-    activity_start::{START_CANCELED, StartArgs},
+    activity_start::{LaunchIntent, START_CANCELED, StartArgs},
     kept::{RawBundle, RawIntent},
     reply,
 };
@@ -30,11 +30,13 @@ pub(super) fn transact(host: &Arc<AppHost>, call: &mut Call<'_>) -> Reply {
         result_who: r.read_string16().map_err(|_| BAD_VALUE)?,
         request_code: r.read_i32().map_err(|_| BAD_VALUE)?,
         options: None,
+        start_flags: 0,
         launch: None,
     };
     let flags = r.read_i32().map_err(|_| BAD_VALUE)?;
     let profiler = read_typed::<super::activity::ProfilerInfo>(r).map_err(|_| BAD_VALUE)?;
     let args = StartArgs {
+        start_flags: flags,
         options: read_typed::<RawBundle>(r).map_err(|_| BAD_VALUE)?,
         ..args
     };
@@ -163,6 +165,155 @@ impl AppHost {
         args.calling_package = from.package.clone();
         self.execute_activity_start(from.uid, from.package, -1, args, prepared)
             .map(|r| r.0)
+    }
+
+    pub(super) fn next_matching(
+        self: &Arc<Self>,
+        call: &Call<'_>,
+        token: Option<Binder>,
+        intent: Option<RawIntent>,
+        options: Option<RawBundle>,
+    ) -> Result<bool, Exception> {
+        if intent.as_ref().is_some_and(RawIntent::has_fds) {
+            return Err(Exception::illegal_argument(
+                "File descriptors passed in Intent",
+            ));
+        }
+        let _serial = self.activities.starts.lock().unwrap();
+        let Some((package, class, seq, launch, resolved, from, result_to, who, request)) =
+            self.activities.with(token, |r| {
+                (
+                    r.package.clone(),
+                    r.class.clone(),
+                    r.start_seq,
+                    r.intent.clone(),
+                    r.resolved_type.clone(),
+                    r.launched_from.clone(),
+                    r.result_to,
+                    r.result_who.clone(),
+                    r.request_code,
+                )
+            })
+        else {
+            return Ok(false);
+        };
+        let Some(Binder::Local(t)) = token else {
+            return Ok(false);
+        };
+        let in_task = {
+            let stack = self.activities.stack.lock().unwrap();
+            stack.get(t).is_some_and(|r| stack.task(r.task).is_some())
+        };
+        if !in_task {
+            return Ok(false);
+        }
+        let Some((uid, pid)) = self
+            .apps
+            .lock()
+            .unwrap()
+            .get(&seq)
+            .filter(|a| a.thread.is_some())
+            .map(|a| (a.uid as i32, a.pid))
+        else {
+            return Ok(false);
+        };
+        let intent = intent
+            .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "intent"))?;
+        let source = match launch {
+            LaunchIntent::Raw(k) => k.intent,
+            LaunchIntent::Component => RawIntent::of(None, 0, &[]).with_component(&package, &class),
+        };
+        let intent = intent
+            .for_next_match(&source)
+            .map_err(|_| Exception::illegal_argument("intent"))?;
+        let user = call.sender_euid as i32 / super::PER_USER_RANGE as i32;
+        let (_, resolution) = self.packages()?;
+        let matches = resolution
+            .query_intent_activities(
+                &intent.intent,
+                resolved.as_deref(),
+                super::STOCK_PM_FLAGS | 0x10000,
+                user,
+                call.sender_euid as i32,
+            )
+            .map_err(|e| Exception::illegal_argument(format!("queryIntentActivities: {e:?}")))?;
+        let mut matches = matches.into_iter().filter_map(|r| match r.info {
+            crate::package::component_resolver::Info::Activity(i) => Some(i),
+            _ => None,
+        });
+        let Some(_) = matches.find(|i| {
+            i.info.item.package_name.as_deref() == Some(&package)
+                && i.info.item.name.as_deref() == Some(&class)
+        }) else {
+            return Ok(false);
+        };
+        let Some(info) = matches.next() else {
+            return Ok(false);
+        };
+        let mut intent = intent.with_component(
+            info.info
+                .application_info
+                .item
+                .package_name
+                .as_deref()
+                .unwrap_or_default(),
+            info.info.item.name.as_deref().unwrap_or_default(),
+        );
+        intent.set_flags(
+            intent.intent.flags & !0x1e000000,
+            intent.intent.extended_flags,
+        );
+        let finishing = {
+            let mut stack = self.activities.stack.lock().unwrap();
+            let r = stack.get_mut(t).unwrap();
+            let old = r.finishing;
+            r.finishing = true;
+            r.result_to = None;
+            // Each result payload belongs to one source, unlike ResultInfo's wire form.
+            let result = r.result.take();
+            if let Some(to) = result_to.and_then(|to| stack.get_mut(to)) {
+                to.results.retain(|p| Some(*p) != result);
+            }
+            if let Some(result) = result {
+                self.activities.payloads.lock().unwrap().remove(&result);
+            }
+            old
+        };
+        self.activities.with(token, |r| r.result_to = None);
+        let args = StartArgs {
+            caller: None,
+            calling_package: from.package.clone(),
+            intent: Some(intent),
+            resolved_type: resolved,
+            result_to: result_to.map(Binder::Local),
+            result_who: who,
+            request_code: request,
+            options,
+            start_flags: 0,
+            launch: None,
+        };
+        let result = self.execute_activity_start(
+            uid,
+            from.package,
+            pid,
+            args,
+            super::activity_start::PreparedStart {
+                info: Some(info),
+                // Supplying activityInfo skips Request.resolveActivity and its grant collection.
+                grants: None,
+                ignore_security: false,
+                real_caller_uid: Some(call.sender_euid as i32),
+            },
+        );
+        if result.is_ok()
+            && let Some(r) = self.activities.stack.lock().unwrap().get_mut(t)
+        {
+            r.finishing = finishing;
+        }
+        match result {
+            Err(e) if e.code == EX_UNSUPPORTED_OPERATION => Ok(false),
+            other => other.map(|r| r.0 == 0),
+        }
     }
 
     // ATMS.createSafeActivityOptionsWithBalAllowed and BAL's two identities.

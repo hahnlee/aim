@@ -229,6 +229,7 @@ fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32
         result_who: None,
         request_code: 0,
         options: None,
+        start_flags: 0,
         launch: None,
     };
     let waited = if wait {
@@ -239,7 +240,7 @@ fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32
     let result = if let Some(w) = &waited {
         w.result
     } else {
-        host.start_activity(&call, args, Some(user), None)?
+        host.start_activity(&call, args, Some(user), None, None)?
     };
     let message = match result {
         0 => String::new(),

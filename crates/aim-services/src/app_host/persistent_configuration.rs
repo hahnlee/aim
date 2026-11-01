@@ -8,6 +8,7 @@ pub(super) struct Locales {
     pub user_set: bool,
     pub direction: i32,
     pub compat: Option<i32>,
+    pub font_scale: Option<f32>,
 }
 
 impl Locales {
@@ -22,6 +23,7 @@ impl Locales {
             user_set: false,
             direction,
             compat: None,
+            font_scale: None,
         }
     }
 }
@@ -96,26 +98,31 @@ impl AppHost {
         &self,
         values: &config::Configuration,
     ) -> Result<(), Exception> {
+        self.apply_configuration(values, true)
+    }
+
+    pub(super) fn apply_configuration(
+        &self,
+        values: &config::Configuration,
+        persistent: bool,
+    ) -> Result<(), Exception> {
         let _update = self.configuration_update.lock().unwrap();
         let old = self.global_configuration()?;
         let merged = old.merge_persistent(values)?;
-        let changes = old.diff(&merged);
-        if changes == 0 {
-            return Ok(());
-        }
-        let persisted_locale = if !values.locales.is_empty() && values.user_set_locale {
-            Some(if values.locales.contains(',') {
-                self.settings_provider()?
-                    .best_persistent_locale(&values.locales)?
+        let persisted_locale =
+            if old.diff(&merged) != 0 && !values.locales.is_empty() && values.user_set_locale {
+                Some(if values.locales.contains(',') {
+                    self.settings_provider()?
+                        .best_persistent_locale(&values.locales)?
+                } else {
+                    values.locales.clone()
+                })
             } else {
-                values.locales.clone()
-            })
-        } else {
-            None
-        };
+                None
+            };
         let inputs = self.platform()?;
         let mut settings_changes = Vec::new();
-        if changes & (config::CONFIG_FONT_SCALE | config::CONFIG_LOCALE) != 0 {
+        if persistent {
             for (name, value) in [
                 ("font_scale", merged.font_scale.to_string()),
                 ("system_locales", merged.locales.clone()),
@@ -161,6 +168,7 @@ impl AppHost {
             user_set: merged.user_set_locale,
             direction: merged.screen_layout & 0xc0,
             compat: Some(merged.screen_layout & 0x1000_0000),
+            font_scale: Some(merged.font_scale),
         };
         self.propagate_configuration(&old, &settings_changes)
     }

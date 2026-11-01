@@ -4289,23 +4289,29 @@ impl AppHost {
 
     /// The global configuration (`ActivityTaskManagerService
     /// .getGlobalConfiguration`): the display's, the locales and fonts the
-    /// settings hold, night as the Mac's appearance, at the current
+    /// global owner holds, night as the Mac's appearance, at the current
     /// sequence number.
     fn global_configuration(&self) -> Result<config::Configuration, Exception> {
         let inputs = self.platform()?;
         let metrics = self.display_metrics()?;
-        let locales = inputs.locales.lock().unwrap().clone();
+        let locales = {
+            let mut locales = inputs.locales.lock().unwrap();
+            locales.font_scale.get_or_insert_with(|| {
+                inputs
+                    .settings
+                    .get(settings::Table::System, "font_scale")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0)
+            });
+            locales.clone()
+        };
         let mut configuration = config::Configuration::of_metrics(
             &metrics,
             &config::Device {
                 locales: &locales.tags,
                 right_to_left: locales.direction == 0x80,
                 night: crate::uimode::mac::dark(),
-                font_scale: inputs
-                    .settings
-                    .get(settings::Table::System, "font_scale")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1.0),
+                font_scale: locales.font_scale.unwrap(),
                 font_weight_adjustment: inputs
                     .settings
                     .get(settings::Table::Secure, "font_weight_adjustment")
@@ -4355,6 +4361,11 @@ impl AppHost {
         const FLAG_RECEIVER_OFFLOAD_FOREGROUND: i32 = 0x0000_0800;
         let changes = old.diff(&self.global_configuration()?);
         if changes == 0 {
+            if let Some((provider, ..)) = self.settings_provider.get() {
+                for name in settings_changes {
+                    provider.notify(settings::Table::System, 0, name)?;
+                }
+            }
             return Ok(());
         }
         self.config_seq.fetch_add(1, Ordering::Relaxed);

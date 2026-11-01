@@ -491,7 +491,16 @@ impl Stack {
 
     /// `startActivityInner`'s decision for `s`, or what of it the app host
     /// does not do.
+    #[cfg(test)]
     pub fn decide(&self, s: &Start<'_>) -> Result<Decision, &'static str> {
+        self.decide_only_if_needed(s, false)
+    }
+
+    pub(super) fn decide_only_if_needed(
+        &self,
+        s: &Start<'_>,
+        only: bool,
+    ) -> Result<Decision, &'static str> {
         let mode = s.launch_mode;
         let single = matches!(mode, LAUNCH_SINGLE_INSTANCE | LAUNCH_SINGLE_TASK);
         let mut flags = document_flags(s.intent.flags, mode, s.document_launch_mode);
@@ -519,6 +528,16 @@ impl Stack {
         let not_top = s
             .source
             .filter(|_| flags & FLAG_ACTIVITY_PREVIOUS_IS_TOP != 0);
+        // ActivityStarter.setInitialState: compare the source, or the running top excluding mNotTop.
+        let caller = source.or_else(|| {
+            self.focused().and_then(|task| {
+                self.activities
+                    .iter()
+                    .rev()
+                    .find(|a| a.task == task && !a.finishing && Some(a.token) != not_top)
+            })
+        });
+        let only = only && caller.is_some_and(|a| a.component == s.component);
         // `computeLaunchingTaskFlags`.
         if source.is_none_or(|src| src.launch_mode == LAUNCH_SINGLE_INSTANCE) || single {
             flags |= FLAG_ACTIVITY_NEW_TASK;
@@ -594,6 +613,13 @@ impl Stack {
             }
             // `complyActivityFlags`.
             let reused_top = reused.and_then(|t| self.top(t));
+            // recycleTask returns before complyActivityFlags, including the source's own task.
+            if only {
+                d.front = Some(task);
+                d.flags = flags;
+                d.outcome = Outcome::Front(1);
+                return Ok(d);
+            }
             if reused_top.is_some() && flags & FLAG_ACTIVITY_RESET_TASK_IF_NEEDED != 0 {
                 return Err("a task's reset");
             }
@@ -692,6 +718,11 @@ impl Stack {
             && top.state != State::Initializing
             && (flags & FLAG_ACTIVITY_SINGLE_TOP != 0 || mode == LAUNCH_SINGLE_TOP)
         {
+            if only {
+                d.outcome = Outcome::Deliver(top.token, 1);
+                d.flags = flags;
+                return Ok(d);
+            }
             if d.result_to.take().is_some() {
                 d.cancel_result = true;
             }
@@ -1487,6 +1518,52 @@ mod tests {
             source,
             result_to: None,
         }
+    }
+
+    // ActivityStarter.setInitialState, recycleTask, deliverToCurrentTopIfNeeded.
+    #[test]
+    fn only_if_needed_checks_the_caller_and_returns_before_clearing_or_delivery() {
+        let mut s = Stack::default();
+        launch_new(&mut s, 1, 7, "A", 0);
+        s.get_mut(1).unwrap().state = State::Resumed;
+        for source in [None, Some(1)] {
+            for flags in [
+                FLAG_ACTIVITY_NEW_TASK,
+                FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK,
+            ] {
+                let intent = Intent {
+                    flags,
+                    ..Default::default()
+                };
+                let request = start("com.example/A", 0, &intent, source);
+                let d = s.decide_only_if_needed(&request, true).unwrap();
+                assert_eq!(d.outcome, Outcome::Front(1));
+                assert!(d.clear.is_empty());
+                assert!(!d.set_intent);
+            }
+        }
+        let intent = Intent {
+            flags: FLAG_ACTIVITY_SINGLE_TOP,
+            ..Default::default()
+        };
+        let request = start("com.example/A", 0, &intent, Some(1));
+        assert_eq!(
+            s.decide_only_if_needed(&request, true).unwrap().outcome,
+            Outcome::Front(1)
+        );
+        let plain = Intent::default();
+        let request = start("com.example/A", 0, &plain, Some(1));
+        assert_eq!(
+            s.decide_only_if_needed(&request, true).unwrap().outcome,
+            Outcome::Front(1)
+        );
+        s.tasks.push(*task(8, "B", Some(APP)));
+        s.activities.push(activity(2, 8, "B", 0));
+        let request = start("com.example/A", 0, &intent, Some(2));
+        assert_ne!(
+            s.decide_only_if_needed(&request, true).unwrap().outcome,
+            Outcome::Deliver(1, 1)
+        );
     }
 
     #[test]

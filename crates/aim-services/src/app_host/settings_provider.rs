@@ -42,6 +42,7 @@ use aim_service_aidl::device_config_write as write_policy;
 
 use super::activity_user::AllowMode;
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
+use super::config;
 use super::content_service::NOTIFY_SYNC_TO_NETWORK;
 use super::cursor::{BulkCursor, Rows};
 use super::device_config::{self, PUBLIC_NAMESPACES};
@@ -2241,6 +2242,27 @@ impl SettingsProvider {
     /// the running users (the app host's one) of a global setting.
     pub(super) fn notify(&self, table: Table, user: i32, name: &str) -> Result<(), Exception> {
         self.generations()?.increment(table, user, name);
+        if table == Table::System && user == 0 && name == "font_scale" {
+            let scale = self
+                .host
+                .platform()?
+                .settings
+                .get(table, name)
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| *v > 0.0)
+                .unwrap_or(1.0);
+            // Before the global owner is initialized, its first read takes the stored scale.
+            let current = self.host.platform()?.locales.lock().unwrap().font_scale;
+            if current.is_some_and(|current| current != scale) {
+                self.host.apply_configuration(
+                    &config::Configuration {
+                        font_scale: scale,
+                        ..config::Configuration::from_proto(&[]).unwrap()
+                    },
+                    false,
+                )?;
+            }
+        }
         if (table == Table::Config && name.starts_with("activity_manager/"))
             || (table == Table::Global
                 && matches!(
