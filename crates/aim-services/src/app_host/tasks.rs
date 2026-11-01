@@ -436,12 +436,14 @@ impl AppHost {
     pub(super) fn remove_task(&self, id: i32) {
         let removed = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
-            let before = tasks.len();
-            tasks.retain(|t| t.id != id);
-            tasks.len() != before
+            tasks
+                .iter()
+                .position(|t| t.id == id)
+                .map(|at| tasks.remove(at))
         };
         self.activities.task_tokens.lock().unwrap().remove(&id);
-        if removed {
+        if let Some(task) = removed {
+            self.remove_layers(task.layer.into_iter().collect());
             self.tasks.send(&Record {
                 op: window::REMOVED,
                 task: id,
@@ -723,6 +725,116 @@ fn bridge(socket: &Path) -> Result<(UnixStream, bool), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aim_binder_host::local::{Call, Reply, Service};
+    use aim_binder_host::parcel::{Binder, Parcel, Reader};
+
+    #[derive(Default)]
+    struct SurfaceTree {
+        handles: Vec<Binder>,
+        next: usize,
+        children: BTreeSet<i32>,
+        removed: Vec<i32>,
+    }
+    struct Surfaces(Arc<Mutex<SurfaceTree>>);
+    impl Service for Surfaces {
+        fn descriptor(&self) -> &str {
+            "android.ui.ISurfaceComposer"
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            let mut tree = self.0.lock().unwrap();
+            let r = &mut call.data;
+            if call.code == 100 {
+                while r.remaining() > 0 {
+                    tree.handles.push(r.read_binder()?.unwrap());
+                }
+            } else if call.code == 1 {
+                r.enforce_interface("android.gui.ISurfaceComposerClient")?;
+                let name = r.read_string16()?;
+                assert_eq!(r.read_i32()?, surface::CONTAINER);
+                let id = tree.next as i32;
+                assert_eq!(r.read_binder()?, (id != 0).then_some(tree.handles[0]));
+                if id != 0 {
+                    tree.children.insert(id);
+                }
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                p.write_i32(1);
+                p.write_i32(0);
+                p.write_binder(Some(tree.handles[tree.next]));
+                p.write_i32(id);
+                p.write_string16(name.as_deref());
+                p.write_i32(0);
+                tree.next += 1;
+                return Ok(p);
+            } else {
+                assert_eq!(call.code, 8);
+                r.enforce_interface("android.ui.ISurfaceComposer")?;
+                let start = r.position();
+                r.skip(r.remaining())?;
+                let (bytes, objects) = r.since(start);
+                for &at in &objects[1..] {
+                    // apply token, then layer handles
+                    let mut r = Reader::new(bytes, &objects);
+                    r.set_position(at as usize);
+                    r.read_binder()?;
+                    let id = r.read_i32()?;
+                    if r.read_i64()? == 0x8000 {
+                        // layer_state_t::eReparent
+                        r.skip(56)?; // position, z, flags, matrix and crop
+                        assert!(!r.read_bool()?); // relative layer
+                        assert!(!r.read_bool()?); // new parent: null
+                        assert!(tree.children.remove(&id));
+                        tree.removed.push(id);
+                    }
+                }
+            }
+            Ok(Parcel::new())
+        }
+    }
+
+    fn removal_under_display(cycles: usize) {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let tree = Arc::new(Mutex::new(SurfaceTree::default()));
+            let endpoint = export(Arc::new(Surfaces(tree.clone())));
+            let handles: Vec<_> = (0..=cycles)
+                .map(|_| export(Arc::new(super::super::activity::Token)))
+                .collect();
+            let mut init = Parcel::new();
+            for handle in &handles {
+                init.write_binder(Some(handle.binder()));
+            }
+            endpoint.transact(100, &init, false).unwrap();
+            assert!(
+                host.composer
+                    .set(surface::Composer::for_test(&host.process, endpoint.handle,))
+                    .is_ok()
+            );
+            for id in 1..=cycles as i32 {
+                host.tasks.animation_test_task(id, Rect::default());
+                host.task_layer(id, |_| Ok(())).unwrap();
+                assert_eq!(tree.lock().unwrap().children, BTreeSet::from([id]));
+                host.remove_task(id);
+                host.remove_task(id); // an already removed task sends no transaction
+                assert!(host.tasks.bounds(id).is_none());
+                assert!(tree.lock().unwrap().children.is_empty());
+                assert_eq!(host.with_display_layer(|root| Ok(root.id)).unwrap(), 0);
+            }
+            assert_eq!(
+                tree.lock().unwrap().removed,
+                (1..=cycles as i32).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn removal_detaches_task_from_retained_display() {
+        removal_under_display(1);
+    }
+
+    #[test]
+    fn repeated_close_reopen_leaves_no_retired_containers() {
+        removal_under_display(3);
+    }
 
     fn launch_host(ready: &AppHost, windows: bool) -> Arc<AppHost> {
         let host = AppHost::new(ready.process.clone());

@@ -70,7 +70,11 @@ impl ReadParcelable for CaptureArgs {
 struct Listener(Option<Binder>);
 impl ReadParcelable for Listener {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        Ok(Self(r.read_binder()?))
+        Ok(Self(if r.read_bool()? {
+            r.read_binder()?
+        } else {
+            None
+        }))
     }
 }
 impl CaptureArgs {
@@ -271,9 +275,27 @@ mod tests {
             }
             p.write_bool(true);
         }
+        p.write_bool(true); // AIDL typed-object presence
+        let start = p.position();
+        // Original ScreenCaptureListener.writeToParcel, then JNI's writeStrongBinder.
+        // Live app_process oracle: listener_body_size=32 native_present=1.
         p.write_bool(true);
         p.write_binder(Some(listener));
+        assert_eq!(p.position() - start, 32);
         p
+    }
+    #[test]
+    fn listener_without_native_object_does_not_read_a_binder() {
+        let mut p = Parcel::new();
+        p.write_bool(false);
+        p.write_i32(42); // next field must remain unread
+        let mut r = p.reader();
+        assert_eq!(Listener::read_from(&mut r).unwrap().0, None);
+        assert_eq!(r.read_i32().unwrap(), 42);
+        assert_eq!(r.remaining(), 0);
+        let mut truncated = Parcel::new();
+        truncated.write_bool(true);
+        assert!(Listener::read_from(&mut truncated.reader()).is_err());
     }
     fn invoke(host: &Arc<AppHost>, p: &Parcel, uid: u32) -> Reply {
         WindowManager(host.clone()).transact(&mut Call {
