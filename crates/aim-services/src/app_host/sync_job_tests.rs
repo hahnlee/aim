@@ -1,6 +1,8 @@
 //! Android 16 SyncOperation.toJobInfoExtras and JobSchedulerService.LocalService.
 #[path = "job_lifecycle_tests.rs"]
 mod lifecycle;
+#[path = "job_persistence_tests.rs"]
+mod persistence;
 #[path = "job_readiness_tests.rs"]
 mod readiness;
 
@@ -127,7 +129,7 @@ fn sync_extras_survive_job_parcel_atomic_store_and_reopen() {
         same_extras(&decoded.extras, &job.extras);
         let stored = status(decoded, 1000, 10100, "p", Some("SyncManager")).stored();
         let dir = host.inputs().unwrap().data.join("sync-job-roundtrip");
-        job_store::write(&dir, 1000, &[&stored], 1000, 2000).unwrap();
+        job_store::write(&dir, 1000, &[&stored], 1000, 2000, &mut [0; 3]).unwrap();
         let (back, legacy) = job_store::read(&dir, 3000, 4000);
         assert!(!legacy);
         assert_eq!(back.len(), 1);
@@ -157,6 +159,7 @@ fn local_jobs_select_source_and_namespace_and_expose_real_load_counts() {
             &[&stored],
             elapsed_ms(),
             wall_ms(),
+            &mut [0; 3],
         )
         .unwrap();
         assert_eq!(jobs.persist_stats().unwrap(), [1, 1, 1, -1, -1, -1]);
@@ -682,10 +685,11 @@ fn failed_job_commit_prevents_migration_confirmation_and_retries() {
             .data
             .join("system/job/jobs_1000.xml.new");
         std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("busy"), b"").unwrap();
         assert!(jobs.system_scheduled_own_jobs(Some("SyncManager")).is_err());
         assert!(jobs.jobs_of(1000).is_err());
         assert!(jobs.state.lock().unwrap().dirty.contains(&1000));
-        std::fs::remove_dir(blocker).unwrap();
+        std::fs::remove_dir_all(blocker).unwrap();
         assert!(
             jobs.system_scheduled_own_jobs(Some("SyncManager"))
                 .unwrap()
@@ -705,6 +709,7 @@ fn failed_job_commit_prevents_migration_confirmation_and_retries() {
             .data
             .join("system/job/jobs_1000.xml.new");
         std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("busy"), b"").unwrap();
         assert!(jobs.jobs_of(1000).is_err());
         assert_source(
             &scheduler(host),
@@ -713,7 +718,7 @@ fn failed_job_commit_prevents_migration_confirmation_and_retries() {
             10100,
             Some("sync-tag"),
         );
-        std::fs::remove_dir(blocker).unwrap();
+        std::fs::remove_dir_all(blocker).unwrap();
         assert!(jobs.jobs_of(1000).unwrap().is_empty());
         assert!(scheduler(host).jobs_of(1000).unwrap().is_empty());
     });

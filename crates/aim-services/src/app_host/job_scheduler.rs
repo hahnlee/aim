@@ -1376,12 +1376,15 @@ impl JobScheduler {
                 .map_err(|e| std::io::Error::other(e.message))?
                 .data
                 .join("system/job");
-            for (uid, jobs) in &writes {
+            let mut failure = None;
+            for (uid, jobs) in writes.iter().rev() {
                 let refs: Vec<&Stored> = jobs.iter().collect();
-                job_store::write(&dir, *uid, &refs, now, wall_ms())?;
-                for (total, n) in counts.iter_mut().zip(persisted_counts(jobs.iter())) {
-                    *total += n;
+                if let Err(e) = job_store::write(&dir, *uid, &refs, now, wall_ms(), &mut counts) {
+                    failure.get_or_insert(e);
                 }
+            }
+            if let Some(e) = failure {
+                return Err(e);
             }
             if state.migrate {
                 job_store::remove_legacy(&dir)?;
@@ -1393,9 +1396,8 @@ impl JobScheduler {
             state.dirty.extend(writes.iter().map(|(uid, _)| *uid));
             state.write_at = Some(now + JOB_PERSIST_DELAY);
             self.post(Message::Persist);
-        } else {
-            state.persist_stats.0[3..].copy_from_slice(&counts);
         }
+        state.persist_stats.0[3..].copy_from_slice(&counts);
         result
     }
 

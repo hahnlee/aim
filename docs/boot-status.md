@@ -651,6 +651,13 @@ jobs are durable. Source UID lookup uses installed package/user state and proxy
 quota uses the target user. Host restart and failed-write checks cover slice 4b
 (#1460/#1490, 2026-11-01); retained verifyJobScheduler and matched-image sync
 execution remain unverified.
+JobStore now applies AtomicFile backup/temporary recovery and counts completed
+serialized jobs even when a write fails. Failed batches retain dirty UIDs and
+legacy migration state; retry syncs legacy deletion even after unlink succeeded.
+Host fault/restart and concurrent-update checks cover split and legacy stores
+(#1460 slice 4e/#1490, 2026-11-01); these are per-file atomic writes, with the
+pinned duplicate/namespace merge behavior during partial migration. Matched-image
+restart and sync CTS acceptance remain unverified; no guest boot was run.
 Scheduler lifecycle checks now cover internal stop reasons, bind/start and
 callback races, soft failures, retry boundaries and disconnect rescheduling.
 Failed stop sends close and reschedule immediately; stale-callback diagnostics
