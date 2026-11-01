@@ -134,6 +134,25 @@ impl Service for Controller {
             return reply(Err(e));
         }
         match (self.1, call.code) {
+            (false, woc::APPLY_TRANSACTION) => {
+                call.data.enforce_interface(woc::DESCRIPTOR)?;
+                reply((|| {
+                    if call
+                        .data
+                        .read_i32()
+                        .map_err(|_| Exception::illegal_argument("WCT"))?
+                        != 1
+                    {
+                        return Err(Exception::new(EX_NULL_POINTER, "transaction"));
+                    }
+                    let transaction =
+                        super::window_container_transaction::Transaction::read(&mut call.data)?;
+                    self.0.apply_window_transaction(transaction)?;
+                    let mut p = Parcel::new();
+                    p.write_no_exception();
+                    Ok(p)
+                })())
+            }
             (false, woc::GET_TASK_ORGANIZER_CONTROLLER) => {
                 woc::GetTaskOrganizerController::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let binder = *self.0.organizers.tasks.get_or_init(|| {
@@ -354,4 +373,4 @@ fn state_error(e: String) -> Exception {
 
 #[cfg(test)]
 #[path = "task_organizer_tests.rs"]
-mod tests;
+pub(super) mod tests;

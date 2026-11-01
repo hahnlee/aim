@@ -861,6 +861,19 @@ impl Stack {
         (true, out)
     }
 
+    /// WCT reorder preserves visibility; moving to the desktop additionally hides.
+    pub(super) fn reorder_to_back(&mut self, task: i32) -> Vec<Command> {
+        if let Some(at) = self.tasks.iter().position(|t| t.id == task) {
+            let moved = self.tasks.remove(at);
+            self.tasks.insert(0, moved);
+        }
+        let mut out = Vec::new();
+        self.resume_focused(false, &mut out);
+        self.stop_hidden(None, &mut out);
+        self.settle(&mut out);
+        out
+    }
+
     /// `startPausing` of the resumed `token`; the top resumed activity is
     /// told it lost its state first.
     fn pause(&mut self, token: u64, user_leaving: bool, out: &mut Vec<Command>) {

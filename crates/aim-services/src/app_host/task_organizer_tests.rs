@@ -31,6 +31,18 @@ fn invoke(service: &dyn Service, code: u32, data: &Parcel, uid: u32) -> Parcel {
         })
         .unwrap()
 }
+pub(in crate::app_host) fn apply_wct(host: &Arc<AppHost>, payload: &Parcel, uid: u32) -> Parcel {
+    let mut request = Parcel::new();
+    request.write_interface_token(woc::DESCRIPTOR);
+    request.write_i32(1);
+    request.write_raw(payload.data(), payload.objects());
+    invoke(
+        &Controller(host.clone(), false),
+        woc::APPLY_TRANSACTION,
+        &request,
+        uid,
+    )
+}
 fn register(host: &Arc<AppHost>, who: &Strong) -> Result<Parcel, Exception> {
     host.register_task_organizer(Some(who.binder()))
 }
@@ -83,6 +95,33 @@ fn controller_getters_are_stable_and_task_permission_is_enforced() {
                 .unwrap()
         };
         assert_eq!(get(), get());
+        denied(
+            invoke(
+                &controller,
+                woc::APPLY_SYNC_TRANSACTION,
+                &Parcel::new(),
+                1000,
+            ),
+            EX_UNSUPPORTED_OPERATION,
+        );
+        denied(
+            invoke(
+                &controller,
+                woc::APPLY_SYNC_TRANSACTION,
+                &Parcel::new(),
+                10100,
+            ),
+            EX_SECURITY,
+        );
+        let mut transaction = Parcel::new();
+        transaction.write_i32(0);
+        transaction.write_i32(0);
+        transaction.write_binder(None);
+        transaction.write_binder(None);
+        denied(
+            apply_wct(host, &transaction, 1000),
+            EX_UNSUPPORTED_OPERATION,
+        );
         let task = Controller(host.clone(), true);
         let mut request = Parcel::new();
         toc::RegisterTaskOrganizer { organizer: None }.write(&mut request);

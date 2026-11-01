@@ -650,7 +650,7 @@ impl AppHost {
 
     /// `FOCUS`: the task comes to the front (`moveTaskToFront`), and its
     /// latest window takes the input focus.
-    fn focus_task(self: &Arc<Self>, id: i32) -> Result<(), String> {
+    pub(super) fn focus_task(self: &Arc<Self>, id: i32) -> Result<(), String> {
         let commands = self.activities.stack.lock().unwrap().bring_to_front(id);
         if !commands.contains(&Command::Front(id)) {
             self.task_to_front(id)?;
@@ -703,7 +703,7 @@ impl AppHost {
     /// `ActivityRecord.updateReportedConfigurationAndSend` and
     /// `WindowState.reportResized` tell them. The server takes the bounds
     /// the task got.
-    fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
+    pub(super) fn task_move_bounds(&self, id: i32, bounds: Rect) -> Result<Rect, String> {
         let min_dp = self
             .framework()
             .ok()
@@ -712,11 +712,20 @@ impl AppHost {
         let display = self.display().map_err(|e| format!("{e:?}"))?;
         let density = display.0.density_dpi() as f32 / 160.0;
         let bounds = {
-            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let tasks = self.tasks.tasks.lock().unwrap();
             let task = tasks
-                .iter_mut()
+                .iter()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
+            // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its parent.
+            if task.windowing_mode != 5 {
+                return Ok(Rect {
+                    left: 0,
+                    top: 0,
+                    right: display.0.width,
+                    bottom: display.0.height,
+                });
+            }
             let default_min = (min_dp as f32 * density) as i32;
             let min = (
                 if task.min_size.0 < 0 {
@@ -730,22 +739,42 @@ impl AppHost {
                     task.min_size.1
                 },
             );
-            task.bounds = if task.windowing_mode == 5 {
-                minimal_dimensions(bounds, task.bounds, min)
-            } else {
-                Rect {
-                    left: 0,
-                    top: 0,
-                    right: display.0.width,
-                    bottom: display.0.height,
+            for (start, end, old_end, minimum) in [
+                (bounds.left, bounds.right, task.bounds.right, min.0),
+                (bounds.top, bounds.bottom, task.bounds.bottom, min.1),
+            ] {
+                let size = end.checked_sub(start).ok_or("task bounds overflow")?;
+                if size <= 0 {
+                    return Err("empty task bounds".into());
                 }
-            };
+                if size < minimum {
+                    if end == old_end {
+                        end.checked_sub(minimum)
+                    } else {
+                        start.checked_add(minimum)
+                    }
+                    .ok_or("minimum task bounds overflow")?;
+                }
+            }
+            minimal_dimensions(bounds, task.bounds, min)
+        };
+        Ok(bounds)
+    }
+
+    pub(super) fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
+        let bounds = self.task_move_bounds(id, bounds)?;
+        {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            task.bounds = bounds;
             if task.windowing_mode == 5 {
-                task.restore_bounds = Some(task.bounds);
+                task.restore_bounds = Some(bounds);
             }
             self.save_task_launch_params(task)?;
-            task.bounds
-        };
+        }
         self.place_tasks()?;
         self.move_windows_of(id, bounds)?;
         let uids: BTreeSet<u32> = self
@@ -775,6 +804,27 @@ impl AppHost {
         }
         self.tasks.send_bounds(id, bounds);
         self.organizer_tasks_changed().map_err(|e| e.message)?;
+        Ok(())
+    }
+
+    pub(super) fn reorder_task_to_back(self: &Arc<Self>, id: i32) -> Result<(), String> {
+        let commands = self.activities.stack.lock().unwrap().reorder_to_back(id);
+        {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let at = tasks
+                .iter()
+                .position(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            let task = tasks.remove(at);
+            tasks.insert(0, task);
+        }
+        self.place_tasks()?;
+        self.tasks.send(&Record {
+            op: window::REORDER_TO_BACK,
+            task: id,
+            ..Default::default()
+        });
+        self.run(commands);
         Ok(())
     }
 
@@ -1444,6 +1494,355 @@ mod tests {
             }
         );
         assert_eq!(minimal_dimensions(previous, previous, (440, 440)), previous);
+    }
+
+    #[test]
+    fn wct_dispatch_permission_admission_bounds_configuration_and_visible_reorder() {
+        use super::super::{
+            activity_stack::{Activity, State, Visibility},
+            task_organizer::tests::apply_wct,
+            window_container_transaction::{Transaction, tests::fixture},
+        };
+        struct Thread;
+        impl Service for Thread {
+            fn descriptor(&self) -> &str {
+                "android.app.IApplicationThread"
+            }
+            fn transact(&self, _: &mut Call<'_>) -> Reply {
+                Ok(Parcel::new())
+            }
+        }
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let permissions = super::super::permission_manager::PermissionManager::with_system(
+                host.clone(),
+                Default::default(),
+            );
+            assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+            host.tasks.windows.set(true).unwrap();
+            host.display_metrics
+                .set(Ok(super::super::display::Metrics::of(
+                    &super::super::display::Display::phone_for_test(),
+                )))
+                .unwrap();
+            host.display
+                .set(Arc::new((
+                    super::super::display::Display::phone_for_test(),
+                    super::super::display_service::Resources {
+                        name: "test".into(),
+                        density_dpi: 320,
+                        brightness: (10, 255, 102),
+                        brightness_dim: 0.05,
+                    },
+                )))
+                .ok()
+                .unwrap();
+            host.framework
+                .set(
+                    super::super::resources::Framework::load(
+                        &aim_paths::original_image(),
+                        320,
+                        "en-US",
+                    )
+                    .unwrap(),
+                )
+                .ok()
+                .unwrap();
+            let endpoint = export(Arc::new(Surfaces(Arc::new(Mutex::new(
+                SurfaceTree::default(),
+            )))));
+            host.composer
+                .set(surface::Composer::for_test(&host.process, endpoint.handle))
+                .ok()
+                .unwrap();
+            let global = host.global_configuration().unwrap();
+            let mut app = super::super::tests::host_with_start(7, Arc::new(|| {}))
+                .apps
+                .lock()
+                .unwrap()
+                .remove(&7)
+                .unwrap();
+            app.uid = 10100;
+            app.package = "p".into();
+            app.packages = vec!["p".into()];
+            app.thread = Some(export(Arc::new(Thread)));
+            app.config = Some(global.clone());
+            host.apps.lock().unwrap().insert(7, app);
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 1500,
+            };
+            let mut activity_tokens = Vec::new();
+            for id in [7, 8] {
+                host.tasks.animation_test_task(id, old);
+                super::super::task_info::tests::add_app_task(host, id);
+                let token = host.new_activity(
+                    7,
+                    10100,
+                    "p",
+                    host.activity_info_of("p", "p.Main").unwrap(),
+                    super::super::resources::WindowStyle::default(),
+                    id,
+                    super::super::activity_start::StartRequest::launcher("A"),
+                );
+                let mut records = host.activities.records.lock().unwrap();
+                let record = records.get_mut(&token).unwrap();
+                record.reported = Some(global.of_freeform_task(old));
+                record.config_changes = i32::MAX;
+                drop(records);
+                let mut a = Activity::new(token, id, 7, "p/p.Main", 0, 0, None);
+                a.state = State::Resumed;
+                a.never_resumed = false;
+                host.activities.stack.lock().unwrap().activities.push(a);
+                activity_tokens.push(token);
+            }
+            host.activities.stack.lock().unwrap().freeform = true;
+            host.tasks.tasks.lock().unwrap()[0].min_size = (900, 1100);
+            let (bridge, mut receive) = UnixStream::pair().unwrap();
+            receive.set_nonblocking(true).unwrap();
+            *host.tasks.bridge.lock().unwrap() = Some(bridge);
+            let token = host.task_token(7);
+            let request = fixture(token);
+            let denied = apply_wct(host, &request, 10100);
+            assert_eq!(
+                denied.reader().read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+            assert_eq!(host.tasks.bounds(7), Some(old));
+            assert_eq!(
+                host.tasks
+                    .tasks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t.id == 7)
+                    .unwrap()
+                    .restore_bounds,
+                Some(old)
+            );
+            assert_eq!(
+                host.activities.records.lock().unwrap()[&activity_tokens[0]]
+                    .reported
+                    .as_ref()
+                    .unwrap()
+                    .window
+                    .bounds,
+                old
+            );
+            assert_eq!(
+                host.activities
+                    .stack
+                    .lock()
+                    .unwrap()
+                    .tasks
+                    .iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>(),
+                [7, 8]
+            );
+            assert_eq!(
+                receive.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let mut malformed = request.clone();
+            malformed.set_i32_at(368, 3); // adjacency must fail before the valid resize
+            let rejected = apply_wct(host, &malformed, 1000);
+            assert_eq!(
+                rejected
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+            );
+            // A valid resize followed by an unknown task must not change either owner or bridge.
+            let mut bad = Transaction::read(&mut request.reader()).unwrap();
+            bad.reorders.push((Binder::Local(u64::MAX), false));
+            assert!(host.apply_window_transaction(bad).is_err());
+            let mut bad = Transaction::read(&mut request.reader()).unwrap();
+            bad.bounds.push((
+                host.task_token(8),
+                Rect {
+                    left: i32::MAX - 1,
+                    top: 0,
+                    right: i32::MAX,
+                    bottom: 1,
+                },
+            ));
+            assert!(host.apply_window_transaction(bad).is_err());
+            assert_eq!(host.tasks.bounds(7), Some(old));
+            assert_eq!(
+                host.activities
+                    .stack
+                    .lock()
+                    .unwrap()
+                    .tasks
+                    .iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>(),
+                [7, 8]
+            );
+            assert_eq!(
+                receive.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let response = apply_wct(host, &request, 1000);
+            let mut response = response.reader();
+            response.read_exception().unwrap().unwrap();
+            assert_eq!(response.remaining(), 0);
+            let expected = Rect {
+                left: -80,
+                top: 120,
+                right: 820,
+                bottom: 1220,
+            };
+            assert_eq!(host.tasks.bounds(7), Some(expected));
+            assert_eq!(host.tasks.bounds(8), Some(old));
+            let records = host.activities.records.lock().unwrap();
+            let config = records[&activity_tokens[0]].reported.as_ref().unwrap();
+            assert_eq!(config.window.bounds, expected);
+            assert_eq!(config.window.windowing_mode, 5);
+            assert_eq!(
+                (config.screen_width_dp, config.screen_height_dp),
+                (450, 550)
+            );
+            assert_eq!(
+                records[&activity_tokens[1]]
+                    .reported
+                    .as_ref()
+                    .unwrap()
+                    .window
+                    .bounds,
+                old
+            );
+            drop(records);
+            host.apply_window_transaction(Transaction {
+                bounds: vec![],
+                reorders: vec![(token, false)],
+            })
+            .unwrap();
+            let stack = host.activities.stack.lock().unwrap();
+            assert_eq!(stack.tasks.iter().map(|t| t.id).collect::<Vec<_>>(), [7, 8]);
+            for a in &stack.activities {
+                assert_eq!(a.state, State::Resumed);
+                assert_eq!(stack.visibility(a.task), Visibility::Visible);
+            }
+            assert_eq!(
+                host.tasks
+                    .tasks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>(),
+                [7, 8]
+            );
+            drop(stack);
+            let mut bytes = Vec::new();
+            assert_eq!(
+                receive.read_to_end(&mut bytes).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let records: Vec<_> = bytes.chunks_exact(size_of::<Record>()).collect();
+            assert!(
+                records
+                    .iter()
+                    .any(|r| u32::from_ne_bytes(r[..4].try_into().unwrap())
+                        == window::REORDER_TO_BACK)
+            );
+            assert!(
+                !records.iter().any(
+                    |r| u32::from_ne_bytes(r[..4].try_into().unwrap()) == window::MOVED_TO_BACK
+                )
+            );
+            let bounds = records
+                .iter()
+                .find(|r| u32::from_ne_bytes(r[..4].try_into().unwrap()) == window::TASK)
+                .unwrap();
+            assert_eq!(
+                (0..4)
+                    .map(|i| i32::from_ne_bytes(bounds[8 + i * 4..12 + i * 4].try_into().unwrap()))
+                    .collect::<Vec<_>>(),
+                [-80, 120, 820, 1220]
+            );
+            assert_eq!(
+                host.tasks
+                    .tasks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t.id == 7)
+                    .unwrap()
+                    .restore_bounds,
+                Some(expected)
+            );
+            // The same task owner used by #1678 resolves fullscreen bounds to the display.
+            host.apply_task_launch_options(
+                7,
+                super::super::activity_options::LaunchOptions {
+                    mode: 1,
+                    bounds: None,
+                },
+                &host.activity_info_of("p", "p.Main").unwrap(),
+            )
+            .unwrap();
+            let display = host.display().unwrap();
+            let area = Rect {
+                left: 0,
+                top: 0,
+                right: display.0.width,
+                bottom: display.0.height,
+            };
+            host.tasks.tasks.lock().unwrap()[0].min_size = (i32::MAX, i32::MAX);
+            let response = apply_wct(host, &request, 1000);
+            response.reader().read_exception().unwrap().unwrap();
+            assert_eq!(host.tasks.bounds(7), Some(area));
+            assert_eq!(host.tasks.freeform_bounds(7), None);
+            assert_eq!(
+                host.tasks
+                    .tasks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t.id == 7)
+                    .unwrap()
+                    .restore_bounds,
+                Some(expected)
+            );
+            let records = host.activities.records.lock().unwrap();
+            let config = records[&activity_tokens[0]].reported.as_ref().unwrap();
+            assert_eq!(config.window.windowing_mode, 1);
+            assert_eq!(config.window.bounds, area);
+            assert_eq!(
+                records[&activity_tokens[1]]
+                    .reported
+                    .as_ref()
+                    .unwrap()
+                    .window
+                    .bounds,
+                old
+            );
+            drop(records);
+            assert_eq!(host.tasks.bounds(8), Some(old));
+            let mut bytes = Vec::new();
+            assert_eq!(
+                receive.read_to_end(&mut bytes).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let last = bytes
+                .chunks_exact(size_of::<Record>())
+                .filter(|r| u32::from_ne_bytes(r[..4].try_into().unwrap()) == window::TASK)
+                .last()
+                .unwrap();
+            assert_eq!(
+                (0..4)
+                    .map(|i| i32::from_ne_bytes(last[8 + i * 4..12 + i * 4].try_into().unwrap()))
+                    .collect::<Vec<_>>(),
+                [area.left, area.top, area.right, area.bottom]
+            );
+        });
     }
 }
 

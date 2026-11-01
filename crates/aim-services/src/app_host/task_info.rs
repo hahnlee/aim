@@ -677,7 +677,7 @@ impl AppHost {
     }
 
     /// The `WindowContainerToken` of `task`, made at its first use.
-    fn task_token(&self, task: i32) -> Binder {
+    pub(super) fn task_token(&self, task: i32) -> Binder {
         *self
             .activities
             .task_tokens

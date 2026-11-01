@@ -20,6 +20,16 @@ remaining failures span task, shell, configuration and display owners. Installer
 #1173 remain. One earlier fresh-data boot failed default-grant owner readiness
 before its class was retried on fresh data (2026-11-01).
 
+Native WOC `applyTransaction` decodes the pinned WCT map, Change and reorder
+layout and admits all supported operations before mutation (#2616). Bounds use
+#1678's per-task owner: freeform minima and restore bounds, fullscreen geometry
+inherited from the display. Reorder-to-bottom preserves visible freeform tasks
+and uses a distinct bridge record instead of minimizing the Mac window. Host
+regressions cover dispatch, permission denial, malformed/unsupported requests,
+configuration and bridge records; root creation, adjacency, launch roots, empty
+transactions and sync remain explicit failures. No guest boot, CTS or live Mac
+window behavior was checked (2026-11-02).
+
 The app host's `wm` user-rotation, fixed-to-user-rotation and ignore-orientation
 commands now use persisted native display policy with Android 16 output (#2630).
 Effective display rotation remains 0; freeform configuration stays bound to task
