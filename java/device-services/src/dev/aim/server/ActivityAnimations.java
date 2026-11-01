@@ -67,11 +67,7 @@ public final class ActivityAnimations extends IActivityAnimations.Stub {
                 animation.getTransformation(ms, transform);
                 transform.getMatrix().getValues(matrix);
                 int at = ms * 11;
-                // SurfaceControl.Transaction.setMatrix: dsdx, dtdx, dtdy, dsdy.
-                samples[at] = matrix[0]; samples[at + 1] = matrix[3];
-                samples[at + 2] = matrix[4]; samples[at + 3] = matrix[1];
-                samples[at + 4] = matrix[2]; samples[at + 5] = matrix[5];
-                samples[at + 6] = transform.getAlpha();
+                ActivityAnimationSample.write(samples, at, matrix, transform.getAlpha());
                 Rect clip = transform.hasClipRect() ? transform.getClipRect() : new Rect(0, 0, -1, -1);
                 samples[at + 7] = clip.left; samples[at + 8] = clip.top;
                 samples[at + 9] = clip.right; samples[at + 10] = clip.bottom;

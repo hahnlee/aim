@@ -140,6 +140,83 @@ impl Service for Frames {
 }
 
 #[test]
+fn java_animation_samples_match_surface_control_matrix_parcels() {
+    use std::{fs, process::Command};
+    let dir = aim_paths::scratch_dir("aim-animation-sample");
+    let root = aim_paths::root();
+    let jdk =
+        aim_paths::fetched().join("java/temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home/bin");
+    let run = |command: &mut Command| {
+        let out = command.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    run(Command::new(jdk.join("javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&dir)
+        .arg(root.join("java/device-services/src/dev/aim/server/ActivityAnimationSample.java"))
+        .arg(root.join("crates/aim-services/tests/fixtures/activity_animation/dev/aim/server/ActivityAnimationSampleTest.java")));
+    let output = run(Command::new(jdk.join("java"))
+        .arg("-cp")
+        .arg(&dir)
+        .arg("dev.aim.server.ActivityAnimationSampleTest"));
+    fs::remove_dir_all(dir).unwrap();
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let bounds = Rect {
+            left: 100,
+            top: 200,
+            right: 500,
+            bottom: 800,
+        };
+        host.tasks.animation_test_task(7, bounds);
+        let (tx, frames) = mpsc::channel();
+        let compositor = export(Arc::new(Frames(tx)));
+        assert!(
+            host.composer
+                .set(surface::Composer::for_test(
+                    &host.process,
+                    compositor.handle
+                ))
+                .is_ok()
+        );
+        host.animation_test_window(compositor, 1, 7, 1);
+        host.animation_test_geometry(1, (30, 40), [2, 3, 4, 5]);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.lines().count(), 5);
+        for line in text.lines() {
+            let values: Vec<f32> = line
+                .split_whitespace()
+                .map(|s| s.parse().unwrap())
+                .collect();
+            assert_eq!(values.len(), 16);
+            let m = &values[..9]; // Matrix.getValues, android-16.0.0_r1.
+            // SurfaceControl.java:3561-3565 -> JNI -> Transaction::setMatrix ->
+            // LayerState.cpp:927-931 writes dsdx, dtdx, dtdy, dsdy without reordering.
+            let matrix = [m[0], m[3], m[1], m[4]];
+            for crop in [[0., 0., -1., -1.], [2., 3., 90., 170.]] {
+                let mut sample = IDENTITY;
+                sample[..7].copy_from_slice(&values[9..]);
+                sample[7..].copy_from_slice(&crop);
+                let (sample, _) = Animation::new(sample.to_vec()).unwrap().at(0);
+                host.animate_activities(1, sample, 2, IDENTITY).unwrap();
+                let actual = receive(&frames); // Decoded from write_layer_state's real parcel.
+                assert_eq!(actual.len(), 1);
+                assert_eq!(actual[0].0, 1);
+                let actual = actual[0].1;
+                let bytes = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<_>>();
+                assert_eq!(bytes(&actual[..4]), bytes(&matrix));
+                assert_eq!(&actual[4..7], &[m[2] + 28., m[5] + 37., 0.25]);
+                assert_eq!(&actual[7..], &crop);
+            }
+        }
+    });
+}
+
+#[test]
 fn vsync_playback_replacement_and_window_removal_preserve_new_collection() {
     for with_options in [false, true] {
         crate::system::with_discovery_binders(|host, _, _, export| {

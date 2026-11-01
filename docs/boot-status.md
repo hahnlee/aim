@@ -20,9 +20,11 @@ per-activity open/close overrides and ActivityOptions custom animation resource
 IDs (#1725). Replacement ends the previous playback; window removal and process
 death cancel it without stale frames or completion affecting the next transition.
 Java samples the original animations and delivers options callbacks; native
-playback submits matrix/alpha/clip transactions on display vsync. Host Binder and
-compositor checks pass; cold readiness timeout and nonzero animation background
-colors remain under #1725. No guest boot or live visual verification (2026-10-29).
+playback submits matrix/alpha/clip transactions on display vsync. Sample matrices
+now follow SurfaceControl's `[0,3,1,4]` slot order (#2588), with translation kept
+as position in Android pixels. JVM serialization and host Binder-to-parcel checks
+pass; cold readiness timeout and nonzero animation background colors remain under
+#1725. No guest boot or live visual verification of the correction (2026-11-01).
 
 The app host runs native package prepare-ready before default grants and opening
 application startup (#2362), matching SystemServer's PMS-before-AMS ordering.
