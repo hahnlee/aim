@@ -1506,10 +1506,15 @@ impl ConnectivityService {
     }
 
     /// `isNetworkWithCapabilitiesBlocked`: the app host's apps are all top,
-    /// so no firewall chain or data saver blocks them; one without INTERNET
-    /// is blocked once its target has the change.
+    /// so metered Data Saver rules do not apply. Power restrictions are read
+    /// from their native owners; unimplemented firewall enforcement is explicit.
+    /// A caller without INTERNET is blocked once its target has the change.
     fn blocked(&self, uid: i32, ignore_blocked: bool) -> Result<bool, Exception> {
-        if ignore_blocked || self.has(uid, INTERNET_PERMISSION)? {
+        if ignore_blocked {
+            return Ok(false);
+        }
+        if self.has(uid, INTERNET_PERMISSION)? {
+            self.host.network_policy().check_power_restrictions(uid)?;
             return Ok(false);
         }
         self.host

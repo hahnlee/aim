@@ -543,6 +543,7 @@ type Job = Box<dyn FnOnce(&Arc<AppHost>) + Send>;
 
 #[derive(Default)]
 pub struct Services {
+    device_idle_temp: Mutex<Vec<i32>>,
     state: Mutex<State>,
     policy: Mutex<Option<Arc<Strong>>>,
     type_host: std::sync::OnceLock<Binder>,
@@ -1077,7 +1078,6 @@ impl AppHost {
     /// service's name, `!` (or `!!`) and why if it may not be started, none
     /// if there is no such service or a foreground one is silently not.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_service(
         &self,
         caller: Option<Binder>,
@@ -1151,6 +1151,16 @@ impl AppHost {
             r.package.clone(),
             r.info.info.application_info.target_sdk_version,
         );
+        let forced_standby = !self.uid_runs(app_uid)
+            && appops::restriction_mode(self, app_uid, &package)? != MODE_ALLOWED
+            && self.temp_allowlisted(&state, app_uid)? != Some(REASON_ALARM_MANAGER_ALARM_CLOCK)
+            && self
+                .framework()?
+                .framework_string("config_deviceProvisioningPackage")
+                .as_deref()
+                != Some(&package);
+        let mut force_silent_abort = false;
+        let r = state.record(token).unwrap();
         if fg_required {
             if !r.fg.allowed_start() && self.bg_fgs_restricted(app_uid, uid)? {
                 if r.fg.owner_unknown {
@@ -1171,13 +1181,12 @@ impl AppHost {
             }
             match appops::mode(self, appops::OP_START_FOREGROUND, app_uid, Some(&package))? {
                 MODE_ALLOWED | MODE_DEFAULT => {}
-                // Started as a service that is not foreground; the app
-                // host's apps are all allowed to start those.
                 appops::MODE_IGNORED => {
                     eprintln!(
                         "app host: startForegroundService not allowed due to app op: service {package}"
                     );
                     fg_required = false;
+                    force_silent_abort = true;
                 }
                 _ => {
                     return Ok(Some((
@@ -1186,10 +1195,28 @@ impl AppHost {
                     )));
                 }
             }
-            // Only an app targeting O or later must call startForeground.
-            fg_required &= target_sdk >= O;
         }
         let r = state.record(token).unwrap();
+        if forced_standby || (!r.start_requested && !fg_required) {
+            match self.background_service_start_mode(
+                &r.info.info.application_info,
+                &package,
+                pid,
+                forced_standby,
+            )? {
+                0 => {}
+                1 => return Ok(None),
+                _ if force_silent_abort || (forced_standby && fg_required) => return Ok(None),
+                _ => {
+                    return Ok(Some((
+                        "?".into(),
+                        format!("app is in background uid {app_uid}"),
+                    )));
+                }
+            }
+        }
+        // O's foreground contract is applied after background admission.
+        fg_required &= target_sdk >= O;
         if fg_required && !r.fg.is_foreground {
             r.fg.timeout_policy = Some(self.fgs_timeout_policy(0, app_uid)?);
         }
@@ -2935,6 +2962,114 @@ impl AppHost {
         allowance: super::device_idle::TempAllowance,
     ) -> Result<(), Exception> {
         self.update_fgs_temp_allowlist(&mut self.services.state.lock().unwrap(), uid, allowance)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fgs_temp_reason_for_test(&self, uid: i32) -> Option<i32> {
+        self.temp_allowlisted(&self.services.state.lock().unwrap(), uid)
+            .unwrap()
+    }
+
+    pub(super) fn device_idle_temp_ids(&self) -> Vec<i32> {
+        self.services.device_idle_temp.lock().unwrap().clone()
+    }
+
+    /// AMS.updateDeviceIdleTempAllowlist: removal clears the changing UID's
+    /// separate FGS record, even if that record had a longer lifetime.
+    pub(super) fn device_idle_temp_changed(&self, ids: Vec<i32>, removed_uid: Option<i32>) {
+        if let Some(uid) = removed_uid {
+            self.services
+                .state
+                .lock()
+                .unwrap()
+                .fgs_temp_allowlist
+                .remove(&uid);
+        }
+        *self.services.device_idle_temp.lock().unwrap() = ids.clone();
+        self.power_service
+            .get_or_init(|| {
+                Arc::new(super::power_service::PowerManager::new(
+                    self.me.upgrade().unwrap(),
+                ))
+            })
+            .set_device_idle_temp_allowlist(ids);
+        if let Some(jobs) = self.job_scheduler.get() {
+            jobs.temp_allowlist_changed();
+        }
+    }
+
+    /// AMS.getAppStartModeLOSP / appServicesRestrictedInBackgroundLOSP.
+    /// Temporary membership exempts service starts, never activity starts.
+    pub(super) fn background_service_start_mode(
+        &self,
+        app: &crate::package::info::ApplicationInfo,
+        package: &str,
+        calling_pid: Option<i32>,
+        forced_standby: bool,
+    ) -> Result<i32, Exception> {
+        let uid = app.uid;
+        if self.uid_runs(uid) && !forced_standby {
+            return Ok(0);
+        }
+        if self.instant_app(package, uid / PER_USER_RANGE as i32)? {
+            return Ok(3);
+        }
+        let id = uid.rem_euclid(PER_USER_RANGE as i32);
+        if app.flags & 8 != 0
+            || id == 1002
+            || self.services.device_idle_temp.lock().unwrap().contains(&id)
+            || self.device_idle().app_on_allowlist(id)?
+        {
+            return Ok(0);
+        }
+        if app.target_sdk_version >= O {
+            return Ok(2);
+        }
+        let settings = &self.platform()?.settings;
+        let on_battery = self.battery_stats.get().is_some_and(|b| b.on_battery());
+        let restricted = on_battery
+            && settings
+                .device_config("activity_manager", "force_bg_check_on_restricted")
+                .is_none_or(|v| v.eq_ignore_ascii_case("true"))
+            && self
+                .me
+                .upgrade()
+                .unwrap()
+                .app_standby_bucket(package, uid / PER_USER_RANGE as i32)?
+                >= 45;
+        let mode = if restricted {
+            1
+        } else {
+            match appops::note(self, 63 /* OP_RUN_IN_BACKGROUND */, uid, Some(package))? {
+                MODE_ALLOWED => {
+                    if id >= 10_000
+                        && !self.device_idle().fgs_allowlisted(uid, false)?
+                        && self
+                            .power_restriction("force_background_check", "forceBackgroundCheck")?
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                appops::MODE_IGNORED => 1,
+                _ => 2,
+            }
+        };
+        // Only a known foreground caller can rescue a delayed legacy start.
+        Ok(
+            if mode == 1
+                && calling_pid.is_some_and(|pid| {
+                    self.apps.lock().unwrap().values().any(|a| {
+                        a.pid == pid && a.proc_state < 8 /* PROCESS_STATE_TRANSIENT_BACKGROUND */
+                    })
+                })
+            {
+                0
+            } else {
+                mode
+            },
+        )
     }
 
     /// `FgsTempAllowList.get`: the entry is still valid at its exact end time.

@@ -564,7 +564,7 @@ pub(super) fn filter_equals(a: &Intent, b: &Intent) -> bool {
 
 impl AppHost {
     /// Whether `package` is an instant app for `user`.
-    fn instant_app(&self, package: &str, user: i32) -> Result<bool, Exception> {
+    pub(super) fn instant_app(&self, package: &str, user: i32) -> Result<bool, Exception> {
         let (state, _) = self.packages()?;
         Ok(state
             .packages
