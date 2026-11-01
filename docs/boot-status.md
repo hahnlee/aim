@@ -1222,7 +1222,7 @@ attachments and root/foreign UIDs are rejected, death revokes readiness, and a
 new process can attach. Attachment makes no Java callback under native install
 locks. Native publication never waits for ART. Completion callbacks, boot/APEX
 observers, compilation and scheduling remain inactive in this startup path;
-profile-clearing callers use this attachment; artifact deletion remains unrouted.
+profile-clearing and package-internal artifact-deletion callers use this attachment.
 Host JVM/native fixtures cover
 these boundaries with original ART/Android constructor dependencies doubled.
 Original service-art.jar/JNI construction cost, image linkage, cold boot's zero
@@ -1244,6 +1244,14 @@ per-pass ordering, caller-user instant policy, missing/disappearing packages,
 locked-CE forwarding, lock ownership, original exceptions and unavailable ART.
 Physical profile/DE/CE/external deletion, sibling/root/APK preservation, an independent
 direct-original control, guest boot and CTS were not run; #2156 remains incomplete.
+Package-internal deleteOat now calls original deleteDexoptArtifacts through that
+generation/epoch-checked capability (#2063 slice 5, host-only, 2026-11-02). It
+forwards the original caller UID and its user for filtered snapshots, preserving
+int64 freed bytes and ART's -1/0 mappings. Host Binder/JVM fixtures cover scope,
+artifact-category result accounting, large results, errors/death and idempotence
+with ART doubled. Actual writable ODEX/VDEX/ART/runtime/SDM/SDC deletion, known
+secondary paths, disk accounting, preopt/APK/other-package preservation and
+interpreted/JIT launch after deletion remain unverified; no guest or CTS was run.
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions

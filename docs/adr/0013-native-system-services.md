@@ -822,8 +822,11 @@ activation. A system-only deletion capability is bound to that native package
 epoch and live process generation. Native maintenance and package-internal
 profile clears now use it (#2063 slice 4): each installd cache/code-cache pass
 is followed by original ART profile clearing under the canonical install lock.
-Artifact deletion remains unrouted; external session cache reclamation still
-requires StorageSessionController (#2156). Physical deletion acceptance is unrun.
+Package-internal deleteOat now forwards caller UID/user through the same
+capability to original deleteDexoptArtifacts (#2063 slice 5, host-only), retaining
+filtered snapshots, int64 bytes and original -1/0 mappings. External session cache
+reclamation still requires StorageSessionController (#2156). Physical deletion
+acceptance is unrun.
 Construction/attachment failures close the package Store and require process
 restart. ART systemReady, shutdown cleanup and dexopt remain #2063; no original
 class or image replacement is added. JVM lifecycle checks cover initialization
