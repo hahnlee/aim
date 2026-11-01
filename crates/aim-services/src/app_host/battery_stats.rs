@@ -23,7 +23,8 @@
 //! process to its last) runs its process state timers and background time
 //! base, and is recorded in the history. Camera and flashlight on/off/reset
 //! notes keep their history and timers. Sync notes keep per-uid named,
-//! unpooled DualTimers with the original name overflow and nesting.
+//! unpooled DualTimers with the original name overflow and nesting; sync and
+//! temporary-allowlist events share the original history presence tracker.
 //! Health snapshots project these
 //! recorded counters through the retained original Java health writer and
 //! parceler, with the original BATTERY_STATS check. The other notes, the
@@ -31,7 +32,7 @@
 //! `batterystats.bin`: #1928.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -44,8 +45,8 @@ use aim_service_aidl::com_android_internal_app_ibatterystats as bs;
 use aim_service_aidl::dev_aim_server_ibatteryhealthstats as health;
 
 use super::battery_history::{
-    Directory, History, MonotonicClock, STATE_AUDIO_ON_FLAG, STATE2_BLUETOOTH_SCAN_FLAG,
-    STATE2_VIDEO_ON_FLAG,
+    Directory, EVENT_FLAG_FINISH, EVENT_FLAG_START, EVENT_SYNC, EVENT_TEMP_WHITELIST, History,
+    MonotonicClock, STATE_AUDIO_ON_FLAG, STATE2_BLUETOOTH_SCAN_FLAG, STATE2_VIDEO_ON_FLAG,
 };
 use super::kept::RawIntent;
 use super::{AppHost, reply};
@@ -689,6 +690,8 @@ struct Stats {
     time_to_full_seconds: i64,
     /// The history, once the guest's `/data` is known.
     history: Option<History>,
+    /// `HistoryEventTracker`: presence, independent of timer nesting/overflow.
+    active_events: BTreeSet<(i32, Option<String>, i32)>,
     /// When the history was last written (`mLastWriteTimeMs`).
     last_write: i64,
     on_battery_time_base: TimeBase,
@@ -979,7 +982,7 @@ impl Stats {
         self.uids.entry(uid).or_insert_with(|| Uid::new(now))
     }
 
-    /// `noteSyncStartLocked` / `noteSyncFinishLocked`'s mapped uid timers.
+    /// `noteSyncStartLocked` / `noteSyncFinishLocked`'s mapped uid timers and history.
     fn note_sync(&mut self, start: bool, name: Option<&str>, uid: i32, now: i64, limit: usize) {
         let u = self.uids.entry(uid).or_insert_with(|| Uid::new(now));
         if let Some(t) = u.sync.timer(name, start, limit) {
@@ -990,6 +993,30 @@ impl Stats {
                 t.timer.stop(&self.on_battery_time_base, now);
                 t.background.stop(&u.background, now);
             }
+        }
+        self.note_event(start, EVENT_SYNC, name, uid, now);
+    }
+
+    /// `noteEventLocked` / `HistoryEventTracker.updateState` for these producers.
+    fn note_event(&mut self, start: bool, event: i32, name: Option<&str>, uid: i32, now: i64) {
+        let key = (event, name.map(str::to_owned), uid);
+        let changed = if start {
+            self.active_events.insert(key)
+        } else {
+            self.active_events.remove(&key)
+        };
+        if changed && let Some(h) = &mut self.history {
+            h.record_event(
+                now,
+                event
+                    | if start {
+                        EVENT_FLAG_START
+                    } else {
+                        EVENT_FLAG_FINISH
+                    },
+                name,
+                uid,
+            );
         }
     }
 
@@ -1566,6 +1593,23 @@ impl BatteryStats {
         self.stats.lock().unwrap().on_battery
     }
 
+    #[cfg(test)]
+    pub(super) fn set_history_for_test(&self, history: History) {
+        self.stats.lock().unwrap().history = Some(history);
+    }
+
+    #[cfg(test)]
+    pub(super) fn history_buffer(&self) -> Vec<u8> {
+        self.stats
+            .lock()
+            .unwrap()
+            .history
+            .as_ref()
+            .unwrap()
+            .buffer()
+            .to_vec()
+    }
+
     /// `isCharging` (`BatteryManager.isCharging`).
     pub(super) fn charging(&self) -> bool {
         self.stats.lock().unwrap().charging
@@ -1637,11 +1681,20 @@ impl BatteryStats {
 
     /// A note from a caller holding UPDATE_DEVICE_STATS (its
     /// `@EnforcePermission`), applied at the time it is taken.
-    fn note(
+    fn note<T>(
         &self,
         caller: i32,
-        apply: impl FnOnce(&mut Stats, &dyn Fn(i32) -> i32, i64),
-    ) -> Result<(), Exception> {
+        apply: impl FnOnce(&mut Stats, &dyn Fn(i32) -> i32, i64) -> T,
+    ) -> Result<T, Exception> {
+        self.prepared_note(caller, || Ok(()), apply)
+    }
+
+    fn prepared_note<T>(
+        &self,
+        caller: i32,
+        prepare: impl FnOnce() -> Result<(), Exception>,
+        apply: impl FnOnce(&mut Stats, &dyn Fn(i32) -> i32, i64) -> T,
+    ) -> Result<T, Exception> {
         let host = self.host.upgrade().ok_or_else(|| {
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "no app host")
         })?;
@@ -1653,12 +1706,26 @@ impl BatteryStats {
         let now = elapsed_realtime();
         let (state, _) = host.packages()?;
         let map_uid = |uid: i32| map_uid(&state.system.isolated_owners, uid);
+        prepare()?;
         let mut s = self.stats.lock().unwrap();
         if let Some(config) = self.config(&host) {
             self.start_history(&host, &config, &mut s);
         }
-        apply(&mut s, &map_uid, now);
-        Ok(())
+        Ok(apply(&mut s, &map_uid, now))
+    }
+
+    /// Prepare the system-UID history owner before changing membership. Record
+    /// transitions under the stats lock, without calling consumers under it.
+    pub(super) fn temp_allowlist_history<T>(
+        &self,
+        prepare: impl FnOnce() -> Result<(), Exception>,
+        change: impl FnOnce(&mut dyn FnMut(bool, Option<&str>, i32)) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
+        self.prepared_note(1000, prepare, |s, map, now| {
+            change(&mut |start, name, uid| {
+                s.note_event(start, EVENT_TEMP_WHITELIST, name, map(uid), now);
+            })
+        })?
     }
 
     /// `noteUidProcessState`, as the activity manager tells it a uid's

@@ -572,3 +572,107 @@ fn legacy_service_starts_follow_restricted_battery_appops_and_foreground_caller(
         });
     });
 }
+
+#[test]
+fn temporary_membership_history_keeps_initial_reason_and_balanced_user_zero_events() {
+    use super::super::battery_history::tests::{events, history};
+    fixture(|idle, _| {
+        let stats = idle.battery_stats();
+        let mut h = history(
+            &idle.host.data().unwrap().join("history-test"),
+            128 * 1024,
+            0,
+        );
+        h.set_initial_battery_state(false, 3, 50, 0);
+        h.start_recording(0, true);
+        stats.set_history_for_test(h);
+        idle.add_temp_direct(54321, 12345, 50000, 1, 306, Some("sync by top app".into()))
+            .unwrap();
+        let first = idle.with(|l| l.temp[&12345].check_at_ms).unwrap();
+        idle.add_temp_direct(1000, 112345, 100000, 0, 307, Some("renewal".into()))
+            .unwrap();
+        let end = idle.with(|l| l.temp[&12345].end_ms).unwrap();
+        assert_eq!(
+            events(&stats.history_buffer()),
+            [(0x8011, "sync by top app".into(), 12345)]
+        );
+        assert_eq!(idle.expire_at(first).unwrap(), Some(end));
+        assert_eq!(idle.expire_at(end).unwrap(), None);
+        assert_eq!(idle.expire_at(end).unwrap(), None);
+        assert_eq!(
+            events(&stats.history_buffer()),
+            [
+                (0x8011, "sync by top app".into(), 12345),
+                (0x4011, "sync by top app".into(), 12345),
+            ]
+        );
+        idle.add_temp_direct(1000, 12345, 0, 1, 306, None).unwrap();
+        let end = idle.with(|l| l.temp[&12345].end_ms).unwrap();
+        idle.expire_at(end).unwrap();
+        assert_eq!(
+            &events(&stats.history_buffer())[2..],
+            [(0x8011, "".into(), 12345), (0x4011, "".into(), 12345),]
+        );
+    });
+}
+
+#[test]
+fn temporary_history_preserves_pinned_cross_user_uid_asymmetry_and_failed_adds() {
+    use super::super::battery_history::tests::{events, history};
+    fixture(|idle, _| {
+        let stats = idle.battery_stats();
+        let mut h = history(
+            &idle.host.data().unwrap().join("history-test"),
+            128 * 1024,
+            0,
+        );
+        h.set_initial_battery_state(false, 3, 50, 0);
+        h.start_recording(0, true);
+        stats.set_history_for_test(h);
+        idle.add_temp(1000, Some("missing"), 1000, 1, 0, 306, None)
+            .unwrap();
+        for (caller, reason_code, exception) in [
+            (10100, 306, aim_binder_host::parcel::EX_SECURITY),
+            (
+                1000,
+                REASON_PUSH_MESSAGING_OVER_QUOTA,
+                EX_UNSUPPORTED_OPERATION,
+            ),
+        ] {
+            let mut data = Parcel::new();
+            di::AddPowerSaveTempWhitelistApp {
+                name: Some("p".into()),
+                duration: 1000,
+                user_id: 0,
+                reason_code,
+                reason: Some("rejected".into()),
+            }
+            .write(&mut data);
+            let reply = invoke(
+                idle.as_ref(),
+                caller,
+                di::ADD_POWER_SAVE_TEMP_WHITELIST_APP,
+                &data,
+            );
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                exception
+            );
+            assert!(idle.with(|l| l.temp.is_empty()).unwrap());
+        }
+        assert!(events(&stats.history_buffer()).is_empty());
+        idle.add_temp_direct(1000, 112345, 50000, 1, 306, Some("user one".into()))
+            .unwrap();
+        let end = idle.with(|l| l.temp[&12345].end_ms).unwrap();
+        idle.expire_at(end).unwrap();
+        assert!(idle.with(|l| l.temp.is_empty()).unwrap());
+        // AOSP adds with uid 112345, removes with appId 12345. Its history
+        // tracker therefore drops the unmatched finish and subsequent duplicate start.
+        idle.add_temp_direct(1000, 112345, 50000, 1, 306, Some("user one".into()))
+            .unwrap();
+        assert_eq!(
+            events(&stats.history_buffer()),
+            [(0x8011, "user one".into(), 112345)]
+        );
+    });
+}

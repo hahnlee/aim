@@ -3996,6 +3996,15 @@ mod tests {
             android_os_ideviceidlecontroller as di, dev_aim_server_isystemprocess as sp,
         };
         crate::system::with_discovery_binders(|host, _, _, _| {
+            host.permission_manager
+                .set(Arc::new(
+                    super::super::permission_manager::PermissionManager::with_system(
+                        host.clone(),
+                        Default::default(),
+                    ),
+                ))
+                .ok()
+                .unwrap();
             host.inputs()
                 .unwrap()
                 .settings

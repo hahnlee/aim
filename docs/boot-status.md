@@ -713,8 +713,13 @@ DNS-only updates stay silent (#1460 slice 5e/#1509). Native receiver/query tests
 and a pinned retained SyncManager receiver/backoff JVM fixture cover this path.
 Native battery-stats now keeps per-UID named sync DualTimers with original
 nesting, name overflow and battery/background time bases (#1460 slice 5f/#1928).
-Generated Binder permission and host timer checks cover this path. Sync history
-and full wake-lock attribution remain #1928. Matched-image adapter accounting,
+Generated Binder permission and host timer checks cover this path. Sync and
+temporary-allowlist notes now produce pooled battery-history events with the
+pinned presence tracker, names and mapped UIDs (#1460 slice 5g/#1928).
+Host tests decode live and persisted history, including duplicate/failure
+transitions, timer nesting and the original cross-user allowlist UID asymmetry.
+Full wake-lock attribution and whole batterystats.bin remain #1928.
+Matched-image adapter accounting,
 restoration and sync CTS remain unverified; no guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
