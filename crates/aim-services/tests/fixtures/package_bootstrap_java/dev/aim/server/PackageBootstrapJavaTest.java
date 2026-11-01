@@ -32,6 +32,7 @@ public final class PackageBootstrapJavaTest {
         PackageShutdownJavaTest.run();
         ExistingInstallJavaTest.run(args[0]);
         PackageLocalOwnersTest.run();
+        RoleIdentityTest.run();
         PackageDiagnosticsJavaTest.run(args[0]);
         Locale.setDefault(Locale.US);
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"));

@@ -137,10 +137,8 @@ public final class PackageLocalOwners {
         }
         @Override public String removeLegacyDefaultBrowserPackageName(int user) {
             try {
-                var host = ISystemProcess.Stub.asInterface(ServiceManager.getService("aim.system_process"));
-                return IPackageInternalHost.Stub.asInterface(host.getPackageInternalHost())
-                        .removeLegacyDefaultBrowserPackageName(user, android.os.Binder.getCallingUid(),
-                                android.os.Binder.getCallingPid());
+                return NativePMMutationProducer.removeLegacyDefaultBrowserPackageName(
+                        IPackageInternalHost.Stub.asInterface(host.get().getPackageInternalHost()), user);
             } catch (RemoteException e) { throw e.rethrowFromSystemServer(); }
         }
         @Override public int getPackageUid(String name, long flags, int user) {

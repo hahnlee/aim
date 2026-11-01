@@ -27,6 +27,12 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
         .replace("public Binder() { throw new RuntimeException(\"stub\"); }", "public Binder() {}")
         .replace("public static final int getCallingUid() { throw new RuntimeException(\"stub\"); }",
             "public static int uid = 1000; public static final int getCallingUid() { return uid; }")
+        .replace("public static final int getCallingPid() { throw new RuntimeException(\"stub\"); }",
+            "public static int pid = 123; public static final int getCallingPid() { return pid; }")
+        .replace("public static final long clearCallingIdentity() { throw new RuntimeException(\"stub\"); }",
+            "public static final long clearCallingIdentity() { long token = ((long)uid << 32) | (pid & 0xffffffffL); uid = 1000; pid = 123; return token; }")
+        .replace("public static final void restoreCallingIdentity(long token) { throw new RuntimeException(\"stub\"); }",
+            "public static final void restoreCallingIdentity(long token) { uid = (int)(token >>> 32); pid = (int)token; }")
         .replace("public void attachInterface(IInterface owner, String descriptor) { throw new RuntimeException(\"stub\"); }",
             "public void attachInterface(IInterface owner, String descriptor) {}");
     fs::write(&binder, source).unwrap();

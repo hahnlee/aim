@@ -464,6 +464,90 @@ struct Session {
 fn session() -> Session {
     session_with_fixture(Fixture::new())
 }
+#[test]
+fn legacy_role_migration_uses_system_identity_and_consumes_browser_once() {
+    use aim_service_aidl::dev_aim_server_ipackageinternalhost as internal;
+    let Session {
+        fixture,
+        bridge,
+        old,
+        workers,
+        ..
+    } = session();
+    let (_, disk) = fixture.system.package_persistence_owner(&old).unwrap();
+    disk.lock()
+        .unwrap()
+        .set_pending_default_browser(0, Some("browser"))
+        .unwrap();
+    let endpoint =
+        crate::package::internal_host::Endpoint::new(Arc::downgrade(&fixture.system), bridge);
+    let request = |uid| {
+        let mut data = Parcel::new();
+        internal::RemoveLegacyDefaultBrowserPackageName {
+            user_id: 0,
+            calling_uid: uid,
+            calling_pid: 987,
+        }
+        .write(&mut data);
+        data
+    };
+    // A trusted transport must not turn a forwarded app identity into a write.
+    let denied = transact(
+        &endpoint,
+        1000,
+        internal::REMOVE_LEGACY_DEFAULT_BROWSER_PACKAGE_NAME,
+        &request(10194),
+    );
+    let error =
+        internal::read_remove_legacy_default_browser_package_name_reply(&mut denied.reader())
+            .unwrap()
+            .unwrap_err();
+    assert_eq!(error.code, aim_binder_host::parcel::EX_SECURITY);
+    assert_eq!(
+        error.message,
+        "Package internal persistence requires system UID"
+    );
+    // Nor can an app forge the forwarded system identity.
+    let denied = transact(
+        &endpoint,
+        10194,
+        internal::REMOVE_LEGACY_DEFAULT_BROWSER_PACKAGE_NAME,
+        &request(1000),
+    );
+    assert_eq!(
+        denied.reader().read_exception().unwrap().unwrap_err().code,
+        aim_binder_host::parcel::EX_SECURITY
+    );
+    assert_eq!(
+        disk.lock()
+            .unwrap()
+            .pending_default_browser(0)
+            .unwrap()
+            .as_deref(),
+        Some("browser")
+    );
+    for expected in [Some("browser"), None] {
+        let result = transact(
+            &endpoint,
+            1000,
+            internal::REMOVE_LEGACY_DEFAULT_BROWSER_PACKAGE_NAME,
+            &request(1000),
+        );
+        assert_eq!(
+            internal::read_remove_legacy_default_browser_package_name_reply(&mut result.reader())
+                .unwrap()
+                .unwrap()
+                .as_deref(),
+            expected
+        );
+    }
+    assert_eq!(
+        disk.lock().unwrap().pending_default_browser(0).unwrap(),
+        None
+    );
+    drop(workers);
+}
+
 fn session_with_fixture(mut fixture: Fixture) -> Session {
     let host = AppHost::new(fixture.native.clone());
     fixture.host = Some(host.clone());
