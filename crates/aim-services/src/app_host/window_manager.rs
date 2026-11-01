@@ -625,6 +625,9 @@ impl Session {
         drop(windows);
         if let Some(task) = drawn_task {
             self.host.task_drawn(task);
+            if let Some(token) = activity {
+                self.host.activity_drawn(token);
+            }
         }
         if let Some(token) = activity {
             self.host.transition_ready(token);

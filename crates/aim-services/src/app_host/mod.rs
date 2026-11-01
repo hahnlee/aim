@@ -13,6 +13,7 @@ pub mod account_service;
 mod account_session;
 pub mod accounts_db;
 pub mod activity;
+mod activity_launch;
 mod activity_multi;
 mod activity_shell;
 pub mod activity_stack;
@@ -3470,7 +3471,7 @@ impl AppHost {
             ..Default::default()
         };
         if let Some(me) = self.me.upgrade() {
-            me.start_in_process(start_seq, uid, package, info, request, &decision)?;
+            me.start_in_process(start_seq, uid, package, info, request, &decision, None)?;
         }
         Ok(())
     }

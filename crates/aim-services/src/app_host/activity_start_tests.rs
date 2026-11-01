@@ -16,7 +16,7 @@ fn invoke(host: &Arc<AppHost>, code: u32, p: &Parcel, uid: u32) -> Result<i32, E
         .unwrap();
     atm::read_start_activity_reply(&mut p.reader()).unwrap()
 }
-fn args(package: Option<&str>, user: i32, intent: Option<RawIntent>) -> AsUser {
+pub(super) fn args(package: Option<&str>, user: i32, intent: Option<RawIntent>) -> AsUser {
     atm::StartActivityAsUser {
         caller: None,
         calling_package: package.map(Into::into),
@@ -41,7 +41,7 @@ fn send(host: &Arc<AppHost>, uid: u32, a: &AsUser) -> Result<i32, Exception> {
 fn intent(class: &str) -> RawIntent {
     RawIntent::of(None, 0, &[]).with_component("p", class)
 }
-fn permissions(host: &Arc<AppHost>) {
+pub(super) fn permissions(host: &Arc<AppHost>) {
     host.permission_manager
         .set(Arc::new(
             permission_manager::PermissionManager::with_system(host.clone(), Default::default()),
@@ -52,7 +52,7 @@ fn permissions(host: &Arc<AppHost>) {
     host.display_metrics.set(Ok(metrics)).unwrap();
 }
 
-fn with_start(test: impl FnOnce(&Arc<AppHost>, &dyn Fn(Arc<dyn Service>) -> Strong)) {
+pub(super) fn with_start(test: impl FnOnce(&Arc<AppHost>, &dyn Fn(Arc<dyn Service>) -> Strong)) {
     crate::system::with_discovery_binders_flags(
         &[("android.permission.flags.appop_mode_caching_enabled", true)],
         true,

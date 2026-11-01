@@ -743,6 +743,7 @@ impl AppHost {
                     result_who: sent.result_who,
                     request_code: sent.request_code,
                     options: sent.options,
+                    launch: None,
                 };
                 let owner = Some(package.clone());
                 let result = if let Some((intents, types)) = all {

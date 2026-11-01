@@ -334,6 +334,8 @@ impl AppHost {
             inherit_show_when_locked: info.private_flags & 1 != 0,
             turn_screen_on: info.flags & 0x1000000 != 0,
             fully_drawn: false,
+            drawn: false,
+            relaunched: false,
             requested_orientation: -1,
             config_changes: ActivityRecord::real_config_changes(&info),
             size_buckets: None,
@@ -587,6 +589,14 @@ impl AppHost {
                         .transact(window, DISPATCH_APP_VISIBILITY, &p, true)
                         .map_err(|s| format!("dispatchAppVisibility: {s}"))?;
                 }
+                if visible
+                    && self
+                        .activities
+                        .with(Some(Binder::Local(token)), |r| r.drawn)
+                        .unwrap_or(false)
+                {
+                    self.activity_drawn(token);
+                }
                 Ok(())
             }
             Command::Front(task) => self.task_to_front(task),
@@ -617,6 +627,7 @@ impl AppHost {
         info: ActivityInfo,
         request: StartRequest,
         d: &Decision,
+        tracking: Option<super::activity_launch::Tracking<'_>>,
     ) -> Result<u64, Exception> {
         let real = real_component(&info);
         let user = uid / PER_USER_RANGE;
@@ -684,6 +695,9 @@ impl AppHost {
             Some(identity),
             user_leaving,
         );
+        if let Some(tracking) = tracking {
+            self.track_activity_launch(token, START_SUCCESS, tracking);
+        }
         self.run(commands);
         Ok(token)
     }
@@ -710,6 +724,7 @@ impl AppHost {
                     info,
                     StartRequest::launcher(class),
                     &Decision::default(),
+                    None,
                 )
                 .map(|_| ()),
             None => self
@@ -763,6 +778,7 @@ impl AppHost {
         }
         let name = match call.code {
             atm::START_ACTIVITIES => "startActivities",
+            atm::START_ACTIVITY_AND_WAIT => "startActivityAndWait",
             atm::START_ACTIVITY_WITH_CONFIG => "startActivityWithConfig",
             _ => "startActivityAsUser",
         };
@@ -937,8 +953,15 @@ impl AppHost {
             }));
         }
         if !self.background_activity_start_allowed(uid)? {
-            // START_ABORTED, which `getExternalResult` reports as success.
-            return Ok((START_SUCCESS, None));
+            // WaitResult retains START_ABORTED; getExternalResult exposes success.
+            return Ok((
+                if args.launch.is_some() {
+                    102
+                } else {
+                    START_SUCCESS
+                },
+                None,
+            ));
         }
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.
@@ -1047,6 +1070,9 @@ impl AppHost {
                     .send_result(to, payload),
             );
         }
+        let process = super::providers::process_name(&info.info);
+        let running = self.running_process(&process, target_uid);
+        let kind = running.map_or(1, |(_, attached)| if attached { 3 } else { 2 });
         let task = match d.outcome {
             Outcome::Deliver(token, code) => {
                 // `deliverNewIntentLocked`: the activity gets the intent's
@@ -1056,6 +1082,15 @@ impl AppHost {
                     intent: kept,
                     referrer: caller_package.unwrap_or_default(),
                 });
+                self.track_activity_launch(
+                    token,
+                    code,
+                    super::activity_launch::Tracking {
+                        source,
+                        kind,
+                        waiter: args.launch.as_ref(),
+                    },
+                );
                 commands.extend(self.activities.stack.lock().unwrap().apply(
                     &d,
                     Then::Deliver(token, payload),
@@ -1069,6 +1104,17 @@ impl AppHost {
                 let stack = self.activities.stack.lock().unwrap();
                 let token = d.front.and_then(|t| stack.top(t)).map(|a| a.token);
                 drop(stack);
+                if let Some(token) = token {
+                    self.track_activity_launch(
+                        token,
+                        code,
+                        super::activity_launch::Tracking {
+                            source,
+                            kind,
+                            waiter: args.launch.as_ref(),
+                        },
+                    );
+                }
                 commands.extend(self.activities.stack.lock().unwrap().apply(
                     &d,
                     Then::Nothing,
@@ -1106,20 +1152,31 @@ impl AppHost {
             source_task,
             grants,
         };
-        let process = super::providers::process_name(&info.info);
-        let seq = self
-            .running_process(&process, target_uid)
+        let seq = running
             .filter(|(_, attached)| *attached)
-            .map(|(seq, _)| seq)
-            .unwrap_or(0);
+            .map_or(0, |(seq, _)| seq);
         self.run(commands);
         let mut pending = request.clone();
-        let token = self.start_in_process(seq, target_uid, &package, info, request, &d)?;
+        let kind = if running.is_some() { 2 } else { 1 };
+        let token = self.start_in_process(
+            seq,
+            target_uid,
+            &package,
+            info,
+            request,
+            &d,
+            Some(super::activity_launch::Tracking {
+                source,
+                kind,
+                waiter: args.launch.as_ref(),
+            }),
+        )?;
         if seq == 0 {
             pending.restart = Some(token);
             if let Err(e) = self.start_process_for(&package, &process, Some(pending), false) {
                 let (_, commands) = self.activities.stack.lock().unwrap().finish(token);
                 self.activities.records.lock().unwrap().remove(&token);
+                self.activities.finish_launch(token, Some((false, -1, 0)));
                 self.cancel_activity_transition(token);
                 self.release_uri_grants(Owner::Activity(token));
                 self.run(commands);
@@ -1316,6 +1373,7 @@ impl AppHost {
             }
         };
         if destroyed {
+            self.activities.finish_launch(token, Some((false, -1, 0)));
             self.cancel_activity_transition(token);
             self.activity_connections_gone(token);
         }
@@ -1405,6 +1463,7 @@ pub struct StartArgs {
     pub result_who: Option<String>,
     pub request_code: i32,
     pub options: Option<RawBundle>,
+    pub(super) launch: Option<Arc<super::activity_launch::Launch>>,
 }
 
 /// A component name as `ComponentName.writeToParcel` writes it.
