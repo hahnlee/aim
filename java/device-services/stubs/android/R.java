@@ -15,6 +15,10 @@ public final class R {
         public static final int windowSplashScreenIconBackgroundColor = 16844336;
     }
 
+    public static final class drawable {
+        public static int stat_sys_warning;
+    }
+
     public static final class style {
         private style() { throw new RuntimeException("stub"); }
         public static final int Theme_DeviceDefault_DayNight = 16974563;

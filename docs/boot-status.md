@@ -629,7 +629,8 @@ host checks pass; no guest boot or real CTS run was performed (2026-11-01).
 Explicit grant/revoke now require a live account and installed target UID, persist
 in DE, and deliver app-permission callbacks after commit (#1504/#1460 3c).
 The inactive AccountManagerInternal adapter shares the SyncAccounts capability;
-access and listeners delegate to the native owner. Consent remains in slice 3d.
+access, listeners and consent delegate to the native owner (#1504/#1460 3d).
+Consent retains the platform Activity; host lifecycle/API and Java linkage checks pass, with no guest boot or CTS run.
 The inactive typed SyncAccounts adapter uses a system-UID-only capability
 on that same native owner (#1460/#1504 3a.2). Snapshots propagate owner/database
 failures, and both Java linkage cohorts check the image's injected seam.

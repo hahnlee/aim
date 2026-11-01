@@ -29,6 +29,7 @@ fn sync_accounts_adapter() {
         .args(common::java::sources(&work.join("aidl")))
         .arg(production.join("src/dev/aim/server/NativeAccountManagerInternal.java"))
         .arg(production.join("src/dev/aim/server/NativeSyncAccounts.java"))
+        .arg(production.join("src/dev/aim/server/AccountConsentNotifications.java"))
         .args(common::java::sources(
             &root.join("crates/aim-services/tests/fixtures/sync_accounts"),
         )));

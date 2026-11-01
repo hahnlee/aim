@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use std::sync::mpsc;
 use std::time::Duration;
 
-fn signed_fixture(
+pub(super) fn signed_fixture(
     host: &Arc<AppHost>,
 ) -> (Arc<AccountManager>, std::path::PathBuf, std::path::PathBuf) {
     let system = host.package_system().unwrap();

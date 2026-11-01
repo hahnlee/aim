@@ -23,6 +23,34 @@ pub struct RawIntent {
 }
 
 impl RawIntent {
+    pub(super) fn with_extras_bundle(&self, extras: &RawBundle) -> Result<Self> {
+        let spans = Spans::of(&self.raw)?;
+        let raw = Raw::concat(&[
+            self.raw.slice(0, spans.extras.0),
+            extras.0.clone(),
+            self.raw
+                .slice(spans.extras.1, self.raw.parcel().data().len()),
+        ]);
+        Self::read_from(&mut raw.parcel().reader())
+    }
+
+    pub(super) fn with_category(&self, category: &str) -> Result<Self> {
+        let spans = Spans::of(&self.raw)?;
+        let mut p = Parcel::new();
+        let mut categories = self.intent.categories.clone().unwrap_or_default();
+        if !categories.iter().any(|c| c == category) {
+            categories.push(category.into());
+        }
+        p.write_i32(categories.len() as i32);
+        for value in categories {
+            p.write_string8(Some(&value));
+        }
+        let raw = self
+            .raw
+            .splice(spans.categories.0, spans.categories.1, p.data());
+        Self::read_from(&mut raw.parcel().reader())
+    }
+
     /// android-16.0.0_r1 Intent.getExtrasTotalSize / Bundle.getSize: the
     /// retained parcelled data size, excluding its length and magic words.
     pub(super) fn extras_total_size(&self) -> Result<i32> {
@@ -600,6 +628,25 @@ const VAL_NULL: i32 = -1;
 const VAL_STRING: i32 = 0;
 
 impl RawBundle {
+    /// `putParcelable`, preserving the parcel's Binder object offsets.
+    pub(super) fn with_parcelable(&self, key: &str, class: &str, value: &Parcel) -> Result<Self> {
+        let (magic, mut parts, has_intent) =
+            self.entries()?
+                .unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
+        let mut head = Parcel::new();
+        head.write_string16(Some(key));
+        head.write_i32(VAL_PARCELABLE);
+        let mut name = Parcel::new();
+        name.write_string16(Some(class));
+        let mut reader = value.reader();
+        reader.set_position(value.data().len());
+        let value = Raw::concat(&[Raw::of(&name), Raw::capture(&reader, 0)]);
+        head.write_i32(value.parcel().data().len() as i32);
+        parts.retain(|(k, _)| k != key);
+        parts.push((key.into(), Raw::concat(&[Raw::of(&head), value])));
+        Ok(Self(bundle_of(magic, parts, has_intent)))
+    }
+
     /// An empty bundle (`new Bundle()`).
     pub fn empty() -> RawBundle {
         let mut p = Parcel::new();
