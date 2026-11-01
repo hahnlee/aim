@@ -426,3 +426,97 @@ fn internal_instant_package_events_require_access_instant_apps_and_the_allow_lis
         }
     });
 }
+
+/// Pinned PMS/PowerGroup/Notifier: permission, no-op, stale events and
+/// registered SCREEN_ON/OFF delivery through the native broadcast owner.
+#[test]
+fn interactive_requests_follow_the_power_owner() {
+    const ON: &str = "android.intent.action.SCREEN_ON";
+    const OFF: &str = "android.intent.action.SCREEN_OFF";
+    use super::super::power_service::PowerManager;
+    use aim_service_aidl::android_os_ipowermanager as pm;
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let permissions = super::super::permission_manager::PermissionManager::with_system(
+            host.clone(),
+            Default::default(),
+        );
+        assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+        let power = host
+            .power_service
+            .get_or_init(|| Arc::new(PowerManager::new(host.clone())));
+        let received = register_filter(host, export, "p", 1000, false);
+        // Reuse the loaded-process receiver fixture with the screen filter.
+        let mut filter = IntentFilter::default();
+        filter.add_action(ON);
+        filter.add_action(OFF);
+        host.broadcasts.state.lock().unwrap().receivers[0].filters[0].filter = filter;
+        let invoke = |code, parcel: &Parcel, uid| {
+            power
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 1000,
+                    sender_euid: uid,
+                    data: parcel.reader(),
+                })
+                .unwrap()
+        };
+        let wake = |time, uid| {
+            let mut p = Parcel::new();
+            pm::WakeUp {
+                time,
+                reason: 4,
+                details: Some("cts wake".into()),
+                op_package_name: Some("android".into()),
+            }
+            .write(&mut p);
+            pm::read_wake_up_reply(&mut invoke(pm::WAKE_UP, &p, uid).reader()).unwrap()
+        };
+        let sleep = |time, uid| {
+            let mut p = Parcel::new();
+            pm::GoToSleep {
+                time,
+                reason: 4,
+                flags: 1,
+            }
+            .write(&mut p);
+            pm::read_go_to_sleep_reply(&mut invoke(pm::GO_TO_SLEEP, &p, uid).reader()).unwrap()
+        };
+        let interactive = || {
+            let mut p = Parcel::new();
+            pm::IsInteractive {}.write(&mut p);
+            pm::read_is_interactive_reply(&mut invoke(pm::IS_INTERACTIVE, &p, 10100).reader())
+                .unwrap()
+                .unwrap()
+        };
+        for result in [wake(0, 10100), sleep(0, 10100)] {
+            assert_eq!(
+                result.unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
+        }
+        wake(0, 1000).unwrap();
+        assert!(interactive());
+        assert!(received.try_recv().is_err());
+        sleep(10, 1000).unwrap();
+        assert!(!interactive());
+        let (off, user) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(user, USER_ALL);
+        assert_eq!(off.intent.action.as_deref(), Some(OFF));
+        wake(9, 1000).unwrap();
+        assert!(!interactive() && received.try_recv().is_err());
+        wake(10, 1000).unwrap();
+        assert!(interactive());
+        let (on, _) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(on.intent.action.as_deref(), Some(ON));
+        assert_eq!(on.intent.flags, 0x5020_0010); // AM adds EXCLUDE_STOPPED_PACKAGES.
+        sleep(9, 1000).unwrap();
+        wake(11, 1000).unwrap();
+        assert!(interactive() && received.try_recv().is_err());
+        let future = aim_hostcall::clock::monotonic_ns() / 1_000_000 + 60_000;
+        assert_eq!(
+            wake(future, 10100).unwrap_err().message,
+            "event time must not be in the future"
+        );
+    });
+}

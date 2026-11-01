@@ -7,8 +7,8 @@
 //! on, by a screen wake lock or a visible keep-screen-on window
 //! (WindowManagerService's hold screen), keeps the Mac's display awake
 //! (`PreventUserIdleDisplaySleep`, docs/power.md); the device's state as
-//! apps read it. The app host's display is always on, so the device is
-//! awake and interactive (the Mac's display sleep: #670); there is no
+//! apps read it. Binder sleep/wake requests share this display state;
+//! the Mac's display sleep/session notifications remain #670. There is no
 //! device idle (doze); battery saver is the
 //! persisted `low_power` setting. Full-policy background-start/firewall
 //! decisions are read natively; remaining policies are #1489.
@@ -38,6 +38,8 @@ const DRAW_WAKE_LOCK: i32 = 0x80;
 const SCREEN_TIMEOUT_OVERRIDE_WAKE_LOCK: i32 = 0x100;
 const WAKE_LOCK_LEVEL_MASK: i32 = 0xffff;
 const SYSTEM_WAKELOCK: i32 = 0x8000_0000_u32 as i32;
+const GO_TO_SLEEP_FLAG_NO_DOZE: i32 = 1;
+const GO_TO_SLEEP_FLAG_SOFT_SLEEP: i32 = 2;
 /// `Display.DEFAULT_DISPLAY`, `INVALID_DISPLAY`.
 const DEFAULT_DISPLAY: i32 = 0;
 const INVALID_DISPLAY: i32 = -1;
@@ -162,6 +164,9 @@ impl Drop for Blocker {
 
 #[derive(Default)]
 struct State {
+    asleep: bool,
+    last_wake: Option<pm::WakeUp>,
+    last_sleep: (i64, i32),
     locks: Vec<WakeLock>,
     device_idle_temp: Vec<i32>,
     /// `PowerManagerService.WakeLocks`, `.Display`.
@@ -177,6 +182,7 @@ struct State {
 pub struct PowerManager {
     host: Arc<AppHost>,
     state: Mutex<State>,
+    transition: Mutex<()>,
 }
 
 /// `IWakeLockCallback.onStateChanged`: the lock is enabled or not.
@@ -302,7 +308,90 @@ impl PowerManager {
         PowerManager {
             host,
             state: Mutex::default(),
+            transition: Mutex::default(),
         }
+    }
+
+    pub(super) fn interactive(&self) -> bool {
+        !self.state.lock().unwrap().asleep
+    }
+
+    /// PMS BinderService / PowerGroup timestamp guards and Notifier's
+    /// single-display interactive transition (android-16.0.0_r1).
+    #[allow(clippy::too_many_arguments)]
+    fn set_interactive(
+        &self,
+        call: &Call<'_>,
+        time: i64,
+        awake: bool,
+        reason: i32,
+        details: Option<String>,
+        package: Option<String>,
+        flags: i32,
+    ) -> Result<(), Exception> {
+        if time > aim_hostcall::clock::monotonic_ns() / 1_000_000 {
+            return Err(Exception::illegal_argument(
+                "event time must not be in the future",
+            ));
+        }
+        self.enforce("android.permission.DEVICE_POWER", call.sender_euid as i32)?;
+        let _transition = self.transition.lock().unwrap();
+        {
+            let mut state = self.state.lock().unwrap();
+            let last = if awake {
+                state.last_sleep.0
+            } else {
+                state.last_wake.as_ref().map_or(0, |a| a.time)
+            };
+            if time < last || awake == !state.asleep {
+                return Ok(());
+            }
+            // SOFT_SLEEP, without fold grace: a screen wake lock vetoes sleep.
+            if !awake
+                && flags & GO_TO_SLEEP_FLAG_SOFT_SLEEP != 0
+                && (state.window_holds_screen || state.locks.iter().any(WakeLock::keeps_screen))
+            {
+                return Ok(());
+            }
+            state.asleep = !awake;
+            if awake {
+                eprintln!(
+                    "app host: power: waking uid={} reason={reason} details={details:?} package={package:?}",
+                    call.sender_euid
+                );
+                state.last_wake = Some(pm::WakeUp {
+                    time,
+                    reason,
+                    details,
+                    op_package_name: package,
+                });
+            } else {
+                state.last_sleep = (
+                    time,
+                    if flags & GO_TO_SLEEP_FLAG_NO_DOZE != 0 {
+                        reason
+                    } else {
+                        reason.clamp(0, 10)
+                    },
+                );
+            }
+            self.update_blockers(&mut state);
+        }
+        if let Some(display) = self.host.display_manager.get() {
+            display.power_changed();
+        }
+        // Notifier's interactive broadcast: nonsticky, registered receivers,
+        // foreground and visible to instant apps, for every user.
+        let action = if awake {
+            "android.intent.action.SCREEN_ON"
+        } else {
+            "android.intent.action.SCREEN_OFF"
+        };
+        self.host.broadcasts.send_from_system(
+            &self.host,
+            super::kept::RawIntent::new(action, 0x5000_0000 | 0x0020_0000, &[]),
+        );
+        Ok(())
     }
 
     fn enforce(&self, permission: &str, uid: i32) -> Result<(), Exception> {
@@ -335,9 +424,11 @@ impl PowerManager {
     }
 
     /// `updateSuspendBlockerLocked`: `.WakeLocks` while a lock keeps the
-    /// CPU on, `.Display` while the display is on (always).
+    /// CPU on, `.Display` while the display is on.
     fn update_blockers(&self, state: &mut State) {
-        let need = state.locks.iter().any(WakeLock::keeps_cpu);
+        let need = state.locks.iter().any(|l| {
+            l.flags & WAKE_LOCK_LEVEL_MASK == PARTIAL_WAKE_LOCK || !state.asleep && l.keeps_cpu()
+        });
         let take = |slot: &mut Option<Blocker>, name: &str| {
             if slot.is_none() {
                 match self.blocker(name) {
@@ -349,12 +440,17 @@ impl PowerManager {
         if need {
             take(&mut state.wake_locks, "PowerManagerService.WakeLocks");
         }
-        take(&mut state.display, "PowerManagerService.Display");
+        if state.asleep {
+            state.display = None;
+        } else {
+            take(&mut state.display, "PowerManagerService.Display");
+        }
         if !need {
             state.wake_locks = None;
         }
         // The screen kept on is the Mac's display kept awake.
-        let screen = state.window_holds_screen || state.locks.iter().any(WakeLock::keeps_screen);
+        let screen = !state.asleep
+            && (state.window_holds_screen || state.locks.iter().any(WakeLock::keeps_screen));
         if !screen {
             state.screen_assertion = None;
         } else if state.screen_assertion.is_none() {
@@ -699,13 +795,29 @@ impl Service for PowerManager {
                     Ok(!component.is_empty())
                 })())
             }
+            pm::WAKE_UP => {
+                let a = pm::WakeUp::read(&mut call.data).map_err(bad)?;
+                empty(self.set_interactive(
+                    call,
+                    a.time,
+                    true,
+                    a.reason,
+                    a.details,
+                    a.op_package_name,
+                    0,
+                ))
+            }
+            pm::GO_TO_SLEEP => {
+                let a = pm::GoToSleep::read(&mut call.data).map_err(bad)?;
+                empty(self.set_interactive(call, a.time, false, a.reason, None, None, a.flags))
+            }
             pm::IS_INTERACTIVE => {
                 pm::IsInteractive::read(&mut call.data).map_err(bad)?;
-                bool_reply(Ok(true))
+                bool_reply(Ok(self.interactive()))
             }
             pm::IS_DISPLAY_INTERACTIVE => {
                 let a = pm::IsDisplayInteractive::read(&mut call.data).map_err(bad)?;
-                bool_reply(Ok(a.display_id == DEFAULT_DISPLAY))
+                bool_reply(Ok(a.display_id == DEFAULT_DISPLAY && self.interactive()))
             }
             pm::IS_POWER_SAVE_MODE => {
                 pm::IsPowerSaveMode::read(&mut call.data).map_err(bad)?;

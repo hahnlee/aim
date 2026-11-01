@@ -589,6 +589,7 @@ pub struct AppHost {
     unlocked_users: Mutex<std::collections::BTreeMap<i32, i64>>,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
+    display_manager: OnceLock<Arc<display_service::DisplayManager>>,
     display_socket: OnceLock<PathBuf>,
     display_metrics: OnceLock<Result<display::Metrics, Exception>>,
     /// The settings provider, its binder and its connection token.
@@ -744,6 +745,7 @@ impl AppHost {
             unlocked_users: Mutex::new(Default::default()),
             activities: Default::default(),
             display: OnceLock::new(),
+            display_manager: OnceLock::new(),
             display_socket: OnceLock::new(),
             display_metrics: OnceLock::new(),
             settings_provider: OnceLock::new(),
@@ -964,7 +966,9 @@ impl AppHost {
             ),
             (
                 "display",
-                Arc::new(display_service::DisplayManager::new(self.clone())),
+                self.display_manager
+                    .get_or_init(|| Arc::new(display_service::DisplayManager::new(self.clone())))
+                    .clone(),
             ),
             (
                 "window",
