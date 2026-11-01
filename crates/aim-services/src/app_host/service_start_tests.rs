@@ -190,7 +190,7 @@ impl aim_binder_host::local::Service for Thread {
 fn attach_preserves_pending_order_and_unbound_services_create_then_stop() {
     use aim_binder_driver::{Credentials, Device, Driver, uapi::*};
     use aim_binder_host::local::LocalProcess;
-    for early_attach in [false, true] {
+    for (early_attach, framework) in [(false, false), (true, false), (false, true), (true, true)] {
         let driver = Driver::new();
         let open = |pid| {
             LocalProcess::open(
@@ -198,7 +198,7 @@ fn attach_preserves_pending_order_and_unbound_services_create_then_stop() {
                 Device::Binder,
                 Credentials {
                     pid,
-                    euid: 10123,
+                    euid: if framework { 1000 } else { 10123 },
                     security_context: None,
                 },
             )
@@ -208,8 +208,8 @@ fn attach_preserves_pending_order_and_unbound_services_create_then_stop() {
         let template = super::super::tests::host_with_start(7, Arc::new(|| {}));
         let mut app = template.apps.lock().unwrap().remove(&7).unwrap();
         template.process.shutdown().unwrap();
-        app.process = "p".into();
-        app.uid = 10123;
+        app.process = if framework { "system" } else { "p" }.into();
+        app.uid = if framework { 1000 } else { 10123 };
         app.config = Some(super::super::config::Configuration::from_proto(&[]).unwrap());
         host.apps.lock().unwrap().insert(7, app);
         let path = std::path::Path::new("target/service-start-test-unused");
@@ -251,7 +251,37 @@ fn attach_preserves_pending_order_and_unbound_services_create_then_stop() {
             .unwrap();
         remote.start();
         // Existing record order differs from pending bring-up order.
-        let (first, _, connected) = pending(&host, "A", false);
+        let (first, first_conn, connected) = pending(&host, "A", false);
+        if framework {
+            let mut state = host.services.state.lock().unwrap();
+            let record = state.record(first).unwrap();
+            record.package = "android".into();
+            record.class = "com.android.server.content.SyncJobService".into();
+            record.info.info.item.name = Some(record.class.clone());
+            record.info.info.item.package_name = Some("android".into());
+            record.info.info.process_name = Some("system".into());
+            Arc::make_mut(&mut record.info.info.application_info).uid = 1000;
+            state.pending_services.retain(|t| *t != first);
+            host.processes_ready.set(Ok(())).unwrap();
+            if early_attach {
+                host.apps.lock().unwrap().get_mut(&7).unwrap().thread =
+                    Some(host.process.strong(0));
+            }
+            host.bring_up(&mut state, first).unwrap();
+            drop(state);
+            host.apps.lock().unwrap().get_mut(&7).unwrap().thread = Some(host.process.strong(0));
+            host.services_attached(7);
+            for code in [
+                thread::SCHEDULE_CREATE_SERVICE,
+                thread::SCHEDULE_BIND_SERVICE,
+            ] {
+                assert_eq!(received.recv_timeout(Duration::from_secs(2)).unwrap(), code);
+            }
+            host.unbind_service_from_host(&first_conn);
+            host.process.shutdown().unwrap();
+            remote.shutdown().unwrap();
+            continue;
+        }
         let (second, gone, gone_rx) = pending(&host, "B", false);
         host.services.state.lock().unwrap().records.reverse();
         host.unbind_service_from_host(&gone);

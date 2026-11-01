@@ -347,6 +347,20 @@ pub fn check_linkage_on(
     problems.extend(classpath.unresolved(&code)?);
     for (adapter, parent, methods) in [
         (
+            "Ldev/aim/server/NativeJobScheduler;",
+            "Lcom/android/server/job/JobSchedulerInternal;",
+            &[
+                (
+                    "getSystemScheduledOwnJobs",
+                    "(Ljava/lang/String;)Ljava/util/List;",
+                ),
+                (
+                    "getPersistStats",
+                    "()Lcom/android/server/job/JobSchedulerInternal$JobStorePersistStats;",
+                ),
+            ][..],
+        ),
+        (
             "Ldev/aim/server/NativeAccountManagerInternal;",
             "Landroid/accounts/AccountManagerInternal;",
             &[

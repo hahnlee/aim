@@ -1,5 +1,6 @@
 package dev.aim.server;
 import dev.aim.server.ISyncAccounts;
+import android.app.job.JobInfo;
 import dev.aim.server.IForegroundServicePolicy;
 import dev.aim.server.IAccessibilityWindowHost;
 import dev.aim.server.IBatteryHealthStats;
@@ -97,4 +98,6 @@ interface ISystemProcess {
     void attachRoleService(IBinder service);
     IBinder getPackageInternalHost();
     ISyncAccounts getSyncAccounts();
+    List<JobInfo> getSystemScheduledOwnJobs(String namespace);
+    int[] getJobPersistStats();
 }

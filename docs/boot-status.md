@@ -634,6 +634,10 @@ Consent retains the platform Activity; host lifecycle/API and Java linkage check
 The inactive typed SyncAccounts adapter uses a system-UID-only capability
 on that same native owner (#1460/#1504 3a.2). Snapshots propagate owner/database
 failures, and both Java linkage cohorts check the image's injected seam.
+The native JobScheduler now supplies aim-system's JobSchedulerInternal own-job
+and persistence reads, with source/namespace selection. Framework services use
+their attached system process, including the original manifest SyncJobService
+(#1460 slice 4a; host/JVM/linkage checks, 2026-11-01; no guest boot).
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
