@@ -172,7 +172,7 @@ public final class SystemProcessHost extends RuntimeInit {
             ActivityStats.publish(host);
             NativeJobScheduler.publish(host);
             SyncPolicyLocals.publish(host);
-            SyncOwnerStartup.start(context, host);
+            var sync = SyncOwnerStartup.start(context, host);
             TaskManagerLocal.publish(host);
             AccessibilityWindows.publish(context, host);
             com.android.server.LocalManagerRegistry.addManager(
@@ -212,6 +212,7 @@ public final class SystemProcessHost extends RuntimeInit {
             for (int phase : new int[] {SystemService.PHASE_LOCK_SETTINGS_READY,
                     SystemService.PHASE_SYSTEM_SERVICES_READY,
                     SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY}) {
+                sync.onBootPhase(phase);
                 for (SystemService service : services) {
                     service.onBootPhase(phase);
                 }
@@ -230,6 +231,7 @@ public final class SystemProcessHost extends RuntimeInit {
             }
             for (int phase : new int[] {SystemService.PHASE_ACTIVITY_MANAGER_READY,
                     SystemService.PHASE_THIRD_PARTY_APPS_CAN_START}) {
+                sync.onBootPhase(phase);
                 for (SystemService service : services) {
                     service.onBootPhase(phase);
                 }
@@ -237,6 +239,7 @@ public final class SystemProcessHost extends RuntimeInit {
             // The app host runs user 0 alone, unlocked from its start.
             TargetUser user = new TargetUser(context.getSystemService(UserManager.class)
                     .getUserInfo(UserHandle.USER_SYSTEM));
+            sync.onStartUser(UserHandle.USER_SYSTEM);
             for (SystemService service : services) {
                 service.onUserStarting(user);
             }
@@ -248,6 +251,7 @@ public final class SystemProcessHost extends RuntimeInit {
             for (SystemService service : services) {
                 service.onUserUnlocked(user);
             }
+            sync.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
             for (SystemService service : services) {
                 service.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
             }

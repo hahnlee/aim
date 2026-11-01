@@ -448,8 +448,12 @@ The private owner is now constructed in aim-system after native local owners
 are published (#1460 slice 6a), using those typed account dependencies. A private
 inactive Binder is attached to the actual system-process generation with death
 invalidation. The existing discovery bridge borrows its cache, avoiding a second
-SyncAdaptersCache. Public sync forwarding, user-unlock readiness and job admission
-are not activated by construction; no guest boot or sync CTS claim is made.
+SyncAdaptersCache. Slice 6b delivers phases and native user-0 unlock replay,
+then acknowledges the attached generation through an explicit original-handler
+barrier in the pinned DEX seam. Restored SyncJobService binds wait for that
+completion. Public sync forwarding remains inactive; host tests do not establish
+ART lifecycle or restored-job boot acceptance. No guest boot or sync CTS claim
+is made.
 
 ### The redirect edit (2026-10-02)
 

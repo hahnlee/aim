@@ -1037,6 +1037,17 @@ impl JobScheduler {
         self.post(Message::Check);
     }
 
+    pub(super) fn sync_owner_changed(&self) {
+        self.post(Message::Check);
+    }
+
+    fn sync_admitted(&self, j: &JobStatus) -> bool {
+        j.calling_uid != 1000
+            || j.job.service.0 != "android"
+            || j.job.service.1 != "com.android.server.content.SyncJobService"
+            || self.host.sync_owner_ready()
+    }
+
     pub(super) fn temp_allowlist_changed(&self) {
         self.state.lock().unwrap().device = None;
         self.post(Message::Check);
@@ -1890,7 +1901,8 @@ impl JobScheduler {
             return false;
         };
         let top = self.is_top(j.source_uid);
-        j.tracked
+        self.sync_admitted(j)
+            && j.tracked
             && j.evaluate(now, &device, top)
             && !state.pending.contains(&key)
             && !state.contexts.iter().any(|c| c.key == key)
@@ -1928,6 +1940,9 @@ impl JobScheduler {
                 if let Some(i) = running {
                     stops.push((state.contexts[i].callback.id, j.reason_unready));
                 }
+                continue;
+            }
+            if running.is_none() && !self.sync_admitted(j) {
                 continue;
             }
             // `shouldForceBatchJob`, for jobs of no network (which never
@@ -2034,6 +2049,9 @@ impl JobScheduler {
 
     /// `JobServiceContext.executeRunnableJob`: the job's service bound.
     fn execute(&self, state: &mut State, key: u64, now: i64) -> bool {
+        if !self.sync_admitted(&state.jobs[&key]) {
+            return false;
+        }
         // The controllers' `prepareForExecutionLocked`.
         if let Some(j) = state.jobs.get_mut(&key).filter(|j| j.has_content_trigger()) {
             state.content.prepare(&mut j.content);

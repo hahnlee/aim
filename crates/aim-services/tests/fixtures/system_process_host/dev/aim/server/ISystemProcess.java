@@ -5,6 +5,8 @@ interface ISystemProcess {
     long getSyncOwnerGeneration();
     void attachSyncOwner(long generation, IBinder owner);
     boolean isSyncOwnerAttached(long generation);
+    boolean isSyncOwnerUserUnlocked(long generation) throws android.os.RemoteException;
+    void completeSyncOwnerReplay(long generation) throws android.os.RemoteException;
     IBinder getInternalServiceRepository();
     IBinder getPackageInternalHost();
     void attachRoleService(IBinder service);
@@ -45,6 +47,14 @@ interface ISystemProcess {
                     SystemProcessHostTest.events.add("syncAttached");
                 }
                 public boolean isSyncOwnerAttached(long generation) { return generation == 7; }
+                public boolean isSyncOwnerUserUnlocked(long generation) {
+                    if (generation != 7 || !SyncOwnerLifecycleTest.alive) throw new IllegalStateException("dead generation");
+                    return SyncOwnerLifecycleTest.unlocked;
+                }
+                public void completeSyncOwnerReplay(long generation) {
+                    if (generation != 7 || !SyncOwnerLifecycleTest.alive) throw new IllegalStateException("dead generation");
+                    SyncOwnerLifecycleTest.ready = true;
+                }
                 public IBinder getInternalServiceRepository() { throw new AssertionError(); }
                 public IBinder getPackageInternalHost() { throw new AssertionError(); }
                 public void attachRoleService(IBinder service) {

@@ -110,4 +110,6 @@ interface ISystemProcess {
     long getSyncOwnerGeneration();
     void attachSyncOwner(long generation, IBinder owner);
     boolean isSyncOwnerAttached(long generation);
+    boolean isSyncOwnerUserUnlocked(long generation);
+    void completeSyncOwnerReplay(long generation);
 }

@@ -5,6 +5,7 @@ package android.content;
 import android.os.IBinder;
 
 public class Intent implements android.os.Parcelable {
+    public static final String ACTION_USER_UNLOCKED = "android.intent.action.USER_UNLOCKED";
     public Intent putStringArrayListExtra(String name, java.util.ArrayList<String> value) { throw new RuntimeException("stub"); }
     public static final int FLAG_INCLUDE_STOPPED_PACKAGES=32;
     public static String ACTION_PACKAGE_REPLACED;

@@ -1,5 +1,11 @@
 package android.content;
 public abstract class Context {
+    public BroadcastReceiver unlockReceiver;
+    public Intent registerReceiverAsUser(BroadcastReceiver receiver, android.os.UserHandle user,
+            IntentFilter filter, String permission, android.os.Handler handler) {
+        unlockReceiver = receiver;
+        return null;
+    }
     public static final String ROLE_SERVICE = "role";
     public static final String ACCESSIBILITY_SERVICE = "accessibility";
     public void sendOrderedBroadcastAsUser(Intent i, android.os.UserHandle user, String p, BroadcastReceiver receiver, android.os.Handler handler, int code, String data, android.os.Bundle extras) { receiver.onReceive(this, i); }

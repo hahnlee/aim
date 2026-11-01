@@ -760,17 +760,24 @@ job persistence and unsupported-owner errors to those cleanup owners
 (#1460 slice 5j/#1723/#2016/#1509/#1928). Host JVM/native tests cover this scope;
 matched-image adapter accounting, restoration and sync CTS remain unverified.
 No guest boot was run.
-Private ContentService/SyncManager construction now follows publication of the
-native local owners in aim-system (#1460 slice 6a). Its inactive capability is
-attached to the actual system-process generation and withdrawn on death; the
-existing native discovery bridge borrows its sole cache. Construction attachment
-is separate from unlock/handler completion and job admission. Public sync
-forwarding remains inactive. Native attachment/death/restart and JVM startup,
-failure and discovery checks pass, as do device-services image linkage and the
-replacement-classpath regression (#1460, 2026-11-01). Debug and release libraries
-each have 2,322 passes, eight baseline failures and 20 ignored tests; three
-failures show sandbox EPERM, while five template-readiness failures remain
-unconfirmed as sandbox-only. No guest boot or CTS run was performed.
+Private ContentService/SyncManager construction follows publication of the
+native local owners in aim-system (#1460 slices 6a/6b). Its inactive capability
+is attached to the actual system-process generation and withdrawn on death; the
+native discovery bridge borrows its sole cache. The owner now receives the
+system process's boot phases and user start. A native user-0 unlock snapshot,
+queried after receiver registration, covers missed/early USER_UNLOCKED delivery.
+Replay marks the original user unlocked, invokes original account validation and
+refresh, then posts completion on the original handler through a pinned DEX seam.
+Only a live attached generation can acknowledge completion; SyncJobService
+admission, including restored or rescheduled jobs, waits for it. Broadcast-queue
+idle is not a readiness signal. Public sync forwarding remains inactive.
+Native generation/death and restored-job admission tests, JVM startup/replay
+fixtures with pinned original unlock/receiver/account-handler bodies, pinned DEX
+verification and device-services linkage pass (#1460, 2026-11-01). The JVM's
+handler transport and Android dependencies remain doubles. Full-access ART
+handler, native user/account transitions, restored-job and default-grant boot
+acceptance on fresh and persisted disposable data remains unverified. No guest
+boot or new CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
 `/data/data` did not exist when the package side's start asked for the
 core apps' data. A second boot of the same data directory keeps the
