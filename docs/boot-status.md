@@ -881,7 +881,13 @@ selections name the individual flag. Host branch tests include a signed APK whos
 own signature permission is granted and platform permission denied. Install candidates
 also apply `-g`, explicit permission states and restricted allowlists through boot
 runtime/split policy and the coalesced writer's synchronous lock, restoring access
-on commit failure (#2560; 94 host checks). A fresh en-US Accessibility CTS install
+on commit failure (#2560; 94 host checks). Pre-M install candidates now use that
+same legacy runtime policy (#2606): install grants and review flags, runtime-only
+exclusion, installer grant review clearing and target-SDK upgrade transitions.
+The install owner's image-selected 23/24 minimum, testOnly exemption and low-target
+bypass remain enforced. Host install/publication/reload and AppOps regressions cover
+this change; no guest boot or CTS preparer run was performed (2026-11-01).
+A fresh en-US Accessibility CTS install
 succeeds with storage grants; #2564 removes the accessibility wait from native
 `attachApplication`, with official instrumentation results recorded above.
 Official
