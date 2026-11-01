@@ -10,6 +10,13 @@ with timestamp ordering, shared interactive/display queries, display-state callb
 and registered SCREEN_ON/OFF broadcasts (#2607). Display/screen blockers follow
 that state. Host regression checks cover denial, no-op and stale wake ordering;
 no guest boot or Mac sleep/session notification check was run (#670, 2026-11-01).
+Stay-on applies the pinned caller check, writes the native global setting as
+the system and notifies observers (#2628). The Mac owns the screen-off timeout;
+the native power owner has no Android screen-timeout to suppress. Stay-on
+schedules no guest sleep and creates no host assertion; its setting feeds into
+the Mac-owned timeout model once #670 implements it. Host tests cover permissions,
+values, observers and absence of assertions/scheduled sleep; original `svc`
+execution and guest boots remain unverified (2026-11-02).
 
 The native `window` service serves text and Android 16 proto dumps from its
 task/activity/window owners (#2605), with hash-pinned schemas and no invented

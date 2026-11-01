@@ -2890,7 +2890,7 @@ fn foreground_changed(host: &AppHost, uid: i32) -> Result<(), Exception> {
 }
 
 /// `getPackagesForUid`.
-fn packages_for_uid(host: &AppHost, uid: i32) -> Result<Vec<String>, Exception> {
+pub(super) fn packages_for_uid(host: &AppHost, uid: i32) -> Result<Vec<String>, Exception> {
     let (state, resolution) = host.packages()?;
     let query = crate::package::query::Query {
         state: &state,

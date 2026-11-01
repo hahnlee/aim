@@ -136,6 +136,15 @@ them on its own.
   Mac's display is awake, and keep the original's timeout for an
   explicit `goToSleep`, `wakeUp` and the CTS's key events.
 
+The app host's native `setStayOnSetting` (#2628) applies the pinned caller
+check, writes `Settings.Global.STAY_ON_WHILE_PLUGGED_IN` as the system and
+notifies settings observers. The Mac owns the screen-off timeout; the native
+power owner has no Android screen-timeout to suppress. Stay-on schedules no
+guest sleep and creates no host power assertion. Once #670 brings the
+Mac-owned timeout model, the persisted stay-on setting feeds into that model.
+Mac input does not yet feed Android user activity, so a guest timeout would
+put the guest to sleep while the user is active.
+
 So a native service would keep: wake lock bookkeeping and their disabled
 states (uid states, device idle allowlists, low power standby), the
 wakefulness state machine per power group, user activity and its

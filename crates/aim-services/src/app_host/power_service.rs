@@ -63,6 +63,7 @@ const SCREEN_ASSERTION: &str = "Android keeps the screen on";
 /// `IWakeLockCallback.onStateChanged`.
 const CALLBACK_DESCRIPTOR: &str = "android.os.IWakeLockCallback";
 const ON_STATE_CHANGED: u32 = 1;
+const STAY_ON: &str = "stay_on_while_plugged_in";
 
 /// `WorkSource` at android-16.0.0_r1. Keep the backing arrays too:
 /// `WorkChain.equals` compares capacity slots, not just its active nodes.
@@ -467,6 +468,36 @@ impl PowerManager {
             &self.host,
             super::kept::RawIntent::new(action, 0x5000_0000 | 0x0020_0000, &[]),
         );
+        Ok(())
+    }
+
+    fn set_stay_on(&self, uid: i32, value: i32) -> Result<(), Exception> {
+        let provider = self.host.settings_provider()?;
+        if uid != 0 {
+            let package = super::appops_service::packages_for_uid(&self.host, uid)?
+                .into_iter()
+                .next();
+            let caller = super::settings_provider::Caller { uid, package };
+            if !provider.check_and_note_write_settings(&caller, caller.package.as_deref())? {
+                return Ok(());
+            }
+        }
+        // clearCallingIdentity: WRITE_SECURE_SETTINGS belongs to the system write.
+        if self.host.platform()?.settings.insert(
+            Table::Global,
+            STAY_ON,
+            &super::settings::Change {
+                value: Some(&value.to_string()),
+                tag: None,
+                make_default: false,
+                package: Some("android"),
+                caller_system: true,
+                overrideable_by_restore: false,
+            },
+            false,
+        )? {
+            provider.notify(Table::Global, 0, STAY_ON)?;
+        }
         Ok(())
     }
 
@@ -1025,6 +1056,10 @@ impl Service for PowerManager {
                     0,
                 ))
             }
+            pm::SET_STAY_ON_SETTING => {
+                let a = pm::SetStayOnSetting::read(&mut call.data).map_err(bad)?;
+                empty(self.set_stay_on(call.sender_euid as i32, a.val))
+            }
             pm::GO_TO_SLEEP => {
                 let a = pm::GoToSleep::read(&mut call.data).map_err(bad)?;
                 empty(self.set_interactive(call, a.time, false, a.reason, None, None, a.flags))
@@ -1220,3 +1255,7 @@ mod wake_tests;
 #[cfg(test)]
 #[path = "sync_cleanup_tests.rs"]
 mod sync_cleanup_tests;
+
+#[cfg(test)]
+#[path = "power_stay_on_tests.rs"]
+mod stay_on_tests;
