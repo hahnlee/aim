@@ -4,8 +4,8 @@
 //! The writable private volumes, a user's CE unlock, file encryption, the
 //! device-protected default and a user's data directory names are
 //! answered, and installd's operations on app data made as the original's
-//! `Installer` makes them, a failure its `InstallerException`; a package's
-//! dexopt artifacts deleted need ART Service (#2063).
+//! `Installer` makes them, a failure its `InstallerException`. Original ART
+//! deletes dexopt artifacts through its generation-bound deletion capability.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -350,6 +350,33 @@ impl Service for PackageInternalStorage {
                 .write(&mut data);
                 reply(self.void(installd::FIXUP_APP_DATA, &data))
             }
+            bridge::DELETE_OAT => {
+                use aim_service_aidl::dev_aim_server_iartdeletion as art;
+                let a = bridge::DeleteOat::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply((|| {
+                    let (generation, owner) = self.host.art_deletion_owner()?;
+                    let mut request = Parcel::new();
+                    art::DeleteDexoptArtifacts {
+                        generation,
+                        package_name: a.package_name,
+                        calling_uid: a.caller_uid,
+                        user_id: a.caller_uid / 100_000, // UserHandle.getUserId.
+                    }
+                    .write(&mut request);
+                    // Java opens the caller-filtered scope and retains ART's -1/0 mappings.
+                    let response = owner
+                        .transact(art::DELETE_DEXOPT_ARTIFACTS, &request, false)
+                        .map_err(|s| {
+                            Exception::new(EX_ILLEGAL_STATE, format!("ART deletion transport: {s}"))
+                        })?;
+                    let bytes = art::read_delete_dexopt_artifacts_reply(&mut response.reader())
+                        .map_err(|s| {
+                        Exception::new(EX_ILLEGAL_STATE, format!("ART deletion reply: {s}"))
+                    })??;
+                    bridge::write_delete_oat_reply(&mut p, bytes);
+                    Ok(p)
+                })())
+            }
             _ => reply(Err(self.host.unimplemented_named(
                 "package internal storage",
                 &format!("{name} (#2063)"),
@@ -361,10 +388,10 @@ impl Service for PackageInternalStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+    use aim_binder_host::parcel::EX_SECURITY;
 
     /// Only the system uid is served; the device-protected default is the
-    /// release's, and deleting dexopt artifacts names ART's issue.
+    /// release's, and deletion requires the live ART owner.
     #[test]
     fn internal_storage_is_the_systems() {
         let node = |euid: u32| {
@@ -398,7 +425,139 @@ mod tests {
             .unwrap();
         assert_eq!(
             reply.reader().read_exception().unwrap().unwrap_err().code,
-            EX_UNSUPPORTED_OPERATION
+            EX_ILLEGAL_STATE
         );
+    }
+
+    #[test]
+    fn delete_oat_preserves_scope_bytes_failures_and_owner_death() {
+        use aim_binder_host::parcel::{DEAD_OBJECT, EX_SERVICE_SPECIFIC};
+        use aim_service_aidl::dev_aim_server_iartdeletion as art;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicI64, AtomicUsize, Ordering},
+        };
+
+        struct Art {
+            host: std::sync::Weak<AppHost>,
+            bytes: Arc<AtomicI64>,
+            mode: Arc<AtomicUsize>,
+            names: Arc<Mutex<Vec<Option<String>>>>,
+        }
+        impl Service for Art {
+            fn descriptor(&self) -> &str {
+                art::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, SYSTEM_UID);
+                assert_eq!(call.code, art::DELETE_DEXOPT_ARTIFACTS);
+                let a = art::DeleteDexoptArtifacts::read(&mut call.data)?;
+                assert_eq!(
+                    (a.generation, a.calling_uid, a.user_id),
+                    (100, 1_010_100, 10)
+                );
+                assert_eq!(call.data.remaining(), 0);
+                // ART's real snapshot/epoch callbacks can reenter the native owner.
+                self.host.upgrade().unwrap().art_deletion_owner().unwrap();
+                self.names.lock().unwrap().push(a.package_name);
+                match self.mode.load(Ordering::SeqCst) {
+                    1 => return Err(DEAD_OBJECT),
+                    2 => return Ok(Parcel::new()),
+                    3 => {
+                        let mut error = Exception::new(EX_SERVICE_SPECIFIC, "original ART failure");
+                        error.service_specific = 73;
+                        return reply(Err(error));
+                    }
+                    _ => {}
+                }
+                let mut p = Parcel::new();
+                art::write_delete_dexopt_artifacts_reply(&mut p, self.bytes.load(Ordering::SeqCst));
+                Ok(p)
+            }
+        }
+        crate::system::with_discovery_binders_lifecycle(&[], true, |host, _, _, export, die| {
+            let leaf = PackageInternalStorage::new(host.clone());
+            let request = |uid, name: Option<&str>| {
+                let mut p = Parcel::new();
+                bridge::DeleteOat {
+                    package_name: name.map(str::to_owned),
+                    caller_uid: 1_010_100,
+                }
+                .write(&mut p);
+                let response = leaf
+                    .transact(&mut Call {
+                        code: bridge::DELETE_OAT,
+                        flags: 0,
+                        sender_pid: 77,
+                        sender_euid: uid,
+                        data: p.reader(),
+                    })
+                    .unwrap();
+                bridge::read_delete_oat_reply(&mut response.reader()).unwrap()
+            };
+            assert_eq!(
+                request(SYSTEM_UID, Some("p")).unwrap_err().code,
+                EX_ILLEGAL_STATE
+            );
+            let bytes = Arc::new(AtomicI64::new(0));
+            let mode = Arc::new(AtomicUsize::new(0));
+            let names = Arc::new(Mutex::new(Vec::new()));
+            let service = Arc::new(Art {
+                host: host.me.clone(),
+                bytes: bytes.clone(),
+                mode: mode.clone(),
+                names: names.clone(),
+            });
+            let owner = export(service.clone());
+            super::super::sync_owner::tests::install(host, export(service));
+            let system = host.package_system().unwrap();
+            let epoch = Arc::new(crate::package::boot_captures::Captures::new(
+                system,
+                system.package_bootstrap().unwrap().clone(),
+            ));
+            host.attach_art_owner(42, 100, epoch, Some(owner.binder()))
+                .unwrap();
+            for uid in [0, 10100] {
+                assert_eq!(request(uid, Some("p")).unwrap_err().code, EX_SECURITY);
+            }
+            assert!(names.lock().unwrap().is_empty());
+            for value in [-1, 0, 1, 1i64 << 40, i64::MAX] {
+                bytes.store(value, Ordering::SeqCst);
+                assert_eq!(request(SYSTEM_UID, Some("p")).unwrap(), value);
+            }
+            // Package validation belongs to original ART, including null and malformed names.
+            bytes.store(-1, Ordering::SeqCst);
+            for name in [None, Some(""), Some("../bad"), Some("unknown")] {
+                assert_eq!(request(SYSTEM_UID, name).unwrap(), -1);
+                assert_eq!(names.lock().unwrap().last().unwrap().as_deref(), name);
+            }
+            for (failure, message) in [(1, "ART deletion transport:"), (2, "ART deletion reply:")] {
+                mode.store(failure, Ordering::SeqCst);
+                let error = request(SYSTEM_UID, Some("p")).unwrap_err();
+                assert_eq!(error.code, EX_ILLEGAL_STATE);
+                assert!(error.message.starts_with(message));
+            }
+            mode.store(3, Ordering::SeqCst);
+            let error = request(SYSTEM_UID, Some("p")).unwrap_err();
+            assert_eq!(
+                (error.code, error.service_specific, error.message.as_str()),
+                (EX_SERVICE_SPECIFIC, 73, "original ART failure")
+            );
+            let count = names.lock().unwrap().len();
+            die();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while host.art_deletion_owner().is_ok() {
+                assert!(
+                    std::time::Instant::now() < until,
+                    "ART Binder death not delivered"
+                );
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                request(SYSTEM_UID, Some("p")).unwrap_err().code,
+                EX_ILLEGAL_STATE
+            );
+            assert_eq!(names.lock().unwrap().len(), count);
+        });
     }
 }

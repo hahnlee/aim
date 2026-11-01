@@ -2,6 +2,7 @@ package com.android.server.art;
 public final class ArtManagerLocal {
     public static boolean missingDependency;
     public static int constructions, calls;
+    public static java.util.function.BiFunction<com.android.server.pm.PackageManagerLocal.FilteredSnapshot, String, Long> deletion;
     public ArtManagerLocal() {}
     public ArtManagerLocal(android.content.Context context) {
         java.util.Objects.requireNonNull(context);
@@ -13,6 +14,10 @@ public final class ArtManagerLocal {
     }
     public com.android.server.art.model.DeleteResult deleteDexoptArtifacts(com.android.server.pm.PackageManagerLocal.FilteredSnapshot snapshot, String name) {
         calls++; if (name.equals("error")) throw new IllegalStateException("original deletion error");
+        if (deletion != null) {
+            long bytes = deletion.apply(snapshot, name);
+            return new com.android.server.art.model.DeleteResult() { public long getFreedBytes() { return bytes; } };
+        }
         return new com.android.server.art.model.DeleteResult() { public long getFreedBytes() { return 1L << 40; } };
     }
     public void dump(java.io.PrintWriter text, com.android.server.pm.PackageManagerLocal.FilteredSnapshot snapshot) { text.println("all dexopt"); }
