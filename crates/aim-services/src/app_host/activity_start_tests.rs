@@ -52,6 +52,87 @@ fn permissions(host: &Arc<AppHost>) {
     host.display_metrics.set(Ok(metrics)).unwrap();
 }
 
+fn with_start(test: impl FnOnce(&Arc<AppHost>, &dyn Fn(Arc<dyn Service>) -> Strong)) {
+    crate::system::with_discovery_binders_flags(
+        &[("android.permission.flags.appop_mode_caching_enabled", true)],
+        true,
+        |host, _, _, export| test(host, export),
+    );
+}
+
+// CTS ContextTest.testStartActivities; pinned ATMS/controller guards and START_* results.
+fn multi(
+    host: &Arc<AppHost>,
+    uid: u32,
+    a: &AsUser,
+    intents: Option<&[Option<RawIntent>]>,
+    types: Option<&[Option<String>]>,
+) -> Result<i32, Exception> {
+    let mut p = Parcel::new();
+    p.write_interface_token(atm::DESCRIPTOR);
+    p.write_binder(a.caller);
+    p.write_string16(a.calling_package.as_deref());
+    p.write_string16(None);
+    aim_service_aidl::write_typed_list(&mut p, intents);
+    aim_service_aidl::write_string_list(&mut p, types);
+    p.write_binder(a.result_to);
+    aim_service_aidl::write_typed(&mut p, a.options.as_ref());
+    p.write_i32(a.user_id);
+    invoke(host, atm::START_ACTIVITIES, &p, uid)
+}
+
+#[test]
+fn multi_start_validates_arrays_caller_and_preflights_before_execution() {
+    use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_NULL_POINTER};
+    crate::system::with_discovery_binders(|host, publish, _, _| {
+        permissions(host);
+        let mut a = args(Some("android"), 0, None);
+        let one = [Some(intent("missing"))];
+        let types = [None];
+        for (intents, types, expected) in [
+            (None, Some(types.as_slice()), EX_NULL_POINTER),
+            (Some(one.as_slice()), None, EX_NULL_POINTER),
+            (
+                Some(one.as_slice()),
+                Some([].as_slice()),
+                EX_ILLEGAL_ARGUMENT,
+            ),
+        ] {
+            assert_eq!(
+                multi(host, 1000, &a, intents, types).unwrap_err().code,
+                expected
+            );
+        }
+        assert_eq!(multi(host, 1000, &a, Some(&[]), Some(&[])), Ok(0));
+        a.caller = Some(Binder::Handle(u32::MAX));
+        assert_eq!(multi(host, 1000, &a, Some(&one), Some(&types)), Ok(-94));
+        a.caller = None;
+        for (uid, package, user) in [(10100, "q", 0), (10100, "p", 10), (99000, "p", 0)] {
+            a.calling_package = Some(package.into());
+            a.user_id = user;
+            assert_eq!(
+                multi(host, uid, &a, Some(&one), Some(&types))
+                    .unwrap_err()
+                    .code,
+                EX_SECURITY
+            );
+        }
+        a = args(Some("android"), 0, None);
+        assert_eq!(multi(host, 1000, &a, Some(&one), Some(&types)), Ok(-2));
+        let implicit = [Some(RawIntent::of(Some("missing"), 0, &[]))];
+        assert_eq!(multi(host, 1000, &a, Some(&implicit), Some(&types)), Ok(-1));
+        publish(&mut |p| p.booleans |= crate::package::pkg::booleans::CANT_SAVE_STATE);
+        let intents = [Some(intent("missing")), Some(intent("p.Main"))];
+        assert_eq!(
+            multi(host, 1000, &a, Some(&intents), Some(&[None, None]))
+                .unwrap_err()
+                .code,
+            EX_ILLEGAL_ARGUMENT
+        );
+        assert!(host.activities.records.lock().unwrap().is_empty());
+    });
+}
+
 #[test]
 fn start_as_user_validates_package_user_and_caller_before_resolution() {
     crate::system::with_discovery_binders(|host, _, _, _| {
@@ -97,7 +178,7 @@ fn system_thread_start_creates_activity_and_returns_start_success() {
             Ok(Parcel::new())
         }
     }
-    crate::system::with_discovery_binders(|host, _, _, export| {
+    with_start(|host, export| {
         permissions(host);
         let app_thread = export(Arc::new(Thread));
         let system_thread = export(Arc::new(Thread));
@@ -154,6 +235,102 @@ fn system_thread_start_creates_activity_and_returns_start_success() {
         let from = &started.launched_from;
         assert_eq!((started.uid, started.task, from.uid), (10100, 7, 1000));
         assert_eq!(from.package.as_deref(), Some("android"));
+        drop(records);
+        let ordered = |n| {
+            Some(
+                RawIntent::of(None, 0, &[("order", crate::bundle::Value::Int(n))])
+                    .with_component("p", "p.Main"),
+            )
+        };
+        let mut a = args(Some("p"), 0, None);
+        a.result_to = Some(Binder::Local(token));
+        let intents = [ordered(1), ordered(2), Some(intent("missing"))];
+        assert_eq!(
+            multi(host, 10100, &a, Some(&intents), Some(&[None, None, None])),
+            Ok(-2)
+        );
+        let orders = || {
+            let stack = host.activities.stack.lock().unwrap();
+            let records = host.activities.records.lock().unwrap();
+            stack
+                .activities
+                .iter()
+                .filter_map(|a| match &records[&a.token].intent {
+                    activity_start::LaunchIntent::Raw(k) => {
+                        let n = k.intent.int_extra("order", 0).unwrap();
+                        (n != 0).then_some((n, a.task))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(orders(), [(1, 7), (2, 7)]);
+        // PendingIntentRecord sends allIntents as the creator; immutable fill-in affects none.
+        let target = host
+            .get_intent_sender(
+                10100,
+                pending_intents::Request {
+                    kind: pending_intents::INTENT_SENDER_ACTIVITY,
+                    package: Some("p".into()),
+                    feature: None,
+                    token: None,
+                    result_who: None,
+                    request_code: 0,
+                    intents: Some(vec![ordered(3), ordered(4)]),
+                    resolved_types: None,
+                    flags: 0x44000000,
+                    options: None,
+                    user: 0,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let sent = || pending_intents::Sent {
+            result_to: a.result_to,
+            request_code: 12,
+            ..Default::default()
+        };
+        let send_pending = || {
+            host.send_record(None, target, 0, ordered(99), None, None, None, sent())
+                .unwrap()
+        };
+        assert_eq!(send_pending(), 0);
+        assert_eq!(send_pending(), -96);
+        assert_eq!(orders(), [(1, 7), (2, 7), (3, 7), (4, 7)]);
+        // Both cold activities join the pending process and retain their admitted tokens/task.
+        let thread = host.apps.lock().unwrap().get_mut(&1).unwrap().thread.take();
+        let intents = [ordered(5), ordered(6)];
+        assert_eq!(
+            multi(host, 10100, &a, Some(&intents), Some(&[None, None])),
+            Ok(0)
+        );
+        assert_eq!(orders(), [(1, 7), (2, 7), (3, 7), (4, 7), (5, 7), (6, 7)]);
+        assert_eq!(host.apps.lock().unwrap()[&1].activities.len(), 2);
+        {
+            let stack = host.activities.stack.lock().unwrap();
+            let pending = stack
+                .activities
+                .iter()
+                .filter(|a| a.pending && a.start_seq == 1);
+            assert_eq!(pending.count(), 2);
+        }
+        host.apps.lock().unwrap().get_mut(&1).unwrap().thread = thread;
+        host.finish_attach(
+            &Call {
+                code: 0,
+                flags: 0,
+                sender_pid: 71,
+                sender_euid: 10100,
+                data: Parcel::new().reader(),
+            },
+            1,
+        )
+        .unwrap();
+        {
+            let stack = host.activities.stack.lock().unwrap();
+            assert!(!stack.activities.iter().any(|a| a.pending));
+        }
+        assert_eq!(orders().len(), 6);
     });
 }
 

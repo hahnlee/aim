@@ -95,6 +95,7 @@ impl LaunchIntent {
 }
 
 /// What starts an activity, in a process yet to start.
+#[derive(Clone)]
 pub struct StartRequest {
     /// An existing activity detached from a dead process, retaining its token/task.
     pub restart: Option<u64>,
@@ -377,6 +378,18 @@ impl AppHost {
         token
     }
 
+    pub(super) fn bind_pending_activity(&self, request: Option<&StartRequest>, seq: i64) {
+        if let Some(token) = request.and_then(|r| r.restart) {
+            let mut stack = self.activities.stack.lock().unwrap();
+            if let Some(a) = stack.get_mut(token).filter(|a| a.pending) {
+                a.start_seq = seq;
+                if let Some(r) = self.activities.records.lock().unwrap().get_mut(&token) {
+                    r.start_seq = seq;
+                }
+            }
+        }
+    }
+
     /// Sends what the stack decided, each as a transaction to its
     /// activity's process, in order.
     pub(super) fn run(self: &Arc<Self>, commands: Vec<Command>) {
@@ -604,7 +617,7 @@ impl AppHost {
         info: ActivityInfo,
         request: StartRequest,
         d: &Decision,
-    ) -> Result<(), Exception> {
+    ) -> Result<u64, Exception> {
         let real = real_component(&info);
         let user = uid / PER_USER_RANGE;
         let user_leaving = request.user_leaving();
@@ -657,6 +670,7 @@ impl AppHost {
             activity.no_history,
         ) = (result, style.occludes_parent(), no_history);
         activity.affinity = affinity.clone();
+        activity.pending = start_seq == 0;
         let identity = stack::Identity {
             component: &real,
             intent: &intent,
@@ -671,7 +685,7 @@ impl AppHost {
             user_leaving,
         );
         self.run(commands);
-        Ok(())
+        Ok(token)
     }
 
     /// The launcher's start of `package`'s `class` (`info`) in a new task:
@@ -688,14 +702,16 @@ impl AppHost {
             .running_process(&process, uid)
             .filter(|(_, attached)| *attached)
         {
-            Some((start_seq, _)) => self.start_in_process(
-                start_seq,
-                uid,
-                package,
-                info,
-                StartRequest::launcher(class),
-                &Decision::default(),
-            ),
+            Some((start_seq, _)) => self
+                .start_in_process(
+                    start_seq,
+                    uid,
+                    package,
+                    info,
+                    StartRequest::launcher(class),
+                    &Decision::default(),
+                )
+                .map(|_| ()),
             None => self
                 .start_process_for(
                     package,
@@ -716,6 +732,26 @@ impl AppHost {
         user: Option<i32>,
         unsupported: Option<&str>,
     ) -> Result<i32, Exception> {
+        let Some((uid, pid, user)) = self.activity_start_caller(call, &args, user)? else {
+            return Ok(START_PERMISSION_DENIED);
+        };
+        if let Some(reason) = unsupported {
+            return Ok(self.cancel_activity_start(reason));
+        }
+        // What the owner cannot serve yet cancels the start, logged, rather
+        // than throwing into the caller (a system service's main thread).
+        match self.start_activity_in_package(uid, args.calling_package.clone(), pid, user, args) {
+            Err(e) if e.code == EX_UNSUPPORTED_OPERATION => Ok(START_CANCELED),
+            result => result,
+        }
+    }
+
+    pub(super) fn activity_start_caller(
+        &self,
+        call: &Call<'_>,
+        args: &StartArgs,
+        user: Option<i32>,
+    ) -> Result<Option<(i32, i32, i32)>, Exception> {
         let sender = call.sender_euid as i32;
         if !matches!(sender, 0 | 1000)
             && !self.owns_package(sender, args.calling_package.as_deref().unwrap_or_default())?
@@ -725,10 +761,10 @@ impl AppHost {
                 args.calling_package.as_deref().unwrap_or("null")
             )));
         }
-        let name = if call.code == atm::START_ACTIVITY_WITH_CONFIG {
-            "startActivityWithConfig"
-        } else {
-            "startActivityAsUser"
+        let name = match call.code {
+            atm::START_ACTIVITIES => "startActivities",
+            atm::START_ACTIVITY_WITH_CONFIG => "startActivityWithConfig",
+            _ => "startActivityAsUser",
         };
         if super::is_isolated(sender) {
             return Err(Exception::security(format!(
@@ -745,21 +781,13 @@ impl AppHost {
         )?;
         let (uid, pid) = if args.caller.is_some() {
             let Some((_, _, uid, pid)) = self.app_of_thread(args.caller) else {
-                return Ok(START_PERMISSION_DENIED);
+                return Ok(None);
             };
             (uid, pid)
         } else {
             (call.sender_euid as i32, call.sender_pid)
         };
-        if let Some(reason) = unsupported {
-            return Ok(self.cancel_activity_start(reason));
-        }
-        // What the owner cannot serve yet cancels the start, logged, rather
-        // than throwing into the caller (a system service's main thread).
-        match self.start_activity_in_package(uid, args.calling_package.clone(), pid, user, args) {
-            Err(e) if e.code == EX_UNSUPPORTED_OPERATION => Ok(START_CANCELED),
-            result => result,
-        }
+        Ok(Some((uid, pid, user)))
     }
 
     /// A start cancelled for `reason`, which the owner does not implement.
@@ -774,14 +802,33 @@ impl AppHost {
     pub(super) fn start_activity_in_package(
         self: &Arc<Self>,
         uid: i32,
-        mut caller_package: Option<String>,
+        caller_package: Option<String>,
         caller_pid: i32,
         user: i32,
-        mut args: StartArgs,
+        args: StartArgs,
     ) -> Result<i32, Exception> {
-        let mut intent = args
-            .intent
-            .ok_or_else(|| Exception::illegal_argument("intent"))?;
+        let prepared = self.prepare_activity_start(
+            uid,
+            caller_pid,
+            user,
+            args.intent
+                .as_ref()
+                .ok_or_else(|| Exception::illegal_argument("intent"))?,
+            args.resolved_type.as_deref(),
+        )?;
+        let _serial = self.activities.starts.lock().unwrap();
+        self.execute_activity_start(uid, caller_package, caller_pid, args, prepared)
+            .map(|r| r.0)
+    }
+
+    pub(super) fn prepare_activity_start(
+        &self,
+        uid: i32,
+        caller_pid: i32,
+        user: i32,
+        intent: &RawIntent,
+        resolved_type: Option<&str>,
+    ) -> Result<PreparedStart, Exception> {
         if intent.has_fds() {
             return Err(Exception::illegal_argument(
                 "File descriptors passed in Intent",
@@ -795,7 +842,7 @@ impl AppHost {
         let found = resolution
             .resolve_intent_for_start(
                 &intent.intent,
-                args.resolved_type.as_deref(),
+                resolved_type,
                 super::STOCK_PM_FLAGS | MATCH_DEFAULT_ONLY,
                 user,
                 uid,
@@ -803,16 +850,47 @@ impl AppHost {
                 &report,
             )
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("resolveIntent: {e:?}")))?;
-        self.report_unsafe_intent(Some(caller_pid), &intent, report.into_inner());
+        self.report_unsafe_intent(Some(caller_pid), intent, report.into_inner());
         let info = match found.map(|r| r.info) {
-            Some(crate::package::component_resolver::Info::Activity(info)) => info,
-            _ => {
-                return Ok(if intent.intent.component.is_some() {
+            Some(crate::package::component_resolver::Info::Activity(info)) => Some(info),
+            _ => None,
+        };
+        let grants = if let Some(info) = &info {
+            let app = &info.info.application_info;
+            self.check_grant_from_intent(
+                intent,
+                uid,
+                app.item.package_name.as_deref().unwrap_or_default(),
+                app.uid / PER_USER_RANGE as i32,
+            )?
+        } else {
+            None
+        };
+        Ok(PreparedStart { info, grants })
+    }
+
+    pub(super) fn execute_activity_start(
+        self: &Arc<Self>,
+        uid: i32,
+        mut caller_package: Option<String>,
+        caller_pid: i32,
+        mut args: StartArgs,
+        prepared: PreparedStart,
+    ) -> Result<(i32, Option<u64>), Exception> {
+        let mut intent = args
+            .intent
+            .take()
+            .ok_or_else(|| Exception::illegal_argument("intent"))?;
+        let PreparedStart { info, grants } = prepared;
+        let Some(info) = info else {
+            return Ok((
+                if intent.intent.component.is_some() {
                     START_CLASS_NOT_FOUND
                 } else {
                     START_INTENT_NOT_RESOLVED
-                });
-            }
+                },
+                None,
+            ));
         };
         if info.info.item.name.as_deref() == Some(RESOLVER) {
             return Err(self.unimplemented_named(
@@ -839,12 +917,6 @@ impl AppHost {
                 "requireContentUriPermissionFromCaller (#1568)",
             ));
         }
-        let grants = self.check_grant_from_intent(
-            &intent,
-            uid,
-            &package,
-            target_uid / PER_USER_RANGE as i32,
-        )?;
         // `checkStartAnyActivityPermission`.
         if !self.check_component_permission(
             info.permission.as_deref(),
@@ -866,7 +938,7 @@ impl AppHost {
         }
         if !self.background_activity_start_allowed(uid)? {
             // START_ABORTED, which `getExternalResult` reports as success.
-            return Ok(START_SUCCESS);
+            return Ok((START_SUCCESS, None));
         }
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.
@@ -892,7 +964,7 @@ impl AppHost {
             && let Some(source) = source
         {
             if args.request_code >= 0 {
-                return Ok(START_FORWARD_AND_REQUEST_CONFLICT);
+                return Ok((START_FORWARD_AND_REQUEST_CONFLICT, None));
             }
             let (forwarded, payload) = self.activities.stack.lock().unwrap().forward_result(source);
             result_to = forwarded;
@@ -991,9 +1063,12 @@ impl AppHost {
                     user_leaving,
                 ));
                 self.run(commands);
-                return Ok(code);
+                return Ok((code, Some(token)));
             }
             Outcome::Front(code) => {
+                let stack = self.activities.stack.lock().unwrap();
+                let token = d.front.and_then(|t| stack.top(t)).map(|a| a.token);
+                drop(stack);
                 commands.extend(self.activities.stack.lock().unwrap().apply(
                     &d,
                     Then::Nothing,
@@ -1001,7 +1076,7 @@ impl AppHost {
                     user_leaving,
                 ));
                 self.run(commands);
-                return Ok(code);
+                return Ok((code, token));
             }
             Outcome::New(task) => {
                 self.collect_open_with_options(task, args.options.as_ref())?;
@@ -1032,30 +1107,26 @@ impl AppHost {
             grants,
         };
         let process = super::providers::process_name(&info.info);
-        match self
+        let seq = self
             .running_process(&process, target_uid)
             .filter(|(_, attached)| *attached)
-        {
-            Some((target_seq, _)) => {
+            .map(|(seq, _)| seq)
+            .unwrap_or(0);
+        self.run(commands);
+        let mut pending = request.clone();
+        let token = self.start_in_process(seq, target_uid, &package, info, request, &d)?;
+        if seq == 0 {
+            pending.restart = Some(token);
+            if let Err(e) = self.start_process_for(&package, &process, Some(pending), false) {
+                let (_, commands) = self.activities.stack.lock().unwrap().finish(token);
+                self.activities.records.lock().unwrap().remove(&token);
+                self.cancel_activity_transition(token);
+                self.release_uri_grants(Owner::Activity(token));
                 self.run(commands);
-                self.start_in_process(target_seq, target_uid, &package, info, request, &d)?;
-            }
-            None => {
-                // What comes before the activity is done now; it is added
-                // once its process attached (`startProcessLocked`).
-                if d.front.is_some() || !d.clear.is_empty() || d.reorder.is_some() {
-                    commands.extend(self.activities.stack.lock().unwrap().apply(
-                        &d,
-                        Then::Nothing,
-                        None,
-                        user_leaving,
-                    ));
-                }
-                self.run(commands);
-                self.start_process_for(&package, &process, Some(request), false)?;
+                return Err(e);
             }
         }
-        Ok(START_SUCCESS)
+        Ok((START_SUCCESS, Some(token)))
     }
 
     /// `finishActivity` by `uid`: whether it finishes; its result to the
@@ -1318,7 +1389,13 @@ pub enum Report {
     Destroyed,
 }
 
+pub(super) struct PreparedStart {
+    pub info: Option<ActivityInfo>,
+    pub grants: Option<NeededUriGrants>,
+}
+
 /// `startActivity`'s arguments the app host reads.
+#[derive(Clone)]
 pub struct StartArgs {
     pub caller: Option<Binder>,
     pub calling_package: Option<String>,

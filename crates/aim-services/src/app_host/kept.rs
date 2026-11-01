@@ -674,6 +674,31 @@ impl RawBundle {
         Ok(RawBundle(bundle_of(magic, mine, has_intent)))
     }
 
+    /// SafeActivityOptions.selectiveCloneLaunchOptions, android-16.0.0_r1.
+    pub(super) fn selective_launch_options(&self) -> Result<RawBundle> {
+        let keys = [
+            "android.activity.launchTaskDisplayAreaToken",
+            "android.activity.launchDisplayId",
+            "android.activity.callerDisplayId",
+            "android.activity.launchRootTaskToken",
+            "android.pendingIntent.backgroundActivityAllowed",
+            "android.activity.pendingIntentCreatorBackgroundActivityStartMode",
+            "android:activity.remoteTransition",
+            "android.activity.windowingMode",
+        ];
+        let Some((magic, parts, has_intent)) = self.entries()? else {
+            return Ok(self.clone());
+        };
+        Ok(RawBundle(bundle_of(
+            magic,
+            parts
+                .into_iter()
+                .filter(|(k, _)| keys.contains(&k.as_str()))
+                .collect(),
+            has_intent,
+        )))
+    }
+
     /// The bundle with `key` removed (`Bundle.remove`).
     pub fn without(&self, key: &str) -> Result<RawBundle> {
         let Some((magic, parts, has_intent)) = self.entries()? else {

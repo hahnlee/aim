@@ -13,6 +13,7 @@ pub mod account_service;
 mod account_session;
 pub mod accounts_db;
 pub mod activity;
+mod activity_multi;
 mod activity_shell;
 pub mod activity_stack;
 pub mod activity_start;
@@ -1928,6 +1929,7 @@ impl AppHost {
                 .map(|(seq, a)| {
                     a.add_package(name);
                     if a.thread.is_none() {
+                        self.bind_pending_activity(request.as_ref(), *seq);
                         a.activities.extend(request.take());
                     }
                     (*seq, a.pid, a.package.clone())
@@ -1949,6 +1951,7 @@ impl AppHost {
         if let Some(session) = &instrumentation {
             session.configure(&mut start);
         }
+        self.bind_pending_activity(request.as_ref(), start_seq);
         apps.insert(
             start_seq,
             App {
@@ -3434,17 +3437,26 @@ impl AppHost {
         if let Some(token) = request.restart {
             let mut stack = self.activities.stack.lock().unwrap();
             let mut records = self.activities.records.lock().unwrap();
-            let Some(a) = stack.get_mut(token).filter(|a| a.start_seq == 0) else {
+            let Some(a) = stack
+                .get_mut(token)
+                .filter(|a| a.start_seq == 0 || a.pending)
+            else {
                 return Ok(());
             };
             let Some(r) = records.get_mut(&token) else {
                 return Ok(());
             };
+            let pending = std::mem::replace(&mut a.pending, false);
             a.start_seq = start_seq;
             r.start_seq = start_seq;
             r.started = Instant::now();
-            let mut commands = vec![activity_stack::Command::Launch(token)];
-            stack.report_top_resumed(&mut commands);
+            let mut commands = Vec::new();
+            if pending {
+                stack.resume_focused(false, &mut commands);
+            } else {
+                commands.push(activity_stack::Command::Launch(token));
+                stack.report_top_resumed(&mut commands);
+            }
             drop(records);
             drop(stack);
             if let Some(me) = self.me.upgrade() {

@@ -660,7 +660,7 @@ impl AppHost {
         required_permission: Option<String>,
         sent: Sent,
     ) -> Result<i32, Exception> {
-        let (kind, package, feature, uid, user, final_intent, resolved) = {
+        let (kind, package, feature, uid, user, final_intent, resolved, all) = {
             let mut records = self.pending_intents.records.lock().unwrap();
             let Some(at) = records
                 .iter()
@@ -702,10 +702,30 @@ impl AppHost {
             }
             let (kind, package, feature, uid, user) =
                 (r.kind, r.package.clone(), r.feature.clone(), r.uid, r.user);
+            let all = (kind == INTENT_SENDER_ACTIVITY && r.intents.len() > 1).then(|| {
+                let mut intents: Vec<_> =
+                    r.intents.iter().map(|k| Some(k.intent.clone())).collect();
+                let mut types = r
+                    .resolved_types
+                    .clone()
+                    .unwrap_or_else(|| vec![None; intents.len()]);
+                *intents.last_mut().unwrap() = Some(final_intent.clone());
+                *types.last_mut().unwrap() = resolved.clone();
+                (intents, types)
+            });
             if r.flags & FLAG_ONE_SHOT != 0 {
                 cancel(&mut records[at]);
             }
-            (kind, package, feature, uid, user, final_intent, resolved)
+            (
+                kind,
+                package,
+                feature,
+                uid,
+                user,
+                final_intent,
+                resolved,
+                all,
+            )
         };
         let user = if user == USER_CURRENT { 0 } else { user };
         // The finished receiver's process gets its result.
@@ -725,7 +745,12 @@ impl AppHost {
                     options: sent.options,
                 };
                 let owner = Some(package.clone());
-                res = match self.start_activity_in_package(uid, owner, 0, user, args) {
+                let result = if let Some((intents, types)) = all {
+                    self.start_activities_in_package(uid, 0, user, args, intents, types)
+                } else {
+                    self.start_activity_in_package(uid, owner, 0, user, args)
+                };
+                res = match result {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!(
