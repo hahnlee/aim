@@ -13,6 +13,7 @@ pub mod account_service;
 mod account_session;
 pub mod accounts_db;
 pub mod activity;
+mod activity_delegated;
 mod activity_launch;
 mod activity_multi;
 mod activity_shell;

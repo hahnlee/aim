@@ -559,8 +559,12 @@ through the shared starter (#2578): package/isolation/cross-user checks and resu
 codes. `startActivities` and multi-intent PendingIntents share ordered preflight
 and task admission before process attachment (#2583). Debug/profiler and
 voice/assistant/game-session/recents starts retain `START_CANCELED` with diagnostics
-naming their missing owners. Only-if-needed, global configuration changes and
-AsCaller remain cancelled; NextMatching remains unimplemented (#2583).
+naming their missing owners. `startActivityAsCaller` uses the source activity's
+launch identity, checks its token/process and caller permission, and supports
+`ignoreTargetSecurity`. Resolver subclasses use boot-classpath visibility;
+background starts retain the delegated/real-caller options and opt-outs (#2583).
+Only-if-needed and global configuration changes remain cancelled; NextMatching
+remains unimplemented (#2583).
 `startActivityAndWait` tracks launch-specific first draws, existing-task visibility,
 configuration relaunches, cancellation and the ten-second timeout (#2583).
 Host-only checks cover these paths; no guest boot was run.

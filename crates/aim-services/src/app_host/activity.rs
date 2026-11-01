@@ -974,18 +974,7 @@ impl Service for ActivityTaskManager {
                 Ok(p)
             }
             atm::START_ACTIVITIES => super::activity_multi::transact(&self.0, call),
-            // Starts with another identity (#2583).
-            atm::START_ACTIVITY_AS_CALLER => {
-                call.data
-                    .enforce_interface(atm::DESCRIPTOR)
-                    .map_err(|_| BAD_VALUE)?;
-                self.0
-                    .unimplemented("activity_task", atm::DESCRIPTOR, call.code);
-                let mut p = Parcel::new();
-                p.write_no_exception();
-                p.write_i32(super::activity_start::START_CANCELED);
-                Ok(p)
-            }
+            atm::START_ACTIVITY_AS_CALLER => super::activity_delegated::transact(&self.0, call),
             // `startActivityIntentSender`: the record sent as `sendInner`
             // sends it, with the caller's result target and flags. Its
             // options are not applied (#1493).
