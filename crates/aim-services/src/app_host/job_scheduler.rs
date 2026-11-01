@@ -207,6 +207,7 @@ struct Device {
     battery_not_low: bool,
     storage_not_low: bool,
     battery_saver: bool,
+    temp_allowlist: Vec<i32>,
     /// The default network and its capabilities, if there is one.
     network: Option<(Network, NetworkCapabilities)>,
 }
@@ -549,7 +550,12 @@ impl JobStatus {
         }
         // `BackgroundJobsController`: battery saver restricts the jobs of
         // apps not active, but expedited ones.
-        let restricted = device.battery_saver && !top && !self.expedited();
+        let restricted = device.battery_saver
+            && !top
+            && !self.expedited()
+            && !device
+                .temp_allowlist
+                .contains(&(self.source_uid % super::PER_USER_RANGE as i32));
         let ready = is_ready(
             satisfied,
             self.required,
@@ -1031,6 +1037,11 @@ impl JobScheduler {
         self.post(Message::Check);
     }
 
+    pub(super) fn temp_allowlist_changed(&self) {
+        self.state.lock().unwrap().device = None;
+        self.post(Message::Check);
+    }
+
     fn post(&self, m: Message) {
         self.queue.lock().unwrap().push(m);
         self.wake.notify_all();
@@ -1147,6 +1158,7 @@ impl JobScheduler {
             battery_not_low: !low,
             storage_not_low: self.storage_not_low(),
             battery_saver,
+            temp_allowlist: self.host.device_idle_temp_ids(),
             network: self
                 .host
                 .connectivity_service
@@ -1376,12 +1388,15 @@ impl JobScheduler {
                 .map_err(|e| std::io::Error::other(e.message))?
                 .data
                 .join("system/job");
-            for (uid, jobs) in &writes {
+            let mut failure = None;
+            for (uid, jobs) in writes.iter().rev() {
                 let refs: Vec<&Stored> = jobs.iter().collect();
-                job_store::write(&dir, *uid, &refs, now, wall_ms())?;
-                for (total, n) in counts.iter_mut().zip(persisted_counts(jobs.iter())) {
-                    *total += n;
+                if let Err(e) = job_store::write(&dir, *uid, &refs, now, wall_ms(), &mut counts) {
+                    failure.get_or_insert(e);
                 }
+            }
+            if let Some(e) = failure {
+                return Err(e);
             }
             if state.migrate {
                 job_store::remove_legacy(&dir)?;
@@ -1393,9 +1408,8 @@ impl JobScheduler {
             state.dirty.extend(writes.iter().map(|(uid, _)| *uid));
             state.write_at = Some(now + JOB_PERSIST_DELAY);
             self.post(Message::Persist);
-        } else {
-            state.persist_stats.0[3..].copy_from_slice(&counts);
         }
+        state.persist_stats.0[3..].copy_from_slice(&counts);
         result
     }
 
@@ -3348,8 +3362,29 @@ mod tests {
         battery_not_low: true,
         storage_not_low: true,
         battery_saver: false,
+        temp_allowlist: Vec::new(),
         network: None,
     };
+
+    #[test]
+    fn temporary_membership_exempts_background_jobs_from_force_standby_only() {
+        let mut j = status(job(|_| {}), NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
+        let mut saver = Device {
+            battery_saver: true,
+            ..PLUGGED.clone()
+        };
+        assert!(!j.evaluate(0, &saver, false));
+        saver
+            .temp_allowlist
+            .push(j.source_uid % super::super::PER_USER_RANGE as i32);
+        assert!(j.evaluate(0, &saver, false));
+        saver.storage_not_low = false;
+        j.required |= CONSTRAINT_STORAGE_NOT_LOW;
+        assert!(!j.evaluate(0, &saver, false));
+        saver.storage_not_low = true;
+        saver.temp_allowlist.clear();
+        assert!(!j.evaluate(0, &saver, false));
+    }
 
     fn job(build: impl FnOnce(&mut JobInfo)) -> JobInfo {
         let mut j = JobInfo::persisted_builder(1, "com.example".into(), "com.example.Job".into());

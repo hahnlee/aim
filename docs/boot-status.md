@@ -655,6 +655,13 @@ jobs are durable. Source UID lookup uses installed package/user state and proxy
 quota uses the target user. Host restart and failed-write checks cover slice 4b
 (#1460/#1490, 2026-11-01); retained verifyJobScheduler and matched-image sync
 execution remain unverified.
+JobStore now applies AtomicFile backup/temporary recovery and counts completed
+serialized jobs even when a write fails. Failed batches retain dirty UIDs and
+legacy migration state; retry syncs legacy deletion even after unlink succeeded.
+Host fault/restart and concurrent-update checks cover split and legacy stores
+(#1460 slice 4e/#1490, 2026-11-01); these are per-file atomic writes, with the
+pinned duplicate/namespace merge behavior during partial migration. Matched-image
+restart and sync CTS acceptance remain unverified; no guest boot was run.
 Scheduler lifecycle checks now cover internal stop reasons, bind/start and
 callback races, soft failures, retry boundaries and disconnect rescheduling.
 Failed stop sends close and reschedule immediately; stale-callback diagnostics
@@ -668,6 +675,34 @@ persistence and native Binder start/completion (#1460 slice 4d/#1490, 2026-11-01
 host tests only). Standby/doze and EJ quota accounting/demotion remain
 unimplemented. Quota-driven regular fallback awaits #1490; no guest or CTS
 acceptance.
+Typed usage/idle locals now delegate retained sync scheduling to native owners
+(#1460 slice 5a/#1723/#2016). Host/JVM and image-link checks cover bucket reads,
+non-doze promotion/hold and temporary allowlisting without FGS privilege.
+Temporary allowlisting now retains caller/reason/type attribution, caps durations,
+resets membership deadlines while preserving the first reason and pending timeout,
+and delivers ordered native listener transitions (#1460 slice 5c/#2016).
+Type 1 never creates or extends an FGS allowance. Host tests cover missing
+packages/users, boundary expiry, renewal and listener reentry. Native AM/power
+membership and queued/synchronous network transitions now consume that allowance
+(#1460 slice 5d/#2016). Service admission follows temporary membership, forced
+standby and legacy battery/app-op/caller rules; existing background-job battery
+saver restrictions exempt temporary members. Network queries serve unblocked
+paths and explicitly reject unimplemented standby/battery-saver firewall effects
+(#1711/#1489). Light/deep doze remain unimplemented and are never fabricated.
+Host tests cover owner expiry, types and read permissions. No guest boot or
+matched-image sync/CTS acceptance was run.
+Standby history now writes the original version-1 XML, expiry records and
+elapsed/screen durations through atomic files, including scheduled and
+exempted-start sync holds (#1460 slice 5b/#1723, 2026-11-01). Host tests cover
+round trips, hold extension/expiry after reopening, disabled/restricted apps and
+write faults. Writes join the usage-stats flush and shutdown paths; late standby
+writes are rejected after shutdown. Native connectivity now sends sticky
+CONNECTIVITY_ACTION broadcasts for the actual Mac default-network transitions,
+including initial connection, loss, reconnect and replacement; duplicates and
+DNS-only updates stay silent (#1460 slice 5e/#1509). Native receiver/query tests
+and a pinned retained SyncManager receiver/backoff JVM fixture cover this path.
+Battery sync timers and full wake-lock attribution remain under their owner issues. Matched-image
+restoration and sync CTS remain unverified; no guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which

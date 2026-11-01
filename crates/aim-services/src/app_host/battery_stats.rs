@@ -1494,6 +1494,10 @@ impl BatteryStats {
         s.history = Some(h);
     }
 
+    pub(super) fn on_battery(&self) -> bool {
+        self.stats.lock().unwrap().on_battery
+    }
+
     /// `isCharging` (`BatteryManager.isCharging`).
     pub(super) fn charging(&self) -> bool {
         self.stats.lock().unwrap().charging

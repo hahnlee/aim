@@ -54,6 +54,74 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::GET_SYNC_ADAPTER_STANDBY_BUCKET => {
+                let a = sp::GetSyncAdapterStandbyBucket::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let package = a
+                        .package_name
+                        .as_deref()
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+                    let bucket = self.host.app_standby_bucket(package, a.user_id)?;
+                    sp::write_get_sync_adapter_standby_bucket_reply(&mut p, bucket);
+                    Ok(())
+                })
+            }
+            sp::REPORT_SYNC_SCHEDULED => {
+                let a = sp::ReportSyncScheduled::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let package = a
+                        .package_name
+                        .as_deref()
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+                    self.host
+                        .report_sync_usage(package, a.user_id, a.exempted, false)?;
+                    sp::write_report_sync_scheduled_reply(&mut p);
+                    Ok(())
+                })
+            }
+            sp::REPORT_EXEMPTED_SYNC_START => {
+                let a = sp::ReportExemptedSyncStart::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let package = a
+                        .package_name
+                        .as_deref()
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+                    self.host
+                        .report_sync_usage(package, a.user_id, true, true)?;
+                    sp::write_report_exempted_sync_start_reply(&mut p);
+                    Ok(())
+                })
+            }
+            sp::ADD_SYNC_TEMP_ALLOWLIST => {
+                let a = sp::AddSyncTempAllowlist::read(&mut call.data)?;
+                system().and_then(|()| {
+                    if !(0..=1).contains(&a.r#type) {
+                        return Err(self.host.unimplemented_named(
+                            "deviceidle",
+                            "local allowlist sync/type (#2016)",
+                        ));
+                    }
+                    let kind = super::device_idle::DeviceIdle::temp_allowlist_type(
+                        a.reason_code,
+                        a.r#type,
+                    )
+                    .map_err(|e| self.host.unimplemented_named("deviceidle", &e))?;
+                    if kind != -1 {
+                        self.host.device_idle().add_temp_with_sync(
+                            a.calling_uid,
+                            a.package_name.as_deref(),
+                            a.duration_ms,
+                            kind,
+                            a.user_id,
+                            a.sync,
+                            a.reason_code,
+                            a.reason,
+                        )?;
+                    }
+                    sp::write_add_sync_temp_allowlist_reply(&mut p);
+                    Ok(())
+                })
+            }
             sp::GET_SYSTEM_SCHEDULED_OWN_JOBS => {
                 let a = sp::GetSystemScheduledOwnJobs::read(&mut call.data)?;
                 system().and_then(|()| {
@@ -661,6 +729,7 @@ impl Service for IdleAdapter {
                         .0
                         .device_idle()
                         .add_temp(
+                            SYSTEM_UID as i32,
                             Some(package),
                             a.duration,
                             super::device_idle::TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,
@@ -688,6 +757,66 @@ impl Service for IdleAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_policy_routes_require_system_identity_and_propagate_owner_errors() {
+        let owner = SystemProcess::new(AppHost::new(crate::test_process(SYSTEM_UID)));
+        let mut requests = Vec::new();
+        let mut p = Parcel::new();
+        sp::GetSyncAdapterStandbyBucket {
+            package_name: Some("p".into()),
+            user_id: 0,
+        }
+        .write(&mut p);
+        requests.push((sp::GET_SYNC_ADAPTER_STANDBY_BUCKET, p));
+        let mut p = Parcel::new();
+        sp::ReportSyncScheduled {
+            package_name: Some("p".into()),
+            user_id: 0,
+            exempted: true,
+        }
+        .write(&mut p);
+        requests.push((sp::REPORT_SYNC_SCHEDULED, p));
+        let mut p = Parcel::new();
+        sp::ReportExemptedSyncStart {
+            package_name: Some("p".into()),
+            user_id: 0,
+        }
+        .write(&mut p);
+        requests.push((sp::REPORT_EXEMPTED_SYNC_START, p));
+        let mut p = Parcel::new();
+        sp::AddSyncTempAllowlist {
+            calling_uid: 1000,
+            package_name: Some("p".into()),
+            duration_ms: 100,
+            r#type: 1,
+            user_id: 0,
+            sync: false,
+            reason_code: 306,
+            reason: Some("sync by top app".into()),
+        }
+        .write(&mut p);
+        requests.push((sp::ADD_SYNC_TEMP_ALLOWLIST, p));
+        for (code, p) in requests {
+            for uid in [10100, SYSTEM_UID] {
+                let reply = owner
+                    .transact(&mut Call {
+                        code,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: uid,
+                        data: p.reader(),
+                    })
+                    .unwrap();
+                let e = reply.reader().read_exception().unwrap().unwrap_err();
+                if uid != SYSTEM_UID {
+                    assert_eq!(e.code, aim_binder_host::parcel::EX_SECURITY);
+                } else {
+                    assert_ne!(e.code, aim_binder_host::parcel::EX_SECURITY);
+                }
+            }
+        }
+    }
 
     #[test]
     fn uid_map_attachment_requires_the_system_uid_and_a_remote_bridge() {

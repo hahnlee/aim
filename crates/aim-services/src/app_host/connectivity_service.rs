@@ -36,6 +36,7 @@ use aim_service_aidl::dev_aim_server_inetworkactivitybridge as activity;
 use aim_uplink::Uplink;
 
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
+use super::kept::RawIntent;
 use super::network::{
     self, CallerPermissions, FOREGROUND, INTERNET, INVALID_UID, LIFETIME_PERMANENT, LOCAL_NETWORK,
     LinkAddress, LinkProperties, Message, Messenger, NOT_CONGESTED, NOT_METERED, NOT_RESTRICTED,
@@ -270,6 +271,48 @@ fn network_info() -> NetworkInfo {
         reason: None,
         extra_info: Some(HW_ADDRESS.into()),
     }
+}
+
+/// ConnectivityService.sendLegacyNetworkBroadcast / makeGeneralIntent (16 r1).
+/// A rematch's simulated loss retains extraInfo; destruction clears it.
+fn connectivity_intent(connected: bool, replacement: bool) -> (RawIntent, String) {
+    use crate::bundle::Value;
+    let mut info = network_info();
+    if !connected {
+        info.state = "DISCONNECTED";
+        info.detailed_state = "DISCONNECTED";
+        if !replacement {
+            info.extra_info = None;
+        }
+    }
+    let mut parcel = Parcel::new();
+    info.write_to(&mut parcel);
+    let mut extras = vec![
+        (
+            "networkInfo",
+            Value::Parcelable {
+                class: "android.net.NetworkInfo".into(),
+                data: parcel.data().to_vec(),
+            },
+        ),
+        ("networkType", Value::Int(TYPE_ETHERNET)),
+        (
+            "inetCondition",
+            Value::Int(if connected || replacement { 100 } else { 0 }),
+        ),
+    ];
+    let key = format!("9;-1;{}", info.extra_info.as_deref().unwrap_or("null"));
+    if let Some(extra) = info.extra_info {
+        extras.push(("extraInfo", Value::String(Some(extra))));
+    }
+    if !connected && !replacement {
+        extras.push(("noConnectivity", Value::Bool(true)));
+    }
+    // REGISTERED_ONLY_BEFORE_BOOT | VISIBLE_TO_INSTANT_APPS.
+    (
+        RawIntent::new("android.net.conn.CONNECTIVITY_CHANGE", 0x0420_0000, &extras),
+        key,
+    )
 }
 
 /// The link properties IpClient makes of the virtual router's lease
@@ -516,6 +559,8 @@ struct State {
     counts: HashMap<(bool, i32), i32>,
     diagnostics: HashMap<i32, (bool, i32)>,
     bridge_epoch: u64,
+    legacy_ready: bool,
+    initial_broadcast: Option<(RawIntent, String)>,
 }
 
 impl State {
@@ -534,8 +579,13 @@ impl State {
             counts: HashMap::new(),
             diagnostics: HashMap::new(),
             bridge_epoch: 0,
+            legacy_ready: false,
+            initial_broadcast: None,
         };
         state.follow(now);
+        if state.network.is_some() {
+            state.initial_broadcast = Some(connectivity_intent(true, false));
+        }
         state
     }
 
@@ -1174,9 +1224,44 @@ impl ConnectivityService {
                         eprintln!("app host: connectivity: network activity: {e:?}");
                     }
                 }
+                let mut intents = Vec::new();
+                if old.is_some() {
+                    intents.push(connectivity_intent(false, new.is_some()));
+                }
+                if new.is_some() {
+                    intents.push(connectivity_intent(true, false));
+                }
+                for intent in intents {
+                    if state.legacy_ready {
+                        self.send_connectivity_broadcast(intent);
+                    } else {
+                        state.initial_broadcast = Some(intent);
+                    }
+                }
             }
         }
         self.sync_native();
+    }
+
+    /// Replay the last pre-ready transition once package/permission owners exist.
+    pub(super) fn system_ready(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        if state.legacy_ready {
+            return;
+        }
+        state.legacy_ready = true;
+        if let Some(intent) = state.initial_broadcast.take() {
+            self.send_connectivity_broadcast(intent);
+        }
+    }
+
+    fn send_connectivity_broadcast(&self, (intent, key): (RawIntent, String)) {
+        self.host.broadcasts.send_sticky_from_system_with_policy(
+            &self.host,
+            intent,
+            Some(23),
+            Some(key),
+        );
     }
 
     /// Called only by the system-uid attach endpoint. Serialize the initial
@@ -1506,10 +1591,15 @@ impl ConnectivityService {
     }
 
     /// `isNetworkWithCapabilitiesBlocked`: the app host's apps are all top,
-    /// so no firewall chain or data saver blocks them; one without INTERNET
-    /// is blocked once its target has the change.
+    /// so metered Data Saver rules do not apply. Power restrictions are read
+    /// from their native owners; unimplemented firewall enforcement is explicit.
+    /// A caller without INTERNET is blocked once its target has the change.
     fn blocked(&self, uid: i32, ignore_blocked: bool) -> Result<bool, Exception> {
-        if ignore_blocked || self.has(uid, INTERNET_PERMISSION)? {
+        if ignore_blocked {
+            return Ok(false);
+        }
+        if self.has(uid, INTERNET_PERMISSION)? {
+            self.host.network_policy().check_power_restrictions(uid)?;
             return Ok(false);
         }
         self.host
@@ -2591,6 +2681,10 @@ fn unreadable(host: &AppHost) -> Exception {
         "a network specifier or transport info other than Ethernet's (#1509)",
     )
 }
+
+#[cfg(test)]
+#[path = "connectivity_broadcast_tests.rs"]
+mod broadcast_tests;
 
 #[cfg(test)]
 mod tests {

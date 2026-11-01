@@ -347,6 +347,23 @@ pub fn check_linkage_on(
     problems.extend(classpath.unresolved(&code)?);
     for (adapter, parent, methods) in [
         (
+            "Ldev/aim/server/SyncPolicyLocals$Usage;",
+            "Landroid/app/usage/UsageStatsManagerInternal;",
+            &[
+                ("getAppStandbyBucket", "(Ljava/lang/String;IJ)I"),
+                ("reportSyncScheduled", "(Ljava/lang/String;IZ)V"),
+                ("reportExemptedSyncStart", "(Ljava/lang/String;I)V"),
+            ][..],
+        ),
+        (
+            "Ldev/aim/server/SyncPolicyLocals$Idle;",
+            "Lcom/android/server/DeviceIdleInternal;",
+            &[(
+                "addPowerSaveTempWhitelistApp",
+                "(ILjava/lang/String;JIIZILjava/lang/String;)V",
+            )][..],
+        ),
+        (
             "Ldev/aim/server/NativeJobScheduler;",
             "Lcom/android/server/job/JobSchedulerInternal;",
             &[

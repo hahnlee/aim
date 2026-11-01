@@ -402,6 +402,7 @@ fn failed_stop_sends_do_not_invalidate_other_constraint_stops() {
                 battery_not_low: true,
                 storage_not_low: true,
                 battery_saver: false,
+                temp_allowlist: Vec::new(),
                 network: None,
             },
             1000,

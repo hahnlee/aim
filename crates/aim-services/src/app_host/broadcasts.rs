@@ -265,6 +265,25 @@ enum Delivery {
     Manifest(Arc<Record>, Arc<Manifest>, Option<u64>),
 }
 
+fn same_delivery_group(old: &Delivery, new: &Delivery) -> bool {
+    let (old, new) = match (old, new) {
+        (Delivery::Once(a, ar), Delivery::Once(b, br)) if ar.handle == br.handle => (a, b),
+        (Delivery::Manifest(a, ar, None), Delivery::Manifest(b, br, None))
+            if ar.uid == br.uid
+                && ar.info.info.item.package_name == br.info.info.item.package_name
+                && ar.info.info.item.name == br.info.info.item.name =>
+        {
+            (a, b)
+        }
+        _ => return false,
+    };
+    new.sender.delivery_group.is_some()
+        && old.sender.delivery_group == new.sender.delivery_group
+        && old.sender.uid == new.sender.uid
+        && old.user == new.user
+        && old.intent.intent.action == new.intent.intent.action
+}
+
 #[derive(Default)]
 struct State {
     /// `mRegisteredReceivers`, in the order registered.
@@ -385,6 +404,7 @@ impl Broadcasts {
 }
 
 /// A sender, as BroadcastSkipPolicy checks a receiver for it.
+#[derive(Clone)]
 struct Sender {
     uid: i32,
     /// `callerPackage`, `callerFeatureId`.
@@ -401,6 +421,8 @@ struct Sender {
     excluded_packages: Vec<String>,
     app_op: i32,
     require_compat_change: Option<(i64, bool)>,
+    max_manifest_sdk: Option<i32>,
+    delivery_group: Option<String>,
 }
 
 impl Sender {
@@ -418,6 +440,8 @@ impl Sender {
             excluded_packages: Vec::new(),
             app_op: OP_NONE,
             require_compat_change: None,
+            max_manifest_sdk: None,
+            delivery_group: None,
         }
     }
 }
@@ -479,17 +503,26 @@ fn strings(list: Option<Vec<Option<String>>>) -> Vec<String> {
 /// broadcast's duration when its type allows them. Device idle's own
 /// temporary allowlist and a freezer's delay are not the app host's, which
 /// is never idle and freezes no process.
-fn temp_allowlist(host: &AppHost, uid: i32, record: &Record) {
+fn temp_allowlist(host: &AppHost, uid: i32, record: &Record) -> bool {
     let Some(t) = record.temp_allowlist else {
-        return;
+        return true;
     };
     if t.kind == TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED {
-        host.temp_allowlist_for_fgs(
+        if let Err(e) = host.temp_allowlist_for_fgs(
             uid,
-            std::time::Duration::from_millis(t.duration_ms.max(0) as u64),
-            t.reason,
-        );
+            super::device_idle::TempAllowance {
+                duration_ms: t.duration_ms,
+                kind: t.kind,
+                reason_code: t.reason,
+                reason: None,
+                calling_uid: record.sender.uid,
+            },
+        ) {
+            eprintln!("app host: broadcast: temporary allowance: {}", e.message);
+            return false;
+        }
     }
+    true
 }
 
 /// `UserHandle.isCore`.
@@ -555,7 +588,7 @@ pub(super) fn filter_equals(a: &Intent, b: &Intent) -> bool {
 
 impl AppHost {
     /// Whether `package` is an instant app for `user`.
-    fn instant_app(&self, package: &str, user: i32) -> Result<bool, Exception> {
+    pub(super) fn instant_app(&self, package: &str, user: i32) -> Result<bool, Exception> {
         let (state, _) = self.packages()?;
         Ok(state
             .packages
@@ -916,6 +949,8 @@ impl Broadcasts {
                 excluded_packages: Vec::new(),
                 app_op: OP_NONE,
                 require_compat_change: None,
+                max_manifest_sdk: None,
+                delivery_group: None,
             };
             let receiver = st
                 .receivers
@@ -1283,6 +1318,8 @@ impl Broadcasts {
                     options.flags & OPTION_REQUIRE_COMPAT_CHANGE_ENABLED != 0,
                 )
             }),
+            max_manifest_sdk: None,
+            delivery_group: None,
         };
         let record = Arc::new(Record {
             enqueue_id: st.enqueue_id(),
@@ -1796,6 +1833,13 @@ impl Broadcasts {
             info.info.item.name.as_deref().unwrap_or_default()
         );
         let action = intent.action.as_deref().unwrap_or("null");
+        if s.max_manifest_sdk
+            .is_some_and(|max| app.target_sdk_version > max)
+        {
+            return Ok(Some(format!(
+                "API level filtered: receiving {action} to {name}"
+            )));
+        }
         if let Some((change, enabled)) = s.require_compat_change
             && host.change_enabled(change, uid)? != enabled
         {
@@ -1998,14 +2042,20 @@ impl Broadcasts {
         m: Option<&Manifest>,
         delivery: Delivery,
     ) {
+        let push = |queue: &mut VecDeque<Delivery>, delivery: Delivery| {
+            // DELIVERY_GROUP_POLICY_MOST_RECENT, per receiver. Already sent
+            // deliveries are absent from these queues and remain untouched.
+            queue.retain(|old| !same_delivery_group(old, &delivery));
+            queue.push_back(delivery);
+        };
         match &to {
-            QueueId::Warm(seq) => st.queues.entry(*seq).or_default().push_back(delivery),
+            QueueId::Warm(seq) => push(st.queues.entry(*seq).or_default(), delivery),
             QueueId::Cold(process, uid) => match st
                 .cold
                 .iter_mut()
                 .find(|c| &c.process == process && c.uid == *uid)
             {
-                Some(c) => c.deliveries.push_back(delivery),
+                Some(c) => push(&mut c.deliveries, delivery),
                 None => st.cold.push(Cold {
                     process: process.clone(),
                     uid: *uid,
@@ -2255,7 +2305,20 @@ impl Broadcasts {
     /// USER_ALL)` of a system service of the app host: kept as the sticky
     /// of all users, in place of one filter-equal to it, then sent as
     /// [`Self::send_from_system`] sends.
-    pub fn send_sticky_from_system(&self, host: &AppHost, mut intent: RawIntent) {
+    pub fn send_sticky_from_system(&self, host: &AppHost, intent: RawIntent) {
+        self.send_sticky_from_system_with_policy(host, intent, None, None);
+    }
+
+    pub(super) fn send_sticky_from_system_with_policy(
+        &self,
+        host: &AppHost,
+        mut intent: RawIntent,
+        max_manifest_sdk: Option<i32>,
+        delivery_group: Option<String>,
+    ) {
+        let mut sender = Sender::system(&[]);
+        sender.max_manifest_sdk = max_manifest_sdk;
+        sender.delivery_group = delivery_group;
         let flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let extended = intent.intent.extended_flags;
         intent.set_flags(flags, extended);
@@ -2269,7 +2332,7 @@ impl Broadcasts {
                     .map(|h| host.process.strong(h))
                     .collect(),
             ),
-            sender: Sender::system(&[]),
+            sender: sender.clone(),
             ordered: false,
             initial_sticky: false,
             user: USER_ALL,
@@ -2294,7 +2357,7 @@ impl Broadcasts {
                 None => st.stickies.push(sticky),
             }
         }
-        self.send_from_system(host, intent);
+        self.send_as(host, intent, USER_ALL, None, sender);
     }
 
     /// The process of `start_seq` attached: the queue started for it runs
@@ -2803,8 +2866,10 @@ impl Broadcasts {
         self.share_identity_access(host, start_seq, record);
         self.report_dispatched(host, start_seq, record);
         let uid = host.apps.lock().unwrap().get(&start_seq).map(|a| a.uid);
-        if let Some(uid) = uid {
-            temp_allowlist(host, uid as i32, record);
+        if let Some(uid) = uid
+            && !temp_allowlist(host, uid as i32, record)
+        {
+            return false;
         }
         let mut p = Parcel::new();
         thread::ScheduleRegisteredReceiver {
@@ -2866,7 +2931,9 @@ impl Broadcasts {
             .unwrap()
             .get_mut(&start_seq)?
             .add_package(&manifest_package(m));
-        temp_allowlist(host, m.uid as i32, record);
+        if !temp_allowlist(host, m.uid as i32, record) {
+            return Some(false);
+        }
         self.share_identity_access(host, start_seq, record);
         let compat = super::config::CompatibilityInfo::of(
             &m.info.info.application_info,
@@ -3170,6 +3237,91 @@ mod tests {
 #[cfg(test)]
 mod wait_tests {
     use super::*;
+
+    #[test]
+    fn connectivity_manifest_sdk_cap_does_not_limit_registered_receivers() {
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            let permissions = super::super::permission_manager::PermissionManager::with_system(
+                host.clone(),
+                Default::default(),
+            );
+            assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+            let mut sender = Sender::system(&[]);
+            sender.max_manifest_sdk = Some(23);
+            let mut m = system_receiver_tests::receiver("p", "p.Legacy", 10100);
+            let intent = RawIntent::new("android.net.conn.CONNECTIVITY_CHANGE", 0, &[]);
+            assert!(
+                host.broadcasts
+                    .skip_manifest(host, &sender, &m.info, &intent.intent, true)
+                    .unwrap()
+                    .unwrap()
+                    .starts_with("API level filtered")
+            );
+            Arc::make_mut(&mut Arc::get_mut(&mut m).unwrap().info.info.application_info)
+                .target_sdk_version = 23;
+            let skipped = host
+                .broadcasts
+                .skip_manifest(host, &sender, &m.info, &intent.intent, true)
+                .unwrap();
+            assert!(skipped.is_none(), "{skipped:?}");
+            // Registered receivers have no SDK gate; production delivery to
+            // a modern registered process is exercised by connectivity's fixture.
+        });
+    }
+
+    #[test]
+    fn most_recent_connectivity_group_replaces_only_pending_matching_receiver() {
+        let broadcasts = Broadcasts::default();
+        let mut state = State::default();
+        let make = |id, key: Option<&str>| {
+            let mut r = record(id);
+            let r_mut = Arc::get_mut(&mut r).unwrap();
+            r_mut.ordered = false;
+            r_mut.sender.delivery_group = key.map(str::to_string);
+            r
+        };
+        let mut other = registered(1);
+        other.handle = 2;
+        for (id, key, receiver) in [
+            (1, Some("9;-1;mac"), registered(1)),
+            (2, Some("9;-1;null"), registered(1)),
+            (3, Some("9;-1;mac"), other),
+            (4, None, registered(1)),
+            (5, Some("9;-1;mac"), registered(1)),
+        ] {
+            broadcasts.queue_delivery(
+                &mut state,
+                QueueId::Warm(1),
+                None,
+                Delivery::Once(make(id, key), receiver),
+            );
+        }
+        let ids: Vec<_> = state.queues[&1]
+            .iter()
+            .map(|d| match d {
+                Delivery::Once(r, _) => r.enqueue_id,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids, [2, 3, 4, 5]);
+        assert!(!same_delivery_group(
+            &Delivery::Chained(0, registered(1)),
+            &Delivery::Once(make(6, Some("9;-1;mac")), registered(1))
+        ));
+        let a = system_receiver_tests::receiver("p", "p.Legacy", 10100);
+        let mut b = system_receiver_tests::receiver("p", "p.Legacy", 10100);
+        Arc::get_mut(&mut b).unwrap().info.info.item.label_res = 42;
+        let old = Delivery::Manifest(make(7, Some("9;-1;mac")), a, None);
+        assert!(same_delivery_group(
+            &old,
+            &Delivery::Manifest(make(8, Some("9;-1;mac")), b, None)
+        ));
+        let other = system_receiver_tests::receiver("p", "p.Other", 10100);
+        assert!(!same_delivery_group(
+            &old,
+            &Delivery::Manifest(make(9, Some("9;-1;mac")), other, None)
+        ));
+    }
 
     fn record(enqueue_id: u64) -> Arc<Record> {
         Arc::new(Record {

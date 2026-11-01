@@ -194,24 +194,36 @@ pub fn write(root: &Element) -> Result<Vec<u8>, String> {
 
 /// Android TypedXmlSerializer also emits independent sibling root sections.
 pub fn write_sequence(roots: &[Element]) -> Result<Vec<u8>, String> {
-    let mut w = Writer {
-        out: MAGIC.to_vec(),
-        interned: HashMap::new(),
-    };
-    w.out.push(START_DOCUMENT | TYPE_NULL);
+    let mut w = Writer::default();
     for root in roots {
         w.element(root)?;
     }
-    w.out.push(END_DOCUMENT | TYPE_NULL);
-    Ok(w.out)
+    Ok(w.finish())
 }
 
-struct Writer {
+/// Incremental TypedXmlSerializer, retaining one document's interned strings.
+pub struct Writer {
     out: Vec<u8>,
     interned: HashMap<String, u16>,
 }
 
+impl Default for Writer {
+    fn default() -> Self {
+        let mut out = MAGIC.to_vec();
+        out.push(START_DOCUMENT | TYPE_NULL);
+        Self {
+            out,
+            interned: HashMap::new(),
+        }
+    }
+}
+
 impl Writer {
+    pub fn finish(mut self) -> Vec<u8> {
+        self.out.push(END_DOCUMENT | TYPE_NULL);
+        self.out
+    }
+
     fn len(&mut self, n: usize) -> Result<(), String> {
         let n = u16::try_from(n).map_err(|_| format!("ABX: {n} bytes in one value"))?;
         self.out.extend(n.to_be_bytes());
@@ -239,12 +251,22 @@ impl Writer {
         Ok(())
     }
 
-    fn element(&mut self, e: &Element) -> Result<(), String> {
+    pub fn start_element(&mut self, e: &Element) -> Result<(), String> {
         self.out.push(START_TAG | TYPE_STRING_INTERNED);
         self.interned(&e.name)?;
         for (name, value) in &e.attrs {
             self.attribute(name, value)?;
         }
+        Ok(())
+    }
+
+    pub fn end_element(&mut self, name: &str) -> Result<(), String> {
+        self.out.push(END_TAG | TYPE_STRING_INTERNED);
+        self.interned(name)
+    }
+
+    pub fn element(&mut self, e: &Element) -> Result<(), String> {
+        self.start_element(e)?;
         for node in &e.content {
             match node {
                 Node::Element(child) => self.element(child)?,
@@ -255,8 +277,7 @@ impl Writer {
                 }
             }
         }
-        self.out.push(END_TAG | TYPE_STRING_INTERNED);
-        self.interned(&e.name)
+        self.end_element(&e.name)
     }
 
     fn attribute(&mut self, name: &str, value: &Value) -> Result<(), String> {
