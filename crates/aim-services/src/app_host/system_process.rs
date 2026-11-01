@@ -54,6 +54,23 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::GET_SYNC_ACCOUNTS => {
+                sp::GetSyncAccounts::read(&mut call.data)?;
+                system().map(|()| {
+                    let owner = self
+                        .host
+                        .account_manager
+                        .get_or_init(|| {
+                            super::account_service::AccountManager::new(self.host.clone())
+                        })
+                        .clone();
+                    let binder = self
+                        .host
+                        .process
+                        .add_service(Arc::new(super::account_service::SyncAccounts(owner)));
+                    sp::write_get_sync_accounts_reply(&mut p, Some(binder));
+                })
+            }
             sp::GET_PACKAGE_INTERNAL_HOST => {
                 sp::GetPackageInternalHost::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().and_then(|()| {

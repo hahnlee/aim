@@ -179,6 +179,12 @@ impl ClassPath {
         Ok(Self { jars })
     }
 
+    /// Include a build-time injected jar in the checked class path.
+    pub fn with_jar(mut self, jar: Vec<u8>) -> Self {
+        self.jars.push(jar);
+        self
+    }
+
     /// `first` (if any), then the class path's dex files.
     fn classes<'a>(&'a self, first: Option<&'a [u8]>) -> Result<Classes<'a>, String> {
         let mut dexes = Vec::new();

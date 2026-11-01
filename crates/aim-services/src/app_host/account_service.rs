@@ -765,13 +765,7 @@ impl AccountManager {
 
     /// `purgeOldGrants`: grants to uids of no package are deleted.
     fn purge_old_grants(&self, db: &AccountsDb) -> Result<(), Failure> {
-        let uids = match db.find_all_uid_grants() {
-            Ok(uids) => uids,
-            Err(e) => {
-                eprintln!("app host: accounts: could not delete grants: {}", e.0);
-                return Ok(());
-            }
-        };
+        let uids = db.find_all_uid_grants()?;
         for uid in uids {
             if self
                 .system_query(|q| q.packages_for_uid(uid))
@@ -1443,6 +1437,85 @@ impl super::package_writes::PackageMonitor for AccountManager {
         }
         Ok(())
     }
+}
+
+/// Vendor capability over the same owner as the public account service.
+/// The app host user owner has one running/alive user, 0 (locked or unlocked).
+pub(super) struct SyncAccounts(pub Arc<AccountManager>);
+
+impl Service for SyncAccounts {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_isyncaccounts::DESCRIPTOR
+    }
+
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_isyncaccounts as sync;
+        if call.sender_euid != SYSTEM_UID as u32 {
+            return reply(Err(Exception::security(
+                "sync accounts requires system uid",
+            )));
+        }
+        let mut p = Parcel::new();
+        let result = match call.code {
+            sync::VALIDATE_ACCOUNTS => {
+                let a = sync::ValidateAccounts::read(&mut call.data)?;
+                require_user(a.user_id)
+                    .and_then(|()| self.0.validate_accounts(a.user_id))
+                    .map(|()| sync::write_validate_accounts_reply(&mut p))
+            }
+            sync::GET_ACCOUNTS => {
+                let a = sync::GetAccounts::read(&mut call.data)?;
+                (|| {
+                    require_user(a.user_id)?;
+                    self.0
+                        .check_package(SYSTEM_UID, a.op_package_name.as_deref())?;
+                    let accounts = self.0.accounts(a.user_id)?;
+                    let found = self.0.accounts_from_cache(
+                        &accounts,
+                        a.user_id,
+                        None,
+                        SYSTEM_UID,
+                        a.op_package_name.as_deref(),
+                        false,
+                    )?;
+                    sync::write_get_accounts_reply(
+                        &mut p,
+                        Some(&found.into_iter().map(Some).collect::<Vec<_>>()),
+                    );
+                    Ok(())
+                })()
+            }
+            sync::GET_RUNNING_ACCOUNTS_FOR_SYSTEM | sync::GET_ALL_ACCOUNTS_FOR_SYSTEM_PROCESS => {
+                if call.code == sync::GET_RUNNING_ACCOUNTS_FOR_SYSTEM {
+                    sync::GetRunningAccountsForSystem::read(&mut call.data)?;
+                } else {
+                    sync::GetAllAccountsForSystemProcess::read(&mut call.data)?;
+                }
+                self.0.accounts(0).map(|accounts| {
+                    let found: Vec<_> = accounts
+                        .state
+                        .lock()
+                        .unwrap()
+                        .of(None)
+                        .into_iter()
+                        .map(Some)
+                        .collect();
+                    sync::write_get_running_accounts_for_system_reply(&mut p, Some(&found));
+                })
+            }
+            _ => return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
+        };
+        reply(result.map(|()| p))
+    }
+}
+
+fn require_user(user: i32) -> Result<(), Exception> {
+    if user != 0 {
+        return Err(Exception::illegal_argument(format!(
+            "unknown account user {user}"
+        )));
+    }
+    Ok(())
 }
 
 impl Service for AccountManager {

@@ -94,6 +94,7 @@ pub fn jar() -> PathBuf {
 pub fn node() -> Node {
     let mut inputs = vec![repo(java::LOCK)];
     inputs.extend(files(SOURCES));
+    inputs.extend(super::sync_seam::inputs());
     inputs.extend(files(NEARBY));
     inputs.extend(files(OVERLAY));
     inputs.extend(files(SHELL_OVERLAY));
@@ -162,7 +163,14 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     )?);
     let mut policy_jars = jars.clone();
     policy_jars.push("/apex/com.android.permission/javalib/service-permission.jar".into());
-    java::check_linkage(&image, &policy_jars, Some(&stubs_dex), &dex)?;
+    let seam_work = work.join("sync-seam");
+    fs::create_dir_all(&seam_work).map_err(|e| e.to_string())?;
+    let seam = super::sync_seam::generate(&image, &seam_work, &tools, log)?;
+    java::check_linkage_on(
+        aim_android_image::linkage::ClassPath::read(&image, &policy_jars)?.with_jar(seam.clone()),
+        Some(&stubs_dex),
+        &dex,
+    )?;
     service_aidl::check_own_stubs(&dex)?;
     tools.jar(log, &dex, &staged.join("aim-services.jar"))?;
 
@@ -203,7 +211,11 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     )?;
     let mut nearby_jars = jars.clone();
     nearby_jars.push(CONNECTIVITY_JAR.into());
-    java::check_linkage(&image, &nearby_jars, Some(&nearby_stubs_dex), &nearby_dex)?;
+    java::check_linkage_on(
+        aim_android_image::linkage::ClassPath::read(&image, &nearby_jars)?.with_jar(seam),
+        Some(&nearby_stubs_dex),
+        &nearby_dex,
+    )?;
     tools.jar(log, &nearby_dex, &staged.join("aim-nearby.jar"))?;
 
     let mut fragment = fs::read(image.join(FRAGMENT)).map_err(|e| format!("{FRAGMENT}: {e}"))?;

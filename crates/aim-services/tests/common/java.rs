@@ -149,3 +149,7 @@ pub fn check_linkage(dex: &Path, classpath: &[&str]) -> Result<(), String> {
         ))
     }
 }
+
+pub fn sync_accounts_aidl(dir: &Path) -> PathBuf {
+    private_aidl(dir, "ISyncAccounts")
+}

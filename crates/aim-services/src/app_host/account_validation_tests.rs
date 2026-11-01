@@ -296,3 +296,210 @@ fn removal_recipients_use_prior_visibility_and_ce_write_failure_rolls_back() {
         assert_eq!(count(&ce, "SELECT count(*) FROM accounts WHERE _id=1"), 1);
     });
 }
+
+#[test]
+fn strict_sync_snapshots() {
+    use aim_binder_host::parcel::EX_SECURITY;
+    use aim_service_aidl::dev_aim_server_isyncaccounts as s;
+    crate::system::with_discovery_session(|host, _, _| {
+        // Give q a system-owned identity in the published package capture.
+        let system = host.package_system().unwrap();
+        let base = host.package_capture().unwrap();
+        let mut owner = base.scan().owner().clone();
+        let setting = owner
+            .settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "q")
+            .unwrap();
+        setting.app_id = 1000;
+        setting.shared_user = true;
+        setting.shared_user_app_id = Some(1000);
+        owner.identities = crate::package::owner::shared_users::Bootstrap::restore(
+            &Default::default(),
+            &owner.settings,
+        )
+        .unwrap();
+        let mut package = (**base.state().packages["q"].pkg.as_ref().unwrap()).clone();
+        package.uid = 1000;
+        package.shared_user_id = Some("android.uid.system".into());
+        owner.load_test_code(package);
+        let groups = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Default::default()))
+            .collect();
+        let names = ["p", "q"].map(|name| (name.to_string(), false));
+        owner
+            .capture_legacy_permissions(
+                &[0],
+                names.clone().map(|n| (n, Default::default())).into(),
+                groups,
+            )
+            .unwrap();
+        owner
+            .capture_install_permissions_fixed(names.map(|n| (n, false)).into())
+            .unwrap();
+        crate::system::complete_discovery_owner(&mut owner);
+        let mut context = (**base.context()).clone();
+        context
+            .packages
+            .get_mut(&("q".into(), false))
+            .unwrap()
+            .app_id = 1000;
+        context.scan_version = base.scan().version() + 1;
+        system
+            .publish_package_scan_with_queries(
+                &system.package_bootstrap().unwrap(),
+                Some(base.scan()),
+                owner,
+                base.scan().usage().clone(),
+                context,
+            )
+            .unwrap();
+        let (manager, de, _) = fixture(host);
+        assert!(host.account_manager.set(manager.clone()).is_ok());
+        let endpoint = super::super::system_process::SystemProcess::new(host.clone());
+        let mut request = Parcel::new();
+        aim_service_aidl::dev_aim_server_isystemprocess::GetSyncAccounts {}.write(&mut request);
+        let acquire = |uid| {
+            endpoint
+                .transact(&mut Call {
+                    code: aim_service_aidl::dev_aim_server_isystemprocess::GET_SYNC_ACCOUNTS,
+                    flags: 0,
+                    sender_pid: 1,
+                    sender_euid: uid,
+                    data: request.reader(),
+                })
+                .unwrap()
+        };
+        for uid in [0, 2000, 10100, 101000] {
+            assert_eq!(
+                acquire(uid)
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                EX_SECURITY
+            );
+        }
+        let acquired = acquire(1000);
+        let binder = aim_service_aidl::dev_aim_server_isystemprocess::read_get_sync_accounts_reply(
+            &mut acquired.reader(),
+        )
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let aim_binder_host::parcel::Binder::Local(pointer) = binder else {
+            panic!("local capability")
+        };
+        let acquired = host.process.local_service(pointer).unwrap();
+        let capability = SyncAccounts(manager.clone());
+        let invoke = |uid, code, user, package: &str| {
+            let mut p = Parcel::new();
+            match code {
+                s::GET_ACCOUNTS => s::GetAccounts {
+                    user_id: user,
+                    op_package_name: Some(package.into()),
+                }
+                .write(&mut p),
+                s::VALIDATE_ACCOUNTS => s::ValidateAccounts { user_id: user }.write(&mut p),
+                _ => p.write_interface_token(s::DESCRIPTOR),
+            }
+            if uid == 1000 {
+                return acquired.transact(code, &p, false).unwrap().into_parcel();
+            }
+            capability
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 1,
+                    sender_euid: uid,
+                    data: p.reader(),
+                })
+                .unwrap()
+        };
+        let status = |uid, code, user, package| {
+            invoke(uid, code, user, package)
+                .reader()
+                .read_exception()
+                .unwrap()
+        };
+        let snapshot = |code| {
+            let p = invoke(1000, code, 0, "q");
+            s::read_get_accounts_reply::<Account>(&mut p.reader()).unwrap()
+        };
+        let codes = [
+            s::GET_ACCOUNTS,
+            s::GET_RUNNING_ACCOUNTS_FOR_SYSTEM,
+            s::GET_ALL_ACCOUNTS_FOR_SYSTEM_PROCESS,
+        ];
+        // The same committed owner, with running/alive user 0 even while CE is locked.
+        for validate in [false, true] {
+            if validate {
+                status(1000, s::VALIDATE_ACCOUNTS, 0, "q").unwrap();
+            }
+            let owner = manager.accounts(0).unwrap();
+            let accounts = owner.state.lock().unwrap().of(None);
+            let expected = Some(accounts.into_iter().map(Some).collect());
+            for code in codes {
+                assert_eq!(snapshot(code).unwrap(), expected);
+            }
+        }
+        for code in codes.into_iter().chain([s::VALIDATE_ACCOUNTS]) {
+            for uid in [0, 2000, 10100, 101000] {
+                assert_eq!(status(uid, code, 0, "q").unwrap_err().code, EX_SECURITY);
+            }
+        }
+        for package in ["p", "missing"] {
+            assert_eq!(
+                status(1000, s::GET_ACCOUNTS, 0, package).unwrap_err().code,
+                EX_SECURITY
+            );
+        }
+        for user in [-1, 10] {
+            for code in [s::GET_ACCOUNTS, s::VALIDATE_ACCOUNTS] {
+                assert!(status(1000, code, user, "q").is_err());
+            }
+            let users = de.parent().unwrap().parent().unwrap();
+            assert!(!users.join(user.to_string()).exists());
+            assert!(!manager.users.lock().unwrap().contains_key(&user));
+        }
+        let owner = manager.accounts(0).unwrap();
+        let visible = |package| {
+            manager
+                .accounts_from_cache(&owner, 0, None, 10100, Some(package), false)
+                .unwrap()
+        };
+        // Stored visibility uses the existing package/certificate decision path.
+        owner.state.lock().unwrap().visibility.insert(
+            Account::new("b".into(), "kept".into()),
+            HashMap::from([("p".into(), 1), ("q".into(), 3)]),
+        );
+        assert!(!visible("p").is_empty());
+        owner
+            .state
+            .lock()
+            .unwrap()
+            .visibility
+            .get_mut(&Account::new("b".into(), "kept".into()))
+            .unwrap()
+            .insert("p".into(), 3);
+        assert!(visible("p").is_empty());
+        assert!(!snapshot(s::GET_ACCOUNTS).unwrap().unwrap().is_empty());
+        assert!(visible("missing").is_empty());
+        manager.users.lock().unwrap().clear();
+        Connection::open(&de)
+            .unwrap()
+            .execute_batch("DROP TABLE grants")
+            .unwrap();
+        for code in codes.into_iter().chain([s::VALIDATE_ACCOUNTS]) {
+            assert_eq!(
+                status(1000, code, 0, "q").unwrap_err().code,
+                EX_ILLEGAL_STATE
+            );
+        }
+    });
+}
