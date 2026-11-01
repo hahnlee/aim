@@ -7,10 +7,10 @@
 //! compat and desktop windowing state: #1589), and it is written as
 //! `RunningTaskInfo.writeToParcel` and `TaskInfo.writeTaskToParcel` write
 //! it. Also `getAppTasks` (`RecentTasks.getAppTasksList`), whose
-//! `IAppTask`s answer `getTaskInfo` with `createRecentTaskInfo`; the
-//! recents list is the app host's tasks, the most recently active first,
-//! and the other `IAppTask` methods and `getRecentTasks` are not
-//! implemented (#1588).
+//! `IAppTask`s answer `getTaskInfo` with `createRecentTaskInfo`, finish
+//! and remove tasks, and change their base intent's recents exclusion.
+//! The recents list is the app host's tasks, the most recently active first;
+//! `moveToFront`, `startActivity` and `getRecentTasks` remain explicit (#1588).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
@@ -445,8 +445,7 @@ impl AppHost {
         let mut tasks: Vec<(i64, i32)> = {
             let stack = self.activities.stack.lock().unwrap();
             stack
-                .tasks
-                .iter()
+                .recent_tasks()
                 .filter(|t| {
                     t.uid as i32 == uid && t.real_activity.split('/').next() == Some(package)
                 })
@@ -766,6 +765,153 @@ pub(super) mod tests {
         s
     }
 
+    pub(in crate::app_host) fn add_app_task(host: &AppHost, id: i32) {
+        let mut task = stack(false).tasks.remove(0);
+        task.id = id;
+        task.real_activity = "p/A".into();
+        host.activities.stack.lock().unwrap().tasks.push(task);
+    }
+
+    pub(in crate::app_host) fn invoke_app_task(
+        host: &Arc<AppHost>,
+        id: i32,
+        uid: u32,
+        code: u32,
+        data: &Parcel,
+    ) -> Parcel {
+        AppTask {
+            host: host.clone(),
+            task: id,
+            uid: 10100,
+        }
+        .transact(&mut Call {
+            code,
+            flags: 0,
+            sender_pid: 42,
+            sender_euid: uid,
+            data: data.reader(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn app_task_checks_capability_uid_before_dispatch_and_missing_task() {
+        use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            add_app_task(host, 7);
+            for code in [
+                iat::FINISH_AND_REMOVE_TASK,
+                iat::GET_TASK_INFO,
+                iat::SET_EXCLUDE_FROM_RECENTS,
+                iat::MOVE_TO_FRONT,
+                iat::START_ACTIVITY,
+            ] {
+                let p = invoke_app_task(host, 7, 10200, code, &Parcel::new());
+                let e = p.reader().read_exception().unwrap().unwrap_err();
+                assert_eq!(e.code, EX_SECURITY);
+                assert_eq!(
+                    e.message,
+                    "Caller 10100 does not match caller of getAppTasks(): 10200"
+                );
+            }
+            assert!(host.activities.stack.lock().unwrap().task(7).is_some());
+            assert_eq!(host.app_tasks(10100, Some("p")).unwrap().len(), 1);
+            host.activities.stack.lock().unwrap().tasks.clear();
+            let mut request = Parcel::new();
+            iat::FinishAndRemoveTask {}.write(&mut request);
+            for uid in [10100, 1000, 0] {
+                add_app_task(host, 7);
+                assert_eq!(host.app_tasks(10100, Some("p")).unwrap().len(), 1);
+                for expected in [None, Some(EX_ILLEGAL_ARGUMENT)] {
+                    let p = invoke_app_task(host, 7, uid, iat::FINISH_AND_REMOVE_TASK, &request);
+                    let result = p.reader().read_exception().unwrap();
+                    assert_eq!(result.err().map(|e| e.code), expected);
+                }
+                assert!(host.activities.stack.lock().unwrap().task(7).is_none());
+                assert!(host.app_tasks(10100, Some("p")).unwrap().is_empty());
+            }
+            for code in [iat::MOVE_TO_FRONT, iat::START_ACTIVITY] {
+                let p = invoke_app_task(host, 7, 10100, code, &Parcel::new());
+                assert_eq!(
+                    p.reader().read_exception().unwrap().unwrap_err().code,
+                    EX_UNSUPPORTED_OPERATION
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn app_task_recents_exclusion_preserves_base_intent_and_other_flags() {
+        use super::super::activity_stack::FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
+        use super::super::kept::{KeptIntent, RawIntent};
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            for raw in [false, true] {
+                add_app_task(host, 7);
+                {
+                    let mut stack = host.activities.stack.lock().unwrap();
+                    let t = stack.tasks.last_mut().unwrap();
+                    t.intent.flags = 0x10000000;
+                    if raw {
+                        let mut intent = RawIntent::new(
+                            "action",
+                            t.intent.flags,
+                            &[("key", crate::bundle::Value::Int(42))],
+                        );
+                        intent.set_flags(t.intent.flags, 4);
+                        t.base =
+                            LaunchIntent::Raw(Box::new(KeptIntent::new(intent, &host.process)));
+                    }
+                }
+                for exclude in [true, true, false] {
+                    let mut p = Parcel::new();
+                    iat::SetExcludeFromRecents { exclude }.write(&mut p);
+                    let p = invoke_app_task(host, 7, 10100, iat::SET_EXCLUDE_FROM_RECENTS, &p);
+                    p.reader().read_exception().unwrap().unwrap();
+                    let stack = host.activities.stack.lock().unwrap();
+                    let t = stack.task(7).unwrap();
+                    let flags = 0x10000000
+                        | if exclude {
+                            FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                        } else {
+                            0
+                        };
+                    assert_eq!(t.intent.flags, flags);
+                    assert_eq!(stack.recent_tasks().count(), 1); // exclusion does not remove it
+                    if raw {
+                        let BaseIntent::Raw(base) = BaseIntent::of(t, false).unwrap() else {
+                            panic!()
+                        };
+                        assert_eq!(base.intent.flags, flags);
+                        assert_eq!(base.intent.extended_flags, 4);
+                        assert_eq!(base.int_extra("key", 0).unwrap(), 42);
+                    }
+                }
+                host.activities.stack.lock().unwrap().tasks.clear();
+            }
+            let mut p = Parcel::new();
+            iat::SetExcludeFromRecents { exclude: true }.write(&mut p);
+            for code in [iat::SET_EXCLUDE_FROM_RECENTS, iat::GET_TASK_INFO] {
+                let mut request = Parcel::new();
+                iat::GetTaskInfo {}.write(&mut request);
+                let p = invoke_app_task(
+                    host,
+                    7,
+                    10100,
+                    code,
+                    if code == iat::GET_TASK_INFO {
+                        &request
+                    } else {
+                        &p
+                    },
+                );
+                assert_eq!(
+                    p.reader().read_exception().unwrap().unwrap_err().code,
+                    aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+                );
+            }
+        });
+    }
+
     #[test]
     fn the_caller_sees_its_own_tasks_unless_allowed_the_visible_ones_first() {
         let s = stack(false);
@@ -971,6 +1117,42 @@ impl Service for AppTask {
             ))));
         }
         match call.code {
+            iat::FINISH_AND_REMOVE_TASK => {
+                iat::FinishAndRemoveTask::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let commands = self
+                    .host
+                    .activities
+                    .stack
+                    .lock()
+                    .unwrap()
+                    .finish_and_remove_task(self.task);
+                super::reply(commands.ok_or_else(|| self.missing()).map(|commands| {
+                    self.host.run(commands);
+                    let mut p = Parcel::new();
+                    iat::write_finish_and_remove_task_reply(&mut p);
+                    p
+                }))
+            }
+            iat::SET_EXCLUDE_FROM_RECENTS => {
+                let a = iat::SetExcludeFromRecents::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut stack = self.host.activities.stack.lock().unwrap();
+                let task = stack.tasks.iter_mut().find(|t| t.id == self.task);
+                super::reply(task.ok_or_else(|| self.missing()).map(|task| {
+                    let flag = super::activity_stack::FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
+                    task.intent.flags = if a.exclude {
+                        task.intent.flags | flag
+                    } else {
+                        task.intent.flags & !flag
+                    };
+                    if let LaunchIntent::Raw(base) = &mut task.base {
+                        let extended = base.intent.intent.extended_flags;
+                        base.intent.set_flags(task.intent.flags, extended);
+                    }
+                    let mut p = Parcel::new();
+                    iat::write_set_exclude_from_recents_reply(&mut p);
+                    p
+                }))
+            }
             // `createRecentTaskInfo(task, stripExtras false, getTasksAllowed
             // true)`.
             iat::GET_TASK_INFO => {
@@ -981,9 +1163,7 @@ impl Service for AppTask {
                         let stack = host.activities.stack.lock().unwrap();
                         stack.task(self.task).map(|t| t.last_active)
                     };
-                    let last_active = last_active.ok_or_else(|| {
-                        Exception::illegal_argument(format!("Unable to find task ID {}", self.task))
-                    })?;
+                    let last_active = last_active.ok_or_else(|| self.missing())?;
                     host.task_info(self.task, last_active, false, true, &host.multi_window()?)
                 })();
                 super::reply(info.map(|info| {
@@ -998,5 +1178,11 @@ impl Service for AppTask {
                 code,
             ))),
         }
+    }
+}
+
+impl AppTask {
+    fn missing(&self) -> Exception {
+        Exception::illegal_argument(format!("Unable to find task ID {}", self.task))
     }
 }

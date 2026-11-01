@@ -849,7 +849,7 @@ mod tests {
         }
     }
 
-    fn removal_under_display(cycles: usize) {
+    fn removal_under_display(cycles: usize, app_task: bool) {
         crate::system::with_discovery_binders(|host, _, _, export| {
             let tree = Arc::new(Mutex::new(SurfaceTree::default()));
             let endpoint = export(Arc::new(Surfaces(tree.clone())));
@@ -866,12 +866,46 @@ mod tests {
                     .set(surface::Composer::for_test(&host.process, endpoint.handle,))
                     .is_ok()
             );
+            let (bridge, mut records) = UnixStream::pair().unwrap();
+            records
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            *host.tasks.bridge.lock().unwrap() = Some(bridge);
             for id in 1..=cycles as i32 {
                 host.tasks.animation_test_task(id, Rect::default());
                 host.task_layer(id, |_| Ok(())).unwrap();
                 assert_eq!(tree.lock().unwrap().children, BTreeSet::from([id]));
-                host.remove_task(id);
-                host.remove_task(id); // an already removed task sends no transaction
+                if app_task {
+                    use aim_service_aidl::android_app_iapptask as iat;
+                    super::super::task_info::tests::add_app_task(host, id);
+                    let mut request = Parcel::new();
+                    iat::FinishAndRemoveTask {}.write(&mut request);
+                    for missing in [false, true] {
+                        let p = super::super::task_info::tests::invoke_app_task(
+                            host,
+                            id,
+                            10100,
+                            iat::FINISH_AND_REMOVE_TASK,
+                            &request,
+                        );
+                        assert_eq!(p.reader().read_exception().unwrap().is_err(), missing);
+                    }
+                    assert_eq!(
+                        host.activities.stack.lock().unwrap().recent_tasks().count(),
+                        0
+                    );
+                    assert!(host.activities.stack.lock().unwrap().task(id).is_none());
+                } else {
+                    host.remove_task(id);
+                    host.remove_task(id); // an already removed task sends no transaction
+                }
+                let mut removed = vec![0; size_of::<Record>()];
+                records.read_exact(&mut removed).unwrap();
+                assert_eq!(
+                    u32::from_ne_bytes(removed[..4].try_into().unwrap()),
+                    window::REMOVED
+                );
+                assert_eq!(i32::from_ne_bytes(removed[4..8].try_into().unwrap()), id);
                 assert!(host.tasks.bounds(id).is_none());
                 assert!(tree.lock().unwrap().children.is_empty());
                 assert_eq!(host.with_display_layer(|root| Ok(root.id)).unwrap(), 0);
@@ -880,17 +914,27 @@ mod tests {
                 tree.lock().unwrap().removed,
                 (1..=cycles as i32).collect::<Vec<_>>()
             );
+            records.set_nonblocking(true).unwrap();
+            assert_eq!(
+                records.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
         });
     }
 
     #[test]
     fn removal_detaches_task_from_retained_display() {
-        removal_under_display(1);
+        removal_under_display(1, false);
     }
 
     #[test]
     fn repeated_close_reopen_leaves_no_retired_containers() {
-        removal_under_display(3);
+        removal_under_display(3, false);
+    }
+
+    #[test]
+    fn app_task_removal_detaches_surface_and_releases_native_task_once() {
+        removal_under_display(3, true);
     }
 
     #[test]

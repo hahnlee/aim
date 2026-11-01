@@ -250,3 +250,56 @@ fn callback_delivery_preserves_initial_list_and_appeared_changed_vanished_order(
         unregister(host, &other);
     });
 }
+
+#[test]
+fn app_task_removal_reports_vanished_once() {
+    use aim_service_aidl::android_app_iapptask as iat;
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let (tx, events) = mpsc::channel();
+        let organizer = export(Arc::new(Callback(tx)));
+        register(host, &organizer).unwrap();
+        let surface = export(Arc::new(super::super::activity::Token));
+        let layer = Layer::animation_test_layer(host.process.strong(surface.handle), 71);
+        let leash = Leash::new(host, surface.binder(), &layer);
+        let mut info = super::super::task_info::tests::organizer_fixture();
+        info.task_id = 7;
+        let mut p = Parcel::new();
+        info.write_to(&mut p);
+        // Seed the original appeared snapshot without a platform/resource boot.
+        state(host).update(&[(7, true, Appeared { info: p, leash })], true);
+        super::super::task_info::tests::add_app_task(host, 7);
+        host.tasks.animation_test_task(7, Default::default());
+        let mut request = Parcel::new();
+        iat::FinishAndRemoveTask {}.write(&mut request);
+        let result = super::super::task_info::tests::invoke_app_task(
+            host,
+            7,
+            10100,
+            iat::FINISH_AND_REMOVE_TASK,
+            &request,
+        );
+        result.reader().read_exception().unwrap().unwrap();
+        assert!(host.tasks.bounds(7).is_none());
+        let (code, payload) = events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(code, callback::ON_TASK_VANISHED);
+        let mut r = payload.reader();
+        assert_eq!(r.read_i32().unwrap(), 1); // typed TaskInfo
+        assert_eq!(
+            (r.read_i32().unwrap(), r.read_i32().unwrap()),
+            (7, info.user_id)
+        );
+        let result = super::super::task_info::tests::invoke_app_task(
+            host,
+            7,
+            10100,
+            iat::FINISH_AND_REMOVE_TASK,
+            &request,
+        );
+        assert_eq!(
+            result.reader().read_exception().unwrap().unwrap_err().code,
+            aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+        );
+        assert!(state(host).entries[0].tasks.is_empty());
+        assert!(events.try_recv().is_err());
+    });
+}
