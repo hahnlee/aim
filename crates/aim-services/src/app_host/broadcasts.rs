@@ -479,17 +479,26 @@ fn strings(list: Option<Vec<Option<String>>>) -> Vec<String> {
 /// broadcast's duration when its type allows them. Device idle's own
 /// temporary allowlist and a freezer's delay are not the app host's, which
 /// is never idle and freezes no process.
-fn temp_allowlist(host: &AppHost, uid: i32, record: &Record) {
+fn temp_allowlist(host: &AppHost, uid: i32, record: &Record) -> bool {
     let Some(t) = record.temp_allowlist else {
-        return;
+        return true;
     };
     if t.kind == TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED {
-        host.temp_allowlist_for_fgs(
+        if let Err(e) = host.temp_allowlist_for_fgs(
             uid,
-            std::time::Duration::from_millis(t.duration_ms.max(0) as u64),
-            t.reason,
-        );
+            super::device_idle::TempAllowance {
+                duration_ms: t.duration_ms,
+                kind: t.kind,
+                reason_code: t.reason,
+                reason: None,
+                calling_uid: record.sender.uid,
+            },
+        ) {
+            eprintln!("app host: broadcast: temporary allowance: {}", e.message);
+            return false;
+        }
     }
+    true
 }
 
 /// `UserHandle.isCore`.
@@ -2803,8 +2812,10 @@ impl Broadcasts {
         self.share_identity_access(host, start_seq, record);
         self.report_dispatched(host, start_seq, record);
         let uid = host.apps.lock().unwrap().get(&start_seq).map(|a| a.uid);
-        if let Some(uid) = uid {
-            temp_allowlist(host, uid as i32, record);
+        if let Some(uid) = uid
+            && !temp_allowlist(host, uid as i32, record)
+        {
+            return false;
         }
         let mut p = Parcel::new();
         thread::ScheduleRegisteredReceiver {
@@ -2866,7 +2877,9 @@ impl Broadcasts {
             .unwrap()
             .get_mut(&start_seq)?
             .add_package(&manifest_package(m));
-        temp_allowlist(host, m.uid as i32, record);
+        if !temp_allowlist(host, m.uid as i32, record) {
+            return Some(false);
+        }
         self.share_identity_access(host, start_seq, record);
         let compat = super::config::CompatibilityInfo::of(
             &m.info.info.application_info,

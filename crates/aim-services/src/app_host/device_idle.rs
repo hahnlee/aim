@@ -109,7 +109,8 @@ struct Lists {
     /// `mRemovedFromSystemWhitelistApps`.
     removed: Apps,
     /// `mTempWhitelistAppIdEndTimes`, by app id.
-    temp: BTreeMap<i32, (Instant, Option<String>)>,
+    temp: BTreeMap<i32, TempEntry>,
+    timeout_order: u64,
 }
 
 impl Lists {
@@ -224,11 +225,38 @@ impl Lists {
     }
 }
 
+/// Attribution supplied to `updateDeviceIdleTempAllowlist`, after the duration cap.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TempAllowance {
+    pub duration_ms: i64,
+    pub kind: i32,
+    pub reason_code: i32,
+    pub reason: Option<String>,
+    pub calling_uid: i32,
+}
+
+#[derive(Debug, PartialEq)]
+struct TempEntry {
+    end_ms: i64,
+    check_at_ms: i64,
+    order: u64,
+    uid: i32,
+    reason: Option<String>,
+    allowance: TempAllowance,
+}
+
+/// Native `PowerAllowlistInternal.TempAllowlistChangeListener`.
+pub trait TempAllowlistChangeListener: Send + Sync {
+    fn on_app_added(&self, uid: i32);
+    fn on_app_removed(&self, uid: i32);
+}
+
 enum Work {
     /// `MSG_WRITE_CONFIG`, coalesced.
     WriteConfig,
     /// A temporary entry added: its end to be waited for.
     Temp,
+    TempChanged(i32, bool),
 }
 
 pub struct DeviceIdle {
@@ -236,6 +264,8 @@ pub struct DeviceIdle {
     /// Loaded at the first call (`onStart`).
     lists: Mutex<Option<Lists>>,
     handler: Mutex<mpsc::Sender<Work>>,
+    listeners: Mutex<Vec<Arc<dyn TempAllowlistChangeListener>>>,
+    temp_changes: Mutex<()>,
 }
 
 impl DeviceIdle {
@@ -245,6 +275,8 @@ impl DeviceIdle {
             host,
             lists: Mutex::new(None),
             handler: Mutex::new(tx),
+            listeners: Mutex::new(Vec::new()),
+            temp_changes: Mutex::new(()),
         });
         let weak = Arc::downgrade(&me);
         std::thread::Builder::new()
@@ -424,17 +456,16 @@ impl DeviceIdle {
                 .unimplemented_named("deviceidle", &format!("{what} (#2016)"))
         })?;
         if kind != TEMPORARY_ALLOW_LIST_TYPE_NONE {
-            self.add_temp(package, duration_ms, kind, user, reason_code, reason)?;
+            self.add_temp(uid, package, duration_ms, kind, user, reason_code, reason)?;
         }
         Ok(())
     }
 
     /// `addPowerSaveTempAllowlistAppInternal`: nothing for a package not
-    /// installed in `user` (`NameNotFoundException`). The caller's uid,
-    /// which the original keeps with the foreground service allowance,
-    /// the app host does not.
+    /// installed in `user` (`NameNotFoundException`).
     pub(super) fn add_temp(
         &self,
+        calling_uid: i32,
         package: Option<&str>,
         duration_ms: i64,
         kind: i32,
@@ -449,43 +480,89 @@ impl DeviceIdle {
         let Some((_, uid, _)) = installed.iter().find(|(n, _, _)| n == package) else {
             return Ok(());
         };
-        self.add_temp_direct(*uid, duration_ms, kind, reason_code, reason)
+        self.add_temp_direct(calling_uid, *uid, duration_ms, kind, reason_code, reason)
     }
 
-    /// `addPowerSaveTempWhitelistAppDirectInternal`: the app id allowed
-    /// until the duration (at most `MAX_TEMP_APP_ALLOWLIST_DURATION_MS`)
-    /// ends; a new entry reported (`reportTempWhitelistChangedLocked`), and
-    /// the uid allowed foreground service starts for the duration
-    /// (`updateDeviceIdleTempAllowlist`). The battery history's
-    /// `EVENT_TEMP_WHITELIST_START` is #1928; the network policy's
-    /// exemption, the app host has no device idle restrictions to lift.
+    /// `addPowerSaveTempWhitelistAppDirectInternal`: renew the app-id deadline,
+    /// retaining its first reason and pending timeout. FGS holds only extend.
     pub(super) fn add_temp_direct(
         &self,
+        calling_uid: i32,
         uid: i32,
         duration_ms: i64,
         kind: i32,
         reason_code: i32,
         reason: Option<String>,
     ) -> Result<(), Exception> {
-        let duration = duration_ms.min(self.constant("max_temp_app_allowlist_duration_ms")?);
-        let duration = Duration::from_millis(duration.max(0) as u64);
-        let app_id = uid % PER_USER_RANGE;
-        let new = self.with(|l| {
-            let end = Instant::now() + duration;
-            l.temp.insert(app_id, (end, reason.clone())).is_none()
-        })?;
-        if kind == TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED {
-            self.host.temp_allowlist_for_fgs(uid, duration, reason_code);
+        let allowance = TempAllowance {
+            duration_ms: duration_ms.min(self.constant("max_temp_app_allowlist_duration_ms")?),
+            kind,
+            reason_code,
+            reason,
+            calling_uid,
+        };
+        let _change = self.temp_changes.lock().unwrap();
+        let now = self.host.temp_allowlist_now()?;
+        self.with(|_| ())?;
+        self.host.temp_allowlist_for_fgs(uid, allowance.clone())?;
+        self.with(|l| {
+            let app_id = uid % PER_USER_RANGE;
+            let end_ms = now.saturating_add(allowance.duration_ms);
+            let new = !l.temp.contains_key(&app_id);
+            if new {
+                l.timeout_order += 1;
+            }
+            let entry = l.temp.entry(app_id).or_insert_with(|| TempEntry {
+                end_ms,
+                check_at_ms: end_ms,
+                order: l.timeout_order,
+                uid,
+                reason: allowance.reason.clone(),
+                allowance: allowance.clone(),
+            });
+            entry.end_ms = end_ms;
+            entry.allowance = allowance.clone();
+            if new {
+                // Enqueue under the membership lock, so expiry cannot overtake add.
+                self.temp_changed(uid, true);
+                self.post(Work::Temp);
+            }
+            Ok(())
+        })?
+    }
+
+    pub fn register_temp_allowlist_listener(&self, listener: Arc<dyn TempAllowlistChangeListener>) {
+        let mut listeners = self.listeners.lock().unwrap();
+        if !listeners.iter().any(|l| Arc::ptr_eq(l, &listener)) {
+            listeners.push(listener);
         }
-        if new {
-            self.post(Work::Temp);
-            self.temp_changed();
+    }
+
+    pub fn unregister_temp_allowlist_listener(
+        &self,
+        listener: &Arc<dyn TempAllowlistChangeListener>,
+    ) {
+        self.listeners
+            .lock()
+            .unwrap()
+            .retain(|l| !Arc::ptr_eq(l, listener));
+    }
+
+    fn deliver_temp_change(&self, uid: i32, added: bool) {
+        // Snapshot at delivery, then release the registry lock before calling out.
+        let listeners = self.listeners.lock().unwrap().clone();
+        for listener in listeners {
+            if added {
+                listener.on_app_added(uid);
+            } else {
+                listener.on_app_removed(uid);
+            }
         }
-        Ok(())
     }
 
     /// `reportTempWhitelistChangedLocked`'s broadcast.
-    fn temp_changed(&self) {
+    fn temp_changed(&self, uid: i32, added: bool) {
+        self.post(Work::TempChanged(uid, added));
         self.host.broadcasts.send_from_system_as_user(
             &self.host,
             RawIntent::of(
@@ -501,21 +578,46 @@ impl DeviceIdle {
     /// removed and reported (`onAppRemovedFromTempWhitelistLocked`); the
     /// next end, if any.
     fn expire(&self) -> Option<Instant> {
-        let now = Instant::now();
-        let (removed, next) = self
-            .with(|l| {
-                let before = l.temp.len();
-                l.temp.retain(|_, (end, _)| *end > now);
-                (
-                    before - l.temp.len(),
-                    l.temp.values().map(|(end, _)| *end).min(),
-                )
+        let result = self.host.temp_allowlist_now().and_then(|now| {
+            self.expire_at(now).map(|next| {
+                next.map(|at| {
+                    Instant::now() + Duration::from_millis(at.saturating_sub(now).max(0) as u64)
+                })
             })
-            .ok()?;
-        for _ in 0..removed {
-            self.temp_changed();
+        });
+        match result {
+            Ok(next) => next,
+            Err(e) => {
+                eprintln!("app host: deviceidle: expiry: {}", e.message);
+                None
+            }
         }
-        next
+    }
+
+    fn expire_at(&self, now: i64) -> Result<Option<i64>, Exception> {
+        let _change = self.temp_changes.lock().unwrap();
+        self.with(|l| {
+            let mut due: Vec<_> = l
+                .temp
+                .iter()
+                .filter(|(_, e)| e.check_at_ms <= now)
+                .map(|(id, e)| (e.check_at_ms, e.order, *id))
+                .collect();
+            due.sort_unstable();
+            for (_, _, id) in due {
+                let entry = l.temp.get_mut(&id).unwrap();
+                if entry.end_ms > now {
+                    entry.check_at_ms = entry.end_ms;
+                    l.timeout_order += 1;
+                    entry.order = l.timeout_order;
+                } else {
+                    let uid = entry.uid;
+                    l.temp.remove(&id);
+                    self.temp_changed(uid, false);
+                }
+            }
+            l.temp.values().map(|e| e.check_at_ms).min()
+        })
     }
 
     /// `Constants`' `key`: the `device_idle_constants` setting's (a
@@ -593,6 +695,18 @@ impl DeviceIdle {
     }
 }
 
+impl AppHost {
+    /// Match the pinned image's deviceidle clock flag for membership and FGS holds.
+    pub(super) fn temp_allowlist_now(&self) -> Result<i64, Exception> {
+        let cpu = self.flag("com.android.server.deviceidle.use_cpu_time_for_temp_allowlist")?;
+        Ok(super::clock_ms(if cpu {
+            libc::CLOCK_UPTIME_RAW
+        } else {
+            libc::CLOCK_MONOTONIC_RAW
+        }))
+    }
+}
+
 /// The service's handler: the config written once no change came for
 /// `WRITE_CONFIG_DELAY`, the temporary entries removed as they end.
 fn handler(me: Weak<DeviceIdle>, rx: mpsc::Receiver<Work>) {
@@ -610,6 +724,7 @@ fn handler(me: Weak<DeviceIdle>, rx: mpsc::Receiver<Work>) {
         match work {
             Ok(Work::WriteConfig) => write_at = Some(Instant::now() + WRITE_CONFIG_DELAY),
             Ok(Work::Temp) => temp_at = service.expire(),
+            Ok(Work::TempChanged(uid, added)) => service.deliver_temp_change(uid, added),
             Err(RecvTimeoutError::Timeout) => {
                 let now = Instant::now();
                 if write_at.is_some_and(|at| at <= now) {
@@ -952,3 +1067,7 @@ mod tests {
         assert!(DeviceIdle::temp_allowlist_type(REASON_PUSH_MESSAGING_OVER_QUOTA, fgs).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "device_idle_temp_tests.rs"]
+mod temp_tests;

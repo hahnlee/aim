@@ -565,7 +565,7 @@ struct State {
     next_connection: u64,
     /// `mFgsStartTempAllowList`: until when a uid may start foreground
     /// services, and why.
-    fgs_temp_allowlist: HashMap<i32, (Instant, i32)>,
+    fgs_temp_allowlist: HashMap<i32, (i64, super::device_idle::TempAllowance)>,
     /// `mFgsDeferralEligible`: until when a uid's foreground services'
     /// notifications show at once.
     deferral_eligible: HashMap<i32, Instant>,
@@ -1740,7 +1740,7 @@ impl AppHost {
         // `fg-service-launch`: its app may make it foreground.
         if r.fg.required && !isolated {
             let timeout = r.fg.timeout_policy.as_ref().unwrap().required;
-            Self::temp_allowlist(state, info.uid, timeout, REASON_SERVICE_LAUNCH);
+            self.temp_allowlist(state, info.uid, timeout, REASON_SERVICE_LAUNCH)?;
         }
         state.pending_services.push(token);
         self.queue_service_start(token, move |host| {
@@ -2887,37 +2887,64 @@ impl AppHost {
 
     /// `tempAllowlistUidLocked` for foreground services: `uid` may start
     /// them for `duration` (or longer, if it already may), for `reason`.
-    fn temp_allowlist(state: &mut State, uid: i32, duration: Duration, reason: i32) {
-        let until = Instant::now() + duration;
-        let entry = state
-            .fgs_temp_allowlist
-            .entry(uid)
-            .or_insert((until, reason));
-        if entry.0 < until {
-            *entry = (until, reason);
-        }
-    }
-
-    /// `tempAllowlistForPendingIntent`, of a PendingIntent sent with
-    /// options that allow its creator `uid` foreground services (an
-    /// alarm's).
-    pub(super) fn temp_allowlist_for_fgs(&self, uid: i32, duration: Duration, reason: i32) {
-        Self::temp_allowlist(
-            &mut self.services.state.lock().unwrap(),
+    fn temp_allowlist(
+        &self,
+        state: &mut State,
+        uid: i32,
+        duration: Duration,
+        reason: i32,
+    ) -> Result<(), Exception> {
+        self.update_fgs_temp_allowlist(
+            state,
             uid,
-            duration,
-            reason,
-        );
+            super::device_idle::TempAllowance {
+                duration_ms: duration.as_millis() as i64,
+                kind: 0,
+                reason_code: reason,
+                reason: None,
+                calling_uid: SYSTEM_UID as i32,
+            },
+        )
     }
 
-    /// `isAllowlistedForFgsStartLOSP`: why `uid` may start foreground
-    /// services now, if it is temporarily allowed.
-    fn temp_allowlisted(state: &State, uid: i32) -> Option<i32> {
-        state
+    fn update_fgs_temp_allowlist(
+        &self,
+        state: &mut State,
+        uid: i32,
+        allowance: super::device_idle::TempAllowance,
+    ) -> Result<(), Exception> {
+        if allowance.kind != 0 || allowance.duration_ms <= 0 {
+            return Ok(());
+        }
+        let until = self
+            .temp_allowlist_now()?
+            .saturating_add(allowance.duration_ms);
+        if state
             .fgs_temp_allowlist
             .get(&uid)
-            .filter(|(until, _)| Instant::now() < *until)
-            .map(|(_, reason)| *reason)
+            .is_none_or(|(end, _)| *end < until)
+        {
+            state.fgs_temp_allowlist.insert(uid, (until, allowance));
+        }
+        Ok(())
+    }
+
+    pub(super) fn temp_allowlist_for_fgs(
+        &self,
+        uid: i32,
+        allowance: super::device_idle::TempAllowance,
+    ) -> Result<(), Exception> {
+        self.update_fgs_temp_allowlist(&mut self.services.state.lock().unwrap(), uid, allowance)
+    }
+
+    /// `FgsTempAllowList.get`: the entry is still valid at its exact end time.
+    fn temp_allowlisted(&self, state: &State, uid: i32) -> Result<Option<i32>, Exception> {
+        let now = self.temp_allowlist_now()?;
+        Ok(state
+            .fgs_temp_allowlist
+            .get(&uid)
+            .filter(|(until, _)| now <= *until)
+            .map(|(_, allowance)| allowance.reason_code))
     }
 
     /// `isBgFgsRestrictionEnabled`: whether a service of `service_uid`,
@@ -3068,7 +3095,7 @@ impl AppHost {
         calling_uid: i32,
         for_bound: bool,
     ) -> Result<(), Exception> {
-        let allowlisted = Self::temp_allowlisted(state, calling_uid);
+        let allowlisted = self.temp_allowlisted(state, calling_uid)?;
         let fg = &state.record(token).unwrap().fg;
         let (mut wiu, mut start) = (fg.allow_wiu.0, fg.allow_start.0);
         if wiu == REASON_DENIED || start == REASON_DENIED {
@@ -3858,7 +3885,7 @@ mod tests {
             for kind in [1, 0] {
                 let mut p = Parcel::new();
                 sp::AddSyncTempAllowlist {
-                    calling_uid: 1000,
+                    calling_uid: 12345,
                     package_name: Some("p".into()),
                     duration_ms: 10_000,
                     r#type: kind,
@@ -3896,10 +3923,50 @@ mod tests {
                     .unwrap();
                 assert!(ids.contains(&(uid % PER_USER_RANGE as i32)));
                 assert_eq!(
-                    AppHost::temp_allowlisted(&host.services.state.lock().unwrap(), uid),
+                    host.temp_allowlisted(&host.services.state.lock().unwrap(), uid)
+                        .unwrap(),
                     (kind == 0).then_some(306)
                 );
             }
+            let first = host.services.state.lock().unwrap().fgs_temp_allowlist[&uid].clone();
+            assert_eq!(
+                (first.1.calling_uid, first.1.reason.as_deref()),
+                (12345, Some("sync by top app"))
+            );
+            assert_eq!((first.1.duration_ms, first.1.kind), (10000, 0));
+            for (kind, duration_ms) in [(1, 300000), (0, 1), (0, 0), (0, -1)] {
+                let allowance = super::super::device_idle::TempAllowance {
+                    duration_ms,
+                    kind,
+                    reason_code: 307,
+                    reason: None,
+                    calling_uid: 54321,
+                };
+                host.temp_allowlist_for_fgs(uid, allowance).unwrap();
+                assert_eq!(
+                    host.services.state.lock().unwrap().fgs_temp_allowlist[&uid],
+                    first
+                );
+            }
+            host.device_idle()
+                .add_temp_direct(54321, uid, i64::MAX, 0, 307, Some("extension".into()))
+                .unwrap();
+            let mut state = host.services.state.lock().unwrap();
+            let extended = &state.fgs_temp_allowlist[&uid];
+            assert!(extended.0 > first.0);
+            assert_eq!(
+                (
+                    extended.1.duration_ms,
+                    extended.1.calling_uid,
+                    extended.1.reason_code
+                ),
+                (300000, 54321, 307)
+            );
+            assert_eq!(extended.1.reason.as_deref(), Some("extension"));
+            // Exercise the actual FGS decision after expiry, independent of membership.
+            state.fgs_temp_allowlist.get_mut(&uid).unwrap().0 =
+                host.temp_allowlist_now().unwrap() - 1;
+            assert_eq!(host.temp_allowlisted(&state, uid).unwrap(), None);
         });
     }
 
