@@ -13,10 +13,9 @@
 //! authenticator's apps, and the listeners apps register by type. The
 //! one user is a full user, never restricted, so shared accounts are not
 //! filtered. Explicit add/remove and visibility writes share this owner.
-//! Other account changes, the authenticator
-//! sessions (`getAuthToken`, `addAccount` and the rest), access grants
-//! and devices with a device or profile owner
-//! are not implemented (#1504).
+//! Explicit access grants use the same DE owner and notify local listeners.
+//! Authenticator sessions (`getAuthToken`, `addAccount` and the rest), consent
+//! and devices with a device or profile owner are not implemented (#1504).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet};
@@ -24,7 +23,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
     Reader, Result as ParcelResult,
@@ -425,6 +424,7 @@ pub struct AccountManager {
     /// `mAuthenticatorCache`'s services, by user.
     authenticators: Mutex<HashMap<i32, Arc<Vec<Authenticator>>>>,
     users: Mutex<HashMap<i32, Arc<UserAccounts>>>,
+    permission_listeners: Mutex<Vec<Arc<Strong>>>,
 }
 
 impl AccountManager {
@@ -434,6 +434,7 @@ impl AccountManager {
             host,
             authenticators: Mutex::default(),
             users: Mutex::default(),
+            permission_listeners: Mutex::default(),
         });
         let monitor = service.clone() as Arc<dyn super::package_writes::PackageMonitor>;
         service
@@ -1586,8 +1587,14 @@ impl AccountManager {
         package: Option<&str>,
         uid: i32,
     ) -> Result<bool, Exception> {
+        if uid < 0 || user_of(uid) != 0 {
+            return Ok(false);
+        }
         let package = match package {
-            Some(package) => package.to_string(),
+            Some(package) if self.package_uid(package, user_of(uid))? == Some(uid) => {
+                package.to_string()
+            }
+            Some(_) => return Ok(false),
             None => match self.package_name_for_uid(uid)? {
                 Some(package) => package,
                 None => return Ok(false),
@@ -1609,6 +1616,49 @@ impl AccountManager {
         let accounts = self.accounts(user)?;
         let visibility = self.resolve_visibility(&accounts, account, &package, user)?;
         Ok(visibility == VISIBILITY_VISIBLE || visibility == VISIBILITY_USER_MANAGED_VISIBLE)
+    }
+
+    /// `grantAppPermission` / `revokeAppPermission`: serialize commits and
+    /// one-way delivery, so listeners receive permission operations in order.
+    fn update_app_permission(
+        &self,
+        account: &Account,
+        token: &str,
+        uid: i32,
+        grant: bool,
+    ) -> Result<(), Exception> {
+        if uid < 0 || user_of(uid) != 0 || self.packages_for_uid(uid)?.is_empty() {
+            return Err(Exception::illegal_argument("target uid is not installed"));
+        }
+        let accounts = self.accounts(user_of(uid))?;
+        let listeners = self.permission_listeners.lock().unwrap();
+        let state = accounts.state.lock().unwrap();
+        if !state.exists(account) {
+            return Err(Exception::illegal_argument("account does not exist"));
+        }
+        state
+            .db
+            .transaction(|db| {
+                let id = db
+                    .account_id(account)?
+                    .ok_or_else(|| DbError("account does not exist".into()))?;
+                db.set_grant(id, token, uid, grant)
+            })
+            .map_err(db_failed)?;
+        drop(state);
+        use aim_service_aidl::dev_aim_server_iaccountpermissionlistener as listener;
+        let mut p = Parcel::new();
+        listener::OnAppPermissionChanged {
+            account: Some(account.clone()),
+            uid,
+        }
+        .write(&mut p);
+        for target in listeners.iter() {
+            if let Err(e) = target.transact(listener::ON_APP_PERMISSION_CHANGED, &p, true) {
+                eprintln!("account permission listener failed: {e:#x}");
+            }
+        }
+        Ok(())
     }
 
     /// The checks of `getPackagesAndVisibilityForAccount` and
@@ -1659,6 +1709,27 @@ impl Service for SyncAccounts {
         }
         let mut p = Parcel::new();
         let result = match call.code {
+            sync::HAS_ACCOUNT_ACCESS => {
+                let a = sync::HasAccountAccess::<Account>::read(&mut call.data)?;
+                (|| {
+                    let account = a.account.ok_or_else(|| null("account"))?;
+                    let access = self.0.has_account_access(&account, None, a.uid)?;
+                    sync::write_has_account_access_reply(&mut p, access);
+                    Ok(())
+                })()
+            }
+            sync::ADD_ON_APP_PERMISSION_CHANGE_LISTENER => {
+                let a = sync::AddOnAppPermissionChangeListener::read(&mut call.data)?;
+                (|| {
+                    let Some(aim_binder_host::parcel::Binder::Handle(handle)) = a.listener else {
+                        return Err(null("listener"));
+                    };
+                    let target = Arc::new(self.0.host.process.strong(handle));
+                    self.0.permission_listeners.lock().unwrap().push(target);
+                    sync::write_add_on_app_permission_change_listener_reply(&mut p);
+                    Ok(())
+                })()
+            }
             sync::VALIDATE_ACCOUNTS => {
                 let a = sync::ValidateAccounts::read(&mut call.data)?;
                 require_user(a.user_id)
@@ -1728,6 +1799,21 @@ impl Service for AccountManager {
         let uid = call.sender_euid as i32;
         let user = user_of(uid);
         match call.code {
+            am::UPDATE_APP_PERMISSION => {
+                let a = am::UpdateAppPermission::<Account>::read(&mut call.data)?;
+                reply((|| {
+                    if apps_filter::app_id(uid) != SYSTEM_UID {
+                        return Err(Exception::security("Can be called only by system UID"));
+                    }
+                    // The pinned service ignores null grant/revoke arguments.
+                    if let (Some(account), Some(token)) = (a.account, a.auth_token_type) {
+                        self.update_app_permission(&account, &token, a.uid, a.value)?;
+                    }
+                    let mut p = Parcel::new();
+                    am::write_update_app_permission_reply(&mut p);
+                    Ok(p)
+                })())
+            }
             am::ADD_ACCOUNT_EXPLICITLY | am::ADD_ACCOUNT_EXPLICITLY_WITH_VISIBILITY => {
                 let (account, password, extras, visibility) =
                     if call.code == am::ADD_ACCOUNT_EXPLICITLY {
@@ -2689,3 +2775,7 @@ mod race_tests;
 #[cfg(test)]
 #[path = "account_mutation_tests.rs"]
 mod mutation_tests;
+
+#[cfg(test)]
+#[path = "account_permission_tests.rs"]
+mod permission_tests;

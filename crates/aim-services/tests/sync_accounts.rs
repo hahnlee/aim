@@ -20,12 +20,14 @@ fn sync_accounts_adapter() {
         .arg("-d")
         .arg(&stubs)
         .args(common::java::sources(&production.join("stubs"))));
+    common::java::sync_accounts_aidl(&work);
     run(Command::new(jdk.join("javac"))
         .arg("-d")
         .arg(&classes)
         .arg("-cp")
         .arg(&stubs)
-        .arg(common::java::sync_accounts_aidl(&work))
+        .args(common::java::sources(&work.join("aidl")))
+        .arg(production.join("src/dev/aim/server/NativeAccountManagerInternal.java"))
         .arg(production.join("src/dev/aim/server/NativeSyncAccounts.java"))
         .args(common::java::sources(
             &root.join("crates/aim-services/tests/fixtures/sync_accounts"),
