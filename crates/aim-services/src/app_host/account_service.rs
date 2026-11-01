@@ -703,6 +703,8 @@ impl AccountManager {
                 Vec::new()
             };
             drop(state);
+            #[cfg(test)]
+            race_tests::checkpoint("delivery");
             self.deliver(user, notices);
             return Ok(accounts);
         }
