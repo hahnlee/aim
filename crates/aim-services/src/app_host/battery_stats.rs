@@ -402,17 +402,19 @@ struct DualTimer {
 
 /// `Uid.mSyncStats`: `OverflowArrayMap<DualTimer>` (android-16.0.0_r1).
 #[derive(Debug, Default)]
-struct SyncTimers {
-    timers: BTreeMap<String, DualTimer>,
+struct NamedTimers<T> {
+    timers: BTreeMap<String, T>,
     active_overflow: BTreeMap<String, i32>,
     overflow: bool,
 }
 
 const OVERFLOW_NAME: &str = "*overflow*";
 
-impl SyncTimers {
+type SyncTimers = NamedTimers<DualTimer>;
+
+impl<T: Default> NamedTimers<T> {
     /// `startObject` / `stopObject`. Null and empty names identify the same timer.
-    fn timer(&mut self, name: Option<&str>, start: bool, limit: usize) -> Option<&mut DualTimer> {
+    fn timer(&mut self, name: Option<&str>, start: bool, limit: usize) -> Option<&mut T> {
         let name = name.unwrap_or_default();
         if self.timers.contains_key(name) {
             return self.timers.get_mut(name);
@@ -424,8 +426,7 @@ impl SyncTimers {
                 if !self.overflow {
                     // Like mCurOverflow, distinguish an overflow allocation from a
                     // caller's earlier literal "*overflow*" name.
-                    self.timers
-                        .insert(OVERFLOW_NAME.into(), DualTimer::default());
+                    self.timers.insert(OVERFLOW_NAME.into(), T::default());
                     self.overflow = true;
                 }
                 self.active_overflow.insert(name.into(), 1);
@@ -438,7 +439,7 @@ impl SyncTimers {
                 self.active_overflow.remove(name);
             }
         } else {
-            eprintln!("app host: batterystats: unable to find sync timer for {name:?}");
+            eprintln!("app host: batterystats: unable to find named timer for {name:?}");
             return None;
         }
         self.timers.get_mut(OVERFLOW_NAME)
@@ -663,6 +664,7 @@ impl LevelStepTracker {
 /// `BatteryStatsImpl`'s battery state.
 #[derive(Debug, Default)]
 struct Stats {
+    wakes: wake::WakeStats,
     have_level: bool,
     on_battery: bool,
     level: i32,
@@ -933,6 +935,7 @@ impl Stats {
     /// `updateTimeBasesLocked`'s on-battery time base, the timers on it,
     /// and the uids' background time bases.
     fn update_time_base(&mut self, unplugged: bool, now: i64) {
+        self.wakes.bases(unplugged, now);
         let Some(base_us) = self.on_battery_time_base.set_running(unplugged, now * 1000) else {
             return;
         };
@@ -1045,6 +1048,7 @@ impl Stats {
         }
         u.process_state = state;
         u.update_background(on_battery, now);
+        self.wakes.process(uid, u.in_background(), now);
         if let Some(h) = &mut self.history {
             h.record_process_state_change(now, uid, consumer_process_state(state));
         }
@@ -2436,3 +2440,6 @@ mod contract_tests;
 #[cfg(test)]
 #[path = "battery_sync_tests.rs"]
 mod sync_tests;
+
+#[path = "battery_wake.rs"]
+mod wake;
