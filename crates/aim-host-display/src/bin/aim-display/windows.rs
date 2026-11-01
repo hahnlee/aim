@@ -343,6 +343,12 @@ fn on_bridge_record(r: &Record) {
         if r.op == window::FRONT {
             s.front = Some(r.task);
         }
+        if r.op == window::REORDER_TO_BACK
+            && let Some(at) = s.order.iter().position(|&(task, _)| task == r.task)
+        {
+            let window = s.order.remove(at);
+            s.order.insert(0, window);
+        }
     });
     if matches!(r.op, window::PACKAGE | window::ACTIVITY) && route(r.task) {
         // The new owner got the task as it is now, this record included.
@@ -420,6 +426,11 @@ fn apply(r: &Record, relative: isize) {
         window::MOVED_TO_BACK => {
             if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
                 send!(w, c"miniaturize:" => (), Id = std::ptr::null_mut());
+            }
+        }
+        window::REORDER_TO_BACK => {
+            if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
+                send!(w, c"orderBack:" => (), Id = std::ptr::null_mut());
             }
         }
         op => eprintln!("aim-display: task record {op}"),

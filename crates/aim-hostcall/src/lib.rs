@@ -553,6 +553,8 @@ pub mod display {
         /// Guest: the task description's ARGB primary and background
         /// colors. Zero means unset; an update may clear both.
         pub const COLORS: u32 = 13;
+        /// Host: WCT reorder to bottom, preserving the window's visibility.
+        pub const REORDER_TO_BACK: u32 = 14;
         /// Server: move or resize the task to [`super::Window::bounds`].
         pub const SET_BOUNDS: u32 = 16;
         /// Server: make the task the top (focused) one.
