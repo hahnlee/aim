@@ -2003,6 +2003,21 @@ impl System {
         {
             return Ok(None);
         }
+        // Installation commits disk/canonical state before its query handoff.
+        // A still-current query pointer can therefore carry old keyset counters
+        // and roles. Reprepare after that handoff, before projecting or writing
+        // any settings; usage-only advances retain the existing rebase path.
+        let Some(canonical) = current
+            .snapshots
+            .as_ref()
+            .ok_or_else(|| before("domain canonical owner unavailable"))?
+            .try_capture()
+        else {
+            return Ok(None);
+        };
+        if !canonical.same_metadata_generation(update.base.scan()) {
+            return Ok(None);
+        }
         if update.capture.scan().version()
             != version
                 .checked_add(1)

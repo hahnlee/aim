@@ -13,6 +13,8 @@ use aim_service_aidl::{
 };
 use std::sync::mpsc;
 use std::time::Duration;
+#[path = "system_package_keyset_domain_tests.rs"]
+mod keyset_domain_tests;
 #[path = "system_package_shell_permission_tests.rs"]
 mod shell_permission_tests;
 #[path = "system_package_shell_read_tests.rs"]
