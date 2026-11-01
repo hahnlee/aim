@@ -302,11 +302,11 @@ impl Service for Backend {
                 }));
             }
             api::GET_RESTRICTION_LEVEL => {
-                api::GetRestrictionLevel::read(&mut call.data)?;
-                return reply(Err(Exception::new(
-                    aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
-                    "native app restriction settings owner unavailable (#2274)",
-                )));
+                let a = api::GetRestrictionLevel::read(&mut call.data)?;
+                return reply(self.0.restriction_level(a.uid).map(|level| {
+                    api::write_get_restriction_level_reply(&mut p, level);
+                    p
+                }));
             }
             api::GET_PROCESSES => {
                 api::GetProcesses::read(&mut call.data)?;
@@ -523,7 +523,7 @@ mod tests {
                 .unwrap()
                 .unwrap_err()
                 .code,
-            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+            aim_binder_host::parcel::EX_ILLEGAL_STATE
         );
         host.apps.lock().unwrap().clear();
         // No package owner is available in this fixture; never invent "allowed".

@@ -38,7 +38,8 @@ impl PermissionPolicy {
         // UserController starts only user 0 in the app host. PackageList's
         // app ID is synchronized for every started user, not only the user
         // carried by the publication's UID.
-        owner.synchronize_permission_app_ops(uid % PER_USER_RANGE, reset.then_some(name), sync)
+        owner.synchronize_permission_app_ops(uid % PER_USER_RANGE, reset.then_some(name), sync)?;
+        host.restrictions_changed(None)
     }
 }
 

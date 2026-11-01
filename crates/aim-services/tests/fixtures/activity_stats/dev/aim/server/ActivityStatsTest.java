@@ -26,7 +26,10 @@ public final class ActivityStatsTest {
                         if ((int)values[0] == -1) throw new android.os.RemoteException();
                         yield (int)values[0] == 10124;
                     }
-                    case "getRestrictionLevel" -> throw new UnsupportedOperationException("native restriction owner unavailable");
+                    case "getRestrictionLevel" -> {
+                        if ((int)values[0] == -1) throw new android.os.RemoteException();
+                        yield (int)values[0] == 10123 ? 30 : 0;
+                    }
                     case "getProcesses" -> new ActivityStatsProcess[]{process};
                     case "getPendingIntents" -> pending;
                     case "getCachedAppsWatermark" -> { reset = (boolean)values[0]; yield watermark; }
@@ -79,8 +82,9 @@ public final class ActivityStatsTest {
         catch (IllegalStateException expected) { check(expected.getCause() instanceof android.os.RemoteException); }
         try { service.isAppStartModeDisabled(-1, "adapter"); throw new AssertionError(); }
         catch (IllegalStateException expected) { check(expected.getCause() instanceof android.os.RemoteException); }
-        try { service.getRestrictionLevel(10123); throw new AssertionError(); }
-        catch (UnsupportedOperationException expected) {}
+        check(service.getRestrictionLevel(10123) == 30 && service.getRestrictionLevel(10124) == 0);
+        try { service.getRestrictionLevel(-1); throw new AssertionError(); }
+        catch (IllegalStateException expected) { check(expected.getCause() instanceof android.os.RemoteException); }
         check(service.getClass().getSuperclass() == ActivityManagerInternal.class);
         var p = service.getMemoryStateForProcesses().get(0);
         check(p.uid == 10123 && p.pid == 42 && p.oomScore == 900 && p.hasForegroundServices

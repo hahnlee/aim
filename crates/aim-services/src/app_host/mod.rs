@@ -24,6 +24,7 @@ pub mod apex_manager;
 mod app_data;
 mod app_hibernation;
 mod app_op_infos;
+mod app_restrictions;
 mod app_standby;
 pub mod app_widget;
 mod application_data;
@@ -638,6 +639,7 @@ pub struct AppHost {
     /// `ProcessList.mGlobalIsolatedUids`.
     isolated_uids: Mutex<IsolatedUids>,
     app_standby: app_standby::AppStandby,
+    app_restrictions: app_restrictions::AppRestrictions,
     broadcast_responses: broadcast_response::BroadcastResponses,
     webview_zygote: webview_zygote::WebViewZygote,
     storage: storage::Volumes,
@@ -768,6 +770,7 @@ impl AppHost {
                 next: FIRST_ISOLATED_UID,
             }),
             app_standby: Default::default(),
+            app_restrictions: Default::default(),
             broadcast_responses: Default::default(),
             webview_zygote: Default::default(),
             storage: Default::default(),
@@ -6050,6 +6053,9 @@ impl Service for Control {
                 });
                 if let Err(e) = host.start_app_standby() {
                     return eprintln!("app host: app standby: {}", e.message);
+                }
+                if let Err(e) = host.start_app_restrictions() {
+                    return eprintln!("app host: app restrictions: {}", e.message);
                 }
                 // BluetoothService's `onUserStarting` of the system user.
                 if let Some(bluetooth) = host.bluetooth.get() {

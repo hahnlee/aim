@@ -15,7 +15,7 @@
 //!
 //! What the app host does not do: write the history back, other usage
 //! events (notifications seen, foreground services, sync, slices, content
-//! providers, user interaction), predictions and restrictions, cross-profile
+//! providers, user interaction), predictions, cross-profile
 //! apps, and the lowest bucket of an app a device admin or the active
 //! network scorer exempts (#1723).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -714,7 +714,8 @@ impl AppHost {
         self.with_standby(|_, c| {
             Self::check_and_update(c, package, user, min_bucket, now);
             Ok(())
-        })
+        })?;
+        self.restrictions_changed(None)
     }
 
     fn check_and_update(c: &mut Controller, package: &str, user: i32, min_bucket: i32, now: i64) {
@@ -954,6 +955,107 @@ impl AppHost {
         Ok(uid >= 0 && self.check_permission(Some(permission), uid)? == 0)
     }
 
+    #[cfg(test)]
+    pub(super) fn with_standby_checks_paused(&self, f: impl FnOnce()) {
+        let _checks = self.app_standby.checks.lock().unwrap();
+        f();
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_restriction_test_bucket(
+        self: &Arc<Self>,
+        package: &str,
+        bucket: i32,
+        reason: i32,
+    ) -> Result<(), Exception> {
+        self.with_standby(|_, c| {
+            c.history
+                .set_bucket(package, 0, elapsed_realtime(), bucket, reason);
+            Ok(())
+        })
+    }
+
+    pub(super) fn restriction_standby(
+        self: &Arc<Self>,
+        package: &str,
+        user: i32,
+    ) -> Result<(i32, i32), Exception> {
+        if !self.app_idle_enabled()? {
+            return Ok((STANDBY_BUCKET_EXEMPTED, 0));
+        }
+        self.with_standby(|_, c| {
+            let u = c.history.usage(package, user);
+            Ok((u.current_bucket, u.bucketing_reason))
+        })
+    }
+
+    /// AppRestrictionController's restrictApp / maybeUnrestrictApp effects.
+    /// No controller callback while its settings lock is held by the caller.
+    pub(super) fn restriction_standby_effect(
+        self: &Arc<Self>,
+        package: &str,
+        user: i32,
+        previous: Option<i32>,
+        reason: i32,
+    ) -> Result<(), Exception> {
+        if !self.app_idle_enabled()? {
+            return Ok(());
+        }
+        let delay = self.with_standby(|_, c| {
+            let now = elapsed_realtime();
+            let elapsed = c.history.elapsed_time(now);
+            let delay = c.constants.auto_restricted_bucket_delay;
+            let u = c.history.usage(package, user);
+            let (bucket, reason) = if let Some(prev) = previous {
+                if u.current_bucket != 45 || u.bucketing_reason & 0xff00 != prev & 0xff00 {
+                    return Ok(None);
+                }
+                if u.bucketing_reason & 0xff == prev & 0xff {
+                    (40, reason)
+                } else {
+                    (45, u.bucketing_reason & !(prev & 0xff))
+                }
+            } else {
+                if u.current_bucket < 10 || !matches!(reason & 0xff00, 0x400 | 0x600) {
+                    return Ok(None);
+                }
+                if u.current_bucket == 45
+                    && u.bucketing_reason & 0xff00 != 0x200
+                    && reason & 0xff00 != 0x400
+                    && !(u.bucketing_reason & 0xff00 == 0x600 && reason & 0xff00 == 0x600)
+                {
+                    return Ok(None);
+                }
+                u.last_restrict_attempt_elapsed = elapsed;
+                u.last_restrict_reason = reason;
+                let wait = u.last_used_by_user_elapsed + delay - elapsed;
+                if reason & 0xff00 != 0x400 && wait > 0 {
+                    return Ok(Some(wait));
+                }
+                if u.current_bucket == 45
+                    && u.bucketing_reason & 0xff00 == 0x600
+                    && reason & 0xff00 == 0x600
+                {
+                    (45, u.bucketing_reason | reason)
+                } else {
+                    (45, reason)
+                }
+            };
+            c.history.set_bucket(package, user, now, bucket, reason);
+            Ok(None)
+        })?;
+        if let Some(delay) = delay {
+            let (me, package) = (Arc::downgrade(self), package.to_string());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(delay as u64));
+                if let Some(host) = me.upgrade() {
+                    host.check_package_idle_state(&package, user);
+                }
+            });
+        }
+        Ok(())
+    }
+
     /// `AppStandbyController.getAppStandbyBucket`.
     pub(super) fn app_standby_bucket(
         self: &Arc<Self>,
@@ -1016,6 +1118,9 @@ impl AppHost {
             Ok(false) => Ok(None),
             Err(e) => Err(e),
         };
+        if let Err(e) = self.restrictions_changed(None) {
+            eprintln!("app host: app restrictions: {}", e.message);
+        }
         match delay {
             Ok(Some(delay)) => {
                 let (me, package) = (Arc::downgrade(self), package.to_string());

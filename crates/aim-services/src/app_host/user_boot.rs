@@ -179,6 +179,7 @@ impl AppHost {
             Some(self.boot_time_temp_allowlist(REASON_LOCKED_BOOT_COMPLETED)),
             None,
         );
+        self.restriction_locked_boot_completed();
         // `maybeUnlockUser` → `finishUserUnlocking`: the CE storage, the
         // user unlocking.
         self.unlock_user_storage(&user)?;
