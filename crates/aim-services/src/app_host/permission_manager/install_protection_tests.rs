@@ -236,11 +236,7 @@ fn known_package_flags_use_selections_or_name_the_missing_flag() {
                 .err()
                 .unwrap();
             assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
-            assert!(
-                error.message.contains(label) && error.message.contains("#2161"),
-                "{}",
-                error.message
-            );
+            assert!(error.message.contains(label), "{}", error.message);
             for selected in [false, true] {
                 let mut known = [(2, vec![]), (7, vec![])]
                     .into_iter()

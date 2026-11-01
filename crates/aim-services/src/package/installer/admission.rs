@@ -292,15 +292,20 @@ mod tests {
     }
     #[test]
     fn sdk_policy_boundary_bypass_and_test_only_exemption() {
-        for (min_target, flags, test_only, expected) in [
-            (23, 0, false, 0),
-            (24, 0, false, -29),
-            (24, 0x1000000, false, 0),
-            (24, 0, true, -15),
-            (24, 4, true, 0),
+        for (target, min_target, flags, test_only, expected) in [
+            (22, 23, 0, false, -29),
+            (22, 23, 0x1000000, false, 0),
+            (22, 24, 0, false, -29),
+            (22, 24, 0x1000000, false, 0),
+            (22, 24, 4, true, 0),
+            (23, 23, 0, false, 0),
+            (23, 24, 0, false, -29),
+            (23, 24, 0x1000000, false, 0),
+            (23, 24, 0, true, -15),
+            (23, 24, 4, true, 0),
         ] {
             let pkg = AndroidPackage {
-                target_sdk_version: 23,
+                target_sdk_version: target,
                 booleans: if test_only { booleans::TEST_ONLY } else { 0 },
                 ..Default::default()
             };

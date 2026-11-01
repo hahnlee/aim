@@ -553,3 +553,53 @@ fn mode_writes_update_revoked_compat_for_granted_runtime_permissions() {
     );
     assert_eq!(after, f.user);
 }
+
+/// AppOpsService.updatePermissionRevokedCompat and PermissionToOpSynchroniser:
+/// review-pending legacy permissions leave modes alone; completed review uses
+/// REVOKED_COMPAT even though the permission itself stays granted.
+#[test]
+fn legacy_review_and_app_op_denial_preserve_the_permission_grant() {
+    let mut f = Fixture::new(&[CAMERA]);
+    f.state.users.insert(0, Default::default());
+    Arc::make_mut(f.state.packages.get_mut("p").unwrap().pkg.as_mut().unwrap())
+        .target_sdk_version = 22;
+    f.user
+        .set_permission_flags(APP, CAMERA, LEGACY_GRANTED | IMPLICIT);
+    f.run(None, true).unwrap();
+    assert_eq!(f.mode(26), MODE_ALLOWED);
+    set_mode(
+        &mut f.user.app_id_app_ops,
+        APP,
+        "android:camera",
+        MODE_IGNORED,
+        MODE_ALLOWED,
+    );
+    assert!(f.run(None, true).unwrap().is_empty());
+    assert_eq!(f.mode(26), MODE_IGNORED);
+    f.user.set_permission_flags(APP, CAMERA, LEGACY_GRANTED);
+    f.run(None, true).unwrap();
+    assert_eq!(f.mode(26), MODE_ALLOWED);
+    for (mode, revoked) in [(MODE_IGNORED, true), (MODE_ALLOWED, false)] {
+        let filter = AppsFilter::default();
+        let compat = CompatConfig::default();
+        let access = Access {
+            delegate: None,
+            state: &f.state,
+            filter: &filter,
+            defined: &f.defined,
+            groups: &[],
+            user0: &f.user,
+            compat: &compat,
+        };
+        let mut after = f.user.clone();
+        update_revoked_compat(&access, &mut after, APP, 26, mode).unwrap();
+        assert_eq!(
+            after.permission_flags(APP, CAMERA),
+            LEGACY_GRANTED | if revoked { APP_OP_REVOKED } else { 0 }
+        );
+        assert!(permission_granted(after.permission_flags(APP, CAMERA)));
+        f.user = after;
+        f.run(None, true).unwrap();
+        assert_eq!(f.mode(26), mode);
+    }
+}

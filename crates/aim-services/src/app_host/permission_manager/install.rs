@@ -30,7 +30,7 @@ fn illegal(message: impl Into<String>) -> Exception {
 fn unsupported(case: &str) -> Exception {
     Exception::new(
         EX_UNSUPPORTED_OPERATION,
-        format!("installer permissions: {case} (#2161)"),
+        format!("installer permissions: {case}"),
     )
 }
 impl PermissionManager {
@@ -234,9 +234,6 @@ fn decode(capture: &Capture, before: &Capture, bytes: &[u8]) -> Result<Vec<Insta
         }
         if !code.adopt_permissions.is_empty() {
             return Err(unsupported("permission ownership transfer"));
-        }
-        if code.target_sdk_version < M {
-            return Err(unsupported("legacy runtime permission policy"));
         }
         // InstallPackageHelper/InstallerPermissionBridge: -g replaces the explicit map.
         if flags & 0x100 != 0 {
@@ -483,7 +480,8 @@ fn prepare(
                 if is_runtime(permission) || is_development(permission) {
                     // DENIED leaves runtime grants alone, as in both pinned owners.
                     if install.states[name] == 1
-                        && (is_development(permission) || !is_role(permission))
+                        && (is_development(permission)
+                            || (install.code.target_sdk_version >= M && !is_role(permission)))
                         && flags
                             & (SYSTEM_FIXED | POLICY_FIXED | RESTRICTION_REVOKED | SOFT_RESTRICTED)
                             == 0
@@ -491,7 +489,9 @@ fn prepare(
                         flags |= RUNTIME_GRANTED;
                     }
                     if install.states[name] == 1 {
-                        flags &= !APP_OP_REVOKED;
+                        // PermissionService.setRequestedPermissionStates clears both API flags
+                        // even when setRuntimePermissionGranted leaves a legacy grant alone.
+                        flags &= !(IMPLICIT | APP_OP_REVOKED);
                     }
                 } else if permission.protection_level & 0x40 != 0
                     && name == "android.permission.USE_FULL_SCREEN_INTENT"
@@ -816,6 +816,152 @@ mod tests {
             );
         });
     }
+    /// PermissionService.setRequestedPermissionStates and AppIdPermissionPolicy's
+    /// legacy/IMPLICIT transitions, android-16.0.0_r1. Exercise PREPARE, atomic
+    /// access publication and AccessPersistence reload without a guest.
+    #[test]
+    fn legacy_install_review_upgrade_and_reload() {
+        const CAMERA: &str = "android.permission.CAMERA";
+        for case in [
+            "review",
+            "reviewed",
+            "denied",
+            "grant-all",
+            "explicit-grant",
+        ] {
+            crate::system::with_discovery_session(|host, publish, _| {
+                let persisted = PersistedAccess::new();
+                seed(&persisted);
+                let manager = Arc::new(PermissionManager::new(persisted.host.clone()));
+                host.package_system()
+                    .unwrap()
+                    .set_native_permissions(&manager);
+                publish(&mut |code| {
+                    if code.package_name == "p" {
+                        code.target_sdk_version = 22;
+                        let mut runtime_only = declaration("p.RUNTIME_ONLY", false);
+                        runtime_only.protection_level = 1 | 0x2000;
+                        code.permissions = vec![runtime_only];
+                        code.requested_permissions = vec![
+                            CAMERA.into(),
+                            "android.permission.INTERNET".into(),
+                            "p.RUNTIME_ONLY".into(),
+                        ];
+                        code.implicit_permissions.clear();
+                    }
+                });
+                let commit = |flags, states: &[(&str, i32)]| {
+                    let capture = host.package_capture().unwrap();
+                    let process = &persisted.host.process;
+                    let endpoint = Arc::new(Endpoint::with_computer(
+                        capture.scan().clone(),
+                        capture.clone(),
+                        process,
+                    ));
+                    let before = Arc::new(Endpoint::with_computer(
+                        capture.scan().clone(),
+                        capture.clone(),
+                        process,
+                    ));
+                    let binder = permission_capture::bind(process, &endpoint);
+                    let old = permission_capture::bind(process, &before);
+                    manager
+                        .prepare_install(binder, old, &installation_with(flags, states, None))
+                        .unwrap();
+                    let scope = endpoint.clone();
+                    let source = Arc::new(move |scan: &Arc<Snapshot>| {
+                        let mut context = (**scope.install_capture()?.context()).clone();
+                        context.scan_version = scan.version();
+                        Ok(context)
+                    });
+                    (crate::system::install_publication(host, source))(capture.scan()).unwrap();
+                    endpoint.revoke_install_scope();
+                    assert!(manager.installs.lock().unwrap().is_empty());
+                    let view = manager.retained_access().unwrap();
+                    let reload = PermissionManager::new(persisted.host.clone())
+                        .retained_access()
+                        .unwrap();
+                    assert_eq!(*reload.system, *view.system);
+                    assert_eq!(*reload.user0, *view.user0);
+                    view
+                };
+                let install_flags = if case == "grant-all" { 0x100 } else { 0 };
+                let states = if case == "explicit-grant" {
+                    vec![(CAMERA, 1)]
+                } else {
+                    vec![]
+                };
+                let legacy = commit(install_flags, &states);
+                let capture = host.package_capture().unwrap();
+                let id = capture.state().packages["p"].app_id;
+                let implicit = !matches!(case, "grant-all" | "explicit-grant");
+                assert_eq!(
+                    legacy.user0.permission_flags(id, CAMERA),
+                    LEGACY_GRANTED | if implicit { IMPLICIT } else { 0 }
+                );
+                assert_eq!(
+                    to_api_flags(legacy.user0.permission_flags(id, CAMERA)),
+                    if implicit {
+                        FLAG_PERMISSION_REVIEW_REQUIRED
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(legacy.user0.permission_flags(id, "p.RUNTIME_ONLY"), 0);
+                assert_eq!(
+                    legacy
+                        .user0
+                        .permission_flags(id, "android.permission.INTERNET"),
+                    INSTALL_GRANTED
+                );
+                assert!(
+                    capture.state().packages["p"].users[&0]
+                        .granted_permissions
+                        .contains(&CAMERA.into())
+                );
+                assert!(
+                    !capture.state().packages["p"].users[&0]
+                        .granted_permissions
+                        .contains(&"p.RUNTIME_ONLY".into())
+                );
+                if matches!(case, "reviewed" | "denied") {
+                    let mut user = (*legacy.user0).clone();
+                    // Permission review clears REVIEW_REQUIRED; a legacy denial
+                    // remains a permission grant with REVOKED_COMPAT for AppOps.
+                    user.set_permission_flags(
+                        id,
+                        CAMERA,
+                        LEGACY_GRANTED
+                            | USER_SET
+                            | if case == "denied" { APP_OP_REVOKED } else { 0 },
+                    );
+                    manager.write_user0(&user).unwrap();
+                    manager.owner.lock().unwrap().user0 = Some(Arc::new(user));
+                }
+                publish(&mut |code| {
+                    if code.package_name == "p" {
+                        code.target_sdk_version = 24;
+                    }
+                });
+                let upgraded = commit(0, &[]);
+                let flags = upgraded.user0.permission_flags(id, CAMERA);
+                let expected = match case {
+                    "review" => 0,
+                    "reviewed" => RUNTIME_GRANTED | USER_SET,
+                    "denied" => USER_SET,
+                    _ => RUNTIME_GRANTED,
+                };
+                assert_eq!(flags, expected, "{case}");
+                assert_eq!(flags & (LEGACY_GRANTED | IMPLICIT | APP_OP_REVOKED), 0);
+                assert_eq!(
+                    host.package_capture().unwrap().state().packages["p"].users[&0]
+                        .granted_permissions
+                        .contains(&CAMERA.into()),
+                    permission_granted(expected)
+                );
+            });
+        }
+    }
     #[test]
     fn installer_runtime_states_and_restrictions_follow_android16() {
         crate::system::with_discovery_session(|host, publish, _| {
@@ -922,7 +1068,10 @@ mod tests {
                 let installs = decode(&capture, &capture, &bytes).unwrap();
                 let view = prepare(&base, capture.state(), &installs, &policy).unwrap();
                 let f = |name| view.user0.permission_flags(id, name);
-                assert_ne!(f("android.permission.READ_EXTERNAL_STORAGE") & IMPLICIT, 0);
+                assert_eq!(
+                    f("android.permission.READ_EXTERNAL_STORAGE") & IMPLICIT != 0,
+                    flags & 0x100 == 0
+                );
                 assert_eq!(
                     f("p.RUNTIME"),
                     USER_FIXED
@@ -1282,7 +1431,7 @@ impl PermissionManager {
             user0: owner.user0.clone().ok_or("access user unavailable")?,
         };
         if !candidate.base.same_base(&current) {
-            return Err("stale permission access base; reprepare required (#2161)".into());
+            return Err("stale permission access base; reprepare required".into());
         }
         // Share #2510's IO lock: an older delayed snapshot must not overwrite
         // this synchronous install, and a failed commit must retain its queued write.
