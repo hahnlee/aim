@@ -189,7 +189,11 @@ pub fn run(mut opts: RunOptions) -> String {
     sys::initialize_umask();
     sys::init_heap_window();
     if let Err(error) = sys::fdtab::bootstrap(inherited, &opts.socket_receipts) {
-        return format!("inherited descriptor publication: errno {error}");
+        return format!(
+            "inherited descriptor publication: pid={} program={} {error}",
+            std::process::id(),
+            opts.program
+        );
     }
     sys::init_fds();
     sys::set_trace(opts.trace);

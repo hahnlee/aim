@@ -102,6 +102,16 @@ resume (#1209). Inotify watch and queued-event restoration also rejects failed
 registrations. Focused host checks cover descriptor exhaustion at reserved
 placeholder slots and failed duplication; no guest boot was run (2026-10-28).
 
+Inherited descriptor publication now names the PID, program, fd, failed stage,
+errno, host descriptor flags, mode and available path (#2571). Fresh app-host
+boots reproduce a CLOEXEC epoll inherited by an `idmap2` subprocess: the exec
+receipt retains it, but Darwin closes its confined kqueue before publication.
+The system process survives that child failure and the Accessibility run
+(109 pass / 4 assumption skips). A threaded exec probe also fails with CLOEXEC
+explicitly cleared. Kqueue-backed exec state preservation remains #2571;
+the change supplies diagnostics, not that broader fix. Publication and actual
+exec-close receipt host checks pass (2026-11-02).
+
 Ptrace keeps exited threads' TID reservations and queued statuses until their
 tracer reaps them or exits; process teardown waits for status delivery rather
 than a 200 ms grace period (#2300). Notifications do not consume exit reports,
