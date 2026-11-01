@@ -10,7 +10,6 @@ pub(super) struct Accessibility {
     callback: Mutex<Option<Arc<Binding>>>,
     ui: Mutex<Option<Arc<Binding>>>,
     reports: Mutex<(bool, VecDeque<(Arc<Binding>, u32, Parcel, Vec<Strong>)>)>,
-    pub(super) rotation_frozen: Mutex<bool>,
 }
 struct Binding {
     process: Arc<LocalProcess>,
