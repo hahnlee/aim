@@ -1,0 +1,100 @@
+// Selected unchanged android-16.0.0_r1 bodies (Apache-2.0); Parcel transport and proto IO are doubles.
+import java.io.*;
+import java.nio.*;
+import java.nio.file.*;
+import java.util.*;
+public class Recovery {
+    static final String TAG = "fixture", LOG_TAG = TAG;
+    static final boolean DELETE_LEGACY_PARCEL_FILES = true;
+    static final String LEGACY_STATUS_FILE_NAME = "status.bin", LEGACY_STATISTICS_FILE_NAME = "stats.bin";
+    static final int STATUS_FILE_END = 0, STATUS_FILE_ITEM = 100;
+    static final int STATISTICS_FILE_END = 0, STATISTICS_FILE_ITEM_OLD = 100, STATISTICS_FILE_ITEM = 101;
+    static class Log { static void e(String a, String b) {} static void e(String a, String b, Throwable t) {} static void w(String a, String b) {} }
+    static class Slog extends Log { static void i(String a, String b) {} }
+    static class FileUtils {
+        static boolean sync(FileOutputStream f) { try { f.getFD().sync(); return true; } catch (IOException e) { return false; } }
+        static final int S_IRWXU=0700, S_IRWXG=0070, S_IXOTH=1;
+        static void setPermissions(String path, int mode, int uid, int gid) {}
+    }
+    static class SystemConfigFileCommitEventLogger { void setStartTime(long t) {} void onStartWrite() {} void onFinishWrite() {} }
+    static class AtomicFile {
+        final File mBaseName, mNewName, mLegacyBackupName;
+        SystemConfigFileCommitEventLogger mCommitEventLogger;
+        AtomicFile(File f) { mBaseName=f; mNewName=new File(f+".new"); mLegacyBackupName=new File(f+".bak"); }
+        @ATOMIC@
+    }
+    static class Parcel {
+        ByteBuffer bytes=ByteBuffer.allocate(4096).order(ByteOrder.LITTLE_ENDIAN);
+        static Parcel obtain() { return new Parcel(); }
+        void unmarshall(byte[] data, int start, int length) { bytes=ByteBuffer.wrap(data,start,length).order(ByteOrder.LITTLE_ENDIAN); }
+        void setDataPosition(int p) { bytes.position(p); }
+        int readInt() { return bytes.getInt(); } long readLong() { return bytes.getLong(); }
+        String readString() { int n=readInt(); if(n<0)return null; char[] s=new char[n]; for(int i=0;i<n;i++)s[i]=bytes.getChar(); bytes.getChar(); bytes.position((bytes.position()+3)&~3); return new String(s); }
+        void readLongArray(long[] a) { if(readInt()!=a.length)throw new AssertionError(); for(int i=0;i<a.length;i++)a[i]=readLong(); }
+        void writeInt(int n) { bytes.putInt(n); } void writeLong(long n) { bytes.putLong(n); }
+        void writeString(String s) { if(s==null){writeInt(-1);return;} writeInt(s.length()); for(char c:s.toCharArray())bytes.putChar(c); bytes.putChar((char)0); while(bytes.position()%4!=0)bytes.put((byte)0); }
+        void writeLongArray(long[] a) { writeInt(a.length); for(long n:a)writeLong(n); }
+        byte[] marshall() { return Arrays.copyOf(bytes.array(),bytes.position()); }
+        void recycle() {}
+    }
+    static class SyncStatusInfo {
+        @STATUS_FIELDS@
+        @STATUS_CONSTRUCT@
+        @STATUS_WRITE@
+        public SyncStatusInfo(int id) { authorityId=id; }
+    }
+    @DAY_STATS@
+    static class Authorities extends HashMap<Integer, Boolean> { int indexOfKey(int id) { return containsKey(id)?0:-1; } }
+    final Authorities mAuthorities = new Authorities();
+    final HashMap<Integer,SyncStatusInfo> mSyncStatus = new HashMap<>();
+    final DayStats[] mDayStats = new DayStats[28];
+    final File mSyncDir;
+    final AtomicFile mStatusFile, mStatisticsFile;
+    boolean failWrite;
+    int statusWrites, statWrites;
+    Recovery(File dir) { mSyncDir=dir; mStatusFile=new AtomicFile(new File(dir,"status")); mStatisticsFile=new AtomicFile(new File(dir,"stats")); mAuthorities.put(42,true); mAuthorities.put(43,true); }
+    // Proto serialization is outside this host fixture; migration calls use real AtomicFile IO.
+    void save(AtomicFile file) { if(failWrite)return; try { var out=file.startWrite(); out.write(1); file.finishWrite(out); } catch(IOException e) { throw new AssertionError(e); } }
+    void writeStatusLocked() { statusWrites++; save(mStatusFile); }
+    void writeStatisticsLocked() { statWrites++; save(mStatisticsFile); }
+    @STORE_METHODS@
+    static void require(boolean b) { if(!b)throw new AssertionError(); }
+    static void bytes(File dir, String name, byte[] bytes) throws Exception { Files.write(new File(dir,name).toPath(),bytes); }
+    static byte[] status(int version) {
+        Parcel p=Parcel.obtain(); p.writeInt(100);
+        if(version==6) { SyncStatusInfo s=new SyncStatusInfo(43); s.pending=true; s.totalStats.numSyncs=9; s.writeToParcel(p,0); }
+        else { p.writeInt(1);p.writeInt(42);p.writeLong(99);p.writeInt(10);for(int i=0;i<4;i++)p.writeInt(1);p.writeLong(100);p.writeInt(2);p.writeLong(200);p.writeInt(3);p.writeString("failure");p.writeLong(300);p.writeInt(1);p.writeInt(0); }
+        p.writeInt(0); return p.marshall();
+    }
+    public static void main(String[] args) throws Exception {
+        File dir=new File(args[0]); dir.mkdirs();
+        byte[] accounts="<accounts><authority user='10'/></accounts>".getBytes(); bytes(dir,"accounts.xml",accounts);
+        // AtomicFile covers absent, main/new, backup/main/new, backup-only, and abort.
+        AtomicFile a=new AtomicFile(new File(dir,"atomic"));
+        bytes(dir,"atomic.new",new byte[]{2}); try { a.openRead();throw new AssertionError(); } catch(FileNotFoundException expected) {}
+        require(new File(dir,"atomic.new").exists()); bytes(dir,"atomic",new byte[]{1}); require(a.readFully()[0]==1 && !new File(dir,"atomic.new").exists());
+        bytes(dir,"atomic.bak",new byte[]{3}); bytes(dir,"atomic.new",new byte[]{2}); require(a.readFully()[0]==3);
+        new File(dir,"atomic").delete(); bytes(dir,"atomic.bak",new byte[]{4}); require(a.readFully()[0]==4);
+        var out=a.startWrite();out.write(5);a.failWrite(out);require(a.readFully()[0]==4);
+        for(int version:new int[]{1,6}) {
+            for(boolean fail:new boolean[]{true,false}) {
+                new File(dir,"status").delete(); bytes(dir,"status.bin",status(version));
+                Recovery r=new Recovery(dir);r.failWrite=fail;r.upgradeStatusIfNeededLocked();
+                int id=version==1?42:43;
+                require(r.mSyncStatus.size()==1 && !r.mSyncStatus.get(id).pending);
+                require(r.mSyncStatus.get(id).totalStats.numSyncs==(version==1?10:9));
+                require(new File(dir,"status.bin").exists()==fail);
+                if(fail) { r.failWrite=false;r.upgradeStatusIfNeededLocked();require(!new File(dir,"status.bin").exists()); }
+            }
+        }
+        Parcel p=Parcel.obtain();for(int token:new int[]{100,101}) {p.writeInt(token);p.writeInt(2009);p.writeInt(2);p.writeLong(33);p.writeInt(4);p.writeLong(55);}p.writeInt(0);
+        bytes(dir,"stats.bin",p.marshall());Recovery r=new Recovery(dir);r.upgradeStatisticsIfNeededLocked();
+        require(r.mDayStats[0].day==14245 && r.mDayStats[1].day==2009 && r.mDayStats[0].successTime==33 && r.mDayStats[1].failureTime==55);
+        require(!new File(dir,"stats.bin").exists());
+        // A proto backup is authoritative: never remigrate an obsolete legacy file.
+        bytes(dir,"status.bak",new byte[]{8});bytes(dir,"status.bin",status(1));
+        r=new Recovery(dir);r.upgradeStatusIfNeededLocked();require(r.statusWrites==0 && !new File(dir,"status.bin").exists());require(r.mStatusFile.readFully()[0]==8);
+        r.writeAllState();require(r.statusWrites==1 && r.statWrites==1);
+        require(Arrays.equals(accounts,Files.readAllBytes(new File(dir,"accounts.xml").toPath())));
+    }
+}

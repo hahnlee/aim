@@ -729,12 +729,13 @@ pub struct AppHost {
 
 impl AppHost {
     pub(crate) fn shutdown_persistence(&self) -> Result<(), Exception> {
+        let jobs = self.job_scheduler.get().map_or(Ok(()), |jobs| jobs.flush());
         self.shutdown_restriction_persistence();
         let standby = self.shutdown_standby();
         if let Some(owner) = self.permission_manager.get() {
             owner.shutdown()?;
         }
-        standby
+        jobs.and(standby)
     }
 
     pub fn new(process: Arc<LocalProcess>) -> Arc<Self> {

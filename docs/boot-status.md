@@ -809,6 +809,17 @@ refresh, then posts completion on the original handler through a pinned DEX seam
 Only a live attached generation can acknowledge completion; SyncJobService
 admission, including restored or rescheduled jobs, waits for it. Broadcast-queue
 idle is not a readiness signal. Public sync forwarding remains inactive.
+The original storage/cache cohort now takes a process-lifetime writer lease and
+requires an account snapshot before opening stores (#1460 slice 6d). Shutdown
+flushes native jobs before the retained original state, while aim-system is still
+alive, with the original shutdown broadcast's 10-second deadline, then commits
+native jobs again after guest exit. Timeout or a dead/detached owner is logged
+without failing shutdown; live-owner errors are reported after final persistence.
+Host regressions cover hung/dead/error owners and normal ordering. Pinned-source JVM recovery
+and ownership fixtures and native persistence tests cover host behavior only.
+The stopped disposable ASIF snapshot/restore tool retains the whole data cohort
+and checks its digest and supplied matched-runtime identity. Actual store recovery,
+shutdown/reboot and single-cache-writer boot acceptance remain unverified.
 Native generation/death and restored-job admission tests, JVM startup/replay
 fixtures with pinned original unlock/receiver/account-handler bodies, pinned DEX
 verification and device-services linkage pass (#1460). Scoped full-access fresh

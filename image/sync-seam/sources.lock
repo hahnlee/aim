@@ -3,6 +3,9 @@ AOSP_TAG=android-16.0.0_r1
 SOURCES=(
   "platform/frameworks/base|services/core/java/com/android/server/content/SyncManager.java|ac8deedeeca97dadea2d9da8b7e2956305fd63e44d9fdb8d80222ddf76f1ed51"
   "platform/frameworks/base|services/core/java/com/android/server/content/ContentService.java|4ebf7091eb00973f0a75011eca3a2868271d4abdc0651430c2d7a21291d11c24"
+  "platform/frameworks/base|services/core/java/com/android/server/content/SyncStorageEngine.java|a16b1277ff717caee2e1cebec06d46017464c2f7945df5d540d074764fa464d0"
+  "platform/frameworks/base|core/java/android/util/AtomicFile.java|90e1cc85e92e53e6c257e49156677de354a79d2b6caf65d826cb77d0cffab70e"
+  "platform/frameworks/base|core/java/android/content/SyncStatusInfo.java|0f5a06d8e33e7c787436af4c54be3df614b4cd1bdf7e230f19b4fa814d5192b7"
 )
 # The pinned original jar and its oat, never edited in place.
 IMAGE=(
