@@ -1,4 +1,7 @@
 //! Android 16 SyncOperation.toJobInfoExtras and JobSchedulerService.LocalService.
+#[path = "job_lifecycle_tests.rs"]
+mod lifecycle;
+
 use super::*;
 use crate::package::restrictions::persistable::{Bundle, Double, Value as V};
 use aim_service_aidl::{ReadParcelable, WriteParcelable, dev_aim_server_isystemprocess as sp};
@@ -232,7 +235,7 @@ fn local_jobs_select_source_and_namespace_and_expose_real_load_counts() {
         assert_eq!(persisted_counts([&stored].into_iter()), [1, 1, 1]);
     });
 }
-struct Probe(mpsc::Sender<(u32, Binder, i32)>);
+struct Probe(mpsc::Sender<(u32, Binder, i32, i32)>);
 impl Service for Probe {
     fn descriptor(&self) -> &str {
         job_service::DESCRIPTOR
@@ -253,9 +256,11 @@ impl Service for Probe {
         assert_eq!(call.data.read_i32()?, -1);
         assert_eq!(call.data.read_i32()?, -1);
         assert_eq!(call.data.read_i32()?, 0);
-        call.data.read_i32()?;
+        let reason = call.data.read_i32()?;
         let internal = call.data.read_i32()?;
-        self.0.send((call.code, callback, internal)).unwrap();
+        self.0
+            .send((call.code, callback, reason, internal))
+            .unwrap();
         Ok(Parcel::new())
     }
 }
@@ -307,8 +312,9 @@ fn sync_job_start_finish_stop_preserve_system_binder_identity() {
             });
             jobs.connected(&mut state, id, Some(remote.binder()), false, 1000);
             drop(state);
-            let (code, callback_handle, internal) =
+            let (code, callback_handle, reason, internal) =
                 rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(reason, STOP_REASON_UNDEFINED);
             assert_eq!((code, internal), (job_service::START_JOB, -1));
             assert!(matches!(callback_handle, Binder::Handle(_)));
             let mut p = Parcel::new();
@@ -337,7 +343,7 @@ fn sync_job_start_finish_stop_preserve_system_binder_identity() {
                     1100,
                 );
                 assert_eq!(
-                    rx.recv_timeout(Duration::from_secs(2)).unwrap().2,
+                    rx.recv_timeout(Duration::from_secs(2)).unwrap().3,
                     INTERNAL_STOP_REASON_CANCELED
                 );
                 let mut p = Parcel::new();

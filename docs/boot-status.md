@@ -644,6 +644,11 @@ jobs are durable. Source UID lookup uses installed package/user state and proxy
 quota uses the target user. Host restart and failed-write checks cover slice 4b
 (#1460/#1490, 2026-11-01); retained verifyJobScheduler and matched-image sync
 execution remain unverified.
+Scheduler lifecycle checks now cover internal stop reasons, bind/start and
+callback races, soft failures, retry boundaries and disconnect rescheduling.
+Failed stop sends close and reschedule immediately; stale-callback diagnostics
+retain the first stop time (#1460 slice 4c/#1490/#1934, 2026-11-01; host tests
+only, no guest or CTS acceptance).
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
