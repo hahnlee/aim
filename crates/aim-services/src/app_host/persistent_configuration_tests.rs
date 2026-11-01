@@ -354,6 +354,20 @@ fn persistent_locale_property_is_written_only_for_user_locale_changes() {
                 .as_deref(),
             Some("en-US")
         );
+        delta.locales = "ko-KR".into();
+        host.apply_configuration(&delta, false).unwrap();
+        assert_eq!(
+            writes.lock().unwrap().last(),
+            Some(&("persist.sys.locale".into(), "ko-KR".into()))
+        );
+        assert_eq!(
+            host.platform()
+                .unwrap()
+                .settings
+                .get(settings::Table::System, "system_locales")
+                .as_deref(),
+            Some("en-US")
+        );
     });
 }
 

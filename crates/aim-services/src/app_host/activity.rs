@@ -36,8 +36,6 @@ pub(super) fn unsupported_start(flags: i32, profiler: bool) -> Option<&'static s
         Some("activity start requires a profiler/allocation-tracker owner (#2583)")
     } else if flags & 0x1a != 0 {
         Some("activity start requires a debugger owner (#2583)")
-    } else if flags & 1 != 0 {
-        Some("START_FLAG_ONLY_IF_NEEDED requires ActivityStarter support (#2583)")
     } else {
         None
     }
@@ -137,6 +135,7 @@ pub struct ActivityRecord {
     pub info: ActivityInfo,
     pub style: WindowStyle,
     pub intent: super::activity_start::LaunchIntent,
+    pub resolved_type: Option<String>,
     pub referrer: String,
     pub launched_from: LaunchedFrom,
     /// Its task (the stack's key).
@@ -864,7 +863,12 @@ impl Service for ActivityTaskManager {
         // The entries that share `ActivityStarter`; what it does not serve
         // cancels the start rather than throwing into the caller.
         macro_rules! start {
-            ($a:expr, $user:expr, $unsupported:expr) => {{
+            ($a:expr, $user:expr, $unsupported:expr) => {
+                start!($a, $user, $unsupported, None, $a.flags)
+            };
+            ($a:expr, $user:expr, $unsupported:expr, $config:expr, $flags:expr) => {{
+                let config: Option<Configuration> = $config;
+                let flags = $flags;
                 let user = $user;
                 let a = $a;
                 let result = self.0.start_activity(
@@ -878,10 +882,12 @@ impl Service for ActivityTaskManager {
                         result_who: a.result_who,
                         request_code: a.request_code,
                         options: a.options,
+                        start_flags: flags,
                         launch: None,
                     },
                     user,
                     $unsupported,
+                    config.as_ref(),
                 );
                 reply(result.map(|code| {
                     let mut p = Parcel::new();
@@ -925,6 +931,7 @@ impl Service for ActivityTaskManager {
                                 result_who: a.result_who,
                                 request_code: a.request_code,
                                 options: a.options,
+                                start_flags: a.flags,
                                 launch: None,
                             },
                             a.user_id,
@@ -938,18 +945,14 @@ impl Service for ActivityTaskManager {
                     &mut call.data,
                 )
                 .map_err(|_| BAD_VALUE)?;
-                // `globalConfigWillChange`: the start that also updates the
-                // global configuration is not served.
-                let changes = match a.new_config.as_ref() {
-                    Some(c) => match self.0.global_configuration() {
-                        Ok(current) => current.diff(c) != 0,
-                        Err(e) => return reply(Err(e)),
-                    },
-                    None => false,
-                };
-                let unsupported = unsupported_start(a.start_flags, false)
-                    .or_else(|| changes.then_some("a global configuration change (#2583)"));
-                start!(a, Some(a.user_id), unsupported)
+                let unsupported = unsupported_start(a.start_flags, false);
+                start!(
+                    a,
+                    Some(a.user_id),
+                    unsupported,
+                    a.new_config.clone(),
+                    a.start_flags
+                )
             }
             atm::START_VOICE_ACTIVITY
             | atm::START_ASSISTANT_ACTIVITY
@@ -975,6 +978,22 @@ impl Service for ActivityTaskManager {
             }
             atm::START_ACTIVITIES => super::activity_multi::transact(&self.0, call),
             atm::START_ACTIVITY_AS_CALLER => super::activity_delegated::transact(&self.0, call),
+            atm::START_NEXT_MATCHING_ACTIVITY => {
+                call.data
+                    .enforce_interface(atm::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let token = call.data.read_binder().map_err(|_| BAD_VALUE)?;
+                let intent = aim_service_aidl::read_typed::<RawIntent>(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let options = aim_service_aidl::read_typed::<RawBundle>(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(self.0.next_matching(call, token, intent, options).map(|v| {
+                    let mut p = Parcel::new();
+                    p.write_no_exception();
+                    p.write_bool(v);
+                    p
+                }))
+            }
             // `startActivityIntentSender`: the record sent as `sendInner`
             // sends it, with the caller's result target and flags. Its
             // options are not applied (#1493).

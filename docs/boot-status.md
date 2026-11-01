@@ -563,8 +563,14 @@ naming their missing owners. `startActivityAsCaller` uses the source activity's
 launch identity, checks its token/process and caller permission, and supports
 `ignoreTargetSecurity`. Resolver subclasses use boot-classpath visibility;
 background starts retain the delegated/real-caller options and opt-outs (#2583).
-Only-if-needed and global configuration changes remain cancelled; NextMatching
-remains unimplemented (#2583).
+`startNextMatchingActivity` queries ordered visible matches as the Binder caller,
+starts as the attached source process and transfers its result target with the
+pinned finishing rules (#2583). Configuration-changing `startActivityWithConfig`
+admits the start, enforces CHANGE_CONFIGURATION and publishes through #2555's
+global owner before client launch. Runtime font scale survives later updates;
+settings persistence remains explicit. Only-if-needed returns without redelivery
+for qualifying reused activities. These additions have host-only checks; no
+guest boot or official CTS was run.
 `startActivityAndWait` tracks launch-specific first draws, existing-task visibility,
 configuration relaunches, cancellation and the ten-second timeout (#2583).
 Host-only checks cover these paths; no guest boot was run.

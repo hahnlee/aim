@@ -196,7 +196,7 @@ impl AppHost {
         let launch = Launch::new();
         args.launch = Some(launch.clone());
         let result = self
-            .start_activity(call, args, Some(user), unsupported)
+            .start_activity(call, args, Some(user), unsupported, None)
             .map(|code| launch.wait(code, Duration::from_secs(10)));
         self.activities
             .launches
