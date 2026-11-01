@@ -1,7 +1,7 @@
 //! android-16.0.0_r1 JobServiceContext and JobSchedulerService retry contracts.
 use super::*;
 
-fn attach(jobs: &Arc<JobScheduler>, state: &mut State, verb: Verb) -> Arc<JobCallback> {
+pub(super) fn attach(jobs: &Arc<JobScheduler>, state: &mut State, verb: Verb) -> Arc<JobCallback> {
     state.loaded = true;
     state.next_key += 1;
     state.next_callback += 1;
@@ -43,7 +43,7 @@ fn attach(jobs: &Arc<JobScheduler>, state: &mut State, verb: Verb) -> Arc<JobCal
     });
     callback
 }
-fn respond(callback: &JobCallback, code: u32, reschedule: bool) {
+pub(super) fn respond(callback: &JobCallback, code: u32, reschedule: bool) {
     let mut p = Parcel::new();
     match code {
         cb::ACKNOWLEDGE_START_MESSAGE => cb::AcknowledgeStartMessage {

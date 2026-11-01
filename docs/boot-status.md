@@ -656,6 +656,14 @@ callback races, soft failures, retry boundaries and disconnect rescheduling.
 Failed stop sends close and reschedule immediately; stale-callback diagnostics
 retain the first stop time (#1460 slice 4c/#1490/#1934, 2026-11-01; host tests
 only, no guest or CTS acceptance).
+Periodic sync window checks cover flex boundaries, missed windows and failure
+retries. Charging readiness now reads native battery-stats charging and health
+charging policy; host tests exercise charging/storage/network loss and recovery.
+Expedited sync jobs retain admission as within quota and preserve extras through
+persistence and native Binder start/completion (#1460 slice 4d/#1490, 2026-11-01;
+host tests only). Standby/doze and EJ quota accounting/demotion remain
+unimplemented. Quota-driven regular fallback awaits #1490; no guest or CTS
+acceptance.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which

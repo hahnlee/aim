@@ -1,6 +1,8 @@
 //! Android 16 SyncOperation.toJobInfoExtras and JobSchedulerService.LocalService.
 #[path = "job_lifecycle_tests.rs"]
 mod lifecycle;
+#[path = "job_readiness_tests.rs"]
+mod readiness;
 
 use super::*;
 use crate::package::restrictions::persistable::{Bundle, Double, Value as V};

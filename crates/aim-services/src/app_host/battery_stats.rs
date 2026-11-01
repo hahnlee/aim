@@ -1299,8 +1299,27 @@ pub struct BatteryStats {
 }
 
 impl BatteryStats {
+    #[cfg(test)]
+    pub(super) fn for_jobs_test(host: &Arc<AppHost>) -> Self {
+        let owner = Self::new(host);
+        owner
+            .config
+            .set(Config {
+                charged_delay_ms: DEFAULT_BATTERY_CHARGED_DELAY_MS,
+                charging_enforce_level: DEFAULT_BATTERY_CHARGING_ENFORCE_LEVEL,
+                reset_high_level: false,
+                reset_significant_charge: false,
+                max_history_buffer: DEFAULT_MAX_HISTORY_BUFFER_KB as usize * 1024,
+                max_history_size: DEFAULT_MAX_HISTORY_SIZE as u64,
+            })
+            .ok()
+            .unwrap();
+        owner
+    }
+
     pub fn new(host: &Arc<AppHost>) -> Self {
         let stats = Stats {
+            charging: true, // BatteryStatsImpl.mCharging's initial state.
             discharge_plug_level: -1,
             time_to_full_seconds: -1,
             ..Stats::default()
