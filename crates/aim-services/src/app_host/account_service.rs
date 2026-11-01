@@ -843,6 +843,8 @@ impl AccountManager {
                     db.delete_account(*id)?;
                 }
             }
+            #[cfg(test)]
+            race_tests::checkpoint("commit");
             Ok((db.find_all_de_accounts()?, db.find_all_visibility_values()?))
         })?;
         accounts.accounts.clear();
@@ -1492,14 +1494,13 @@ impl Service for SyncAccounts {
                     sync::GetAllAccountsForSystemProcess::read(&mut call.data)?;
                 }
                 self.0.accounts(0).map(|accounts| {
-                    let found: Vec<_> = accounts
-                        .state
-                        .lock()
-                        .unwrap()
-                        .of(None)
-                        .into_iter()
-                        .map(Some)
-                        .collect();
+                    let found: Vec<_> = {
+                        let state = accounts.state.lock().unwrap();
+                        let found = state.of(None).into_iter().map(Some).collect();
+                        #[cfg(test)]
+                        race_tests::checkpoint("snapshot");
+                        found
+                    };
                     sync::write_get_running_accounts_for_system_reply(&mut p, Some(&found));
                 })
             }
@@ -2403,3 +2404,7 @@ mod tests {
 #[cfg(test)]
 #[path = "account_validation_tests.rs"]
 mod validation_tests;
+
+#[cfg(test)]
+#[path = "account_race_tests.rs"]
+mod race_tests;
