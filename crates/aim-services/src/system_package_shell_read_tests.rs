@@ -1281,6 +1281,7 @@ impl Service for StartSyntax {
         } else {
             let mut parsed = Parcel::new();
             parsed.write_i32(if has("all") { -1 } else { -2 });
+            parsed.write_bool(has("-W"));
             parsed.write_string16(Some("Intent { fixture start }"));
             let intent = crate::app_host::kept::RawIntent::new("fixture.MISSING", 0x10000000, &[]);
             if has("-n") {
@@ -1319,7 +1320,7 @@ fn activity_shell_start_uses_native_resolution_user_errors_and_parser_failures()
             (
                 1,
                 "Starting: Intent { fixture start }\n".into(),
-                "Error type 3\nError: Activity class {p/p.Missing} does not exist.\n".into()
+                "Error type 3\nError: Activity class {p/.Missing} does not exist.\n".into()
             )
         );
     }
@@ -1339,6 +1340,9 @@ fn activity_shell_start_uses_native_resolution_user_errors_and_parser_failures()
             "Error: Can't start service with user 'all'\n".into()
         )
     );
+    assert_eq!(s.command(&["start", "-W", "-n", "p/.Missing"]), (
+        1, "Starting: Intent { fixture start }\nError type 3\nError: Activity class {p/.Missing} does not exist.\n".into(), String::new()
+    ));
     let (status, out, err) = s.command(&["start", "--bad"]);
     assert_eq!((status, out), (-1, String::new()));
     assert!(err.contains("java.lang.IllegalArgumentException: Unknown option: --bad"));

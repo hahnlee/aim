@@ -545,10 +545,14 @@ codes. `startActivities` and multi-intent PendingIntents share ordered preflight
 and task admission before process attachment (#2583). Debug/profiler and
 voice/assistant/game-session/recents starts retain `START_CANCELED` with diagnostics
 naming their missing owners. Only-if-needed, global configuration changes and
-AsCaller remain cancelled; AndWait and NextMatching remain unimplemented (#2583).
+AsCaller remain cancelled; NextMatching remains unimplemented (#2583).
+`startActivityAndWait` tracks launch-specific first draws, existing-task visibility,
+configuration relaunches, cancellation and the ten-second timeout (#2583).
 Host-only checks cover these paths; no guest boot was run.
 The activity shell serves ordinary `start`/`start-activity` through original Intent
-syntax and the native starter; wait/profiler/options paths remain #2511 errors.
+syntax and the native starter, including `-W` and Android WaitResult output
+(#2511). Profiler/options paths remain explicit errors. Wait checks are host-only;
+no guest boot or CTS run validates this change (2026-11-01).
 Accessibility window records now declare all 72 bytes, including Binder stability
 (#2584). The old 68-byte size made Java reject every nonempty callback with four
 unread bytes. Native focus already reached a real home once launched; the shell's

@@ -2,6 +2,7 @@
 //! Original am.jar owns Instrument's parser and watcher. Only syntax and
 //! display strings cross the Java leaf; native owners retain caller policy.
 use std::sync::mpsc;
+use std::time::Instant;
 
 use aim_binder_host::local::{Call, Reply};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
@@ -189,6 +190,7 @@ fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32
         .ok_or_else(|| failure("null activity start syntax"))?;
     let mut r = Reader::new(&bytes, &[]);
     let user = r.read_i32().map_err(codec)?;
+    let wait = r.read_bool().map_err(codec)?;
     let display = r.read_string16().map_err(codec)?.unwrap_or_default();
     let intent = RawIntent::read_from(&mut r).map_err(codec)?;
     if r.remaining() != 0 {
@@ -213,39 +215,59 @@ fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32
         sender_pid: pid,
         data: empty.reader(),
     };
-    let result = host
+    let started = Instant::now();
+    let host = host
         .me
         .upgrade()
-        .ok_or_else(|| failure("activity owner gone"))?
-        .start_activity(
-            &call,
-            super::activity_start::StartArgs {
-                caller: None,
-                calling_package: Some("com.android.shell".into()),
-                intent: Some(intent),
-                resolved_type,
-                result_to: None,
-                result_who: None,
-                request_code: 0,
-                options: None,
-            },
-            Some(user),
-            None,
-        )?;
+        .ok_or_else(|| failure("activity owner gone"))?;
+    let args = super::activity_start::StartArgs {
+        caller: None,
+        calling_package: Some("com.android.shell".into()),
+        intent: Some(intent),
+        resolved_type,
+        result_to: None,
+        result_who: None,
+        request_code: 0,
+        options: None,
+        launch: None,
+    };
+    let waited = if wait {
+        Some(host.wait_activity_start(&call, args.clone(), user, None)?)
+    } else {
+        None
+    };
+    let result = if let Some(w) = &waited {
+        w.result
+    } else {
+        host.start_activity(&call, args, Some(user), None)?
+    };
     let message = match result {
-        0 => return Ok(0),
+        0 => String::new(),
         2 => "Warning: Activity not started, its current task has been brought to the front".into(),
-        3 => "Warning: Activity not started, intent has been delivered to currently running top-most instance.".into(),
+        3 => "Warning: Activity not started, intent has been delivered to currently running top-most instance".into(),
         -1 => format!("Error: Activity not started, unable to resolve {display}"),
         -2 => {
-            c.eprintln("Error type 3");
-            let name = component.map(|v| format!("{{{}/{}}}", v.package, v.class)).unwrap_or_default();
+            if wait { c.println("Error type 3"); } else { c.eprintln("Error type 3"); }
+            let name = component.map(|v| format!("{{{}}}", super::services::short_name(&v.package, &v.class))).unwrap_or_default();
             format!("Error: Activity class {name} does not exist.")
         }
         -93 => "Error: Activity not started, you requested to both forward and receive its result".into(),
         -94 => "Error: Activity not started, you do not have permission to access it.".into(),
         _ => format!("Error: Activity not started, unknown error code {result}"),
     };
-    c.eprintln(&message);
-    Ok(if matches!(result, 2 | 3) { 0 } else { 1 })
+    if !message.is_empty() {
+        if wait {
+            c.println(&message);
+        } else {
+            c.eprintln(&message);
+        }
+    }
+    if matches!(result, 0 | 2 | 3) {
+        if let Some(w) = waited {
+            c.println(&w.shell_output(started.elapsed().as_millis()));
+        }
+        Ok(0)
+    } else {
+        Ok(1)
+    }
 }

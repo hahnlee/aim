@@ -123,6 +123,8 @@ pub struct ActivityRecord {
     pub turn_screen_on: bool,
     /// Whether it reported itself fully drawn (`reportFullyDrawn`).
     pub fully_drawn: bool,
+    pub(super) drawn: bool,
+    pub(super) relaunched: bool,
     pub requested_orientation: i32,
     /// `ActivityInfo.getRealConfigChanged`: the changes it handles itself.
     pub config_changes: i32,
@@ -177,6 +179,7 @@ pub(super) struct StyleKey {
 #[derive(Default)]
 pub struct Activities {
     pub(super) starts: Mutex<()>,
+    pub(super) launches: Mutex<Vec<Arc<super::activity_launch::Launch>>>,
     pub(super) records: Mutex<HashMap<u64, ActivityRecord>>,
     next_ident: Mutex<i32>,
     pub(super) stack: Mutex<super::activity_stack::Stack>,
@@ -247,11 +250,14 @@ impl Activities {
             .collect();
         let commands = stack.process_died(start_seq, removed);
         let mut gone = Vec::new();
+        let mut cancelled = Vec::new();
         self.records.lock().unwrap().retain(|token, r| {
             if r.start_seq != start_seq {
                 return true;
             }
+            cancelled.push(*token);
             if stack.get(*token).is_some() {
+                r.drawn = false;
                 r.start_seq = 0;
                 r.resumed = false;
                 r.reported = None;
@@ -269,6 +275,10 @@ impl Activities {
             payloads.remove(&result);
         }
         drop(payloads);
+        drop(stack);
+        for token in cancelled {
+            self.finish_launch(token, Some((false, -1, 0)));
+        }
         (gone, commands)
     }
 
@@ -528,6 +538,8 @@ impl AppHost {
                 | config::CONFIG_ORIENTATION
                 | config::CONFIG_SCREEN_LAYOUT;
             relaunching = true;
+            record.relaunched = true;
+            record.drawn = false;
             items.push((
                 record.start_seq,
                 Box::new(ActivityRelaunchItem {
@@ -866,6 +878,7 @@ impl Service for ActivityTaskManager {
                         result_who: a.result_who,
                         request_code: a.request_code,
                         options: a.options,
+                        launch: None,
                     },
                     user,
                     $unsupported,
@@ -892,6 +905,33 @@ impl Service for ActivityTaskManager {
                 .map_err(|_| BAD_VALUE)?;
                 let unsupported = unsupported_start(a.flags, a.profiler_info.is_some());
                 start!(a, Some(a.user_id), unsupported)
+            }
+            atm::START_ACTIVITY_AND_WAIT => {
+                let a = atm::StartActivityAsUser::<RawIntent, ProfilerInfo, RawBundle>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
+                let unsupported = unsupported_start(a.flags, a.profiler_info.is_some());
+                reply(
+                    self.0
+                        .wait_activity_start(
+                            call,
+                            super::activity_start::StartArgs {
+                                caller: a.caller,
+                                calling_package: a.calling_package,
+                                intent: a.intent,
+                                resolved_type: a.resolved_type,
+                                result_to: a.result_to,
+                                result_who: a.result_who,
+                                request_code: a.request_code,
+                                options: a.options,
+                                launch: None,
+                            },
+                            a.user_id,
+                            unsupported,
+                        )
+                        .map(|w| w.reply()),
+                )
             }
             atm::START_ACTIVITY_WITH_CONFIG => {
                 let a = atm::StartActivityWithConfig::<RawIntent, Configuration, RawBundle>::read(

@@ -214,6 +214,7 @@ fn activity_start_uses_original_intent_flags_home_categories_and_user_parser() {
     let parser = JavaParser::new(&root).expect("pinned original Intent parser and JDK");
     for args in [
         vec!["-n", "p/.Main"],
+        vec!["-W", "-n", "p/.Main"],
         vec!["-n", "p/.Main", "--user", "0"],
         vec![
             "-a",
@@ -235,6 +236,7 @@ fn activity_start_uses_original_intent_flags_home_categories_and_user_parser() {
             r.read_i32().unwrap(),
             if args.last() == Some(&"0") { 0 } else { -2 }
         );
+        assert_eq!(r.read_bool().unwrap(), args.contains(&"-W"));
         r.read_string16().unwrap();
         let intent = crate::app_host::kept::RawIntent::read_from(&mut r)
             .unwrap()
@@ -260,7 +262,6 @@ fn activity_start_uses_original_intent_flags_home_categories_and_user_parser() {
         vec!["--bad"],
         vec!["-n"],
         vec!["-n", "bad"],
-        vec!["-W", "-n", "p/.Main"],
         vec!["-D", "-n", "p/.Main"],
     ] {
         let output = Command::new(JavaParser::jdk().join("java"))
