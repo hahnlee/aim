@@ -306,7 +306,7 @@ fn register_monitor(fixture: &Fixture, services: &[&dyn Service]) -> mpsc::Recei
     }
     receive
 }
-fn complete_owner(owner: &mut crate::package::scan::SigningScan) {
+pub(crate) fn complete_owner(owner: &mut crate::package::scan::SigningScan) {
     let names = ["p", "q"];
     owner
         .assign_seinfo_at_boot(
@@ -329,12 +329,13 @@ fn complete_owner(owner: &mut crate::package::scan::SigningScan) {
         .capture_replica_runtime(
             names
                 .map(|name| {
+                    let labels = owner.seinfo_state(name).unwrap().unwrap();
                     (
                         (name.into(), false),
                         crate::package::scan::ReplicaRuntime {
                             usage: [0; 8],
-                            seinfo: owner.seinfo(name).unwrap().map(str::to_owned),
-                            override_seinfo: None,
+                            seinfo: labels.base.clone(),
+                            override_seinfo: labels.override_label.clone(),
                             library_files: vec![],
                             libraries: vec![],
                         },

@@ -1,4 +1,5 @@
 package dev.aim.server;
+import dev.aim.server.ISyncAccounts;
 import dev.aim.server.IForegroundServicePolicy;
 import dev.aim.server.IAccessibilityWindowHost;
 import dev.aim.server.IBatteryHealthStats;
@@ -95,4 +96,5 @@ interface ISystemProcess {
     /** Retained original RoleService; system UID only. */
     void attachRoleService(IBinder service);
     IBinder getPackageInternalHost();
+    ISyncAccounts getSyncAccounts();
 }

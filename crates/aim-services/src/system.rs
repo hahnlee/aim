@@ -49,9 +49,9 @@ mod internal_suspension;
 mod internal_usage_tests;
 #[cfg(test)]
 pub(crate) use internal_usage_tests::host_mutations::{
-    install_publication, with_boot_discovery_binders, with_discovery_binders,
-    with_discovery_binders_flags, with_discovery_session, with_discovery_session_flags,
-    with_late_package_boot, with_late_package_construction,
+    complete_owner as complete_discovery_owner, install_publication, with_boot_discovery_binders,
+    with_discovery_binders, with_discovery_binders_flags, with_discovery_session,
+    with_discovery_session_flags, with_late_package_boot, with_late_package_construction,
 };
 mod legacy_domain;
 #[path = "system_package_original_domains.rs"]

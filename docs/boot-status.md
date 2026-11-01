@@ -599,6 +599,11 @@ attachment on unlock and removes obsolete-authenticator accounts transactionally
 retaining installed UIDs during updates. Committed caches precede visibility,
 removal and account-list broadcasts, with the sender user preserved (#1504,
 #1460 3a.1; host persistence/rollback/reentry checks, 2026-11-01; no guest boot).
+The inactive typed SyncAccounts adapter now uses a system-UID-only capability
+on that same native owner (#1460/#1504 3a.2). Snapshots propagate owner/database
+failures, and both Java linkage cohorts check the image's injected seam.
+Private ContentService startup and sync forwarding remain inactive; no guest
+boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
 `/data/data` did not exist when the package side's start asked for the
 core apps' data. A second boot of the same data directory keeps the

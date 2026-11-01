@@ -330,8 +330,15 @@ pub fn check_linkage(
     stubs: Option<&Path>,
     dex: &Path,
 ) -> Result<(), String> {
+    check_linkage_on(ClassPath::read(image, jars)?, stubs, dex)
+}
+
+pub fn check_linkage_on(
+    classpath: ClassPath,
+    stubs: Option<&Path>,
+    dex: &Path,
+) -> Result<(), String> {
     let read = |p: &Path| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
-    let classpath = ClassPath::read(image, jars)?;
     let mut problems = match stubs {
         Some(stubs) => classpath.stub_mismatches(&read(stubs)?)?,
         None => Vec::new(),
@@ -339,6 +346,25 @@ pub fn check_linkage(
     let code = read(dex)?;
     problems.extend(classpath.unresolved(&code)?);
     for (adapter, parent, methods) in [
+        (
+            "Ldev/aim/server/NativeSyncAccounts;",
+            "Lcom/android/server/content/SyncAccounts;",
+            &[
+                ("validateAccounts", "(I)V"),
+                (
+                    "getAccounts",
+                    "(ILjava/lang/String;)[Landroid/accounts/Account;",
+                ),
+                (
+                    "getRunningAccountsForSystem",
+                    "()[Landroid/accounts/AccountAndUser;",
+                ),
+                (
+                    "getAllAccountsForSystemProcess",
+                    "()[Landroid/accounts/AccountAndUser;",
+                ),
+            ][..],
+        ),
         (
             "Ldev/aim/server/ActivityStats;",
             "Landroid/app/ActivityManagerInternal;",
