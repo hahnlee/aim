@@ -64,61 +64,136 @@ const SCREEN_ASSERTION: &str = "Android keeps the screen on";
 const CALLBACK_DESCRIPTOR: &str = "android.os.IWakeLockCallback";
 const ON_STATE_CHANGED: u32 = 1;
 
-/// `android.os.WorkSource`, as far as whether it is empty: its uids'
-/// count and its chains'. Battery stats, which it attributes power to,
-/// are not kept.
-#[derive(Default)]
+/// `WorkSource` at android-16.0.0_r1. Keep the backing arrays too:
+/// `WorkChain.equals` compares capacity slots, not just its active nodes.
+#[derive(Clone, Debug, Default)]
 pub(super) struct WorkSource {
-    num: i32,
-    chains: Option<usize>,
+    num: usize,
+    uids: Vec<i32>,
+    names: Option<Vec<Option<String>>>,
+    chains: Option<Vec<WorkChain>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct WorkChain {
+    size: usize,
+    uids: Vec<i32>,
+    tags: Vec<Option<String>>,
 }
 
 impl WorkSource {
-    /// `isEmpty`.
+    /// `isEmpty` counts chains even if every chain has zero nodes.
     pub(super) fn is_empty(&self) -> bool {
-        self.num == 0 && self.chains.is_none_or(|n| n == 0)
+        self.num == 0 && self.chains.as_ref().is_none_or(Vec::is_empty)
     }
 }
 
-/// `createStringArray`, read past.
-fn string_array(r: &mut Reader<'_>) -> ParcelResult<()> {
-    for _ in 0..r.read_i32()?.max(0) {
-        r.read_string16()?;
+impl PartialEq for WorkSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.num == other.num
+            && self.uids[..self.num] == other.uids[..other.num]
+            && match (&self.names, &other.names) {
+                (Some(a), Some(b)) => a[..self.num] == b[..other.num],
+                _ => true,
+            }
+            && match &self.chains {
+                Some(c) if !c.is_empty() => other.chains.as_ref() == Some(c),
+                _ => other.chains.as_ref().is_none_or(Vec::is_empty),
+            }
     }
-    Ok(())
 }
 
 impl ReadParcelable for WorkSource {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        let num = r.read_i32()?;
-        aim_service_aidl::read_int_array(r)?;
-        string_array(r)?;
+        let num = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
+        let uids = aim_service_aidl::read_int_array(r)?.unwrap_or_default();
+        let names = aim_service_aidl::read_string_list(r)?;
+        if num > uids.len() || names.as_ref().is_some_and(|n| num > n.len()) {
+            return Err(BAD_VALUE);
+        }
         let chains = if r.read_i32()? >= 0 {
-            // writeParcelableList: its count, then each chain by class:
-            // its size, uids and tags.
-            let n = r.read_i32()?.max(0) as usize;
+            // The first count supplies ArrayList's initial capacity. The
+            // second belongs to writeParcelableList and controls its elements.
+            let n = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
+            if n > r.remaining() / 4 {
+                return Err(BAD_VALUE);
+            }
+            let mut chains = Vec::new();
             for _ in 0..n {
-                if r.read_string16()?.is_none() {
+                if r.read_string16()?.as_deref() != Some("android.os.WorkSource$WorkChain") {
+                    // Null entries and other parcelable classes are unsupported.
                     return Err(BAD_VALUE);
                 }
-                r.read_i32()?;
-                aim_service_aidl::read_int_array(r)?;
-                string_array(r)?;
+                let size = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
+                let uids = aim_service_aidl::read_int_array(r)?.ok_or(BAD_VALUE)?;
+                let tags = aim_service_aidl::read_string_list(r)?.ok_or(BAD_VALUE)?;
+                if size > uids.len() || size > tags.len() {
+                    return Err(BAD_VALUE);
+                }
+                chains.push(WorkChain { size, uids, tags });
             }
-            Some(n)
+            Some(chains)
         } else {
             None
         };
-        Ok(WorkSource { num, chains })
+        Ok(WorkSource {
+            num,
+            uids,
+            names,
+            chains,
+        })
     }
 }
 
-/// `PowerManagerService.WakeLock`, of what decides the device's state:
-/// its level and its callback.
+/// Immutable owner identity and Notifier's attributed properties.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Attribution {
+    pub uid: i32,
+    pub pid: i32,
+    pub package: String,
+    pub tag: String,
+    pub history: Option<String>,
+    pub source: Option<WorkSource>,
+    pub kind: Option<usize>,
+}
+
+impl Attribution {
+    pub(super) fn entries(&self, other: Option<&Self>) -> Vec<i32> {
+        let Some(ws) = &self.source else {
+            return vec![self.uid];
+        };
+        let other = other
+            .and_then(|a| a.source.as_ref())
+            .and_then(|w| w.chains.as_ref());
+        ws.uids[..ws.num]
+            .iter()
+            .copied()
+            .chain(
+                ws.chains
+                    .iter()
+                    .flatten()
+                    .filter(|c| other.is_none_or(|o| !o.contains(c)))
+                    .map(|c| if c.size == 0 { -1 } else { c.uids[0] }),
+            )
+            .collect()
+    }
+}
+
+fn monitor_type(flags: i32) -> Option<usize> {
+    match flags & WAKE_LOCK_LEVEL_MASK {
+        PARTIAL_WAKE_LOCK | PROXIMITY_SCREEN_OFF_WAKE_LOCK => Some(0),
+        FULL_WAKE_LOCK | SCREEN_DIM_WAKE_LOCK | SCREEN_BRIGHT_WAKE_LOCK => Some(1),
+        DRAW_WAKE_LOCK => Some(2),
+        _ => None,
+    }
+}
+
+/// `PowerManagerService.WakeLock`: state, immutable owner and full attribution.
 struct WakeLock {
     lock: Strong,
     death: u64,
     flags: i32,
+    attribution: Attribution,
     callback: Option<Strong>,
 }
 
@@ -176,7 +251,7 @@ struct State {
     /// `mHoldingScreenWakeLock`, a screen-bright wake lock).
     window_holds_screen: bool,
     /// The Mac's display kept awake while the screen is kept on.
-    screen_assertion: Option<crate::power_assertion::Assertion>,
+    screen_assertion: crate::power_assertion::AttributedAssertion,
 }
 
 pub struct PowerManager {
@@ -353,6 +428,7 @@ impl PowerManager {
             {
                 return Ok(());
             }
+            self.battery().wake_screen(awake);
             state.asleep = !awake;
             if awake {
                 eprintln!(
@@ -423,6 +499,12 @@ impl PowerManager {
         }
     }
 
+    fn battery(&self) -> &Arc<super::battery_stats::BatteryStats> {
+        self.host
+            .battery_stats
+            .get_or_init(|| Arc::new(super::battery_stats::BatteryStats::new(&self.host)))
+    }
+
     /// `updateSuspendBlockerLocked`: `.WakeLocks` while a lock keeps the
     /// CPU on, `.Display` while the display is on.
     fn update_blockers(&self, state: &mut State) {
@@ -451,13 +533,20 @@ impl PowerManager {
         // The screen kept on is the Mac's display kept awake.
         let screen = !state.asleep
             && (state.window_holds_screen || state.locks.iter().any(WakeLock::keeps_screen));
-        if !screen {
-            state.screen_assertion = None;
-        } else if state.screen_assertion.is_none() {
-            match crate::power_assertion::Assertion::prevent_display_sleep(SCREEN_ASSERTION) {
-                Ok(a) => state.screen_assertion = Some(a),
-                Err(e) => eprintln!("app host: power: {SCREEN_ASSERTION}: IOKit error {e:#x}"),
+        let screen_name = screen.then(|| {
+            let mut names: Vec<_> = state
+                .locks
+                .iter()
+                .filter(|l| l.keeps_screen())
+                .map(|l| format!("{:?}", l.attribution))
+                .collect();
+            if state.window_holds_screen {
+                names.push("Android display".into());
             }
+            format!("{SCREEN_ASSERTION}: {}", names.join("; "))
+        });
+        if let Err(e) = state.screen_assertion.update(screen_name.as_deref()) {
+            eprintln!("app host: power: display assertion: IOKit error {e:#x}");
         }
     }
 
@@ -480,6 +569,7 @@ impl PowerManager {
         tag: Option<String>,
         package: Option<String>,
         ws: Option<WorkSource>,
+        history: Option<String>,
         display_id: i32,
         callback: Option<Binder>,
     ) -> Result<(), Exception> {
@@ -510,12 +600,78 @@ impl PowerManager {
             }
             self.enforce("android.permission.SCREEN_TIMEOUT_OVERRIDE", calling_uid)?;
         }
-        if ws.is_some_and(|w| !w.is_empty()) {
+        let mut ws = ws.filter(|w| !w.is_empty());
+        if ws.is_some() {
             self.enforce("android.permission.UPDATE_DEVICE_STATS", calling_uid)?;
         }
+        let (mut uid, mut pid) = (calling_uid, call.sender_pid as i32);
         if flags & SYSTEM_WAKELOCK != 0 {
             self.enforce("android.permission.DEVICE_POWER", calling_uid)?;
+            let mut source = ws.unwrap_or_default();
+            if source.num > 0 && source.names.is_none() {
+                return Err(Exception::illegal_argument(
+                    "Adding unnamed WorkSource to named WorkSource",
+                ));
+            }
+            let mut entries: Vec<_> = source.uids[..source.num]
+                .iter()
+                .copied()
+                .zip(
+                    source
+                        .names
+                        .as_ref()
+                        .map_or(&[][..], |n| &n[..source.num])
+                        .iter()
+                        .cloned(),
+                )
+                .collect();
+            if let Some(chains) = &mut source.chains {
+                let mut unique = Vec::new();
+                for c in chains.drain(..) {
+                    if !unique.contains(&c) {
+                        unique.push(c);
+                    }
+                }
+                *chains = unique;
+            }
+            entries.push((calling_uid, package.clone()));
+            entries.sort_by_key(|(uid, name)| {
+                (
+                    *uid,
+                    name.as_ref().map(|n| n.encode_utf16().collect::<Vec<_>>()),
+                )
+            });
+            entries.dedup();
+            source.num = entries.len();
+            (source.uids, source.names) = (
+                entries.iter().map(|e| e.0).collect(),
+                Some(entries.into_iter().map(|e| e.1).collect()),
+            );
+            ws = Some(source);
+            uid = 1000;
+            pid = self.host.process.pid() as i32;
         }
+        let attribution = Attribution {
+            uid,
+            pid,
+            package: package.unwrap(),
+            tag: tag.unwrap(),
+            history,
+            source: ws,
+            kind: if flags & WAKE_LOCK_LEVEL_MASK == PROXIMITY_SCREEN_OFF_WAKE_LOCK
+                && self
+                    .host
+                    .framework()?
+                    .framework_bool("config_suspendWhenScreenOffDueToProximity")
+                    .ok_or_else(|| {
+                        Exception::new(EX_ILLEGAL_STATE, "Missing proximity suspend configuration")
+                    })?
+            {
+                None
+            } else {
+                monitor_type(flags)
+            },
+        };
         if display_id != INVALID_DISPLAY && display_id != DEFAULT_DISPLAY {
             // getDisplayInfo of an unknown display: the original logs a wtf.
             eprintln!("app host: power: a wake lock for invalid display {display_id}");
@@ -523,12 +679,34 @@ impl PowerManager {
         }
         let mut state = self.state.lock().unwrap();
         if let Some(l) = state.locks.iter_mut().find(|l| l.lock.handle == handle) {
-            l.flags = flags;
-            l.callback = callback.and_then(|c| match c {
-                Binder::Handle(h) => Some(self.host.process.strong(h)),
-                Binder::Local(_) => None,
-            });
+            if l.flags != flags
+                || l.attribution.tag != attribution.tag
+                || l.attribution.source != attribution.source
+                || l.attribution.uid != uid
+                || l.attribution.pid != pid
+            {
+                if (
+                    l.attribution.package.as_str(),
+                    l.attribution.uid,
+                    l.attribution.pid,
+                ) != (attribution.package.as_str(), uid, pid)
+                {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "Existing wake lock owner changed",
+                    ));
+                }
+                self.battery()
+                    .change_wake(Some(&l.attribution), Some(&attribution))?;
+                l.flags = flags;
+                l.attribution = attribution;
+                l.callback = callback.and_then(|c| match c {
+                    Binder::Handle(h) => Some(self.host.process.strong(h)),
+                    Binder::Local(_) => None,
+                });
+            }
         } else {
+            self.battery().change_wake(None, Some(&attribution))?;
             let lock = self.host.process.strong(handle);
             let me = Arc::downgrade(&self.host);
             let death = self.host.process.link_to_death(
@@ -552,6 +730,7 @@ impl PowerManager {
                 lock,
                 death,
                 flags,
+                attribution,
                 callback,
             });
         }
@@ -566,6 +745,9 @@ impl PowerManager {
             return;
         };
         let l = state.locks.remove(at);
+        self.battery()
+            .change_wake(Some(&l.attribution), None)
+            .unwrap();
         self.host.process.clear_death(&l.lock, l.death);
         if let Some(c) = &l.callback {
             notify(c, false);
@@ -590,22 +772,31 @@ impl PowerManager {
         call: &Call<'_>,
         lock: Option<Binder>,
         ws: Option<WorkSource>,
+        history: Option<String>,
     ) -> Result<(), Exception> {
         let Some(lock) = lock else {
             return Err(Exception::illegal_argument("lock must not be null"));
         };
         let uid = call.sender_euid as i32;
         self.enforce("android.permission.WAKE_LOCK", uid)?;
-        if ws.is_some_and(|w| !w.is_empty()) {
+        let ws = ws.filter(|w| !w.is_empty());
+        if ws.is_some() {
             self.enforce("android.permission.UPDATE_DEVICE_STATS", uid)?;
         }
-        let state = self.state.lock().unwrap();
-        if !state
+        let mut state = self.state.lock().unwrap();
+        let l = state
             .locks
-            .iter()
-            .any(|l| Binder::Handle(l.lock.handle) == lock)
-        {
-            return Err(Exception::illegal_argument("Wake lock not active"));
+            .iter_mut()
+            .find(|l| Binder::Handle(l.lock.handle) == lock)
+            .ok_or_else(|| Exception::illegal_argument("Wake lock not active"))?;
+        if l.attribution.source != ws {
+            let mut next = l.attribution.clone();
+            next.source = ws;
+            next.history = history;
+            self.battery()
+                .change_wake(Some(&l.attribution), Some(&next))?;
+            l.attribution = next;
+            self.update_blockers(&mut state);
         }
         Ok(())
     }
@@ -677,6 +868,7 @@ impl Service for PowerManager {
                     a.tag,
                     a.package_name,
                     a.ws,
+                    a.history_tag,
                     a.display_id,
                     a.callback,
                 ))
@@ -691,6 +883,7 @@ impl Service for PowerManager {
                     a.tag,
                     a.package_name,
                     a.ws,
+                    a.history_tag,
                     INVALID_DISPLAY,
                     None,
                 ) {
@@ -712,17 +905,42 @@ impl Service for PowerManager {
             pm::UPDATE_WAKE_LOCK_WORK_SOURCE => {
                 let a = pm::UpdateWakeLockWorkSource::<WorkSource>::read(&mut call.data)
                     .map_err(bad)?;
-                empty(self.update_work_source(call, a.lock, a.ws))
+                empty(self.update_work_source(call, a.lock, a.ws, a.history_tag))
             }
             pm::UPDATE_WAKE_LOCK_UIDS | pm::UPDATE_WAKE_LOCK_UIDS_ASYNC => {
                 let oneway = call.code == pm::UPDATE_WAKE_LOCK_UIDS_ASYNC;
                 let a = pm::UpdateWakeLockUids::read(&mut call.data).map_err(bad)?;
                 // A work source of the uids.
-                let ws = a.uids.map(|uids| WorkSource {
-                    num: uids.len() as i32,
-                    chains: None,
+                let chained = self.host.flag(
+                    "com.android.server.power.feature.flags.wakelock_attribution_via_workchain",
+                );
+                let r = chained.and_then(|chained| {
+                    let ws = a.uids.map(|mut uids| {
+                        if chained {
+                            WorkSource {
+                                chains: Some(
+                                    uids.into_iter()
+                                        .map(|uid| WorkChain {
+                                            size: 2,
+                                            uids: vec![uid, call.sender_euid as i32, 0, 0],
+                                            tags: vec![None; 4],
+                                        })
+                                        .collect(),
+                                ),
+                                ..WorkSource::default()
+                            }
+                        } else {
+                            uids.sort();
+                            uids.dedup();
+                            WorkSource {
+                                num: uids.len(),
+                                uids,
+                                ..WorkSource::default()
+                            }
+                        }
+                    });
+                    self.update_work_source(call, a.lock, ws, None)
                 });
-                let r = self.update_work_source(call, a.lock, ws);
                 if oneway {
                     if let Err(e) = r {
                         eprintln!("app host: power: updateWakeLockUidsAsync: {}", e.message);
@@ -910,8 +1128,91 @@ mod tests {
         let mut r = p.reader();
         let ws = WorkSource::read_from(&mut r).unwrap();
         assert_eq!(r.remaining(), 0);
-        assert_eq!((ws.num, ws.chains), (2, Some(1)));
+        assert_eq!(ws.num, 2);
+        assert_eq!(ws.uids, [10_001, 10_002]);
+        let chains = ws.chains.as_ref().unwrap();
+        assert_eq!(chains[0].uids, [10_003]);
+        assert_eq!(chains[0].tags, [Some("tag".into())]);
         assert!(!ws.is_empty());
         assert!(WorkSource::default().is_empty());
     }
+
+    pub(super) fn source_with_chain(class: Option<&str>, size: i32) -> Parcel {
+        let mut p = Parcel::new();
+        p.write_i32(1);
+        aim_service_aidl::write_int_array(&mut p, Some(&[10001, 0, 0]));
+        aim_service_aidl::write_string_list(&mut p, Some(&[Some("owner".into()), None, None]));
+        p.write_i32(8); // ArrayList initial capacity, independent of list count
+        p.write_i32(1);
+        p.write_string16(class);
+        if class.is_some() {
+            p.write_i32(size);
+            aim_service_aidl::write_int_array(&mut p, Some(&[10002, 1000, 0, 0]));
+            aim_service_aidl::write_string_list(
+                &mut p,
+                Some(&[Some("adapter".into()), None, None, None]),
+            );
+        }
+        p
+    }
+
+    #[test]
+    fn work_source_preserves_names_chain_nodes_capacity_and_parcel_boundary() {
+        let mut p = source_with_chain(Some("android.os.WorkSource$WorkChain"), 2);
+        p.write_i32(0x12345678);
+        let mut r = p.reader();
+        let ws = WorkSource::read_from(&mut r).unwrap();
+        assert_eq!(ws.num, 1);
+        assert_eq!(ws.uids, [10001, 0, 0]);
+        assert_eq!(ws.names.as_ref().unwrap()[0].as_deref(), Some("owner"));
+        let chain = &ws.chains.as_ref().unwrap()[0];
+        assert_eq!(chain.size, 2);
+        assert_eq!(chain.uids, [10002, 1000, 0, 0]);
+        assert_eq!(chain.tags, [Some("adapter".into()), None, None, None]);
+        assert_eq!(r.read_i32().unwrap(), 0x12345678);
+        assert_eq!(r.remaining(), 0);
+        let mut changed = ws.clone();
+        changed.chains.as_mut().unwrap()[0].uids[3] = 42;
+        assert_ne!(ws, changed); // WorkChain.equals includes inactive capacity
+        let mut changed = ws.clone();
+        changed.uids[2] = 42;
+        assert_eq!(ws, changed); // WorkSource.diff ignores inactive capacity
+        changed.names = None;
+        assert_eq!(ws, changed); // pinned diff only compares two named sources
+    }
+
+    #[test]
+    fn work_source_rejects_unrepresentable_counts_classes_and_truncation() {
+        let valid = source_with_chain(Some("android.os.WorkSource$WorkChain"), 2);
+        let size = valid.reader().remaining();
+        let mut r = valid.reader();
+        r.skip(size).unwrap();
+        let bytes = r.since(0).0.to_vec();
+        for len in 0..size {
+            // Build each truncation without treating payload bytes as a parcelable.
+            let mut r = Reader::new(&bytes[..len], &[]);
+            assert!(WorkSource::read_from(&mut r).is_err(), "{len}");
+        }
+        for class in [None, Some("other.Parcelable")] {
+            assert!(WorkSource::read_from(&mut source_with_chain(class, 2).reader()).is_err());
+        }
+        for size in [-1, 5] {
+            assert!(
+                WorkSource::read_from(
+                    &mut source_with_chain(Some("android.os.WorkSource$WorkChain"), size).reader()
+                )
+                .is_err()
+            );
+        }
+        let mut p = Parcel::new();
+        p.write_i32(2);
+        aim_service_aidl::write_int_array(&mut p, Some(&[10001]));
+        p.write_i32(-1);
+        p.write_i32(-1);
+        assert!(WorkSource::read_from(&mut p.reader()).is_err());
+    }
 }
+
+#[cfg(test)]
+#[path = "power_wake_tests.rs"]
+mod wake_tests;

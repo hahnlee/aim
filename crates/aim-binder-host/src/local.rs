@@ -568,6 +568,11 @@ impl LocalProcess {
         }
     }
 
+    /// This native Binder process's guest PID.
+    pub fn pid(&self) -> i32 {
+        self.credentials.pid
+    }
+
     /// Its open binder file description, for the driver's own calls
     /// ([`Driver::shadow`]).
     pub fn proc_handle(&self) -> ProcHandle {

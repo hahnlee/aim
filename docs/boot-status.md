@@ -718,7 +718,15 @@ temporary-allowlist notes now produce pooled battery-history events with the
 pinned presence tracker, names and mapped UIDs (#1460 slice 5g/#1928).
 Host tests decode live and persisted history, including duplicate/failure
 transitions, timer nesting and the original cross-user allowlist UID asymmetry.
-Full wake-lock attribution and whole batterystats.bin remain #1928.
+Native power retains complete wake-lock UID/name arrays and attribution chains,
+checks WAKE_LOCK/UPDATE_DEVICE_STATS before mutation, and sends acquire/change/
+release attribution to native battery timers (#1460 slice 5h/#1928). Named
+partial/full/draw pools, screen-off/background bases, aggregate partial timers
+and PID spans have host coverage. Native power updates its existing display
+assertion attribution in place as sources change. System-sleep assertion mapping
+remains #669/#670, pending Android/Mac display sleep synchronization.
+These checks do not establish live adapter accounting or macOS sleep behavior.
+Whole batterystats.bin remains #1928.
 Matched-image adapter accounting,
 restoration and sync CTS remain unverified; no guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
