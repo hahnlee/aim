@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.aim.overlay.settings">
+    <application android:hasCode="false" />
+    <overlay
+        android:targetPackage="com.android.providers.settings"
+        android:resourcesMap="@xml/overlays"
+        android:isStatic="true"
+        android:priority="1" />
+</manifest>

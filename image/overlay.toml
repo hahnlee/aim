@@ -554,6 +554,11 @@ path = "/vendor/overlay/aim-framework-overlay.apk"
 source = "target/aim/device-services/framework-overlay.apk"
 reason = "the device's static overlay of framework-res: config_deviceSpecificSystemServices names the device's system service"
 
+[[add]]
+path = "/vendor/overlay/aim-settings-overlay.apk"
+source = "target/aim/device-services/settings-overlay.apk"
+reason = "AIM's provisioned-device defaults for the original SettingsProvider, matching the native provider; skip the emulator provisioning pass that enables ADB (#713)"
+
 # Temporary (#470), until PermissionController is native (ADR 0013): the
 # device's system service redirects a request for POST_NOTIFICATIONS
 # alone to this activity, which answers it with the Mac's prompt.

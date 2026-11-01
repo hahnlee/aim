@@ -497,7 +497,18 @@ retain the current Java owner; system-process restart replaces it. Host forwardi
 system-process startup and pinned-image Java linkage are checked without a guest
 boot; staged APEX activation has not been exercised.
 The app host retains framework-res's localized default zen rules on fresh data or a policy without `<zen>` and includes them in the next notification policy save.
-A fresh data directory is provisioned: the native settings provider creates its tables with `device_provisioned` and `user_setup_complete` set, as vendor defaults.
+A fresh data directory is provisioned: the native settings provider creates its
+tables with `device_provisioned` and `user_setup_complete` set, and the original
+SettingsProvider uses the same static vendor resource defaults (#713).
+Without those defaults, fresh original SystemServer data reproduced
+`adb_enabled=0` at systemReady followed by GoogleSdkSetup writing value/default
+1 with restore preservation. The original setup APK now skips its emulator
+provisioning pass. Fresh no-port data keeps ADB 0 and adbd stopped; a named port
+and a no-port restart of its stopped data keep ADB 1 and loopback listeners.
+Explicit debugging enable/disable still works. The compiled resource-map check
+and all three disposable state checks pass. The retained-data boot also records
+a SystemServer restart at ProcessList's WebView process-group creation assertion;
+its ADB state survives, but this is not whole-boot health acceptance (2026-11-02).
 Settings provider inserts and updates convert Float, Double and byte-array values through the original Java scalar `toString` in aim-system, over a system-UID-only bridge (#1583; host storage/JVM tests and pinned-image linkage, no guest boot).
 URI grants publish indirect package visibility of their provider to the target, including basic grants needing no permission record and restored persisted grants. Persistable grants retain visibility across package updates (#1569; focused host tests, no guest boot).
 The app host prepares user 0's CE storage before starting vold's user and mounting the emulated volume at unlocking, and logs external storage failures without aborting boot completion (#2227; host tests only, no guest boot rerun).

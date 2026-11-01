@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<overlay>
+    <item target="bool/def_device_provisioned" value="@bool/def_device_provisioned" />
+    <item target="bool/def_user_setup_complete" value="@bool/def_user_setup_complete" />
+</overlay>

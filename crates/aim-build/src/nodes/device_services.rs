@@ -14,6 +14,8 @@
 //! - `framework-overlay.apk`, the static overlay of framework-res of
 //!   `java/framework-overlay` that names the service in
 //!   `config_deviceSpecificSystemServices`, signed with AOSP's test key;
+//! - `settings-overlay.apk`, the original provider's fresh-data provisioning
+//!   defaults, matching the native provider (`java/settings-overlay`);
 //! - `lightweight-shell-overlay.apk`, the overlay of
 //!   `java/lightweight-shell-overlay` for the image without the Android
 //!   shell (docs/m1-shell.md), signed likewise;
@@ -45,6 +47,7 @@ const NEARBY: &str = "java/nearby-initializer";
 const CONNECTIVITY_JAR: &str = "/apex/com.android.tethering/javalib/service-connectivity.jar";
 const OVERLAY: &str = "java/framework-overlay";
 const SHELL_OVERLAY: &str = "java/lightweight-shell-overlay";
+const SETTINGS_OVERLAY: &str = "java/settings-overlay";
 /// The jar's guest path.
 pub const JAR: &str = "/system/framework/aim-services.jar";
 
@@ -98,6 +101,7 @@ pub fn node() -> Node {
     inputs.extend(files(NEARBY));
     inputs.extend(files(OVERLAY));
     inputs.extend(files(SHELL_OVERLAY));
+    inputs.extend(files(SETTINGS_OVERLAY));
     for app in &APPS {
         inputs.extend(files(app.sources));
     }
@@ -107,6 +111,7 @@ pub fn node() -> Node {
         out().join("systemserverclasspath.pb"),
         out().join("framework-overlay.apk"),
         out().join("lightweight-shell-overlay.apk"),
+        out().join("settings-overlay.apk"),
         out().join("shell-res.apk"),
     ];
     outputs.extend(APPS.iter().map(|app| out().join(app.apk)));
@@ -241,6 +246,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     for (dir, apk) in [
         (OVERLAY, "framework-overlay.apk"),
         (SHELL_OVERLAY, "lightweight-shell-overlay.apk"),
+        (SETTINGS_OVERLAY, "settings-overlay.apk"),
     ] {
         let overlay = repo(dir);
         tools.apk(
@@ -285,4 +291,67 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let _ = force_remove(&out);
     fs::rename(&staged, &out).map_err(|e| e.to_string())?;
     force_remove(&work).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_apps::{apk::Apk, res::Value, table::Entry};
+
+    #[test]
+    fn built_settings_overlay_maps_only_the_original_provisioning_defaults() {
+        let Some(path) = aim_paths::input(out().join("settings-overlay.apk"), "device-services")
+        else {
+            return;
+        };
+        let apk = Apk::open(&path).unwrap();
+        let manifest = apk.manifest().unwrap();
+        let overlay = manifest
+            .children
+            .iter()
+            .find(|e| e.name == "overlay")
+            .unwrap();
+        assert_eq!(
+            overlay.named("targetPackage"),
+            Some(&Value::String("com.android.providers.settings".into()))
+        );
+        assert_eq!(overlay.named("isStatic"), Some(&Value::Bool(true)));
+        let app = manifest
+            .children
+            .iter()
+            .find(|e| e.name == "application")
+            .unwrap();
+        assert_eq!(app.named("hasCode"), Some(&Value::Bool(false)));
+        assert!(apk.file_if_present("classes.dex").unwrap().is_none());
+        let table = apk.table().unwrap();
+        let Some(Value::Ref(map)) = overlay.named("resourcesMap") else {
+            panic!("missing resource map")
+        };
+        let Some((Entry::Simple(Value::String(map)), _)) = table.get(*map, false) else {
+            panic!("resource map is not XML")
+        };
+        let map = aim_apps::res::xml(&apk.file(map).unwrap()).unwrap();
+        let mut names = Vec::new();
+        for item in &map.children {
+            let Some(Value::String(name)) = item.named("target") else {
+                panic!("missing target")
+            };
+            let Some(Value::Ref(value)) = item.named("value") else {
+                panic!("missing default")
+            };
+            assert!(matches!(
+                table.get(*value, false),
+                Some((Entry::Simple(Value::Bool(true)), _))
+            ));
+            names.push(name.as_str());
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "bool/def_device_provisioned",
+                "bool/def_user_setup_complete"
+            ]
+        );
+    }
 }
