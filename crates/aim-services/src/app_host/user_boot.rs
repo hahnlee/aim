@@ -187,8 +187,10 @@ impl AppHost {
         // `finishUserUnlocked`: STATE_RUNNING_UNLOCKED (the app host runs
         // no persistent apps or encryption unaware providers to start), to
         // the registered receivers.
-        self.broadcasts
-            .send_from_system_as_user(self, user_unlocked(), USER);
+        self.before_user_unlocked(|| {
+            self.broadcasts
+                .send_from_system_as_user(self, user_unlocked(), USER);
+        })?;
         // A system update's pre-boot receivers first.
         let updated = user.updated || self.mock_upgrade();
         let host = self.clone();

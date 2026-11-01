@@ -38,7 +38,10 @@ final class SyncReplayOriginal {
                     .mapToObj(i -> new AccountAndUser()).toArray(AccountAndUser[]::new);
         }
         AccountAndUser[] getAllAccountsForSystemProcess() { return getRunningAccountsForSystem(); }
-        void validateAccounts(int user) { if (user != 0) throw new AssertionError(); }
+        void validateAccounts(int user) {
+            if (user != 0 || !SyncOwnerLifecycleTest.original.mUnlockedUsers.getOrDefault(0, false))
+                throw new AssertionError("account validation preceded lifecycle unlock");
+        }
         Account[] getAccounts(int user, String pkg) {
             if (SyncOwnerLifecycleTest.fail) throw new IllegalStateException("account snapshot failed");
             return new Account[SyncOwnerLifecycleTest.accounts];
@@ -81,6 +84,10 @@ final class SyncReplayOriginal {
     @ACCOUNTS_MESSAGE@
     @USER_RECEIVER@
     void replay(int user, Runnable complete) { onUserUnlocked(user); mSyncHandler.post(complete); }
+    void broadcast(Context context, int user) {
+        mUserIntentReceiver.onReceive(context, new Intent(Intent.ACTION_USER_UNLOCKED)
+                .putExtra(Intent.EXTRA_USER_HANDLE, user));
+    }
     void noUser(Context context) {
         mUserIntentReceiver.onReceive(context, new Intent(Intent.ACTION_USER_UNLOCKED));
     }

@@ -1,74 +1,108 @@
 package dev.aim.server;
 
 import android.content.Context;
-import android.content.Intent;
 import java.util.ArrayDeque;
 
-/** Production coordinator and capability; Android handler/account boundaries are doubles. */
+/** Production coordinator and pinned original bodies; handler/account transports are doubles. */
 public final class SyncOwnerLifecycleTest {
     public static boolean unlocked, ready, alive = true, fail;
+    static ISystemUserLifecycle lifecycle;
     static int accounts;
-    private static int observed, replays;
+    private static int observed, replays, acknowledgements;
     static SyncReplayOriginal original;
     static final ArrayDeque<Runnable> handler = new ArrayDeque<>();
     public static void unlockFlag(int user) { original.onUnlockUser(user); }
     public static void replay(int user, Runnable complete) {
-        require(user == 0);
-        require(SystemProcessHostTest.events.get(SystemProcessHostTest.events.size()-1).equals("sync:unlock=0"));
-        require(original.mUnlockedUsers.getOrDefault(0, false));
+        require(user == 0 && original.mUnlockedUsers.getOrDefault(0, false));
         original.replay(user, complete);
         replays++;
     }
     static void observe(int count) { observed = count; }
+    static void acknowledge() {
+        require(alive && !ready);
+        ready = true;
+        acknowledgements++;
+    }
     private static void require(boolean condition) { if (!condition) throw new AssertionError(); }
     private static void boot(SyncOwnerStartup sync) {
         for (int phase : new int[] {480, 500, 520, 550, 600, 1000}) sync.onBootPhase(phase);
     }
-    private static void unlock(Context context, int user) {
-        context.unlockReceiver.onReceive(context, new Intent(Intent.ACTION_USER_UNLOCKED)
-                .putExtra(Intent.EXTRA_USER_HANDLE, user));
+    private static SyncOwnerStartup start(Context context, ISystemProcess host) throws Exception {
+        ready = fail = false; lifecycle = null; alive = true;
+        accounts = 1; observed = replays = acknowledgements = 0; handler.clear();
+        original = new SyncReplayOriginal();
+        var sync = SyncOwnerStartup.start(context, host);
+        original.noUser(context);
+        require(handler.isEmpty());
+        sync.onStartUser(0);
+        require(!ready && handler.isEmpty());
+        return sync;
     }
+    private static void drain() { while (!handler.isEmpty()) handler.remove().run(); }
     static void run(Context context, ISystemProcess host) throws Exception {
-        for (int scenario = 0; scenario < 6; scenario++) {
-            unlocked = scenario == 0; // Missed unlock, before registration.
-            ready = fail = false;
-            alive = true;
-            accounts = 1; observed = replays = 0; handler.clear();
-            original = new SyncReplayOriginal();
-            var sync = SyncOwnerStartup.start(context, host);
-            original.noUser(context);
-            require(handler.isEmpty());
-            if (scenario == 1) { unlocked = true; unlock(context, 0); } // Early unlock.
-            sync.onStartUser(0);
-            require(!ready && handler.isEmpty());
-            if (scenario >= 2) {
-                boot(sync);
-                unlock(context, android.os.UserHandle.USER_NULL);
-                unlock(context, 10);
-                require(handler.isEmpty()); // No-user and other-user broadcasts never unlock 0.
-                unlocked = true;
-                fail = scenario == 2;
-                try { unlock(context, 0); require(!fail); }
-                catch (IllegalStateException e) { require(fail && e.getMessage().contains("snapshot")); }
-            } else boot(sync);
-            require(!ready);
-            if (fail) {
-                fail = false;
-                while (!handler.isEmpty()) handler.remove().run();
-                require(!ready && replays == 0); continue;
-            }
-            require(replays == 1);
-            // Commit an account change while the replay's refresh is still queued.
-            accounts = 2;
-            fail = scenario == 3;
-            handler.remove().run(); // Original onUnlockUser handler log.
-            try { handler.remove().run(); require(!fail); }
-            catch (IllegalStateException e) { require(fail && !ready); handler.clear(); continue; }
-            require(observed == 2 && !ready); // Refresh is insufficient: barrier must run.
-            if (scenario == 5) alive = false; // Death between refresh and completion.
-            try { handler.remove().run(); require(alive && ready); }
-            catch (IllegalStateException e) { require(!alive && !ready); }
-            if (alive) { unlock(context, 0); require(handler.isEmpty() && replays == 1); }
+        // Startup snapshot, including a restart after unlock and a broadcast queued at construction.
+        for (int attempt = 0; attempt < 2; attempt++) {
+            unlocked = true;
+            var sync = start(context, host);
+            boot(sync);
+            require(replays == 1 && !ready);
+            original.broadcast(context, 0); // First possible main-looper receiver execution.
+            drain();
+            require(ready && acknowledgements == 1);
+            lifecycle.onUserUnlocking(0);
+            drain();
+            require(replays == 1 && acknowledgements == 1);
         }
+        // Native late unlock delivers the synchronous callback before dispatch to the original.
+        unlocked = false;
+        var sync = start(context, host);
+        boot(sync);
+        require(handler.isEmpty());
+        lifecycle.onUserUnlocking(android.os.UserHandle.USER_NULL);
+        lifecycle.onUserUnlocking(10);
+        require(handler.isEmpty());
+        unlocked = true;
+        lifecycle.onUserUnlocking(0);
+        require(replays == 1 && original.mUnlockedUsers.get(0));
+        original.broadcast(context, 0);
+        accounts = 2; // Account change before the original handler refresh.
+        drain();
+        require(ready && observed == 2 && acknowledgements == 1);
+        // Unlock during construction/startup blocks native dispatch until phase delivery.
+        unlocked = false;
+        sync = start(context, host);
+        unlocked = true;
+        var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        Thread nativeUnlock = new Thread(() -> {
+            entered.countDown();
+            try { lifecycle.onUserUnlocking(0); original.broadcast(context, 0); }
+            catch (Throwable error) { failure.set(error); }
+        });
+        nativeUnlock.start(); entered.await();
+        require(!ready && handler.isEmpty());
+        boot(sync);
+        nativeUnlock.join(5000);
+        require(!nativeUnlock.isAlive() && failure.get() == null && replays == 1);
+        drain(); require(ready && acknowledgements == 1);
+        // Death after delivery but before completion: the old completion cannot acknowledge.
+        unlocked = false;
+        sync = start(context, host); boot(sync);
+        unlocked = true; lifecycle.onUserUnlocking(0);
+        handler.remove().run(); handler.remove().run();
+        alive = false;
+        try { handler.remove().run(); throw new AssertionError(); }
+        catch (IllegalStateException expected) { require(!ready); }
+        // Replacement sees the native snapshot before any queued broadcast can run.
+        sync = start(context, host); boot(sync);
+        original.broadcast(context, 0); drain();
+        require(ready && acknowledgements == 1);
+        // Snapshot/account failure is not converted to readiness.
+        unlocked = false;
+        sync = start(context, host); boot(sync);
+        unlocked = true; fail = true;
+        try { lifecycle.onUserUnlocking(0); throw new AssertionError(); }
+        catch (IllegalStateException expected) { require(!ready && replays == 0); }
+        handler.clear(); fail = false;
     }
 }

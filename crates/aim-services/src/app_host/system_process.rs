@@ -54,6 +54,18 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::ATTACH_SYSTEM_USER_LIFECYCLE => {
+                let a = sp::AttachSystemUserLifecycle::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let unlocked = self.host.attach_system_user_lifecycle(
+                        call.sender_pid,
+                        a.generation,
+                        a.lifecycle,
+                    )?;
+                    sp::write_attach_system_user_lifecycle_reply(&mut p, unlocked);
+                    Ok(())
+                })
+            }
             sp::GET_SYNC_ADAPTER_STANDBY_BUCKET => {
                 let a = sp::GetSyncAdapterStandbyBucket::read(&mut call.data)?;
                 system().and_then(|()| {

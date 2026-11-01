@@ -9,56 +9,64 @@ import com.android.server.content.PrivateContentService;
 final class SyncOwnerStartup {
     private final ISystemProcess host;
     private final long generation;
-    private final PrivateContentService content;
-    private boolean started, booted, replaying;
-    private SyncOwnerStartup(Context context, ISystemProcess host, long generation,
-            PrivateContentService content) {
+    private final java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(1);
+    private PrivateContentService content;
+    private boolean started, booted, unlocked, replaying;
+    private SyncOwnerStartup(ISystemProcess host, long generation) {
         this.host = host;
         this.generation = generation;
-        this.content = content;
-        // Subscribe before the native snapshot; USER_UNLOCKED is not sticky.
-        context.registerReceiverAsUser(new android.content.BroadcastReceiver() {
-            @Override public void onReceive(Context c, android.content.Intent intent) {
-                if (android.content.Intent.ACTION_USER_UNLOCKED.equals(intent.getAction())
-                        && intent.getIntExtra(android.content.Intent.EXTRA_USER_HANDLE,
-                                android.os.UserHandle.USER_NULL) == 0) replay();
-            }
-        }, android.os.UserHandle.ALL,
-                new android.content.IntentFilter(android.content.Intent.ACTION_USER_UNLOCKED),
-                null, null);
     }
     void onBootPhase(int phase) {
         content.onBootPhase(phase);
         if (phase == com.android.server.SystemService.PHASE_BOOT_COMPLETED) booted = true;
-        replay();
+        ready();
     }
     void onStartUser(int user) {
         content.onStartUser(user);
         if (user == 0) started = true;
+        ready();
+    }
+    private void ready() {
+        if (!started || !booted) return;
+        // A restart replays before the main looper can deliver any queued receiver.
+        if (unlocked) replay();
+        ready.countDown();
+    }
+    private void onUserUnlocking(int userId) {
+        if (userId != 0) return;
+        try { ready.await(); }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("system lifecycle interrupted", e);
+        }
         replay();
     }
-    private void replay() {
-        if (!started || !booted || replaying) return;
-        try {
-            if (!host.isSyncOwnerUserUnlocked(generation)) return;
-            replaying = true;
-            content.onUnlockUser(0);
-            content.replaySyncState(0, () -> {
-                try { host.completeSyncOwnerReplay(generation); }
-                catch (android.os.RemoteException e) { throw e.rethrowFromSystemServer(); }
-            });
-        } catch (android.os.RemoteException e) { throw e.rethrowFromSystemServer(); }
+    private synchronized void replay() {
+        if (replaying) return;
+        replaying = true;
+        content.onUnlockUser(0);
+        content.replaySyncState(0, () -> {
+            try { host.completeSyncOwnerReplay(generation); }
+            catch (android.os.RemoteException e) { throw e.rethrowFromSystemServer(); }
+        });
     }
     static SyncOwnerStartup start(Context context, ISystemProcess host) throws android.os.RemoteException {
         var accounts = java.util.Objects.requireNonNull(host.getSyncAccounts());
         LocalServices.addService(AccountManagerInternal.class,
                 new NativeAccountManagerInternal(context, accounts));
         long generation = host.getSyncOwnerGeneration();
+        var startup = new SyncOwnerStartup(host, generation);
+        // Subscribe before constructing the original manager and its receivers. A concurrent
+        // native unlock waits for startup, then for lifecycle delivery, before broadcasting.
+        startup.unlocked = host.attachSystemUserLifecycle(generation, new ISystemUserLifecycle.Stub() {
+            @Override public void onUserUnlocking(int userId) { startup.onUserUnlocking(userId); }
+        });
         var content = new PrivateContentService(context, new NativeSyncAccounts(accounts));
+        startup.content = content;
         host.attachSyncOwner(generation, content);
         if (!host.isSyncOwnerAttached(generation))
             throw new IllegalStateException("private sync owner died during construction (#1460)");
         host.attachSyncAdapterQueries(new SyncAdapterQueries(host, content::getSyncAdapterTypes));
-        return new SyncOwnerStartup(context, host, generation, content);
+        return startup;
     }
 }

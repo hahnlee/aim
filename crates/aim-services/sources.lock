@@ -585,6 +585,7 @@ OWN_INTERFACES=(
   "dev.aim.server.IInputFilterCallback|java/device-services/aidl/dev/aim/server/IInputFilterCallback.aidl|*"
   "dev.aim.server.IAccessibilityWindowCallback|java/device-services/aidl/dev/aim/server/IAccessibilityWindowCallback.aidl|*"
   "dev.aim.server.ISystemProcess|java/device-services/aidl/dev/aim/server/ISystemProcess.aidl|*"
+  "dev.aim.server.ISystemUserLifecycle|java/device-services/aidl/dev/aim/server/ISystemUserLifecycle.aidl|*"
   "dev.aim.server.IProviderQueries|java/device-services/aidl/dev/aim/server/IProviderQueries.aidl|*"
   "dev.aim.server.IDexUseBridge|java/device-services/aidl/dev/aim/server/IDexUseBridge.aidl|*"
   "dev.aim.server.IDexUsePackages|java/device-services/aidl/dev/aim/server/IDexUsePackages.aidl|*"

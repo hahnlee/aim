@@ -1,6 +1,7 @@
 package dev.aim.server;
 import android.os.IBinder;
 interface ISystemProcess {
+    boolean attachSystemUserLifecycle(long generation, ISystemUserLifecycle lifecycle) throws android.os.RemoteException;
     Object getSyncAccounts();
     long getSyncOwnerGeneration();
     void attachSyncOwner(long generation, IBinder owner);
@@ -36,6 +37,11 @@ interface ISystemProcess {
     abstract class Stub {
         public static ISystemProcess asInterface(IBinder binder) {
             return new ISystemProcess() {
+                public boolean attachSystemUserLifecycle(long generation, ISystemUserLifecycle lifecycle) {
+                    if (generation != 7 || !SyncOwnerLifecycleTest.alive) throw new IllegalStateException("dead generation");
+                    SyncOwnerLifecycleTest.lifecycle = lifecycle;
+                    return SyncOwnerLifecycleTest.unlocked;
+                }
                 public Object getSyncAccounts() { return this; }
                 public long getSyncOwnerGeneration() { return 7; }
                 public void attachSyncOwner(long generation, IBinder owner) {
@@ -53,7 +59,7 @@ interface ISystemProcess {
                 }
                 public void completeSyncOwnerReplay(long generation) {
                     if (generation != 7 || !SyncOwnerLifecycleTest.alive) throw new IllegalStateException("dead generation");
-                    SyncOwnerLifecycleTest.ready = true;
+                    SyncOwnerLifecycleTest.acknowledge();
                 }
                 public IBinder getInternalServiceRepository() { throw new AssertionError(); }
                 public IBinder getPackageInternalHost() { throw new AssertionError(); }
