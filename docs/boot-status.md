@@ -541,8 +541,12 @@ events with policy flags and re-injects asynchronously. Stream cancellation/queu
 retirement and the separate accessibility-tool motion marker remain #2529 gaps.
 Native `activity_task` serves `startActivityAsUser` and `startActivityWithConfig`
 through the shared starter (#2578): package/isolation/cross-user checks and result
-codes. Unserved start flags, configuration changes and the other start entries
-return `START_CANCELED` instead of throwing into aim-system.
+codes. `startActivities` and multi-intent PendingIntents share ordered preflight
+and task admission before process attachment (#2583). Debug/profiler and
+voice/assistant/game-session/recents starts retain `START_CANCELED` with diagnostics
+naming their missing owners. Only-if-needed, global configuration changes and
+AsCaller remain cancelled; AndWait and NextMatching remain unimplemented (#2583).
+Host-only checks cover these paths; no guest boot was run.
 The activity shell serves ordinary `start`/`start-activity` through original Intent
 syntax and the native starter; wait/profiler/options paths remain #2511 errors.
 Accessibility window records now declare all 72 bytes, including Binder stability

@@ -27,9 +27,21 @@ use crate::package::info::ActivityInfo;
 
 /// `ActivityManager.LOCK_TASK_MODE_NONE`.
 const LOCK_TASK_MODE_NONE: i32 = 0;
-/// `ActivityManager.START_FLAG_*`, which `ActivityStarter` reads (not the
-/// `FLAG_ACTIVITY_NEW_TASK` that `ContextImpl.startActivityAsUser` passes).
-const START_FLAGS: i32 = 0x1f;
+/// Missing owners of `ActivityManager.START_FLAG_*` and `ProfilerInfo`.
+/// `ContextImpl.startActivityAsUser` also passes FLAG_ACTIVITY_NEW_TASK.
+pub(super) fn unsupported_start(flags: i32, profiler: bool) -> Option<&'static str> {
+    if flags & 0x1a != 0 && (profiler || flags & 4 != 0) {
+        Some("activity start requires debugger/profiler owners (#2583)")
+    } else if profiler || flags & 4 != 0 {
+        Some("activity start requires a profiler/allocation-tracker owner (#2583)")
+    } else if flags & 0x1a != 0 {
+        Some("activity start requires a debugger owner (#2583)")
+    } else if flags & 1 != 0 {
+        Some("START_FLAG_ONLY_IF_NEEDED requires ActivityStarter support (#2583)")
+    } else {
+        None
+    }
+}
 /// `ActivityManager.PROCESS_STATE_UNKNOWN` and `PROCESS_STATE_CACHED_EMPTY`:
 /// the resume's process state, and the launch's before the process state
 /// is reported.
@@ -164,6 +176,7 @@ pub(super) struct StyleKey {
 /// The activities, by their token, and their tasks' stack.
 #[derive(Default)]
 pub struct Activities {
+    pub(super) starts: Mutex<()>,
     pub(super) records: Mutex<HashMap<u64, ActivityRecord>>,
     next_ident: Mutex<i32>,
     pub(super) stack: Mutex<super::activity_stack::Stack>,
@@ -869,8 +882,7 @@ impl Service for ActivityTaskManager {
                 let a =
                     atm::StartActivity::<RawIntent, ProfilerInfo, RawBundle>::read(&mut call.data)
                         .map_err(|_| BAD_VALUE)?;
-                let unsupported = (a.profiler_info.is_some() || a.flags & START_FLAGS != 0)
-                    .then_some("a start with flags or a profiler");
+                let unsupported = unsupported_start(a.flags, a.profiler_info.is_some());
                 start!(a, None, unsupported)
             }
             atm::START_ACTIVITY_AS_USER => {
@@ -878,8 +890,7 @@ impl Service for ActivityTaskManager {
                     &mut call.data,
                 )
                 .map_err(|_| BAD_VALUE)?;
-                let unsupported = (a.profiler_info.is_some() || a.flags & START_FLAGS != 0)
-                    .then_some("a start with flags or a profiler");
+                let unsupported = unsupported_start(a.flags, a.profiler_info.is_some());
                 start!(a, Some(a.user_id), unsupported)
             }
             atm::START_ACTIVITY_WITH_CONFIG => {
@@ -896,17 +907,35 @@ impl Service for ActivityTaskManager {
                     },
                     None => false,
                 };
-                let unsupported = (a.start_flags & START_FLAGS != 0 || changes)
-                    .then_some("a start with flags or a configuration change");
+                let unsupported = unsupported_start(a.start_flags, false)
+                    .or_else(|| changes.then_some("a global configuration change (#2583)"));
                 start!(a, Some(a.user_id), unsupported)
             }
-            // Starts with another identity, several intents or a session.
-            atm::START_ACTIVITY_AS_CALLER
-            | atm::START_ACTIVITIES
-            | atm::START_VOICE_ACTIVITY
+            atm::START_VOICE_ACTIVITY
             | atm::START_ASSISTANT_ACTIVITY
             | atm::START_ACTIVITY_FROM_GAME_SESSION
             | atm::START_ACTIVITY_FROM_RECENTS => {
+                call.data
+                    .enforce_interface(atm::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let owner = match call.code {
+                    atm::START_VOICE_ACTIVITY | atm::START_ASSISTANT_ACTIVITY => {
+                        "activity start requires a voice interaction service owner (#2583)"
+                    }
+                    atm::START_ACTIVITY_FROM_GAME_SESSION => {
+                        "activity start requires a game session service owner (#2583)"
+                    }
+                    _ => "activity start requires a recents/task restoration owner (#2583)",
+                };
+                self.0.unimplemented_named("activity_task", owner);
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                p.write_i32(super::activity_start::START_CANCELED);
+                Ok(p)
+            }
+            atm::START_ACTIVITIES => super::activity_multi::transact(&self.0, call),
+            // Starts with another identity (#2583).
+            atm::START_ACTIVITY_AS_CALLER => {
                 call.data
                     .enforce_interface(atm::DESCRIPTOR)
                     .map_err(|_| BAD_VALUE)?;

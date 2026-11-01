@@ -81,6 +81,7 @@ pub struct Activity {
     pub token: u64,
     pub task: i32,
     pub start_seq: i64,
+    pub(super) pending: bool,
     /// `mActivityComponent`, `package/class`: its class, or an alias's
     /// target.
     pub component: String,
@@ -120,6 +121,7 @@ impl Activity {
             token,
             task,
             start_seq,
+            pending: false,
             component: component.to_string(),
             launch_mode,
             user,
@@ -832,7 +834,7 @@ impl Stack {
     /// (`pauseBackTasks`); once none is pausing, the focused task's top
     /// activity is launched or resumed, then those of the other visible
     /// tasks. Whether one was.
-    fn resume_focused(&mut self, user_leaving: bool, out: &mut Vec<Command>) -> bool {
+    pub(super) fn resume_focused(&mut self, user_leaving: bool, out: &mut Vec<Command>) -> bool {
         let hidden: Vec<u64> = self
             .activities
             .iter()
@@ -862,7 +864,7 @@ impl Stack {
     /// the task first, else, with no activity pausing, launch or resume
     /// the top one. Whether it was.
     fn resume_top(&mut self, task: i32, user_leaving: bool, out: &mut Vec<Command>) -> bool {
-        let Some(top) = self.top(task).map(|a| a.token) else {
+        let Some(top) = self.top(task).filter(|a| !a.pending).map(|a| a.token) else {
             return false;
         };
         let others: Vec<u64> = self
@@ -1277,6 +1279,7 @@ impl Stack {
             }
             if !removed && !a.finishing && a.never_resumed {
                 a.start_seq = 0;
+                a.pending = false;
                 a.state = State::Initializing;
                 true
             } else {
