@@ -83,6 +83,8 @@ const STATE2_GPS_SIGNAL_QUALITY_SHIFT: i32 = 7;
 const GNSS_SIGNAL_QUALITY_NONE: i32 = 2;
 /// `HistoryItem.EVENT_*`.
 pub const EVENT_NONE: i32 = 0;
+pub const EVENT_SYNC: i32 = 0x04;
+pub const EVENT_TEMP_WHITELIST: i32 = 0x11;
 pub const EVENT_STATE_CHANGE: i32 = 0x15;
 pub const EVENT_FLAG_START: i32 = 0x8000;
 pub const EVENT_FLAG_FINISH: i32 = 0x4000;
@@ -866,6 +868,19 @@ impl History {
         self.write_item(now);
     }
 
+    /// `recordEvent`; `writeHistoryTag` normalizes a null name to empty.
+    pub fn record_event(&mut self, now: i64, code: i32, name: Option<&str>, uid: i32) {
+        if name.is_none() {
+            eprintln!("app host: batterystats: writeHistoryTag called with null name");
+        }
+        self.cur.event_code = code;
+        self.cur.event_tag = Some(HistoryTag {
+            string: name.unwrap_or_default().into(),
+            uid,
+        });
+        self.write_item(now);
+    }
+
     /// `recordStateStartEvent`/`recordStateStopEvent`, the latter as
     /// `on` false, with their state change event if `event` names it.
     pub fn record_state(&mut self, now: i64, flags: i32, on: bool, event: Option<(i32, &str)>) {
@@ -1082,6 +1097,22 @@ pub(super) mod tests {
         pub(in crate::app_host) fn buffer(&self) -> &[u8] {
             &self.buffer
         }
+    }
+
+    pub(in crate::app_host) fn events(buffer: &[u8]) -> Vec<(i32, String, i32)> {
+        let mut tags = HashMap::new();
+        decode(buffer)
+            .into_iter()
+            .filter_map(|item| {
+                let (code, index, tag) = item.event?;
+                let key = index & !TAG_FIRST_OCCURRENCE_FLAG;
+                if let Some(tag) = tag {
+                    tags.insert(key, tag);
+                }
+                let (name, uid) = tags[&key].clone();
+                Some((code, name, uid))
+            })
+            .collect()
     }
 
     pub(in crate::app_host) fn decode(buffer: &[u8]) -> Vec<Decoded> {

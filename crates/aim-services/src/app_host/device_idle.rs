@@ -557,26 +557,33 @@ impl DeviceIdle {
         let _change = self.temp_changes.lock().unwrap();
         let now = self.host.temp_allowlist_now()?;
         self.with(|_| ())?;
-        self.host.temp_allowlist_for_fgs(uid, allowance.clone())?;
-        let (ids, new) = self.with(|l| {
-            let app_id = uid % PER_USER_RANGE;
-            let end_ms = now.saturating_add(allowance.duration_ms);
-            let new = !l.temp.contains_key(&app_id);
-            if new {
-                l.timeout_order += 1;
-            }
-            let entry = l.temp.entry(app_id).or_insert_with(|| TempEntry {
-                end_ms,
-                check_at_ms: end_ms,
-                order: l.timeout_order,
-                uid,
-                reason: allowance.reason.clone(),
-                allowance: allowance.clone(),
-            });
-            entry.end_ms = end_ms;
-            entry.allowance = allowance.clone();
-            (l.temp.keys().copied().collect(), new)
-        })?;
+        let (ids, new) = self.battery_stats().temp_allowlist_history(
+            || self.host.temp_allowlist_for_fgs(uid, allowance.clone()),
+            |record| {
+                self.with(|l| {
+                    let app_id = uid % PER_USER_RANGE;
+                    let end_ms = now.saturating_add(allowance.duration_ms);
+                    let new = !l.temp.contains_key(&app_id);
+                    if new {
+                        l.timeout_order += 1;
+                    }
+                    let entry = l.temp.entry(app_id).or_insert_with(|| TempEntry {
+                        end_ms,
+                        check_at_ms: end_ms,
+                        order: l.timeout_order,
+                        uid,
+                        reason: allowance.reason.clone(),
+                        allowance: allowance.clone(),
+                    });
+                    entry.end_ms = end_ms;
+                    entry.allowance = allowance.clone();
+                    if new {
+                        record(true, allowance.reason.as_deref(), uid);
+                    }
+                    (l.temp.keys().copied().collect(), new)
+                })
+            },
+        )?;
         if new {
             self.host.device_idle_temp_changed(ids, None);
             if sync {
@@ -588,6 +595,12 @@ impl DeviceIdle {
             self.post(Work::Temp);
         }
         Ok(())
+    }
+
+    fn battery_stats(&self) -> &Arc<super::battery_stats::BatteryStats> {
+        self.host
+            .battery_stats
+            .get_or_init(|| Arc::new(super::battery_stats::BatteryStats::new(&self.host)))
     }
 
     pub fn register_temp_allowlist_listener(&self, listener: Arc<dyn TempAllowlistChangeListener>) {
@@ -655,29 +668,36 @@ impl DeviceIdle {
 
     fn expire_at(&self, now: i64) -> Result<Option<i64>, Exception> {
         let _change = self.temp_changes.lock().unwrap();
-        let (next, changes) = self.with(|l| {
-            let mut changes = Vec::new();
-            let mut due: Vec<_> = l
-                .temp
-                .iter()
-                .filter(|(_, e)| e.check_at_ms <= now)
-                .map(|(id, e)| (e.check_at_ms, e.order, *id))
-                .collect();
-            due.sort_unstable();
-            for (_, _, id) in due {
-                let entry = l.temp.get_mut(&id).unwrap();
-                if entry.end_ms > now {
-                    entry.check_at_ms = entry.end_ms;
-                    l.timeout_order += 1;
-                    entry.order = l.timeout_order;
-                } else {
-                    let uid = entry.uid;
-                    l.temp.remove(&id);
-                    changes.push((uid, l.temp.keys().copied().collect()));
-                }
-            }
-            (l.temp.values().map(|e| e.check_at_ms).min(), changes)
-        })?;
+        let (next, changes) = self.battery_stats().temp_allowlist_history(
+            || Ok(()),
+            |record| {
+                self.with(|l| {
+                    let mut changes = Vec::new();
+                    let mut due: Vec<_> = l
+                        .temp
+                        .iter()
+                        .filter(|(_, e)| e.check_at_ms <= now)
+                        .map(|(id, e)| (e.check_at_ms, e.order, *id))
+                        .collect();
+                    due.sort_unstable();
+                    for (_, _, id) in due {
+                        let entry = l.temp.get_mut(&id).unwrap();
+                        if entry.end_ms > now {
+                            entry.check_at_ms = entry.end_ms;
+                            l.timeout_order += 1;
+                            entry.order = l.timeout_order;
+                        } else {
+                            let uid = entry.uid;
+                            // Pinned removal uses appId; addition uses the full uid.
+                            record(false, entry.reason.as_deref(), id);
+                            l.temp.remove(&id);
+                            changes.push((uid, l.temp.keys().copied().collect()));
+                        }
+                    }
+                    (l.temp.values().map(|e| e.check_at_ms).min(), changes)
+                })
+            },
+        )?;
         for (uid, ids) in changes {
             self.host.device_idle_temp_changed(ids, Some(uid));
             self.post(Work::NetworkTemp(uid, false));
