@@ -5,6 +5,15 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+The native `window` service serves text and Android 16 proto dumps from its
+task/activity/window owners (#2605), with hash-pinned schemas and no invented
+IME/policy fields. Three dump tests, the configuration round-trip and host/image
+builds pass; all eight saved live protos decode with the pinned schema. The eight
+diagnostic WM classes finish 0 pass / 100 fail / 0 skip, now in shared setup's
+missing `IActivityTaskManager.getWindowOrganizerController`; installer #2606 and
+#1173 remain. One earlier fresh-data boot failed default-grant owner readiness
+before its class was retried on fresh data (2026-11-01).
+
 Regular-file writes and admitted fallocate allocation/in-file hole punching clear
 set-ID modes without CAP_FSETID (#779, #2515); a shared generation invalidates
 cached modes. Host syscall/metadata checks pass; no guest boot was run (2026-10-31).
