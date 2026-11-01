@@ -63,6 +63,7 @@ fn fixture(f: impl FnOnce(&Arc<AppHost>)) {
     fixture_flags(false, f);
 }
 fn fixture_flags(api: bool, f: impl FnOnce(&Arc<AppHost>)) {
+    let _image = aim_storage::system::ImageLease::read(&aim_paths::system_image()).unwrap();
     crate::system::with_discovery_binders_flags(
         &[
             (API, api),
@@ -176,6 +177,48 @@ fn startup_raw_foreground_and_runtime_evaluation_are_distinct() {
         assert_eq!(h.restriction_level(uid(h)).unwrap(), 50);
         appop(h, appops_service::MODE_ALLOWED);
         assert_eq!(h.restriction_level(uid(h)).unwrap(), 30);
+    });
+}
+
+#[test]
+fn shutdown_drains_access_writes_and_rejects_late_restriction_callbacks() {
+    fixture(|h| {
+        standby(h, 10, DEFAULT);
+        appop(h, appops_service::MODE_IGNORED);
+        assert_eq!(h.restriction_level(uid(h)).unwrap(), 50);
+        let access = h
+            .data()
+            .unwrap()
+            .join("misc_de/0/apexdata/com.android.permission/access.abx");
+        let saving = h.app_restrictions.0.lock().unwrap();
+        let (started, start) = std::sync::mpsc::channel();
+        let (finished, finish) = std::sync::mpsc::channel();
+        let host = h.clone();
+        let shutdown = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            host.shutdown_persistence().unwrap();
+            finished.send(()).unwrap();
+        });
+        start.recv().unwrap();
+        assert!(
+            finish.try_recv().is_err(),
+            "shutdown must wait for the active save"
+        );
+        drop(saving);
+        finish.recv().unwrap();
+        shutdown.join().unwrap();
+        assert!(
+            access.is_file(),
+            "shutdown must flush the queued access snapshot"
+        );
+        std::fs::remove_dir_all(h.data().unwrap()).unwrap();
+        assert!(h.restrictions_changed(None).is_err());
+        assert!(h.start_app_restrictions().is_err());
+        h.shutdown_persistence().unwrap();
+        assert!(
+            !h.data().unwrap().exists(),
+            "late callbacks must not recreate data"
+        );
     });
 }
 

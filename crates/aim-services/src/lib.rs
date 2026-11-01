@@ -414,6 +414,13 @@ impl NativeServices {
         }
         shutdown.phase = ShutdownPhase::Closing;
         if !shutdown.package {
+            if let Some(host) = &self.app_host {
+                if let Err(error) = host.shutdown_persistence() {
+                    shutdown
+                        .errors
+                        .push(format!("app host persistence shutdown: {}", error.message));
+                }
+            }
             if let Some(owner) = self.system.native_permissions() {
                 if let Err(error) = owner.shutdown() {
                     shutdown

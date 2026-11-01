@@ -63,6 +63,7 @@ struct Fixture {
     original: Vec<Arc<LocalProcess>>,
     system: Arc<System>,
     root: PathBuf,
+    host: Option<Arc<crate::app_host::AppHost>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -119,6 +120,7 @@ impl Fixture {
             original: Vec::new(),
             system,
             root,
+            host: None,
         }
     }
     fn attach(&mut self) -> Arc<crate::package::bootstrap::Bridge> {
@@ -154,6 +156,13 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if let Some(host) = &self.host {
+            host.shutdown_persistence().unwrap();
+        }
+        if let Ok(bridge) = self.system.package_bootstrap() {
+            self.system.close_package_boot_session(&bridge).unwrap();
+            self.system.detach_package_bootstrap(&bridge).unwrap();
+        }
         for original in &self.original {
             self.driver.release(original.proc_handle());
         }

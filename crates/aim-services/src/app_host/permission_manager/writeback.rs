@@ -13,6 +13,7 @@ struct Pending {
     first: Option<Instant>,
     next: Option<Instant>,
     stopped: bool,
+    close_error: Option<Exception>,
 }
 #[derive(Default)]
 pub(super) struct Writer {
@@ -93,6 +94,12 @@ impl Writer {
         write: impl FnOnce() -> Result<(), Exception>,
     ) -> Result<(), Exception> {
         let mut pending = self.shared.0.lock().unwrap();
+        if pending.stopped {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "permission writer stopped",
+            ));
+        }
         write()?;
         pending.write = None;
         pending.first = None;
@@ -108,7 +115,12 @@ impl Writer {
     pub(super) fn close(&self) -> Result<(), Exception> {
         let mut worker = self.worker.lock().unwrap();
         let mut pending = self.shared.0.lock().unwrap();
+        if pending.stopped {
+            return pending.close_error.clone().map_or(Ok(()), Err);
+        }
         let result = pending.flush();
+        pending.write = None;
+        pending.close_error = result.as_ref().err().cloned();
         pending.stopped = true;
         self.shared.1.notify_all();
         drop(pending);
@@ -164,6 +176,11 @@ mod tests {
         writer.close().unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 100);
         assert!(writer.schedule(Box::new(|| Ok(()))).is_err());
+        assert!(
+            writer
+                .synchronize(|| panic!("write after shutdown"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -181,6 +198,28 @@ mod tests {
         assert!(writer.shared.0.lock().unwrap().write.is_some());
         writer.synchronize(|| Ok(())).unwrap();
         writer.close().unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_close_is_terminal_even_when_the_owner_is_retained() {
+        let writer = Writer::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        writer
+            .schedule(Box::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err(Exception::new(EX_ILLEGAL_STATE, "disk failure"))
+            }))
+            .unwrap();
+        assert_eq!(writer.close().unwrap_err().message, "disk failure");
+        assert_eq!(writer.close().unwrap_err().message, "disk failure");
+        assert!(
+            writer
+                .synchronize(|| panic!("write after failed shutdown"))
+                .is_err()
+        );
+        drop(writer);
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

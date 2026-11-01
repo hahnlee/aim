@@ -48,13 +48,27 @@ impl ImageLease {
         let mut name = image.file_name().unwrap_or_default().to_os_string();
         name.push(".use.lock");
         let path = image.with_file_name(name);
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        // A shared flock needs no write access to an existing lock file.
+        let create = || {
+            fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)
+        };
+        let file = if write {
+            create()
+        } else {
+            File::open(&path).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    create()
+                } else {
+                    Err(e)
+                }
+            })
+        }
+        .map_err(|e| format!("{}: {e}", path.display()))?;
         let operation = if write {
             libc::LOCK_EX | libc::LOCK_NB
         } else {
@@ -270,7 +284,11 @@ mod lease_tests {
         fs::create_dir_all(&dir).unwrap();
         let image = dir.join("fixture.dmg");
         let first = ImageLease::read(&image).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let lock = image.with_file_name("fixture.dmg.use.lock");
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
         let second = ImageLease::read(&image).unwrap();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(ImageLease::write(&image).is_err());
         drop(first);
         assert!(ImageLease::write(&image).is_err());
