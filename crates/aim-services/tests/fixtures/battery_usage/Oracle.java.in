@@ -1,0 +1,123 @@
+// Host boundary adapters; the generator inserts hash-pinned AOSP bodies below.
+import java.nio.*;
+import java.nio.file.*;
+import java.io.*;
+import java.util.*;
+
+public class Oracle {
+    static Path directory;
+    static class Parcel {
+        ByteBuffer data = ByteBuffer.allocate(4_000_000).order(ByteOrder.LITTLE_ENDIAN);
+        String file;
+        static Parcel obtain() { return new Parcel(); }
+        static Parcel load(String name) throws Exception {
+            Parcel p = obtain(); p.file = name;
+            byte[] bytes = Files.readAllBytes(directory.resolve(name));
+            p.unmarshall(bytes, 0, bytes.length); return p;
+        }
+        void unmarshall(byte[] bytes, int off, int len) {
+            data = ByteBuffer.wrap(Arrays.copyOfRange(bytes, off, off + len)).order(ByteOrder.LITTLE_ENDIAN);
+        }
+        void setDataPosition(int pos) { data.position(pos); }
+        int readInt() { return data.remaining() >= 4 ? data.getInt() : 0; }
+        // Android's Parcel::readInt64 returns zero on NOT_ENOUGH_DATA without advancing.
+        long readLong() { return data.remaining() >= 8 ? data.getLong() : 0; }
+        double readDouble() { return Double.longBitsToDouble(readLong()); }
+        boolean readBoolean() { return readInt() != 0; }
+        byte[] raw(int len) { byte[] b = new byte[len]; data.get(b); align(); return b; }
+        void align() { data.position((data.position() + 3) & ~3); }
+        String readString8() {
+            int n = readInt(); byte[] b = new byte[n]; data.get(b); data.get(); align();
+            return new String(b, java.nio.charset.StandardCharsets.UTF_8);
+        }
+        String[] readStringArray() {
+            int n = readInt(); if (n != 0) throw new AssertionError("custom names"); return new String[0];
+        }
+        byte[] fd() {
+            int offset = data.position(); data.position(offset + 24);
+            try { return Files.readAllBytes(directory.resolve(file + ".fd-" + offset)); }
+            catch (IOException e) { throw new UncheckedIOException(e); }
+        }
+        byte[] readBlob() { int n = readInt(); return readInt() == 0 ? raw(n) : Arrays.copyOf(fd(), n); }
+        byte[] createByteArray() { return raw(readInt()); }
+        void writeInt(int v) { data.putInt(v); }
+        void writeLong(long v) { data.putLong(v); }
+        void writeDouble(double v) { data.putDouble(v); }
+        void writeBoolean(boolean v) { writeInt(v ? 1 : 0); }
+        void writeStringArray(String[] v) { if (v.length != 0) throw new AssertionError(); writeInt(0); }
+        void writeRaw(byte[] bytes) { data.put(bytes); while ((data.position() & 3) != 0) data.put((byte) 0); }
+        void writeBlob(byte[] bytes) { writeInt(bytes.length); writeInt(0); writeRaw(bytes); }
+        byte[] marshall() { return Arrays.copyOf(data.array(), data.position() == 0 ? data.limit() : data.position()); }
+    }
+    static class Cursor { static final int FIELD_TYPE_NULL = 0; }
+    static class CursorWindow {
+        int rows, columns; byte[] bytes, wire;
+        static CursorWindow newFromParcel(Parcel p) {
+            int start = p.data.position();
+            if (p.readInt() != 0) throw new AssertionError("start position");
+            p.readString8(); CursorWindow w = new CursorWindow();
+            w.rows = p.readInt(); w.columns = p.readInt(); int size = p.readInt();
+            w.bytes = p.readBoolean() ? p.fd() : p.raw(size);
+            w.wire = Arrays.copyOfRange(p.data.array(), start, p.data.position()); return w;
+        }
+        int getNumRows() { return rows; }
+        ByteBuffer slot(int r, int c) {
+            int at = bytes.length - (r * columns + c + 1) * 16;
+            return ByteBuffer.wrap(bytes, at, 16).slice().order(ByteOrder.LITTLE_ENDIAN);
+        }
+        int getType(int r, int c) { return slot(r,c).getInt(); }
+        long getLong(int r, int c) { return getType(r,c) == 0 ? 0 : slot(r,c).getLong(4); }
+        int getInt(int r, int c) { return (int) getLong(r,c); }
+        double getDouble(int r, int c) {
+            return getType(r,c) == 2 ? slot(r,c).getDouble(4) : getLong(r,c);
+        }
+        String getString(int r, int c) { if (getType(r,c) != 0) throw new AssertionError(); return null; }
+        boolean allocRow() { throw new UnsupportedOperationException(); }
+        void putLong(long v,int r,int c) { throw new UnsupportedOperationException(); }
+        void putDouble(double v,int r,int c) { throw new UnsupportedOperationException(); }
+        void putString(String v,int r,int c) { throw new UnsupportedOperationException(); }
+        void writeToParcel(Parcel p,int flags) { p.writeRaw(wire); }
+    }
+    static class SparseArray<T> {
+        TreeMap<Integer,T> entries = new TreeMap<>();
+        SparseArray(int size) {}
+        T get(int i) { return entries.get(i); }
+        void put(int i,T t) { entries.put(i,t); }
+    }
+    static class IntArray {
+        int[] entries; static IntArray wrap(int[] v) { IntArray a = new IntArray(); a.entries=v; return a; }
+        int binarySearch(int v) { return Arrays.binarySearch(entries,v); }
+    }
+    static class Slog { static void e(String t,String s) { throw new AssertionError(s); } static void d(String t,String s) {} }
+    static class Clock { static final Clock SYSTEM_CLOCK = new Clock(); }
+    static class EventLogger {}
+    static class SystemClock { static long uptimeMillis() { return 0; } }
+
+@ORIGINAL@
+
+    static void check(boolean v) { if (!v) throw new AssertionError(); }
+    public static void main(String[] args) throws Exception {
+        directory = Path.of(args[0]);
+        Parcel parcel = Parcel.load("snapshot");
+        BatteryUsageStats stats = new BatteryUsageStats(parcel);
+        check(parcel.data.remaining() == 0);
+        check(stats.mStatsStartTimestampMs == 1234 && stats.mStatsEndTimestampMs == 11234);
+        check(stats.mStatsDurationMs == 10000 && stats.mDischargeDurationMs == 4000);
+        check(stats.mIncludesProcessStateData && !stats.mIncludesScreenStateData && !stats.mIncludesPowerStateData);
+        check(stats.mBatteryConsumerDataLayout.columnCount == 138);
+        check(stats.mUidBatteryConsumers.size() == 2 && stats.mAggregateBatteryConsumers.length == 2);
+        UidBatteryConsumer uid = stats.mUidBatteryConsumers.get(0);
+        check(uid.getUid() == 10001 && uid.getTimeInProcessStateMs(1) == 3000);
+        check(uid.getUsageDurationMillis(3) == 2000 && uid.getUsageDurationMillis(1) == 0);
+        check(uid.getConsumedPower(1) == 0 && uid.getPowerModel(1) == 0);
+        check(!uid.mData.hasValue(uid.getKey(1,0).mPowerColumnIndex));
+        check(stats.mBatteryStatsHistory.mHistoryBuffer.data.limit() > 0);
+        check(stats.mBatteryStatsHistory.mHistoryParcels.size() > 0);
+        // Writer/reader discrepancy at the pin: absent long reads as zero at EOF.
+        check(stats.mPreferredHistoryDurationMs == 0);
+        Parcel out = Parcel.obtain(); stats.writeToParcel(out,0);
+        check(Arrays.equals(Files.readAllBytes(directory.resolve("snapshot")),out.marshall()));
+        Files.write(directory.resolve("roundtrip"),out.marshall());
+        System.out.println("pinned BatteryUsageStats reader/writer, UID/layout, power and history: PASS");
+    }
+}

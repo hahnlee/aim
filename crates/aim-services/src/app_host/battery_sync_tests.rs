@@ -185,6 +185,7 @@ fn sync_battery_and_background_bases_pause_and_resume_running_timers() {
         charging_enforce_level: DEFAULT_BATTERY_CHARGING_ENFORCE_LEVEL,
         reset_high_level: false,
         reset_significant_charge: false,
+        continuous_history: false,
         max_history_buffer: 128 * 1024,
         max_history_size: 4 * 1024 * 1024,
     };

@@ -52,6 +52,9 @@ use super::kept::RawIntent;
 use super::{AppHost, reply};
 use crate::location::parcels::WorkSource;
 
+#[path = "battery_usage.rs"]
+mod usage;
+
 /// `BatteryManager.BATTERY_STATUS_UNKNOWN`, `BATTERY_STATUS_FULL`,
 /// `BATTERY_PLUGGED_NONE`.
 const UPDATE_DEVICE_STATS: &str = "android.permission.UPDATE_DEVICE_STATS";
@@ -665,6 +668,11 @@ impl LevelStepTracker {
 #[derive(Debug, Default)]
 struct Stats {
     wakes: wake::WakeStats,
+    session_start: i64,
+    session_clock: i64,
+    discharge_uah: i64,
+    charge_sample_uah: Option<i32>,
+    screen_on: TimeBase,
     have_level: bool,
     on_battery: bool,
     level: i32,
@@ -723,6 +731,7 @@ struct Config {
     /// `BatteryStatsConfig`'s resets on unplugging.
     reset_high_level: bool,
     reset_significant_charge: bool,
+    continuous_history: bool,
     /// `Constants.MAX_HISTORY_BUFFER` and `MAX_HISTORY_SIZE`, bytes.
     max_history_buffer: usize,
     max_history_size: u64,
@@ -761,6 +770,14 @@ impl Stats {
             (self.last_charge_step_level, self.last_discharge_step_level) = (level, level);
             self.init_step_mode = STEP_MODE_SCREEN_ON;
         }
+        if self.on_battery
+            && charge_uah >= 0
+            && let Some(last) = self.charge_sample_uah
+            && last > charge_uah
+        {
+            self.discharge_uah += i64::from(last - charge_uah);
+        }
+        self.charge_sample_uah = (charge_uah >= 0).then_some(charge_uah);
         let old_status = self.status;
         if let Some(h) = &mut self.history
             && (on_battery || level < 96 && status != STATUS_UNKNOWN)
@@ -890,6 +907,7 @@ impl Stats {
                 || c.reset_significant_charge && self.discharge_plug_level < 20 && level >= 80
                 || self.high_discharge_since_charge >= 200;
             if reset {
+                self.reset_session(now, uptime(), !c.continuous_history);
                 self.discharge_steps.init();
                 self.high_discharge_since_charge = 0;
             }
@@ -904,6 +922,9 @@ impl Stats {
             if let Some(h) = &mut self.history {
                 if reset {
                     h.start_recording(now, true);
+                    for (code, name, uid) in &self.active_events {
+                        h.record_event(now, *code, name.as_deref(), *uid);
+                    }
                 }
                 h.record_battery_state(now, level, false);
             }
@@ -936,6 +957,8 @@ impl Stats {
     /// and the uids' background time bases.
     fn update_time_base(&mut self, unplugged: bool, now: i64) {
         self.wakes.bases(unplugged, now);
+        self.screen_on
+            .set_running(unplugged && !self.wakes.screen_off, now * 1000);
         let Some(base_us) = self.on_battery_time_base.set_running(unplugged, now * 1000) else {
             return;
         };
@@ -1409,6 +1432,7 @@ impl BatteryStats {
                 charging_enforce_level: DEFAULT_BATTERY_CHARGING_ENFORCE_LEVEL,
                 reset_high_level: false,
                 reset_significant_charge: false,
+                continuous_history: false,
                 max_history_buffer: DEFAULT_MAX_HISTORY_BUFFER_KB as usize * 1024,
                 max_history_size: DEFAULT_MAX_HISTORY_SIZE as u64,
             })
@@ -1419,6 +1443,8 @@ impl BatteryStats {
 
     pub fn new(host: &Arc<AppHost>) -> Self {
         let stats = Stats {
+            session_start: elapsed_realtime(),
+            session_clock: usage::wall_time(),
             charging: true, // BatteryStatsImpl.mCharging's initial state.
             discharge_plug_level: -1,
             time_to_full_seconds: -1,
@@ -1551,6 +1577,7 @@ impl BatteryStats {
             reset_significant_charge: resource(
                 "config_batteryStatsResetOnUnplugAfterSignificantCharge",
             ),
+            continuous_history: host.flag("com.android.server.power.optimization.extended_battery_history_continuous_collection_enabled").ok()?,
             max_history_buffer: max_history_buffer.max(0) as usize,
             max_history_size: max_history_size.max(0) as u64,
         };
@@ -1820,6 +1847,9 @@ impl Service for BatteryStats {
         let mut p = Parcel::new();
         let caller = call.sender_euid as i32;
         let bad = |_| BAD_VALUE;
+        if call.code == bs::GET_BATTERY_USAGE_STATS {
+            return self.usage(call);
+        }
         // The notes; the audio ones are one-way.
         let noted = match call.code {
             bs::NOTE_SYNC_START => {
@@ -2099,11 +2129,12 @@ mod tests {
         ));
     }
 
-    const C: Config = Config {
+    pub(super) const C: Config = Config {
         charged_delay_ms: 900_000,
         charging_enforce_level: 90,
         reset_high_level: true,
         reset_significant_charge: true,
+        continuous_history: false,
         max_history_buffer: 128 * 1024,
         max_history_size: 4 * 1024 * 1024,
     };

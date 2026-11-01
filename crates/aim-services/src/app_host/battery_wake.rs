@@ -15,12 +15,72 @@ struct WakeUid {
 pub(super) struct WakeStats {
     battery: TimeBase,
     off: TimeBase,
-    screen_off: bool,
+    pub(super) screen_off: bool,
     uids: BTreeMap<i32, WakeUid>,
     mapped: BTreeMap<i32, (i32, usize)>,
 }
 
 impl WakeStats {
+    /// WakelockPowerCalculator.calculateApp: pooled partial timers, summed
+    /// in microseconds before conversion; full/window locks do not contribute.
+    pub(super) fn usage_durations(&self, now: i64) -> BTreeMap<i32, i64> {
+        let rt = self.off.realtime(now * 1000);
+        let pool = self
+            .uids
+            .values()
+            .flat_map(|u| u.names.timers.values())
+            .filter(|ts| ts[0].as_ref().is_some_and(|t| t.timer.timer.nesting > 0))
+            .count();
+        self.uids
+            .iter()
+            .map(|(&uid, u)| {
+                let us: i64 = u
+                    .names
+                    .timers
+                    .values()
+                    .filter_map(|ts| ts[0].as_ref())
+                    .map(|t| t.timer.timer.run_time_in(rt, pool))
+                    .sum();
+                (uid, us / 1000)
+            })
+            .collect()
+    }
+
+    pub(super) fn reset_usage(&mut self, now: i64) {
+        self.battery.reset_usage(now);
+        self.off.reset_usage(now);
+        self.uids.retain(|_, u| {
+            u.foreground
+                || u.names
+                    .timers
+                    .values()
+                    .flat_map(|t| t.iter().flatten())
+                    .any(|t| t.timer.timer.nesting > 0)
+        });
+        for u in self.uids.values_mut() {
+            u.background.reset_usage(now);
+            for timers in u.names.timers.values_mut() {
+                for (kind, t) in timers.iter_mut().enumerate() {
+                    if let Some(t) = t {
+                        t.reset_usage(
+                            if kind == 0 {
+                                self.off.running
+                            } else {
+                                self.battery.running
+                            },
+                            u.background.running,
+                        );
+                    }
+                }
+            }
+            u.aggregate
+                .reset_usage(self.off.running, u.background.running);
+            for p in u.pids.values_mut() {
+                *p = (p.0, if p.0 > 0 { now } else { 0 }, 0);
+            }
+        }
+    }
+
     fn base(&self, kind: usize) -> &TimeBase {
         if kind == 0 { &self.off } else { &self.battery }
     }
@@ -275,7 +335,9 @@ impl BatteryStats {
         let mut s = self.stats.lock().unwrap();
         s.wakes.screen_off = !on;
         let battery = s.on_battery_time_base.running;
-        s.wakes.bases(battery, elapsed_realtime());
+        let now = elapsed_realtime();
+        s.wakes.bases(battery, now);
+        s.screen_on.set_running(battery && on, now * 1000);
     }
 }
 
@@ -296,6 +358,28 @@ mod tests {
     fn timer<'a>(w: &'a WakeStats, uid: i32, name: &str, kind: usize) -> &'a DualTimer {
         w.uids[&uid].names.timers[name][kind].as_ref().unwrap()
     }
+    #[test]
+    fn reset_rebases_active_pooled_wake_timers() {
+        let mut w = WakeStats {
+            screen_off: true,
+            ..WakeStats::default()
+        };
+        w.bases(true, 0);
+        w.note(true, 10001, &attribution(10001, "a", 0), 1000, 200);
+        w.note(true, 10002, &attribution(10002, "b", 0), 2000, 200);
+        w.reset_usage(5000);
+        assert_eq!(
+            w.usage_durations(7000),
+            BTreeMap::from([(10001, 1000), (10002, 1000)])
+        );
+        w.note(false, 10001, &attribution(10001, "a", 0), 7000, 200);
+        w.note(false, 10002, &attribution(10002, "b", 0), 8000, 200);
+        assert_eq!(
+            w.usage_durations(9000),
+            BTreeMap::from([(10001, 1000), (10002, 2000)])
+        );
+    }
+
     #[test]
     fn wake_pools_screen_off_background_and_pid_spans_follow_bases() {
         let mut w = WakeStats::default();
@@ -326,6 +410,10 @@ mod tests {
             3_000_000
         );
         assert_eq!(w.uids[&10001].pids[&71], (0, 0, 5000)); // elapsed, including plugged/screen-on
+        assert_eq!(
+            w.usage_durations(6000),
+            BTreeMap::from([(10001, 2000), (10002, 1000)])
+        );
         assert!(w.mapped.is_empty());
     }
     #[test]
