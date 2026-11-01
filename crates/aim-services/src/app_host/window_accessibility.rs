@@ -25,7 +25,7 @@ impl Drop for Binding {
 struct Snapshot(Binder, [i32; 10]);
 impl WriteParcelable for Snapshot {
     fn write_to(&self, p: &mut Parcel) {
-        p.write_i32(68);
+        p.write_i32(72); // size + Binder/stability (28) + ten ints
         p.write_binder(Some(self.0));
         self.1.iter().for_each(|value| p.write_i32(*value));
     }
@@ -437,12 +437,16 @@ mod tests {
     struct Row([i32; 10]);
     impl ReadParcelable for Row {
         fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-            assert_eq!(r.read_i32()?, 68);
+            let start = r.position();
+            let size = r.read_i32()? as usize;
             assert!(r.read_binder()?.is_some());
             let mut values = [0; 10];
             for value in &mut values {
                 *value = r.read_i32()?;
             }
+            // Generated AccessibilityWindowData.readFromParcel advances to the
+            // declared end; a short size leaves bytes for enforceNoDataAvail.
+            assert_eq!(r.position() - start, size);
             Ok(Self(values))
         }
     }
@@ -467,6 +471,7 @@ mod tests {
             )
             .unwrap();
             let a = callback::OnWindowsChanged::<Row>::read(&mut call.data).unwrap();
+            assert_eq!(call.data.remaining(), 0);
             let rows = a
                 .windows
                 .unwrap()

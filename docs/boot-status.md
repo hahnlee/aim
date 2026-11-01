@@ -543,12 +543,19 @@ Native `activity_task` serves `startActivityAsUser` and `startActivityWithConfig
 through the shared starter (#2578): package/isolation/cross-user checks and result
 codes. Unserved start flags, configuration changes and the other start entries
 return `START_CANCELED` instead of throwing into aim-system.
-Fresh en-US `-g` Accessibility CTS is 102 pass / 7 fail / 4 flag-assumption skips;
-all 113 starts/results pair and the run completes. aim-system lives until the owned
-stop; the shortcut target starts. All seven failures are CaptioningManagerTest
-cleanups, before masked by the lost UiAutomation: no focused accessibility window
-of a home package. No window test changed with the #2570 display root. Safety
-Center remains 476/0/52; neither run has a Java or native fatal, ANR or tombstone.
+The activity shell serves ordinary `start`/`start-activity` through original Intent
+syntax and the native starter; wait/profiler/options paths remain #2511 errors.
+Accessibility window records now declare all 72 bytes, including Binder stability
+(#2584). The old 68-byte size made Java reject every nonempty callback with four
+unread bytes. Native focus already reached a real home once launched; the shell's
+unsupported `am start` had first prevented HOME from starting at all.
+Fresh en-US `-g` Accessibility CTS is 109 pass / 0 fail / 4 flag-assumption skips;
+all 113 starts/results pair. All seven CaptioningManagerTest cleanups now pass,
+with no previous pass regressing. An empty Mac desktop still has no fabricated
+Android home window. Safety Center remains 476/0/52 with all 528 results paired.
+aim-system lives until the owned stop; neither run has a Java or native fatal,
+ANR or tombstone. Accessibility ran under recorded unrelated build interference;
+Safety had none. These are correctness results, not timing measurements.
 Unserved local operations remain explicit #2529 errors; conformance is partial (2026-11-01).
 
 The app host image ([app-host.md](app-host.md)) boots without
