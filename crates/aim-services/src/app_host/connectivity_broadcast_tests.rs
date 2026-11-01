@@ -7,7 +7,7 @@ use std::sync::mpsc;
 
 const ACTION: &str = "android.net.conn.CONNECTIVITY_CHANGE";
 
-fn lease(last: u8) -> Option<(Uplink, Vec<Ipv4Addr>)> {
+pub(in crate::app_host) fn lease(last: u8) -> Option<(Uplink, Vec<Ipv4Addr>)> {
     Some((
         Uplink {
             index: 4,
@@ -19,7 +19,7 @@ fn lease(last: u8) -> Option<(Uplink, Vec<Ipv4Addr>)> {
         vec![],
     ))
 }
-struct Receiver(mpsc::Sender<(RawIntent, bool)>);
+pub(in crate::app_host) struct Receiver(pub(in crate::app_host) mpsc::Sender<(RawIntent, bool)>);
 impl Service for Receiver {
     fn descriptor(&self) -> &str {
         thread::DESCRIPTOR
@@ -33,7 +33,11 @@ impl Service for Receiver {
         Ok(Parcel::new())
     }
 }
-fn register(host: &Arc<AppHost>, binder: Binder, receiver: bool) -> Option<RawIntent> {
+pub(in crate::app_host) fn register(
+    host: &Arc<AppHost>,
+    binder: Binder,
+    receiver: bool,
+) -> Option<RawIntent> {
     let mut filter = IntentFilter::default();
     filter.add_action(ACTION);
     let mut p = Parcel::new();
@@ -136,7 +140,7 @@ fn check(intent: &RawIntent, connected: bool, replacement: bool) {
     assert_eq!(r.read_string16().unwrap(), None);
     assert_eq!(r.read_string16().unwrap(), extra);
 }
-fn active(cs: &ConnectivityService) -> bool {
+pub(in crate::app_host) fn active(cs: &ConnectivityService) -> bool {
     let mut p = Parcel::new();
     cm::GetActiveNetworkInfo {}.write(&mut p);
     let result = cs
@@ -159,7 +163,7 @@ fn active(cs: &ConnectivityService) -> bool {
     r.read_string16().unwrap();
     r.read_string16().unwrap().as_deref() == Some("CONNECTED")
 }
-fn receive(
+pub(in crate::app_host) fn receive(
     rx: &mpsc::Receiver<(RawIntent, bool)>,
     connected: bool,
     replacement: bool,

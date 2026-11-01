@@ -733,8 +733,12 @@ Binder registry, suspend-probe and token owners verify each blocker is acquired
 and released exactly once, including token-owner shutdown. These host fixtures
 do not establish live adapter accounting or macOS sleep behavior; no guest boot
 was run. Whole batterystats.bin remains #1928.
-Matched-image adapter accounting,
-restoration and sync CTS remain unverified; no guest boot was run.
+Cross-owner retained-handler fixtures also connect scheduling, standby holds,
+type-1 temporary membership, native connectivity broadcasts/backoff rescheduling,
+job persistence and unsupported-owner errors to those cleanup owners
+(#1460 slice 5j/#1723/#2016/#1509/#1928). Host JVM/native tests cover this scope;
+matched-image adapter accounting, restoration and sync CTS remain unverified.
+No guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
