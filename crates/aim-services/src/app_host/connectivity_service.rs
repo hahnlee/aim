@@ -1159,7 +1159,7 @@ impl ConnectivityService {
         self.follow_network(mac_network(&self.host));
     }
 
-    fn follow_network(&self, now: Option<(Uplink, Vec<Ipv4Addr>)>) {
+    pub(super) fn follow_network(&self, now: Option<(Uplink, Vec<Ipv4Addr>)>) {
         {
             let mut state = self.shared.state.lock().unwrap();
             let old = state.network.as_ref().map(|n| n.id);

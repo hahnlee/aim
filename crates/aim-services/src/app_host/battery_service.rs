@@ -126,6 +126,7 @@ struct HealthInfo {
     capacity_level: i32,
     charge_time_to_full: i64,
     charging_state: i32,
+    charging_policy: i32,
 }
 
 /// A nullable structured parcelable as the HAL's backend writes it: 1,
@@ -179,6 +180,7 @@ impl HealthInfo {
         info.charge_time_to_full = r.read_i64()?;
         r.read_i32()?; // full charge design capacity
         info.charging_state = r.read_i32()?;
+        info.charging_policy = r.read_i32()?;
         Ok(info)
     }
 
@@ -569,6 +571,29 @@ impl BatteryService {
             s.info.as_ref().is_some_and(|i| i.is_powered(PLUGGED_ANY)),
             s.level_low,
         )
+    }
+
+    /// JobSchedulerService.BatteryStateTracker.isConsideredCharging, using
+    /// the same health state that owns the charging and power broadcasts.
+    pub(super) fn job_power_state(&self) -> (bool, bool, bool) {
+        let charging = self.host.battery_stats.get().is_some_and(|b| b.charging());
+        let s = self.state.lock().unwrap();
+        let powered = s.info.as_ref().is_some_and(|i| i.is_powered(PLUGGED_ANY));
+        let charging = s.info.as_ref().is_some_and(|i| {
+            charging || powered && i.level >= 70 && matches!(i.charging_policy, 2..=4)
+        });
+        (powered, charging, s.level_low)
+    }
+
+    #[cfg(test)]
+    pub(super) fn report_job_power(&self, powered: bool, status: i32, level: i32, policy: i32) {
+        self.update(HealthInfo {
+            charger_ac_online: powered,
+            status,
+            level,
+            charging_policy: policy,
+            ..HealthInfo::default()
+        });
     }
 
     pub(super) fn on_wireless_charger(&self) -> bool {
@@ -963,6 +988,7 @@ mod tests {
                 capacity_level: -1,
                 charge_time_to_full: 3600,
                 charging_state: 1,
+                charging_policy: 1,
                 ..HealthInfo::default()
             }
         );

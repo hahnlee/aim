@@ -467,7 +467,7 @@ impl JobStatus {
     }
 
     /// `shouldTreatAsExpeditedJob`: every expedited job is within its
-    /// quota, the app host keeping none.
+    /// quota, the app host keeping none (#1490).
     fn expedited(&self) -> bool {
         self.job.is_expedited()
     }
@@ -1131,11 +1131,11 @@ impl JobScheduler {
     /// DeviceStorageMonitorService's low storage of the volume of `/data`,
     /// battery saver, and ConnectivityService's default network.
     fn read_device(&self) -> Device {
-        let (plugged, low) = self
+        let (plugged, charging, low) = self
             .host
             .battery_service
             .get()
-            .map_or((false, false), |b| b.powered_and_low());
+            .map_or((false, false, false), |b| b.job_power_state());
         let battery_saver = self
             .host
             .power_service
@@ -1143,7 +1143,7 @@ impl JobScheduler {
             .is_some_and(|p| p.power_save_mode().unwrap_or(false));
         Device {
             power_connected: plugged,
-            charging: plugged,
+            charging,
             battery_not_low: !low,
             storage_not_low: self.storage_not_low(),
             battery_saver,
