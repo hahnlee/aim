@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use aim_android_xml::{Element, Node, TEXT};
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_hardware_display_idisplaymanager as dm;
@@ -48,6 +48,7 @@ pub struct Resources {
 pub struct DisplayInfo<'a> {
     pub display: &'a Display,
     pub resources: &'a Resources,
+    pub state: i32,
 }
 
 /// `BrightnessSynchronizer.brightnessIntToFloat`.
@@ -129,8 +130,8 @@ impl WriteParcelable for DisplayInfo<'_> {
         p.write_f32(mode.y_dpi);
         p.write_i64(mode.app_vsync_offset);
         p.write_i64(mode.presentation_deadline);
-        p.write_i32(STATE_ON);
-        p.write_i32(STATE_ON); // committed
+        p.write_i32(self.state);
+        p.write_i32(self.state); // committed
         p.write_i32(0); // owner uid
         p.write_string8(None); // owner package
         p.write_string8(Some(&format!("local:{}", d.id)));
@@ -292,7 +293,7 @@ fn write_state(data: &Path, root: &Element) -> std::io::Result<()> {
 /// `display`.
 pub struct DisplayManager {
     host: Arc<AppHost>,
-    callbacks: Mutex<Vec<(Binder, i64)>>,
+    callbacks: Mutex<Vec<(Binder, i64, Option<Arc<Strong>>)>>,
     /// `mStableDisplaySize`, once loaded.
     stable: Mutex<Option<(i32, i32)>>,
 }
@@ -303,6 +304,41 @@ impl DisplayManager {
             host,
             callbacks: Mutex::new(Vec::new()),
             stable: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn power_changed(&self) {
+        use aim_service_aidl::android_hardware_display_idisplaymanagercallback as cb;
+        let callbacks = self.callbacks.lock().unwrap().clone();
+        for (binder, mask, _strong) in callbacks {
+            // DisplayManagerGlobal's internal state / committed-state events.
+            for (bit, event) in [(1 << 7, 9), (1 << 9, 10)] {
+                if mask & bit == 0 {
+                    continue;
+                }
+                let mut p = Parcel::new();
+                cb::OnDisplayEvent {
+                    display_id: 0,
+                    event,
+                }
+                .write(&mut p);
+                let result = match binder {
+                    Binder::Handle(h) => {
+                        self.host
+                            .process
+                            .transact(h, cb::ON_DISPLAY_EVENT, &p, true)
+                    }
+                    Binder::Local(t) => self
+                        .host
+                        .process
+                        .local_service(t)
+                        .ok_or(BAD_VALUE)
+                        .and_then(|s| s.transact(cb::ON_DISPLAY_EVENT, &p, true)),
+                };
+                if let Err(status) = result {
+                    eprintln!("app host: display power callback: status {status}");
+                }
+            }
         }
     }
 
@@ -376,6 +412,16 @@ impl Service for DisplayManager {
                 let info = (args.display_id == 0).then(|| DisplayInfo {
                     display: &display.0,
                     resources: &display.1,
+                    state: if self
+                        .host
+                        .power_service
+                        .get()
+                        .is_none_or(|p| p.interactive())
+                    {
+                        STATE_ON
+                    } else {
+                        1
+                    },
                 });
                 dm::write_get_display_info_reply(&mut p, info.as_ref());
             }
@@ -386,12 +432,15 @@ impl Service for DisplayManager {
             dm::REGISTER_CALLBACK_WITH_EVENT_MASK => {
                 let args = dm::RegisterCallbackWithEventMask::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
-                // The display never changes, so no event is sent yet.
                 if let Some(callback) = args.callback {
+                    let strong = match callback {
+                        Binder::Handle(h) => Some(Arc::new(self.host.process.strong(h))),
+                        _ => None,
+                    };
                     self.callbacks
                         .lock()
                         .unwrap()
-                        .push((callback, args.events_mask));
+                        .push((callback, args.events_mask, strong));
                 }
                 dm::write_register_callback_with_event_mask_reply(&mut p);
             }
@@ -526,6 +575,7 @@ mod tests {
             Some(&DisplayInfo {
                 display: &display,
                 resources: &resources,
+                state: STATE_ON,
             }),
         );
         assert_eq!(

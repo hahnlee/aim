@@ -5,6 +5,12 @@ aim-guest-init on the syscall layer (ADR 0012, tracking #153). Update it
 with every boot-relevant change: the table, the date and the run it came
 from.
 
+The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep requests,
+with timestamp ordering, shared interactive/display queries, display-state callbacks
+and registered SCREEN_ON/OFF broadcasts (#2607). Display/screen blockers follow
+that state. Host regression checks cover denial, no-op and stale wake ordering;
+no guest boot or Mac sleep/session notification check was run (#670, 2026-11-01).
+
 Regular-file writes and admitted fallocate allocation/in-file hole punching clear
 set-ID modes without CAP_FSETID (#779, #2515); a shared generation invalidates
 cached modes. Host syscall/metadata checks pass; no guest boot was run (2026-10-31).
