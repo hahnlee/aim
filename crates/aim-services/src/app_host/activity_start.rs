@@ -407,6 +407,7 @@ impl AppHost {
                 eprintln!("app host: activity: {e}");
             }
         }
+        self.notify_task_organizers();
     }
 
     pub(super) fn run_one(self: &Arc<Self>, command: Command) -> Result<(), String> {

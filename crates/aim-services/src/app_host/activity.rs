@@ -1105,6 +1105,23 @@ impl Service for ActivityTaskManager {
                 atm::write_get_activity_client_controller_reply(&mut p, Some(self.1));
                 Ok(p)
             }
+            atm::GET_WINDOW_ORGANIZER_CONTROLLER => {
+                atm::GetWindowOrganizerController::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                atm::write_get_window_organizer_controller_reply(
+                    &mut p,
+                    Some(self.0.window_organizer_controller()),
+                );
+                Ok(p)
+            }
+            atm::CLEAR_LAUNCH_PARAMS_FOR_PACKAGES => {
+                let a = atm::ClearLaunchParamsForPackages::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .clear_organizer_launch_params(call.sender_euid as i32, a.package_names),
+                )
+            }
             atm::STOP_APP_SWITCHES | atm::RESUME_APP_SWITCHES => self.0.app_switches_reply(
                 atm::DESCRIPTOR,
                 call.code == atm::STOP_APP_SWITCHES,

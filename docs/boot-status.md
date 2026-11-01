@@ -15,8 +15,8 @@ The native `window` service serves text and Android 16 proto dumps from its
 task/activity/window owners (#2605), with hash-pinned schemas and no invented
 IME/policy fields. Three dump tests, the configuration round-trip and host/image
 builds pass; all eight saved live protos decode with the pinned schema. The eight
-diagnostic WM classes finish 0 pass / 100 fail / 0 skip, now in shared setup's
-missing `IActivityTaskManager.getWindowOrganizerController`; installer #2606 and
+diagnostic WM classes pass organizer setup (#2616): 5 pass / 63 fail / 32 skip;
+remaining failures span task, shell, configuration and display owners. Installer #2606 and
 #1173 remain. One earlier fresh-data boot failed default-grant owner readiness
 before its class was retried on fresh data (2026-11-01).
 

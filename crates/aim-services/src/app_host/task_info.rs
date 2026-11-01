@@ -665,6 +665,18 @@ impl AppHost {
         Ok(info)
     }
 
+    pub(super) fn organizer_task_info(&self, task: i32) -> Result<RunningTaskInfo, Exception> {
+        let last_active = self
+            .activities
+            .stack
+            .lock()
+            .unwrap()
+            .task(task)
+            .ok_or_else(|| Exception::illegal_argument("unknown task"))?
+            .last_active;
+        self.task_info(task, last_active, true, true, &self.multi_window()?)
+    }
+
     /// The `WindowContainerToken` of `task`, made at its first use.
     fn task_token(&self, task: i32) -> Binder {
         *self
@@ -722,7 +734,7 @@ fn trim_ineffective_info(info: &mut RunningTaskInfo, top_uid: u32, base_uid: u32
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::app_host::activity_stack::{Activity, Task};
     use crate::app_host::config::Device;
@@ -784,9 +796,7 @@ mod tests {
         );
     }
 
-    /// The parcel, read back in `TaskInfo.readTaskFromParcel`'s order.
-    #[test]
-    fn a_running_task_info_is_written_as_the_original_reads_it() {
+    pub(in crate::app_host) fn organizer_fixture() -> RunningTaskInfo {
         let device = Device {
             locales: "en-US",
             right_to_left: false,
@@ -821,7 +831,7 @@ mod tests {
             user: 0,
             last_active: 0,
         };
-        let info = RunningTaskInfo {
+        RunningTaskInfo {
             user_id: 0,
             task_id: 9,
             effective_uid: 10_100,
@@ -849,7 +859,14 @@ mod tests {
             is_activity_stack_transparent: false,
             last_non_fullscreen_bounds: Some(bounds),
             top_activity_app_bounds: bounds,
-        };
+        }
+    }
+
+    /// The parcel, read back in `TaskInfo.readTaskFromParcel`'s order.
+    #[test]
+    fn a_running_task_info_is_written_as_the_original_reads_it() {
+        let info = organizer_fixture();
+        let configuration = info.configuration.clone();
         let mut p = Parcel::new();
         info.write_to(&mut p);
         let mut r = Reader::new(p.data(), p.objects());
