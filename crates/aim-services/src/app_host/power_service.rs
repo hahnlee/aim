@@ -1216,3 +1216,7 @@ mod tests {
 #[cfg(test)]
 #[path = "power_wake_tests.rs"]
 mod wake_tests;
+
+#[cfg(test)]
+#[path = "sync_cleanup_tests.rs"]
+mod sync_cleanup_tests;

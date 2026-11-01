@@ -1476,6 +1476,28 @@ pub(crate) fn with_discovery_binders_lifecycle(
         &dyn Fn(),
     ),
 ) {
+    with_discovery_context(
+        flags,
+        ready,
+        false,
+        |_, p, s| Arc::new(crate::service_host::ServiceHost::new(p.clone(), s)),
+        test,
+    );
+}
+
+pub(crate) fn with_discovery_context(
+    flags: &[(&str, bool)],
+    ready: bool,
+    separate: bool,
+    context: impl FnOnce(&Arc<Driver>, &Arc<LocalProcess>, &Arc<System>) -> Arc<dyn Service>,
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
+        &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+        &dyn Fn(),
+    ),
+) {
     let Session {
         fixture,
         host,
@@ -1483,7 +1505,7 @@ pub(crate) fn with_discovery_binders_lifecycle(
         workers,
         cached,
         ..
-    } = session();
+    } = session_with_fixture(Fixture::with_context_owner(separate, context));
     let image = fixture.root.join("image");
     std::fs::create_dir_all(image.join("system/framework")).unwrap();
     std::fs::write(image.join("system/build.prop"), "ro.build.version.sdk=36\n").unwrap();

@@ -2906,6 +2906,19 @@ impl AppHost {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn sync_service_death_for_test(self: &Arc<Self>) {
+        for r in &mut self.services.state.lock().unwrap().records {
+            r.app = Some(7);
+        }
+        self.services_process_died(7, false);
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_sync_service_bindings_for_test(&self, count: usize) {
+        assert_eq!(self.services.state.lock().unwrap().connections.len(), count);
+    }
+
     /// Whether an aconfig flag of the image is on.
     pub(super) fn flag(&self, name: &str) -> Result<bool, Exception> {
         let (state, _) = self.packages()?;
