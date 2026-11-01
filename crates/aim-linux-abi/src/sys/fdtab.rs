@@ -1727,7 +1727,7 @@ pub fn nonblocking(fd: i32) -> bool {
     unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK != 0 }
 }
 
-/// Set O_NONBLOCK and FD_CLOEXEC on a host fd as requested.
+/// Initialize guest flags, including clearing a backing kqueue's defaults.
 pub fn set_flags(fd: i32, nonblock: bool, cloexec: bool) {
     // SAFETY: plain fcntl on our fd.
     unsafe {
@@ -1735,9 +1735,11 @@ pub fn set_flags(fd: i32, nonblock: bool, cloexec: bool) {
             let fl = libc::fcntl(fd, libc::F_GETFL);
             libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
         }
-        if cloexec {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-        }
+        libc::fcntl(
+            fd,
+            libc::F_SETFD,
+            if cloexec { libc::FD_CLOEXEC } else { 0 },
+        );
     }
 }
 

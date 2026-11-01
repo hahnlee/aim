@@ -2544,7 +2544,13 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
         }
         return errno::check(unsafe {
             if cmd == F_GETFD {
-                libc::fcntl(original, libc::F_GETFD)
+                let flags = libc::fcntl(original, libc::F_GETFD);
+                if flags < 0 {
+                    return -(errno::last() as i64);
+                }
+                // FD_CLOEXEC is the Linux descriptor state. Darwin also
+                // exposes FD_CLOFORK, which must never reach the guest.
+                flags & libc::FD_CLOEXEC
             } else {
                 libc::fcntl(original, libc::F_SETFD, arg as i32 & libc::FD_CLOEXEC)
             }
@@ -2585,10 +2591,6 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
         match cmd {
             F_DUPFD => dup_from(fd, arg as i32, false),
             F_DUPFD_CLOEXEC => dup_from(fd, arg as i32, true),
-            F_GETFD => errno::check(libc::fcntl(fd, libc::F_GETFD) as i64),
-            F_SETFD => {
-                errno::check(libc::fcntl(fd, libc::F_SETFD, arg as i32 & libc::FD_CLOEXEC) as i64)
-            }
             F_GETFL => {
                 let r = libc::fcntl(fd, libc::F_GETFL);
                 if r < 0 {
@@ -2867,6 +2869,10 @@ pub fn close_range(a: [u64; 6]) -> i64 {
     }
     0
 }
+
+#[cfg(test)]
+#[path = "fd_flags_tests.rs"]
+mod fd_flags_tests;
 
 #[cfg(test)]
 mod dac_tests {
