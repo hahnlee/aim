@@ -32,7 +32,7 @@ impl Service for SystemThread {
     }
 }
 
-fn receiver(package: &str, class: &str, uid: u32) -> Arc<Manifest> {
+pub(super) fn receiver(package: &str, class: &str, uid: u32) -> Arc<Manifest> {
     let pkg = pkg::AndroidPackage {
         package_name: package.into(),
         uid: uid as i32,
