@@ -301,6 +301,7 @@ pub struct Stack {
     pub tasks: Vec<Task>,
     /// Whether the display is freeform: tasks do not hide each other.
     pub freeform: bool,
+    fullscreen: BTreeSet<i32>,
     /// Tasks behind the desktop, also hidden on a freeform display.
     background: BTreeSet<i32>,
     /// `RecentTasks.remove`: finishing tasks can remain attached until destroyed.
@@ -316,6 +317,13 @@ pub struct Stack {
 }
 
 impl Stack {
+    pub(super) fn set_task_windowing_mode(&mut self, task: i32, mode: i32) {
+        if mode == 1 {
+            self.fullscreen.insert(task);
+        } else {
+            self.fullscreen.remove(&task);
+        }
+    }
     pub fn get(&self, token: u64) -> Option<&Activity> {
         self.activities.iter().find(|a| a.token == token)
     }
@@ -384,12 +392,12 @@ impl Stack {
         if self.background.contains(&task) || self.top(task).is_none() {
             return Visibility::Invisible;
         }
-        if self.freeform {
-            return Visibility::Visible;
-        }
         let mut translucent = false;
         for other in self.tasks.iter().rev().take_while(|t| t.id != task) {
             if self.background.contains(&other.id) || self.top(other.id).is_none() {
+                continue;
+            }
+            if self.freeform && !self.fullscreen.contains(&other.id) {
                 continue;
             }
             if !self.translucent(other.id) {
@@ -1181,6 +1189,7 @@ impl Stack {
             self.tasks.retain(|t| t.id != task);
             self.background.remove(&task);
             self.removed_from_recents.remove(&task);
+            self.fullscreen.remove(&task);
             out.push(Command::TaskEmpty(task));
         }
     }
@@ -2186,6 +2195,25 @@ mod tests {
         s.get_mut(2).unwrap().never_resumed = false;
         assert_eq!(s.process_died(2, false), [TaskEmpty(8), Front(7)]);
         assert!(s.get(2).is_none() && s.get(1).is_some());
+    }
+
+    #[test]
+    fn fullscreen_launch_modes_occlude_freeform_tasks_and_are_retired() {
+        let mut s = Stack {
+            freeform: true,
+            ..Default::default()
+        };
+        launch_new(&mut s, 1, 7, "A", 0);
+        launch_new(&mut s, 2, 8, "B", 0);
+        assert_eq!(s.visibility(7), Visibility::Visible);
+        s.set_task_windowing_mode(8, 1);
+        assert_eq!(s.visibility(7), Visibility::Invisible);
+        s.set_task_windowing_mode(8, 5);
+        assert_eq!(s.visibility(7), Visibility::Visible);
+        s.set_task_windowing_mode(8, 1);
+        s.destroyed(2);
+        assert!(!s.fullscreen.contains(&8));
+        assert_eq!(s.visibility(7), Visibility::Visible);
     }
 
     // android-16.0.0_r1 ActivityRecord.hasSavedState/handleAppDied:

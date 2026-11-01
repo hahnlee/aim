@@ -107,6 +107,7 @@ impl JavaParser {
             "android/os/Parcel.java",
             "android/os/ShellCommand.java",
             "android/os/Bundle.java",
+            "android/app/ActivityOptions.java",
             "android/util/Log.java",
             "dev/aim/server/Bridge.java",
             "dev/aim/server/IPackageIntentParser.java",
@@ -241,6 +242,11 @@ fn activity_start_uses_original_intent_flags_home_categories_and_user_parser() {
         let intent = crate::app_host::kept::RawIntent::read_from(&mut r)
             .unwrap()
             .intent;
+        assert!(
+            aim_service_aidl::read_typed::<crate::app_host::kept::RawBundle>(&mut r)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(intent.flags, 0x10000000);
         if args[0] == "-a" {
             assert_eq!(intent.action.as_deref(), Some("android.intent.action.MAIN"));
@@ -278,5 +284,140 @@ fn activity_start_uses_original_intent_flags_home_categories_and_user_parser() {
         );
         assert!(output.stdout.is_empty());
     }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn activity_start_launch_options_cross_the_bundle_boundary() {
+    use crate::app_host::kept::{RawBundle, RawIntent};
+    use aim_service_aidl::{ReadParcelable, WriteParcelable};
+    let root = crate::app_host::test_temp_dir("activity-start-options");
+    let parser = JavaParser::new(&root).expect("pinned Intent parser and JDK");
+    let parse = |args: &[&str]| {
+        let bytes = run(Command::new(JavaParser::jdk().join("java"))
+            .arg("-cp")
+            .arg(&parser.0)
+            .arg("dev.aim.server.PackageIntentParserTest")
+            .args(["--start", "-n", "p/.Main"])
+            .args(args));
+        let mut r = Reader::new(&bytes, &[]);
+        r.read_i32().unwrap();
+        r.read_bool().unwrap();
+        r.read_string16().unwrap();
+        RawIntent::read_from(&mut r).unwrap();
+        let options = aim_service_aidl::read_typed::<RawBundle>(&mut r).unwrap();
+        assert_eq!(r.remaining(), 0);
+        options
+    };
+    for (option, key) in [
+        ("--windowingMode", "android.activity.windowingMode"),
+        ("--activityType", "android.activity.activityType"),
+        ("--display", "android.activity.launchDisplayId"),
+        ("--task", "android.activity.launchTaskId"),
+        (
+            "--task-display-area-feature-id",
+            "android.activity.launchTaskDisplayAreaFeatureId",
+        ),
+    ] {
+        let bundle = parse(&[option, "5"]).unwrap();
+        let mut p = Parcel::new();
+        bundle.write_to(&mut p);
+        assert_eq!(
+            RawBundle::read_from(&mut p.reader())
+                .unwrap()
+                .int(key, -99)
+                .unwrap(),
+            5
+        );
+        for value in [None, Some("bad")] {
+            let mut command = Command::new(JavaParser::jdk().join("java"));
+            command
+                .arg("-cp")
+                .arg(&parser.0)
+                .arg("dev.aim.server.PackageIntentParserTest")
+                .args(["--start", "-n", "p/.Main", option]);
+            if let Some(value) = value {
+                command.arg(value);
+            }
+            let output = command.output().unwrap();
+            assert!(!output.status.success(), "{option} {value:?}");
+            assert!(output.stdout.is_empty());
+        }
+    }
+    for (option, key) in [
+        ("--lock-task", "android:activity.lockTaskMode"),
+        (
+            "--dismiss-keyguard",
+            "android.activity.dismissKeyguardIfInsecure",
+        ),
+        (
+            "--dismiss-keyguard-if-insecure",
+            "android.activity.dismissKeyguardIfInsecure",
+        ),
+    ] {
+        assert!(parse(&[option]).unwrap().boolean(key, false).unwrap());
+    }
+    assert_eq!(
+        parse(&["--splashscreen-show-icon"])
+            .unwrap()
+            .int("android.activity.splashScreenStyle", 0)
+            .unwrap(),
+        1
+    );
+    let overlay = parse(&["--task", "7", "--task-overlay"]).unwrap();
+    assert!(
+        overlay
+            .boolean("android.activity.taskOverlay", false)
+            .unwrap()
+    );
+    assert!(
+        overlay
+            .boolean("android.activity.taskOverlayCanResume", false)
+            .unwrap()
+    );
+    assert!(parse(&["--allow-background-activity-starts"]).is_none());
+    assert!(parse(&["--windowingMode", "0", "--display", "-1", "--task", "-1"]).is_none());
+    assert_eq!(
+        parse(&["--windowingMode", "5", "--windowingMode", "1"])
+            .unwrap()
+            .int("android.activity.windowingMode", 0)
+            .unwrap(),
+        1
+    );
+    for args in [
+        vec!["--task-overlay"],
+        vec!["-D"],
+        vec!["--suspend"],
+        vec!["-N"],
+        vec!["-S"],
+        vec!["--streaming"],
+        vec!["--track-allocation"],
+        vec!["--async"],
+        vec!["-P", "file"],
+        vec!["--start-profiler", "file"],
+        vec!["--clock-type", "wall"],
+        vec!["--attach-agent", "agent"],
+        vec!["--attach-agent-bind", "agent"],
+        vec!["--receiver-permission", "p"],
+        vec!["--sampling", "10"],
+        vec!["--profiler-output-version", "4"],
+        vec!["-R", "2"],
+    ] {
+        let output = Command::new(JavaParser::jdk().join("java"))
+            .arg("-cp")
+            .arg(&parser.0)
+            .arg("dev.aim.server.PackageIntentParserTest")
+            .args(["--start", "-n", "p/.Main"])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("Unsupported activity start option:"),
+            "{args:?}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    assert!(parse(&["--allow-fgs-start-reason", "123"]).is_none());
     fs::remove_dir_all(root).unwrap();
 }

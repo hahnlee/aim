@@ -648,6 +648,32 @@ const VAL_NULL: i32 = -1;
 const VAL_STRING: i32 = 0;
 
 impl RawBundle {
+    /// `Bundle.getParcelable(key, Rect.class)` for launch bounds.
+    pub(super) fn rect(&self, key: &str) -> Result<Option<super::config::Rect>> {
+        let Some((_, parts, _)) = self.entries()? else {
+            return Ok(None);
+        };
+        let Some((_, value)) = parts.iter().find(|(name, _)| name == key) else {
+            return Ok(None);
+        };
+        let p = value.parcel();
+        let mut r = p.reader();
+        r.read_string16()?;
+        if r.read_i32()? != VAL_PARCELABLE {
+            return Ok(None);
+        }
+        r.read_i32()?; // Parcel.writeValue length
+        if r.read_string16()?.as_deref() != Some("android.graphics.Rect") {
+            return Ok(None);
+        }
+        Ok(Some(super::config::Rect {
+            left: r.read_i32()?,
+            top: r.read_i32()?,
+            right: r.read_i32()?,
+            bottom: r.read_i32()?,
+        }))
+    }
+
     /// `putParcelable`, preserving the parcel's Binder object offsets.
     pub(super) fn with_parcelable(&self, key: &str, class: &str, value: &Parcel) -> Result<Self> {
         let (magic, mut parts, has_intent) =

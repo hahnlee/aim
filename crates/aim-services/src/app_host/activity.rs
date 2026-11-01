@@ -459,7 +459,7 @@ impl AppHost {
         self.reconfigure(
             |r| r.task == task,
             |uid| globals.get(&uid),
-            |_| Some(bounds),
+            |_| self.tasks.freeform_bounds(task).map(|_| bounds),
         )
     }
 

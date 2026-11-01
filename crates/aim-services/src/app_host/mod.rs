@@ -16,6 +16,7 @@ pub mod activity;
 mod activity_delegated;
 mod activity_launch;
 mod activity_multi;
+mod activity_options;
 mod activity_shell;
 pub mod activity_stack;
 pub mod activity_start;

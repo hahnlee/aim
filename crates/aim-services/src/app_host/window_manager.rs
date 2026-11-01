@@ -1223,7 +1223,7 @@ impl super::AppHost {
         id: i32,
         task: Rect,
     ) -> Result<Vec<(u32, Frames, u32, i32)>, String> {
-        let freeform = self.tasks.window_mode();
+        let freeform = self.tasks.freeform_bounds(id).is_some();
         let mut windows = self.windows.windows.lock().unwrap();
         let mut of_task: Vec<(u32, u32)> = windows
             .iter()
@@ -1265,6 +1265,7 @@ impl super::AppHost {
         frame: Rect,
     ) -> Result<ProcessItems, String> {
         let display = self.display().map_err(|e| format!("{e:?}"))?.0.clone();
+        let freeform = self.tasks.freeform_bounds(id).is_some();
         let laid = self.relayout_windows_of(id, frame)?;
         let laid: Vec<_> = laid
             .into_iter()
@@ -1279,7 +1280,11 @@ impl super::AppHost {
                 let w = windows.get_mut(&window)?;
                 w.frames_seq += 1;
                 w.insets_seq += 1;
-                let mut config = global.of_freeform_task(frame);
+                let mut config = if freeform {
+                    global.of_freeform_task(frame)
+                } else {
+                    global.clone()
+                };
                 config.window.activity_type = 1;
                 Some((
                     start_seq,

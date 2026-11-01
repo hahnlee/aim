@@ -11,7 +11,7 @@ use aim_service_aidl::{
     android_app_iactivitymanager as am, dev_aim_server_ipackageintentparser as syntax,
 };
 
-use super::kept::RawIntent;
+use super::kept::{RawBundle, RawIntent};
 use super::{AppHost, reply};
 use crate::shell::ShellCommand;
 
@@ -193,6 +193,7 @@ fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32
     let wait = r.read_bool().map_err(codec)?;
     let display = r.read_string16().map_err(codec)?.unwrap_or_default();
     let intent = RawIntent::read_from(&mut r).map_err(codec)?;
+    let options = aim_service_aidl::read_typed::<RawBundle>(&mut r).map_err(codec)?;
     if r.remaining() != 0 {
         return Err(failure("activity start syntax trailing data"));
     }
@@ -200,6 +201,7 @@ fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32
         c.eprintln("Error: Can't start service with user 'all'");
         return Ok(1);
     }
+    host.activity_launch_options(options.as_ref(), uid)?;
     let resolved_type = match (&intent.intent.ty, &intent.intent.data) {
         (Some(ty), _) => Some(ty.clone()),
         (None, Some(uri)) => host.provider_type(uri, uid)?,
@@ -228,7 +230,7 @@ fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32
         result_to: None,
         result_who: None,
         request_code: 0,
-        options: None,
+        options,
         start_flags: 0,
         launch: None,
     };
