@@ -559,15 +559,16 @@ pub fn write(
             mode: Some(0o600),
         },
     )?;
-    std::fs::rename(&new, path)
+    std::fs::rename(&new, path)?;
+    crate::fsync(&std::fs::File::open(dir)?)
 }
 
 /// The legacy file, once its jobs are in split files.
-pub fn remove_legacy(dir: &Path) {
-    if let Err(e) = std::fs::remove_file(dir.join(LEGACY_FILE))
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!("app host: jobs: removing {LEGACY_FILE}: {e}");
+pub fn remove_legacy(dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(dir.join(LEGACY_FILE)) {
+        Ok(()) => crate::fsync(&std::fs::File::open(dir)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
