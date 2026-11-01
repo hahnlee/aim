@@ -100,4 +100,10 @@ interface ISystemProcess {
     ISyncAccounts getSyncAccounts();
     List<JobInfo> getSystemScheduledOwnJobs(String namespace);
     int[] getJobPersistStats();
+    /** Local sync policy queries/effects at the native owners; system UID only. */
+    int getSyncAdapterStandbyBucket(String packageName, int userId);
+    void reportSyncScheduled(String packageName, int userId, boolean exempted);
+    void reportExemptedSyncStart(String packageName, int userId);
+    void addSyncTempAllowlist(int callingUid, String packageName, long durationMs,
+            int type, int userId, boolean sync, int reasonCode, String reason);
 }

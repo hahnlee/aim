@@ -671,6 +671,11 @@ persistence and native Binder start/completion (#1460 slice 4d/#1490, 2026-11-01
 host tests only). Standby/doze and EJ quota accounting/demotion remain
 unimplemented. Quota-driven regular fallback awaits #1490; no guest or CTS
 acceptance.
+Typed usage/idle locals now delegate retained sync scheduling to native owners
+(#1460 slice 5a/#1723/#2016). Host/JVM and image-link checks cover bucket reads,
+non-doze promotion/hold and temporary allowlisting without FGS privilege.
+Standby persistence, reconnect broadcasts, battery sync timers and full wake-lock
+attribution remain under their owner issues; no guest or sync CTS was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
