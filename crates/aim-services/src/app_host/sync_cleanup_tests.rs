@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "sync_acceptance_tests.rs"]
+mod acceptance;
+
 // Bootstrap calls relay parcels through Binder so every process gets its own handles.
 // The private registration codes are fixture protocols, never production routes.
 struct Registry {
@@ -192,6 +195,16 @@ impl Drop for Child {
 #[test]
 #[ignore = "requires pinned AOSP source and JDK; execute explicitly without a guest"]
 fn retained_sync_cleanup_reaches_native_owners() {
+    run(false);
+}
+
+#[test]
+#[ignore = "requires pinned AOSP source, image and JDK; execute explicitly without a guest"]
+fn retained_sync_cross_owner_acceptance() {
+    run(true);
+}
+
+fn run(acceptance: bool) {
     use sha2::{Digest, Sha256};
     let source = fs::read_to_string(
         aim_paths::aosp()
@@ -204,7 +217,23 @@ fn retained_sync_cleanup_reaches_native_owners() {
     );
     // Apache-2.0, AOSP android-16.0.0_r1. Bodies remain unchanged; only Android boundaries double.
     let mut java = include_str!("sync_cleanup_fixture.java").to_owned();
+    java = java.replace("@ACCEPTANCE@", include_str!("sync_acceptance_fixture.java"));
     for (key, start, end) in [
+        (
+            "@SCHEDULE@",
+            "    private void scheduleSyncOperationH(SyncOperation syncOperation) {",
+            "    /**\n     * Remove scheduled sync operations.",
+        ),
+        (
+            "@EXEMPTED_START@",
+            "            if (op.isAppStandbyExempted()) {\n                final UsageStatsManagerInternal usmi",
+            "            // Connect to the sync adapter.",
+        ),
+        (
+            "@RECONNECT@",
+            "    private BroadcastReceiver mConnectivityIntentReceiver =",
+            "    private String getJobStats()",
+        ),
         (
             "@ACTIVE@",
             "    class ActiveSyncContext extends",
@@ -263,8 +292,9 @@ fn retained_sync_cleanup_reaches_native_owners() {
             .success()
     );
     let peers = Mutex::new(None);
+    let flags = [("android.permission.flags.appop_mode_caching_enabled", true)];
     crate::system::with_discovery_context(
-        &[],
+        if acceptance { &flags } else { &[] },
         true,
         true,
         |driver, p, _| {
@@ -275,12 +305,14 @@ fn retained_sync_cleanup_reaches_native_owners() {
                 services: Mutex::new(Default::default()),
             })
         },
-        |host, publish, _, _, _| {
-            let permissions = super::super::permission_manager::PermissionManager::with_system(
-                host.clone(),
-                Default::default(),
-            );
-            assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+        |host, publish, _, export, _| {
+            if !acceptance {
+                let permissions = super::super::permission_manager::PermissionManager::with_system(
+                    host.clone(),
+                    Default::default(),
+                );
+                assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+            }
             publish(&mut |p| {
                 p.services.push(crate::package::pkg::Service {
                     main: crate::package::pkg::MainComponent {
@@ -299,6 +331,9 @@ fn retained_sync_cleanup_reaches_native_owners() {
                     permission: None,
                 })
             });
+            if acceptance {
+                super::super::job_scheduler::sync_job_tests::install_sync_manifest(host);
+            }
             let power = Arc::new(PowerManager::new(host.clone()));
             assert!(host.power_service.set(power.clone()).is_ok());
             power.state.lock().unwrap().asleep = true; // No display blocker or assertion for these partial locks.
@@ -318,6 +353,7 @@ fn retained_sync_cleanup_reaches_native_owners() {
                     super::super::display::check_service(&host.process, &name).unwrap()
                 })
                 .collect();
+            let acceptance = acceptance.then(|| acceptance::Owners::new(host, export));
             let (tx, rx) = std::sync::mpsc::channel();
             let mut connections = std::collections::HashMap::new();
             let mut child = Child(
@@ -325,6 +361,7 @@ fn retained_sync_cleanup_reaches_native_owners() {
                     .arg("-cp")
                     .arg(&work)
                     .arg("Cleanup")
+                    .args(acceptance.as_ref().map(|_| "acceptance"))
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .spawn()
@@ -457,7 +494,7 @@ fn retained_sync_cleanup_reaches_native_owners() {
                             std::thread::yield_now();
                         }
                     }
-                    _ => panic!("unknown native request: {line}"),
+                    _ => answer = acceptance.as_ref().unwrap().request(&fields),
                 }
                 // One compatibility blocker per nonempty interval, including loop-only work.
                 // Source changes and overlapping adapters must retain it, with no extra release.

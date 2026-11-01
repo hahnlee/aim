@@ -34,25 +34,37 @@ public class Cleanup {
     static class Log {
         static final int VERBOSE = 2;
         static boolean isLoggable(String s, int n) { return false; }
-        static void d(Object... o) {} static void w(Object... o) {}
+        static void v(Object... o) {} static void d(Object... o) {} static void w(Object... o) {}
         static String getStackTraceString(Exception e) { return e.toString(); }
     }
-    static class Slog { static void v(Object... o) {} static void wtf(Object... o) {} static void e(Object... o) {} }
+    static class Slog { static void v(Object... o) {} static void wtf(Object... o) {} static void e(Object... o) {} static void i(Object... o) {} }
     static class Logger { void log(Object... o) {} boolean enabled() { return false; } }
     static class SystemClock { static long elapsedRealtime() { return System.nanoTime()/1000000; } }
-    static class Bundle {} static class UserHandle { UserHandle(int u) {} }
-    static class ComponentName {} static class Intent {} static class SyncInfo {}
+    static class Bundle {} static class UserHandle { UserHandle(int u) {} static int getUserId(int uid) { return uid / 100000; } }
+    static class ComponentName { ComponentName() {} ComponentName(Context c, Class<?> k) {} } static class Intent {} static class SyncInfo {}
     static class SyncStorageEngine {
         static final String MESG_SUCCESS = "success", MESG_CANCELED = "cancel";
         static class EndPoint { int userId; String provider = "authority"; Object account = "account"; }
+        static final long NOT_IN_BACKOFF_MODE = -1;
+        long backoff = -1, delayUntil; int clears; boolean pending;
+        Pair<Long,Long> getBackoff(Object o) { return new Pair<>(backoff, 100L); }
+        long getDelayUntilTime(Object o) { return delayUntil; }
+        void markPending(Object o, boolean b) { pending = b; }
+        void clearAllBackoffsLocked() { backoff = -1; clears++; }
         Set<SyncInfo> active = new HashSet<>();
         void removeActiveSync(SyncInfo i, int u) { require(active.remove(i)); }
     }
     static class SyncOperation {
         SyncStorageEngine.EndPoint target = new SyncStorageEngine.EndPoint();
         int jobId, reason, retries, syncExemptionFlag, owningUid, syncSource; String owningPackage; boolean isPeriodic, allowParallelSyncs;
+        static final int NO_JOB_ID = -1;
+        long expectedRuntime, periodMillis = 3600000, flexMillis = 900000; boolean scheduleEjAsRegularJob, expedited, ignoreBackoff, unmetered, charging;
+        boolean hasIgnoreBackoff() { return ignoreBackoff; } boolean isNotAllowedOnMetered() { return unmetered; }
+        boolean hasRequireCharging() { return charging; } boolean isScheduledAsExpeditedJob() { return expedited; }
+        boolean isAppStandbyExempted() { return syncExemptionFlag != 0; }
+        int getJobBias() { return 0; } SyncOperation toJobInfoExtras() { return this; }
         final String key;
-        SyncOperation(String k) { key = k; }
+        SyncOperation(String k) { key = k; owningPackage="p"; owningUid=10100; jobId=NO_JOB_ID; }
         SyncOperation(Object a, int u, int uid, String p, int r, int s, String provider, Bundle b, boolean parallel, int exemption) { throw new AssertionError(); }
         String wakeLockName() { return key; } Object getExtrasAsString() { return ""; }
         Bundle getClonedExtras() { return new Bundle(); }
@@ -65,11 +77,11 @@ public class Cleanup {
         static class Stats { long numDeletes, numIoExceptions; } Stats stats = new Stats();
         boolean hasError() { return stats.numIoExceptions != 0; }
     }
-    static class ContentResolver { static final int SYNC_EXEMPTION_NONE = 0; static String syncErrorToString(int n) { return "io"; } }
+    static class ContentResolver { static final int SYNC_EXEMPTION_NONE = 0, SYNC_EXEMPTION_PROMOTE_BUCKET_WITH_TEMP = 2; static String syncErrorToString(int n) { return "io"; } }
     static class SyncJobService { static int finishes; static void callJobFinished(Object... o) { finishes++; } }
     static class SystemMessage { static final int NOTE_SYNC_ERROR = 1; }
     static class Notifications { void cancelAsUser(String s, int id, UserHandle u) {} }
-    static class Constants { int getMaxRetriesWithAppStandbyExemption() { return 3; } }
+    static class Constants { int getMaxRetriesWithAppStandbyExemption() { return 3; } int getKeyExemptionTempWhitelistDurationInSeconds() { return 30; } }
     static class WorkSource { int uid; WorkSource(int u) { uid = u; } }
     static class PowerManager {
         static final int PARTIAL_WAKE_LOCK = 1; int next;
@@ -172,5 +184,6 @@ public class Cleanup {
         // Death of the retained process itself removes all its native wake tokens.
         mSyncManagerWakeLock.acquire(); mSyncHandler.getSyncWakeLock(new SyncOperation("a")).acquire(); request("owner-death"); request("owner-death"); request("idle");
     }
-    public static void main(String[] args) { new Cleanup().run(); }
+    @ACCEPTANCE@
+    public static void main(String[] args) { Cleanup c=new Cleanup(); if (args.length==0) c.run(); else { c.acceptance(); c.run(); request("history"); } }
 }

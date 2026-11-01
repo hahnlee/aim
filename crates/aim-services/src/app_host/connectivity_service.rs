@@ -2684,7 +2684,7 @@ fn unreadable(host: &AppHost) -> Exception {
 
 #[cfg(test)]
 #[path = "connectivity_broadcast_tests.rs"]
-mod broadcast_tests;
+pub(in crate::app_host) mod broadcast_tests;
 
 #[cfg(test)]
 mod tests {
