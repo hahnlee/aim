@@ -54,6 +54,33 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::GET_SYSTEM_SCHEDULED_OWN_JOBS => {
+                let a = sp::GetSystemScheduledOwnJobs::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let jobs = self
+                        .host
+                        .job_scheduler
+                        .get_or_init(|| super::job_scheduler::JobScheduler::new(self.host.clone()));
+                    let own = jobs.system_scheduled_own_jobs(a.namespace.as_deref())?;
+                    let own: Vec<_> = own.into_iter().map(Some).collect();
+                    sp::write_get_system_scheduled_own_jobs_reply(&mut p, Some(&own));
+                    Ok(())
+                })
+            }
+            sp::GET_JOB_PERSIST_STATS => {
+                sp::GetJobPersistStats::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let jobs = self
+                        .host
+                        .job_scheduler
+                        .get_or_init(|| super::job_scheduler::JobScheduler::new(self.host.clone()));
+                    sp::write_get_job_persist_stats_reply(
+                        &mut p,
+                        &Some(jobs.persist_stats()?.to_vec()),
+                    );
+                    Ok(())
+                })
+            }
             sp::GET_SYNC_ACCOUNTS => {
                 sp::GetSyncAccounts::read(&mut call.data)?;
                 system().map(|()| {

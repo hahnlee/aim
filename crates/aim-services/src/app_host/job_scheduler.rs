@@ -868,9 +868,31 @@ enum Message {
     ContentChanged { key: ObserverKey, uris: Vec<Uri> },
 }
 
+/// JobStore's first-load and latest write-batch counts, in local-interface order.
+struct PersistStats([i32; 6]);
+impl Default for PersistStats {
+    fn default() -> Self {
+        Self([-1; 6])
+    }
+}
+fn persisted_counts<'a>(jobs: impl Iterator<Item = &'a Stored>) -> [i32; 3] {
+    let mut counts = [0; 3];
+    for j in jobs {
+        counts[0] += 1;
+        if j.uid == 1000 {
+            counts[1] += 1;
+            if j.job.service.1 == "com.android.server.content.SyncJobService" {
+                counts[2] += 1;
+            }
+        }
+    }
+    counts
+}
+
 #[derive(Default)]
 struct State {
     loaded: bool,
+    persist_stats: PersistStats,
     /// `mReadyToRock`: jobs run once the app host has started.
     running: bool,
     /// Every job tracked or running, by identity.
@@ -1139,6 +1161,7 @@ impl JobScheduler {
         let dir = self.host.inputs()?.data.join("system/job");
         let (now, wall) = (elapsed_ms(), wall_ms());
         let (stored, migrate) = job_store::read(&dir, now, wall);
+        state.persist_stats.0[..3].copy_from_slice(&persisted_counts(stored.iter()));
         state.loaded = true;
         let count = stored.len();
         for s in stored {
@@ -2613,6 +2636,33 @@ impl JobScheduler {
             .collect())
     }
 
+    /// JobSchedulerService.LocalService: both scheduler and source must be the system.
+    pub(super) fn system_scheduled_own_jobs(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<JobInfo>, Exception> {
+        let mut state = self.state.lock().unwrap();
+        self.ensure_loaded(&mut state)?;
+        Ok(state
+            .jobs
+            .values()
+            .filter(|j| {
+                j.tracked
+                    && j.calling_uid == 1000
+                    && j.source_uid == 1000
+                    && j.source_package == "android"
+                    && j.namespace.as_deref() == namespace
+            })
+            .map(|j| j.job.clone())
+            .collect())
+    }
+
+    pub(super) fn persist_stats(&self) -> Result<[i32; 6], Exception> {
+        let mut state = self.state.lock().unwrap();
+        self.ensure_loaded(&mut state)?;
+        Ok(state.persist_stats.0)
+    }
+
     /// `checkRunUserInitiatedJobsPermission`: `RUN_USER_INITIATED_JOBS`, an
     /// install-time permission without an app op.
     fn can_run_user_initiated(&self, uid: i32) -> Result<bool, Exception> {
@@ -2863,12 +2913,17 @@ fn run(scheduler: Weak<JobScheduler>) {
         };
         let dir = inputs.data.join("system/job");
         let wall = wall_ms();
+        let mut counts = [0; 3];
         for (uid, jobs) in writes {
+            for (total, n) in counts.iter_mut().zip(persisted_counts(jobs.iter())) {
+                *total += n;
+            }
             let refs: Vec<&Stored> = jobs.iter().collect();
             if let Err(e) = job_store::write(&dir, uid, &refs, now, wall) {
                 eprintln!("app host: jobs: writing the jobs of uid {uid}: {e}");
             }
         }
+        s.state.lock().unwrap().persist_stats.0[3..].copy_from_slice(&counts);
         if migrate {
             job_store::remove_legacy(&dir);
         }
@@ -3510,3 +3565,7 @@ mod tests {
         assert_eq!(old.work_count(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "sync_job_tests.rs"]
+mod sync_job_tests;

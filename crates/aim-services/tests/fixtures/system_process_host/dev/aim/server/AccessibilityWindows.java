@@ -1,4 +1,4 @@
 package dev.aim.server;
 final class AccessibilityWindows {
-    static void publish(ISystemProcess host) { SystemProcessHostTest.events.add("windowLocal"); }
+    static void publish(android.content.Context context, ISystemProcess host) { SystemProcessHostTest.events.add("windowLocal"); }
 }

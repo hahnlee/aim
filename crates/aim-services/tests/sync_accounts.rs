@@ -37,5 +37,32 @@ fn sync_accounts_adapter() {
         .arg("-cp")
         .arg(format!("{}:{}", classes.display(), stubs.display()))
         .arg("dev.aim.server.SyncAccountsTest"));
+    let declarations = work.join("JobSchedulerInternal.java");
+    fs::write(
+        &declarations,
+        fs::read_to_string(
+            production.join("stubs/com/android/server/job/JobSchedulerInternal.java"),
+        )
+        .unwrap()
+        .replace("throw new RuntimeException(\"stub\");", ""),
+    )
+    .unwrap();
+    run(Command::new(jdk.join("javac"))
+        .arg("-d")
+        .arg(&classes)
+        .arg("-cp")
+        .arg(&stubs)
+        .arg(declarations)
+        .arg(root.join(
+            "crates/aim-services/tests/fixtures/sync_accounts/android/os/RemoteException.java",
+        ))
+        .arg(production.join("src/dev/aim/server/NativeJobScheduler.java"))
+        .args(common::java::sources(
+            &root.join("crates/aim-services/tests/fixtures/sync_jobs"),
+        )));
+    run(Command::new(jdk.join("java"))
+        .arg("-cp")
+        .arg(format!("{}:{}", classes.display(), stubs.display()))
+        .arg("dev.aim.server.SyncJobsTest"));
     fs::remove_dir_all(work).unwrap();
 }
