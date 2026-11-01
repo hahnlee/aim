@@ -8,8 +8,8 @@
 //! of a change. Battery saver's Data Saver policy is #1489.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
@@ -125,18 +125,91 @@ impl Policy {
 pub struct NetworkPolicy {
     host: Arc<AppHost>,
     policy: OnceLock<Policy>,
+    temp_allowlist: Mutex<BTreeSet<i32>>,
+}
+
+impl AppHost {
+    pub(super) fn network_policy(&self) -> Arc<NetworkPolicy> {
+        self.network_policy
+            .get_or_init(|| Arc::new(NetworkPolicy::new(self.me.upgrade().unwrap())))
+            .clone()
+    }
 }
 
 impl NetworkPolicy {
+    /// NPMS.onTempPowerSaveWhitelistChange: membership is by app-id, not UID.
+    pub(super) fn temp_allowlist_changed(&self, uid: i32, added: bool) {
+        let mut ids = self.temp_allowlist.lock().unwrap();
+        let id = uid.rem_euclid(PER_USER_RANGE as i32);
+        if added {
+            ids.insert(id);
+        } else {
+            ids.remove(&id);
+        }
+    }
+
+    /// Only the unblocked unmetered path is served. The packet firewall is
+    /// unimplemented (#1711); never report a restriction as enforced here.
+    pub(super) fn check_power_restrictions(&self, uid: i32) -> Result<(), Exception> {
+        if !is_app(uid)
+            || self
+                .host
+                .check_permission(Some("android.permission.INTERNET"), uid)?
+                != 0
+            || self.host.uid_runs(uid)
+            || self
+                .temp_allowlist
+                .lock()
+                .unwrap()
+                .contains(&uid.rem_euclid(PER_USER_RANGE as i32))
+        {
+            return Ok(());
+        }
+        let names = self.host.installed(0, uid / PER_USER_RANGE as i32)?;
+        let names: Vec<_> = names.iter().filter(|(_, u, _)| *u == uid).collect();
+        let mut idle = true;
+        for (name, _, _) in names {
+            if self.host.device_idle().allowed_except_idle(name)? {
+                return Ok(());
+            }
+            idle &= self
+                .host
+                .app_idle_filtered(name, uid / PER_USER_RANGE as i32)?;
+        }
+        if idle {
+            return Err(self
+                .host
+                .unimplemented_named("netpolicy", "app standby firewall (#1711)"));
+        }
+        if self
+            .host
+            .power_restriction("enable_firewall", "enableFirewall")?
+        {
+            return Err(self
+                .host
+                .unimplemented_named("netpolicy", "battery saver firewall (#1489)"));
+        }
+        Ok(())
+    }
+
     pub fn new(host: Arc<AppHost>) -> Self {
         NetworkPolicy {
             host,
             policy: OnceLock::new(),
+            temp_allowlist: Mutex::default(),
         }
     }
 
     /// The policy read at the start; Data Saver as `initService` sets it.
     fn policy(&self) -> Result<&Policy, Exception> {
+        if self
+            .host
+            .power_restriction("enable_datasaver", "enableDataSaver")?
+        {
+            return Err(self
+                .host
+                .unimplemented_named("netpolicy", "battery saver's Data Saver (#1489)"));
+        }
         if let Some(p) = self.policy.get() {
             return Ok(p);
         }
@@ -158,17 +231,17 @@ impl NetworkPolicy {
             },
             Err(e) => return Err(state(e.to_string())),
         };
-        if self
-            .host
-            .power_service
-            .get()
-            .is_some_and(|p| matches!(p.power_save_mode(), Ok(true)))
-        {
-            return Err(self
-                .host
-                .unimplemented_named("netpolicy", "battery saver's Data Saver (#1489)"));
-        }
         Ok(self.policy.get_or_init(|| policy))
+    }
+
+    #[cfg(test)]
+    pub(super) fn temp_ids_for_test(&self) -> Vec<i32> {
+        self.temp_allowlist
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect()
     }
 
     /// `getNetworkPolicies`: MANAGE_NETWORK_POLICY, then

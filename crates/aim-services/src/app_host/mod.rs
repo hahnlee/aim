@@ -655,6 +655,7 @@ pub struct AppHost {
     window_contexts: Arc<Mutex<HashMap<u32, window_manager::WindowContext>>>,
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
+    network_policy: OnceLock<Arc<netpolicy_service::NetworkPolicy>>,
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
     time_zone_detector: OnceLock<Arc<time_zone_detector::TimeZoneDetector>>,
     battery_service: OnceLock<Arc<battery_service::BatteryService>>,
@@ -794,6 +795,7 @@ impl AppHost {
             window_contexts: Arc::new(Mutex::new(HashMap::new())),
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
+            network_policy: OnceLock::new(),
             alarm_service: OnceLock::new(),
             time_zone_detector: OnceLock::new(),
             battery_service: OnceLock::new(),
@@ -1167,10 +1169,7 @@ impl AppHost {
                 "device_identifiers",
                 Arc::new(device_identifiers::DeviceIdentifiers::new(self.clone())),
             ),
-            (
-                "netpolicy",
-                Arc::new(netpolicy_service::NetworkPolicy::new(self.clone())),
-            ),
+            ("netpolicy", self.network_policy()),
             (
                 "telephony.registry",
                 Arc::new(telephony_registry::TelephonyRegistry::new(self.clone())),

@@ -10,15 +10,16 @@
 //! apps read it. The app host's display is always on, so the device is
 //! awake and interactive (the Mac's display sleep: #670); there is no
 //! device idle (doze); battery saver is the
-//! persisted `low_power` setting, its policies not run (#1489).
+//! persisted `low_power` setting. Full-policy background-start/firewall
+//! decisions are read natively; remaining policies are #1489.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, DEAD_OBJECT, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader,
-    Result as ParcelResult,
+    BAD_VALUE, Binder, DEAD_OBJECT, EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
+    Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_os_ipowermanager as pm;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
@@ -162,6 +163,7 @@ impl Drop for Blocker {
 #[derive(Default)]
 struct State {
     locks: Vec<WakeLock>,
+    device_idle_temp: Vec<i32>,
     /// `PowerManagerService.WakeLocks`, `.Display`.
     wake_locks: Option<Blocker>,
     display: Option<Blocker>,
@@ -242,7 +244,60 @@ impl WriteParcelable for PowerSaveState {
     }
 }
 
+impl AppHost {
+    /// BatterySaverPolicy's selected full-policy boolean. Other power policies
+    /// remain unsupported; no light/deep idle state is inferred from this.
+    pub(super) fn power_restriction(&self, key: &str, resource: &str) -> Result<bool, Exception> {
+        let power = self
+            .power_service
+            .get_or_init(|| Arc::new(PowerManager::new(self.me.upgrade().unwrap())));
+        if !power.power_save_mode()? {
+            return Ok(false);
+        }
+        let settings = &self.platform()?.settings;
+        let constants = settings
+            .get(Table::Global, "battery_saver_constants")
+            .unwrap_or_default();
+        let pairs: Option<Vec<_>> = constants
+            .split(',')
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| v.trim().split_once('=').map(|(k, v)| (k.trim(), v.trim())))
+            .collect();
+        let value = pairs
+            .as_ref()
+            .and_then(|p| {
+                p.iter()
+                    .rev()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| (*v).to_owned())
+            })
+            .or_else(|| settings.device_config("battery_saver", key));
+        if let Some(value) = value {
+            return Ok(value.eq_ignore_ascii_case("true"));
+        }
+        self.framework()?
+            .framework_bool(&format!("config_batterySaver_full_{resource}"))
+            .ok_or_else(|| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("power: missing {resource} policy"),
+                )
+            })
+    }
+}
+
 impl PowerManager {
+    /// PowerManagerInternal.setDeviceIdleTempWhitelist. Neither light nor deep
+    /// idle is implemented: no wake lock is disabled or enabled by this update.
+    pub(super) fn set_device_idle_temp_allowlist(&self, ids: Vec<i32>) {
+        self.state.lock().unwrap().device_idle_temp = ids;
+    }
+
+    #[cfg(test)]
+    pub(super) fn temp_ids_for_test(&self) -> Vec<i32> {
+        self.state.lock().unwrap().device_idle_temp.clone()
+    }
+
     pub fn new(host: Arc<AppHost>) -> PowerManager {
         PowerManager {
             host,

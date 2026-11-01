@@ -257,6 +257,7 @@ enum Work {
     /// A temporary entry added: its end to be waited for.
     Temp,
     TempChanged(i32, bool),
+    NetworkTemp(i32, bool),
 }
 
 pub struct DeviceIdle {
@@ -473,6 +474,29 @@ impl DeviceIdle {
         reason_code: i32,
         reason: Option<String>,
     ) -> Result<(), Exception> {
+        self.add_temp_with_sync(
+            calling_uid,
+            package,
+            duration_ms,
+            kind,
+            user,
+            false,
+            reason_code,
+            reason,
+        )
+    }
+
+    pub(super) fn add_temp_with_sync(
+        &self,
+        calling_uid: i32,
+        package: Option<&str>,
+        duration_ms: i64,
+        kind: i32,
+        user: i32,
+        sync: bool,
+        reason_code: i32,
+        reason: Option<String>,
+    ) -> Result<(), Exception> {
         let Some(package) = package else {
             return Ok(());
         };
@@ -480,7 +504,15 @@ impl DeviceIdle {
         let Some((_, uid, _)) = installed.iter().find(|(n, _, _)| n == package) else {
             return Ok(());
         };
-        self.add_temp_direct(calling_uid, *uid, duration_ms, kind, reason_code, reason)
+        self.add_temp_direct_with_sync(
+            calling_uid,
+            *uid,
+            duration_ms,
+            kind,
+            sync,
+            reason_code,
+            reason,
+        )
     }
 
     /// `addPowerSaveTempWhitelistAppDirectInternal`: renew the app-id deadline,
@@ -491,6 +523,27 @@ impl DeviceIdle {
         uid: i32,
         duration_ms: i64,
         kind: i32,
+        reason_code: i32,
+        reason: Option<String>,
+    ) -> Result<(), Exception> {
+        self.add_temp_direct_with_sync(
+            calling_uid,
+            uid,
+            duration_ms,
+            kind,
+            false,
+            reason_code,
+            reason,
+        )
+    }
+
+    fn add_temp_direct_with_sync(
+        &self,
+        calling_uid: i32,
+        uid: i32,
+        duration_ms: i64,
+        kind: i32,
+        sync: bool,
         reason_code: i32,
         reason: Option<String>,
     ) -> Result<(), Exception> {
@@ -505,7 +558,7 @@ impl DeviceIdle {
         let now = self.host.temp_allowlist_now()?;
         self.with(|_| ())?;
         self.host.temp_allowlist_for_fgs(uid, allowance.clone())?;
-        self.with(|l| {
+        let (ids, new) = self.with(|l| {
             let app_id = uid % PER_USER_RANGE;
             let end_ms = now.saturating_add(allowance.duration_ms);
             let new = !l.temp.contains_key(&app_id);
@@ -522,13 +575,19 @@ impl DeviceIdle {
             });
             entry.end_ms = end_ms;
             entry.allowance = allowance.clone();
-            if new {
-                // Enqueue under the membership lock, so expiry cannot overtake add.
-                self.temp_changed(uid, true);
-                self.post(Work::Temp);
+            (l.temp.keys().copied().collect(), new)
+        })?;
+        if new {
+            self.host.device_idle_temp_changed(ids, None);
+            if sync {
+                self.host.network_policy().temp_allowlist_changed(uid, true);
+            } else {
+                self.post(Work::NetworkTemp(uid, true));
             }
-            Ok(())
-        })?
+            self.temp_changed(uid, true);
+            self.post(Work::Temp);
+        }
+        Ok(())
     }
 
     pub fn register_temp_allowlist_listener(&self, listener: Arc<dyn TempAllowlistChangeListener>) {
@@ -596,7 +655,8 @@ impl DeviceIdle {
 
     fn expire_at(&self, now: i64) -> Result<Option<i64>, Exception> {
         let _change = self.temp_changes.lock().unwrap();
-        self.with(|l| {
+        let (next, changes) = self.with(|l| {
+            let mut changes = Vec::new();
             let mut due: Vec<_> = l
                 .temp
                 .iter()
@@ -613,11 +673,17 @@ impl DeviceIdle {
                 } else {
                     let uid = entry.uid;
                     l.temp.remove(&id);
-                    self.temp_changed(uid, false);
+                    changes.push((uid, l.temp.keys().copied().collect()));
                 }
             }
-            l.temp.values().map(|e| e.check_at_ms).min()
-        })
+            (l.temp.values().map(|e| e.check_at_ms).min(), changes)
+        })?;
+        for (uid, ids) in changes {
+            self.host.device_idle_temp_changed(ids, Some(uid));
+            self.post(Work::NetworkTemp(uid, false));
+            self.temp_changed(uid, false);
+        }
+        Ok(next)
     }
 
     /// `Constants`' `key`: the `device_idle_constants` setting's (a
@@ -725,6 +791,10 @@ fn handler(me: Weak<DeviceIdle>, rx: mpsc::Receiver<Work>) {
             Ok(Work::WriteConfig) => write_at = Some(Instant::now() + WRITE_CONFIG_DELAY),
             Ok(Work::Temp) => temp_at = service.expire(),
             Ok(Work::TempChanged(uid, added)) => service.deliver_temp_change(uid, added),
+            Ok(Work::NetworkTemp(uid, added)) => service
+                .host
+                .network_policy()
+                .temp_allowlist_changed(uid, added),
             Err(RecvTimeoutError::Timeout) => {
                 let now = Instant::now();
                 if write_at.is_some_and(|at| at <= now) {

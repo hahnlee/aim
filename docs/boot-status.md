@@ -678,8 +678,15 @@ Temporary allowlisting now retains caller/reason/type attribution, caps duration
 resets membership deadlines while preserving the first reason and pending timeout,
 and delivers ordered native listener transitions (#1460 slice 5c/#2016).
 Type 1 never creates or extends an FGS allowance. Host tests cover missing
-packages/users, boundary expiry, renewal and listener reentry; consumer integration
-remains slice 5d. No guest boot or matched-image sync/CTS acceptance was run.
+packages/users, boundary expiry, renewal and listener reentry. Native AM/power
+membership and queued/synchronous network transitions now consume that allowance
+(#1460 slice 5d/#2016). Service admission follows temporary membership, forced
+standby and legacy battery/app-op/caller rules; existing background-job battery
+saver restrictions exempt temporary members. Network queries serve unblocked
+paths and explicitly reject unimplemented standby/battery-saver firewall effects
+(#1711/#1489). Light/deep doze remain unimplemented and are never fabricated.
+Host tests cover owner expiry, types and read permissions. No guest boot or
+matched-image sync/CTS acceptance was run.
 Standby history now writes the original version-1 XML, expiry records and
 elapsed/screen durations through atomic files, including scheduled and
 exempted-start sync holds (#1460 slice 5b/#1723, 2026-11-01). Host tests cover

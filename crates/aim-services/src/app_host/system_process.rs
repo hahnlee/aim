@@ -95,7 +95,7 @@ impl Service for SystemProcess {
             sp::ADD_SYNC_TEMP_ALLOWLIST => {
                 let a = sp::AddSyncTempAllowlist::read(&mut call.data)?;
                 system().and_then(|()| {
-                    if a.sync || !(0..=1).contains(&a.r#type) {
+                    if !(0..=1).contains(&a.r#type) {
                         return Err(self.host.unimplemented_named(
                             "deviceidle",
                             "local allowlist sync/type (#2016)",
@@ -107,12 +107,13 @@ impl Service for SystemProcess {
                     )
                     .map_err(|e| self.host.unimplemented_named("deviceidle", &e))?;
                     if kind != -1 {
-                        self.host.device_idle().add_temp(
+                        self.host.device_idle().add_temp_with_sync(
                             a.calling_uid,
                             a.package_name.as_deref(),
                             a.duration_ms,
                             kind,
                             a.user_id,
+                            a.sync,
                             a.reason_code,
                             a.reason,
                         )?;
