@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::sync::mpsc;
 use std::time::Duration;
 
-fn count(path: &std::path::Path, sql: &str) -> i32 {
+pub(super) fn count(path: &std::path::Path, sql: &str) -> i32 {
     Connection::open(path)
         .unwrap()
         .query_row(sql, [], |r| r.get(0))
@@ -31,7 +31,9 @@ fn authenticator(kind: &str, uid: i32) -> Authenticator {
     }
 }
 
-fn fixture(host: &Arc<AppHost>) -> (Arc<AccountManager>, std::path::PathBuf, std::path::PathBuf) {
+pub(super) fn fixture(
+    host: &Arc<AppHost>,
+) -> (Arc<AccountManager>, std::path::PathBuf, std::path::PathBuf) {
     host.set_user_unlocked_for_package_test(0, false);
     let data = &host.platform().unwrap().data;
     let de = data.join("system_de/0/accounts_de.db");
@@ -96,14 +98,23 @@ impl Service for Probe {
                 .unwrap(),
             0
         );
+        let committed = state.of(None);
         drop(state);
+        for code in [
+            aim_service_aidl::dev_aim_server_isyncaccounts::GET_RUNNING_ACCOUNTS_FOR_SYSTEM,
+            aim_service_aidl::dev_aim_server_isyncaccounts::GET_ALL_ACCOUNTS_FOR_SYSTEM_PROCESS,
+        ] {
+            let found = super::race_tests::invoke(&self.0, code).unwrap();
+            assert!(!found.contains(&gone));
+            assert_eq!(found, committed);
+        }
         assert!(!self.0.has_account_access(&gone, Some("p"), 1000).unwrap());
         self.1.send((a.intent.unwrap(), a.sending_user)).unwrap();
         Ok(Parcel::new())
     }
 }
 
-fn listen(
+pub(super) fn listen(
     host: &Arc<AppHost>,
     export: &dyn Fn(Arc<dyn Service>) -> Strong,
     manager: Arc<AccountManager>,
