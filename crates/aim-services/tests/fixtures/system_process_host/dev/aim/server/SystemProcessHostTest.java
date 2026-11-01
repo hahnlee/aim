@@ -27,7 +27,7 @@ public final class SystemProcessHostTest {
             List<String> wanted = new ArrayList<>(List.of("jni", "context", "modules", "art", "memory",
                     "systemApplication", "dex", "network", "roles", "settings", "installer", "installer:start", "packageLocals",
                     "packageShutdown", "packageJava", "staging", "domain", "attachDomain", "preBootNotifications", "graphicsstats:construct", "graphicsstats:publish",
-                    "foreground", "attachSystem", "companion", "crates", "activityStats", "jobLocal", "policyLocals", "accountLocal", "syncConstructed", "syncAttached", "taskManagerLocal", "windowLocal", "roleHelper", "RoleService:construct", "RoleService:start", "role:publish", "attachRole", "AccessibilityManagerService$Lifecycle:construct", "AccessibilityManagerService$Lifecycle:start",
+                    "foreground", "attachSystem", "artAttached", "companion", "crates", "activityStats", "jobLocal", "policyLocals", "accountLocal", "syncConstructed", "syncAttached", "taskManagerLocal", "windowLocal", "roleHelper", "RoleService:construct", "RoleService:start", "role:publish", "attachRole", "AccessibilityManagerService$Lifecycle:construct", "AccessibilityManagerService$Lifecycle:start",
                     "PinnerService:construct", "PinnerService:start", "ConnectivityDumpInitializer:construct", "ConnectivityDumpInitializer:start", "NetworkStatsInitializer:construct",
                     "NetworkStatsInitializer:start", "NearbyServiceInitializer:construct",
                     "NearbyServiceInitializer:start"));

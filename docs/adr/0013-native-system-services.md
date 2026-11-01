@@ -805,7 +805,7 @@ classes and AIDL only, with no original class or image replacement.
 
 The app host's dex-load recording (#1425) retains the image's original
 [DexUseManagerLocal](https://android.googlesource.com/platform/art/+/android-16.0.0_r1/libartservice/service/java/com/android/server/art/DexUseManagerLocal.java)
-in aim-system, without constructing ArtManagerLocal. Before constructing the
+in aim-system. Before constructing the
 owner, SystemProcessHost performs SystemServer's explicit
 ArtModuleServiceInitializer registration of ArtModuleServiceManager; this is
 not part of ActivityThread.initializeMainlineModules, and the original Injector
@@ -815,7 +815,13 @@ supplies that UID/user and PackageManagerLocal over the existing native replica
 and lease-bound visibility owner. The original owns ART JNI input validation,
 primary/secondary dex discovery, loader/ABI records, protobuf load and debounced
 atomic saves. Only PackageManagerService's ISA check is adapted in the vendor
-bridge. ART systemReady, shutdown cleanup and dexopt remain #2063; no original
+bridge. The same process now constructs/registers original ArtManagerLocal over
+those exact package/dex-use owners after application-thread attachment (#2063,
+slice 3). OriginalArtOwner separates construction from callback/receiver/job
+activation. A system-only deletion capability is bound to that native package
+epoch and live process generation; no maintenance callers are routed yet.
+Construction/attachment failures close the package Store and require process
+restart. ART systemReady, shutdown cleanup and dexopt remain #2063; no original
 class or image replacement is added. JVM lifecycle checks cover initialization
 order and a missing-initializer control. An isolated ART process executes the
 original constructor over empty and populated protobuf state, JNI path validation,

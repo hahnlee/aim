@@ -132,8 +132,8 @@ public final class SystemProcessHost extends RuntimeInit {
             IApplicationThread applicationThread = thread.getApplicationThread();
             ISystemProcess host = ISystemProcess.Stub.asInterface(
                     ServiceManager.waitForService("aim.system_process"));
-            host.attachDexUseBridge(new com.android.server.art.AppHostDexUse(
-                    context, host.getDexUsePackages()));
+            var artPackages = host.getDexUsePackages();
+            host.attachDexUseBridge(new com.android.server.art.AppHostDexUse(context, artPackages));
             host.attachNetworkActivityBridge(new NetworkActivityBridge(
                     context, new Handler(Looper.getMainLooper()), host));
             host.attachActivityAnimations(new ActivityAnimations(context));
@@ -163,6 +163,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachSystemProcess(applicationThread.asBinder(),
                     DeviceServices.foregroundServicePolicy(context), new SafeLabels(),
                     new BatteryHealthStats(context));
+            ArtOwnerStartup.start(context, artPackages);
             MediaArtwork.publish(context);
             AlarmIndicator.publish(context);
             host.attachSystemRouteQueries(new com.android.server.media.SystemRouteQueries(context));

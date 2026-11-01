@@ -1212,12 +1212,25 @@ the artd UID/group and DAC_OVERRIDE/DAC_READ_SEARCH/FOWNER/CHOWN capabilities;
 class startup does not eagerly launch it. Synthetic host init tests cover
 filtering, launch identity, duplicate requests, idle exit and death/restart.
 No guest boot, live Binder registration, filesystem access or idle reconnect
-was verified for this change (2026-11-02). ArtManagerLocal and its
-cleanup/dexopt lifecycle remain #2063.
+was verified for this change (2026-11-02).
+Original ArtManagerLocal is now constructed/registered in aim-system after its
+application-thread attachment, reusing OriginalArtOwner's PMS-free construction
+(#2063 slice 3, host-only, 2026-11-02). It shares the canonical package and dex-use
+owners. A typed system-only deletion bridge acknowledges readiness against the
+same package-source capability and live process generation; duplicate/stale
+attachments and root/foreign UIDs are rejected, death revokes readiness, and a
+new process can attach. Attachment makes no Java callback under native install
+locks. Native publication never waits for ART. Completion callbacks, boot/APEX
+observers, compilation and scheduling remain inactive in this startup path;
+maintenance/deletion callers are still unrouted. Host JVM/native fixtures cover
+these boundaries with original ART/Android constructor dependencies doubled.
+Original service-art.jar/JNI construction cost, image linkage, cold boot's zero
+compiler launches, actual process restart and manager survival across live
+package updates remain unverified. No guest was run; ART lifecycle remains #2063.
 The native maintenance endpoint now routes cache/code-cache deletion to installd
 with DE/CE/external flags and the published CE inode under the shared install lock
 (#2156, incomplete host-only candidate, 2026-11-01). It returns an explicit #2063
-error after storage deletion because profile cleanup has no owner. Storage-space,
+error after storage deletion because profile-cleanup forwarding is not connected. Storage-space,
 preload/parser-cache pruning, installd free-cache, caller logging and result delivery
 have native routes; external storage session cache reclamation remains unsupported.
 Host tests cover request scope, locked-CE forwarding, lock ownership and pruning
