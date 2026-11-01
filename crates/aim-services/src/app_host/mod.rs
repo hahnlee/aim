@@ -16,6 +16,8 @@ pub mod activity;
 mod activity_shell;
 pub mod activity_stack;
 pub mod activity_start;
+#[cfg(test)]
+mod activity_start_tests;
 mod activity_stats;
 mod activity_transitions;
 mod activity_user;
