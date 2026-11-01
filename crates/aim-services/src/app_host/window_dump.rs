@@ -475,7 +475,16 @@ impl AppHost {
         rotation.int(
             "frozen_to_user_rotation",
             2,
-            i32::from(*self.windows.accessibility.rotation_frozen.lock().unwrap()),
+            i32::from(self.platform().ok().is_some_and(|p| {
+                p.settings
+                    .get(
+                        super::super::settings::Table::System,
+                        "accelerometer_rotation",
+                    )
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(0)
+                    == 0
+            })),
         );
         display.message("display_rotation", 33, rotation);
         let mut root_wc = container("RootWindowContainer", None, None, global, true);

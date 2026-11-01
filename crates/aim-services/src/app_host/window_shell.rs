@@ -4,8 +4,8 @@
 //! density are its own (the app host applies no forced size, density or
 //! scaling, so the base metrics are the initial ones), the folded area is
 //! `config_foldedArea` or its override (`DisplayFoldController`), and the
-//! keyguard is never shown. Overriding the display's metrics, rotation,
-//! orientation requests, letterboxing, multi-window, blur, windowing mode,
+//! keyguard is never shown. Rotation policy belongs to the native window
+//! owner. Overriding display metrics, letterboxing, multi-window, blur, windowing mode,
 //! tracing, logging and dumps: #2050.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -47,6 +47,10 @@ fn on_command(host: &AppHost, uid: i32, cmd: &str, c: &mut ShellCommand) -> Outc
     match cmd {
         "size" => display_size(host, uid, c),
         "density" => display_density(host, uid, c),
+        "user-rotation"
+        | "fixed-to-user-rotation"
+        | "set-ignore-orientation-request"
+        | "get-ignore-orientation-request" => rotation(host, uid, cmd, c),
         "folded-area" => folded_area(host, uid, c),
         "dismiss-keyguard" => {
             // `dismissKeyguard(null, null)`: with the keyguard not showing
@@ -88,10 +92,6 @@ fn on_command(host: &AppHost, uid: i32, cmd: &str, c: &mut ShellCommand) -> Outc
         }
         "tracing"
         | "logging"
-        | "user-rotation"
-        | "fixed-to-user-rotation"
-        | "set-ignore-orientation-request"
-        | "get-ignore-orientation-request"
         | "dump-visible-window-views"
         | "set-letterbox-style"
         | "get-letterbox-style"
@@ -118,6 +118,134 @@ fn on_command(host: &AppHost, uid: i32, cmd: &str, c: &mut ShellCommand) -> Outc
             Ok(-1)
         }
     }
+}
+
+/// WindowManagerShellCommand's four rotation/orientation commands.
+fn rotation(host: &AppHost, uid: i32, cmd: &str, c: &mut ShellCommand) -> Outcome {
+    use super::window_rotation::Update;
+    let mut arg = if cmd == "set-ignore-orientation-request" {
+        Some(c.next_arg_required()?)
+    } else {
+        c.next_arg()
+    };
+    let display = if arg.as_deref() == Some("-d") {
+        let id = parse_int(&c.next_arg_required()?)?;
+        arg = if cmd == "set-ignore-orientation-request" {
+            Some(c.next_arg_required()?)
+        } else {
+            c.next_arg()
+        };
+        id
+    } else {
+        0
+    };
+    let update = match (cmd, arg.as_deref()) {
+        ("get-ignore-orientation-request", _) => None,
+        ("user-rotation", Some("free")) => Some(Update::User(None)),
+        ("user-rotation", Some("lock")) => {
+            let rotation = match c.next_arg().map(|s| parse_int(&s)).transpose() {
+                Ok(r) => r.unwrap_or(-1),
+                Err(e) => {
+                    c.eprintln(&format!(
+                        "Error: {}",
+                        e.trim_start_matches("java.lang.NumberFormatException: ")
+                    ));
+                    return Ok(-1);
+                }
+            };
+            if !(-1..=3).contains(&rotation) {
+                // WMS checks permission before validating the rotation.
+                host.rotation_permission(uid)
+                    .map_err(|e| java_exception(&e))?;
+                c.eprintln("Error: Rotation argument must be -1 or a valid rotation constant.");
+                return Ok(-1);
+            }
+            Some(Update::User(Some(rotation)))
+        }
+        ("fixed-to-user-rotation", Some(mode)) => Some(Update::Fixed(match mode {
+            "default" => 0,
+            "disabled" => 1,
+            "enabled" => 2,
+            "enabled_if_no_auto_rotation" => 3,
+            _ => {
+                c.eprintln(&format!(
+                    "Error: expecting enabled, disabled or default, but we get {mode}"
+                ));
+                return Ok(-1);
+            }
+        })),
+        ("set-ignore-orientation-request", Some(mode)) => Some(Update::Ignore(match mode {
+            "reset" => None,
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => {
+                c.eprintln(&format!(
+                    "Error: expecting true, 1, false, 0, reset, but we get {mode}"
+                ));
+                return Ok(-1);
+            }
+        })),
+        ("user-rotation", Some(_)) => {
+            c.eprintln("Error: argument needs to be either -d, free or lock.");
+            return Ok(-1);
+        }
+        _ => None,
+    };
+    let reset = matches!(update, Some(Update::Ignore(None)));
+    let query = update.is_none();
+    if display != 0 {
+        if update.is_some() && !reset {
+            host.rotation_permission(uid)
+                .map_err(|e| java_exception(&e))?;
+        }
+        if reset {
+            c.eprintln(&format!(
+                "Unable to reset ignoreOrientationRequest for displayId={display}"
+            ));
+            return Ok(-1);
+        }
+        if cmd == "get-ignore-orientation-request" {
+            c.println(&format!(
+                "ignoreOrientationRequest false for displayId={display}"
+            ));
+        } else if query {
+            c.eprintln("Error: check logcat for more details.");
+            return Ok(-1);
+        }
+        return Ok(0);
+    }
+    let policy = host
+        .rotation_policy(uid, update)
+        .map_err(|e| java_exception(&e))?;
+    if reset {
+        c.println(&format!(
+            "Reset ignoreOrientationRequest to {} for displayId={display}",
+            policy.ignore
+        ));
+    } else if query {
+        match cmd {
+            "user-rotation" => c.println(&if policy.frozen {
+                format!("lock {}", policy.user)
+            } else {
+                "free".into()
+            }),
+            "fixed-to-user-rotation" => match policy.fixed {
+                0 => c.println("default"),
+                1 => c.println("disabled"),
+                2 => c.println("enabled"),
+                3 => c.println("enabled_if_no_auto_rotation"),
+                _ => {
+                    c.eprintln("Error: check logcat for more details.");
+                    return Ok(-1);
+                }
+            },
+            _ => c.println(&format!(
+                "ignoreOrientationRequest {} for displayId={display}",
+                policy.ignore
+            )),
+        }
+    }
+    Ok(0)
 }
 
 /// `getDisplayId(opt)`: the display after `-d`, else the default; a bad
@@ -599,6 +727,291 @@ const HELP_DEBUG: &str = "\
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // CTS IgnoreOrientationRequestSession's regex and RotationSession's saved mode,
+    // and WindowManagerShellCommand at android-16.0.0_r1, without a guest.
+    #[test]
+    fn rotation_commands_share_persisted_window_policy() {
+        use super::super::*;
+        use aim_service_aidl::android_view_iwindowmanager as wm;
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            let settings = Arc::new(settings_provider::SettingsProvider::for_test(host.clone()));
+            assert!(
+                host.settings_provider
+                    .set((
+                        settings.clone(),
+                        host.process.add_service(settings),
+                        host.process.add_service(Arc::new(activity::Token)),
+                    ))
+                    .is_ok()
+            );
+            host.permission_manager
+                .set(std::sync::Arc::new(
+                    permission_manager::PermissionManager::with_system(
+                        host.clone(),
+                        Default::default(),
+                    ),
+                ))
+                .ok()
+                .unwrap();
+            let display = |host: &AppHost| {
+                assert!(
+                    host.display
+                        .set(std::sync::Arc::new((
+                            display::Display::phone_for_test(),
+                            display_service::Resources {
+                                name: "Built-in Screen".into(),
+                                density_dpi: 320,
+                                brightness: (0, 255, 128),
+                                brightness_dim: 0.1,
+                            },
+                        )))
+                        .is_ok()
+                );
+                host.display_metrics
+                    .set(Ok(display::Metrics {
+                        width: 1080,
+                        height: 1920,
+                        density_dpi: 320,
+                    }))
+                    .unwrap();
+            };
+            display(host);
+            let path = host.data().unwrap().join("rotation-shell-output");
+            let file = std::fs::File::create(&path).unwrap();
+            let command = |uid, args: &str| {
+                use std::io::Seek;
+                file.set_len(0).unwrap();
+                (&file).rewind().unwrap();
+                let mut c =
+                    ShellCommand::for_test(&args.split_whitespace().collect::<Vec<_>>(), &file);
+                let result = run(host, uid, &mut c);
+                (result, std::fs::read_to_string(&path).unwrap())
+            };
+            for (args, output) in [
+                ("user-rotation free", ""),
+                ("user-rotation", "free\n"),
+                ("user-rotation lock 3", ""),
+                ("user-rotation -d 0", "lock 3\n"),
+                ("fixed-to-user-rotation enabled", ""),
+                ("fixed-to-user-rotation", "enabled\n"),
+                ("fixed-to-user-rotation disabled", ""),
+                ("fixed-to-user-rotation", "disabled\n"),
+                ("fixed-to-user-rotation default", ""),
+                ("fixed-to-user-rotation", "default\n"),
+                ("fixed-to-user-rotation enabled_if_no_auto_rotation", ""),
+                ("fixed-to-user-rotation", "enabled_if_no_auto_rotation\n"),
+                ("set-ignore-orientation-request 1", ""),
+                (
+                    "get-ignore-orientation-request",
+                    "ignoreOrientationRequest true for displayId=0\n",
+                ),
+                ("set-ignore-orientation-request false", ""),
+                (
+                    "get-ignore-orientation-request -d 0",
+                    "ignoreOrientationRequest false for displayId=0\n",
+                ),
+                (
+                    "set-ignore-orientation-request reset",
+                    "Reset ignoreOrientationRequest to false for displayId=0\n",
+                ),
+                ("user-rotation lock", ""),
+                ("user-rotation", "lock 0\n"),
+            ] {
+                assert_eq!(command(0, args), (0, output.into()), "{args}");
+                assert_eq!(
+                    host.global_configuration().unwrap().window.display_rotation,
+                    0
+                );
+            }
+            for args in [
+                "user-rotation lock 2",
+                "user-rotation free",
+                "fixed-to-user-rotation enabled",
+                "set-ignore-orientation-request true",
+            ] {
+                let (status, text) = command(10100, args);
+                assert_eq!(status, -1);
+                assert!(
+                    text.contains("Requires SET_ORIENTATION permission"),
+                    "{text}"
+                );
+            }
+            assert_eq!(command(10100, "user-rotation"), (0, "lock 0\n".into()));
+            assert_eq!(
+                command(0, "user-rotation lock 9"),
+                (
+                    -1,
+                    "Error: Rotation argument must be -1 or a valid rotation constant.\n".into()
+                )
+            );
+            assert_eq!(
+                command(0, "get-ignore-orientation-request -d 99"),
+                (
+                    0,
+                    "ignoreOrientationRequest false for displayId=99\n".into()
+                )
+            );
+            let mut p = aim_binder_host::parcel::Parcel::new();
+            wm::FreezeRotation {
+                rotation: 2,
+                caller: None,
+            }
+            .write(&mut p);
+            let binder = |uid, code, p: &Parcel| {
+                window_manager::WindowManager(host.clone())
+                    .transact(&mut aim_binder_host::local::Call {
+                        code,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: uid,
+                        data: p.reader(),
+                    })
+                    .unwrap()
+            };
+            binder(0, wm::FREEZE_ROTATION, &p)
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap();
+            for code in [
+                wm::FREEZE_ROTATION,
+                wm::THAW_ROTATION,
+                wm::SET_FIXED_TO_USER_ROTATION,
+                wm::SET_IGNORE_ORIENTATION_REQUEST,
+            ] {
+                let mut data = Parcel::new();
+                match code {
+                    wm::FREEZE_ROTATION => wm::FreezeRotation {
+                        rotation: 1,
+                        caller: None,
+                    }
+                    .write(&mut data),
+                    wm::THAW_ROTATION => wm::ThawRotation { caller: None }.write(&mut data),
+                    wm::SET_FIXED_TO_USER_ROTATION => wm::SetFixedToUserRotation {
+                        display_id: 0,
+                        fixed_to_user_rotation: 1,
+                    }
+                    .write(&mut data),
+                    _ => wm::SetIgnoreOrientationRequest {
+                        display_id: 0,
+                        ignore_orientation_request: true,
+                    }
+                    .write(&mut data),
+                }
+                assert_eq!(
+                    binder(10100, code, &data)
+                        .reader()
+                        .read_exception()
+                        .unwrap()
+                        .unwrap_err()
+                        .code,
+                    aim_binder_host::parcel::EX_SECURITY
+                );
+            }
+            let mut data = Parcel::new();
+            wm::GetDefaultDisplayRotation {}.write(&mut data);
+            let response = binder(10100, wm::GET_DEFAULT_DISPLAY_ROTATION, &data);
+            let mut reader = response.reader();
+            reader.read_exception().unwrap().unwrap();
+            assert_eq!(reader.read_i32().unwrap(), 0);
+            assert_eq!(command(0, "user-rotation"), (0, "lock 2\n".into()));
+            assert_eq!(
+                host.global_configuration().unwrap().window.display_rotation,
+                0
+            );
+            // SettingsState persists on its writer, even for critical settings.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let saved =
+                    settings::Settings::load(host.data().unwrap(), host.root().unwrap()).unwrap();
+                if saved
+                    .get(settings::Table::System, "user_rotation")
+                    .as_deref()
+                    == Some("2")
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rotation policy was not persisted"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let saved = aim_android_xml::read(
+                &std::fs::read(host.data().unwrap().join("system/display_settings.xml")).unwrap(),
+            )
+            .unwrap();
+            let row = saved.children().find(|e| e.name == "display").unwrap();
+            assert_eq!(row.int("fixedToUserRotation").unwrap(), Some(3));
+            assert_eq!(row.bool("ignoreOrientationRequest").unwrap(), None);
+            assert_eq!(
+                command(0, "set-ignore-orientation-request true"),
+                (0, "".into())
+            );
+            let fresh = AppHost::new(host.process.clone());
+            configure_test_host(
+                &fresh,
+                host.root().unwrap(),
+                host.data().unwrap(),
+                &host.data().unwrap().join("reload-runtime"),
+                Box::new({
+                    let host = host.clone();
+                    move |name| host.property(name)
+                }),
+            );
+            display(&fresh);
+            let policy = fresh.rotation_policy(0, None).unwrap();
+            assert!(policy.frozen && policy.ignore);
+            assert_eq!((policy.user, policy.fixed), (2, 3));
+            assert_eq!(
+                fresh
+                    .global_configuration()
+                    .unwrap()
+                    .window
+                    .display_rotation,
+                0
+            );
+
+            // Product beats vendor; old display names and physical ports remain readable.
+            for (partition, xml) in [
+                (
+                    "vendor",
+                    r#"<display-settings><display name="local:0" fixedToUserRotation="1" ignoreOrientationRequest="false"/></display-settings>"#,
+                ),
+                (
+                    "product",
+                    r#"<display-settings><display name="Built-in Screen" fixedToUserRotation="2" ignoreOrientationRequest="true"/></display-settings>"#,
+                ),
+            ] {
+                let dir = host.root().unwrap().join(partition).join("etc");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("display_settings.xml"), xml).unwrap();
+            }
+            let path = host.data().unwrap().join("system/display_settings.xml");
+            std::fs::write(&path, r#"<display-settings><config identifier="1"/><display name="port:0" forcedDensity="240" ignoreOrientationRequest="false"/><display name="local:99" fixedToUserRotation="1"/></display-settings>"#).unwrap();
+            let policy = host.rotation_policy(0, None).unwrap();
+            assert_eq!(policy.fixed, 2);
+            assert!(!policy.ignore);
+            assert_eq!(
+                command(10100, "set-ignore-orientation-request reset"),
+                (
+                    0,
+                    "Reset ignoreOrientationRequest to true for displayId=0\n".into()
+                )
+            );
+            assert_eq!(command(0, "fixed-to-user-rotation default"), (0, "".into()));
+            let saved = aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap();
+            let rows: Vec<_> = saved.children().filter(|e| e.name == "display").collect();
+            assert_eq!(rows.len(), 2);
+            let row = rows
+                .iter()
+                .find(|e| e.string("name").as_deref() == Some("port:0"))
+                .unwrap();
+            assert_eq!(row.int("forcedDensity").unwrap(), Some(240));
+            assert_eq!(host.rotation_policy(0, None).unwrap().fixed, 0);
+        });
+    }
 
     /// `Integer.parseInt` and its exception's text.
     #[test]

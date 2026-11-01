@@ -161,6 +161,34 @@ visibility included). It connects to the display server itself
 - **Input**: the agent sends a touch to the front window under it, in the
   window's coordinates (`aim-app-host-agent`).
 
+### Display rotation policy (#2630)
+
+The Mac display stays at its natural rotation, `ROTATION_0`. The native
+window owner accepts rotation preferences as Android policy: `wm user-rotation
+[free|lock] [rotation]`, `fixed-to-user-rotation`, and
+`set-ignore-orientation-request` / `get-ignore-orientation-request` use the
+pinned Android 16 shell's output, including the strings CTS saves and parses.
+An explicit lock stores the requested rotation (0–3); a lock without a value
+captures the effective rotation, 0. Neither changes scanout or display metrics.
+
+Persistence follows `DisplayRotation` and `DisplayWindowSettings`: the default
+display's user lock and rotation are `accelerometer_rotation` and `user_rotation`
+in Settings.System; fixed mode and the nullable ignore override live in
+`/data/system/display_settings.xml`. Resetting the ignore override reveals the
+product/vendor default or Android's large-screen default. XML writes preserve
+other display settings and rows. Binder rotation operations share this owner,
+including SET_ORIENTATION checks; queries and the original local ignore-reset
+operation need no such permission.
+
+App orientation requests remain activity policy. Under the original freeform
+rules (`TaskFragment.computeConfigResourceOverrides`), a task's configuration
+comes from its bounds, and a freeform task is not the display's orientation
+source. With display rotation fixed at 0, recording a rotation preference
+therefore neither swaps a task's bounds nor rotates its Mac window. The legacy
+bridge's orientation-to-window resizing described below is separate from this
+native app-host display policy. Remaining shell owners, including overrides
+and letterboxing, are tracked in #2050.
+
 ## Windows
 
 - **Placement.** A new task's window takes the bounds Android chose

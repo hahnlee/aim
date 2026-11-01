@@ -102,6 +102,7 @@ pub struct Windows {
     /// `DisplayFoldController.mOverrideFoldedArea`: left, top, right,
     /// bottom; empty for none.
     pub(super) folded_area_override: Mutex<[i32; 4]>,
+    pub(super) rotation: Mutex<()>,
 }
 
 /// WMS's focus owner and serialized reports. Binder delivery holds none
@@ -342,53 +343,67 @@ impl Service for WindowManager {
                 wm::write_open_session_reply(&mut p, Some(session));
             }
             wm::IS_ROTATION_FROZEN => {
-                wm::IsRotationFrozen::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                wm::write_is_rotation_frozen_reply(
-                    &mut p,
-                    *self.0.windows.accessibility.rotation_frozen.lock().unwrap(),
-                );
+                wm::IsRotationFrozen::read(&mut call.data)?;
+                match self.0.rotation_policy(call.sender_euid as i32, None) {
+                    Ok(policy) => wm::write_is_rotation_frozen_reply(&mut p, policy.frozen),
+                    Err(e) => return reply(Err(e)),
+                }
             }
             wm::GET_DEFAULT_DISPLAY_ROTATION => {
-                wm::GetDefaultDisplayRotation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let rotation = match self.0.global_configuration() {
-                    Ok(c) => c.window.display_rotation,
-                    Err(e) => return reply(Err(e)),
-                };
-                wm::write_get_default_display_rotation_reply(&mut p, rotation);
+                wm::GetDefaultDisplayRotation::read(&mut call.data)?;
+                wm::write_get_default_display_rotation_reply(&mut p, 0);
             }
-            wm::FREEZE_ROTATION | wm::THAW_ROTATION => {
+            wm::FREEZE_ROTATION
+            | wm::THAW_ROTATION
+            | wm::SET_FIXED_TO_USER_ROTATION
+            | wm::SET_IGNORE_ORIENTATION_REQUEST
+            | wm::GET_IGNORE_ORIENTATION_REQUEST => {
+                use super::window_rotation::Update;
+                let (display, update) = match call.code {
+                    wm::FREEZE_ROTATION => (
+                        0,
+                        Some(Update::User(Some(
+                            wm::FreezeRotation::read(&mut call.data)?.rotation,
+                        ))),
+                    ),
+                    wm::THAW_ROTATION => {
+                        wm::ThawRotation::read(&mut call.data)?;
+                        (0, Some(Update::User(None)))
+                    }
+                    wm::SET_FIXED_TO_USER_ROTATION => {
+                        let a = wm::SetFixedToUserRotation::read(&mut call.data)?;
+                        (a.display_id, Some(Update::Fixed(a.fixed_to_user_rotation)))
+                    }
+                    wm::SET_IGNORE_ORIENTATION_REQUEST => {
+                        let a = wm::SetIgnoreOrientationRequest::read(&mut call.data)?;
+                        (
+                            a.display_id,
+                            Some(Update::Ignore(Some(a.ignore_orientation_request))),
+                        )
+                    }
+                    _ => (
+                        wm::GetIgnoreOrientationRequest::read(&mut call.data)?.display_id,
+                        None,
+                    ),
+                };
                 let result = (|| {
-                    if self.0.check_permission(
-                        Some("android.permission.SET_ORIENTATION"),
-                        call.sender_euid as i32,
-                    )? != 0
-                    {
-                        return Err(Exception::security("SET_ORIENTATION required"));
+                    if update.is_some() {
+                        self.0.rotation_permission(call.sender_euid as i32)?;
                     }
-                    let freeze = call.code == wm::FREEZE_ROTATION;
-                    if freeze {
-                        let a = wm::FreezeRotation::read(&mut call.data)
-                            .map_err(|_| Exception::illegal_argument("rotation"))?;
-                        if !(-1..=3).contains(&a.rotation) {
-                            return Err(Exception::illegal_argument("invalid rotation"));
-                        }
-                        let rotation = self.0.global_configuration()?.window.display_rotation;
-                        if a.rotation != -1 && a.rotation != rotation {
-                            return Err(self
-                                .0
-                                .unimplemented_named("window", "rotation changes (#2529)"));
-                        }
+                    let policy = if display == 0 {
+                        Some(self.0.rotation_policy(call.sender_euid as i32, update)?)
                     } else {
-                        wm::ThawRotation::read(&mut call.data)
-                            .map_err(|_| Exception::illegal_argument("rotation"))?;
+                        None
+                    };
+                    p.write_no_exception();
+                    if call.code == wm::GET_IGNORE_ORIENTATION_REQUEST {
+                        p.write_bool(policy.is_some_and(|p| p.ignore));
                     }
-                    *self.0.windows.accessibility.rotation_frozen.lock().unwrap() = freeze;
                     Ok(())
                 })();
                 if let Err(e) = result {
                     return reply(Err(e));
                 }
-                p.write_no_exception();
             }
             wm::GET_CURRENT_ANIMATOR_SCALE => {
                 wm::GetCurrentAnimatorScale::read(&mut call.data).map_err(|_| BAD_VALUE)?;

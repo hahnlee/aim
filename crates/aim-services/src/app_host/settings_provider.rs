@@ -1618,6 +1618,13 @@ fn key_valid(key: &str) -> bool {
 }
 
 impl SettingsProvider {
+    #[cfg(test)]
+    pub(super) fn for_test(host: Arc<AppHost>) -> Self {
+        let provider = Self::new(host);
+        assert!(provider.generations.set(GenerationRegistry::new(1)).is_ok());
+        provider
+    }
+
     pub fn new(host: Arc<AppHost>) -> SettingsProvider {
         SettingsProvider {
             host,

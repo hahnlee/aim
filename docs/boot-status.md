@@ -20,6 +20,13 @@ remaining failures span task, shell, configuration and display owners. Installer
 #1173 remain. One earlier fresh-data boot failed default-grant owner readiness
 before its class was retried on fresh data (2026-11-01).
 
+The app host's `wm` user-rotation, fixed-to-user-rotation and ignore-orientation
+commands now use persisted native display policy with Android 16 output (#2630).
+Effective display rotation remains 0; freeform configuration stays bound to task
+bounds ([window mode](windows.md#display-rotation-policy-2630)). Host shell,
+permission, persistence/reload and fixed-rotation checks cover this path; no
+guest boot or live CtsWindowManager rerun was performed (2026-11-01).
+
 Regular-file writes and admitted fallocate allocation/in-file hole punching clear
 set-ID modes without CAP_FSETID (#779, #2515); a shared generation invalidates
 cached modes. Host syscall/metadata checks pass; no guest boot was run (2026-10-31).

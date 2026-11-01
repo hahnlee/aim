@@ -37,6 +37,22 @@ impl WriteParcelable for NoBundle {
 }
 
 impl ShellCommand {
+    #[cfg(test)]
+    pub(crate) fn for_test(args: &[&str], file: &std::fs::File) -> Self {
+        use std::os::fd::AsFd;
+        let file = aim_binder_host::server::file_from_fd(file.as_fd()).unwrap();
+        Self {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            next: 1,
+            cur_arg_data: None,
+            input: None,
+            out: aim_binder_host::server::file_fd(&file),
+            err: aim_binder_host::server::file_fd(&file),
+            result: None,
+            callback: None,
+        }
+    }
+
     /// A call's data (`IBinder::shellCommand`): the input, output and error
     /// descriptors, the arguments, the shell callback and the result
     /// receiver.
