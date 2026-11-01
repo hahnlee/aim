@@ -132,6 +132,7 @@ public final class PackageSnapshots {
             catch (IOException failure) { throw new IllegalStateException("native package replica refresh failed", failure); }
             synchronized (this) {
                 if (closed || current == null) throw new IllegalStateException("package replica store is closed");
+                if (current.version < observed) throw new IllegalStateException("native snapshot precedes published version");
                 current.retain();
                 return current;
             }

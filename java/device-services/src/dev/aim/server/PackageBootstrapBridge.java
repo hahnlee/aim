@@ -191,6 +191,63 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         return new PackageLocal(snapshots, sdkDataOwner(host), signingOwner(host));
     }
 
+    /** aim-system's canonical local: captures and filters stay in one native epoch. */
+    public static PackageLocal captureLocal(IDexUsePackages backend)
+            throws RemoteException, java.io.IOException {
+        IBinder binder = ServiceManager.checkService("aim.service_host");
+        if (binder == null) throw new IllegalStateException("native service host is unavailable");
+        return captureLocal(IServiceHost.Stub.asInterface(binder), binder, backend);
+    }
+
+    static PackageLocal captureLocal(IServiceHost host, IBinder binder, IDexUsePackages backend)
+            throws RemoteException, java.io.IOException {
+        boolean crossUser = backend.crossUserSuspensions();
+        var page = new PackageVersionPage(host.getPackageStateVersionPage());
+        var retained = new java.util.concurrent.atomic.AtomicReference<PackageLocal>();
+        var dead = new java.util.concurrent.atomic.AtomicBoolean();
+        IBinder.DeathRecipient death = () -> {
+            dead.set(true);
+            var local = retained.get();
+            // LocalManagerRegistry cannot replace an owner. Init restarts aim-system.
+            try { if (local != null) local.closeEpoch(); }
+            finally { android.os.Process.killProcess(android.os.Process.myPid()); }
+        };
+        var versions = new PackageSnapshots.VersionSource() {
+            public long currentVersion() {
+                long version = page.currentVersion();
+                if (dead.get() || version == 0) {
+                    death.binderDied();
+                    throw new IllegalStateException("native package epoch ended");
+                }
+                return version;
+            }
+            public void close() { binder.unlinkToDeath(death, 0); page.close(); }
+        };
+        var owner = new PackageSnapshots.Owner() {
+            public String getFilteredPackageName(long version, String name, int uid, int user) {
+                try { return backend.filterPackageName(version, name, uid, user); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
+            public boolean shouldFilter(long version, com.android.server.pm.pkg.PackageState state, int uid, int user) {
+                try { return backend.shouldFilter(version, state.getPackageName(), uid, user); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
+        };
+        var snapshots = new PackageSnapshots.Store(backend::getSnapshot, owner,
+                crossUser, versions);
+        try {
+            binder.linkToDeath(death, 0);
+            snapshots.refresh();
+            var local = new PackageLocal(snapshots, sdkDataOwner(host), signingOwner(host));
+            retained.set(local);
+            versions.currentVersion();
+            return local;
+        } catch (RemoteException | java.io.IOException | RuntimeException failure) {
+            try { snapshots.close(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
+    }
+
     @Override
     public void restoreInstallerContext(String path) {
         enforceSystemUid();

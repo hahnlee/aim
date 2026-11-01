@@ -61,12 +61,15 @@ public final class PackageLocal implements PackageManagerLocal {
         Objects.requireNonNull(full).getVersion();snapshots=full;
         PackageSnapshots.Data old=initial;initial=null;old.close();
     }
-    public synchronized void closeEpoch(){if(closed)return;closed=true;if(initial!=null){initial.close();initial=null;}snapshots=null;}
+    public synchronized void closeEpoch(){if(closed)return;closed=true;if(initial!=null){initial.close();initial=null;}if(snapshots!=null)snapshots.close();snapshots=null;}
     private synchronized PackageSnapshots.Store full(){if(closed||snapshots==null)throw new IllegalStateException("Full package Local not yet bound or closed");return snapshots;}
+
+    private synchronized void checkOpen() { if (closed) throw new IllegalStateException("Package Local epoch closed"); if (snapshots != null) snapshots.getVersion(); }
 
     @Override
     public void reconcileSdkData(String volumeUuid, String packageName, List<String> subDirNames,
             int userId, int appId, int previousAppId, String seInfo, int flags) throws IOException {
+        checkOpen();
         sdkData.reconcile(volumeUuid, packageName, subDirNames, userId, appId, previousAppId, seInfo, flags);
     }
 
@@ -100,18 +103,21 @@ public final class PackageLocal implements PackageManagerLocal {
 
     @Override
     public void addOverrideSigningDetails(SigningDetails oldSigningDetails, SigningDetails newSigningDetails) {
+        checkOpen();
         enforceDebuggable();
         signing.add(oldSigningDetails, newSigningDetails);
     }
 
     @Override
     public void removeOverrideSigningDetails(SigningDetails oldSigningDetails) {
+        checkOpen();
         enforceDebuggable();
         signing.remove(oldSigningDetails);
     }
 
     @Override
     public void clearOverrideSigningDetails() {
+        checkOpen();
         enforceDebuggable();
         signing.clear();
     }

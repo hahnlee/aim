@@ -30,8 +30,11 @@ fn dex_use_bridge_keeps_original_identity_validation_and_errors() {
         .arg(&stubs)
         .args(common::java::sources(&fixtures))
         .arg(production.join("src/com/android/server/art/AppHostDexUse.java")));
-    run(Command::new(jdk.join("bin/java"))
-        .arg("-cp")
-        .arg(format!("{}:{}", classes.display(), stubs.display()))
-        .arg("com.android.server.art.DexUseTest"));
+    for mode in ["foreign", "normal"] {
+        run(Command::new(jdk.join("bin/java"))
+            .arg("-cp")
+            .arg(format!("{}:{}", classes.display(), stubs.display()))
+            .arg("com.android.server.art.DexUseTest")
+            .arg(mode));
+    }
 }

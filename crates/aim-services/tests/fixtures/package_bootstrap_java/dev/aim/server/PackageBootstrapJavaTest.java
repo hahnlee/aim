@@ -28,6 +28,7 @@ public final class PackageBootstrapJavaTest {
             }
         }
         Binder.uid = 1000;
+        ArtPackageLocalTest.run(args[0]);
         DefaultGrantOwnersTest.run();
         PackageShutdownJavaTest.run();
         ExistingInstallJavaTest.run(args[0]);

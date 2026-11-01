@@ -112,6 +112,17 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
             .join("\n"),
     )
     .unwrap();
+    let build = data.0.join("Build.java");
+    fs::write(
+        &build,
+        fs::read_to_string(production.join("stubs/android/os/Build.java"))
+            .unwrap()
+            .replace(
+                "public static boolean isDebuggable() { throw new RuntimeException(\"stub\"); }",
+                "public static boolean isDebuggable() { return true; }",
+            ),
+    )
+    .unwrap();
     let classpath = format!("{}:{}", classes.display(), stubs.display());
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
@@ -122,6 +133,7 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
         .arg(&users)
         .arg(&permissions)
         .arg(&package)
+        .arg(&build)
         .args(&discovery)
         .args(common::java::sources(&aim_paths::root().join(
             "crates/aim-services/tests/fixtures/package_bootstrap_java",

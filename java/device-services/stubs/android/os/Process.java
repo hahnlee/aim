@@ -3,6 +3,7 @@
 package android.os;
 
 public class Process {
+    public static void killProcess(int pid) { throw new RuntimeException("stub"); }
     public static int myPid() { throw new RuntimeException("stub"); }
     public static int myUid() { throw new RuntimeException("stub"); }
     public static final int ROOT_UID = 0;

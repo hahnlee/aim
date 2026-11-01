@@ -17,10 +17,11 @@ import android.os.Binder;
 import android.os.UserHandle;
 import android.util.ArrayMap;
 import com.android.server.pm.InstructionSets;
+import com.android.server.pm.PackageManagerLocal;
 import dev.aim.server.IDexUseBridge;
 import dev.aim.server.IDexUsePackages;
+import dev.aim.server.PackageBootstrapBridge;
 import dev.aim.server.PackageLocal;
-import dev.aim.server.PackageSnapshots;
 import dalvik.system.VMRuntime;
 import java.io.IOException;
 import java.util.Objects;
@@ -38,7 +39,6 @@ import java.util.Objects;
  */
 @SuppressWarnings("try")
 public final class AppHostDexUse extends IDexUseBridge.Stub {
-    private final PackageSnapshots.Store packages;
     private final PackageLocal local;
     private final ThreadLocal<Integer> caller = new ThreadLocal<>();
     private final DexUseManagerLocal usage;
@@ -47,42 +47,24 @@ public final class AppHostDexUse extends IDexUseBridge.Stub {
         Objects.requireNonNull(backend);
         if (com.android.server.LocalManagerRegistry.getManager(DexUseManagerLocal.class) != null)
             throw new IllegalStateException("ART dex-use owner already registered");
-        packages = new PackageSnapshots.Store(backend::getSnapshot, new PackageSnapshots.Owner() {
-            @Override public String getFilteredPackageName(long version, String name, int uid, int user) {
-                try { return backend.filterPackageName(version, name, uid, user); }
-                catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); }
-            }
-            @Override public boolean shouldFilter(long version, com.android.server.pm.pkg.PackageState state, int uid, int user) {
-                try { return backend.shouldFilter(version, state.getPackageName(), uid, user); }
-                catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); }
-            }
-        }, crossUser(backend));
-        refresh();
-        local = new PackageLocal(packages,
-                (volume, name, dirs, user, app, previous, seInfo, flags) -> {
-                    throw new UnsupportedOperationException("dex-use snapshot cannot reconcile SDK data");
-                }, new PackageLocal.SigningOwner() {
-                    @Override public void add(android.content.pm.SigningDetails oldDetails, android.content.pm.SigningDetails newDetails) { throw new UnsupportedOperationException("dex-use snapshot cannot override signing"); }
-                    @Override public void remove(android.content.pm.SigningDetails details) { throw new UnsupportedOperationException("dex-use snapshot cannot override signing"); }
-                    @Override public void clear() { throw new UnsupportedOperationException("dex-use snapshot cannot override signing"); }
-                });
-        usage = new DexUseManagerLocal(new DexUseManagerLocal.Injector(context) {
-            @Override public com.android.server.pm.PackageManagerLocal getPackageManagerLocal() { return local; }
-            @Override public int getCallingUid() { return Objects.requireNonNull(caller.get()); }
-            @Override public UserHandle getCallingUserHandle() { return UserHandle.of(UserHandle.getUserId(getCallingUid())); }
-        });
-        com.android.server.LocalManagerRegistry.addManager(DexUseManagerLocal.class, usage);
-    }
-
-    private static boolean crossUser(IDexUsePackages backend) {
-        try { return backend.crossUserSuspensions(); }
+        if (com.android.server.LocalManagerRegistry.getManager(PackageManagerLocal.class) != null)
+            throw new IllegalStateException("ART package owner already registered");
+        ArtModuleServiceInitializer.getArtModuleServiceManager();
+        try { local = PackageBootstrapBridge.captureLocal(backend); }
         catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); }
-    }
-
-    private void refresh() {
-        try { packages.refresh(); }
-        catch (android.os.RemoteException failure) { throw failure.rethrowFromSystemServer(); }
-        catch (IOException failure) { throw new IllegalStateException("dex-use package capture failed", failure); }
+        catch (IOException failure) { throw new IllegalStateException("ART package capture failed", failure); }
+        try {
+            com.android.server.LocalManagerRegistry.addManager(PackageManagerLocal.class, local);
+            usage = new DexUseManagerLocal(new DexUseManagerLocal.Injector(context) {
+                @Override public com.android.server.pm.PackageManagerLocal getPackageManagerLocal() { return local; }
+                @Override public int getCallingUid() { return Objects.requireNonNull(caller.get()); }
+                @Override public UserHandle getCallingUserHandle() { return UserHandle.of(UserHandle.getUserId(getCallingUid())); }
+            });
+            com.android.server.LocalManagerRegistry.addManager(DexUseManagerLocal.class, usage);
+        } catch (RuntimeException failure) {
+            try { local.closeEpoch(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
     }
 
     @Override public void notifyDexLoad(String name, String[] paths, String[] contexts,
@@ -95,7 +77,6 @@ public final class AppHostDexUse extends IDexUseBridge.Stub {
             map = new ArrayMap<>();
             for (int i = 0; i < paths.length; i++) map.put(paths[i], contexts[i]);
         }
-        refresh();
         caller.set(uid);
         try (var snapshot = local.withFilteredSnapshot(uid, UserHandle.of(UserHandle.getUserId(uid)))) {
             var state = snapshot.getPackageState(name);
