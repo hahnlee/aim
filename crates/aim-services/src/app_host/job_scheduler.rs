@@ -754,10 +754,10 @@ fn backoff_delay(policy: i32, initial: i64, attempts: i32) -> Option<i64> {
     }
     let backoff = initial.max(MIN_BACKOFF_MILLIS);
     let delay = if policy == BACKOFF_POLICY_LINEAR {
-        backoff.saturating_mul(attempts as i64)
+        backoff.wrapping_mul(attempts as i64)
     } else {
-        // `(long) Math.scalb(backoff, attempts - 1)`, saturating.
-        (backoff as f64 * 2f64.powi(attempts - 1)) as i64
+        // Java selects Math.scalb(float, int) for its long argument.
+        (backoff as f32 * 2f32.powi(attempts - 1)) as i64
     };
     Some(delay.min(MAX_BACKOFF_DELAY_MILLIS))
 }
@@ -946,6 +946,7 @@ impl HostConnection for Connection {
 struct Stopped {
     reason: Option<String>,
     at: i64,
+    finished_at: i64,
     successful: bool,
 }
 
@@ -1911,7 +1912,7 @@ impl JobScheduler {
             let top = self.is_top(j.source_uid);
             if !j.evaluate(now, &device, top) {
                 if let Some(i) = running {
-                    stops.push((i, j.reason_unready));
+                    stops.push((state.contexts[i].callback.id, j.reason_unready));
                 }
                 continue;
             }
@@ -1945,7 +1946,14 @@ impl JobScheduler {
                 }
             }
         }
-        for (i, reason) in stops {
+        for (callback, reason) in stops {
+            let Some(i) = state
+                .contexts
+                .iter()
+                .position(|c| c.callback.id == callback)
+            else {
+                continue;
+            };
             self.cancel_context(
                 state,
                 i,
@@ -2152,7 +2160,7 @@ impl JobScheduler {
     }
 
     /// `IJobService.startJob` or `stopJob` with the context's parameters.
-    fn send(&self, state: &State, i: usize, code: u32) {
+    fn send(&self, state: &State, i: usize, code: u32) -> bool {
         let c = &state.contexts[i];
         let j = &state.jobs[&c.key];
         let params = JobParameters {
@@ -2181,12 +2189,19 @@ impl JobScheduler {
             }
             .write(&mut p);
         }
-        if let Some(Err(s)) = c.service.as_ref().map(|s| s.transact(code, &p, true)) {
+        if let Err(s) = c
+            .service
+            .as_ref()
+            .ok_or(BAD_VALUE)
+            .and_then(|s| s.transact(code, &p, true))
+        {
             eprintln!(
                 "app host: jobs: {}/{}: call {code}: status {s}",
                 j.job.service.0, j.job.service.1
             );
+            return false;
         }
+        true
     }
 
     /// `doCancelLocked` of context `i`.
@@ -2218,7 +2233,15 @@ impl JobScheduler {
         c.callback.stopped_because(reason, now);
         c.verb = Verb::Stopping;
         c.timeout_at = now + OP_TIMEOUT_MILLIS;
-        self.send(state, i, job_service::STOP_JOB);
+        if !self.send(state, i, job_service::STOP_JOB) {
+            self.close(
+                state,
+                i,
+                true,
+                Some("host crashed when trying to stop"),
+                now,
+            );
+        }
     }
 
     /// `scheduleOpTimeOutLocked` of an executing context: at its minimum
@@ -2988,6 +3011,7 @@ impl JobCallback {
             *stopped = Some(Stopped {
                 reason,
                 at: now,
+                finished_at: 0,
                 successful: false,
             });
         }
@@ -2998,10 +3022,11 @@ impl JobCallback {
         let s = stopped.get_or_insert(Stopped {
             reason: None,
             at: now,
+            finished_at: now,
             successful,
         });
         s.successful = successful;
-        s.at = now;
+        s.finished_at = now;
     }
 
     /// `assertCallerLocked`: the context of a current callback; a stale one
@@ -3014,7 +3039,7 @@ impl JobCallback {
         let stopped = self.stopped.lock().unwrap();
         if stopped
             .as_ref()
-            .is_some_and(|s| !s.successful && now - s.at < 15_000)
+            .is_some_and(|s| !s.successful && now - s.finished_at < 15_000)
         {
             return Ok(None);
         }
