@@ -21,7 +21,7 @@ use aim_service_aidl::android_app_iactivitymanager as am;
 use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
 use aim_service_aidl::android_content_iintentsender as sender;
 
-use super::activity_start::StartArgs;
+use super::activity_start::{START_CANCELED, StartArgs};
 use super::activity_user::AllowMode;
 use super::broadcasts::filter_equals;
 use super::kept::{By, KeptIntent, RawBundle, RawIntent};
@@ -63,9 +63,8 @@ const FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT: i32 = 1 << 24;
 const FLAG_RECEIVER_BOOT_UPGRADE: i32 = 0x0200_0000;
 /// `PendingIntent.BLOCK_MUTABLE_IMPLICIT_PENDING_INTENT`.
 const BLOCK_MUTABLE_IMPLICIT_PENDING_INTENT: i64 = 236_704_164;
-/// `ActivityManager.START_SUCCESS`, `START_CANCELED`; `Activity.RESULT_CANCELED`.
+/// `ActivityManager.START_SUCCESS`; `Activity.RESULT_CANCELED`.
 const START_SUCCESS: i32 = 0;
-const START_CANCELED: i32 = -96;
 const RESULT_CANCELED: i32 = 0;
 /// `Process.INVALID_UID`; `UserHandle.USER_CURRENT`.
 const INVALID_UID: i32 = -1;
@@ -725,7 +724,8 @@ impl AppHost {
                     request_code: sent.request_code,
                     options: sent.options,
                 };
-                res = match self.start_activity_in_package(uid, Some(package.clone()), 0, args) {
+                let owner = Some(package.clone());
+                res = match self.start_activity_in_package(uid, owner, 0, user, args) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!(

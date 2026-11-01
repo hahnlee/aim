@@ -17,8 +17,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use aim_binder_host::local::Call;
-use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{
+    Binder, EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
+};
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::android_app_iactivitytaskmanager as atm;
 use aim_service_aidl::android_app_iapplicationthread as thread;
 
 use super::activity::{ActivityRecord, Item, Token};
@@ -35,6 +38,8 @@ pub const START_SUCCESS: i32 = stack::START_SUCCESS;
 const START_INTENT_NOT_RESOLVED: i32 = -1;
 const START_CLASS_NOT_FOUND: i32 = -2;
 const START_FORWARD_AND_REQUEST_CONFLICT: i32 = -93;
+const START_PERMISSION_DENIED: i32 = -94;
+pub(super) const START_CANCELED: i32 = -96;
 /// `Intent.FLAG_ACTIVITY_FORWARD_RESULT`,
 /// `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
 const FLAG_ACTIVITY_FORWARD_RESULT: i32 = 0x0200_0000;
@@ -702,27 +707,65 @@ impl AppHost {
         }
     }
 
-    /// `IActivityTaskManager.startActivity`: the start's result code.
+    /// `IActivityTaskManager.startActivity`, `startActivityAsUser` (as
+    /// `user`) and `startActivityWithConfig`: the start's result code.
     pub(super) fn start_activity(
         self: &Arc<Self>,
         call: &Call<'_>,
         args: StartArgs,
+        user: Option<i32>,
+        unsupported: Option<&str>,
     ) -> Result<i32, Exception> {
         let sender = call.sender_euid as i32;
         if !matches!(sender, 0 | 1000)
             && !self.owns_package(sender, args.calling_package.as_deref().unwrap_or_default())?
         {
-            return Err(Exception::security("Package does not belong to uid"));
+            return Err(Exception::security(format!(
+                "Permission Denial: package={} does not belong to uid={sender}",
+                args.calling_package.as_deref().unwrap_or("null")
+            )));
         }
+        let name = if call.code == atm::START_ACTIVITY_WITH_CONFIG {
+            "startActivityWithConfig"
+        } else {
+            "startActivityAsUser"
+        };
+        if super::is_isolated(sender) {
+            return Err(Exception::security(format!(
+                "Isolated process not allowed to call {name}"
+            )));
+        }
+        let user = self.handle_incoming_user(
+            sender,
+            user.unwrap_or(sender / PER_USER_RANGE as i32),
+            false,
+            super::activity_user::AllowMode::NonFull,
+            Some(name),
+            None,
+        )?;
         let (uid, pid) = if args.caller.is_some() {
             let Some((_, _, uid, pid)) = self.app_of_thread(args.caller) else {
-                return Err(Exception::security("Unable to find app for caller"));
+                return Ok(START_PERMISSION_DENIED);
             };
             (uid, pid)
         } else {
             (call.sender_euid as i32, call.sender_pid)
         };
-        self.start_activity_in_package(uid, args.calling_package.clone(), pid, args)
+        if let Some(reason) = unsupported {
+            return Ok(self.cancel_activity_start(reason));
+        }
+        // What the owner cannot serve yet cancels the start, logged, rather
+        // than throwing into the caller (a system service's main thread).
+        match self.start_activity_in_package(uid, args.calling_package.clone(), pid, user, args) {
+            Err(e) if e.code == EX_UNSUPPORTED_OPERATION => Ok(START_CANCELED),
+            result => result,
+        }
+    }
+
+    /// A start cancelled for `reason`, which the owner does not implement.
+    fn cancel_activity_start(&self, reason: &str) -> i32 {
+        self.unimplemented_named("activity_task", reason);
+        START_CANCELED
     }
 
     /// `ActivityStarter`'s start of `args` by `uid` of `caller_package`
@@ -733,6 +776,7 @@ impl AppHost {
         uid: i32,
         mut caller_package: Option<String>,
         caller_pid: i32,
+        user: i32,
         mut args: StartArgs,
     ) -> Result<i32, Exception> {
         let mut intent = args
@@ -753,7 +797,7 @@ impl AppHost {
                 &intent.intent,
                 args.resolved_type.as_deref(),
                 super::STOCK_PM_FLAGS | MATCH_DEFAULT_ONLY,
-                uid / PER_USER_RANGE as i32,
+                user,
                 uid,
                 only_exported,
                 &report,
@@ -821,7 +865,8 @@ impl AppHost {
             }));
         }
         if !self.background_activity_start_allowed(uid)? {
-            return Ok(102); // ActivityManager.START_ABORTED.
+            // START_ABORTED, which `getExternalResult` reports as success.
+            return Ok(START_SUCCESS);
         }
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.

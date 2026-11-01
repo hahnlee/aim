@@ -27,6 +27,9 @@ use crate::package::info::ActivityInfo;
 
 /// `ActivityManager.LOCK_TASK_MODE_NONE`.
 const LOCK_TASK_MODE_NONE: i32 = 0;
+/// `ActivityManager.START_FLAG_*`, which `ActivityStarter` reads (not the
+/// `FLAG_ACTIVITY_NEW_TASK` that `ContextImpl.startActivityAsUser` passes).
+const START_FLAGS: i32 = 0x1f;
 /// `ActivityManager.PROCESS_STATE_UNKNOWN` and `PROCESS_STATE_CACHED_EMPTY`:
 /// the resume's process state, and the launch's before the process state
 /// is reported.
@@ -833,31 +836,86 @@ impl Service for ActivityTaskManager {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        // The entries that share `ActivityStarter`; what it does not serve
+        // cancels the start rather than throwing into the caller.
+        macro_rules! start {
+            ($a:expr, $user:expr, $unsupported:expr) => {{
+                let user = $user;
+                let a = $a;
+                let result = self.0.start_activity(
+                    call,
+                    super::activity_start::StartArgs {
+                        caller: a.caller,
+                        calling_package: a.calling_package,
+                        intent: a.intent,
+                        resolved_type: a.resolved_type,
+                        result_to: a.result_to,
+                        result_who: a.result_who,
+                        request_code: a.request_code,
+                        options: a.options,
+                    },
+                    user,
+                    $unsupported,
+                );
+                reply(result.map(|code| {
+                    let mut p = Parcel::new();
+                    atm::write_start_activity_reply(&mut p, code);
+                    p
+                }))
+            }};
+        }
         match call.code {
             atm::START_ACTIVITY => {
                 let a =
                     atm::StartActivity::<RawIntent, ProfilerInfo, RawBundle>::read(&mut call.data)
                         .map_err(|_| BAD_VALUE)?;
-                if a.profiler_info.is_some() {
-                    return reply(Err(self
-                        .0
-                        .unimplemented_named("activity_task", "a start with a profiler")));
-                }
-                let args = super::activity_start::StartArgs {
-                    caller: a.caller,
-                    calling_package: a.calling_package,
-                    intent: a.intent,
-                    resolved_type: a.resolved_type,
-                    result_to: a.result_to,
-                    result_who: a.result_who,
-                    request_code: a.request_code,
-                    options: a.options,
+                let unsupported = (a.profiler_info.is_some() || a.flags & START_FLAGS != 0)
+                    .then_some("a start with flags or a profiler");
+                start!(a, None, unsupported)
+            }
+            atm::START_ACTIVITY_AS_USER => {
+                let a = atm::StartActivityAsUser::<RawIntent, ProfilerInfo, RawBundle>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
+                let unsupported = (a.profiler_info.is_some() || a.flags & START_FLAGS != 0)
+                    .then_some("a start with flags or a profiler");
+                start!(a, Some(a.user_id), unsupported)
+            }
+            atm::START_ACTIVITY_WITH_CONFIG => {
+                let a = atm::StartActivityWithConfig::<RawIntent, Configuration, RawBundle>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
+                // `globalConfigWillChange`: the start that also updates the
+                // global configuration is not served.
+                let changes = match a.new_config.as_ref() {
+                    Some(c) => match self.0.global_configuration() {
+                        Ok(current) => current.diff(c) != 0,
+                        Err(e) => return reply(Err(e)),
+                    },
+                    None => false,
                 };
-                reply(self.0.start_activity(call, args).map(|code| {
-                    let mut p = Parcel::new();
-                    atm::write_start_activity_reply(&mut p, code);
-                    p
-                }))
+                let unsupported = (a.start_flags & START_FLAGS != 0 || changes)
+                    .then_some("a start with flags or a configuration change");
+                start!(a, Some(a.user_id), unsupported)
+            }
+            // Starts with another identity, several intents or a session.
+            atm::START_ACTIVITY_AS_CALLER
+            | atm::START_ACTIVITIES
+            | atm::START_VOICE_ACTIVITY
+            | atm::START_ASSISTANT_ACTIVITY
+            | atm::START_ACTIVITY_FROM_GAME_SESSION
+            | atm::START_ACTIVITY_FROM_RECENTS => {
+                call.data
+                    .enforce_interface(atm::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                self.0
+                    .unimplemented("activity_task", atm::DESCRIPTOR, call.code);
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                p.write_i32(super::activity_start::START_CANCELED);
+                Ok(p)
             }
             // `startActivityIntentSender`: the record sent as `sendInner`
             // sends it, with the caller's result target and flags. Its

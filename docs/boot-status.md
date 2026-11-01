@@ -518,14 +518,16 @@ the all-top process model remains #1738. `setInputFilter` now installs/uninstall
 the original filter through a Java host. The native agent routes hardware key/touch
 events with policy flags and re-injects asynchronously. Stream cancellation/queue
 retirement and the separate accessibility-tool motion marker remain #2529 gaps.
-Fresh en-US `-g` Accessibility CTS is 99 pass / 10 fail / 4 flag-assumption skips;
-all 113 starts/results pair, followed by a UiAutomation cleanup crash. All 23 prior
-passes remain. The setInputFilter fatal is gone; one aim-system fatal now comes
-from native `activity_task.startActivityAsUser` during a shortcut launch, with
-shortcut/captioning cascades. Two descriptor-publication errno-9 lines recur (#2571).
-Safety Center remains 476/0/52 and has no captured Java fatal. Build/image, 1,025
-app-host checks (3 ignored, not run), JVM and 18 transport checks pass. Both official
-runs have no foreign guest/build overlap, native fatal signal, ANR or tombstone.
+Native `activity_task` serves `startActivityAsUser` and `startActivityWithConfig`
+through the shared starter (#2578): package/isolation/cross-user checks and result
+codes. Unserved start flags, configuration changes and the other start entries
+return `START_CANCELED` instead of throwing into aim-system.
+Fresh en-US `-g` Accessibility CTS is 102 pass / 7 fail / 4 flag-assumption skips;
+all 113 starts/results pair and the run completes. aim-system lives until the owned
+stop; the shortcut target starts. All seven failures are CaptioningManagerTest
+cleanups, before masked by the lost UiAutomation: no focused accessibility window
+of a home package. No window test changed with the #2570 display root. Safety
+Center remains 476/0/52; neither run has a Java or native fatal, ANR or tombstone.
 Unserved local operations remain explicit #2529 errors; conformance is partial (2026-11-01).
 
 The app host image ([app-host.md](app-host.md)) boots without
