@@ -279,7 +279,7 @@ impl AppHost {
     /// StorageManagerService's `onUserUnlocking`: vold creates the
     /// emulated volume on `onUserStarted`, then `H_VOLUME_MOUNT` mounts it.
     /// The user's CE storage already exists (`onBeforeUnlockUser`).
-    fn mount_user_storage(&self, vold: &Strong) -> Result<(), String> {
+    fn mount_user_storage(&self, vold: &Strong, installd: &Strong) -> Result<(), String> {
         let mut data = Parcel::new();
         data.write_interface_token(VOLD_DESCRIPTOR);
         data.write_i32(USER);
@@ -298,6 +298,9 @@ impl AppHost {
         })
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))?;
+        // Installer's initial connection precedes this late FUSE mount.
+        // Refresh its original external-cache inventory after publication.
+        self.invalidate_storage_mounts(installd)?;
         eprintln!("app host: {VOLUME} mounted");
         Ok(())
     }
@@ -338,14 +341,14 @@ impl AppHost {
     /// unlocking, then StorageManagerService's `onUserUnlocking`.
     pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<(), String> {
         self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE)?;
-        self.finish_storage_unlock(&user.vold)
+        self.finish_storage_unlock(&user.vold, &user.installd)
     }
 
-    fn finish_storage_unlock(&self, vold: &Strong) -> Result<(), String> {
+    fn finish_storage_unlock(&self, vold: &Strong, installd: &Strong) -> Result<(), String> {
         self.user_unlocking(USER).map_err(|e| e.message)?;
         // StorageManagerService logs onUserStarted/mount exceptions and
         // lets UserController finish unlocking and send BOOT_COMPLETED.
-        if let Err(e) = self.mount_user_storage(vold) {
+        if let Err(e) = self.mount_user_storage(vold, installd) {
             eprintln!("app host: external storage: {e}");
         }
         Ok(())
@@ -1792,37 +1795,59 @@ mod tests {
 
     struct UnlockStorage {
         host: std::sync::Weak<AppHost>,
-        agent: bool,
+        code: u32,
         fail: bool,
         calls: Arc<Mutex<Vec<u32>>>,
     }
 
     impl Service for UnlockStorage {
         fn descriptor(&self) -> &str {
-            if self.agent {
-                super::super::AGENT_DESCRIPTOR
-            } else {
-                VOLD_DESCRIPTOR
+            match self.code {
+                MOUNT_STORAGE => super::super::AGENT_DESCRIPTOR,
+                aim_service_aidl::android_os_iinstalld::INVALIDATE_MOUNTS => {
+                    aim_service_aidl::android_os_iinstalld::DESCRIPTOR
+                }
+                _ => VOLD_DESCRIPTOR,
             }
         }
 
         fn transact(&self, call: &mut Call<'_>) -> Reply {
             call.data.enforce_interface(self.descriptor())?;
-            assert_eq!(
-                call.code,
-                if self.agent {
-                    MOUNT_STORAGE
-                } else {
-                    ON_USER_STARTED
-                }
-            );
-            assert_eq!(call.data.read_i32()?, USER);
             let host = self.host.upgrade().unwrap();
+            // Pinned IVold.prepareUserStorage / destroyUserStorage.
+            let preparation = self.code == ON_USER_STARTED && call.code == 48;
+            let rollback = self.code == ON_USER_STARTED && call.code == 49
+                || self.code == aim_service_aidl::android_os_iinstalld::INVALIDATE_MOUNTS
+                    && call.code == aim_service_aidl::android_os_iinstalld::DESTROY_USER_DATA;
+            if preparation || rollback {
+                assert_eq!(call.data.read_string16()?, None);
+                assert_eq!(call.data.read_i32()?, USER);
+                assert_ne!(
+                    call.data.read_i32()? & super::super::app_data::FLAG_STORAGE_CE,
+                    0
+                );
+                assert_eq!(call.data.remaining(), 0);
+                let mut reply = Parcel::new();
+                if preparation {
+                    assert!(!host.data().unwrap().join("media/0").exists());
+                    reply.write_exception(&Exception::new(EX_SERVICE_SPECIFIC, "CE unavailable"));
+                } else {
+                    reply.write_no_exception();
+                }
+                return Ok(reply);
+            }
+            assert_eq!(call.code, self.code);
+            if self.code != aim_service_aidl::android_os_iinstalld::INVALIDATE_MOUNTS {
+                assert_eq!(call.data.read_i32()?, USER);
+            }
             assert!(host.ce_storage_prepared(USER));
             assert!(host.user_unlocking_or_unlocked(USER).unwrap());
             assert!(host.data().unwrap().join("media/0").is_dir());
-            if self.agent {
+            if self.code == MOUNT_STORAGE {
                 assert_eq!(call.data.read_i32()?, 10100);
+            }
+            if self.code == aim_service_aidl::android_os_iinstalld::INVALIDATE_MOUNTS {
+                assert!(host.data().unwrap().join("media/0/Android").is_dir());
             }
             assert_eq!(call.data.remaining(), 0);
             self.calls.lock().unwrap().push(call.code);
@@ -1830,7 +1855,7 @@ mod tests {
             if self.fail {
                 reply.write_exception(&Exception::new(EX_SERVICE_SPECIFIC, "storage unavailable"));
             } else {
-                if self.agent {
+                if self.code == MOUNT_STORAGE {
                     std::fs::create_dir(host.data().unwrap().join("media/0/Android")).unwrap();
                 }
                 reply.write_no_exception();
@@ -1844,7 +1869,13 @@ mod tests {
     /// SMS logs either external-storage failure and user boot continues.
     #[test]
     fn emulated_storage_starts_at_unlock_and_failures_do_not_abort_it() {
-        for failure in [None, Some(ON_USER_STARTED), Some(MOUNT_STORAGE)] {
+        use aim_service_aidl::android_os_iinstalld::INVALIDATE_MOUNTS;
+        for failure in [
+            None,
+            Some(ON_USER_STARTED),
+            Some(MOUNT_STORAGE),
+            Some(INVALIDATE_MOUNTS),
+        ] {
             crate::system::with_discovery_binders(|host, publish, _, export| {
                 publish(&mut |package| {
                     if package.package_name == "p" {
@@ -1858,21 +1889,17 @@ mod tests {
                     }
                 });
                 let calls = Arc::new(Mutex::new(Vec::new()));
-                let service = |agent| {
+                let service = |code| {
                     export(Arc::new(UnlockStorage {
                         host: Arc::downgrade(host),
-                        agent,
-                        fail: failure
-                            == Some(if agent {
-                                MOUNT_STORAGE
-                            } else {
-                                ON_USER_STARTED
-                            }),
+                        code,
+                        fail: failure == Some(code),
                         calls: calls.clone(),
                     }))
                 };
-                let vold = service(false);
-                *host.agent.lock().unwrap() = Some(service(true));
+                let vold = service(ON_USER_STARTED);
+                let installd = service(INVALIDATE_MOUNTS);
+                *host.agent.lock().unwrap() = Some(service(MOUNT_STORAGE));
                 assert!(!host.data().unwrap().join("media/0").exists());
                 assert!(!host.ce_storage_prepared(USER));
                 assert!(!host.user_unlocking_or_unlocked(USER).unwrap());
@@ -1880,7 +1907,7 @@ mod tests {
                 // A failed CE preparation must leave vold's user unstarted.
                 let user = StartedUser {
                     vold: host.process.strong(vold.handle),
-                    installd: host.process.strong(vold.handle),
+                    installd: host.process.strong(installd.handle),
                     fingerprint: String::new(),
                     updated: false,
                 };
@@ -1892,19 +1919,21 @@ mod tests {
                 // UserController dispatches the services' unlocking callbacks.
                 std::fs::create_dir_all(host.data().unwrap().join("media/0")).unwrap();
                 host.storage.prepared_users.lock().unwrap().insert(USER, 3);
-                host.finish_storage_unlock(&vold).unwrap();
+                host.finish_storage_unlock(&vold, &user.installd).unwrap();
                 assert!(host.user_unlocking_or_unlocked(USER).unwrap());
                 assert_eq!(
                     *calls.lock().unwrap(),
                     if failure == Some(ON_USER_STARTED) {
                         vec![ON_USER_STARTED]
-                    } else {
+                    } else if failure == Some(MOUNT_STORAGE) {
                         vec![ON_USER_STARTED, MOUNT_STORAGE]
+                    } else {
+                        vec![ON_USER_STARTED, MOUNT_STORAGE, INVALIDATE_MOUNTS]
                     }
                 );
                 assert_eq!(
                     host.data().unwrap().join("media/0/Android").exists(),
-                    failure.is_none()
+                    failure.is_none() || failure == Some(INVALIDATE_MOUNTS)
                 );
                 assert!(host.storage.volume.lock().unwrap().is_none());
             });

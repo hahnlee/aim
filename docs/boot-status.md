@@ -402,7 +402,7 @@ Usage-event queries hide shortcut invocations unless the caller holds ACCESS_SHO
 `aimctl open` checks user readiness before opening a window shim, so an open during app-host startup returns the booting error before showing its splash (#1875; host regression, no guest boot rerun).
 User 0's unlock time is recorded and returned; device_policy answers ManagedProvisioning's single-user boot queries (cross-profile filters and packages) from the original resources; a broadcast's caller package is checked against every package its process hosts.
 On owner-less data, device_policy reads the original Java content-protection default and image policy flags, and rejects non-admin user-control and keyguard policy setters with the original caller exceptions (#1521; host tests only, no guest boot rerun). Pending-update reads now check Android 16 permissions/owners and return matching persisted OwnersData info (null when absent or stale); the provisioning-config read checks MANAGE_USERS and reads DevicePolicyData (#1521; host tests, no guest boot rerun, 2026-10-31).
-The image's original RoleService now owns role selection, grants, persistence and listeners (#2540, #1657), with live native local reads, legacy-browser persistence, user/account qualification, preferred-role forwarding and permission-checked UID termination. The local legacy-browser migration adapter now clears and restores calling identity before native persistence (#2636); host call-shape, permission, Binder admission and persistence tests cover the PermissionController cold visibility-query failure. No guest boot or cold-boot survival check was run for this fix (2026-11-02). The latest en-US `-g` Safety Center CTS run is 476 pass / 0 fail / 52 assumption skips (#2560), preserving all prior passes. Canceled PendingIntents retain their query metadata (#2545); instrumentation unstops its target through the package owner, with state-checked unhibernation and package-unstopped notifications, restoring refresh/dismiss/resolve receiver delivery (#2544). The English title/scrolling test passes after the input-transaction and locale fixes; legacy fallback migration logs CancellationException (#1657, 2026-11-01).
+The image's original RoleService now owns role selection, grants, persistence and listeners (#2540, #1657), with live native local reads, legacy-browser persistence, user/account qualification, preferred-role forwarding and permission-checked UID termination. The local legacy-browser migration adapter now clears and restores calling identity before native persistence (#2636); host call-shape, permission, Binder admission and persistence tests cover the PermissionController cold visibility-query failure. Disposable acceptance observes one PermissionController start and a live final process without a fatal in three fresh-data boots each of the slice-5 candidate and its storage fix. The same boots have no GMS keyset-rewind fatal (#2637); one fixed cold boot separately crashes GMS unstable in libdroidguard.so, whose native compatibility cause remains unresolved (2026-11-02). The latest en-US `-g` Safety Center CTS run is 476 pass / 0 fail / 52 assumption skips (#2560), preserving all prior passes. Canceled PendingIntents retain their query metadata (#2545); instrumentation unstops its target through the package owner, with state-checked unhibernation and package-unstopped notifications, restoring refresh/dismiss/resolve receiver delivery (#2544). The English title/scrolling test passes after the input-transaction and locale fixes; legacy fallback migration logs CancellationException (#1657, 2026-11-01).
 `device_policy` serves
 `isUsbDataSignalingEnabled` after package-identity validation, using the original
 Java policy readers over the retained engine XML, including a resolved disabled
@@ -1180,7 +1180,7 @@ App-host `notifyDexLoad` now reaches the image's original DexUseManagerLocal
 in aim-system through a typed system-UID-only bridge (#1425). Its single canonical
 PackageManagerLocal is now registered before dex-use,
 using native epoch-bound captures, the shared version page and the existing
-SDK/signing delegates (#2063 slice 2, host-only, 2026-11-02). New snapshots refresh
+SDK/signing delegates (#2063 slice 2, disposable boot acceptance, 2026-11-02). New snapshots refresh
 on publication without notifyDexLoad; retained snapshots keep their old data.
 The backend waits for initial scan/query publication, independently of runtime
 construction and storage readiness. Source death or epoch retirement closes the
@@ -1204,18 +1204,22 @@ registration. Current JVM startup, dex-use and canonical package-local fixtures
 pass, including
 refresh, scope close and source/epoch invalidation. Native focused tests pass;
 the complete library runs retain sandbox shared-memory and Binder-readiness
-failures. Current image linkage, actual process restart and install/update/remove
-snapshot acceptance remain unverified; no guest boot was run (2026-11-02).
+failures. Disposable aim-system acceptance verifies image linkage and install/update/remove
+publication without dex-use notification, immutable old snapshots and one stable
+canonical manager/process. Forced process restart and source/epoch retirement
+remain unverified in a guest (2026-11-02).
 The app-host allowlist now permits original artd on `ctl.interface_start`
 requests (#2063, slice 1). Its original rc remains disabled and oneshot with
 the artd UID/group and DAC_OVERRIDE/DAC_READ_SEARCH/FOWNER/CHOWN capabilities;
 class startup does not eagerly launch it. Synthetic host init tests cover
 filtering, launch identity, duplicate requests, idle exit and death/restart.
-No guest boot, live Binder registration, filesystem access or idle reconnect
-was verified for this change (2026-11-02).
+Disposable acceptance verifies no eager daemon, one original artd on the first
+real request, Binder registration, UID/GID 1082 and original capabilities, protected
+profile access, idle exit and reconnection. No dex2oat/profman child start is
+observed during deletion (2026-11-02).
 Original ArtManagerLocal is now constructed/registered in aim-system after its
 application-thread attachment, reusing OriginalArtOwner's PMS-free construction
-(#2063 slice 3, host-only, 2026-11-02). It shares the canonical package and dex-use
+(#2063 slice 3, disposable boot acceptance, 2026-11-02). It shares the canonical package and dex-use
 owners. A typed system-only deletion bridge acknowledges readiness against the
 same package-source capability and live process generation; duplicate/stale
 attachments and root/foreign UIDs are rejected, death revokes readiness, and a
@@ -1225,12 +1229,16 @@ observers, compilation and scheduling remain inactive in this startup path;
 profile-clearing and package-internal artifact-deletion callers use this attachment.
 Host JVM/native fixtures cover
 these boundaries with original ART/Android constructor dependencies doubled.
-Original service-art.jar/JNI construction cost, image linkage, cold boot's zero
-compiler launches, actual process restart and manager survival across live
-package updates remain unverified. No guest was run; ART lifecycle remains #2063.
+Disposable acceptance verifies original service-art.jar/JNI linkage, exactly one
+registry entry for each canonical manager, no observed cold-boot compiler start
+and manager survival across live package updates. Six actual ArtManagerLocal
+constructor samples have a median of 1.113 ms (range 1.044–1.184 ms), excluding
+surrounding class loading and package capture. One fixed warm boot lacks an exact
+services-started timestamp despite a live process and completed package publication;
+forced process replacement and broader ART lifecycle remain unverified under #2063.
 The native maintenance endpoint routes each cache/code-cache storage clear to
 installd, followed by original ART profile clearing, under the canonical install
-lock (#2063 slice 4, #2156 ART portion, host-only, 2026-11-02). DE/CE/external flags
+lock (#2063 slice 4, #2156 ART portion, 2026-11-02). DE/CE/external flags
 and refreshed CE inodes are forwarded even when CE is locked; a disappearing
 package retains the parsed code identity with inode zero. Package-internal profile
 clears reach the same generation/epoch-checked owner. Unavailable ART fails before
@@ -1242,16 +1250,28 @@ have native routes; external storage session cache reclamation still explicitly
 requires StorageSessionController under #2156 and is unsupported. Host tests cover
 per-pass ordering, caller-user instant policy, missing/disappearing packages,
 locked-CE forwarding, lock ownership, original exceptions and unavailable ART.
-Physical profile/DE/CE/external deletion, sibling/root/APK preservation, an independent
-direct-original control, guest boot and CTS were not run; #2156 remains incomplete.
+Full-access disposable acceptance clears base/split/known-secondary profiles and
+DE/CE caches through the maintenance path, with an independent original-ART
+profile control and sibling/root/APK preservation. External cache clearing exposed
+an empty original installd mount inventory: its initial connection precedes the
+app host's late FUSE mount. An original invalidateMounts control discovers the
+trusted passthrough mount and lets the same maintenance call remove the external
+marker. The native storage owner now requests that refresh only after the agent
+publishes the mount, using the existing installd owner. A rebuilt disposable
+boot verifies automatic discovery and external deletion, with every guarded
+root/sibling/APK intact. #2156's separate session-cache owner and CTS remain open
+(2026-11-02).
 Package-internal deleteOat now calls original deleteDexoptArtifacts through that
-generation/epoch-checked capability (#2063 slice 5, host-only, 2026-11-02). It
+generation/epoch-checked capability (#2063 slice 5, 2026-11-02). It
 forwards the original caller UID and its user for filtered snapshots, preserving
 int64 freed bytes and ART's -1/0 mappings. Host Binder/JVM fixtures cover scope,
 artifact-category result accounting, large results, errors/death and idempotence
-with ART doubled. Actual writable ODEX/VDEX/ART/runtime/SDM/SDC deletion, known
-secondary paths, disk accounting, preopt/APK/other-package preservation and
-interpreted/JIT launch after deletion remain unverified; no guest or CTS was run.
+with ART doubled. Disposable original-owner acceptance removes 17 seeded writable
+ODEX/VDEX/ART/runtime/SDM/SDC artifacts, including known secondary paths. The
+returned 8,619 bytes equal their logical sizes (allocated APFS blocks are recorded
+separately); a repeated call returns zero. Immutable system-image files, APKs,
+roots and unrelated package artifacts survive, and the fixture launches afterward.
+Full ART CTS and compilation/job lifecycle remain unrun.
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions

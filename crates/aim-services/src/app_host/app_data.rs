@@ -411,6 +411,18 @@ impl AppHost {
         )
     }
 
+    pub(super) fn invalidate_storage_mounts(&self, owner: &Strong) -> Result<(), String> {
+        let mut data = Parcel::new();
+        installd::InvalidateMounts {}.write(&mut data);
+        call(
+            owner,
+            "invalidateMounts",
+            installd::INVALIDATE_MOUNTS,
+            &data,
+            installd::read_invalidate_mounts_reply,
+        )
+    }
+
     /// `prepareAppDataContentsLeafLIF`: in CE, the native library link
     /// of a package whose primary ABI is 32-bit.
     pub(super) fn prepare_app_data_contents(
