@@ -27,6 +27,72 @@ const JOBS_FILE_VERSION: i32 = 1;
 const SPLIT_PREFIX: &str = "jobs_";
 const LEGACY_FILE: &str = "jobs.xml";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WriteStep {
+    Open,
+    Job,
+    Data,
+    FileSync,
+    Rename,
+    DirectorySync,
+    LegacyRemove,
+    LegacySync,
+}
+
+#[cfg(test)]
+type IoHook = Box<dyn FnMut(&Path, WriteStep) -> std::io::Result<()>>;
+#[cfg(test)]
+thread_local! {
+    static IO_HOOK: std::cell::RefCell<Option<IoHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(super) fn with_io_hook<T>(hook: IoHook, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            IO_HOOK.with(|h| *h.borrow_mut() = None);
+        }
+    }
+    IO_HOOK.with(|h| assert!(h.borrow_mut().replace(hook).is_none()));
+    let _reset = Reset;
+    run()
+}
+fn checkpoint(_path: &Path, _step: WriteStep) -> std::io::Result<()> {
+    #[cfg(test)]
+    IO_HOOK.with(|h| match h.borrow_mut().as_mut() {
+        Some(hook) => hook(_path, _step),
+        None => Ok(()),
+    })?;
+    Ok(())
+}
+
+/// AtomicFile restores its legacy backup before either startWrite or openRead.
+fn restore_backup(path: &Path) -> std::io::Result<()> {
+    let backup = path.with_extension("xml.bak");
+    if backup.exists() {
+        if path.is_dir() {
+            std::fs::remove_dir(path)?;
+        }
+        std::fs::rename(backup, path)?;
+    }
+    Ok(())
+}
+fn atomic_read(path: &Path) -> std::io::Result<Vec<u8>> {
+    restore_backup(path)?;
+    let new = path.with_extension("xml.new");
+    if path.exists() && new.exists() {
+        let result = if new.is_dir() {
+            std::fs::remove_dir(&new)
+        } else {
+            std::fs::remove_file(&new)
+        };
+        if let Err(e) = result {
+            eprintln!("app host: jobs: deleting {}: {e}", new.display());
+        }
+    }
+    std::fs::read(path)
+}
+
 /// A job as `JobStore` keeps it: the `JobStatus` fields it writes.
 #[derive(Clone)]
 pub struct Stored {
@@ -77,7 +143,7 @@ pub fn read(dir: &Path, now_elapsed: i64, now_wall: i64) -> (Vec<Stored>, bool) 
     let mut migrate = false;
     for (path, split) in job_files(dir) {
         migrate |= !split;
-        let read = std::fs::read(&path)
+        let read = atomic_read(&path)
             .map_err(|e| e.to_string())
             .and_then(|bytes| read_file(&bytes, now_elapsed, now_wall));
         match read {
@@ -372,7 +438,7 @@ fn extras(b: &Bundle) -> Result<Node, String> {
 }
 
 /// `writeJobsMapImpl`'s `<job>` of `s`, at `now_elapsed` and `now_wall`.
-fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, String> {
+fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Element, String> {
     let job = &s.job;
     // `addAttributesToJobTag`.
     let mut attrs = vec![
@@ -502,17 +568,22 @@ fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, Stri
             .collect();
         content.push(element("debug-info", attrs, tags));
     }
-    Ok(element("job", attrs, content))
+    Ok(Element {
+        name: "job".into(),
+        attrs,
+        content,
+    })
 }
 
 /// The document `writeJobsMapImpl` writes of `jobs`.
+#[cfg(test)]
 fn document(jobs: &[&Stored], now_elapsed: i64, now_wall: i64) -> Result<Element, String> {
     Ok(Element {
         name: "job-info".into(),
         attrs: vec![string("version", JOBS_FILE_VERSION)],
         content: jobs
             .iter()
-            .map(|s| job_element(s, now_elapsed, now_wall))
+            .map(|s| job_element(s, now_elapsed, now_wall).map(Node::Element))
             .collect::<Result<_, _>>()?,
     })
 }
@@ -525,11 +596,8 @@ pub fn write(
     jobs: &[&Stored],
     now_elapsed: i64,
     now_wall: i64,
+    counts: &mut [i32; 3],
 ) -> std::io::Result<()> {
-    let bytes = aim_android_xml::abx::write(
-        &document(jobs, now_elapsed, now_wall).map_err(std::io::Error::other)?,
-    )
-    .map_err(std::io::Error::other)?;
     if !dir.is_dir() {
         std::fs::create_dir_all(dir)?;
         aim_storage::guest_inode::record(
@@ -543,13 +611,40 @@ pub fn write(
     }
     let path = dir.join(format!("{SPLIT_PREFIX}{uid}.xml"));
     let new = dir.join(format!("{SPLIT_PREFIX}{uid}.xml.new"));
+    restore_backup(&path)?;
+    checkpoint(&path, WriteStep::Open)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(&new)?;
+    // JobStore's finally counts completed job elements, even if finishWrite fails.
+    let mut out = aim_android_xml::abx::Writer::default();
+    let serialize = (|| -> Result<(), String> {
+        out.start_element(&Element {
+            name: "job-info".into(),
+            attrs: vec![string("version", JOBS_FILE_VERSION)],
+            content: Vec::new(),
+        })?;
+        for s in jobs {
+            checkpoint(&path, WriteStep::Job).map_err(|e| e.to_string())?;
+            out.element(&job_element(s, now_elapsed, now_wall)?)?;
+            counts[0] += 1;
+            if s.uid == 1000 {
+                counts[1] += 1;
+                if s.job.service.1 == "com.android.server.content.SyncJobService" {
+                    counts[2] += 1;
+                }
+            }
+        }
+        out.end_element("job-info")
+    })();
+    serialize.map_err(std::io::Error::other)?;
+    let bytes = out.finish();
+    checkpoint(&path, WriteStep::Data)?;
     std::io::Write::write_all(&mut file, &bytes)?;
+    checkpoint(&path, WriteStep::FileSync)?;
     crate::fsync(&file)?;
     aim_storage::guest_inode::record(
         &new,
@@ -559,17 +654,23 @@ pub fn write(
             mode: Some(0o600),
         },
     )?;
-    std::fs::rename(&new, path)?;
+    drop(file);
+    checkpoint(&path, WriteStep::Rename)?;
+    std::fs::rename(&new, &path)?;
+    checkpoint(&path, WriteStep::DirectorySync)?;
     crate::fsync(&std::fs::File::open(dir)?)
 }
 
 /// The legacy file, once its jobs are in split files.
 pub fn remove_legacy(dir: &Path) -> std::io::Result<()> {
+    checkpoint(dir, WriteStep::LegacyRemove)?;
     match std::fs::remove_file(dir.join(LEGACY_FILE)) {
-        Ok(()) => crate::fsync(&std::fs::File::open(dir)?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
+    checkpoint(dir, WriteStep::LegacySync)?;
+    crate::fsync(&std::fs::File::open(dir)?)
 }
 
 #[cfg(test)]
