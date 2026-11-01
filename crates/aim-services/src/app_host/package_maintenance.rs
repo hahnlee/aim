@@ -77,7 +77,7 @@ impl PackageMaintenance {
             .installd()
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         self.clear_cache_storage(&owner, package, user)?;
-        // No ArtManagerLocal is constructed in aim-system (#2063). Do not
+        // ART deletion forwarding is not connected yet (#2063). Do not
         // report a completed clear while its profile effect is unavailable.
         Err(self
             .host
@@ -381,7 +381,10 @@ impl Service for PackageMaintenance {
 }
 
 /// The same lease-bound native visibility owner used by the Java package facade.
-pub(super) struct DexUsePackages(pub crate::package::boot_captures::Captures);
+pub(super) struct DexUsePackages(
+    pub std::sync::Arc<crate::package::boot_captures::Captures>,
+    pub std::sync::Weak<AppHost>,
+);
 
 impl Service for DexUsePackages {
     fn descriptor(&self) -> &str {
@@ -395,6 +398,45 @@ impl Service for DexUsePackages {
         }
         let mut p = Parcel::new();
         let result = match call.code {
+            packages::GET_ART_OWNER_GENERATION => {
+                packages::GetArtOwnerGeneration::read(&mut call.data)?;
+                self.0
+                    .current()
+                    .and_then(|_| {
+                        self.1
+                            .upgrade()
+                            .ok_or_else(|| Exception::illegal_argument("ART host stopped"))?
+                            .art_owner_generation(call.sender_pid)
+                    })
+                    .map(|generation| {
+                        packages::write_get_art_owner_generation_reply(&mut p, generation)
+                    })
+            }
+            packages::ATTACH_ART_OWNER => {
+                let a = packages::AttachArtOwner::read(&mut call.data)?;
+                self.0
+                    .current()
+                    .and_then(|_| {
+                        self.1
+                            .upgrade()
+                            .ok_or_else(|| Exception::illegal_argument("ART host stopped"))?
+                            .attach_art_owner(
+                                call.sender_pid,
+                                a.generation,
+                                self.0.clone(),
+                                a.owner,
+                            )
+                    })
+                    .map(|()| packages::write_attach_art_owner_reply(&mut p))
+            }
+            packages::CHECK_ART_OWNER => {
+                let a = packages::CheckArtOwner::read(&mut call.data)?;
+                self.1
+                    .upgrade()
+                    .ok_or_else(|| Exception::illegal_argument("ART host stopped"))
+                    .and_then(|host| host.check_art_owner(call.sender_pid, a.generation, &self.0))
+                    .map(|()| packages::write_check_art_owner_reply(&mut p))
+            }
             packages::GET_SNAPSHOT => {
                 packages::GetSnapshot::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.0

@@ -70,12 +70,22 @@ public final class NativePackageManagerService {
         public OriginalArtOwner(com.android.server.art.ArtManagerLocal.DexoptDoneCallback done) {
             this.done = Objects.requireNonNull(done);
         }
-        @Override public void initialize(Context context, PackageManagerLocal packages) {
-            if (LocalManagerRegistry.getManager(PackageManagerLocal.class) != packages)
+        /** Construction only: no callbacks, boot receivers, compilation or scheduling. */
+        public static com.android.server.art.ArtManagerLocal construct(Context context, PackageManagerLocal packages) {
+            var art = create(context, packages);
+            LocalManagerRegistry.addManager(com.android.server.art.ArtManagerLocal.class, art);
+            return art;
+        }
+        private static com.android.server.art.ArtManagerLocal create(Context context, PackageManagerLocal packages) {
+            if (LocalManagerRegistry.getManager(PackageManagerLocal.class) != Objects.requireNonNull(packages))
                 throw new IllegalStateException("ART PackageManagerLocal generation differs");
+            Objects.requireNonNull(LocalManagerRegistry.getManager(com.android.server.art.DexUseManagerLocal.class));
             if (LocalManagerRegistry.getManager(com.android.server.art.ArtManagerLocal.class) != null)
                 throw new IllegalStateException("ART manager already registered");
-            var art = new com.android.server.art.ArtManagerLocal(context);
+            return new com.android.server.art.ArtManagerLocal(context);
+        }
+        @Override public void initialize(Context context, PackageManagerLocal packages) {
+            var art = create(context, packages);
             art.addDexoptDoneCallback(false, Runnable::run, done);
             LocalManagerRegistry.addManager(com.android.server.art.ArtManagerLocal.class, art);
             context.registerReceiver(new android.content.BroadcastReceiver() {

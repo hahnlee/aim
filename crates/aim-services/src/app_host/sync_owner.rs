@@ -170,7 +170,7 @@ pub(super) mod tests {
             })
             .unwrap()
     }
-    pub(in crate::app_host) fn install(host: &AppHost, thread: Strong) {
+    pub(crate) fn install(host: &AppHost, thread: Strong) {
         host.apps.lock().unwrap().insert(
             100,
             super::super::App {

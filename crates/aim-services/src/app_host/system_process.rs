@@ -393,7 +393,10 @@ impl Service for SystemProcess {
                         owner.package_bootstrap()?,
                     );
                     let backend = self.host.process.add_service(Arc::new(
-                        super::package_maintenance::DexUsePackages(captures),
+                        super::package_maintenance::DexUsePackages(
+                            Arc::new(captures),
+                            self.host.me.clone(),
+                        ),
                     ));
                     sp::write_get_dex_use_packages_reply(&mut p, Some(backend));
                     Ok(())
