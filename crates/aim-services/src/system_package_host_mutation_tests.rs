@@ -1462,6 +1462,20 @@ pub(crate) fn with_discovery_binders_flags(
         &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
     ),
 ) {
+    with_discovery_binders_lifecycle(flags, ready, |h, p, e, x, _| test(h, p, e, x));
+}
+
+pub(crate) fn with_discovery_binders_lifecycle(
+    flags: &[(&str, bool)],
+    ready: bool,
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
+        &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+        &dyn Fn(),
+    ),
+) {
     let Session {
         fixture,
         host,
@@ -1582,7 +1596,9 @@ pub(crate) fn with_discovery_binders_flags(
         let binder = reply.reader().read_binder().unwrap().unwrap();
         reply.retain_remote_binder(binder).unwrap()
     };
-    test(&host, &mut publish, &enabled, &export);
+    test(&host, &mut publish, &enabled, &export, &|| {
+        fixture.original[0].shutdown().unwrap()
+    });
     drop(workers);
 }
 

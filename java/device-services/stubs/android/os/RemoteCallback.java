@@ -5,6 +5,8 @@ package android.os;
 public final class RemoteCallback {
     public RemoteCallback(OnResultListener listener) { throw new RuntimeException("stub"); }
 
+    public void sendResult(Bundle result) { throw new RuntimeException("stub"); }
+
     public interface OnResultListener {
         void onResult(Bundle result);
     }

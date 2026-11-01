@@ -425,6 +425,8 @@ pub struct AccountManager {
     authenticators: Mutex<HashMap<i32, Arc<Vec<Authenticator>>>>,
     users: Mutex<HashMap<i32, Arc<UserAccounts>>>,
     permission_listeners: Mutex<Vec<Arc<Strong>>>,
+    consent_requests: Mutex<()>,
+    consents: Mutex<HashMap<String, std::sync::Weak<consent::Consent>>>,
 }
 
 impl AccountManager {
@@ -435,6 +437,8 @@ impl AccountManager {
             authenticators: Mutex::default(),
             users: Mutex::default(),
             permission_listeners: Mutex::default(),
+            consents: Mutex::default(),
+            consent_requests: Mutex::default(),
         });
         let monitor = service.clone() as Arc<dyn super::package_writes::PackageMonitor>;
         service
@@ -755,6 +759,11 @@ impl AccountManager {
     }
 
     fn deliver(&self, user: i32, notices: Vec<RawIntent>) {
+        if !notices.is_empty() {
+            if let Err(e) = self.prune_consents(None) {
+                eprintln!("account consent invalidation: {}", e.message);
+            }
+        }
         for intent in notices {
             self.host
                 .broadcasts
@@ -1633,10 +1642,44 @@ impl AccountManager {
             return Err(Exception::illegal_argument("target uid is not installed"));
         }
         let accounts = self.accounts(user_of(uid))?;
+        let request = if token == consent::ACCESS_TOKEN {
+            account
+                .access_id
+                .as_ref()
+                .and_then(|id| self.consents.lock().unwrap().get(id).cloned())
+        } else {
+            None
+        };
+        let request = request.and_then(|r| r.upgrade());
+        if token == consent::ACCESS_TOKEN
+            && account
+                .access_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("aim-consent:"))
+            && request.is_none()
+        {
+            return Err(Exception::illegal_argument("expired consent"));
+        }
+        let mut completion = request.as_ref().map(|r| r.state.lock().unwrap());
+        if let Some(request) = &request {
+            if completion.as_ref().unwrap().closed
+                || completion.as_ref().unwrap().decision.is_some()
+                || !request.installed(self)?
+            {
+                return Err(Exception::illegal_argument(
+                    "closed consent or missing target",
+                ));
+            }
+        }
         let listeners = self.permission_listeners.lock().unwrap();
         let state = accounts.state.lock().unwrap();
         if !state.exists(account) {
             return Err(Exception::illegal_argument("account does not exist"));
+        }
+        if let Some(request) = &request {
+            if !request.matches(account, uid, &state)? {
+                return Err(Exception::illegal_argument("consent identity changed"));
+            }
         }
         state
             .db
@@ -1648,6 +1691,11 @@ impl AccountManager {
             })
             .map_err(db_failed)?;
         drop(state);
+        if let Some(completion) = &mut completion {
+            completion.decision = Some(grant);
+            request.as_ref().unwrap().cancel_notification(completion);
+        }
+        drop(completion);
         use aim_service_aidl::dev_aim_server_iaccountpermissionlistener as listener;
         let mut p = Parcel::new();
         listener::OnAppPermissionChanged {
@@ -1658,6 +1706,18 @@ impl AccountManager {
         for target in listeners.iter() {
             if let Err(e) = target.transact(listener::ON_APP_PERMISSION_CHANGED, &p, true) {
                 eprintln!("account permission listener failed: {e:#x}");
+            }
+        }
+        drop(listeners);
+        if request.is_none() && (grant || token == consent::ACCESS_TOKEN) {
+            for pending in self.pending_consents() {
+                if pending.account == *account && pending.uid == uid {
+                    if !grant {
+                        pending.finish(false, true)?;
+                    } else {
+                        pending.cancel_notification(&mut pending.state.lock().unwrap());
+                    }
+                }
             }
         }
         Ok(())
@@ -1677,6 +1737,14 @@ impl super::package_writes::PackageMonitor for AccountManager {
         &self,
         change: &super::package_writes::PackageChanged<'_>,
     ) -> Result<(), Exception> {
+        self.prune_consents(change.removed.then_some(change.package))?;
+        if change.removed {
+            let owner = self.users.lock().unwrap().get(&change.user).cloned();
+            if let Some(owner) = owner {
+                self.purge_old_grants(&owner.state.lock().unwrap().db)
+                    .map_err(Failure::exception)?;
+            }
+        }
         {
             let mut cache = self.authenticators.lock().unwrap();
             let found = Arc::new(account_authenticators::generate(&self.host, change.user)?);
@@ -1711,6 +1779,31 @@ impl Service for SyncAccounts {
         }
         let mut p = Parcel::new();
         let result = match call.code {
+            sync::REQUEST_ACCOUNT_ACCESS => {
+                let a = sync::RequestAccountAccess::<Account>::read(&mut call.data)?;
+                (|| {
+                    if let (
+                        Some(account),
+                        Some(package),
+                        Some(aim_binder_host::parcel::Binder::Handle(callback)),
+                        Some(aim_binder_host::parcel::Binder::Handle(notification)),
+                    ) = (a.account, a.package_name, a.callback, a.notification)
+                    {
+                        if a.user_id >= 0 {
+                            self.0.prepare_access_consent(
+                                &account,
+                                &package,
+                                a.user_id,
+                                Some(self.0.host.process.strong(callback)),
+                                true,
+                                Some(self.0.host.process.strong(notification)),
+                            )?;
+                        }
+                    }
+                    sync::write_request_account_access_reply(&mut p);
+                    Ok(())
+                })()
+            }
             sync::HAS_ACCOUNT_ACCESS => {
                 let a = sync::HasAccountAccess::<Account>::read(&mut call.data)?;
                 (|| {
@@ -2346,6 +2439,28 @@ impl Service for AccountManager {
                     Ok(p)
                 })())
             }
+            am::CREATE_REQUEST_ACCOUNT_ACCESS_INTENT_SENDER_AS_USER => {
+                let a =
+                    am::CreateRequestAccountAccessIntentSenderAsUser::<Account, UserHandle>::read(
+                        &mut call.data,
+                    )?;
+                reply((|| {
+                    if apps_filter::app_id(uid) != SYSTEM_UID {
+                        return Err(Exception::security("Can be called only by system UID"));
+                    }
+                    let account = a.account.ok_or_else(|| null("account"))?;
+                    let package = a.package_name.ok_or_else(|| null("packageName"))?;
+                    let user = a.user_handle.ok_or_else(|| null("userHandle"))?.0;
+                    let sender = self.access_intent_sender(&account, &package, user)?;
+                    let mut p = Parcel::new();
+                    p.write_no_exception();
+                    p.write_i32(i32::from(sender.is_some()));
+                    if let Some(sender) = sender {
+                        p.write_binder(Some(sender));
+                    }
+                    Ok(p)
+                })())
+            }
             am::HAS_ACCOUNT_ACCESS => {
                 let a = am::HasAccountAccess::<Account, UserHandle>::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -2781,3 +2896,10 @@ mod mutation_tests;
 #[cfg(test)]
 #[path = "account_permission_tests.rs"]
 mod permission_tests;
+
+#[path = "account_consent.rs"]
+mod consent;
+
+#[cfg(test)]
+#[path = "account_consent_tests.rs"]
+mod consent_tests;
