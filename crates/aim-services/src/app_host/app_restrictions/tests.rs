@@ -251,7 +251,7 @@ fn typed_backend_answers_and_unavailable_inputs_remain_errors() {
         );
         let path = h.data().unwrap().join("system_ce/0/hibernation/states");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, [0x0a, 0]).unwrap();
+        std::fs::write(path, [0x0a, 0xff]).unwrap();
         assert!(h.restrictions_changed(None).is_err());
         assert!(h.restriction_level(uid(h)).is_err());
     });

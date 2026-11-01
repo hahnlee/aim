@@ -427,7 +427,10 @@ restriction getter now reads native AppRestrictionController settings initialize
 from standby and AppOps, then restored from the pinned per-user XML (#2575).
 AppOps, bucket, package and UID notifications update that state and its standby
 effects. Public restriction writes and abuse trackers remain outside this slice;
-persisted hibernation remains explicit (#2064). Device-services and AIDL builds pass, including pinned-image
+persisted hibernation read queries now decode the original user/global protobufs
+and recover AtomicFile backups; transition effects, writes and dexopt suppression
+remain explicit or unserved (#2064, #2063; incomplete host-only candidate, 2026-11-01).
+Device-services and AIDL builds pass, including pinned-image
 linkage and concrete-method checks for these retained calls. Adapter JVM fixtures
 and the missing-abstract-method regression pass. These are scoped method checks,
 not completeness checks of all ActivityManagerInternal methods. Sync forwarding
