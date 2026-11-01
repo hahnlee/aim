@@ -71,6 +71,7 @@ fn run(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32, 
             c.eprintln("Error: must be invoked through 'am instrument'.");
             Ok(-1)
         }
+        "start" | "start-activity" => start(host, uid, pid, c),
         "broadcast" => broadcast(host, uid, pid, c),
         "wait-for-broadcast-idle" | "wait-for-broadcast-barrier" => {
             let barrier = c.command() == Some("wait-for-broadcast-barrier");
@@ -172,4 +173,79 @@ fn broadcast(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result
         c.println(line.as_deref().unwrap_or_default());
     }
     Ok(0)
+}
+
+// ActivityManagerShellCommand.runStartActivity, android-16.0.0_r1:
+// original Intent syntax/presentation, native starter and caller identity.
+fn start(host: &AppHost, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32, Exception> {
+    let mut request = Parcel::new();
+    syntax::ParseActivityStart {
+        arguments: Some(c.args[1..].iter().cloned().map(Some).collect()),
+    }
+    .write(&mut request);
+    let parsed = leaf(host, syntax::PARSE_ACTIVITY_START, request)?;
+    let bytes = syntax::read_parse_activity_start_reply(&mut parsed.reader())
+        .map_err(codec)??
+        .ok_or_else(|| failure("null activity start syntax"))?;
+    let mut r = Reader::new(&bytes, &[]);
+    let user = r.read_i32().map_err(codec)?;
+    let display = r.read_string16().map_err(codec)?.unwrap_or_default();
+    let intent = RawIntent::read_from(&mut r).map_err(codec)?;
+    if r.remaining() != 0 {
+        return Err(failure("activity start syntax trailing data"));
+    }
+    if user == -1 {
+        c.eprintln("Error: Can't start service with user 'all'");
+        return Ok(1);
+    }
+    let resolved_type = match (&intent.intent.ty, &intent.intent.data) {
+        (Some(ty), _) => Some(ty.clone()),
+        (None, Some(uri)) => host.provider_type(uri, uid)?,
+        _ => None,
+    };
+    c.println(&format!("Starting: {display}"));
+    let component = intent.intent.component.clone();
+    let empty = Parcel::new();
+    let call = Call {
+        code: aim_service_aidl::android_app_iactivitytaskmanager::START_ACTIVITY_AS_USER,
+        flags: 0,
+        sender_euid: uid as u32,
+        sender_pid: pid,
+        data: empty.reader(),
+    };
+    let result = host
+        .me
+        .upgrade()
+        .ok_or_else(|| failure("activity owner gone"))?
+        .start_activity(
+            &call,
+            super::activity_start::StartArgs {
+                caller: None,
+                calling_package: Some("com.android.shell".into()),
+                intent: Some(intent),
+                resolved_type,
+                result_to: None,
+                result_who: None,
+                request_code: 0,
+                options: None,
+            },
+            Some(user),
+            None,
+        )?;
+    let message = match result {
+        0 => return Ok(0),
+        2 => "Warning: Activity not started, its current task has been brought to the front".into(),
+        3 => "Warning: Activity not started, intent has been delivered to currently running top-most instance.".into(),
+        -1 => format!("Error: Activity not started, unable to resolve {display}"),
+        -2 => {
+            c.eprintln("Error type 3");
+            let name = component.map(|v| format!("{{{}/{}}}", v.package, v.class)).unwrap_or_default();
+            format!("Error: Activity class {name} does not exist.")
+        }
+        -93 => "Error: Activity not started, you requested to both forward and receive its result".into(),
+        -94 => "Error: Activity not started, you do not have permission to access it.".into(),
+        _ => format!("Error: Activity not started, unknown error code {result}"),
+    };
+    c.eprintln(&message);
+    Ok(if matches!(result, 2 | 3) { 0 } else { 1 })
 }

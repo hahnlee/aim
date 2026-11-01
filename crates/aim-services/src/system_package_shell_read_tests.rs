@@ -274,6 +274,9 @@ impl Shell {
         Some(shell)
     }
     fn new() -> Self {
+        Self::new_as(2000)
+    }
+    fn new_as(uid: u32) -> Self {
         let services = Arc::new(Mutex::new(BTreeMap::new()));
         let names = services.clone();
         let fixture = Fixture::with_context(|p, s| {
@@ -421,7 +424,7 @@ impl Shell {
             Device::Binder,
             Credentials {
                 pid: 97330,
-                euid: 2000,
+                euid: uid,
                 security_context: None,
             },
         );
@@ -906,7 +909,7 @@ fn domain_shell_entrypoints_transfer_fds_identity_status_and_errors() {
 fn activity_shell_transferred_streams_status_and_caller_guard() {
     let mut s = Shell::new();
     s.package = lookup(&s.process, "activity");
-    for command in ["start", "force-stop", "help", "unknown"] {
+    for command in ["force-stop", "help", "unknown"] {
         assert_eq!(
             s.command(&[command]),
             (
@@ -1255,4 +1258,88 @@ fn device_config_shell_shares_provider_state_and_preserves_errors() {
     let (status, help, error) = s.command(&[]);
     assert_eq!((status, error), (-1, String::new()));
     assert!(help.starts_with("Device Config (device_config) commands:\n"));
+}
+
+struct StartSyntax;
+impl Service for StartSyntax {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_ipackageintentparser::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_ipackageintentparser as syntax;
+        assert_eq!(
+            (call.code, call.sender_euid),
+            (syntax::PARSE_ACTIVITY_START, 1000)
+        );
+        let args = syntax::ParseActivityStart::read(&mut call.data)?
+            .arguments
+            .unwrap();
+        let has = |value| args.iter().any(|a| a.as_deref() == Some(value));
+        let mut p = Parcel::new();
+        if has("--bad") {
+            p.write_exception(&Exception::illegal_argument("Unknown option: --bad"));
+        } else {
+            let mut parsed = Parcel::new();
+            parsed.write_i32(if has("all") { -1 } else { -2 });
+            parsed.write_string16(Some("Intent { fixture start }"));
+            let intent = crate::app_host::kept::RawIntent::new("fixture.MISSING", 0x10000000, &[]);
+            if has("-n") {
+                intent
+                    .with_component("p", "p.Missing")
+                    .write_to(&mut parsed);
+            } else {
+                intent.write_to(&mut parsed);
+            }
+            syntax::write_parse_activity_start_reply(&mut p, &Some(parsed.data().to_vec()));
+        }
+        Ok(p)
+    }
+}
+
+#[test]
+fn activity_shell_start_uses_native_resolution_user_errors_and_parser_failures() {
+    let mut s = Shell::new_as(0);
+    s.package = lookup(&s.process, "activity");
+    let original = &s.session.fixture.original[0];
+    let mut p = Parcel::new();
+    sp::AttachPackageIntentParser {
+        parser: Some(original.add_service(Arc::new(StartSyntax))),
+    }
+    .write(&mut p);
+    lookup(original, "aim.system_process")
+        .transact(sp::ATTACH_PACKAGE_INTENT_PARSER, &p, false)
+        .unwrap()
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    for name in ["start", "start-activity"] {
+        assert_eq!(
+            s.command(&[name, "-n", "p/.Missing"]),
+            (
+                1,
+                "Starting: Intent { fixture start }\n".into(),
+                "Error type 3\nError: Activity class {p/p.Missing} does not exist.\n".into()
+            )
+        );
+    }
+    assert_eq!(
+        s.command(&["start", "-a", "fixture.MISSING"]),
+        (
+            1,
+            "Starting: Intent { fixture start }\n".into(),
+            "Error: Activity not started, unable to resolve Intent { fixture start }\n".into()
+        )
+    );
+    assert_eq!(
+        s.command(&["start", "--user", "all", "-n", "p/.Missing"]),
+        (
+            1,
+            String::new(),
+            "Error: Can't start service with user 'all'\n".into()
+        )
+    );
+    let (status, out, err) = s.command(&["start", "--bad"]);
+    assert_eq!((status, out), (-1, String::new()));
+    assert!(err.contains("java.lang.IllegalArgumentException: Unknown option: --bad"));
 }

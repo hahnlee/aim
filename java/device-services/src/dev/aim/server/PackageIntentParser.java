@@ -24,6 +24,35 @@ import java.util.Objects;
 
 /** Original Intent.parseCommandArgs; no native shell syntax fork. */
 public final class PackageIntentParser extends IPackageIntentParser.Stub {
+    // ActivityManagerShellCommand.makeIntent/runStartActivity, android-16.0.0_r1.
+    // Wait/profiler/options paths remain unsupported; Intent parses all intent options.
+    @Override public byte[] parseActivityStart(String[] arguments) {
+        Bridge.enforceSystemUid();
+        final byte[][] result=new byte[1][];
+        ShellCommand parser=new ShellCommand(){
+            @Override public void onHelp(){}
+            @Override public int onCommand(String ignored){
+                final int[] user={-2};
+                try {
+                    Intent intent=Intent.parseCommandArgs(this,(option,command)->{
+                        if (!option.equals("--user")) return false;
+                        user[0]=UserHandle.parseUserArg(command.getNextArgRequired());return true;
+                    });
+                    Parcel out=Parcel.obtain();try{
+                        out.writeInt(user[0]);
+                        out.writeString(intent.toString());
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        intent.writeToParcel(out,0);result[0]=out.marshall();
+                    }finally{out.recycle();}
+                    return 0;
+                }catch(java.net.URISyntaxException error){throw new IllegalArgumentException(error.getMessage(),error);}
+            }
+        };
+        parser.init(null,null,null,null,arguments,0);parser.onCommand(null);
+        return Objects.requireNonNull(result[0]);
+    }
+
+
     // ActivityManagerShellCommand.makeIntent/runSendBroadcast, android-16.0.0_r1,
     @Override public byte[] parseBroadcast(String[] arguments) {
         Bridge.enforceSystemUid();
