@@ -347,6 +347,23 @@ pub fn check_linkage_on(
     problems.extend(classpath.unresolved(&code)?);
     for (adapter, parent, methods) in [
         (
+            "Ldev/aim/server/NativeAccountManagerInternal;",
+            "Landroid/accounts/AccountManagerInternal;",
+            &[
+                ("hasAccountAccess", "(Landroid/accounts/Account;I)Z"),
+                (
+                    "addOnAppPermissionChangeListener",
+                    "(Landroid/accounts/AccountManagerInternal$OnAppPermissionChangeListener;)V",
+                ),
+                (
+                    "requestAccountAccess",
+                    "(Landroid/accounts/Account;Ljava/lang/String;ILandroid/os/RemoteCallback;)V",
+                ),
+                ("backupAccountAccessPermissions", "(I)[B"),
+                ("restoreAccountAccessPermissions", "([BI)V"),
+            ][..],
+        ),
+        (
             "Ldev/aim/server/NativeSyncAccounts;",
             "Lcom/android/server/content/SyncAccounts;",
             &[

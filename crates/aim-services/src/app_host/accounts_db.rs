@@ -403,6 +403,22 @@ impl AccountsDb {
         )?)
     }
 
+    /// `insertGrant` / `deleteGrantsByAccountIdAuthTokenTypeAndUid`.
+    pub fn set_grant(&self, id: i64, token: &str, uid: i32, grant: bool) -> Result<()> {
+        if grant {
+            self.db.execute(
+                "INSERT OR IGNORE INTO grants (accounts_id,auth_token_type,uid) VALUES (?,?,?)",
+                params![id, token, uid],
+            )?;
+        } else {
+            self.db.execute(
+                "DELETE FROM grants WHERE accounts_id=? AND auth_token_type=? AND uid=?",
+                params![id, token, uid],
+            )?;
+        }
+        Ok(())
+    }
+
     /// `findAllUidGrants`.
     pub fn find_all_uid_grants(&self) -> Result<Vec<i32>> {
         let mut q = self.db.prepare("SELECT uid FROM grants GROUP BY uid")?;

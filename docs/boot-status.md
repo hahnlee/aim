@@ -614,7 +614,11 @@ Explicit add (including initial visibility/extras), remove and visibility writes
 now share that DE/CE owner and commit-before-publication delivery (#1504/#1460 3b).
 Signed-caller, locked-user, rollback/reopen, cascade and CTS-derived setup/teardown
 host checks pass; no guest boot or real CTS run was performed (2026-11-01).
-The inactive typed SyncAccounts adapter now uses a system-UID-only capability
+Explicit grant/revoke now require a live account and installed target UID, persist
+in DE, and deliver app-permission callbacks after commit (#1504/#1460 3c).
+The inactive AccountManagerInternal adapter shares the SyncAccounts capability;
+access and listeners delegate to the native owner. Consent remains in slice 3d.
+The inactive typed SyncAccounts adapter uses a system-UID-only capability
 on that same native owner (#1460/#1504 3a.2). Snapshots propagate owner/database
 failures, and both Java linkage cohorts check the image's injected seam.
 Private ContentService startup and sync forwarding remain inactive; no guest
