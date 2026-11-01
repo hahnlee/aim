@@ -23,8 +23,20 @@ Java samples the original animations and delivers options callbacks; native
 playback submits matrix/alpha/clip transactions on display vsync. Sample matrices
 now follow SurfaceControl's `[0,3,1,4]` slot order (#2588), with translation kept
 as position in Android pixels. JVM serialization and host Binder-to-parcel checks
-pass; cold readiness timeout and nonzero animation background colors remain under
-#1725. No guest boot or live visual verification of the correction (2026-11-01).
+pass. Fresh-data window-mode Settings → Network & Internet and Cmd+[ transitions
+now render moving app content in 80 scoped task-window samples, with no black
+sample and zero SurfaceFlinger `invalidTransform` warnings (107 before the fix).
+Cold readiness timeout and nonzero animation background colors remain under
+#1725; this is sampled transition acceptance, not a frame-rate claim (2026-11-01).
+
+Pending window-mode launches retire their shim splash on an accepted
+`finishDrawing` from a real surfaced app window, following
+`ActivityRecord.onFirstWindowDrawn` / `removeStartingWindow` (#2589).
+Activity idle retains launch-bounds persistence and no longer completes the launch.
+Host regressions cover idle without drawing, absent surfaces, starting windows,
+failed draw submissions, null transactions and duplicate completions. Clock,
+Settings and Files show their app UI on their first launch in each of two
+independent fresh-data window-mode boots (2026-11-01).
 
 The app host runs native package prepare-ready before default grants and opening
 application startup (#2362), matching SystemServer's PMS-before-AMS ordering.

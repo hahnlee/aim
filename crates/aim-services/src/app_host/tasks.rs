@@ -43,7 +43,7 @@ pub struct Task {
     min_size: (i32, i32),
     /// Its layer, made with its first window's.
     layer: Option<Layer>,
-    /// The server's `LAUNCH` it answers with `DRAWN` once it is idle.
+    /// The server's `LAUNCH` it answers when its first real window draws.
     launch: Option<String>,
     window_layout_affinity: Option<String>,
     has_been_visible: bool,
@@ -412,21 +412,31 @@ impl AppHost {
         composer.apply(&Tasks::placement(&tasks))
     }
 
-    /// An activity of task `id` is idle: the launch the task answers drew
-    /// its first frame.
+    /// An activity of task `id` is idle: persist its visible launch bounds.
     pub(super) fn task_idle(&self, id: i32) {
-        let launch = {
-            let mut tasks = self.tasks.tasks.lock().unwrap();
-            let Some(task) = tasks.iter_mut().find(|t| t.id == id) else {
-                return;
-            };
-            task.has_been_visible = true;
-            if let Err(e) = self.save_task_launch_params(task) {
-                eprintln!("app host: task {id} launch params: {e}");
-            }
-            task.launch.take()
+        let mut tasks = self.tasks.tasks.lock().unwrap();
+        let Some(task) = tasks.iter_mut().find(|t| t.id == id) else {
+            return;
         };
+        task.has_been_visible = true;
+        if let Err(e) = self.save_task_launch_params(task) {
+            eprintln!("app host: task {id} launch params: {e}");
+        }
+    }
+
+    /// `ActivityRecord.onFirstWindowDrawn` / `removeStartingWindow`:
+    /// a real app window drew, independently of the activity's queue idling.
+    pub(super) fn task_drawn(&self, id: i32) {
+        let launch = self
+            .tasks
+            .tasks
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t.id == id)
+            .and_then(|t| t.launch.take());
         if let Some(launch) = launch {
+            eprintln!("app host: task {id} first window drawn for {launch}");
             self.tasks.send_text(window::DRAWN, id, &launch);
         }
     }
@@ -862,6 +872,22 @@ mod tests {
     }
 
     #[test]
+    fn idle_does_not_complete_a_launch_without_a_drawn_window() {
+        crate::system::with_discovery_session(|ready, _, _| {
+            let host = launch_host(ready, false);
+            let (bridge, mut receive) = UnixStream::pair().unwrap();
+            receive.set_nonblocking(true).unwrap();
+            host.tasks.launch_test_task(1, Rect::default(), bridge);
+            host.task_idle(1);
+            let mut byte = [0];
+            assert_eq!(
+                receive.read(&mut byte).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        });
+    }
+
+    #[test]
     fn a_launch_after_restart_restores_saved_task_bounds() {
         crate::system::with_discovery_session(|ready, _, _| {
             let mut info = ready.activity_info_of("p", "p.Main").unwrap();
@@ -1004,6 +1030,12 @@ mod tests {
 
 #[cfg(test)]
 impl Tasks {
+    pub(super) fn launch_test_task(&self, id: i32, bounds: Rect, bridge: UnixStream) {
+        self.animation_test_task(id, bounds);
+        self.tasks.lock().unwrap().last_mut().unwrap().launch = Some("p/p.Main".into());
+        *self.bridge.lock().unwrap() = Some(bridge);
+    }
+
     pub(super) fn animation_test_task(&self, id: i32, bounds: Rect) {
         self.tasks.lock().unwrap().push(Task {
             id,

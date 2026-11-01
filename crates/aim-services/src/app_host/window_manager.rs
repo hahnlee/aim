@@ -616,8 +616,16 @@ impl Session {
                 .apply_draw(&draw)
                 .map_err(|e| format!("finishDrawing seqId={seq_id}: {e}"))?;
         }
+        // WindowState.performShowLocked excludes TYPE_APPLICATION_STARTING.
+        // A window without a surface has not drawn (WindowStateAnimator).
+        let drawn_task = (w.layer.is_some() && w.activity.is_some() && w.attrs.kind != 3)
+            .then_some(w.task)
+            .flatten();
         let activity = w.activity;
         drop(windows);
+        if let Some(task) = drawn_task {
+            self.host.task_drawn(task);
+        }
         if let Some(token) = activity {
             self.host.transition_ready(token);
         }
@@ -2012,6 +2020,44 @@ mod tests {
         one_way.set_i32_at(12, 0x20);
         finish(&draw_request(Some(&one_way), 11)).unwrap();
         assert!(receive.recv_timeout(Duration::from_secs(5)).unwrap().2);
+        // ActivityRecord.onFirstWindowDrawn removes the starting window,
+        // independently of activityIdle and reportFullyDrawn.
+        use std::io::Read;
+        use std::os::fd::AsFd;
+        let (bridge, mut launch) = std::os::unix::net::UnixStream::pair().unwrap();
+        launch.set_nonblocking(true).unwrap();
+        host.tasks.launch_test_task(1, frame, bridge);
+        {
+            let mut windows = host.windows.windows.lock().unwrap();
+            let w = windows.get_mut(&0).unwrap();
+            w.task = Some(1);
+            w.activity = Some(7);
+            w.attrs.kind = 1;
+        }
+        let no_completion = |launch: &mut std::os::unix::net::UnixStream| {
+            assert_eq!(
+                launch.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        };
+        finish(&draw_request(None, 11)).unwrap(); // no surface yet
+        no_completion(&mut launch);
+        {
+            let mut windows = host.windows.windows.lock().unwrap();
+            let w = windows.get_mut(&0).unwrap();
+            w.layer = Some(Layer::animation_test_layer(process.strong(0), 1));
+            w.attrs.kind = 3; // TYPE_APPLICATION_STARTING is not the app window.
+        }
+        finish(&draw_request(None, 11)).unwrap();
+        no_completion(&mut launch);
+        host.windows
+            .windows
+            .lock()
+            .unwrap()
+            .get_mut(&0)
+            .unwrap()
+            .attrs
+            .kind = 1;
         status.store(
             aim_binder_host::parcel::DEAD_OBJECT,
             std::sync::atomic::Ordering::Relaxed,
@@ -2021,7 +2067,19 @@ mod tests {
             Some(BAD_VALUE)
         );
         receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        no_completion(&mut launch); // a rejected draw cannot retire the splash
         status.store(0, std::sync::atomic::Ordering::Relaxed);
+        // A null post-draw transaction still completes an ordinary draw.
+        finish(&draw_request(None, 12)).unwrap();
+        let record =
+            aim_host_display::wire::recv_record::<aim_hostcall::display::Window>(launch.as_fd())
+                .unwrap()
+                .unwrap();
+        assert_eq!(record.op, aim_hostcall::display::window::DRAWN);
+        assert_eq!(record.task, 1);
+        assert_eq!(record.text(), "p/p.Main");
+        finish(&draw_request(None, 12)).unwrap();
+        no_completion(&mut launch); // exactly one completion per launch
         host.windows.windows.lock().unwrap().remove(&0);
         finish(&draw_request(Some(&draw), 11)).unwrap(); // removed during delivery
         assert!(receive.try_recv().is_err());
