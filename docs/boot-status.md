@@ -725,8 +725,14 @@ partial/full/draw pools, screen-off/background bases, aggregate partial timers
 and PID spans have host coverage. Native power updates its existing display
 assertion attribution in place as sources change. System-sleep assertion mapping
 remains #669/#670, pending Android/Mac display sleep synchronization.
-These checks do not establish live adapter accounting or macOS sleep behavior.
-Whole batterystats.bin remains #1928.
+A pinned retained SyncManager JVM cleanup fixture now drives the native binding,
+PowerManager and battery owners (#1460 slice 5i/#1928). Failed bind/start/stop,
+finish/cancel/death, concurrent adapters, WorkSource clearing and loop exceptions
+leave no active native sync/wake timer or compatibility blocker. Independent
+Binder registry, suspend-probe and token owners verify each blocker is acquired
+and released exactly once, including token-owner shutdown. These host fixtures
+do not establish live adapter accounting or macOS sleep behavior; no guest boot
+was run. Whole batterystats.bin remains #1928.
 Matched-image adapter accounting,
 restoration and sync CTS remain unverified; no guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest

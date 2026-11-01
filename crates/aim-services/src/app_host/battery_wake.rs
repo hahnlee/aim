@@ -203,6 +203,43 @@ impl WakeStats {
 }
 
 impl BatteryStats {
+    #[cfg(test)]
+    pub(in crate::app_host) fn assert_sync_cleanup_for_test(&self) {
+        let s = self.stats.lock().unwrap();
+        assert!(s.wakes.mapped.is_empty());
+        for u in s.wakes.uids.values() {
+            assert_eq!(u.aggregate.timer.timer.nesting, 0);
+            assert_eq!(u.aggregate.background.timer.nesting, 0);
+            assert!(u.names.active_overflow.is_empty());
+            assert!(u.pids.values().all(|p| p.0 == 0));
+            assert!(
+                u.names
+                    .timers
+                    .values()
+                    .flatten()
+                    .flatten()
+                    .all(|t| t.timer.timer.nesting == 0 && t.background.timer.nesting == 0)
+            );
+        }
+        for u in s.uids.values() {
+            assert!(u.sync.active_overflow.is_empty());
+            assert!(
+                u.sync
+                    .timers
+                    .values()
+                    .all(|t| t.timer.timer.nesting == 0 && t.background.timer.nesting == 0)
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::app_host) fn assert_sync_nesting_for_test(&self, uid: i32, name: &str, n: i32) {
+        let s = self.stats.lock().unwrap();
+        let timer = &s.uids[&uid].sync.timers[name];
+        assert_eq!(timer.timer.timer.nesting, n);
+        assert_eq!(timer.background.timer.nesting, n);
+    }
+
     pub(in crate::app_host) fn change_wake(
         &self,
         old: Option<&Attribution>,

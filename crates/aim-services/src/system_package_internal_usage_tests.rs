@@ -61,6 +61,7 @@ struct Fixture {
     driver: Arc<Driver>,
     native: Arc<LocalProcess>,
     original: Vec<Arc<LocalProcess>>,
+    context: Option<Arc<LocalProcess>>,
     system: Arc<System>,
     root: PathBuf,
     host: Option<Arc<crate::app_host::AppHost>>,
@@ -77,6 +78,12 @@ impl Fixture {
     fn with_context(
         context: impl FnOnce(&Arc<LocalProcess>, &Arc<System>) -> Arc<dyn Service>,
     ) -> Self {
+        Self::with_context_owner(false, |_, p, s| context(p, s))
+    }
+    fn with_context_owner(
+        separate: bool,
+        context: impl FnOnce(&Arc<Driver>, &Arc<LocalProcess>, &Arc<System>) -> Arc<dyn Service>,
+    ) -> Self {
         let root = crate::app_host::test_temp_dir("usage-epoch");
         std::fs::create_dir(root.join("image")).unwrap();
         std::fs::create_dir(root.join("data")).unwrap();
@@ -91,7 +98,21 @@ impl Fixture {
             },
         );
         let system = System::new(native.clone(), &[]);
-        let Binder::Local(pointer) = native.add_service(context(&native, &system)) else {
+        let manager = if separate {
+            LocalProcess::open(
+                &driver,
+                Device::Binder,
+                Credentials {
+                    pid: 97100,
+                    euid: 1000,
+                    security_context: None,
+                },
+            )
+        } else {
+            native.clone()
+        };
+        let Binder::Local(pointer) = manager.add_service(context(&driver, &manager, &system))
+        else {
             panic!("local host expected")
         };
         let mut object = FlatBinderObject {
@@ -103,7 +124,7 @@ impl Fixture {
         .encode();
         driver
             .ioctl(
-                native.proc_handle(),
+                manager.proc_handle(),
                 97102,
                 BINDER_SET_CONTEXT_MGR_EXT,
                 &mut object,
@@ -111,6 +132,18 @@ impl Fixture {
             )
             .unwrap();
         native.start();
+        if separate {
+            manager.start();
+            // Hand the independent test registry a remote native host, preserving handle ownership.
+            let mut request = Parcel::new();
+            request.write_binder(Some(native.add_service(Arc::new(
+                crate::service_host::ServiceHost::new(native.clone(), &system),
+            ))));
+            native
+                .strong(0)
+                .transact(0x00ff_ff00, &request, false)
+                .unwrap();
+        }
         system
             .configure_native_package_image(&root.join("image"), &root.join("data"), &[])
             .unwrap();
@@ -118,6 +151,7 @@ impl Fixture {
             driver,
             native,
             original: Vec::new(),
+            context: separate.then_some(manager),
             system,
             root,
             host: None,
@@ -165,6 +199,9 @@ impl Drop for Fixture {
         }
         for original in &self.original {
             self.driver.release(original.proc_handle());
+        }
+        if let Some(context) = &self.context {
+            context.shutdown().unwrap();
         }
         self.driver.release(self.native.proc_handle());
         std::fs::remove_dir_all(&self.root).unwrap();
