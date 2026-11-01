@@ -36,6 +36,7 @@ pub enum Kind {
     ProxyFile,
     Event(Arc<event::EventFd>),
     Timer(Arc<event::TimerFd>),
+    Signal(Arc<super::signalfd::SignalFd>),
     Sock(Arc<net::Sock>),
     Epoll(Arc<epoll::Epoll>),
     Memfd(memfd::Key),
@@ -1362,6 +1363,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             Kind::Regular(_) | Kind::Pty(_) => return None,
             Kind::Event(_) => "anon_inode:[eventfd]",
             Kind::Timer(_) => "anon_inode:[timerfd]",
+            Kind::Signal(_) => "anon_inode:[signalfd]",
             Kind::Epoll(_) => "anon_inode:[eventpoll]",
             Kind::Inotify(_) => "anon_inode:inotify",
             Kind::SyncFile => "anon_inode:sync_file",
@@ -1472,6 +1474,10 @@ pub(crate) fn regular_exec_text() -> Result<String, crate::errno::Errno> {
                 fd,
                 description.carrier()?.as_raw_fd()
             )),
+            Kind::Signal(description) => records.push(format!(
+                "signal\t{fd}\t{}",
+                super::signalfd::exec_text(description)
+            )),
             _ => {}
         }
     }
@@ -1527,6 +1533,7 @@ pub(crate) fn prepare_regular_exec() -> Result<ExecWriterFlags, crate::errno::Er
 }
 pub(crate) fn restore_regular_exec(text: &str) -> Result<(), crate::errno::Errno> {
     let mut inherited = Vec::new();
+    let mut signals = std::collections::HashMap::new();
     for line in text.lines() {
         let fields = line.split('\t').collect::<Vec<_>>();
         if fields.len() != 3 {
@@ -1570,6 +1577,22 @@ pub(crate) fn restore_regular_exec(text: &str) -> Result<(), crate::errno::Errno
                     proof: Mutex::new(None),
                 })),
             );
+            continue;
+        }
+        if fields[0] == "signal" {
+            let fd = fields[1].parse::<i32>().map_err(|_| crate::errno::EINVAL)?;
+            let (mask, reader) = fields[2].split_once(':').ok_or(crate::errno::EINVAL)?;
+            let mask = mask.parse::<u64>().map_err(|_| crate::errno::EINVAL)?;
+            require_guest_visible(fd)?;
+            let description = match signals.entry(reader.to_owned()) {
+                std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    Arc::clone(entry.insert(super::signalfd::load(mask)?))
+                }
+            };
+            super::signalfd::install(fd, &description)?;
+            insert(fd, Kind::Signal(description));
+            publish_guest(fd)?;
             continue;
         }
         if fields[0] == "pty" {
@@ -1857,6 +1880,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Pty(a) => Arc::as_ptr(a) as *const (),
             Kind::Event(a) => Arc::as_ptr(a) as *const (),
             Kind::Timer(a) => Arc::as_ptr(a) as *const (),
+            Kind::Signal(a) => Arc::as_ptr(a) as *const (),
             Kind::Sock(a) => Arc::as_ptr(a) as *const (),
             Kind::Epoll(a) => Arc::as_ptr(a) as *const (),
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
@@ -1923,6 +1947,10 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Timer(t) => {
                 w.u32(1);
                 event::save_timer(t, w);
+            }
+            Kind::Signal(description) => {
+                w.u32(18);
+                w.u64(super::signalfd::save(description));
             }
             Kind::Sock(s) => {
                 w.u32(2);
@@ -2004,6 +2032,14 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             8 => Kind::Random,
             13 => Kind::Ashmem,
             9 => Kind::ProxyFile,
+            18 => match super::signalfd::load(r.u64()) {
+                Ok(description) => Kind::Signal(description),
+                Err(error) => {
+                    eprintln!("signalfd fork restore: errno {error}");
+                    r.invalidate();
+                    return (fd, None);
+                }
+            },
             16 => match super::proc_mem::Open::load(fd) {
                 Ok(open) => Kind::ProcMem(open),
                 Err(_) => {
@@ -2086,6 +2122,13 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     });
     for (fd, k) in entries {
         if let Some(k) = k {
+            if let Kind::Signal(description) = &k
+                && let Err(error) = super::signalfd::install(fd, description)
+            {
+                eprintln!("signalfd fork restore: errno {error}");
+                r.invalidate();
+                continue;
+            }
             insert(fd, k);
         }
     }

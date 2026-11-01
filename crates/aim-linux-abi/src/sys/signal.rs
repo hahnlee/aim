@@ -40,7 +40,7 @@ const NSIG: i32 = 64;
 const SIGKILL: i32 = 9;
 const SIGSTOP: i32 = 19;
 const SIGCONT: i32 = 18;
-const UNBLOCKABLE: u64 = bit(SIGKILL) | bit(SIGSTOP);
+pub(super) const UNBLOCKABLE: u64 = bit(SIGKILL) | bit(SIGSTOP);
 /// Delivered before other pending signals, as Linux's `dequeue_synchronous_signal`.
 const SYNCHRONOUS: u64 = bit(4) | bit(5) | bit(7) | bit(8) | bit(11) | bit(31);
 
@@ -323,6 +323,7 @@ fn send_thread(th: &Thread, info: Siginfo) -> i64 {
     if let Err(e) = lock(&th.sig.pending).push(info) {
         return e;
     }
+    super::signalfd::refresh();
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
             if t.contains_key(&th.tid) {
@@ -341,10 +342,13 @@ fn send_process(info: Siginfo) -> i64 {
     if sig == SIGKILL || sig == SIGSTOP {
         return host_self(sig);
     }
-    match process().push(info) {
+    // The queue's lock is released before signalfd readiness reads it.
+    let queued = process().push(info);
+    match queued {
         Err(e) => e,
         Ok(false) => 0,
         Ok(true) => {
+            super::signalfd::refresh();
             route(sig);
             0
         }
@@ -363,6 +367,7 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
     let Some(tid) = tid else {
         let queued = process().push(info) == Ok(true);
         if queued {
+            super::signalfd::refresh();
             route(sig);
         }
         return queued;
@@ -376,6 +381,7 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
     if lock(&th.sig.pending).push(info) != Ok(true) {
         return false;
     }
+    super::signalfd::refresh();
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
             if t.contains_key(&th.tid) {
@@ -515,6 +521,9 @@ fn take(th: &Thread) -> Option<Taken> {
             let _ = lock(&th.sig.pending).push(sender(sig, sigframe::SI_USER));
         }
     }
+    if own != 0 {
+        super::signalfd::refresh();
+    }
     loop {
         let (info, more) = {
             let mut tp = lock(&th.sig.pending);
@@ -536,6 +545,7 @@ fn take(th: &Thread) -> Option<Taken> {
             };
             (info?, (tp.set | pp.set) & allow != 0)
         };
+        super::signalfd::refresh();
         let sig = info.signo;
         let act = action(sig);
         if act.handler == SIG_IGN {
@@ -1261,6 +1271,7 @@ pub fn rt_sigaction(a: [u64; 6]) -> i64 {
             for th in all {
                 lock(&th.sig.pending).flush(sig);
             }
+            super::signalfd::refresh();
         }
     }
     if oact != 0 {
@@ -1330,21 +1341,67 @@ pub fn rt_sigsuspend(a: [u64; 6]) -> i64 {
     -(EINTR as i64)
 }
 
-/// Take a pending signal in `set` (thread queue first).
+/// Take a pending signal in `set`: the thread's queue first, then the
+/// process's, as `dequeue_signal`.
 fn dequeue(th: &Thread, set: u64) -> Option<Siginfo> {
     drain_external();
-    let mut tp = lock(&th.sig.pending);
-    let mut pp = process();
-    let (t, p) = (tp.set & set, pp.set & set);
-    if t | p == 0 {
-        return None;
+    let info = {
+        let mut tp = lock(&th.sig.pending);
+        let mut pp = process();
+        let (t, p) = (tp.set & set, pp.set & set);
+        if t != 0 {
+            tp.take(lowest(t))
+        } else if p != 0 {
+            pp.take(lowest(p))
+        } else {
+            None
+        }
+    };
+    if info.is_some() {
+        super::signalfd::refresh();
     }
-    let sig = lowest(t | p);
-    if t & bit(sig) != 0 {
-        tp.take(sig)
-    } else {
-        pp.take(sig)
-    }
+    info
+}
+
+/// Every signal pending on the process or one of its threads.
+pub(super) fn all_pending() -> u64 {
+    let threads = thread::with_table(|t| {
+        t.values()
+            .fold(0, |set, th| set | lock(&th.sig.pending).set)
+    });
+    threads | process().set
+}
+
+/// A signalfd's mask changed: threads waiting in [`read_signal`] look again.
+pub(super) fn wake_waiters() {
+    thread::with_table(|t| {
+        for th in t.values().filter(|th| th.sig.waitset.load(SeqCst) != 0) {
+            th.park.unpark();
+        }
+    });
+}
+
+/// A signalfd read: take a pending signal in `mask`, waiting for one
+/// unless `nonblock`. Waiting makes the set routable here, as Linux's
+/// signalfd wait queue is woken by any signal sent to the process.
+pub(super) fn read_signal(mask: &AtomicU64, nonblock: bool) -> Result<Siginfo, i64> {
+    let th = current();
+    let result = loop {
+        let set = mask.load(SeqCst);
+        th.sig.waitset.store(set, SeqCst);
+        if let Some(info) = dequeue(th, set) {
+            break Ok(info);
+        }
+        if nonblock {
+            break Err(-(EAGAIN as i64));
+        }
+        if interrupted(th) {
+            break Err(-(EINTR as i64));
+        }
+        th.park.park(th.tid, None);
+    };
+    th.sig.waitset.store(0, SeqCst);
+    result
 }
 
 pub fn rt_sigtimedwait(a: [u64; 6]) -> i64 {
