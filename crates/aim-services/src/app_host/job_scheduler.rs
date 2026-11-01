@@ -868,9 +868,31 @@ enum Message {
     ContentChanged { key: ObserverKey, uris: Vec<Uri> },
 }
 
+/// JobStore's first-load and latest write-batch counts, in local-interface order.
+struct PersistStats([i32; 6]);
+impl Default for PersistStats {
+    fn default() -> Self {
+        Self([-1; 6])
+    }
+}
+fn persisted_counts<'a>(jobs: impl Iterator<Item = &'a Stored>) -> [i32; 3] {
+    let mut counts = [0; 3];
+    for j in jobs {
+        counts[0] += 1;
+        if j.uid == 1000 {
+            counts[1] += 1;
+            if j.job.service.1 == "com.android.server.content.SyncJobService" {
+                counts[2] += 1;
+            }
+        }
+    }
+    counts
+}
+
 #[derive(Default)]
 struct State {
     loaded: bool,
+    persist_stats: PersistStats,
     /// `mReadyToRock`: jobs run once the app host has started.
     running: bool,
     /// Every job tracked or running, by identity.
@@ -1034,11 +1056,20 @@ impl JobScheduler {
 
     /// `PackageManagerInternal.getPackageUid(package, 0, user)`.
     fn package_uid(&self, package: &str, user: i32) -> Result<Option<i32>, Exception> {
-        let (state, _) = self.host.packages()?;
-        Ok(state
-            .packages
-            .get(package)
-            .map(|ps| user * PER_USER_RANGE as i32 + ps.app_id))
+        let (state, resolution) = self.host.packages()?;
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        match query.package_uid(package, 0, user) {
+            Ok(Ok(uid)) => Ok((uid != -1).then_some(uid)),
+            Ok(Err(e)) => Err(e),
+            Err(crate::package::apps_filter::NotModelled(reason)) => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("getPackageUid: {reason}"),
+            )),
+        }
     }
 
     /// `getServiceInfo(service, MATCH_DIRECT_BOOT_AWARE | UNAWARE)` in
@@ -1139,6 +1170,7 @@ impl JobScheduler {
         let dir = self.host.inputs()?.data.join("system/job");
         let (now, wall) = (elapsed_ms(), wall_ms());
         let (stored, migrate) = job_store::read(&dir, now, wall);
+        state.persist_stats.0[..3].copy_from_slice(&persisted_counts(stored.iter()));
         state.loaded = true;
         let count = stored.len();
         for s in stored {
@@ -1298,6 +1330,72 @@ impl JobScheduler {
             state.write_at = Some(now + JOB_PERSIST_DELAY);
             self.post(Message::Persist);
         }
+    }
+
+    /// A pending-job snapshot may let a client persist migration completion in
+    /// another store (SyncManager.verifyJobScheduler). Commit its inputs first.
+    fn flush_pending(&self, state: &mut State) -> Result<(), Exception> {
+        let writes = Self::pending_writes(state);
+        self.write_jobs(state, writes, elapsed_ms())
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("JobStore write failed: {e}")))
+    }
+
+    fn pending_writes(state: &mut State) -> Vec<(i32, Vec<Stored>)> {
+        state.write_at = None;
+        std::mem::take(&mut state.dirty)
+            .into_iter()
+            .map(|uid| {
+                let jobs = state
+                    .jobs
+                    .values()
+                    .filter(|j| j.tracked && j.job.persisted && j.calling_uid == uid)
+                    .map(JobStatus::stored)
+                    .collect();
+                (uid, jobs)
+            })
+            .collect()
+    }
+
+    /// Hold the state lock through commit so an older background snapshot
+    /// cannot overwrite a snapshot returned by a concurrent read barrier.
+    fn write_jobs(
+        &self,
+        state: &mut State,
+        writes: Vec<(i32, Vec<Stored>)>,
+        now: i64,
+    ) -> std::io::Result<()> {
+        if writes.is_empty() && !state.migrate {
+            return Ok(());
+        }
+        let mut counts = [0; 3];
+        let result = (|| {
+            let dir = self
+                .host
+                .inputs()
+                .map_err(|e| std::io::Error::other(e.message))?
+                .data
+                .join("system/job");
+            for (uid, jobs) in &writes {
+                let refs: Vec<&Stored> = jobs.iter().collect();
+                job_store::write(&dir, *uid, &refs, now, wall_ms())?;
+                for (total, n) in counts.iter_mut().zip(persisted_counts(jobs.iter())) {
+                    *total += n;
+                }
+            }
+            if state.migrate {
+                job_store::remove_legacy(&dir)?;
+                state.migrate = false;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            state.dirty.extend(writes.iter().map(|(uid, _)| *uid));
+            state.write_at = Some(now + JOB_PERSIST_DELAY);
+            self.post(Message::Persist);
+        } else {
+            state.persist_stats.0[3..].copy_from_slice(&counts);
+        }
+        result
     }
 
     fn find(state: &State, uid: i32, namespace: Option<&str>, id: i32) -> Option<u64> {
@@ -1517,6 +1615,7 @@ impl JobScheduler {
         // The persisted schedules' quota.
         let service_package = job.service.0.clone();
         let proxy_package = proxy.as_ref().map(|(p, ..)| p.clone());
+        let quota_user = proxy.as_ref().map_or(user, |(_, user, _)| *user);
         if job.persisted
             && (self.flag(FLAG_ENFORCE_SCHEDULE_LIMIT_TO_PROXY_JOBS)?
                 || proxy_package.as_ref().is_none_or(|p| *p == service_package))
@@ -1524,7 +1623,7 @@ impl JobScheduler {
             let package = proxy_package.unwrap_or_else(|| service_package.clone());
             let calls = state
                 .schedule_calls
-                .entry((user, package.clone()))
+                .entry((quota_user, package.clone()))
                 .or_default();
             while calls
                 .front()
@@ -1533,7 +1632,9 @@ impl JobScheduler {
                 calls.pop_front();
             }
             if calls.len() >= API_QUOTA_SCHEDULE_COUNT {
-                eprintln!("app host: jobs: {user}-{package} has called schedule() too many times");
+                eprintln!(
+                    "app host: jobs: {quota_user}-{package} has called schedule() too many times"
+                );
                 let (model, _) = self.host.packages()?;
                 let debuggable = model
                     .packages
@@ -2605,12 +2706,41 @@ impl JobScheduler {
     fn jobs_of(&self, uid: i32) -> Result<Vec<(Option<String>, JobInfo)>, Exception> {
         let mut state = self.state.lock().unwrap();
         self.ensure_loaded(&mut state)?;
+        self.flush_pending(&mut state)?;
         Ok(state
             .jobs
             .values()
             .filter(|j| j.tracked && j.calling_uid == uid)
             .map(|j| (j.namespace.clone(), j.job.clone()))
             .collect())
+    }
+
+    /// JobSchedulerService.LocalService: both scheduler and source must be the system.
+    pub(super) fn system_scheduled_own_jobs(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<JobInfo>, Exception> {
+        let mut state = self.state.lock().unwrap();
+        self.ensure_loaded(&mut state)?;
+        self.flush_pending(&mut state)?;
+        Ok(state
+            .jobs
+            .values()
+            .filter(|j| {
+                j.tracked
+                    && j.calling_uid == 1000
+                    && j.source_uid == 1000
+                    && j.source_package == "android"
+                    && j.namespace.as_deref() == namespace
+            })
+            .map(|j| j.job.clone())
+            .collect())
+    }
+
+    pub(super) fn persist_stats(&self) -> Result<[i32; 6], Exception> {
+        let mut state = self.state.lock().unwrap();
+        self.ensure_loaded(&mut state)?;
+        Ok(state.persist_stats.0)
     }
 
     /// `checkRunUserInitiatedJobsPermission`: `RUN_USER_INITIATED_JOBS`, an
@@ -2799,16 +2929,7 @@ impl JobScheduler {
         }
         let mut writes = Vec::new();
         if state.write_at.is_some_and(|t| t <= now) {
-            state.write_at = None;
-            for uid in std::mem::take(&mut state.dirty) {
-                let jobs = state
-                    .jobs
-                    .values()
-                    .filter(|j| j.tracked && j.job.persisted && j.calling_uid == uid)
-                    .map(JobStatus::stored)
-                    .collect();
-                writes.push((uid, jobs));
-            }
+            writes = Self::pending_writes(state);
         }
         let mut next: Vec<i64> = state.contexts.iter().map(|c| c.timeout_at).collect();
         next.extend(state.write_at);
@@ -2852,26 +2973,10 @@ fn run(scheduler: Weak<JobScheduler>) {
             s.handle(&mut state, m, now);
         }
         let (next, writes) = s.tick(&mut state, now);
-        wake_at = next;
-        let migrate = !writes.is_empty() && std::mem::take(&mut state.migrate);
-        drop(state);
-        if writes.is_empty() {
-            continue;
+        if let Err(e) = s.write_jobs(&mut state, writes, now) {
+            eprintln!("app host: jobs: writing jobs: {e}");
         }
-        let Ok(inputs) = s.host.inputs() else {
-            continue;
-        };
-        let dir = inputs.data.join("system/job");
-        let wall = wall_ms();
-        for (uid, jobs) in writes {
-            let refs: Vec<&Stored> = jobs.iter().collect();
-            if let Err(e) = job_store::write(&dir, uid, &refs, now, wall) {
-                eprintln!("app host: jobs: writing the jobs of uid {uid}: {e}");
-            }
-        }
-        if migrate {
-            job_store::remove_legacy(&dir);
-        }
+        wake_at = next.into_iter().chain(state.write_at).min();
     }
 }
 
@@ -3510,3 +3615,7 @@ mod tests {
         assert_eq!(old.work_count(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "sync_job_tests.rs"]
+mod sync_job_tests;

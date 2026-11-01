@@ -589,8 +589,7 @@ impl WriteParcelable for StartArgs {
     }
 }
 
-/// `ActivityManager.RunningServiceInfo`. None of the app host's services
-/// runs in the system's process.
+/// `ActivityManager.RunningServiceInfo`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunningServiceInfo {
     package: String,
@@ -1704,12 +1703,6 @@ impl AppHost {
         }
         let r = state.record(token).unwrap();
         let package = r.package.clone();
-        // The `android` package's services still need their owners'
-        // system_server internals (#1518).
-        if package == super::SYSTEM_PACKAGE {
-            return Err(self
-                .unimplemented_named("activity", "a service of system_server's own code (#1518)"));
-        }
         // ProcessList holds early starts for AMS.systemReady. A bind must
         // not wait under the service lock or receive PMS's boot failure.
         if !matches!(self.processes_ready.get(), Some(Ok(()))) {
@@ -1732,6 +1725,14 @@ impl AppHost {
                 }
                 return Ok(());
             }
+        }
+        // Framework components share the attached system process; never fork another one.
+        if !isolated
+            && process == super::SYSTEM_PROCESS
+            && r.info.info.application_info.uid as u32 == super::SYSTEM_UID
+        {
+            state.pending_services.push(token);
+            return Ok(());
         }
         let info = r.info.info.application_info.clone();
         let defining = r.info.info.item.package_name.clone();
