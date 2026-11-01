@@ -367,9 +367,8 @@ impl AppHost {
 
     /// `AppDataHelper.clearAppDataLeafLIF` of `ps` in `user`: installd's
     /// `clearAppData` of its storage `flags`, with failures returned to
-    /// the native coordinator and its observer. Its ART profiles are ART Service's
-    /// (`destroyAppProfilesLIF`), which the app host does not start, so
-    /// they stay, as the original leaves them before ART Service runs.
+    /// the native coordinator and its observer. ART profile clearing is
+    /// coordinated separately through the retained ART owner by maintenance.
     pub(super) fn clear_app_data(
         &self,
         installd: &Strong,
@@ -377,13 +376,30 @@ impl AppHost {
         user: i32,
         flags: i32,
     ) -> Result<(), String> {
+        self.clear_app_data_with_inode(
+            installd,
+            ps,
+            user,
+            flags,
+            crate::package::info::user_state(ps, user).ce_data_inode,
+        )
+    }
+
+    pub(super) fn clear_app_data_with_inode(
+        &self,
+        installd: &Strong,
+        ps: &PackageState,
+        user: i32,
+        flags: i32,
+        ce_data_inode: i64,
+    ) -> Result<(), String> {
         let mut data = Parcel::new();
         installd::ClearAppData {
             uuid: ps.volume_uuid.clone(),
             package_name: Some(ps.name.clone()),
             user_id: user,
             flags,
-            ce_data_inode: crate::package::info::user_state(ps, user).ce_data_inode,
+            ce_data_inode,
         }
         .write(&mut data);
         call(

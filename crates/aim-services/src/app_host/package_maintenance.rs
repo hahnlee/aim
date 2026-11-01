@@ -4,7 +4,7 @@
 //! (`android-16.0.0_r1`), to the system uid only. Its ART methods are ART
 //! Service's (#2063), except dex-use recording in aim-system's original
 //! DexUseManagerLocal. Package caches stay owned by installd; profile
-//! cleanup and the external storage session cache remain explicit gaps.
+//! cleanup uses aim-system's original ART owner; external session cache is #2156.
 //! Storage policy follows AOSP android-16.0.0_r1 PMS/AppDataHelper (Apache-2.0).
 
 use std::sync::Arc;
@@ -72,30 +72,29 @@ impl PackageMaintenance {
         let Some(package) = cache_package(capture.state(), name, instant, caller) else {
             return Ok(());
         };
+        // Fail before storage effects if the retained ART owner is unavailable.
+        let art = self.host.art_deletion_owner()?;
         let owner = self
             .host
             .installd()
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        self.clear_cache_storage(&owner, package, user)?;
-        // ART deletion forwarding is not connected yet (#2063). Do not
-        // report a completed clear while its profile effect is unavailable.
-        Err(self
-            .host
-            .unimplemented_named("package maintenance", "clearAppProfiles (#2063)"))
-    }
-
-    fn clear_cache_storage(
-        &self,
-        owner: &aim_binder_host::local::Strong,
-        package: &crate::package::model::PackageState,
-        user: i32,
-    ) -> Result<(), Exception> {
         // Installd owns CE inode resolution (including locked CE), DE,
         // external cache and SDK sandbox caches. External has no code cache.
         for cache in [0x10, 0x20] {
-            self.host
-                .clear_app_data(owner, package, user, 1 | 2 | 4 | cache)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            // PMS retains the parsed package for both passes; the leaf refreshes
+            // its inode, defaulting to zero if state disappeared meanwhile.
+            let current = self.host.package_capture()?;
+            let inode = current.state().packages.get(&package.name).map_or(0, |ps| {
+                crate::package::info::user_state(ps, user).ce_data_inode
+            });
+            if let Err(error) =
+                self.host
+                    .clear_app_data_with_inode(&owner, package, user, 1 | 2 | 4 | cache, inode)
+            {
+                // Original AppDataHelper logs InstallerException and still clears profiles.
+                eprintln!("PackageManager: {error}");
+            }
+            self.host.clear_art_profiles(&art, Some(&package.name))?;
         }
         Ok(())
     }
@@ -140,6 +139,20 @@ impl Service for PackageMaintenance {
         let host = &self.host;
         let mut p = Parcel::new();
         let result = match call.code {
+            bridge::FREE_STORAGE_SERVICE_CACHE => {
+                bridge::FreeStorageServiceCache::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                Err(host.unimplemented_named(
+                    "package maintenance",
+                    "freeStorageServiceCache: StorageSessionController owner required (#2156)",
+                ))
+            }
+            bridge::CLEAR_APP_PROFILES => {
+                let a = bridge::ClearAppProfiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                // Package-internal callers already hold the canonical install lock.
+                host.art_deletion_owner()
+                    .and_then(|owner| host.clear_art_profiles(&owner, a.package_name.as_deref()))
+                    .map(|()| bridge::write_clear_app_profiles_reply(&mut p))
+            }
             bridge::CLEAR_CACHE_FILES => {
                 let a = bridge::ClearCacheFiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.clear_cache_files(
@@ -368,9 +381,7 @@ impl Service for PackageMaintenance {
                     .find(|(c, _)| *c == code)
                     .map_or("an unknown call", |(_, n)| n);
                 let issue = match code {
-                    bridge::GET_ART_MANAGER_BINDER
-                    | bridge::DEXOPT_PACKAGE
-                    | bridge::CLEAR_APP_PROFILES => "#2063",
+                    bridge::GET_ART_MANAGER_BINDER | bridge::DEXOPT_PACKAGE => "#2063",
                     _ => "#2156",
                 };
                 Err(host.unimplemented_named("package maintenance", &format!("{name} ({issue})")))
@@ -484,17 +495,57 @@ impl Service for DexUsePackages {
 mod tests {
     use super::*;
 
+    fn publish_cache_state(
+        host: &AppHost,
+        edit: impl FnOnce(&mut crate::package::scan::SigningScan),
+    ) {
+        let system = host.package_system().unwrap();
+        let bridge = system.package_bootstrap().unwrap();
+        let base = host.package_capture().unwrap();
+        let mut owner = base.scan().owner().clone();
+        edit(&mut owner);
+        owner
+            .complete_library_dependencies(&|_, _| {
+                Ok(crate::package::libraries::Policy {
+                    enforce_native_dependencies: false,
+                    sdk_library_independence: false,
+                })
+            })
+            .unwrap();
+        let mut usage = base.scan().usage().clone();
+        for name in base.state().packages.keys() {
+            if !owner.settings.packages.iter().any(|p| &p.name == name) {
+                usage.remove(name);
+            }
+        }
+        let mut context = (**base.context()).clone();
+        context.packages.retain(|(name, factory), _| {
+            let settings = if *factory {
+                &owner.settings.disabled_system_packages
+            } else {
+                &owner.settings.packages
+            };
+            settings.iter().any(|p| &p.name == name)
+        });
+        context.scan_version += 1;
+        system
+            .publish_package_scan_with_queries(&bridge, Some(base.scan()), owner, usage, context)
+            .unwrap();
+    }
+
     #[test]
     fn cache_deletion_uses_installd_under_the_shared_lock_even_with_ce_locked() {
-        use aim_binder_host::parcel::{Binder, EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+        use aim_binder_host::parcel::{Binder, EX_ILLEGAL_ARGUMENT, EX_SECURITY};
         use aim_service_aidl::android_os_iservicemanager as sm;
+        use aim_service_aidl::dev_aim_server_iartdeletion as art;
         use std::sync::{
             Mutex, OnceLock,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicI32, Ordering},
         };
         type Calls = Arc<Mutex<Vec<(Option<String>, Option<String>, i32, i32, i64)>>>;
         struct Installer {
             calls: Calls,
+            events: Arc<Mutex<Vec<&'static str>>>,
             gate: Arc<OnceLock<Arc<Mutex<()>>>>,
             fail: Arc<AtomicBool>,
         }
@@ -509,6 +560,11 @@ mod tests {
                 match call.code {
                     installd::CLEAR_APP_DATA => {
                         let a = installd::ClearAppData::read(&mut call.data)?;
+                        self.events.lock().unwrap().push(if a.flags == 0x17 {
+                            "cache"
+                        } else {
+                            "code"
+                        });
                         self.calls.lock().unwrap().push((
                             a.uuid,
                             a.package_name,
@@ -534,6 +590,67 @@ mod tests {
                     _ => panic!("unexpected installd method"),
                 }
                 assert_eq!(call.data.remaining(), 0);
+                Ok(p)
+            }
+        }
+        struct Profiles {
+            host: std::sync::Weak<AppHost>,
+            events: Arc<Mutex<Vec<&'static str>>>,
+            failure: Arc<AtomicI32>,
+        }
+        impl Service for Profiles {
+            fn descriptor(&self) -> &str {
+                art::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, SYSTEM_UID);
+                assert_eq!(call.code, art::CLEAR_APP_PROFILES);
+                let a = art::ClearAppProfiles::read(&mut call.data)?;
+                assert_eq!((a.generation, a.package_name.as_deref()), (100, Some("p")));
+                assert_eq!(call.data.remaining(), 0);
+                let host = self.host.upgrade().unwrap();
+                assert!(
+                    host.package_system()
+                        .unwrap()
+                        .package_install_gate()
+                        .try_lock()
+                        .is_err()
+                );
+                // The original ART bridge reenters native snapshot/epoch owners.
+                host.art_deletion_owner().unwrap();
+                self.events.lock().unwrap().push("profiles");
+                let failure = self.failure.load(Ordering::SeqCst);
+                if failure == 1 {
+                    return Err(aim_binder_host::parcel::DEAD_OBJECT);
+                }
+                if failure == 2 {
+                    return Ok(Parcel::new());
+                }
+                if failure == 3
+                    && host
+                        .package_capture()
+                        .unwrap()
+                        .state()
+                        .packages
+                        .contains_key("p")
+                {
+                    publish_cache_state(&host, |owner| {
+                        let users = owner.scanned_user_states("p").unwrap().clone();
+                        for (user, mut state) in users {
+                            state.installed = false;
+                            owner.set_user_state("p", user, state).unwrap();
+                        }
+                        *owner = owner.prepare_live_package_removal("p").unwrap();
+                    });
+                }
+                if failure == 3 {
+                    return reply(Err(Exception::illegal_argument("package disappeared")));
+                }
+                if failure != 0 {
+                    return reply(Err(Exception::new(failure, "original profile failure")));
+                }
+                let mut p = Parcel::new();
+                art::write_clear_app_profiles_reply(&mut p);
                 Ok(p)
             }
         }
@@ -581,9 +698,12 @@ mod tests {
             }
         }
         let calls: Calls = Arc::default();
+        let events = Arc::new(Mutex::new(vec![]));
+        let profile_failure = Arc::new(AtomicI32::new(0));
         let gate = Arc::new(OnceLock::new());
         let fail = Arc::new(AtomicBool::new(false));
         let (record, lock, failure) = (calls.clone(), gate.clone(), fail.clone());
+        let storage_events = events.clone();
         crate::system::with_discovery_context(
             &[],
             true,
@@ -591,6 +711,7 @@ mod tests {
             move |_, process, _| {
                 let installer = process.add_service(Arc::new(Installer {
                     calls: record,
+                    events: storage_events,
                     gate: lock,
                     fail: failure,
                 }));
@@ -600,7 +721,7 @@ mod tests {
                     installer,
                 })
             },
-            |host, _, _, _, _| {
+            |host, _, _, export, _| {
                 gate.set(host.package_system().unwrap().package_install_gate())
                     .unwrap();
                 assert!(!host.ce_storage_prepared(0));
@@ -658,13 +779,15 @@ mod tests {
                         assert_eq!(error.code, EX_SECURITY);
                     }
                 }
+                let caller = AtomicI32::new(1000);
+                let access_instant = AtomicBool::new(false);
                 let clear = |uid, package| {
                     let mut p = Parcel::new();
                     bridge::ClearCacheFiles {
                         package_name: Some(package),
                         user_id: 0,
-                        can_access_instant_apps: false,
-                        calling_uid: 1000,
+                        can_access_instant_apps: access_instant.load(Ordering::SeqCst),
+                        calling_uid: caller.load(Ordering::SeqCst),
                     }
                     .write(&mut p);
                     let response = leaf
@@ -684,8 +807,30 @@ mod tests {
                 assert!(calls.lock().unwrap().is_empty());
                 clear(SYSTEM_UID, "absent".into()).unwrap();
                 let error = clear(SYSTEM_UID, "p".into()).unwrap_err();
-                assert_eq!(error.code, EX_UNSUPPORTED_OPERATION);
+                assert_eq!(error.code, EX_ILLEGAL_STATE);
                 assert!(error.message.contains("#2063"));
+                assert!(calls.lock().unwrap().is_empty());
+                let owner = export(Arc::new(Profiles {
+                    host: Arc::downgrade(host),
+                    events: events.clone(),
+                    failure: profile_failure.clone(),
+                }));
+                super::super::sync_owner::tests::install(
+                    host,
+                    export(super::super::test_activity_service(host)),
+                );
+                let system = host.package_system().unwrap();
+                let epoch = Arc::new(crate::package::boot_captures::Captures::new(
+                    system,
+                    system.package_bootstrap().unwrap(),
+                ));
+                host.attach_art_owner(42, 100, epoch, Some(owner.binder()))
+                    .unwrap();
+                clear(SYSTEM_UID, "p".into()).unwrap();
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    ["cache", "profiles", "code", "profiles"]
+                );
                 assert_eq!(
                     *calls.lock().unwrap(),
                     vec![
@@ -706,13 +851,105 @@ mod tests {
                 assert!(cache_package(&state, Some("p"), false, 1_001_000).is_none());
                 assert!(cache_package(&state, Some("p"), true, 1_001_000).is_some());
                 assert!(cache_package(&state, Some("p"), false, 1000).is_some());
+                state.packages.get_mut("p").unwrap().pkg = None;
+                assert!(cache_package(&state, Some("p"), true, 1000).is_none());
                 fail.store(true, Ordering::SeqCst);
-                assert!(
-                    clear(SYSTEM_UID, "p".into())
-                        .unwrap_err()
-                        .message
-                        .contains("cache deletion failed")
+                events.lock().unwrap().clear();
+                clear(SYSTEM_UID, "p".into()).unwrap(); // InstallerException is logged, then profiles run.
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    ["cache", "profiles", "code", "profiles"]
                 );
+                fail.store(false, Ordering::SeqCst);
+                profile_failure.store(EX_ILLEGAL_ARGUMENT, Ordering::SeqCst);
+                events.lock().unwrap().clear();
+                clear(SYSTEM_UID, "p".into()).unwrap(); // The package race is logged for each pass.
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    ["cache", "profiles", "code", "profiles"]
+                );
+                for code in [EX_ILLEGAL_STATE, EX_SECURITY, 1, 2] {
+                    profile_failure.store(code, Ordering::SeqCst);
+                    events.lock().unwrap().clear();
+                    let error = clear(SYSTEM_UID, "p".into()).unwrap_err();
+                    assert_eq!(error.code, if code > 0 { EX_ILLEGAL_STATE } else { code });
+                    assert_eq!(*events.lock().unwrap(), ["cache", "profiles"]);
+                }
+                profile_failure.store(0, Ordering::SeqCst);
+                events.lock().unwrap().clear();
+                let mut p = Parcel::new();
+                bridge::ClearAppProfiles {
+                    package_name: Some("p".into()),
+                }
+                .write(&mut p);
+                {
+                    let _install = system.package_install_guard();
+                    let response = leaf
+                        .transact(&mut Call {
+                            code: bridge::CLEAR_APP_PROFILES,
+                            flags: 0,
+                            sender_pid: 77,
+                            sender_euid: SYSTEM_UID,
+                            data: p.reader(),
+                        })
+                        .unwrap();
+                    bridge::read_clear_app_profiles_reply(&mut response.reader())
+                        .unwrap()
+                        .unwrap();
+                }
+                assert_eq!(*events.lock().unwrap(), ["profiles"]);
+                publish_cache_state(host, |owner| {
+                    let mut state = owner.scanned_user_states("p").unwrap()[&0].clone();
+                    state.instant_app = true;
+                    owner.set_user_state("p", 0, state).unwrap();
+                });
+                events.lock().unwrap().clear();
+                clear(SYSTEM_UID, "p".into()).unwrap();
+                assert!(events.lock().unwrap().is_empty());
+                access_instant.store(true, Ordering::SeqCst);
+                clear(SYSTEM_UID, "p".into()).unwrap();
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    ["cache", "profiles", "code", "profiles"]
+                );
+                access_instant.store(false, Ordering::SeqCst);
+                caller.store(1_001_000, Ordering::SeqCst);
+                events.lock().unwrap().clear();
+                clear(SYSTEM_UID, "p".into()).unwrap(); // Policy follows caller user 10, not target user 0.
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    ["cache", "profiles", "code", "profiles"]
+                );
+                caller.store(1000, Ordering::SeqCst);
+                access_instant.store(true, Ordering::SeqCst);
+                profile_failure.store(3, Ordering::SeqCst);
+                calls.lock().unwrap().clear();
+                events.lock().unwrap().clear();
+                clear(SYSTEM_UID, "p".into()).unwrap();
+                assert_eq!(
+                    *events.lock().unwrap(),
+                    ["cache", "profiles", "code", "profiles"]
+                );
+                assert_eq!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|c| c.4)
+                        .collect::<Vec<_>>(),
+                    [991, 0]
+                );
+                assert!(
+                    !host
+                        .package_capture()
+                        .unwrap()
+                        .state()
+                        .packages
+                        .contains_key("p")
+                );
+                events.lock().unwrap().clear();
+                clear(SYSTEM_UID, "p".into()).unwrap();
+                assert!(events.lock().unwrap().is_empty());
                 let mut p = Parcel::new();
                 bridge::FreeInstalldCache {
                     volume_uuid: Some("volume".into()),
@@ -991,9 +1228,25 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(
-            e.message.contains("clearAppProfiles (#2063)"),
+            e.message
+                .contains("ART owner generation unavailable (#2063)"),
             "{}",
             e.message
+        );
+        let reply = call(bridge::FREE_STORAGE_SERVICE_CACHE, &|p| {
+            bridge::FreeStorageServiceCache {
+                volume_uuid: None,
+                required_bytes: 1,
+            }
+            .write(p)
+        });
+        let e = bridge::read_free_storage_service_cache_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);
+        assert!(
+            e.message
+                .contains("StorageSessionController owner required (#2156)")
         );
     }
 }

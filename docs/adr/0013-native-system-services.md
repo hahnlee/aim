@@ -819,7 +819,11 @@ bridge. The same process now constructs/registers original ArtManagerLocal over
 those exact package/dex-use owners after application-thread attachment (#2063,
 slice 3). OriginalArtOwner separates construction from callback/receiver/job
 activation. A system-only deletion capability is bound to that native package
-epoch and live process generation; no maintenance callers are routed yet.
+epoch and live process generation. Native maintenance and package-internal
+profile clears now use it (#2063 slice 4): each installd cache/code-cache pass
+is followed by original ART profile clearing under the canonical install lock.
+Artifact deletion remains unrouted; external session cache reclamation still
+requires StorageSessionController (#2156). Physical deletion acceptance is unrun.
 Construction/attachment failures close the package Store and require process
 restart. ART systemReady, shutdown cleanup and dexopt remain #2063; no original
 class or image replacement is added. JVM lifecycle checks cover initialization

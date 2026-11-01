@@ -1222,19 +1222,28 @@ attachments and root/foreign UIDs are rejected, death revokes readiness, and a
 new process can attach. Attachment makes no Java callback under native install
 locks. Native publication never waits for ART. Completion callbacks, boot/APEX
 observers, compilation and scheduling remain inactive in this startup path;
-maintenance/deletion callers are still unrouted. Host JVM/native fixtures cover
+profile-clearing callers use this attachment; artifact deletion remains unrouted.
+Host JVM/native fixtures cover
 these boundaries with original ART/Android constructor dependencies doubled.
 Original service-art.jar/JNI construction cost, image linkage, cold boot's zero
 compiler launches, actual process restart and manager survival across live
 package updates remain unverified. No guest was run; ART lifecycle remains #2063.
-The native maintenance endpoint now routes cache/code-cache deletion to installd
-with DE/CE/external flags and the published CE inode under the shared install lock
-(#2156, incomplete host-only candidate, 2026-11-01). It returns an explicit #2063
-error after storage deletion because profile-cleanup forwarding is not connected. Storage-space,
+The native maintenance endpoint routes each cache/code-cache storage clear to
+installd, followed by original ART profile clearing, under the canonical install
+lock (#2063 slice 4, #2156 ART portion, host-only, 2026-11-02). DE/CE/external flags
+and refreshed CE inodes are forwarded even when CE is locked; a disappearing
+package retains the parsed code identity with inode zero. Package-internal profile
+clears reach the same generation/epoch-checked owner. Unavailable ART fails before
+storage effects; later ART failures propagate without reporting completed clearing.
+Original logged installd failures and profile IllegalArgumentException races remain
+logged continuations. Storage-space,
 preload/parser-cache pruning, installd free-cache, caller logging and result delivery
-have native routes; external storage session cache reclamation remains unsupported.
-Host tests cover request scope, locked-CE forwarding, lock ownership and pruning
-siblings. Physical package deletion, guest boot and CTS were not run.
+have native routes; external storage session cache reclamation still explicitly
+requires StorageSessionController under #2156 and is unsupported. Host tests cover
+per-pass ordering, caller-user instant policy, missing/disappearing packages,
+locked-CE forwarding, lock ownership, original exceptions and unavailable ART.
+Physical profile/DE/CE/external deletion, sibling/root/APK preservation, an independent
+direct-original control, guest boot and CTS were not run; #2156 remains incomplete.
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions
