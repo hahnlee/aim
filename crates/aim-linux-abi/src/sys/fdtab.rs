@@ -1678,26 +1678,58 @@ pub fn parse_guest_fds(text: &str) -> Result<Vec<i32>, crate::errno::Errno> {
 /// Take the fds a process was exec'd with as the guest's, as linux-run does
 /// at start.
 pub fn inherit(fds: &[i32]) -> Result<(), crate::errno::Errno> {
-    bootstrap(fds.to_vec(), &[])
+    bootstrap(fds.to_vec(), &[]).map_err(|error| error.errno)
+}
+#[derive(Debug)]
+pub(crate) struct InheritedFdError {
+    fd: i32,
+    stage: &'static str,
+    errno: crate::errno::Errno,
+    flags: i32,
+    mode: libc::mode_t,
+    path: Option<std::path::PathBuf>,
+}
+impl std::fmt::Display for InheritedFdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "fd={} stage={} errno={} flags={} mode={:#o} path={:?}",
+            self.fd, self.stage, self.errno, self.flags, self.mode, self.path
+        )
+    }
 }
 pub(crate) fn bootstrap(
     inherited: Vec<i32>,
     receipts: &[(i32, aim_storage::socket_inode::Receipt)],
-) -> Result<(), crate::errno::Errno> {
-    if receipts.iter().any(|(fd, _)| !inherited.contains(fd)) {
-        return Err(crate::errno::EINVAL);
+) -> Result<(), InheritedFdError> {
+    let context = |fd, stage, errno| {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        unsafe { libc::fstat(fd, &mut stat) };
+        InheritedFdError {
+            fd,
+            stage,
+            errno,
+            flags,
+            mode: stat.st_mode,
+            path: crate::xrt::fd_path(fd),
+        }
+    };
+    if let Some((fd, _)) = receipts.iter().find(|(fd, _)| !inherited.contains(fd)) {
+        return Err(context(*fd, "receipt inventory", crate::errno::EINVAL));
     }
     for fd in inherited {
         if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-            return Err(crate::errno::EBADF);
+            return Err(context(fd, "validate", crate::errno::last()));
         }
         adopt(fd);
-        super::dir::adopt(fd)?;
+        super::dir::adopt(fd).map_err(|error| context(fd, "directory adoption", error))?;
         if let Some((_, receipt)) = receipts.iter().find(|(target, _)| *target == fd) {
-            super::net::install_socket_receipt(fd, *receipt)?;
+            super::net::install_socket_receipt(fd, *receipt)
+                .map_err(|error| context(fd, "socket receipt", error))?;
         }
         let _guard = lifecycle();
-        publish_guest(fd)?;
+        publish_guest(fd).map_err(|error| context(fd, "publish", error))?;
     }
     Ok(())
 }
@@ -2418,6 +2450,28 @@ mod publication_tests {
         for invalid in ["-1", "0,0", "0,,2", "2147483648", " 2", "2x"] {
             assert_eq!(parse_guest_fds(invalid).unwrap_err(), crate::errno::EBADF);
         }
+    }
+
+    #[test]
+    fn inherited_publication_reports_the_closed_slot_and_stage() {
+        if isolated_kernel_test(
+            "sys::fdtab::publication_tests::inherited_publication_reports_the_closed_slot_and_stage",
+        ) {
+            return;
+        }
+        use std::os::fd::IntoRawFd;
+        let fd = File::open("/dev/null").unwrap().into_raw_fd();
+        assert_eq!(unsafe { libc::close(fd) }, 0);
+        let error = bootstrap(vec![fd], &[]).unwrap_err();
+        assert_eq!(error.fd, fd);
+        assert_eq!(error.stage, "validate");
+        assert_eq!(error.errno, crate::errno::EBADF);
+        assert_eq!(error.flags, -1);
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("fd={fd} stage=validate errno=9"))
+        );
     }
 }
 
