@@ -27,6 +27,14 @@ fn unavailable() -> Exception {
     )
 }
 impl AppHost {
+    pub(super) fn sync_forwarding_owner(&self) -> Result<Strong, Exception> {
+        let state = self.sync_owner.lock().unwrap();
+        if !state.ready {
+            return Err(unavailable());
+        }
+        let owner = state.owner.as_ref().ok_or_else(unavailable)?;
+        Ok(self.process.strong(owner.strong.handle))
+    }
     pub(super) fn sync_owner_generation(&self, pid: i32) -> Result<i64, Exception> {
         let apps = self.apps.lock().unwrap();
         apps.iter()
@@ -289,6 +297,7 @@ pub(super) mod tests {
                 .unwrap();
             host.set_user_unlocked_for_package_test(0, false);
             assert!(!host.sync_owner_user_unlocked(42, 100).unwrap());
+            assert!(host.sync_forwarding_owner().is_err());
             assert!(host.complete_sync_owner_replay(42, 100).is_err());
             host.set_user_unlocked_for_package_test(0, true);
             for (uid, pid, generation) in [(10100, 42, 100), (1000, 43, 100), (1000, 42, 99)] {
@@ -311,9 +320,11 @@ pub(super) mod tests {
             .unwrap()
             .unwrap();
             assert!(host.sync_owner_ready());
+            assert!(host.sync_forwarding_owner().is_ok());
             assert!(host.complete_sync_owner_replay(42, 100).is_err());
             host.sync_owner_died(100);
             assert!(!host.sync_owner_ready());
+            assert!(host.sync_forwarding_owner().is_err());
             assert!(host.complete_sync_owner_replay(42, 100).is_err());
         });
     }

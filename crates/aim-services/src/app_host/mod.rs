@@ -194,6 +194,7 @@ pub mod storage;
 pub mod storage_stats;
 mod strict_mode;
 pub mod surface;
+mod sync_forward;
 mod sync_owner;
 pub mod system_process;
 pub mod system_update;
