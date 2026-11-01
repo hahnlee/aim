@@ -616,6 +616,33 @@ impl Service for SystemProcess {
                     Ok(())
                 })
             }
+            sp::GET_SYNC_OWNER_GENERATION => {
+                sp::GetSyncOwnerGeneration::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let generation = self.host.sync_owner_generation(call.sender_pid)?;
+                    sp::write_get_sync_owner_generation_reply(&mut p, generation);
+                    Ok(())
+                })
+            }
+            sp::ATTACH_SYNC_OWNER => {
+                let a = sp::AttachSyncOwner::read(&mut call.data)?;
+                system().and_then(|()| {
+                    self.host
+                        .attach_sync_owner(call.sender_pid, a.generation, a.owner)?;
+                    sp::write_attach_sync_owner_reply(&mut p);
+                    Ok(())
+                })
+            }
+            sp::IS_SYNC_OWNER_ATTACHED => {
+                let a = sp::IsSyncOwnerAttached::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let ready = self
+                        .host
+                        .sync_owner_attached(call.sender_pid, a.generation)?;
+                    sp::write_is_sync_owner_attached_reply(&mut p, ready);
+                    Ok(())
+                })
+            }
             sp::GET_INTERNAL_SERVICE_REPOSITORY => {
                 sp::GetInternalServiceRepository::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 system().map(|()| {

@@ -24,16 +24,17 @@ public class ReadQueriesTest {
     }
     public static void main(String[] args) throws android.os.RemoteException {
         var audio = new AudioPolicyQueries(new Context());
-        var sync = new SyncAdapterQueries(new Context(), (name, uid, user) -> {
+        var cache = new SyncAdaptersCache(new Context());
+        var sync = new SyncAdapterQueries((name, uid, user) -> {
             check(uid == 10100 && user == 10);
             return name.equals("hidden");
-        });
+        }, user -> cache.getAllServices(user).stream().map(info -> info.type).toArray(SyncAdapterType[]::new));
         Binder.uid = 10100;
         denied(() -> audio.getAudioProductStrategies());
         denied(() -> audio.getDeviceMaskForStream(3));
         try { sync.getSyncAdapterTypes(10100, 10); throw new AssertionError("accepted app uid"); }
         catch (SecurityException expected) {}
-        check(SyncAdaptersCache.constructed == 0 && Parcel.recycled == 0);
+        check(SyncAdaptersCache.constructed == 1 && Parcel.recycled == 0);
         Binder.uid = 1000;
         var strategy = new AudioProductStrategy();
         AudioProductStrategy.strategies.add(strategy);

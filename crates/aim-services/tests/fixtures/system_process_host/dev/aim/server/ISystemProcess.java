@@ -1,6 +1,10 @@
 package dev.aim.server;
 import android.os.IBinder;
 interface ISystemProcess {
+    Object getSyncAccounts();
+    long getSyncOwnerGeneration();
+    void attachSyncOwner(long generation, IBinder owner);
+    boolean isSyncOwnerAttached(long generation);
     IBinder getInternalServiceRepository();
     IBinder getPackageInternalHost();
     void attachRoleService(IBinder service);
@@ -30,6 +34,17 @@ interface ISystemProcess {
     abstract class Stub {
         public static ISystemProcess asInterface(IBinder binder) {
             return new ISystemProcess() {
+                public Object getSyncAccounts() { return this; }
+                public long getSyncOwnerGeneration() { return 7; }
+                public void attachSyncOwner(long generation, IBinder owner) {
+                    if (generation != 7 || owner == null) throw new AssertionError();
+                    try { owner.transact(4, null, null, 0); throw new AssertionError("sync forwarded"); }
+                    catch (IllegalStateException expected) {
+                        if (!expected.getMessage().contains("forwarding inactive")) throw expected;
+                    } catch (android.os.RemoteException e) { throw new AssertionError(e); }
+                    SystemProcessHostTest.events.add("syncAttached");
+                }
+                public boolean isSyncOwnerAttached(long generation) { return generation == 7; }
                 public IBinder getInternalServiceRepository() { throw new AssertionError(); }
                 public IBinder getPackageInternalHost() { throw new AssertionError(); }
                 public void attachRoleService(IBinder service) {

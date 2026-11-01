@@ -179,10 +179,21 @@ impl ClassPath {
         Ok(Self { jars })
     }
 
-    /// Include a build-time injected jar in the checked class path.
-    pub fn with_jar(mut self, jar: Vec<u8>) -> Self {
-        self.jars.push(jar);
-        self
+    /// Check the replacement at its real class-path position, without the original
+    /// class definitions masking changed members in the replacement.
+    pub fn read_replacing(
+        root: &Path,
+        guest_paths: &[String],
+        replaced: &str,
+        jar: Vec<u8>,
+    ) -> Result<Self, String> {
+        let index = guest_paths
+            .iter()
+            .position(|p| p == replaced)
+            .ok_or_else(|| format!("replacement jar absent from class path: {replaced}"))?;
+        let mut result = Self::read(root, guest_paths)?;
+        result.jars[index] = jar;
+        Ok(result)
     }
 
     /// `first` (if any), then the class path's dex files.
@@ -382,6 +393,23 @@ impl ClassPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_preserves_classpath_position_and_rejects_missing_target() {
+        let root = aim_paths::scratch_dir("linkage-replacement");
+        std::fs::create_dir_all(&root).unwrap();
+        let paths: Vec<String> = ["first.jar", "services.jar", "last.jar"]
+            .map(String::from)
+            .to_vec();
+        for (i, path) in paths.iter().enumerate() {
+            std::fs::write(root.join(path), [i as u8]).unwrap();
+        }
+        let classpath = ClassPath::read_replacing(&root, &paths, "services.jar", vec![9]).unwrap();
+        assert_eq!(classpath.jars, vec![vec![0], vec![9], vec![2]]);
+        assert_eq!(std::fs::read(root.join("services.jar")).unwrap(), vec![1]);
+        assert!(ClassPath::read_replacing(&root, &paths, "absent.jar", vec![9]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn constructors_resolve_only_on_the_requested_class() {

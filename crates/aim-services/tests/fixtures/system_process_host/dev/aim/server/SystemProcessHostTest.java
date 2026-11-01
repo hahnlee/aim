@@ -4,6 +4,7 @@ import java.util.List;
 public final class SystemProcessHostTest {
     public static boolean deviceLock;
     public static boolean printing;
+    public static boolean failSync;
     public static void loadLibrary(String name) {
         if (!name.equals("android_servers")) throw new AssertionError(name);
         events.add("jni");
@@ -18,6 +19,7 @@ public final class SystemProcessHostTest {
     public static void main(String[] args) throws Exception {
         deviceLock = Boolean.parseBoolean(args[0]);
         printing = Boolean.parseBoolean(args[1]);
+        failSync = Boolean.parseBoolean(args[2]);
         try {
             SystemProcessHost.Server.main(new String[0]);
             throw new AssertionError("startup returned");
@@ -25,7 +27,7 @@ public final class SystemProcessHostTest {
             List<String> wanted = new ArrayList<>(List.of("jni", "context", "modules", "art", "memory",
                     "systemApplication", "dex", "network", "roles", "settings", "installer", "installer:start", "packageLocals",
                     "packageShutdown", "packageJava", "staging", "domain", "attachDomain", "preBootNotifications", "graphicsstats:construct", "graphicsstats:publish",
-                    "foreground", "attachSystem", "companion", "crates", "activityStats", "taskManagerLocal", "windowLocal", "roleHelper", "RoleService:construct", "RoleService:start", "role:publish", "attachRole", "AccessibilityManagerService$Lifecycle:construct", "AccessibilityManagerService$Lifecycle:start",
+                    "foreground", "attachSystem", "companion", "crates", "activityStats", "jobLocal", "policyLocals", "accountLocal", "syncConstructed", "syncAttached", "taskManagerLocal", "windowLocal", "roleHelper", "RoleService:construct", "RoleService:start", "role:publish", "attachRole", "AccessibilityManagerService$Lifecycle:construct", "AccessibilityManagerService$Lifecycle:start",
                     "PinnerService:construct", "PinnerService:start", "ConnectivityDumpInitializer:construct", "ConnectivityDumpInitializer:start", "NetworkStatsInitializer:construct",
                     "NetworkStatsInitializer:start", "NearbyServiceInitializer:construct",
                     "NearbyServiceInitializer:start"));

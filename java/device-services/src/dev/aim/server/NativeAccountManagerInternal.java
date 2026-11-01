@@ -9,7 +9,7 @@ import android.content.Context;
 import android.os.RemoteException;
 import java.util.Objects;
 
-/** Inactive local adapter over the same native owner as NativeSyncAccounts (#1460). */
+/** Local adapter over the same native owner as NativeSyncAccounts (#1460). */
 final class NativeAccountManagerInternal extends AccountManagerInternal {
     private final ISyncAccounts owner;
     private final IAccountConsentNotification notifications;

@@ -150,7 +150,6 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachPackageBootstrapJava(packageBridge);
             host.attachNativeStagingBridge(new com.android.server.pm.NativeStagingBridge());
             host.attachAudioPolicyQueries(new AudioPolicyQueries(context));
-            host.attachSyncAdapterQueries(new SyncAdapterQueries(context, host));
             host.initializeCameraPrivacyAllowlist(new ArrayList<>(
                     com.android.server.SystemConfig.getInstance().getCameraPrivacyAllowlist()));
             host.attachUserSwitcherPolicy(new UserSwitcherPolicy(context));
@@ -173,6 +172,7 @@ public final class SystemProcessHost extends RuntimeInit {
             ActivityStats.publish(host);
             NativeJobScheduler.publish(host);
             SyncPolicyLocals.publish(host);
+            SyncOwnerStartup.start(context, host);
             TaskManagerLocal.publish(host);
             AccessibilityWindows.publish(context, host);
             com.android.server.LocalManagerRegistry.addManager(
