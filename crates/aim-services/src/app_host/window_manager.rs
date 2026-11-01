@@ -2080,6 +2080,14 @@ impl AppHost {
     pub(super) fn remove_animation_test_window(&self, id: u32) {
         self.remove_window(id);
     }
+
+    pub(super) fn animation_test_geometry(&self, id: u32, offset: (i32, i32), insets: [i32; 4]) {
+        let mut windows = self.windows.windows.lock().unwrap();
+        let w = windows.get_mut(&id).unwrap();
+        w.frames.frame.left += offset.0;
+        w.frames.frame.top += offset.1;
+        w.attrs.surface_insets = insets;
+    }
 }
 
 #[path = "window_accessibility.rs"]
