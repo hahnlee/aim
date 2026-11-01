@@ -36,6 +36,7 @@ pub(super) fn transact(host: &Arc<AppHost>, call: &mut Call<'_>) -> Reply {
         result_who: None,
         request_code: -1,
         options: read_typed::<RawBundle>(r).map_err(|_| BAD_VALUE)?,
+        launch: None,
     };
     let user = r.read_i32().map_err(|_| BAD_VALUE)?;
     reply((|| {
