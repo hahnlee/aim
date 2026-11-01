@@ -4,7 +4,7 @@ use super::*;
 use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
 use std::sync::mpsc;
 
-fn permissions(host: &Arc<AppHost>) {
+pub(super) fn permissions(host: &Arc<AppHost>) {
     let manager = Arc::new(
         super::super::permission_manager::PermissionManager::with_system(
             host.clone(),
@@ -14,7 +14,7 @@ fn permissions(host: &Arc<AppHost>) {
     assert!(host.permission_manager.set(manager).is_ok());
 }
 
-fn invoke(stats: &BatteryStats, uid: u32, code: u32, data: &Parcel) -> Parcel {
+pub(super) fn invoke(stats: &BatteryStats, uid: u32, code: u32, data: &Parcel) -> Parcel {
     stats
         .transact(&mut Call {
             code,
