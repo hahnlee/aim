@@ -1,7 +1,7 @@
 //! BatteryStatsService / BatteryStatsImpl at android-16.0.0_r1; health assertions
 //! follow CtsOsTestCases SystemHealthManagerTest (own uid, ordered UID arrays).
 use super::*;
-use aim_binder_host::parcel::{EX_SECURITY, EX_UNSUPPORTED_OPERATION};
+use aim_binder_host::parcel::EX_SECURITY;
 use std::sync::mpsc;
 
 pub(super) fn permissions(host: &Arc<AppHost>) {
@@ -309,14 +309,5 @@ fn binder_camera_and_flashlight_pairs_enforce_update_device_stats() {
                 .unwrap()
                 .unwrap();
         }
-        let mut p = Parcel::new();
-        p.write_interface_token(bs::DESCRIPTOR);
-        let e = invoke(&stats, 1000, bs::GET_BATTERY_USAGE_STATS, &p)
-            .reader()
-            .read_exception()
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(e.code, EX_UNSUPPORTED_OPERATION);
-        assert!(e.message.contains("#1928"));
     });
 }

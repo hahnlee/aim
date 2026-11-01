@@ -58,6 +58,29 @@ struct Window {
     region: Option<std::fs::File>,
 }
 
+/// Numeric/null rows in BatteryConsumerData's native CursorWindow format.
+pub(super) fn write_numbers(p: &mut Parcel, rows: &[Vec<Option<i64>>]) -> Result<(), Exception> {
+    let columns = rows.first().map_or(0, Vec::len);
+    let mut window = Window::new("BatteryUsageStats", 20_000_000);
+    window.columns = columns;
+    for row in rows {
+        if row.len() != columns || !window.alloc_row() {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "BatteryUsageStats cursor allocation failed",
+            ));
+        }
+        let start = window.slots.len() - columns;
+        for (slot, value) in window.slots[start..].iter_mut().zip(row) {
+            if let Some(value) = value {
+                slot[..4].copy_from_slice(&1i32.to_le_bytes()); // FIELD_TYPE_INTEGER
+                slot[4..12].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    window.write(p)
+}
+
 impl Window {
     /// `CursorWindow::create`: inline, inflated up to `inflated_size`.
     fn new(name: &str, inflated_size: usize) -> Window {

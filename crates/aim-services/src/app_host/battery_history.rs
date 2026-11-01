@@ -703,6 +703,30 @@ fn current_time() -> i64 {
 }
 
 impl History {
+    /// BatteryStatsHistory.writeToBatteryUsageStatsParcel: live buffer, then
+    /// completed fragments. The pinned writer omits the reader's duration long.
+    pub(super) fn write_usage(
+        &mut self,
+        out: &mut Parcel,
+        preferred_ms: i64,
+    ) -> Result<(), String> {
+        write_usage_blob(out, &self.buffer)?;
+        let fragments = self.store.fragments().clone();
+        for pair in fragments.windows(2) {
+            if pair[1] < self.monotonic_end_time.saturating_sub(preferred_ms) {
+                continue;
+            }
+            if let Some(data) = self.store.read(pair[0])
+                && !data.is_empty()
+            {
+                out.write_bool(true);
+                write_usage_blob(out, &data)?;
+            }
+        }
+        out.write_bool(false);
+        Ok(())
+    }
+
     /// The history of `store` at elapsed `now`, continuing its latest
     /// fragment or a new one.
     pub fn new(store: Directory, clock: MonotonicClock, max_buffer: usize, now: i64) -> Self {
@@ -1035,6 +1059,30 @@ impl History {
     }
 }
 
+/// Parcel.writeBlob's in-place and immutable ashmem forms. Preserve Binder
+/// object ownership; marshalling the bytes would lose the file descriptor.
+fn write_usage_blob(out: &mut Parcel, bytes: &[u8]) -> Result<(), String> {
+    use std::os::{fd::AsFd, unix::fs::FileExt};
+    out.write_i32(i32::try_from(bytes.len()).map_err(|e| e.to_string())?);
+    if bytes.len() <= 16_384 {
+        out.write_i32(0); // BLOB_INPLACE
+        out.write_raw(bytes, &[]);
+    } else {
+        let file = aim_ashmem::read_only_region(b"BatteryUsageStats history")
+            .and_then(|f| {
+                f.set_len(bytes.len() as u64)?;
+                f.write_all_at(bytes, 0)?;
+                Ok(f)
+            })
+            .map_err(|e| e.to_string())?;
+        let file = aim_binder_host::server::file_from_fd(file.as_fd())
+            .ok_or("battery history: no fileport")?;
+        out.write_i32(1); // BLOB_ASHMEM_IMMUTABLE
+        out.write_file(file);
+    }
+    Ok(())
+}
+
 fn set_flags(states: &mut i32, flags: i32, on: bool) {
     if on {
         *states |= flags;
@@ -1054,6 +1102,54 @@ pub fn paths(system: &Path) -> (PathBuf, PathBuf) {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn large_usage_blob_retains_immutable_file_object() {
+        use std::io::Read;
+        let bytes = vec![0x5a; 20_000];
+        let mut p = Parcel::new();
+        write_usage_blob(&mut p, &bytes).unwrap();
+        let mut r = p.reader();
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (20_000, 1));
+        assert_eq!(p.objects(), &[8]);
+        let mut actual = Vec::new();
+        aim_binder_host::server::file_fd(&p.files()[0].1)
+            .unwrap()
+            .read_to_end(&mut actual)
+            .unwrap();
+        assert_eq!(actual, bytes);
+    }
+
+    #[test]
+    fn usage_export_keeps_live_buffer_and_decodes_completed_fragments() {
+        let dir = temp_dir("usage-export");
+        let mut h = history(&dir, 128 * 1024, 0);
+        h.set_initial_battery_state(true, 3, 50, 0);
+        h.start_recording(0, true);
+        h.record_event(1000, EVENT_SYNC | EVENT_FLAG_START, Some("sync"), 10001);
+        h.write_history(1000, true);
+        let completed = h.store.read(h.active).unwrap();
+        // Rotate as write_item does when a buffer fills.
+        h.active = h.store.create(2000);
+        h.init_buffer(2000);
+        h.start_recording(2000, false);
+        let mut p = Parcel::new();
+        h.write_usage(&mut p, i64::MAX).unwrap();
+        let mut r = p.reader();
+        let blob = |r: &mut Reader<'_>| {
+            let len = r.read_i32().unwrap() as usize;
+            assert_eq!(r.read_i32().unwrap(), 0);
+            let start = r.position();
+            r.skip(len).unwrap();
+            p.data()[start..start + len].to_vec()
+        };
+        assert_eq!(blob(&mut r), h.buffer);
+        assert!(r.read_bool().unwrap());
+        assert_eq!(blob(&mut r), completed);
+        assert!(!r.read_bool().unwrap());
+        assert_eq!(r.position(), p.data().len());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     pub(crate) fn temp_dir(name: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
