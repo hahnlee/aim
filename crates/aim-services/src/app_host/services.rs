@@ -3828,6 +3828,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sync_temp_allowlist_reaches_idle_without_granting_foreground_services() {
+        use aim_binder_host::local::{Call, Service};
+        use aim_service_aidl::{
+            android_os_ideviceidlecontroller as di, dev_aim_server_isystemprocess as sp,
+        };
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            host.inputs()
+                .unwrap()
+                .settings
+                .set_config(
+                    "device_idle/",
+                    &mut [(
+                        "device_idle/max_temp_app_allowlist_duration_ms".into(),
+                        Some("300000".into()),
+                    )],
+                    Some("android"),
+                    true,
+                )
+                .unwrap();
+            let uid = host
+                .installed(0, 0)
+                .unwrap()
+                .into_iter()
+                .find(|(n, _, _)| n == "p")
+                .unwrap()
+                .1;
+            let owner = super::super::system_process::SystemProcess::new(host.clone());
+            for kind in [1, 0] {
+                let mut p = Parcel::new();
+                sp::AddSyncTempAllowlist {
+                    calling_uid: 1000,
+                    package_name: Some("p".into()),
+                    duration_ms: 10_000,
+                    r#type: kind,
+                    user_id: 0,
+                    sync: false,
+                    reason_code: 306,
+                    reason: Some("sync by top app".into()),
+                }
+                .write(&mut p);
+                let response = owner
+                    .transact(&mut Call {
+                        code: sp::ADD_SYNC_TEMP_ALLOWLIST,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: 1000,
+                        data: p.reader(),
+                    })
+                    .unwrap();
+                sp::read_add_sync_temp_allowlist_reply(&mut response.reader())
+                    .unwrap()
+                    .unwrap();
+                let response = host
+                    .device_idle()
+                    .transact(&mut Call {
+                        code: di::GET_APP_ID_TEMP_WHITELIST,
+                        flags: 0,
+                        sender_pid: 1,
+                        sender_euid: 1000,
+                        data: Parcel::new().reader(),
+                    })
+                    .unwrap();
+                let ids = di::read_get_app_id_temp_whitelist_reply(&mut response.reader())
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(ids.contains(&(uid % PER_USER_RANGE as i32)));
+                assert_eq!(
+                    AppHost::temp_allowlisted(&host.services.state.lock().unwrap(), uid),
+                    (kind == 0).then_some(306)
+                );
+            }
+        });
+    }
+
+    #[test]
     fn early_bindings_are_held_without_waiting_for_or_returning_boot_errors() {
         use crate::package::info::{ApplicationInfo, ComponentInfo, PackageItemInfo};
         struct Connection;

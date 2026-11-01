@@ -14,7 +14,7 @@
 //! checked again when that ends. The display, the Mac's, is on.
 //!
 //! What the app host does not do: write the history back, other usage
-//! events (notifications seen, foreground services, sync, slices, content
+//! events (notifications seen, foreground services, slices, content
 //! providers, user interaction), predictions, cross-profile
 //! apps, and the lowest bucket of an app a device admin or the active
 //! network scorer exempts (#1723).
@@ -57,6 +57,10 @@ const REASON_SUB_USAGE_MOVE_TO_FOREGROUND: i32 = 0x0004;
 const REASON_SUB_USAGE_MOVE_TO_BACKGROUND: i32 = 0x0005;
 const REASON_SUB_USAGE_USER_INTERACTION: i32 = 0x0003;
 const REASON_SUB_USAGE_ACTIVE_TIMEOUT: i32 = 0x0007;
+/// UsageStatsManager's noninteractive sync subreasons.
+const REASON_SUB_USAGE_EXEMPTED_SYNC_SCHEDULED_NON_DOZE: i32 = 0x000B;
+const REASON_SUB_USAGE_EXEMPTED_SYNC_START: i32 = 0x000D;
+const REASON_SUB_USAGE_UNEXEMPTED_SYNC_SCHEDULED: i32 = 0x000E;
 const REASON_SUB_PREDICTED_RESTORED: i32 = 0x0001;
 const FIRST_APPLICATION_UID: i32 = 10_000;
 const SYSTEM_UID: i32 = 1000;
@@ -406,6 +410,9 @@ struct Constants {
     system_update_timeout: i64,
     prediction_timeout: i64,
     auto_restricted_bucket_delay: i64,
+    sync_scheduled_timeout: i64,
+    sync_start_timeout: i64,
+    sync_unexempted_timeout: i64,
 }
 
 impl Constants {
@@ -456,6 +463,9 @@ impl Constants {
             DEFAULT_LEGACY_STRONG_USAGE_TIMEOUT
         };
         Constants {
+            sync_scheduled_timeout: long("exempted_sync_scheduled_nd_duration", 10 * ONE_MINUTE),
+            sync_start_timeout: long("exempted_sync_start_duration", 10 * ONE_MINUTE),
+            sync_unexempted_timeout: long("unexempted_sync_scheduled_duration", 10 * ONE_MINUTE),
             screen_thresholds,
             elapsed_thresholds,
             check_idle_interval: (elapsed_thresholds[1] / 4).min(DEFAULT_CHECK_IDLE_INTERVAL_MS),
@@ -489,6 +499,44 @@ struct Controller {
     history: History,
     /// `Flags.screenTimeBypass`.
     screen_time_bypass: bool,
+}
+
+impl Controller {
+    // AppStandbyController's noninteractive sync usage. The native idle owner
+    // stays active (#2016); doze promotion is not advertised here.
+    fn sync_usage(
+        &mut self,
+        package: &str,
+        user: i32,
+        exempted: bool,
+        start: bool,
+        now: i64,
+    ) -> Option<i64> {
+        let (bucket, reason, delay) = if start {
+            (
+                STANDBY_BUCKET_ACTIVE,
+                REASON_SUB_USAGE_EXEMPTED_SYNC_START,
+                self.constants.sync_start_timeout,
+            )
+        } else if exempted {
+            (
+                STANDBY_BUCKET_ACTIVE,
+                REASON_SUB_USAGE_EXEMPTED_SYNC_SCHEDULED_NON_DOZE,
+                self.constants.sync_scheduled_timeout,
+            )
+        } else if self.history.bucket(package, user) == STANDBY_BUCKET_NEVER {
+            (
+                STANDBY_BUCKET_WORKING_SET,
+                REASON_SUB_USAGE_UNEXEMPTED_SYNC_SCHEDULED,
+                self.constants.sync_unexempted_timeout,
+            )
+        } else {
+            return None;
+        };
+        self.history
+            .report_usage(package, user, bucket, reason, 0, now.wrapping_add(delay));
+        Some(delay)
+    }
 }
 
 /// App standby: the controller and serialized handler idle passes.
@@ -1068,6 +1116,31 @@ impl AppHost {
         self.with_standby(|_, c| Ok(c.history.bucket(package, user)))
     }
 
+    pub(super) fn report_sync_usage(
+        self: &Arc<Self>,
+        package: &str,
+        user: i32,
+        exempted: bool,
+        start: bool,
+    ) -> Result<(), Exception> {
+        if !self.app_idle_enabled()? {
+            return Ok(());
+        }
+        let delay = self.with_standby(|_, c| {
+            Ok(c.sync_usage(package, user, exempted, start, elapsed_realtime()))
+        })?;
+        if let Some(delay) = delay {
+            let (host, package) = (Arc::downgrade(self), package.to_string());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(delay.max(0) as u64));
+                if let Some(host) = host.upgrade() {
+                    host.check_package_idle_state(&package, user);
+                }
+            });
+        }
+        self.restrictions_changed(None)
+    }
+
     /// `isAppIdleFiltered(package, getAppId(package), user, now)`: idle
     /// while not charging when its bucket is rare or below and its
     /// minimum bucket lets it be.
@@ -1265,6 +1338,62 @@ mod tests {
             STANDBY_BUCKET_ACTIVE
         );
         assert_eq!(h.bucket("com.example.absent", 0), STANDBY_BUCKET_NEVER);
+    }
+
+    #[test]
+    fn sync_promotions_hold_buckets_without_recording_interactive_use() {
+        let mut c = Controller {
+            policy: Arc::new(Policy {
+                enabled: true,
+                headless: BTreeSet::new(),
+            }),
+            constants: Constants::read(
+                &|key| (key == "exempted_sync_start_duration").then(|| "1234".into()),
+                true,
+            ),
+            history: history(0),
+            screen_time_bypass: false,
+        };
+        let original = c.history.usage("com.example.used", 0).clone();
+        assert_eq!(c.sync_usage("com.example.used", 0, false, false, 100), None);
+        assert_eq!(c.history.usage("com.example.used", 0), &original);
+        assert_eq!(
+            c.sync_usage("new", 0, false, false, 100),
+            Some(10 * ONE_MINUTE)
+        );
+        assert_eq!(c.history.usage("new", 0).bucketing_reason, 0x30E);
+        assert_eq!(c.history.bucket("new", 0), STANDBY_BUCKET_WORKING_SET);
+        c.sync_usage("new", 0, true, false, 200);
+        let u = c.history.usage("new", 0);
+        assert_eq!(
+            (u.current_bucket, u.bucketing_reason),
+            (STANDBY_BUCKET_ACTIVE, 0x30B)
+        );
+        assert_eq!(
+            (
+                u.last_used_elapsed,
+                u.last_used_by_user_elapsed,
+                u.last_used_screen
+            ),
+            (i32::MIN as i64, i32::MIN as i64, i32::MIN as i64)
+        );
+        assert_eq!(c.sync_usage("new", 0, true, true, 300), Some(1234));
+        assert_eq!(c.history.usage("new", 0).bucketing_reason, 0x30D);
+        let expiry = c.history.usage("new", 0).expiry[&STANDBY_BUCKET_ACTIVE];
+        assert_eq!(expiry, 200 + 10 * ONE_MINUTE);
+        AppHost::check_and_update(&mut c, "new", 0, STANDBY_BUCKET_NEVER, expiry - 1);
+        assert_eq!(c.history.bucket("new", 0), STANDBY_BUCKET_ACTIVE);
+        AppHost::check_and_update(&mut c, "new", 0, STANDBY_BUCKET_NEVER, expiry + 1);
+        assert_eq!(c.history.bucket("new", 0), STANDBY_BUCKET_NEVER);
+        c.history.set_bucket(
+            "restricted",
+            0,
+            1,
+            STANDBY_BUCKET_RESTRICTED,
+            REASON_MAIN_FORCED_BY_USER,
+        );
+        c.sync_usage("restricted", 0, true, true, 2);
+        assert_eq!(c.history.bucket("restricted", 0), STANDBY_BUCKET_RESTRICTED);
     }
 
     /// AppStandbyController.checkAndUpdateStandbyState reads the latest

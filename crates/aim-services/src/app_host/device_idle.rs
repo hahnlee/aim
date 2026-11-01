@@ -380,7 +380,7 @@ impl DeviceIdle {
     }
 
     /// `getTempAllowListType`.
-    fn temp_allowlist_type(reason_code: i32, default: i32) -> Result<i32, String> {
+    pub(super) fn temp_allowlist_type(reason_code: i32, default: i32) -> Result<i32, String> {
         match reason_code {
             // `ActivityManagerInternal.getPushMessagingOverQuotaBehavior`.
             REASON_PUSH_MESSAGING_OVER_QUOTA => {

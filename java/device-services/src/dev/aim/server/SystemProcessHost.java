@@ -172,6 +172,7 @@ public final class SystemProcessHost extends RuntimeInit {
             host.attachStorageCrates(new StorageCrates(context));
             ActivityStats.publish(host);
             NativeJobScheduler.publish(host);
+            SyncPolicyLocals.publish(host);
             TaskManagerLocal.publish(host);
             AccessibilityWindows.publish(context, host);
             com.android.server.LocalManagerRegistry.addManager(
