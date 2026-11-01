@@ -198,6 +198,7 @@ mod sync_owner;
 pub mod system_process;
 pub mod system_update;
 pub mod task_info;
+mod task_organizer;
 pub mod tasks;
 pub mod telephony_registry;
 pub mod text_services;
@@ -612,6 +613,7 @@ pub struct AppHost {
     user_switcher_policy: Mutex<Option<Arc<Strong>>>,
     package_shell_read: Mutex<Option<Arc<Strong>>>,
     tasks: tasks::Tasks,
+    organizers: task_organizer::Organizers,
     /// The server's launches, by package, until the package's task is made.
     pending_launches: Mutex<HashMap<String, String>>,
     providers: providers::Providers,
@@ -767,6 +769,7 @@ impl AppHost {
             user_switcher_policy: Mutex::new(None),
             package_shell_read: Mutex::new(None),
             tasks: Default::default(),
+            organizers: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
             providers: Default::default(),
             uri_grants: Default::default(),

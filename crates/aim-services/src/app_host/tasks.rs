@@ -47,6 +47,7 @@ pub struct Task {
     launch: Option<String>,
     window_layout_affinity: Option<String>,
     has_been_visible: bool,
+    organized: bool,
 }
 
 impl Task {
@@ -194,9 +195,14 @@ impl Tasks {
                 Some((
                     layer,
                     Change {
-                        position: Some((b.left as f32, b.top as f32)),
+                        position: (!t.organized).then_some((b.left as f32, b.top as f32)),
                         z: Some(z as i32),
-                        crop: Some([0.0, 0.0, b.width() as f32, b.height() as f32]),
+                        crop: (!t.organized).then_some([
+                            0.0,
+                            0.0,
+                            b.width() as f32,
+                            b.height() as f32,
+                        ]),
                         ..Default::default()
                     },
                 ))
@@ -325,6 +331,7 @@ impl AppHost {
             launch,
             window_layout_affinity: info.window_layout.as_ref().and_then(|l| l.affinity.clone()),
             has_been_visible: false,
+            organized: false,
         });
         drop(tasks);
         if windows {
@@ -422,6 +429,8 @@ impl AppHost {
         if let Err(e) = self.save_task_launch_params(task) {
             eprintln!("app host: task {id} launch params: {e}");
         }
+        drop(tasks);
+        self.notify_task_organizers();
     }
 
     /// `ActivityRecord.onFirstWindowDrawn` / `removeStartingWindow`:
@@ -434,7 +443,11 @@ impl AppHost {
             .unwrap()
             .iter_mut()
             .find(|t| t.id == id)
-            .and_then(|t| t.launch.take());
+            .and_then(|t| {
+                t.has_been_visible = true;
+                t.launch.take()
+            });
+        self.notify_task_organizers();
         if let Some(launch) = launch {
             eprintln!("app host: task {id} first window drawn for {launch}");
             self.tasks.send_text(window::DRAWN, id, &launch);
@@ -460,6 +473,7 @@ impl AppHost {
                 ..Default::default()
             });
         }
+        self.notify_task_organizers();
     }
 
     /// Takes the server's requests until it closes the connection.
@@ -668,6 +682,7 @@ impl AppHost {
             self.schedule(start_seq, items)?;
         }
         self.tasks.send_bounds(id, bounds);
+        self.organizer_tasks_changed().map_err(|e| e.message)?;
         Ok(())
     }
 
@@ -744,6 +759,9 @@ mod tests {
         next: usize,
         children: BTreeSet<i32>,
         removed: Vec<i32>,
+        parents: BTreeMap<i32, Option<i32>>,
+        fail_create: Option<usize>,
+        fail_apply: bool,
     }
     struct Surfaces(Arc<Mutex<SurfaceTree>>);
     impl Service for Surfaces {
@@ -761,9 +779,16 @@ mod tests {
                 r.enforce_interface("android.gui.ISurfaceComposerClient")?;
                 let name = r.read_string16()?;
                 assert_eq!(r.read_i32()?, surface::CONTAINER);
+                if tree.fail_create == Some(tree.next) {
+                    tree.fail_create = None;
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
                 let id = tree.next as i32;
-                assert_eq!(r.read_binder()?, (id != 0).then_some(tree.handles[0]));
-                if id != 0 {
+                let parent = r
+                    .read_binder()?
+                    .map(|b| tree.handles.iter().position(|h| *h == b).unwrap() as i32);
+                tree.parents.insert(id, parent);
+                if parent == Some(0) {
                     tree.children.insert(id);
                 }
                 let mut p = Parcel::new();
@@ -778,6 +803,9 @@ mod tests {
                 return Ok(p);
             } else {
                 assert_eq!(call.code, 8);
+                if std::mem::take(&mut tree.fail_apply) {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
                 r.enforce_interface("android.ui.ISurfaceComposer")?;
                 let start = r.position();
                 r.skip(r.remaining())?;
@@ -788,13 +816,32 @@ mod tests {
                     r.set_position(at as usize);
                     r.read_binder()?;
                     let id = r.read_i32()?;
-                    if r.read_i64()? == 0x8000 {
-                        // layer_state_t::eReparent
-                        r.skip(56)?; // position, z, flags, matrix and crop
-                        assert!(!r.read_bool()?); // relative layer
-                        assert!(!r.read_bool()?); // new parent: null
-                        assert!(tree.children.remove(&id));
-                        tree.removed.push(id);
+                    let what = r.read_i64()?;
+                    if id < 0 || id as usize >= tree.next {
+                        continue;
+                    } // nested client objects
+                    if what & 0x8000 != 0 {
+                        r.skip(56)?;
+                        assert!(!r.read_bool()?);
+                        let parent = if r.read_bool()? {
+                            r.read_binder()?; // native SurfaceControl client
+                            let handle = r.read_binder()?.unwrap();
+                            let parent = r.read_i32()?;
+                            assert_eq!(handle, tree.handles[parent as usize]);
+                            assert!(r.read_string16()?.is_some());
+                            r.skip(16)?; // hint, dimensions, format
+                            Some(parent)
+                        } else {
+                            None
+                        };
+                        tree.parents.insert(id, parent);
+                        tree.children.remove(&id);
+                        if parent == Some(0) {
+                            tree.children.insert(id);
+                        }
+                        if parent.is_none() {
+                            tree.removed.push(id);
+                        }
                     }
                 }
             }
@@ -844,6 +891,116 @@ mod tests {
     #[test]
     fn repeated_close_reopen_leaves_no_retired_containers() {
         removal_under_display(3);
+    }
+
+    #[test]
+    fn organizer_migration_moves_window_children_and_cleans_failed_staging() {
+        for fail_create in [true, false] {
+            crate::system::with_discovery_binders(|host, _, _, export| {
+                let tree = Arc::new(Mutex::new(SurfaceTree::default()));
+                let endpoint = export(Arc::new(Surfaces(tree.clone())));
+                let held: Vec<_> = (0..12)
+                    .map(|_| export(Arc::new(super::super::activity::Token)))
+                    .collect();
+                let mut init = Parcel::new();
+                for h in &held {
+                    init.write_binder(Some(h.binder()));
+                }
+                endpoint.transact(100, &init, false).unwrap();
+                assert!(
+                    host.composer
+                        .set(surface::Composer::for_test(&host.process, endpoint.handle))
+                        .is_ok()
+                );
+                let organizer = Some(endpoint.binder());
+                host.register_task_organizer(organizer).unwrap();
+                let mut old = Vec::new();
+                for id in [7, 8] {
+                    host.tasks.animation_test_task(
+                        id,
+                        Rect {
+                            left: 10,
+                            top: 20,
+                            right: 110,
+                            bottom: 220,
+                        },
+                    );
+                    old.push(
+                        host.task_layer(id, |l| {
+                            Ok(Layer::animation_test_layer(
+                                host.process.strong(match l.handle {
+                                    Binder::Handle(h) => h,
+                                    _ => unreachable!(),
+                                }),
+                                l.id,
+                            ))
+                        })
+                        .unwrap(),
+                    );
+                    host.animation_test_window(
+                        host.process.strong(endpoint.handle),
+                        1,
+                        id,
+                        id as u32,
+                    );
+                    let child = host
+                        .task_layer(id, |parent| {
+                            host.composer().unwrap().create_surface(
+                                &host.process,
+                                "real window container",
+                                surface::CONTAINER,
+                                Some(parent),
+                                &[],
+                            )
+                        })
+                        .unwrap();
+                    host.organizer_test_window_layer(id as u32, child);
+                }
+                host.set_tasks_organized(true);
+                if fail_create {
+                    tree.lock().unwrap().fail_create = Some(6);
+                } else {
+                    tree.lock().unwrap().fail_apply = true;
+                }
+                assert!(host.unregister_task_organizer(organizer, None).is_err());
+                assert_eq!(tree.lock().unwrap().parents[&2], Some(1));
+                assert_eq!(tree.lock().unwrap().parents[&4], Some(3));
+                assert!(
+                    tree.lock()
+                        .unwrap()
+                        .parents
+                        .iter()
+                        .filter(|(id, _)| **id >= 5)
+                        .all(|(_, p)| p.is_none())
+                );
+                for (id, layer) in [7, 8].into_iter().zip(&old) {
+                    assert_eq!(host.task_layer(id, |l| Ok(l.id)).unwrap(), layer.id);
+                }
+                host.unregister_task_organizer(organizer, None).unwrap();
+                let expected = tree.lock().unwrap().parents.clone();
+                for layer in &old {
+                    host.composer()
+                        .unwrap()
+                        .apply(&[(
+                            layer,
+                            Change {
+                                position: Some((-1000., -1000.)),
+                                alpha: Some(0.),
+                                remove: true,
+                                ..Default::default()
+                            },
+                        )])
+                        .unwrap();
+                }
+                let parents = tree.lock().unwrap().parents.clone();
+                for (child, task) in [(2, 7), (4, 8)] {
+                    let new = host.task_layer(task, |l| Ok(l.id)).unwrap();
+                    assert_eq!(parents[&child], Some(new));
+                    assert_eq!(parents[&child], expected[&child]);
+                    assert_eq!(parents[&new], Some(0));
+                }
+            });
+        }
     }
 
     fn launch_host(ready: &AppHost, windows: bool) -> Arc<AppHost> {
@@ -1049,6 +1206,78 @@ impl Tasks {
             launch: None,
             window_layout_affinity: None,
             has_been_visible: true,
+            organized: false,
         });
+    }
+}
+
+impl AppHost {
+    pub(super) fn organizer_surfaces(
+        &self,
+    ) -> Result<Vec<(i32, bool, super::task_organizer::Leash)>, Exception> {
+        let tasks = self.tasks.tasks.lock().unwrap();
+        if !tasks.iter().any(|t| t.layer.is_some()) {
+            return Ok(Vec::new());
+        }
+        let client = self.composer()?.binder();
+        Ok(tasks
+            .iter()
+            .rev()
+            .filter_map(|task| {
+                Some((
+                    task.id,
+                    task.has_been_visible,
+                    super::task_organizer::Leash::new(self, client, task.layer.as_ref()?),
+                ))
+            })
+            .collect())
+    }
+    pub(super) fn set_tasks_organized(&self, organized: bool) {
+        for task in self.tasks.tasks.lock().unwrap().iter_mut() {
+            task.organized = organized;
+        }
+    }
+}
+impl Tasks {
+    pub(super) fn migrate_organized_layers(
+        &self,
+        migrate: impl FnOnce(&[(i32, &Layer, Rect, i32)]) -> Result<Vec<Layer>, String>,
+    ) -> Result<(), String> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let current: Vec<_> = tasks
+            .iter()
+            .enumerate()
+            .filter_map(|(z, t)| {
+                Some((
+                    t.id,
+                    t.layer.as_ref().filter(|_| t.organized)?,
+                    t.bounds,
+                    z as i32,
+                ))
+            })
+            .collect();
+        let replacements = migrate(&current)?;
+        assert_eq!(current.len(), replacements.len());
+        for (task, layer) in tasks
+            .iter_mut()
+            .filter(|t| t.organized && t.layer.is_some())
+            .zip(replacements)
+        {
+            task.layer = Some(layer);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Tasks {
+    pub(super) fn organizer_test_layer(&self, id: i32, layer: Layer) {
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap()
+            .layer = Some(layer);
     }
 }

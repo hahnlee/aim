@@ -72,7 +72,39 @@ pub struct Composer {
 
 /// What a transaction changes of one layer (`SurfaceComposerClient
 /// ::Transaction`'s `setPosition`, `setLayer`, `setCrop`, `remove`).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeControl {
+    pub client: Binder,
+    pub handle: Binder,
+    pub id: i32,
+    pub name: String,
+    pub transform_hint: i32,
+}
+impl NativeControl {
+    pub(super) fn write_to(&self, p: &mut Parcel) {
+        p.write_binder(Some(self.client));
+        p.write_binder(Some(self.handle));
+        p.write_i32(self.id);
+        p.write_string16(Some(&self.name));
+        p.write_i32(self.transform_hint);
+        p.write_i32(0); // container width and height
+        p.write_i32(0);
+        p.write_i32(-3); // TRANSLUCENT
+    }
+}
+impl Layer {
+    pub(super) fn control(&self, client: Binder) -> NativeControl {
+        NativeControl {
+            client,
+            handle: self.handle,
+            id: self.id,
+            name: self.name.clone(),
+            transform_hint: self.transform_hint,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Change {
     pub position: Option<(f32, f32)>,
     pub matrix: Option<[f32; 4]>,
@@ -84,6 +116,7 @@ pub struct Change {
     /// `remove`: reparented to none, so SurfaceFlinger destroys it and
     /// its children once their handles go (a layer with a parent stays).
     pub remove: bool,
+    pub parent: Option<NativeControl>,
 }
 
 impl Composer {
@@ -198,7 +231,7 @@ impl Composer {
         let id = self.next_transaction_id();
         let changes: Vec<_> = changes
             .iter()
-            .map(|(layer, change)| (layer.handle, layer.id, *change))
+            .map(|(layer, change)| (layer.handle, layer.id, change.clone()))
             .collect();
         let data = transaction(id, self.apply_token, &changes);
         self.submit(&data, false)
@@ -288,7 +321,7 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
         .crop
         .inspect(|_| what |= CROP_CHANGED)
         .unwrap_or([0.0, 0.0, -1.0, -1.0]);
-    if change.remove {
+    if change.remove || change.parent.is_some() {
         what |= REPARENT;
     }
     if change.matrix.is_some() {
@@ -318,7 +351,10 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
         .iter()
         .for_each(|v| p.write_f32(*v));
     p.write_bool(false); // no relative layer
-    p.write_bool(false); // no parent for a child
+    p.write_bool(change.parent.is_some());
+    if let Some(parent) = &change.parent {
+        parent.write_to(p);
+    }
     [0., 0., 0., change.alpha.unwrap_or(0.)]
         .iter()
         .for_each(|v| p.write_f32(*v)); // color
@@ -434,6 +470,55 @@ pub(super) fn draw_for_test() -> Parcel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, process::Command};
+    #[test]
+    #[ignore = "runs original app_process; reserve the guest gate and build the derived image first"]
+    fn original_native_reparent_parcel() {
+        let root = aim_paths::root();
+        let image = aim_paths::input(aim_paths::derived_image(), "derived-image").unwrap();
+        let dir = root.join(format!("target/so-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let control = NativeControl {
+            client: Binder::Local(1),
+            handle: Binder::Local(2),
+            id: 71,
+            name: "parent".into(),
+            transform_hint: 3,
+        };
+        let change = Change {
+            parent: Some(control),
+            ..Default::default()
+        };
+        let tx = transaction(123, Binder::Local(3), &[(Binder::Local(4), 9, change)]);
+        let mut reader = tx.reader();
+        reader.enforce_interface(TRANSACTIONS_DESCRIPTOR).unwrap();
+        let start = reader.position();
+        reader.skip(reader.remaining()).unwrap();
+        let (bytes, objects) = reader.since(start);
+        let at: Vec<_> = objects.iter().map(|p| (p + 4).to_string()).collect();
+        fs::write(dir.join("input.offsets"), at.join(",")).unwrap();
+        let mut input = Parcel::new();
+        input.write_bool(true);
+        input.write_raw(bytes, &[]);
+        input.write_i32(0);
+        input.write_i32(0x13572468);
+        fs::write(dir.join("input"), input.data()).unwrap();
+        let out = Command::new("python3")
+            .arg(root.join("crates/aim-services/tests/surface_parcel_oracle.py"))
+            .arg(root)
+            .arg(&image)
+            .arg(aim_paths::sdk().unwrap())
+            .arg(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A `layer_state_t` system_server sent to change a layer's flags
     /// (`setTransactionState`, captured on the pinned image), from the
@@ -518,7 +603,11 @@ mod tests {
             alpha: Some(0.25),
             ..Default::default()
         };
-        let p = transaction(5, Binder::Local(1), &[(Binder::Handle(9), 7, change)]);
+        let p = transaction(
+            5,
+            Binder::Local(1),
+            &[(Binder::Handle(9), 7, change.clone())],
+        );
         let data = p.data();
         let after_token = 4 * 3 + 4 + 2 * ("android.ui.ISurfaceComposer".len() + 1);
         assert_eq!(&data[after_token..after_token + 8], &5u64.to_le_bytes());

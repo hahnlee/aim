@@ -2146,6 +2146,15 @@ impl AppHost {
         self.remove_window(id);
     }
 
+    pub(super) fn organizer_test_window_layer(&self, id: u32, layer: Layer) {
+        self.windows
+            .windows
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .container = Some(layer);
+    }
     pub(super) fn animation_test_geometry(&self, id: u32, offset: (i32, i32), insets: [i32; 4]) {
         let mut windows = self.windows.windows.lock().unwrap();
         let w = windows.get_mut(&id).unwrap();
@@ -2158,3 +2167,101 @@ impl AppHost {
 #[path = "window_accessibility.rs"]
 mod accessibility;
 pub(super) use accessibility::service as accessibility_host;
+
+impl AppHost {
+    /// TaskOrganizerState.removeTask -> migrateToNewSurfaceControl: stale
+    /// organizer handles never retain control over the replacement's children.
+    pub(super) fn migrate_organized_tasks(
+        &self,
+    ) -> Result<Vec<(i32, super::task_organizer::Leash)>, String> {
+        let windows = self.windows.windows.lock().unwrap();
+        let mut leashes = Vec::new();
+        self.tasks.migrate_organized_layers(|tasks| {
+            if tasks.is_empty() {
+                return Ok(Vec::new());
+            }
+            let composer = self.composer().map_err(|e| e.message)?;
+            let mut replacements = Vec::new();
+            let result = (|| {
+                for (_, old, _, _) in tasks {
+                    replacements.push(self.with_display_layer(|parent| {
+                        composer.create_surface(
+                            &self.process,
+                            &old.name,
+                            surface::CONTAINER,
+                            Some(parent),
+                            &[],
+                        )
+                    })?);
+                }
+                let mut changes = Vec::new();
+                for ((id, old, bounds, z), layer) in tasks.iter().zip(&replacements) {
+                    changes.extend(
+                        windows
+                            .values()
+                            .filter(|w| w.task == Some(*id))
+                            .filter_map(|w| w.container.as_ref())
+                            .map(|child| {
+                                (
+                                    child,
+                                    surface::Change {
+                                        parent: Some(layer.control(composer.binder())),
+                                        ..Default::default()
+                                    },
+                                )
+                            }),
+                    );
+                    changes.push((
+                        layer,
+                        surface::Change {
+                            position: Some((bounds.left as f32, bounds.top as f32)),
+                            z: Some(*z),
+                            crop: Some([0., 0., bounds.width() as f32, bounds.height() as f32]),
+                            ..Default::default()
+                        },
+                    ));
+                    changes.push((
+                        *old,
+                        surface::Change {
+                            remove: true,
+                            ..Default::default()
+                        },
+                    ));
+                }
+                composer.apply(&changes)
+            })();
+            if let Err(error) = result {
+                composer
+                    .apply(
+                        &replacements
+                            .iter()
+                            .map(|layer| {
+                                (
+                                    layer,
+                                    surface::Change {
+                                        remove: true,
+                                        ..Default::default()
+                                    },
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|cleanup| format!("{error}; staged surface cleanup: {cleanup}"))?;
+                return Err(error);
+            }
+            leashes.extend(
+                tasks
+                    .iter()
+                    .zip(&replacements)
+                    .map(|((id, _, _, _), layer)| {
+                        (
+                            *id,
+                            super::task_organizer::Leash::new(self, composer.binder(), layer),
+                        )
+                    }),
+            );
+            Ok(replacements)
+        })?;
+        Ok(leashes)
+    }
+}
