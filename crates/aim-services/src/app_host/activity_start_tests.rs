@@ -41,6 +41,62 @@ fn send(host: &Arc<AppHost>, uid: u32, a: &AsUser) -> Result<i32, Exception> {
 fn intent(class: &str) -> RawIntent {
     RawIntent::of(None, 0, &[]).with_component("p", class)
 }
+
+#[test]
+fn launch_options_reject_unserved_owners_before_admitting_an_activity() {
+    use crate::bundle::Value::{Bool, Int};
+    use aim_service_aidl::ReadParcelable;
+    with_start(|host, _| {
+        permissions(host);
+        for (key, value, name) in [
+            ("android.activity.launchTaskId", Int(7), "task targeting"),
+            (
+                "android.activity.launchTaskDisplayAreaFeatureId",
+                Int(1),
+                "task display area",
+            ),
+            ("android.activity.activityType", Int(2), "activity type"),
+            ("android.activity.taskOverlay", Bool(true), "task overlay"),
+            (
+                "android.activity.splashScreenStyle",
+                Int(1),
+                "splash screen",
+            ),
+            (
+                "android.activity.dismissKeyguardIfInsecure",
+                Bool(true),
+                "dismiss keyguard",
+            ),
+            (
+                "android:activity.lockTaskMode",
+                Bool(true),
+                "lockTaskMode=true",
+            ),
+            (
+                "android.activity.launchDisplayId",
+                Int(99),
+                "launchDisplayId=99",
+            ),
+        ] {
+            let mut p = Parcel::new();
+            crate::bundle::write(&mut p, &[(key, value)]);
+            let options = RawBundle::read_from(&mut p.reader()).unwrap();
+            let error = host
+                .activity_launch_options(Some(&options), 1000)
+                .err()
+                .unwrap();
+            assert!(error.message.contains(name), "{error:?}");
+            let mut a = args(Some("android"), 0, Some(intent("p.Main")));
+            a.options = Some(options);
+            if error.code == EX_SECURITY {
+                assert_eq!(send(host, 1000, &a).unwrap_err().code, EX_SECURITY);
+            } else {
+                assert_eq!(send(host, 1000, &a), Ok(-96));
+            }
+            assert!(host.activities.records.lock().unwrap().is_empty());
+        }
+    });
+}
 pub(super) fn permissions(host: &Arc<AppHost>) {
     host.permission_manager
         .set(Arc::new(

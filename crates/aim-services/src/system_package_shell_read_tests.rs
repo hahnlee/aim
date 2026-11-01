@@ -1291,6 +1291,12 @@ impl Service for StartSyntax {
             } else {
                 intent.write_to(&mut parsed);
             }
+            let options = has("--display").then(|| {
+                crate::app_host::kept::RawBundle::empty()
+                    .with_ints(&[("android.activity.launchDisplayId", 99)])
+                    .unwrap()
+            });
+            aim_service_aidl::write_typed(&mut parsed, options.as_ref());
             syntax::write_parse_activity_start_reply(&mut p, &Some(parsed.data().to_vec()));
         }
         Ok(p)
@@ -1346,4 +1352,7 @@ fn activity_shell_start_uses_native_resolution_user_errors_and_parser_failures()
     let (status, out, err) = s.command(&["start", "--bad"]);
     assert_eq!((status, out), (-1, String::new()));
     assert!(err.contains("java.lang.IllegalArgumentException: Unknown option: --bad"));
+    let (status, out, err) = s.command(&["start", "--display", "99", "-n", "p/.Missing"]);
+    assert_eq!((status, out), (-1, String::new()));
+    assert!(err.contains("java.lang.SecurityException") && err.contains("launchDisplayId=99"));
 }

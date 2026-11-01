@@ -109,6 +109,7 @@ pub struct StartRequest {
     pub request_code: i32,
     /// The task it goes on top of, else a new one.
     pub task: Option<i32>,
+    pub(super) launch_options: super::activity_options::LaunchOptions,
     /// The caller's task: a launch it has not drawn yet goes on with this
     /// start (`ActivityMetricsLogger.notifyActivityLaunching` with the
     /// caller in the transition, as a trampoline's).
@@ -135,6 +136,7 @@ impl StartRequest {
             result_who: None,
             request_code: -1,
             task: None,
+            launch_options: Default::default(),
             source_task: None,
             grants: None,
         }
@@ -449,6 +451,7 @@ impl AppHost {
                                 result_who: r.result_who.clone(),
                                 request_code: r.request_code,
                                 task: Some(r.task),
+                                launch_options: Default::default(),
                                 source_task: None,
                                 grants: None,
                             },
@@ -662,7 +665,14 @@ impl AppHost {
         let (task, new) = match existing {
             Some(task) => (task, None),
             None => {
-                let id = self.new_task(uid, package, &request.class, &info, request.source_task)?;
+                let id = self.new_task_with_options(
+                    uid,
+                    package,
+                    &request.class,
+                    &info,
+                    request.source_task,
+                    request.launch_options,
+                )?;
                 let task = stack::Task {
                     id,
                     affinity: affinity.clone(),
@@ -1061,6 +1071,7 @@ impl AppHost {
                 "the resolver for an intent of several activities (#1485)",
             ));
         }
+        let launch_options = self.activity_launch_options(args.options.as_ref(), uid)?;
         let target_uid = info.info.application_info.uid;
         let package = info
             .info
@@ -1185,6 +1196,21 @@ impl AppHost {
             .map_err(|what| {
                 self.unimplemented_named("activity_task", &format!("{what} (#1485)"))
             })?;
+        let reused = match d.outcome {
+            Outcome::New(task) => task,
+            Outcome::Front(_) => d.front,
+            Outcome::Deliver(token, _) => self
+                .activities
+                .stack
+                .lock()
+                .unwrap()
+                .get(token)
+                .map(|a| a.task),
+        };
+        if let Some(task) = reused {
+            self.apply_task_launch_options(task, launch_options, &info)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        }
         if matches!(d.outcome, Outcome::Front(1) | Outcome::Deliver(_, 1)) {
             let mut stack = self.activities.stack.lock().unwrap();
             let token = match d.outcome {
@@ -1313,6 +1339,7 @@ impl AppHost {
             result_who: args.result_who,
             request_code: args.request_code,
             task,
+            launch_options,
             source_task,
             grants,
         };

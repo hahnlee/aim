@@ -39,6 +39,8 @@ pub struct Task {
     pub component: String,
     real_activity: String,
     pub bounds: Rect,
+    windowing_mode: i32,
+    restore_bounds: Option<Rect>,
     /// Its root activity's window layout's minimum size, -1 for none.
     min_size: (i32, i32),
     /// Its layer, made with its first window's.
@@ -152,7 +154,12 @@ impl Tasks {
 
     /// The bounds of task `id` in window mode, a freeform task's.
     pub fn freeform_bounds(&self, id: i32) -> Option<Rect> {
-        self.bounds(id).filter(|_| self.window_mode())
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id && t.windowing_mode == 5)
+            .map(|t| t.bounds)
     }
 
     /// The bounds of the tasks.
@@ -254,6 +261,7 @@ impl AppHost {
     /// `package`: its id. It has the display, or in window mode freeform's
     /// saved or default bounds. It answers the package's pending launch, else the
     /// launch `source`'s task has not answered yet.
+    #[cfg(test)]
     pub(super) fn new_task(
         &self,
         uid: u32,
@@ -261,6 +269,18 @@ impl AppHost {
         class: &str,
         info: &ActivityInfo,
         source: Option<i32>,
+    ) -> Result<i32, Exception> {
+        self.new_task_with_options(uid, package, class, info, source, Default::default())
+    }
+
+    pub(super) fn new_task_with_options(
+        &self,
+        uid: u32,
+        package: &str,
+        class: &str,
+        info: &ActivityInfo,
+        source: Option<i32>,
+        options: super::activity_options::LaunchOptions,
     ) -> Result<i32, Exception> {
         let display = self.display()?.0.clone();
         let area = Rect {
@@ -270,9 +290,10 @@ impl AppHost {
             bottom: display.height,
         };
         let windows = self.tasks.window_mode();
+        let windowing_mode = options.windowing_mode(windows);
         let activity = super::freeform::Activity::from(info);
         let real_activity = super::activity_start::real_component(info);
-        let bounds = if windows {
+        let bounds = if windowing_mode == 5 {
             let name = crate::package::preferred::unflatten(&real_activity)
                 .ok_or_else(|| Exception::illegal_argument("invalid task component"))?;
             let saved = self
@@ -301,6 +322,10 @@ impl AppHost {
         } else {
             area
         };
+        let bounds = options
+            .bounds
+            .filter(|_| windowing_mode == 5)
+            .map_or(bounds, |b| super::freeform::restored_bounds(area, &[], b));
         let id = {
             let mut next = self.tasks.next.lock().unwrap();
             *next += 1;
@@ -326,6 +351,8 @@ impl AppHost {
             component: component.clone(),
             real_activity,
             bounds,
+            windowing_mode,
+            restore_bounds: (windowing_mode == 5).then_some(bounds).or(options.bounds),
             min_size: activity.min_size,
             layer: None,
             launch,
@@ -334,6 +361,11 @@ impl AppHost {
             organized: false,
         });
         drop(tasks);
+        self.activities
+            .stack
+            .lock()
+            .unwrap()
+            .set_task_windowing_mode(id, windowing_mode);
         if windows {
             self.tasks.send_bounds(id, bounds);
             self.tasks.send_text(window::PACKAGE, id, package);
@@ -341,6 +373,58 @@ impl AppHost {
         }
         eprintln!("app host: task {id} of {component} at {bounds:?}");
         Ok(id)
+    }
+
+    pub(super) fn apply_task_launch_options(
+        &self,
+        id: i32,
+        options: super::activity_options::LaunchOptions,
+        info: &ActivityInfo,
+    ) -> Result<(), String> {
+        if options.mode == 0 && options.bounds.is_none() {
+            return Ok(());
+        }
+        let display = self.display().map_err(|e| e.message)?;
+        let area = Rect {
+            left: 0,
+            top: 0,
+            right: display.0.width,
+            bottom: display.0.height,
+        };
+        let (bounds, mode) = {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            if options.mode != 0 {
+                task.windowing_mode = options.windowing_mode(self.tasks.window_mode());
+            }
+            let bounds = if task.windowing_mode == 5 {
+                let bounds = options.bounds.or(task.restore_bounds).unwrap_or_else(|| {
+                    super::freeform::default_bounds(
+                        &super::freeform::Activity::from(info),
+                        area,
+                        display.0.density_dpi(),
+                        false,
+                        &[],
+                    )
+                });
+                super::freeform::restored_bounds(area, &[], bounds)
+            } else {
+                if options.bounds.is_some() {
+                    task.restore_bounds = options.bounds;
+                }
+                area
+            };
+            (bounds, task.windowing_mode)
+        };
+        self.activities
+            .stack
+            .lock()
+            .unwrap()
+            .set_task_windowing_mode(id, mode);
+        self.move_task(id, bounds)
     }
 
     /// Task `id` is in front and focused: its layer goes over the others,
@@ -625,12 +709,8 @@ impl AppHost {
             .ok()
             .and_then(|i| i.framework_dimension_dp("default_minimal_size_resizable_task"))
             .ok_or("no default_minimal_size_resizable_task")? as i32;
-        let density = self
-            .display()
-            .map_err(|e| format!("{e:?}"))?
-            .0
-            .density_dpi() as f32
-            / 160.0;
+        let display = self.display().map_err(|e| format!("{e:?}"))?;
+        let density = display.0.density_dpi() as f32 / 160.0;
         let bounds = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
             let task = tasks
@@ -650,7 +730,19 @@ impl AppHost {
                     task.min_size.1
                 },
             );
-            task.bounds = minimal_dimensions(bounds, task.bounds, min);
+            task.bounds = if task.windowing_mode == 5 {
+                minimal_dimensions(bounds, task.bounds, min)
+            } else {
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: display.0.width,
+                    bottom: display.0.height,
+                }
+            };
+            if task.windowing_mode == 5 {
+                task.restore_bounds = Some(task.bounds);
+            }
             self.save_task_launch_params(task)?;
             task.bounds
         };
@@ -689,7 +781,7 @@ impl AppHost {
     /// Task.saveLaunchingStateIfNeeded: visible leaf tasks in a freeform
     /// display area. This owner currently has only freeform tasks there.
     fn save_task_launch_params(&self, task: &Task) -> Result<(), String> {
-        if !self.tasks.window_mode() || !task.has_been_visible {
+        if task.windowing_mode != 5 || !task.has_been_visible {
             return Ok(());
         }
         let display = self.display().map_err(|e| e.message)?;
@@ -1089,6 +1181,132 @@ mod tests {
     }
 
     #[test]
+    fn launch_options_choose_task_geometry_and_validate_displays() {
+        use super::super::kept::RawBundle;
+        use aim_binder_host::parcel::{EX_SECURITY, Parcel};
+        crate::system::with_discovery_binders(|ready, _, _, export| {
+            let host = launch_host(ready, true);
+            let info = ready.activity_info_of("p", "p.Main").unwrap();
+            assert!(
+                host.framework
+                    .set(
+                        super::super::resources::Framework::load(
+                            &aim_paths::original_image(),
+                            320,
+                            "en-US"
+                        )
+                        .expect("framework resources for native task resizing")
+                    )
+                    .is_ok()
+            );
+            let endpoint = export(Arc::new(Surfaces(Default::default())));
+            assert!(
+                host.composer
+                    .set(surface::Composer::for_test(&host.process, endpoint.handle))
+                    .is_ok()
+            );
+            let bounds = Rect {
+                left: 80,
+                top: 100,
+                right: 880,
+                bottom: 1500,
+            };
+            let mut rect = Parcel::new();
+            for n in [bounds.left, bounds.top, bounds.right, bounds.bottom] {
+                rect.write_i32(n);
+            }
+            for (requested, mode) in [(5, 5), (1, 1), (2, 1), (6, 1)] {
+                let bundle = RawBundle::empty()
+                    .with_ints(&[
+                        ("android.activity.windowingMode", requested),
+                        ("android.activity.launchDisplayId", 0),
+                    ])
+                    .unwrap()
+                    .with_parcelable(
+                        "android:activity.launchBounds",
+                        "android.graphics.Rect",
+                        &rect,
+                    )
+                    .unwrap();
+                let options = host.activity_launch_options(Some(&bundle), 2000).unwrap();
+                let mut request = super::super::activity_start::StartRequest::launcher("p.Main");
+                request.launch_options = options;
+                let token = host
+                    .start_in_process(
+                        0,
+                        10100,
+                        "p",
+                        info.clone(),
+                        request,
+                        &Default::default(),
+                        None,
+                    )
+                    .unwrap();
+                let id = host
+                    .activities
+                    .stack
+                    .lock()
+                    .unwrap()
+                    .get(token)
+                    .unwrap()
+                    .task;
+                if mode == 5 {
+                    assert_eq!(host.tasks.freeform_bounds(id), Some(bounds));
+                } else {
+                    assert!(host.tasks.freeform_bounds(id).is_none());
+                    let display = host.display().unwrap();
+                    assert_eq!(
+                        host.tasks.bounds(id),
+                        Some(Rect {
+                            left: 0,
+                            top: 0,
+                            right: display.0.width,
+                            bottom: display.0.height,
+                        })
+                    );
+                }
+                assert_eq!(
+                    host.tasks
+                        .tasks
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .windowing_mode,
+                    mode
+                );
+            }
+            let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
+            let before = host.tasks.bounds(id).unwrap();
+            for mode in [1, 5] {
+                host.apply_task_launch_options(
+                    id,
+                    super::super::activity_options::LaunchOptions { mode, bounds: None },
+                    &info,
+                )
+                .unwrap();
+                assert_eq!(
+                    host.tasks.freeform_bounds(id),
+                    (mode == 5).then_some(before)
+                );
+            }
+            for display in [-2, 1, 123] {
+                let bundle = RawBundle::empty()
+                    .with_ints(&[("android.activity.launchDisplayId", display)])
+                    .unwrap();
+                assert_eq!(
+                    host.activity_launch_options(Some(&bundle), 2000)
+                        .err()
+                        .unwrap()
+                        .code,
+                    EX_SECURITY
+                );
+            }
+            assert!(host.activity_launch_options(None, 2000).is_ok());
+        });
+    }
+
+    #[test]
     fn a_launch_after_restart_restores_saved_task_bounds() {
         crate::system::with_discovery_session(|ready, _, _| {
             let mut info = ready.activity_info_of("p", "p.Main").unwrap();
@@ -1238,6 +1456,7 @@ impl Tasks {
     }
 
     pub(super) fn animation_test_task(&self, id: i32, bounds: Rect) {
+        let windowing_mode = if self.window_mode() { 5 } else { 1 };
         self.tasks.lock().unwrap().push(Task {
             id,
             uid: 10100,
@@ -1245,6 +1464,8 @@ impl Tasks {
             component: "p/p.Main".into(),
             real_activity: "p/p.Main".into(),
             bounds,
+            windowing_mode,
+            restore_bounds: (windowing_mode == 5).then_some(bounds),
             min_size: (-1, -1),
             layer: None,
             launch: None,

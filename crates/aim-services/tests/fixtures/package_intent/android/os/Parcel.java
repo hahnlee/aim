@@ -24,4 +24,5 @@ public class Parcel {
     public int readInt() { throw new AssertionError("unexercised read boundary"); }
     public String readString() { throw new AssertionError("unexercised read boundary"); }
     public Bundle readBundle() { throw new AssertionError("unexercised read boundary"); }
+    public void writeBundle(Bundle bundle) { bundle.writeToParcel(this); }
 }
