@@ -479,9 +479,16 @@ pass; fresh locale/persistence and official CTS checks below pass (2026-11-01).
 Native `window.captureDisplay` now forwards the logical display's WM root
 subtree and caller's capture listener to original SurfaceFlinger `captureLayers`
 (#2570). Crop bounds and scales stay in Android pixels; SurfaceFlinger owns
-secure/protected capture and GraphicBuffer results. Host Binder checks cover
-forwarding, permission/display rejection and transport failure; no guest boot
-or live screenshot/CTS check was run.
+secure/protected capture and GraphicBuffer results. The listener decoder now
+reads Java's internal native-object presence flag before its Binder (#2587).
+Task removal explicitly detaches its container before releasing its handle
+(#2586). Twelve focused host checks pass, including retained-display removal,
+three close/reopen cycles and the original listener's 32-byte body. A fresh
+window-mode guest (2026-11-01) opens Settings, Clock and Files; three native
+Clock close/reopens leave no retired task containers. Original app_process
+captureDisplay returns a nonblack 3840×2160 Android-pixel PNG, matching the
+logical display. Five sampled attribution states match the previous after-state;
+task captures retain their own content. No CTS rerun was made.
 
 The app host starts the original AccessibilityManagerService with native overlay
 and window callback ownership and ordered initial-user initialization (#2529).
