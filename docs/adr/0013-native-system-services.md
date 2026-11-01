@@ -448,8 +448,19 @@ The private owner is now constructed in aim-system after native local owners
 are published (#1460 slice 6a), using those typed account dependencies. A private
 inactive Binder is attached to the actual system-process generation with death
 invalidation. The existing discovery bridge borrows its cache, avoiding a second
-SyncAdaptersCache. Public sync forwarding, user-unlock readiness and job admission
-are not activated by construction; no guest boot or sync CTS claim is made.
+SyncAdaptersCache. Slice 6b delivers phases and native user-0 unlock replay,
+then acknowledges the attached generation through an explicit original-handler
+barrier in the pinned DEX seam. Restored SyncJobService binds wait for that
+completion. The native user lifecycle synchronously delivers `onUserUnlocking`
+through a generation-bound vendor capability before dispatching USER_UNLOCKED,
+following pinned UserController/SystemServiceManager ordering. Startup subscribes
+and replays the native unlock snapshot before entering the main looper, including
+after process death; the original receivers are unchanged. This adds vendor
+classes/AIDL only, without another original-class replacement.
+Public sync forwarding remains inactive. Scoped fresh ART boots verify the
+unlock/receiver/handler ordering and generation replay after process restart
+(2026-11-02); restored-job acceptance and sync CTS remain unverified. The separate
+stability and timing limits are recorded in boot-status.md.
 
 ### The redirect edit (2026-10-02)
 

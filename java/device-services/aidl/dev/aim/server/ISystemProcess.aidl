@@ -13,6 +13,7 @@ import dev.aim.server.IStorageCrates;
 import dev.aim.server.IAppHostPackageShellRead;
 import dev.aim.server.IDexUseBridge;
 import dev.aim.server.IDexUsePackages;
+import dev.aim.server.ISystemUserLifecycle;
 
 /**
  * The app host's part of system_server for its system process
@@ -110,4 +111,8 @@ interface ISystemProcess {
     long getSyncOwnerGeneration();
     void attachSyncOwner(long generation, IBinder owner);
     boolean isSyncOwnerAttached(long generation);
+    boolean isSyncOwnerUserUnlocked(long generation);
+    void completeSyncOwnerReplay(long generation);
+    /** Subscribe before entering the main looper; returns the native unlock snapshot. */
+    boolean attachSystemUserLifecycle(long generation, ISystemUserLifecycle lifecycle);
 }

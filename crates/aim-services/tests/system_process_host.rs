@@ -43,6 +43,58 @@ fn system_process_initializes_nonces_and_drives_original_service_lifecycles() {
     fs::write(&binder, binder_source).unwrap();
     // Only compile dependencies here; the class under test is always production source.
     let mut sources = common::java::sources(&fixtures);
+    let original = fs::read_to_string(
+        aim_paths::aosp()
+            .join("frameworks/base/services/core/java/com/android/server/content/SyncManager.java"),
+    )
+    .unwrap();
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        format!("{:x}", Sha256::digest(original.as_bytes())),
+        "ac8deedeeca97dadea2d9da8b7e2956305fd63e44d9fdb8d80222ddf76f1ed51"
+    );
+    let mut replay =
+        fs::read_to_string(fixtures.join("dev/aim/server/SyncReplayOriginal.java.in")).unwrap();
+    for (key, start, end) in [
+        (
+            "@CONTAINS@",
+            "    private boolean containsAccountAndUser(",
+            "    /** target indicates",
+        ),
+        (
+            "@REFRESH@",
+            "        private void updateRunningAccountsH(",
+            "        /**",
+        ),
+        (
+            "@UNLOCK_FLAG@",
+            "    public void onUnlockUser(",
+            "    public void onStopUser(",
+        ),
+        (
+            "@UNLOCK_ACCOUNTS@",
+            "    private void onUserUnlocked(",
+            "    private void onUserStopped(",
+        ),
+        (
+            "@ACCOUNTS_MESSAGE@",
+            "    private void updateRunningAccounts(",
+            "    private void removeStaleAccounts(",
+        ),
+        (
+            "@USER_RECEIVER@",
+            "    private BroadcastReceiver mUserIntentReceiver =",
+            "    private static class PackageMonitorImpl",
+        ),
+    ] {
+        let body = &original[original.find(start).unwrap()..];
+        let body = body[..body.find(end).unwrap()]
+            .replace("AccountManagerService.getSingleton()", "mSyncAccounts");
+        replay = replay.replace(key, &body);
+    }
+    let replay_source = data.0.join("SyncReplayOriginal.java");
+    fs::write(&replay_source, replay).unwrap();
+    sources.push(replay_source);
     sources.push(binder);
     sources.push(production.join("src/dev/aim/server/SyncOwnerStartup.java"));
     sources.push(production.join("src/com/android/server/content/PrivateContentService.java"));

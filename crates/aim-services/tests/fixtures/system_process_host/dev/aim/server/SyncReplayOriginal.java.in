@@ -1,0 +1,94 @@
+package dev.aim.server;
+
+import android.content.*;
+import android.os.UserHandle;
+import java.util.Arrays;
+import java.util.List;
+
+/** AOSP android-16.0.0_r1, Apache-2.0. Pinned bodies inserted by the Rust test.
+ * The singleton calls receive the same per-instance substitution as the DEX seam.
+ * Android logging, cache, scheduling and handler transport are boundary doubles. */
+final class SyncReplayOriginal {
+    static final String TAG = "fixture";
+    static class Log { static final int VERBOSE=2, DEBUG=3; static boolean isLoggable(String s, int i) { return false; } static void d(String s, String t) {} }
+    static class Slog { static void v(String s, String t) {} static void d(String s, String t) {} }
+    static class Account {}
+    static class AccountAndUser {
+        Account account = new Account();
+        int userId;
+    }
+    static class EndPoint {
+        Account account; String provider; int userId;
+        EndPoint(Account a, String p, int user) { account=a; provider=p; userId=user; }
+    }
+    static class SyncOperation {
+        static final int REASON_USER_START=-8, REASON_ACCOUNTS_UPDATED=-2;
+        EndPoint target;
+    }
+    static class AuthorityInfo { static final int NOT_INITIALIZED=-1; }
+    static class ContentResolver { static final int SYNC_EXEMPTION_NONE=0; }
+    static class Process { static int myUid() { return 1000; } }
+    static class Logger { void log(Object... values) {} boolean enabled() { return false; } }
+    final Logger mLogger = new Logger();
+    final java.util.Map<Integer,Boolean> mUnlockedUsers = new java.util.HashMap<>();
+    static class Accounts {
+        AccountAndUser[] getRunningAccountsForSystem() {
+            if (SyncOwnerLifecycleTest.fail) throw new IllegalStateException("handler snapshot failed");
+            return java.util.stream.IntStream.range(0, SyncOwnerLifecycleTest.accounts)
+                    .mapToObj(i -> new AccountAndUser()).toArray(AccountAndUser[]::new);
+        }
+        AccountAndUser[] getAllAccountsForSystemProcess() { return getRunningAccountsForSystem(); }
+        void validateAccounts(int user) {
+            if (user != 0 || !SyncOwnerLifecycleTest.original.mUnlockedUsers.getOrDefault(0, false))
+                throw new AssertionError("account validation preceded lifecycle unlock");
+        }
+        Account[] getAccounts(int user, String pkg) {
+            if (SyncOwnerLifecycleTest.fail) throw new IllegalStateException("account snapshot failed");
+            return new Account[SyncOwnerLifecycleTest.accounts];
+        }
+    }
+    final Accounts mSyncAccounts = new Accounts();
+    static class Cache { void invalidateCache(int user) { if (user != 0) throw new AssertionError(); } }
+    final Cache mSyncAdapters = new Cache();
+    static class OpContext { String getOpPackageName() { return "android"; } }
+    final OpContext mContext = new OpContext();
+    class Message {
+        Object obj;
+        void sendToTarget() { SyncOwnerLifecycleTest.handler.add(() -> {
+            updateRunningAccountsH((EndPoint)obj);
+            SyncOwnerLifecycleTest.observe(mRunningAccounts.length);
+        }); }
+    }
+    class SyncHandler {
+        static final int MESSAGE_ACCOUNTS_UPDATED=9;
+        Message obtainMessage(int what) { if (what != 9) throw new AssertionError(); return new Message(); }
+        void post(Runnable task) { SyncOwnerLifecycleTest.handler.add(task); }
+    }
+    final SyncHandler mSyncHandler = new SyncHandler();
+    void scheduleSync(Object... values) {}
+    void onUserRemoved(int user) { throw new AssertionError(); }
+    void onUserStopped(int user) { throw new AssertionError(); }
+    final Object mAccountsLock = new Object();
+    AccountAndUser[] mRunningAccounts = new AccountAndUser[0];
+    static class ActiveSyncContext { SyncOperation mSyncOperation; }
+    final java.util.List<ActiveSyncContext> mActiveSyncContexts = java.util.List.of();
+    java.util.List<SyncOperation> getAllPendingSyncs() { return java.util.List.of(); }
+    void removeStaleAccounts() {}
+    void sendSyncFinishedOrCanceledMessage(Object... args) { throw new AssertionError(); }
+    void cancelJob(Object... args) { throw new AssertionError(); }
+    static class AccountSyncSettingsBackupHelper { static void accountAdded(Object... args) {} }
+    @CONTAINS@
+    @REFRESH@
+    @UNLOCK_FLAG@
+    @UNLOCK_ACCOUNTS@
+    @ACCOUNTS_MESSAGE@
+    @USER_RECEIVER@
+    void replay(int user, Runnable complete) { onUserUnlocked(user); mSyncHandler.post(complete); }
+    void broadcast(Context context, int user) {
+        mUserIntentReceiver.onReceive(context, new Intent(Intent.ACTION_USER_UNLOCKED)
+                .putExtra(Intent.EXTRA_USER_HANDLE, user));
+    }
+    void noUser(Context context) {
+        mUserIntentReceiver.onReceive(context, new Intent(Intent.ACTION_USER_UNLOCKED));
+    }
+}

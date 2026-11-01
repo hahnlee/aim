@@ -1,10 +1,13 @@
 package dev.aim.server;
 import android.os.IBinder;
 interface ISystemProcess {
+    boolean attachSystemUserLifecycle(long generation, ISystemUserLifecycle lifecycle) throws android.os.RemoteException;
     Object getSyncAccounts();
     long getSyncOwnerGeneration();
     void attachSyncOwner(long generation, IBinder owner);
     boolean isSyncOwnerAttached(long generation);
+    boolean isSyncOwnerUserUnlocked(long generation) throws android.os.RemoteException;
+    void completeSyncOwnerReplay(long generation) throws android.os.RemoteException;
     IBinder getInternalServiceRepository();
     IBinder getPackageInternalHost();
     void attachRoleService(IBinder service);
@@ -34,6 +37,11 @@ interface ISystemProcess {
     abstract class Stub {
         public static ISystemProcess asInterface(IBinder binder) {
             return new ISystemProcess() {
+                public boolean attachSystemUserLifecycle(long generation, ISystemUserLifecycle lifecycle) {
+                    if (generation != 7 || !SyncOwnerLifecycleTest.alive) throw new IllegalStateException("dead generation");
+                    SyncOwnerLifecycleTest.lifecycle = lifecycle;
+                    return SyncOwnerLifecycleTest.unlocked;
+                }
                 public Object getSyncAccounts() { return this; }
                 public long getSyncOwnerGeneration() { return 7; }
                 public void attachSyncOwner(long generation, IBinder owner) {
@@ -45,6 +53,14 @@ interface ISystemProcess {
                     SystemProcessHostTest.events.add("syncAttached");
                 }
                 public boolean isSyncOwnerAttached(long generation) { return generation == 7; }
+                public boolean isSyncOwnerUserUnlocked(long generation) {
+                    if (generation != 7 || !SyncOwnerLifecycleTest.alive) throw new IllegalStateException("dead generation");
+                    return SyncOwnerLifecycleTest.unlocked;
+                }
+                public void completeSyncOwnerReplay(long generation) {
+                    if (generation != 7 || !SyncOwnerLifecycleTest.alive) throw new IllegalStateException("dead generation");
+                    SyncOwnerLifecycleTest.acknowledge();
+                }
                 public IBinder getInternalServiceRepository() { throw new AssertionError(); }
                 public IBinder getPackageInternalHost() { throw new AssertionError(); }
                 public void attachRoleService(IBinder service) {

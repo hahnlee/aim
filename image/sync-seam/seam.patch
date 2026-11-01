@@ -133,3 +133,31 @@
 +    invoke-virtual/range {v0 .. v8}, Lcom/android/server/content/SyncManager;->scheduleLocalSync(Landroid/accounts/Account;IILjava/lang/String;IIILjava/lang/String;)V
 +    return-void
 +.end method
+--- a/com/android/server/content/SyncManager.smali
++++ b/com/android/server/content/SyncManager.smali
+@@ -11873,0 +11874,14 @@
++
++.method public final replaySyncState(ILjava/lang/Runnable;)V
++    .registers 4
++    invoke-virtual {p0, p1}, Lcom/android/server/content/SyncManager;->onUserUnlocked(I)V
++    iget-object v0, p0, Lcom/android/server/content/SyncManager;->mSyncHandler:Lcom/android/server/content/SyncManager$SyncHandler;
++    invoke-virtual {v0, p2}, Landroid/os/Handler;->post(Ljava/lang/Runnable;)Z
++    move-result v0
++    if-nez v0, :posted
++    new-instance v0, Ljava/lang/IllegalStateException;
++    invoke-direct {v0}, Ljava/lang/IllegalStateException;-><init>()V
++    throw v0
++    :posted
++    return-void
++.end method
+--- a/com/android/server/content/ContentService.smali
++++ b/com/android/server/content/ContentService.smali
+@@ -5114,0 +5115,8 @@
++
++.method public final replaySyncState(ILjava/lang/Runnable;)V
++    .registers 4
++    invoke-virtual {p0}, Lcom/android/server/content/ContentService;->getSyncManager()Lcom/android/server/content/SyncManager;
++    move-result-object v0
++    invoke-virtual {v0, p1, p2}, Lcom/android/server/content/SyncManager;->replaySyncState(ILjava/lang/Runnable;)V
++    return-void
++.end method

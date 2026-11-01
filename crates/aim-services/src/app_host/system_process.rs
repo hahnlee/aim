@@ -54,6 +54,18 @@ impl Service for SystemProcess {
             Ok(())
         };
         let result = match call.code {
+            sp::ATTACH_SYSTEM_USER_LIFECYCLE => {
+                let a = sp::AttachSystemUserLifecycle::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let unlocked = self.host.attach_system_user_lifecycle(
+                        call.sender_pid,
+                        a.generation,
+                        a.lifecycle,
+                    )?;
+                    sp::write_attach_system_user_lifecycle_reply(&mut p, unlocked);
+                    Ok(())
+                })
+            }
             sp::GET_SYNC_ADAPTER_STANDBY_BUCKET => {
                 let a = sp::GetSyncAdapterStandbyBucket::read(&mut call.data)?;
                 system().and_then(|()| {
@@ -640,6 +652,25 @@ impl Service for SystemProcess {
                         .host
                         .sync_owner_attached(call.sender_pid, a.generation)?;
                     sp::write_is_sync_owner_attached_reply(&mut p, ready);
+                    Ok(())
+                })
+            }
+            sp::IS_SYNC_OWNER_USER_UNLOCKED => {
+                let a = sp::IsSyncOwnerUserUnlocked::read(&mut call.data)?;
+                system().and_then(|()| {
+                    let unlocked = self
+                        .host
+                        .sync_owner_user_unlocked(call.sender_pid, a.generation)?;
+                    sp::write_is_sync_owner_user_unlocked_reply(&mut p, unlocked);
+                    Ok(())
+                })
+            }
+            sp::COMPLETE_SYNC_OWNER_REPLAY => {
+                let a = sp::CompleteSyncOwnerReplay::read(&mut call.data)?;
+                system().and_then(|()| {
+                    self.host
+                        .complete_sync_owner_replay(call.sender_pid, a.generation)?;
+                    sp::write_complete_sync_owner_replay_reply(&mut p);
                     Ok(())
                 })
             }

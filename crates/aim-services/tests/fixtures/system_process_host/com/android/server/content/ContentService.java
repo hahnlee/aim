@@ -2,6 +2,15 @@ package com.android.server.content;
 import dev.aim.server.SystemProcessHostTest;
 public class ContentService {
     private boolean constructed;
+    public void onBootPhase(int phase) { SystemProcessHostTest.events.add("sync:phase="+phase); }
+    public void onStartUser(int user) { SystemProcessHostTest.events.add("sync:start="+user); }
+    public void onUnlockUser(int user) {
+        dev.aim.server.SyncOwnerLifecycleTest.unlockFlag(user);
+        SystemProcessHostTest.events.add("sync:unlock="+user);
+    }
+    public void replaySyncState(int user, Runnable complete) {
+        dev.aim.server.SyncOwnerLifecycleTest.replay(user, complete);
+    }
     public ContentService(android.content.Context context, boolean factory, SyncAccounts accounts) {
         if (SystemProcessHostTest.failSync) throw new IllegalStateException("sync construction failed");
         if (context == null || factory || accounts == null) throw new AssertionError();

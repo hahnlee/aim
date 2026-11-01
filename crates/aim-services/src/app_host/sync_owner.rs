@@ -8,6 +8,7 @@ use std::sync::Arc;
 pub(super) struct State {
     generation: i64,
     owner: Option<Attachment>,
+    ready: bool,
 }
 struct Attachment {
     process: Arc<LocalProcess>,
@@ -26,6 +27,14 @@ fn unavailable() -> Exception {
     )
 }
 impl AppHost {
+    pub(super) fn sync_forwarding_owner(&self) -> Result<Strong, Exception> {
+        let state = self.sync_owner.lock().unwrap();
+        if !state.ready {
+            return Err(unavailable());
+        }
+        let owner = state.owner.as_ref().ok_or_else(unavailable)?;
+        Ok(self.process.strong(owner.strong.handle))
+    }
     pub(super) fn sync_owner_generation(&self, pid: i32) -> Result<i64, Exception> {
         let apps = self.apps.lock().unwrap();
         apps.iter()
@@ -78,6 +87,7 @@ impl AppHost {
         );
         *state = State {
             generation,
+            ready: false,
             owner: Some(Attachment {
                 process: self.process.clone(),
                 strong,
@@ -93,16 +103,58 @@ impl AppHost {
         let state = self.sync_owner.lock().unwrap();
         Ok(state.generation == generation && state.owner.is_some())
     }
+    pub(super) fn sync_owner_user_unlocked(
+        &self,
+        pid: i32,
+        generation: i64,
+    ) -> Result<bool, Exception> {
+        if !self.sync_owner_attached(pid, generation)? {
+            return Err(unavailable());
+        }
+        self.user_unlocking_or_unlocked(0)
+    }
+    pub(super) fn complete_sync_owner_replay(
+        &self,
+        pid: i32,
+        generation: i64,
+    ) -> Result<(), Exception> {
+        if !self.sync_owner_user_unlocked(pid, generation)? {
+            return Err(unavailable());
+        }
+        let apps = self.apps.lock().unwrap();
+        if !apps
+            .get(&generation)
+            .is_some_and(|a| !a.removed && a.pid == pid && a.thread.is_some())
+        {
+            return Err(unavailable());
+        }
+        let mut state = self.sync_owner.lock().unwrap();
+        if state.generation != generation || state.owner.is_none() || state.ready {
+            return Err(unavailable());
+        }
+        state.ready = true;
+        drop(state);
+        drop(apps);
+        if let Some(jobs) = self.job_scheduler.get() {
+            jobs.sync_owner_changed();
+        }
+        Ok(())
+    }
+    pub(super) fn sync_owner_ready(&self) -> bool {
+        let state = self.sync_owner.lock().unwrap();
+        state.owner.is_some() && state.ready
+    }
     pub(super) fn sync_owner_died(&self, generation: i64) {
         let mut state = self.sync_owner.lock().unwrap();
         if state.generation == generation {
             state.owner.take();
+            state.ready = false;
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use aim_binder_host::local::{Call, Service};
     use aim_binder_host::parcel::{EX_SECURITY, Parcel};
@@ -118,7 +170,7 @@ mod tests {
             })
             .unwrap()
     }
-    fn install(host: &AppHost, thread: Strong) {
+    pub(in crate::app_host) fn install(host: &AppHost, thread: Strong) {
         host.apps.lock().unwrap().insert(
             100,
             super::super::App {
@@ -234,6 +286,46 @@ mod tests {
                 .unwrap()
                 .unwrap()
             );
+        });
+    }
+    #[test]
+    fn replay_completion_requires_live_unlocked_generation() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            install(host, export(super::super::test_activity_service(host)));
+            let owner = export(super::super::test_activity_service(host));
+            host.attach_sync_owner(42, 100, Some(owner.binder()))
+                .unwrap();
+            host.set_user_unlocked_for_package_test(0, false);
+            assert!(!host.sync_owner_user_unlocked(42, 100).unwrap());
+            assert!(host.sync_forwarding_owner().is_err());
+            assert!(host.complete_sync_owner_replay(42, 100).is_err());
+            host.set_user_unlocked_for_package_test(0, true);
+            for (uid, pid, generation) in [(10100, 42, 100), (1000, 43, 100), (1000, 42, 99)] {
+                let mut p = Parcel::new();
+                sp::CompleteSyncOwnerReplay { generation }.write(&mut p);
+                assert!(
+                    sp::read_complete_sync_owner_replay_reply(
+                        &mut request(host, sp::COMPLETE_SYNC_OWNER_REPLAY, &p, uid, pid).reader()
+                    )
+                    .unwrap()
+                    .is_err()
+                );
+                assert!(!host.sync_owner_ready());
+            }
+            let mut p = Parcel::new();
+            sp::CompleteSyncOwnerReplay { generation: 100 }.write(&mut p);
+            sp::read_complete_sync_owner_replay_reply(
+                &mut request(host, sp::COMPLETE_SYNC_OWNER_REPLAY, &p, 1000, 42).reader(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(host.sync_owner_ready());
+            assert!(host.sync_forwarding_owner().is_ok());
+            assert!(host.complete_sync_owner_replay(42, 100).is_err());
+            host.sync_owner_died(100);
+            assert!(!host.sync_owner_ready());
+            assert!(host.sync_forwarding_owner().is_err());
+            assert!(host.complete_sync_owner_replay(42, 100).is_err());
         });
     }
     #[test]
