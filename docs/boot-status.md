@@ -674,8 +674,14 @@ acceptance.
 Typed usage/idle locals now delegate retained sync scheduling to native owners
 (#1460 slice 5a/#1723/#2016). Host/JVM and image-link checks cover bucket reads,
 non-doze promotion/hold and temporary allowlisting without FGS privilege.
-Standby persistence, reconnect broadcasts, battery sync timers and full wake-lock
-attribution remain under their owner issues; no guest or sync CTS was run.
+Standby history now writes the original version-1 XML, expiry records and
+elapsed/screen durations through atomic files, including scheduled and
+exempted-start sync holds (#1460 slice 5b/#1723, 2026-11-01). Host tests cover
+round trips, hold extension/expiry after reopening, disabled/restricted apps and
+write faults. Writes join the usage-stats flush and shutdown paths; late standby
+writes are rejected after shutdown. Reconnect broadcasts, battery sync timers
+and full wake-lock attribution remain under their owner issues. Matched-image
+restoration and sync CTS remain unverified; no guest boot was run.
 Private ContentService startup and sync forwarding remain inactive; no guest
 boot or CTS run was performed.
 vdc runs post-fs-data's `init_user0`, without which
