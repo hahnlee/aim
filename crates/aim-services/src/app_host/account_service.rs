@@ -13,8 +13,8 @@
 //! authenticator's apps, and the listeners apps register by type. The
 //! one user is a full user, never restricted, so shared accounts are not
 //! filtered. Adding, removing and changing accounts, the authenticator
-//! sessions (`getAuthToken`, `addAccount` and the rest), the broadcasts
-//! of a change, access grants and devices with a device or profile owner
+//! sessions (`getAuthToken`, `addAccount` and the rest), access grants
+//! and devices with a device or profile owner
 //! are not implemented (#1504).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -33,6 +33,7 @@ use aim_service_aidl::{ParcelValue, ReadParcelable, WriteParcelable};
 
 use super::account_authenticators::{self, Authenticator, AuthenticatorDescription};
 use super::accounts_db::{AccountsDb, DbError};
+use super::kept::RawIntent;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::apps_filter::{self, NotModelled, Setting};
 use crate::package::model::State;
@@ -689,14 +690,18 @@ impl AccountManager {
             drop(users);
             let current = self.authenticators(user).map_err(Failure::Thrown)?;
             let mut state = accounts.state.lock().unwrap();
-            if !state
+            self.attach_ce(&mut state.db, user)?;
+            let notices = if !state
                 .authenticators
                 .as_ref()
                 .is_some_and(|old| Arc::ptr_eq(old, &current))
             {
-                self.validate(&mut state, user)?;
-            }
+                self.validate(&accounts, &mut state, user)?
+            } else {
+                Vec::new()
+            };
             drop(state);
+            self.deliver(user, notices);
             return Ok(accounts);
         }
         let inputs = self.host.platform().map_err(Failure::Thrown)?;
@@ -707,17 +712,8 @@ impl AccountManager {
             &super::lock_settings::java_locale(&inputs.locale_tags()),
         )?;
         self.purge_old_grants(&db)?;
-        if self.unlocked(user).map_err(Failure::Thrown)? {
-            db.attach_ce(&data.join(format!("system_ce/{user}/accounts_ce.db")))?;
-            // `syncDeCeAccountsLocked`.
-            if !db.find_ce_accounts_not_in_de()?.is_empty() {
-                return Err(Failure::Thrown(self.host.unimplemented_named(
-                    "account",
-                    "removing accounts deleted while the user was locked (#1504)",
-                )));
-            }
-        }
-        let mut accounts = Accounts {
+        self.attach_ce(&mut db, user)?;
+        let accounts = Accounts {
             db,
             authenticators: None,
             accounts: Vec::new(),
@@ -726,13 +722,40 @@ impl AccountManager {
             visibility: HashMap::new(),
             previous_names: HashMap::new(),
         };
-        self.validate(&mut accounts, user)?;
         let accounts = Arc::new(UserAccounts {
             state: Mutex::new(accounts),
             receivers: Mutex::default(),
         });
+        let notices = self.validate(&accounts, &mut accounts.state.lock().unwrap(), user)?;
         users.insert(user, accounts.clone());
+        drop(users);
+        self.deliver(user, notices);
         Ok(accounts)
+    }
+
+    fn attach_ce(&self, db: &mut AccountsDb, user: i32) -> Result<(), Failure> {
+        if self.unlocked(user).map_err(Failure::Thrown)? {
+            if !db.is_ce_attached() {
+                let inputs = self.host.platform().map_err(Failure::Thrown)?;
+                db.attach_ce(&inputs.data.join(format!("system_ce/{user}/accounts_ce.db")))?;
+            }
+            db.reconcile_ce()?;
+        }
+        Ok(())
+    }
+
+    /// Explicit validation always rescans the authenticator services.
+    pub(super) fn validate_accounts(&self, user: i32) -> Result<(), Exception> {
+        self.authenticators.lock().unwrap().remove(&user);
+        self.accounts(user).map(|_| ())
+    }
+
+    fn deliver(&self, user: i32, notices: Vec<RawIntent>) {
+        for intent in notices {
+            self.host
+                .broadcasts
+                .send_from_system_as_user(&self.host, intent, user);
+        }
     }
 
     /// `getUserAccounts` where the databases' failure is thrown.
@@ -761,11 +784,13 @@ impl AccountManager {
         Ok(())
     }
 
-    /// `validateAccountsInternal`: the authenticators' uids in `meta`
-    /// updated, and the accounts cached. Accounts whose authenticator is
-    /// gone would be deleted, which is not implemented (#1504); the check
-    /// comes before any write.
-    fn validate(&self, accounts: &mut Accounts, user: i32) -> Result<(), Failure> {
+    /// `validateAccountsInternal`: publish only after the whole mutation commits.
+    fn validate(
+        &self,
+        owner: &UserAccounts,
+        accounts: &mut Accounts,
+        user: i32,
+    ) -> Result<Vec<RawIntent>, Failure> {
         let authenticators = self.authenticators(user).map_err(Failure::Thrown)?;
         let mut known: Vec<(String, i32)> = authenticators
             .iter()
@@ -800,23 +825,32 @@ impl AccountManager {
             }
         }
         let all = accounts.db.find_all_de_accounts()?;
-        if all
+        let mut notices = Vec::new();
+        for (_, account) in &all {
+            if obsolete.iter().any(|(kind, _)| *kind == account.kind) {
+                notices.extend(
+                    self.removal_notices(owner, accounts, account, user)
+                        .map_err(Failure::Thrown)?,
+                );
+            }
+        }
+        let deleted = all
             .iter()
-            .any(|(_, a)| obsolete.iter().any(|(kind, _)| *kind == a.kind))
-        {
-            return Err(Failure::Thrown(self.host.unimplemented_named(
-                "account",
-                "deleting the accounts of a removed authenticator (#1504)",
-            )));
-        }
-        for (kind, uid) in &obsolete {
-            accounts.db.delete_meta_by_auth_type_and_uid(kind, *uid)?;
-        }
-        for (kind, uid) in &known {
-            accounts
-                .db
-                .insert_or_replace_meta_auth_type_and_uid(kind, *uid)?;
-        }
+            .any(|(_, a)| obsolete.iter().any(|(kind, _)| *kind == a.kind));
+        let (all, visibility) = accounts.db.transaction(|db| {
+            for (kind, uid) in &obsolete {
+                db.delete_meta_by_auth_type_and_uid(kind, *uid)?;
+            }
+            for (kind, uid) in &known {
+                db.insert_or_replace_meta_auth_type_and_uid(kind, *uid)?;
+            }
+            for (id, account) in &all {
+                if obsolete.iter().any(|(kind, _)| *kind == account.kind) {
+                    db.delete_account(*id)?;
+                }
+            }
+            Ok((db.find_all_de_accounts()?, db.find_all_visibility_values()?))
+        })?;
         accounts.accounts.clear();
         for (_, account) in all {
             let entry = match accounts
@@ -835,11 +869,109 @@ impl AccountManager {
                 ..account
             });
         }
-        accounts
-            .visibility
-            .extend(accounts.db.find_all_visibility_values()?);
+        let live: HashSet<_> = accounts.of(None).into_iter().collect();
+        accounts.user_data.retain(|a, _| live.contains(a));
+        accounts.auth_tokens.retain(|a, _| live.contains(a));
+        accounts.previous_names.retain(|a, _| live.contains(a));
+        accounts.visibility = visibility;
         accounts.authenticators = Some(authenticators);
-        Ok(())
+        if deleted {
+            notices.push(RawIntent::new(
+                "android.accounts.LOGIN_ACCOUNTS_CHANGED",
+                0x0500_0000,
+                &[],
+            ));
+        }
+        Ok(notices)
+    }
+
+    /// Resolve recipients against the pre-deletion visibility, including first open.
+    fn removal_notices(
+        &self,
+        owner: &UserAccounts,
+        accounts: &Accounts,
+        account: &Account,
+        user: i32,
+    ) -> Result<Vec<RawIntent>, Exception> {
+        let visibility = accounts
+            .db
+            .find_all_visibility_values()
+            .map_err(db_failed)?;
+        let visible = |package: &str| -> Result<bool, Exception> {
+            let value = resolve_visibility(
+                &UserPackages {
+                    manager: self,
+                    user,
+                },
+                &mut |key| {
+                    visibility
+                        .get(account)
+                        .and_then(|v| v.get(key))
+                        .copied()
+                        .unwrap_or(0)
+                },
+                account,
+                package,
+            )?;
+            Ok(matches!(
+                value,
+                VISIBILITY_VISIBLE | VISIBILITY_USER_MANAGED_VISIBLE
+            ))
+        };
+        let receivers = owner.receivers.lock().unwrap();
+        let packages: HashSet<_> = [Some(account.kind.clone()), None]
+            .iter()
+            .filter_map(|kind| receivers.get(kind))
+            .flat_map(|r| r.keys().cloned())
+            .collect();
+        drop(receivers);
+        let mut notices = Vec::new();
+        for package in packages {
+            if visible(&package)? {
+                notices.push(RawIntent::with_data(
+                    Some("android.accounts.action.VISIBLE_ACCOUNTS_CHANGED"),
+                    None,
+                    Some(&package),
+                    0x4000_0000,
+                    &[],
+                ));
+            }
+        }
+        let intent = RawIntent::new("android.accounts.action.ACCOUNT_REMOVED", 0x0100_0000, &[]);
+        let (_, resolution) = self.host.packages()?;
+        let found = resolution
+            .query_intent_receivers(&intent.intent, None, 0, user, SYSTEM_UID)
+            .map_err(|e| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("queryBroadcastReceiversAsUser: {e:?}"),
+                )
+            })?;
+        for receiver in found {
+            let crate::package::component_resolver::Info::Activity(info) = receiver.info else {
+                continue;
+            };
+            let package = info.info.item.package_name.unwrap_or_default();
+            if visible(&package)? {
+                notices.push(RawIntent::with_data(
+                    intent.intent.action.as_deref(),
+                    None,
+                    Some(&package),
+                    intent.intent.flags,
+                    &[
+                        (
+                            "authAccount",
+                            crate::bundle::Value::String(Some(account.name.clone())),
+                        ),
+                        (
+                            "accountType",
+                            crate::bundle::Value::String(Some(account.kind.clone())),
+                        ),
+                    ],
+                ));
+            }
+        }
+        Ok(notices)
     }
 
     /// `resolveAccountVisibility` of `account` to `package` in `user`.
@@ -850,6 +982,9 @@ impl AccountManager {
         package: &str,
         user: i32,
     ) -> Result<i32, Exception> {
+        if !accounts.state.lock().unwrap().exists(account) {
+            return Ok(VISIBILITY_NOT_VISIBLE);
+        }
         let mut stored = |key: &str| {
             accounts
                 .state
@@ -1264,6 +1399,10 @@ impl AccountManager {
         };
         // `permissionIsGranted` of any token type.
         let user = user_of(uid);
+        let accounts = self.accounts(user)?;
+        if !accounts.state.lock().unwrap().exists(account) {
+            return Ok(false);
+        }
         if apps_filter::app_id(uid) == SYSTEM_UID
             || self.uid_package_is(uid, |ps| ps.is.privileged)?
             || self.managed_by_caller(Some(&account.kind), uid, user)?
@@ -1299,9 +1438,8 @@ impl super::package_writes::PackageMonitor for AccountManager {
             cache.insert(change.user, found);
         }
         let accounts = self.users.lock().unwrap().get(&change.user).cloned();
-        if let Some(accounts) = accounts {
-            self.validate(&mut accounts.state.lock().unwrap(), change.user)
-                .map_err(Failure::exception)?;
+        if accounts.is_some() {
+            self.validate_accounts(change.user)?;
         }
         Ok(())
     }
@@ -1535,14 +1673,19 @@ impl Service for AccountManager {
                         let accounts = self.accounts(user)?;
                         let mut state = accounts.state.lock().unwrap();
                         // `readAuthTokenInternal`.
-                        if !state.auth_tokens.contains_key(&account) {
+                        if state.exists(&account) && !state.auth_tokens.contains_key(&account) {
                             let tokens = state
                                 .db
                                 .find_auth_tokens_by_account(&account)
                                 .map_err(db_failed)?;
                             state.auth_tokens.insert(account.clone(), tokens);
                         }
-                        token = state.auth_tokens[&account].get(&kind).cloned().flatten();
+                        token = state
+                            .auth_tokens
+                            .get(&account)
+                            .and_then(|t| t.get(&kind))
+                            .cloned()
+                            .flatten();
                     }
                     am::write_peek_auth_token_reply(&mut p, &token);
                     Ok(p)
@@ -1651,6 +1794,9 @@ impl Service for AccountManager {
                         (LEGACY_NOT_VISIBLE, VISIBILITY_USER_MANAGED_NOT_VISIBLE),
                     ];
                     let visibility = match legacy.iter().find(|(key, _)| *key == package) {
+                        _ if !accounts.state.lock().unwrap().exists(&account) => {
+                            VISIBILITY_NOT_VISIBLE
+                        }
                         Some((key, default)) => match accounts
                             .state
                             .lock()
@@ -2180,3 +2326,7 @@ mod tests {
         assert_ne!(id, random_uuid());
     }
 }
+
+#[cfg(test)]
+#[path = "account_validation_tests.rs"]
+mod validation_tests;

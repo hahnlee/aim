@@ -172,6 +172,37 @@ impl AccountsDb {
         Ok(())
     }
 
+    /// Commit a DE/CE mutation and its reads together; an error rolls it back.
+    pub fn transaction<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let transaction = self.db.unchecked_transaction()?;
+        let result = f(self)?;
+        self.wrote()?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    /// `syncDeCeAccountsLocked`: CE's delete trigger also removes secrets.
+    pub fn reconcile_ce(&self) -> Result<()> {
+        self.transaction(|db| {
+            db.db.execute(
+                "DELETE FROM ceDb.accounts WHERE _id NOT IN (SELECT _id FROM main.accounts)",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// `deleteDeAccount` / `deleteCeAccount`, including their delete triggers.
+    pub fn delete_account(&self, id: i64) -> Result<()> {
+        self.db
+            .execute("DELETE FROM main.accounts WHERE _id=?", [id])?;
+        if self.ce_attached {
+            self.db
+                .execute("DELETE FROM ceDb.accounts WHERE _id=?", [id])?;
+        }
+        Ok(())
+    }
+
     /// `findMetaAuthUid`: the authenticators' uids by type, in key order.
     pub fn find_meta_auth_uid(&self) -> Result<Vec<(String, i32)>> {
         let mut q = self
@@ -273,7 +304,8 @@ impl AccountsDb {
         Ok(self
             .db
             .query_row(
-                "SELECT password FROM ceDb.accounts WHERE name=? AND type=?",
+                "SELECT password FROM ceDb.accounts WHERE name=? AND type=? AND _id IN \
+                 (SELECT _id FROM main.accounts)",
                 params![name, kind],
                 |r| r.get(0),
             )

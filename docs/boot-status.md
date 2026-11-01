@@ -589,7 +589,12 @@ package's CE and DE data directories through it (285 packages, their
 inodes in the package restrictions), and AccountManager creates
 `accounts_de.db` and `accounts_ce.db`, so the Contacts provider, AdServices
 and Play Store no longer stop at missing directories or databases
-(2026-10-20); vdc runs post-fs-data's `init_user0`, without which
+(2026-10-20). Native account validation now reconciles cached users' CE
+attachment on unlock and removes obsolete-authenticator accounts transactionally,
+retaining installed UIDs during updates. Committed caches precede visibility,
+removal and account-list broadcasts, with the sender user preserved (#1504,
+#1460 3a.1; host persistence/rollback/reentry checks, 2026-11-01; no guest boot).
+vdc runs post-fs-data's `init_user0`, without which
 `/data/data` did not exist when the package side's start asked for the
 core apps' data. A second boot of the same data directory keeps the
 apps' data (no directory destroyed or recreated). The app host finishes the boot
