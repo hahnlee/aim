@@ -84,12 +84,13 @@ impl PermissionManager {
         let access = prepare(&base, capture.state(), &installs, &policy)?;
         let mut out = Parcel::new();
         aim_service_aidl::write_int_array(&mut out, Some(&[0]));
-        out.write_i32(installs.len() as i32);
-        for install in &installs {
-            out.write_i32(install.app_id);
+        let app_ids: BTreeSet<_> = installs.iter().map(|i| i.app_id).collect();
+        out.write_i32(app_ids.len() as i32);
+        for app_id in app_ids {
+            out.write_i32(app_id);
             aim_service_aidl::write_byte_array(
                 &mut out,
-                Some(&access.legacy_state(install.app_id, &[0], &config)?),
+                Some(&access.legacy_state(app_id, &[0], &config)?),
             );
         }
         scope
@@ -220,11 +221,8 @@ fn decode(capture: &Capture, before: &Capture, bytes: &[u8]) -> Result<Vec<Insta
             .as_deref()
             .ok_or_else(|| illegal("permission candidate code absent"))?;
         let old = before.state().packages.get(&name);
-        if ps.shared_user.is_some()
-            || old.is_some_and(|p| p.shared_user.is_some())
-            || previous != -1
-        {
-            return Err(unsupported("shared UID installation"));
+        if previous != -1 {
+            return Err(unsupported("shared UID migration"));
         }
         if ps.is.system {
             return Err(unsupported("system package installation"));
@@ -356,36 +354,50 @@ fn prepare(
             });
         }
     }
-    for ps in state.packages.values() {
-        let Some(code) = ps.pkg.as_deref() else {
-            continue;
-        };
-        let installing = installs.iter().any(|i| i.name == ps.name);
-        let requested: BTreeSet<_> = code
-            .requested_permissions
+    // AppIdPermissionPolicy trims and evaluates the shared user's request union.
+    let mut groups: BTreeMap<i32, Vec<&PackageState>> = BTreeMap::new();
+    for ps in state.packages.values().filter(|p| !p.is.apex) {
+        groups
+            .entry(ps.shared_user_app_id.unwrap_or(ps.app_id))
+            .or_default()
+            .push(ps);
+    }
+    for (app_id, packages) in groups {
+        let installing = installs.iter().any(|i| i.app_id == app_id);
+        let requested: BTreeSet<_> = packages
             .iter()
-            .map(String::as_str)
+            .filter_map(|p| p.pkg.as_deref())
+            .flat_map(|p| p.requested_permissions.iter())
             .collect();
         if installing {
             if let Some((_, flags)) = user
                 .app_id_permissions
                 .iter_mut()
-                .find(|(id, _)| *id == ps.app_id)
+                .find(|(id, _)| *id == app_id)
             {
-                flags.retain(|(name, _)| requested.contains(name.as_str()));
+                flags.retain(|(name, _)| requested.contains(name));
             }
         }
-        for name in &code.requested_permissions {
-            if !installing && !changed.contains(name) {
+        for name in requested {
+            let installed_request = installs
+                .iter()
+                .any(|i| i.app_id == app_id && i.code.requested_permissions.contains(name));
+            if !installed_request && !changed.contains(name) {
                 continue;
             }
-            if ps.shared_user.is_some() {
-                return Err(unsupported("shared UID permission reevaluation"));
-            }
-            let old = user.permission_flags(ps.app_id, name);
+            let requesters: Vec<_> = packages
+                .iter()
+                .copied()
+                .filter(|p| {
+                    p.pkg
+                        .as_ref()
+                        .is_some_and(|p| p.requested_permissions.contains(name))
+                })
+                .collect();
+            let old = user.permission_flags(app_id, name);
             let Some(permission) = system.permissions.iter().find(|p| p.name == *name) else {
                 if old == 0 {
-                    user.set_permission_flags(ps.app_id, name, INSTALL_REVOKED);
+                    user.set_permission_flags(app_id, name, INSTALL_REVOKED);
                 }
                 continue;
             };
@@ -398,8 +410,8 @@ fn prepare(
                 0 => {
                     if old & INSTALL_GRANTED != 0
                         || old & INSTALL_REVOKED == 0
-                        || installing
-                        || ps.is.system
+                        || installed_request
+                        || requesters.iter().any(|p| p.is.system)
                     {
                         INSTALL_GRANTED
                     } else {
@@ -409,16 +421,22 @@ fn prepare(
                 1 => boot::runtime_flags(
                     base,
                     &user,
-                    ps.app_id,
+                    app_id,
                     name,
                     permission,
                     old,
-                    &[ps],
+                    &requesters,
                     &system,
                     policy,
                 )?,
                 PROTECTION_SIGNATURE | 4 => {
-                    let granted = policy.grant(state, &[ps], permission, declared, unsupported)?;
+                    let granted = if old & PROTECTION_GRANTED != 0
+                        && packages.iter().any(|p| p.pkg.is_none())
+                    {
+                        true
+                    } else {
+                        policy.grant(state, &requesters, permission, declared, unsupported)?
+                    };
                     let mut flags = if granted { PROTECTION_GRANTED } else { 0 };
                     if is_development(permission) {
                         flags |= old & RUNTIME_GRANTED;
@@ -438,14 +456,19 @@ fn prepare(
             let flags = boot::evaluate_permission(
                 permission,
                 declared.map_or(0, |p| p.component.flags),
-                code.target_sdk_version,
+                requesters
+                    .iter()
+                    .filter_map(|p| p.pkg.as_ref())
+                    .map(|p| p.target_sdk_version)
+                    .min()
+                    .unwrap_or(CUR_DEVELOPMENT),
                 old,
                 flags,
             );
-            user.set_permission_flags(ps.app_id, name, flags);
+            user.set_permission_flags(app_id, name, flags);
         }
         if installing {
-            boot::implicit::inherit(base, &system, &mut user, ps.app_id, &[ps], policy)?;
+            boot::implicit::inherit(base, &system, &mut user, app_id, &packages, policy)?;
         }
     }
     // PermissionService.onPackageInstalled: clear upgrade exemptions, union the
@@ -464,14 +487,30 @@ fn prepare(
             let old = user.permission_flags(install.app_id, name);
             let mut flags = old;
             if info & (FLAG_HARD_RESTRICTED | FLAG_SOFT_RESTRICTED) != 0 {
-                flags &= !UPGRADE_EXEMPT;
+                if !state.packages.values().any(|p| {
+                    p.app_id == install.app_id
+                        && p.is.system
+                        && p.pkg
+                            .as_ref()
+                            .is_some_and(|p| p.requested_permissions.contains(name))
+                }) {
+                    flags &= !UPGRADE_EXEMPT;
+                }
                 if install.allowlist.contains(name) {
                     flags |= INSTALLER_EXEMPT;
                 }
                 flags = existing::exemption_flags(
                     name,
                     info,
-                    install.code.target_sdk_version,
+                    state
+                        .packages
+                        .values()
+                        .filter(|p| p.app_id == install.app_id)
+                        .filter_map(|p| p.pkg.as_ref())
+                        .filter(|p| p.requested_permissions.contains(name))
+                        .map(|p| p.target_sdk_version)
+                        .min()
+                        .unwrap_or(CUR_DEVELOPMENT),
                     old,
                     flags,
                 );
@@ -607,6 +646,10 @@ impl permissions::AccessView {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "install_shared_tests.rs"]
+mod shared_tests;
 
 #[cfg(test)]
 #[path = "install_protection_tests.rs"]

@@ -786,6 +786,8 @@ mod tests {
             now: 20,
         }
     }
+    mod shared_tests;
+
     fn static_request(version: i64, certificate: u8) -> Request {
         let mut request = request("org.example.provider", version);
         request.code.manifest_package_name = Some(request.code.package_name.clone());
