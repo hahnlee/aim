@@ -525,6 +525,14 @@ captureDisplay returns a nonblack 3840×2160 Android-pixel PNG, matching the
 logical display. Five sampled attribution states match the previous after-state;
 task captures retain their own content. No CTS rerun was made.
 
+`IAppTask.finishAndRemoveTask` now uses the native stack's bottom-first finishing
+and result delivery, removes recents membership immediately and releases the
+native task and detached surface, notifying its organizer after activity destruction
+(#2627). Caller UID/system/root checks and missing-task exceptions follow pinned
+AppTaskImpl. `setExcludeFromRecents` updates the base intent; task launch methods
+remain explicit (#1588). Host checks cover these paths; no guest boot or CTS rerun
+was made (2026-11-01).
+
 The app host starts the original AccessibilityManagerService with native overlay
 and window callback ownership and ordered initial-user initialization (#2529).
 App attach no longer waits for accessibility's user-initialization completion

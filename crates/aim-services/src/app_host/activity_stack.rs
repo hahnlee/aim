@@ -303,6 +303,8 @@ pub struct Stack {
     pub freeform: bool,
     /// Tasks behind the desktop, also hidden on a freeform display.
     background: BTreeSet<i32>,
+    /// `RecentTasks.remove`: finishing tasks can remain attached until destroyed.
+    removed_from_recents: BTreeSet<i32>,
     /// The task last reported focused.
     front: Option<i32>,
     /// `mTopResumedActivity`, `mLastReportedTopResumedActivity`,
@@ -335,6 +337,12 @@ impl Stack {
 
     pub fn task(&self, id: i32) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
+    }
+
+    pub fn recent_tasks(&self) -> impl Iterator<Item = &Task> {
+        self.tasks
+            .iter()
+            .filter(|t| !self.removed_from_recents.contains(&t.id))
     }
 
     /// The top activity of `task` that is not finishing.
@@ -1172,6 +1180,7 @@ impl Stack {
         if !self.activities.iter().any(|a| a.task == task) && self.task(task).is_some() {
             self.tasks.retain(|t| t.id != task);
             self.background.remove(&task);
+            self.removed_from_recents.remove(&task);
             out.push(Command::TaskEmpty(task));
         }
     }
@@ -1231,6 +1240,19 @@ impl Stack {
         self.resume_focused(false, &mut out);
         self.settle(&mut out);
         out
+    }
+
+    /// `AppTaskImpl.finishAndRemoveTask` / `removeTaskById(killProcess=false,
+    /// REMOVE_FROM_RECENTS)`: finish bottom first, then remove from recents.
+    /// The attached task and its surface live until its last activity is destroyed.
+    pub fn finish_and_remove_task(&mut self, task: i32) -> Option<Vec<Command>> {
+        self.task(task)?;
+        let mut out = self.remove(task);
+        self.remove_if_empty(task, &mut out);
+        if self.task(task).is_some() {
+            self.removed_from_recents.insert(task);
+        }
+        Some(out)
     }
 
     fn finish_one(&mut self, token: u64, user_leaving: bool, out: &mut Vec<Command>) {
@@ -1385,6 +1407,79 @@ mod tests {
 
     fn activity(token: u64, task: i32, class: &str, mode: i32) -> Activity {
         Activity::new(token, task, 1, &format!("{APP}/{class}"), mode, 0, None)
+    }
+
+    /// AppTaskImpl / Task.removeActivities: bottom-first results and destroys,
+    /// no intermediate resume of an activity in the removed task, no process kill.
+    #[test]
+    fn finish_and_remove_task_preserves_result_and_lifecycle_order() {
+        let mut s = Stack::default();
+        s.tasks = vec![*task(8, "Receiver", None), *task(7, "Root", None)];
+        let mut receiver = activity(8, 8, "Receiver", 0);
+        receiver.state = State::Resumed;
+        s.activities.push(receiver);
+        for token in 1..=3 {
+            let mut a = activity(token, 7, "A", 0);
+            a.state = State::Stopped;
+            a.result_to = Some(8);
+            a.result = Some(100 + token);
+            s.activities.push(a);
+        }
+        let commands = s.finish_and_remove_task(7).unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| matches!(c, Result { .. } | Destroy(_)))
+                .cloned()
+                .collect::<Vec<_>>(),
+            (1..=3)
+                .flat_map(|token| [
+                    Result {
+                        token: 8,
+                        results: vec![100 + token]
+                    },
+                    Destroy(token),
+                ])
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            s.activities
+                .iter()
+                .filter(|a| a.task == 7)
+                .all(|a| a.finishing)
+        );
+        assert!(s.task(7).is_some()); // attached until callbacks
+        assert_eq!(s.recent_tasks().map(|t| t.id).collect::<Vec<_>>(), [8]);
+        assert!(s.finish_and_remove_task(7).unwrap().is_empty());
+        for token in 1..=3 {
+            let commands = s.destroyed(token);
+            assert_eq!(commands.contains(&TaskEmpty(7)), token == 3);
+        }
+        assert!(s.task(7).is_none());
+        assert!(s.finish_and_remove_task(7).is_none());
+        // Retired recents membership must not affect a later task with the same ID.
+        s.tasks.push(*task(7, "New", None));
+        assert_eq!(s.recent_tasks().count(), 2);
+    }
+
+    #[test]
+    fn finish_and_remove_task_waits_for_resumed_activity_to_pause() {
+        let mut s = Stack::default();
+        s.tasks.push(*task(7, "Root", None));
+        let mut a = activity(1, 7, "Root", 0);
+        a.state = State::Resumed;
+        s.activities.push(a);
+        let commands = s.finish_and_remove_task(7).unwrap();
+        assert!(commands.contains(&Pause {
+            token: 1,
+            finishing: true,
+            user_leaving: false
+        }));
+        assert!(!commands.contains(&Destroy(1)));
+        assert!(!commands.contains(&TaskEmpty(7)));
+        assert_eq!(s.recent_tasks().count(), 0);
+        assert!(s.paused(1).contains(&Destroy(1)));
+        assert!(s.destroyed(1).contains(&TaskEmpty(7)));
     }
 
     /// ActivityClientController.moveActivityTaskToBack / Task.moveTaskToBack
