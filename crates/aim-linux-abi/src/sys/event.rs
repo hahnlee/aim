@@ -50,7 +50,7 @@ const O_CLOEXEC: u64 = 0o2000000;
 const EFD_SEMAPHORE: u64 = 1;
 
 /// A socketpair: (guest end, hidden peer end).
-fn pair(flags: u64) -> Result<(i32, i32), i64> {
+pub(super) fn pair(flags: u64) -> Result<(i32, i32), i64> {
     let mut sv = [0i32; 2];
     // SAFETY: socketpair into a local array.
     if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, sv.as_mut_ptr()) } < 0 {
@@ -73,12 +73,12 @@ fn pair(flags: u64) -> Result<(i32, i32), i64> {
     Ok((sv[0], peer))
 }
 
-fn send_record(peer: i32, v: u64) -> bool {
+pub(super) fn send_record(peer: i32, v: u64) -> bool {
     // SAFETY: sending 8 bytes from a local.
     unsafe { libc::send(peer, (&v as *const u64).cast(), 8, libc::MSG_DONTWAIT) == 8 }
 }
 
-fn recv_record(fd: i32) -> Option<u64> {
+pub(super) fn recv_record(fd: i32) -> Option<u64> {
     let mut v = 0u64;
     // SAFETY: receiving into a local.
     let n = unsafe { libc::recv(fd, (&mut v as *mut u64).cast(), 8, libc::MSG_DONTWAIT) };

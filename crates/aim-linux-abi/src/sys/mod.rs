@@ -106,6 +106,7 @@ mod selinuxfs;
 mod sharedfile;
 mod sigframe;
 mod signal;
+mod signalfd;
 mod smaps;
 pub(crate) use signal::die as die_process;
 pub(crate) use signal::initialize_verity_fault_slot;
@@ -340,6 +341,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         28 => inotify::inotify_rm_watch(a),
         72 => poll::pselect6(a),
         73 => poll::ppoll(a),
+        74 => signalfd::signalfd4(a),
         85 => event::timerfd_create(a),
         86 => event::timerfd_settime(a),
         87 => event::timerfd_gettime(a),
