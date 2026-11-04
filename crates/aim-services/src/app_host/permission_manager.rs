@@ -690,7 +690,9 @@ impl Access<'_> {
             filter: self.filter,
             calling_uid: caller,
         };
-        let name = query.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
+        let name = query
+            .resolve_internal_package_name(name, VERSION_CODE_HIGHEST)
+            .map_err(not_modelled)?;
         self.package_by_name(&name, caller, user)
     }
 
@@ -3569,6 +3571,7 @@ mod tests {
                 },
             )]
             .into(),
+            renamed_packages: Some(Vec::new()),
             ..State::default()
         };
         let mut state = state;
@@ -4194,6 +4197,7 @@ mod tests {
                 ("system".into(), declaring("system", 10003, true)),
             ]
             .into(),
+            renamed_packages: Some(Vec::new()),
             ..State::default()
         };
         let groups = permission_groups(&state);

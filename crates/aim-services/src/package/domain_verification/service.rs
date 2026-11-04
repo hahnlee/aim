@@ -339,15 +339,6 @@ impl DomainQueries {
             return Err(missing());
         }
         let name = name.ok_or_else(missing)?;
-        let normalized = capture
-            .scan()
-            .owner()
-            .settings
-            .renamed_packages
-            .iter()
-            .rev()
-            .find(|(new, _)| new == name)
-            .map_or(name, |(_, old)| old.as_str());
         let resolver = crate::package::resolve::Resolver::default();
         let resolution = resolver.resolution(capture.state()).map_err(|e| {
             Exception::new(
@@ -360,7 +351,9 @@ impl DomainQueries {
             filter: &resolution.apps_filter,
             calling_uid: uid,
         };
-        let resolved = query.resolve_internal_package_name(normalized, -1);
+        let resolved = query
+            .resolve_internal_package_name(name, -1)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.0))?;
         let code = capture
             .scan()
             .owner()

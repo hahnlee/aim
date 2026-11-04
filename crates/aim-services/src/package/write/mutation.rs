@@ -257,7 +257,8 @@ impl Request {
             return Ok(Err(error.clone()));
         }
         if let Self::RelinquishUpdateOwner { package } = self {
-            let name = q.internal_resolve_name(package.as_deref().unwrap_or_default(), -1)?;
+            let name =
+                q.resolve_internal_package_name(package.as_deref().unwrap_or_default(), -1)?;
             let state = q.state.packages.get(&name);
             let user = apps_filter::user_id(q.calling_uid);
             if state.is_none_or(|state| !info::user_state(state, user).installed)
@@ -270,7 +271,10 @@ impl Request {
             }
             let state = state.unwrap();
             let owner = match state.install_source.update_owner.as_deref() {
-                Some(owner) => q.state.packages.get(&q.internal_resolve_name(owner, -1)?),
+                Some(owner) => q
+                    .state
+                    .packages
+                    .get(&q.resolve_internal_package_name(owner, -1)?),
                 None => None,
             };
             let change = if let Some(owner) = owner {
@@ -316,7 +320,7 @@ impl Request {
                 ))));
             }
             let target = package.as_deref().unwrap_or_default();
-            let name = q.internal_resolve_name(target, -1)?;
+            let name = q.resolve_internal_package_name(target, -1)?;
             let state = q.state.packages.get(&name);
             if state.is_none_or(|state| !info::user_state(state, user).installed)
                 || q.filtered_including_uninstalled(state, user)?

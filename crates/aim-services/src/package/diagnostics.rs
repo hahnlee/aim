@@ -384,16 +384,20 @@ impl Runtime {
                         )
                     };
                     if !secondary && !matches!(uid, 0 | 1000 | 2000) {
-                        let internal = query.resolve_internal_package_name(
-                            package.as_deref().unwrap_or_default(),
-                            -1,
-                        );
+                        let internal = query
+                            .resolve_internal_package_name(
+                                package.as_deref().unwrap_or_default(),
+                                -1,
+                            )
+                            .map_err(unsupported)?;
                         let owner = query
                             .state
                             .packages
                             .get(&internal)
                             .and_then(|state| state.install_source.installer.as_deref())
-                            .map(|installer| query.resolve_internal_package_name(installer, -1));
+                            .map(|installer| query.resolve_internal_package_name(installer, -1))
+                            .transpose()
+                            .map_err(unsupported)?;
                         let allowed = owner
                             .as_ref()
                             .and_then(|name| query.state.packages.get(name))

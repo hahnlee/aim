@@ -653,7 +653,9 @@ pub fn admit(
     if admission.pinned {
         return Ok(Admission::Rejected(APP_PINNED));
     }
-    let internal = q.resolve_internal_package_name(&request.package, request.version);
+    let internal = q
+        .resolve_internal_package_name(&request.package, request.version)
+        .map_err(|error| illegal(format!("Removal package owner: {error:?}")))?;
     let Some(package) = q.state.packages.get(&internal) else {
         return Ok(Admission::Rejected(INTERNAL_ERROR));
     };
@@ -1068,7 +1070,9 @@ impl Controller {
             vec![user]
         };
         let plan = Plan {
-            internal_package: query.resolve_internal_package_name(package, version),
+            internal_package: query
+                .resolve_internal_package_name(package, version)
+                .map_err(|error| illegal(format!("Internal removal package owner: {error:?}")))?,
             request,
             users,
             blocked_users: vec![],
@@ -1749,7 +1753,10 @@ mod admission_policy_tests {
 
     #[test]
     fn absent_target_skips_per_user_policy_after_admission_priorities() {
-        let state = State::default();
+        let state = State {
+            renamed_packages: Some(Vec::new()),
+            ..State::default()
+        };
         let filter = AppsFilter::default();
         let query = Query {
             state: &state,
@@ -1822,6 +1829,7 @@ mod admission_policy_tests {
         };
         let state = State {
             packages: [(caller.name.clone(), caller), (target.name.clone(), target)].into(),
+            renamed_packages: Some(Vec::new()),
             ..Default::default()
         };
         let filter = AppsFilter::default();

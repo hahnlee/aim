@@ -190,7 +190,9 @@ impl DomainVerification {
             filter: &resolution.apps_filter,
             calling_uid: uid,
         };
-        let resolved = query.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
+        let resolved = query
+            .resolve_internal_package_name(name, VERSION_CODE_HIGHEST)
+            .map_err(|e| self.unimplemented(e.0))?;
         let code = state
             .packages
             .get(&resolved)

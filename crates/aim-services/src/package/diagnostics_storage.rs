@@ -180,7 +180,9 @@ impl Owner {
         let mut candidates = Vec::new();
         for library in libraries {
             let name = match library.kind {
-                2 => query.resolve_internal_package_name(&library.declaring.0, library.declaring.1),
+                2 => query
+                    .resolve_internal_package_name(&library.declaring.0, library.declaring.1)
+                    .map_err(|error| Exception::new(EX_UNSUPPORTED_OPERATION, error.0))?,
                 3 => library.declaring.0.clone(),
                 _ => continue,
             };
