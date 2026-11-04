@@ -56,7 +56,9 @@ can itself make an input method's calls on it.
 - **When the editor goes, the composition goes.** A new start or an end
   makes the app's InputMethodManager finish the old connection's
   composing text (`RemoteInputConnectionImpl.deactivate`), so the view
-  discards the input method's marked text without sending it again.
+  discards the input method's marked text; what the input method gives
+  in answer, in the call or later from its process until it takes the
+  next key, is the old editor's and changes nothing.
 - **Everything else keeps the raw key path.** Keys outside an editor (a
   game, a list, a non-editor `View`) and keys with Command or Control go
   out as evdev keys through EventHub as before (a release goes where its

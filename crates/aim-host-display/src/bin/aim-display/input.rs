@@ -20,7 +20,6 @@
 
 use std::ffi::c_void;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use aim_host_display::input::server::Devices;
@@ -326,6 +325,7 @@ fn key(view: Id, event: Id, down: bool) {
     if down && editing(view).is_some() && flags & (COMMAND | CONTROL) == 0 {
         // The view's input context is made at its first use: it is the
         // current one before the input method sees the key.
+        COMPOSITION.lock().unwrap().key();
         let context = send!(view, c"inputContext" => Id);
         if !context.is_null()
             && send!(class(c"NSTextInputContext"), c"currentInputContext" => Id) != context
@@ -379,9 +379,6 @@ const KEYCODE_DPAD_RIGHT: i32 = 22;
 static EDITOR: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 /// What the input method composes in the editor.
 static COMPOSITION: Mutex<Composition> = Mutex::new(Composition::new());
-/// Whether the input method is discarding its marked text: what it gives
-/// meanwhile is not the editor's.
-static DISCARDING: AtomicBool = AtomicBool::new(false);
 /// The keys whose press went to the keyboard device.
 static PRESSED: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
@@ -414,18 +411,14 @@ pub fn editor(m: &Text) {
     if COMPOSITION.lock().unwrap().reset() {
         let context = send!(class(c"NSTextInputContext"), c"currentInputContext" => Id);
         if !context.is_null() {
-            DISCARDING.store(true, Ordering::Relaxed);
             send!(context, c"discardMarkedText" => ());
-            DISCARDING.store(false, Ordering::Relaxed);
         }
     }
 }
 
-/// What the input method gave, unless it is discarding it.
+/// What the input method gave.
 fn give_all(messages: Vec<Text>) {
-    if !DISCARDING.load(Ordering::Relaxed) {
-        messages.into_iter().for_each(give);
-    }
+    messages.into_iter().for_each(give);
 }
 
 /// The editor's `imeOptions`, if `view` shows its task.
