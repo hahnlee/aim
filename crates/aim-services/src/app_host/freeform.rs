@@ -36,7 +36,7 @@ impl Rect {
         self.bottom - self.top
     }
 
-    fn offset(&mut self, dx: i32, dy: i32) {
+    pub(super) fn offset(&mut self, dx: i32, dy: i32) {
         *self = Rect {
             left: self.left + dx,
             top: self.top + dy,

@@ -109,10 +109,11 @@ in the root, and it keeps its own Mac window at those bounds. A root's
 `setAdjacentRoots`, `clearAdjacentRoots` and `setLaunchAdjacentFlagRoot` /
 `clearLaunchAdjacentFlagRoot` keep the roots' adjacent sets and the display
 area's flag root (`AdjacentSet`, `setLaunchAdjacentFlagRootTask`), admitted in
-order and dropped with their roots. In window mode the tasks of adjacent roots
-are two Mac windows tiled side by side at their roots' bounds: the user's
-resize of one moves the shared edge of the roots, as the split divider does,
-and the other window follows; clearing adjacency makes them independent.
+order (an op on a deleted root is skipped, as the original does) and dropped
+with their roots. In window mode the tasks of adjacent roots are two Mac
+windows tiled side by side at their roots' bounds: the user's resize of one
+moves the shared edge of the roots, as the split divider does, a drag moves
+both, and the other window follows; clearing adjacency makes them independent.
 `setLaunchRoot`, a launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT` into the flag
 root, other root windowing modes, multi-window tasks of the display area and
 nested roots remain explicit failures. Host regressions cover the wire, modes,

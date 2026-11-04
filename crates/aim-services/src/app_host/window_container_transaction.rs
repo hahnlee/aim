@@ -312,17 +312,17 @@ impl super::AppHost {
         t: Transaction,
     ) -> Result<(), Exception> {
         // Resolve every token and validate every operation before invoking a mutating owner.
+        // The task of a token, unless it is unknown or removed (detached).
+        let attached = |token| {
+            let id = self.task_of_token(token)?;
+            let attached = self.tasks.bounds(id).is_some()
+                && (self.tasks.root(id).is_some()
+                    || self.activities.stack.lock().unwrap().task(id).is_some());
+            attached.then_some(id)
+        };
         let resolve = |token| {
-            let id = self
-                .task_of_token(token)
-                .ok_or_else(|| Exception::illegal_argument("unknown WCT task token"))?;
-            if self.tasks.bounds(id).is_none()
-                || (self.tasks.root(id).is_none()
-                    && self.activities.stack.lock().unwrap().task(id).is_none())
-            {
-                return Err(Exception::illegal_argument("removed WCT task"));
-            }
-            Ok(id)
+            attached(token)
+                .ok_or_else(|| Exception::illegal_argument("unknown or removed WCT task"))
         };
         // A parent: an organizer root task, else the display area. Nesting a
         // task in an app task is not served (#2616).
@@ -361,8 +361,13 @@ impl super::AppHost {
         }
         // The adjacency the hops leave, each admitted in the adjacency the
         // ones before it left (`setLaunchAdjacentFlagRoot` after
-        // `setAdjacentRoots`).
-        let mut adjacency = self.tasks.adjacency.lock().unwrap().clone();
+        // `setAdjacentRoots`). It stays locked until it is committed, so a
+        // root task removed meanwhile leaves it after the commit.
+        let mut committed = self.tasks.adjacency.lock().unwrap();
+        let mut adjacency = committed.clone();
+        // An adjacency op on an unknown or detached container is skipped, the
+        // rest of the transaction applied.
+        let detached = |op| eprintln!("app host: {op}: unknown or detached container");
         let mut adjacency_ops = false;
         let created = |id, op| match self.tasks.root(id) {
             Some(_) => Ok(id),
@@ -380,15 +385,24 @@ impl super::AppHost {
             );
             hierarchy.push(match hop {
                 Hop::SetAdjacentRoots(tokens) => {
-                    let mut ids = Vec::new();
+                    let op = "setAdjacentRootsHierarchyOp";
+                    let (mut ids, mut skipped) = (Vec::new(), false);
                     for token in tokens {
-                        let id = created(resolve(token)?, "setAdjacentRootsHierarchyOp")?;
+                        let Some(id) = attached(token) else {
+                            detached(op);
+                            skipped = true;
+                            break;
+                        };
+                        let id = created(id, op)?;
                         if ids.contains(&id) {
                             return Err(Exception::illegal_argument(format!(
                                 "setAdjacentRootsHierarchyOp: called with same root twice={id}"
                             )));
                         }
                         ids.push(id);
+                    }
+                    if skipped {
+                        continue;
                     }
                     if ids.len() < 2 {
                         return Err(Exception::illegal_argument(
@@ -399,11 +413,18 @@ impl super::AppHost {
                     continue;
                 }
                 Hop::ClearAdjacentRoots(token) => {
-                    adjacency.leave(created(resolve(token)?, "clearAdjacentRootsHierarchyOp")?);
+                    let op = "clearAdjacentRootsHierarchyOp";
+                    match attached(token) {
+                        Some(id) => adjacency.leave(created(id, op)?),
+                        None => detached(op),
+                    }
                     continue;
                 }
                 Hop::LaunchAdjacentFlagRoot { root, clear } => {
-                    let id = resolve(root)?;
+                    let Some(id) = attached(root) else {
+                        detached("setLaunchAdjacentFlagRoot");
+                        continue;
+                    };
                     if self.tasks.root(id).is_none() {
                         return Err(Exception::new(
                             EX_UNSUPPORTED_OPERATION,
@@ -457,7 +478,8 @@ impl super::AppHost {
         if changes.is_empty() && roots.is_empty() && hierarchy.is_empty() && !adjacency_ops {
             return Err(unsupported());
         }
-        *self.tasks.adjacency.lock().unwrap() = adjacency;
+        *committed = adjacency;
+        drop(committed);
         for (id, bounds) in roots {
             self.set_root_bounds(id, bounds).map_err(owner_error)?;
         }

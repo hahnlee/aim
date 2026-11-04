@@ -54,10 +54,15 @@ impl Adjacency {
 }
 
 /// The bounds `b` of a root task tiled with one whose bounds `old` become
-/// `new`, as the split divider keeps them: each of its edges that met an
-/// opposite edge of `old` follows it, and the edges along a shared one stay
-/// aligned with `new`'s.
+/// `new`. Moved at the same size, the tiles move together. Resized, as the
+/// split divider keeps them: each of its edges that met an opposite edge of
+/// `old` follows it, and the edges along a shared one stay aligned with
+/// `new`'s.
 pub(super) fn tiled(mut b: Rect, old: Rect, new: Rect) -> Rect {
+    if new.width() == old.width() && new.height() == old.height() {
+        b.offset(new.left - old.left, new.top - old.top);
+        return b;
+    }
     let beside = b.left == old.right || b.right == old.left;
     let stacked = b.top == old.bottom || b.bottom == old.top;
     if b.left == old.right {
@@ -136,5 +141,14 @@ mod tests {
         );
         // Roots that do not meet stay where they are.
         assert_eq!(tiled(right, r(0, 0, 500, 1920), left), right);
+        // A tile dragged by its title bar takes the others with it.
+        assert_eq!(
+            tiled(right, left, r(200, 30, 740, 1950)),
+            r(740, 30, 1280, 1950)
+        );
+        assert_eq!(
+            tiled(left, right, r(340, 0, 880, 1920)),
+            r(-200, 0, 340, 1920)
+        );
     }
 }

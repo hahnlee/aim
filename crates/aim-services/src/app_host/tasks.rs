@@ -787,13 +787,16 @@ impl AppHost {
             .unwrap()
             .extract_if(.., |t| t.root.is_some())
             .collect();
+        // The adjacency is locked alone: a WCT reads tokens under it.
         let mut tokens = self.activities.task_tokens.lock().unwrap();
-        let mut adjacency = self.tasks.adjacency.lock().unwrap();
         for root in &roots {
             tokens.remove(&root.id);
-            adjacency.remove(root.id);
         }
         drop(tokens);
+        let mut adjacency = self.tasks.adjacency.lock().unwrap();
+        for root in &roots {
+            adjacency.remove(root.id);
+        }
         drop(adjacency);
         let ids = roots.iter().map(|r| r.id).collect();
         self.remove_layers(roots.into_iter().filter_map(|r| r.layer).collect());
@@ -984,9 +987,10 @@ impl AppHost {
     }
 
     /// `SET_BOUNDS` of task `task`, a tile of the adjacent organizer root
-    /// task `root`: as the split divider resizes the stages, the root task
-    /// takes the bounds and the root tasks adjacent to it keep tiling with
-    /// it (`adjacency::tiled`). Bounds that would leave a root task empty
+    /// task `root`: the root task takes the bounds and the root tasks
+    /// adjacent to it keep tiling with it (`adjacency::tiled`), moving with
+    /// it, or as the split divider resizes the stages. Bounds that would
+    /// leave a root task empty
     /// are refused, and the task's record answers that.
     fn resize_tile(self: &Arc<Self>, task: i32, root: i32, bounds: Rect) -> Result<(), String> {
         let old = self
@@ -2947,6 +2951,14 @@ pub(super) mod tests {
             assert!(set_bounds(8, [0, 70, 1080, 1920]).is_err());
             assert_eq!(host.tasks.bounds(8), Some(r(600, 70, 1080, 1920)));
             assert_eq!(last(&mut receive).1, ([600, 70, 1080, 1920], 6));
+            // A window dragged by its title bar takes the other with it.
+            set_bounds(8, [800, 90, 1280, 1940]).unwrap();
+            assert_eq!(
+                last(&mut receive),
+                (([200, 90, 800, 1940], 6), ([800, 90, 1280, 1940], 6))
+            );
+            set_bounds(7, [0, 70, 600, 1920]).unwrap();
+            assert_eq!(host.tasks.bounds(8), Some(r(600, 70, 1080, 1920)));
             // Cleared adjacency: the windows move on their own; the flag root
             // stays until its root task goes.
             apply(&[op(15, Some(p), None)]).unwrap();
@@ -2959,6 +2971,20 @@ pub(super) mod tests {
             );
             apply(&[adjacent(vec![p, s])]).unwrap();
             host.remove_task(secondary);
+            assert_eq!(*host.tasks.adjacency.lock().unwrap(), Default::default());
+            // Adjacency ops on the deleted root are skipped, the rest applied.
+            let clear_flag = Op {
+                to_top: true,
+                ..flag(s)
+            };
+            apply(&[
+                clear_flag,
+                op(15, Some(s), None),
+                adjacent(vec![p, s]),
+                reparent(host.task_token(7), None, true),
+            ])
+            .unwrap();
+            assert_eq!(host.tasks.parent(7), None);
             assert_eq!(*host.tasks.adjacency.lock().unwrap(), Default::default());
         });
     }
