@@ -979,7 +979,8 @@ protobufs (AtomicFile backups recovered, stale unstopped rows corrected), writte
 back on each change, kept by non-replacing package additions and removals and left
 on use (user interaction, resumed activity, used component) and on unstop. Global
 hibernation deletes OAT artifacts through the original ART owner when
-`config_hibernationDeletesOatArtifactsEnabled`; leaving a user's hibernation sends
+`config_hibernationDeletesOatArtifactsEnabled` (an unavailable owner, as ART's
+mapped failures, saves no bytes and leaves the transition successful); leaving a user's hibernation sends
 the package LOCKED_BOOT_COMPLETED and BOOT_COMPLETED. The package boot's dexopt
 suppression reads this global state. Entering a user's hibernation (force stop,
 cache deletion, storage stats), the statsd atoms and the shell command remain

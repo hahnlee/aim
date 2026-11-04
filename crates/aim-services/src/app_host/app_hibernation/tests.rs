@@ -331,6 +331,15 @@ fn transitions_persist_and_leave_hibernation_on_use_unstop_and_package_events() 
         s.boot_completed().unwrap();
         s.user_unlocking().unwrap();
         assert!(s.suppresses_dexopt("p").is_ok_and(|v| !v));
+        // Without an ART owner the deletion answers -1 as PackageManager's
+        // mapped IllegalStateException does; the transition still succeeds.
+        success(&set_global(&s, 1000, true));
+        assert!(globally(&s));
+        assert_eq!(
+            std::fs::read(&global).unwrap(),
+            [0x0a, 5, 0x0a, 1, b'p', 0x10, 1, 0x0a, 3, 0x0a, 1, b'q']
+        );
+        success(&set_global(&s, 1000, false));
         let deletes = host
             .framework()
             .unwrap()
@@ -410,5 +419,26 @@ fn transitions_persist_and_leave_hibernation_on_use_unstop_and_package_events() 
         assert!(globally(&s));
         s.package_added("p", 0);
         assert!(!for_user(&s) && globally(&s));
+    });
+}
+
+#[test]
+fn removal_for_all_users_drops_the_global_state_without_user_states() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        grant(host);
+        let s = AppHibernation(host.clone());
+        s.boot_completed().unwrap();
+        // A hibernating package's row while user 0's states are not loaded.
+        let hibernated = State {
+            hibernated: true,
+            saved: 0,
+        };
+        (host.hibernation.0.lock().unwrap().global.as_mut())
+            .unwrap()
+            .insert("gone".into(), hibernated);
+        s.package_removed("gone", 0).unwrap();
+        let loaded = host.hibernation.0.lock().unwrap();
+        assert!(loaded.user.is_none());
+        assert!(!loaded.global.as_ref().unwrap().contains_key("gone"));
     });
 }

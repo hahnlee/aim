@@ -17,7 +17,9 @@ use std::{
 };
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, Exception, Parcel,
+};
 use aim_service_aidl::android_apphibernation_iapphibernationservice as ah;
 
 use super::exit_info::{ProtoWriter, Value, fields};
@@ -147,9 +149,10 @@ impl AppHibernation {
         let mut loaded = self.0.hibernation.0.lock().unwrap();
         if let (0, Some(states)) = (user, loaded.user.as_mut()) {
             states.remove(name);
-            if all_users && let Some(global) = loaded.global.as_mut() {
-                global.remove(name);
-            }
+        }
+        // `onPackageRemovedForAllUsers` does not depend on the user's states.
+        if all_users && let Some(global) = loaded.global.as_mut() {
+            global.remove(name);
         }
         Ok(())
     }
@@ -386,15 +389,19 @@ impl AppHibernation {
             return Ok(());
         }
         self.enforce(uid, "setHibernatingGlobally")?;
+        // The constructor's `mOatArtifactDeletionEnabled`, read before any change.
+        let deletes = hibernating && self.deletion_enabled()?;
         let visible = name.map(|n| self.visible(uid, n)).transpose()?;
         let name = {
             let mut loaded = self.0.hibernation.0.lock().unwrap();
             let found = name.filter(|_| visible == Some(true));
             let Some((name, states)) = found.zip(loaded.global.as_mut()) else {
-                return Ok(not_installed(name));
+                not_installed(name);
+                return Ok(());
             };
             let Some(state) = states.get_mut(name) else {
-                return Ok(not_installed(Some(name)));
+                not_installed(Some(name));
+                return Ok(());
             };
             if state.hibernated == hibernating {
                 return Ok(());
@@ -406,10 +413,20 @@ impl AppHibernation {
             }
             name
         };
-        let saved = if self.deletion_enabled()? {
+        // PackageManagerService.deleteOatArtifactsOfPackage logs ART's
+        // IllegalArgument/IllegalStateException and answers -1; the change
+        // itself has already succeeded.
+        let saved = if deletes {
             self.0.delete_oat_artifacts(Some(name.into()), SYSTEM)
         } else {
             Ok(0)
+        };
+        let saved = match saved {
+            Err(e) if matches!(e.code, EX_ILLEGAL_ARGUMENT | EX_ILLEGAL_STATE) => {
+                eprintln!("app host: PackageManager: {}", e.message);
+                Ok(-1)
+            }
+            saved => saved,
         };
         let mut loaded = self.0.hibernation.0.lock().unwrap();
         if let Some(states) = loaded.global.as_mut() {
