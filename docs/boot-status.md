@@ -13,6 +13,20 @@ set and libstatssocket/libstatspull imports equal the original libart's. One
 disposable app-host boot reached `sys.boot_completed` in 9 s with statsd
 running and no native crash (2026-11-04).
 
+libperfetto_hprof is rebuilt with the ART exception, with Perfetto's client
+SDK built from its Android.bp (#220), so the plugins that link libart's
+internals are all rebuilt. A disposable app-host boot reached
+`sys.boot_completed` with zygote mapping the plugin (its original failed to
+dlopen), and a disposable default-image boot with system_server running its
+attached `perfetto_hprof_listener` thread; `dalvikvm64 -XX:PerfettoHprof=true`
+loads it at start and exits cleanly. A `java_hprof` perfetto trace of the
+shell-profileable `com.google.android.apps.messaging` holds its heap graph (64
+`HeapGraph` packets, 560k objects): the plugin forked, dumped and logged
+`finished dumping heap`. On this user build heapprofd refuses system_server
+(`(UID 1000) not profileable`) and `am dumpheap` refuses every
+non-debuggable process (`Process not debuggable: android`), as Android does
+(2026-11-04).
+
 `signalfd4` (#2648) creates and updates signal descriptors whose reads take the
 reader's pending signals as `signalfd_siginfo` records, returning the records
 copied before a fault. Poll, select and epoll report POLLIN alone, for a masked

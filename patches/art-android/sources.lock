@@ -26,6 +26,7 @@ SOURCE_TREES=(
   "platform/art|odrefresh|f3df6988bc671d602809307f57d37b535e7c39c4144e1d08012d6125cf774008"
   "platform/art|openjdkjvm|9a406a48190957dc9f178fead70a1f3da8c57b7c6034b48b19d97c5292420dde"
   "platform/art|openjdkjvmti|beb3e684c7a36751797737e0e117714dd97f8a1e41044f11a84ccef4c6b779ce"
+  "platform/art|perfetto_hprof|79e06542d1d53952cd4b6254e27d0326d6325d69974ebaf9cdf7708133c590a1"
   "platform/art|runtime|16aadf73f21d56c37cdaf73821c70c7d8688cdcf9ed5ec26e805af4e90ba0084"
   "platform/art|sigchainlib|6cc6ba72651be1a51c44e46303b3bedd47e4506e71395ecb776d9c9f67a0fb3e"
   "platform/art|tools/cpp-define-generator|1b16436259167776fac99fce5a936f630cadeef48842fd0773e12cef142cae2d"
@@ -39,7 +40,15 @@ SOURCE_TREES=(
   "platform/external/libcap||21492cd26b8dedfef622799621d0c9accfef5834461ec9dee58ad076bcebb079"
   "platform/external/lz4|lib|7e3589004f893754a34956a28f5c3e1d30c3ea271b3cfb41e1055136487280fe"
   "platform/external/lzma|C|3bed9c69f7de6da65f9a066495c86bf4320161aca459cfe7b80d66b856d2e3f4|c30edc9a7147f4f4829ed9848e2479f3061d46bb"
+  "platform/external/perfetto|include|40e78b769b049d1b09698d7e98af6ee8d50720ebccf8c8f077b57e8d3ef98eb7"
+  "platform/external/perfetto|protos/perfetto|d3fd0f9bfd3d2426a9478a4e1a88c66031bab85ae3fe8aafb1bb9ae516aaea8f"
+  "platform/external/perfetto|src/android_internal|a108ce33cfaee66a1a42153934048069da8045cb7ed6de693a00518243eb982d"
+  "platform/external/perfetto|src/android_stats|9f46132b478c08034d72aef903eea9d2e89e1c1a02d2f0c6423052d0fea6efd7"
+  "platform/external/perfetto|src/base|5f0e6dbf7d643c98933871925731aac3ce74bca34c06f673cf93cb8dba0e968c"
+  "platform/external/perfetto|src/ipc|247866f890aa0261e91f93b3fbacd4ff52c61e7dcb237ab1513c15b9870e014f"
   "platform/external/perfetto|src/profiling/memory/include|546f6c35fffa59b3dedd3e705c7e3e643336d159754b50676f650ffd5d5f5326"
+  "platform/external/perfetto|src/protozero|0834e8f4edef6ff9dc5b3a03419c3a5f37ed14def4fcc9edd77ebafd5409d079"
+  "platform/external/perfetto|src/tracing|e21533978160f9bdf7b6f6470d5d796b68855488d2bb60534e8fc199f50b526f"
   "platform/external/protobuf|android|84716f92cdd8d88d204933f6b8039429572959ce869666c77c93e85fb06c3680"
   "platform/external/protobuf|src|f87e90c41292807a78943a1ea983e5ca678dedbfd0220ac3abc09b6ca06a6a30"
   "platform/external/tinyxml2||055c41a099b697c8d43eb298820a5fb57a5c32893f6d187af61067fd2fd964cd"
@@ -62,6 +71,9 @@ SOURCE_TREES=(
 # project|path|sha256: single files.
 SOURCE_FILES=(
   "platform/art|tools/generate_operator_out.py|ea13bd12b99a6dee5d50d1a7c8151f7ab0332a8a1e58c25647df9aeb0fd7c871"
+  "platform/external/perfetto|Android.bp|777c8c3ba44450b539bffdcd521624bbc2e6deebde6be716217d09acc0a8bee0"
+  "platform/external/perfetto|CHANGELOG|5dc6e31254d2f8ca6dc8eff6aedc2497dc1679b70697aef99960aeea99a5f18c"
+  "platform/external/perfetto|tools/write_version_header.py|83fdfa271cefe4bf7479790b61bcea8b899ec25ebbd6f68ef8cc2b5cf3fc5c27"
   "platform/external/protobuf|Android.bp|2b65434b7b868bd12a7f8a21177d0ec30bb15502faa673ea2597f2ac8d47cd88"
   "platform/system/apex|apexd/ApexInfoList.xsd|d02e30bc40b826186800d12ba2345171c97573417751c87bc87e2b868a8883fc"
 )
