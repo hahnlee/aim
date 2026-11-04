@@ -42,9 +42,10 @@ others'. Host checks only; no guest boot (2026-11-04).
 Poll, select and epoll ask a descriptor only for the events its Linux `_poll`
 reports (#2667): a timerfd is POLLIN alone, once expired, never writable as its
 socket is; an eventfd is POLLIN|POLLOUT without POLLRDNORM/POLLWRNORM, with
-POLLOUT cleared and writes blocking (EAGAIN if non-blocking) where they would
-take the count past ULLONG_MAX - 1 (#2698), one lock across the processes a
-fork shares it with; an epoll, inotify or pidfd (each a
+POLLOUT cleared only at a count of ULLONG_MAX - 1, and writes blocking (EAGAIN
+if non-blocking) where they would take the count past it (#2698), woken by any
+read without touching POLLOUT (#2712), one lock across the processes a fork
+shares it with; an epoll, inotify or pidfd (each a
 kqueue) is POLLIN|POLLRDNORM, so a write event asked of one is not ready instead
 of POLLNVAL/EBADF, and epoll_ctl accepts EPOLLOUT on it; a pidfd adds POLLHUP
 once its process is reaped (#2699). Every other epoll interest also reports

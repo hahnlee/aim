@@ -10,14 +10,14 @@
 //!   and is shared by every process holding the fd. The guest end is
 //!   writable while the peer end has room to receive, so filling the peer
 //!   end with empty records makes it unwritable: that is done while a write
-//!   of 1 would block (`eventfd_poll` drops EPOLLOUT at ULLONG_MAX - 1),
-//!   and while a write waits for a read to make room (`eventfd_write`), so
-//!   it sleeps on that writability; a read, or the waiter giving up,
-//!   empties it again (a writer killed while it waits leaves it until
-//!   then). A read or write is one step under one lock, `wqh.lock`: the
-//!   description's mutex, and once a fork shares the count, also a record
-//!   lock on an unlinked file the processes share, which Darwin drops with
-//!   a process that dies holding it.
+//!   of 1 would block, and only then (`eventfd_poll` drops EPOLLOUT at
+//!   ULLONG_MAX - 1, whoever waits). A read or write is one step under one
+//!   lock, `wqh.lock`: the description's mutex, and once a fork shares the
+//!   count, also a record lock on an unlinked file the processes share,
+//!   which Darwin drops with a process that dies holding it. A write that
+//!   waits for a read to make room (`eventfd_write`) sleeps on a kqueue
+//!   watching that file, made on its first such wait, and each read then
+//!   writes to the file, waking every waiter (`wake_up_locked_poll`).
 //! - **timerfd:** the timer kqueue's thread (`park`) sends a token record
 //!   when a timer expires; a read computes the expirations from the
 //!   timer's settings and drains the token. Timer settings are per
@@ -108,8 +108,9 @@ pub struct EventFd {
     peer: AtomicI32,
     semaphore: bool,
     lock: Mutex<()>,
-    /// The file whose record lock the processes sharing the count take;
-    /// -1 until a fork shares it.
+    /// The file whose record lock the processes sharing the count take,
+    /// and that reads write to for waiting writers; -1 until a fork shares
+    /// the count or a write first waits.
     shared: AtomicI32,
 }
 
@@ -180,6 +181,17 @@ fn close_peer(peer: &AtomicI32) {
     }
 }
 
+/// A waiting write's hidden kqueue on the count's lock file.
+struct ReadWatch(i32);
+
+impl Drop for ReadWatch {
+    fn drop(&mut self) {
+        if let Err(error) = fdtab::close_fork_private(self.0) {
+            crate::diag!("eventfd read watch close: errno {error}");
+        }
+    }
+}
+
 impl EventFd {
     /// Holds the count against every other read and write of it.
     fn locked(&self) -> Result<Locked<'_>, crate::errno::Errno> {
@@ -192,6 +204,36 @@ impl EventFd {
             _local: local,
             shared,
         })
+    }
+
+    /// A kqueue that reports the next read of the count ([`Self::read`]),
+    /// watching from now, under the lock, so that no read slips past.
+    fn watch_reads(&self) -> Result<ReadWatch, crate::errno::Errno> {
+        let mut file = self.shared.load(Ordering::Relaxed);
+        if file < 0 {
+            file = lock_file()?;
+            self.shared.store(file, Ordering::Relaxed);
+        }
+        // SAFETY: plain kqueue creation.
+        let kq = unsafe { libc::kqueue() };
+        if kq < 0 {
+            return Err(errno::last());
+        }
+        // Out of the guest's way while the write waits, however long.
+        let kq = ReadWatch(fdtab::hide(kq));
+        fdtab::set_flags(kq.0, false, true);
+        // SAFETY: a zeroed kevent is valid; one change, no events out.
+        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+        change.ident = file as usize;
+        change.filter = libc::EVFILT_VNODE;
+        change.flags = libc::EV_ADD | libc::EV_CLEAR;
+        change.fflags = libc::NOTE_WRITE;
+        let r =
+            unsafe { libc::kevent(kq.0, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+        if r < 0 {
+            return Err(errno::last());
+        }
+        Ok(kq)
     }
 
     /// Leaves `count` in the socket as one record (it was drained, so
@@ -222,6 +264,13 @@ impl EventFd {
                 if count > 0 {
                     let v = if self.semaphore { 1 } else { count };
                     self.put(fd, count - v, false);
+                    let waiters = self.shared.load(Ordering::Relaxed);
+                    // SAFETY: writing one byte from a local to our file.
+                    if waiters >= 0
+                        && unsafe { libc::pwrite(waiters, [0u8].as_ptr().cast(), 1, 0) } != 1
+                    {
+                        crate::diag!("eventfd read wakeup: errno {}", errno::last());
+                    }
                     // SAFETY: guest buffer of at least 8 bytes.
                     user_write!(buf, u64, v);
                     trace_event(fd, "read", v, self.semaphore);
@@ -250,7 +299,7 @@ impl EventFd {
         // A write of 0 never blocks: the count is at most ULLONG_MAX - 1.
         while v > 0 {
             let nonblocking = fdtab::nonblocking(fd);
-            {
+            let reads = {
                 let _g = match self.locked() {
                     Ok(g) => g,
                     Err(error) => return -(error as i64),
@@ -260,22 +309,29 @@ impl EventFd {
                     self.put(fd, count + v, count + v >= u64::MAX - 1);
                     break;
                 }
-                self.put(fd, count, !nonblocking || count >= u64::MAX - 1);
-            }
-            if nonblocking {
-                return -(EAGAIN as i64);
-            }
-            let r = fdtab::wait_for(fd, libc::POLLOUT);
-            if r < 0 {
-                // No longer waiting: writable again unless at the limit.
-                match self.locked() {
-                    Ok(_g) => {
-                        let count = drain(fd);
-                        self.put(fd, count, count >= u64::MAX - 1);
-                    }
-                    Err(error) => crate::diag!("eventfd write wait end: errno {error}"),
+                self.put(fd, count, count >= u64::MAX - 1);
+                if nonblocking {
+                    return -(EAGAIN as i64);
                 }
-                return r;
+                match self.watch_reads() {
+                    Ok(kq) => kq,
+                    Err(error) => return -(error as i64),
+                }
+            };
+            // SAFETY: a zeroed kevent receives the one event.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            let r = unsafe {
+                libc::kevent(
+                    reads.0,
+                    std::ptr::null(),
+                    0,
+                    &mut event,
+                    1,
+                    std::ptr::null(),
+                )
+            };
+            if r < 0 {
+                return -(errno::last() as i64);
             }
         }
         trace_event(fd, "write", v, self.semaphore);
@@ -972,11 +1028,103 @@ mod count_tests {
         unsafe { libc::poll(&mut entry, 1, 0) == 1 }
     }
 
+    /// Whether a write on `fd` has started waiting for reads.
+    fn watched(fd: i64) -> bool {
+        match fdtab::get(fd as i32) {
+            Some(Kind::Event(e)) => e.shared.load(Ordering::Relaxed) >= 0,
+            _ => false,
+        }
+    }
+
+    /// Blocks until a write on `fd` waits for reads.
+    fn until_watched(fd: i64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !watched(fd) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// A write waiting for room for a value that overflows leaves the fd
+    /// writable while a write of 1 would not block: `eventfd_poll` reports
+    /// EPOLLOUT from the count alone. A read then lets the write in.
+    #[test]
+    fn a_waiting_overflowing_write_leaves_the_count_writable() {
+        let _view = crate::vfs::test_view();
+        let counter = eventfd2([10, 0, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        let writer = std::thread::spawn(move || write_count(counter, u64::MAX - 10));
+        until_watched(counter);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!writer.is_finished());
+        assert!(writable(counter));
+        let ep = super::super::epoll::epoll_create1([O_CLOEXEC, 0, 0, 0, 0, 0]);
+        assert!(ep >= 0);
+        let event = [libc::POLLOUT as u64, 7];
+        assert_eq!(
+            super::super::epoll::epoll_ctl([
+                ep as u64,
+                1,
+                counter as u64,
+                event.as_ptr() as u64,
+                0,
+                0
+            ]),
+            0
+        );
+        let mut output = [0u64; 2];
+        assert_eq!(
+            super::super::epoll::epoll_pwait([ep as u64, output.as_mut_ptr() as u64, 1, 0, 0, 0]),
+            1
+        );
+        assert_eq!(output[0] as u32, libc::POLLOUT as u32);
+        assert_eq!(read_count(counter), 10);
+        assert_eq!(writer.join().unwrap(), 8);
+        assert!(writable(counter));
+        assert_eq!(read_count(counter), (u64::MAX - 10) as i64);
+        assert_eq!(super::super::fs::close([ep as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(super::super::fs::close([counter as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// The lowest free host fd, which the guest's next open takes.
+    fn lowest_free() -> i32 {
+        // SAFETY: duplicating stdin to the lowest free slot, then closing it.
+        unsafe {
+            let fd = libc::fcntl(0, libc::F_DUPFD, 0);
+            assert!(fd >= 0);
+            libc::close(fd);
+            fd
+        }
+    }
+
+    /// A waiting write keeps its own descriptors out of the guest's way:
+    /// the guest's next open still takes the lowest free number.
+    #[test]
+    fn a_waiting_write_takes_no_guest_fd() {
+        // Other tests open and close fds concurrently.
+        if fdtab::isolated_kernel_test("sys::event::count_tests::a_waiting_write_takes_no_guest_fd")
+        {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let counter = eventfd2([10, 0, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        let free = lowest_free();
+        let writer = std::thread::spawn(move || write_count(counter, u64::MAX - 10));
+        until_watched(counter);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!writer.is_finished());
+        assert_eq!(lowest_free(), free);
+        assert_eq!(read_count(counter), 10);
+        assert_eq!(writer.join().unwrap(), 8);
+        assert_eq!(lowest_free(), free);
+        assert_eq!(super::super::fs::close([counter as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
     extern "C" fn interrupt(_: i32) {}
 
-    /// A blocked overflowing write that a signal interrupts stops waiting:
-    /// the eventfd is writable again, as `eventfd_poll` reports it from the
-    /// count alone.
+    /// A blocked overflowing write that a signal interrupts fails with
+    /// EINTR and leaves the count, and the fd writable, as they were.
     #[test]
     fn an_interrupted_overflowing_write_leaves_the_count_writable() {
         // A signal handler is installed for the process.
@@ -1005,11 +1153,8 @@ mod count_tests {
             write_count(counter, u64::MAX - 10)
         });
         let thread = rx.recv().unwrap();
+        until_watched(counter);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while writable(counter) {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
         // Until it lands in the wait rather than just before it.
         while !writer.is_finished() {
             assert!(std::time::Instant::now() < deadline);
