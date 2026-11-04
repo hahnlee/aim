@@ -41,6 +41,10 @@ pub struct Task {
     real_activity: String,
     pub bounds: Rect,
     windowing_mode: i32,
+    /// Its requested override windowing mode, 0 inheriting its parent's.
+    requested_mode: i32,
+    /// The organizer root task it is in (`getParent().asTask()`).
+    parent: Option<i32>,
     /// Its requested override bounds, `None` if empty (inheriting its parent's).
     requested_bounds: Option<Rect>,
     /// `mLastNonFullscreenBounds`.
@@ -176,14 +180,16 @@ impl Tasks {
             .map(|t| t.min_size)
     }
 
-    /// The bounds of task `id` in window mode, a freeform task's.
-    pub fn freeform_bounds(&self, id: i32) -> Option<Rect> {
+    /// The windowing mode and bounds of task `id` if its configuration is
+    /// of its own bounds: a freeform task's in window mode, or one's in an
+    /// organizer root task.
+    pub fn own_bounds(&self, id: i32) -> Option<(i32, Rect)> {
         self.tasks
             .lock()
             .unwrap()
             .iter()
-            .find(|t| t.id == id && t.windowing_mode == 5)
-            .map(|t| t.bounds)
+            .find(|t| t.id == id && (t.windowing_mode == 5 || t.parent.is_some()))
+            .map(|t| (t.windowing_mode, t.bounds))
     }
 
     /// The bounds of the tasks of a Mac window.
@@ -212,31 +218,74 @@ impl Tasks {
 
     /// The root tasks, top to bottom (`DisplayContent.forAllRootTasks`).
     pub(super) fn root_task_ids(&self) -> Vec<i32> {
+        self.children(None)
+    }
+
+    /// The tasks of the organizer root task `parent`, else the display
+    /// area's, top to bottom.
+    pub(super) fn children(&self, parent: Option<i32>) -> Vec<i32> {
         self.tasks
             .lock()
             .unwrap()
             .iter()
             .rev()
+            .filter(|t| t.parent == parent)
             .map(|t| t.id)
             .collect()
     }
 
-    /// Runs `f` with the layer of task `id`, made by `make` if it has none.
+    /// The organizer root task task `id` is in.
+    pub(super) fn parent(&self, id: i32) -> Option<i32> {
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)?
+            .parent
+    }
+
+    /// The windowing mode of task `id` (`getWindowingMode`).
+    pub(super) fn windowing_mode(&self, id: i32) -> Option<i32> {
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.windowing_mode)
+    }
+
+    /// Moves task `id` over or under the other tasks, without telling the
+    /// server: only for a task of no Mac window.
+    fn restack(&self, id: i32, to_top: bool) {
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(at) = tasks.iter().position(|t| t.id == id) {
+            let task = tasks.remove(at);
+            let at = if to_top { tasks.len() } else { 0 };
+            tasks.insert(at, task);
+        }
+    }
+
+    /// Runs `f` with the layer of task `id`, made by `make` if it has none,
+    /// given its organizer root task's layer if it is in one.
     pub fn with_layer<T>(
         &self,
         id: i32,
-        make: impl FnOnce(&Task) -> Result<Layer, String>,
+        make: impl FnOnce(&Task, Option<&Layer>) -> Result<Layer, String>,
         f: impl FnOnce(&Layer) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks
-            .iter_mut()
-            .find(|t| t.id == id)
+        let at = tasks
+            .iter()
+            .position(|t| t.id == id)
             .ok_or_else(|| format!("no task {id}"))?;
-        if task.layer.is_none() {
-            task.layer = Some(make(task)?);
+        if tasks[at].layer.is_none() {
+            let parent = tasks[at]
+                .parent
+                .and_then(|p| tasks.iter().find(|t| t.id == p)?.layer.as_ref());
+            let layer = make(&tasks[at], parent)?;
+            tasks[at].layer = Some(layer);
         }
-        f(task.layer.as_ref().unwrap())
+        f(tasks[at].layer.as_ref().unwrap())
     }
 
     /// The task `id`'s layer's place: its bounds, cut to them, in the
@@ -410,6 +459,8 @@ impl AppHost {
             real_activity,
             bounds,
             windowing_mode,
+            requested_mode: windowing_mode,
+            parent: None,
             requested_bounds: (windowing_mode == 5).then_some(bounds),
             restore_bounds: (windowing_mode == 5)
                 .then_some(bounds)
@@ -462,6 +513,7 @@ impl AppHost {
                 .ok_or_else(|| format!("no task {id}"))?;
             if options.mode != 0 {
                 task.windowing_mode = options.windowing_mode(self.tasks.window_mode());
+                task.requested_mode = task.windowing_mode;
             }
             let bounds = if task.windowing_mode == 5 {
                 let bounds = options.bounds.or(task.restore_bounds).unwrap_or_else(|| {
@@ -542,8 +594,8 @@ impl AppHost {
         let composer = self.composer().map_err(|e| format!("{e:?}"))?;
         let made = self.tasks.with_layer(
             id,
-            |task| {
-                self.with_display_layer(|parent| {
+            |task, root| {
+                let make = |parent: &Layer| {
                     composer.create_surface(
                         &self.process,
                         &format!("Task={id} {}", task.component),
@@ -551,7 +603,11 @@ impl AppHost {
                         Some(parent),
                         &[],
                     )
-                })
+                };
+                match root {
+                    Some(root) => make(root),
+                    None => self.with_display_layer(make),
+                }
             },
             f,
         )?;
@@ -670,6 +726,8 @@ impl AppHost {
                 real_activity: String::new(),
                 bounds,
                 windowing_mode: mode,
+                requested_mode: mode,
+                parent: None,
                 requested_bounds: None,
                 restore_bounds: None,
                 min_size: (-1, -1),
@@ -707,6 +765,132 @@ impl AppHost {
         let ids = roots.iter().map(|r| r.id).collect();
         self.remove_layers(roots.into_iter().filter_map(|r| r.layer).collect());
         ids
+    }
+
+    /// `Task.reparent` of task `id` into the organizer root task `parent`,
+    /// else onto the display area, over or under its new parent's tasks:
+    /// its layer becomes its new parent's child and its windowing mode and
+    /// bounds resolve in its new parent. It keeps its own Mac window.
+    pub(super) fn reparent_task(
+        self: &Arc<Self>,
+        id: i32,
+        parent: Option<i32>,
+        to_top: bool,
+    ) -> Result<(), String> {
+        let composer = self.composer().map_err(|e| e.message)?;
+        {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let at = tasks
+                .iter()
+                .position(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            let mut task = tasks.remove(at);
+            task.parent = parent;
+            let at = match parent {
+                Some(root) => {
+                    let base = tasks
+                        .iter()
+                        .position(|t| t.id == root)
+                        .ok_or_else(|| format!("no root task {root}"))?;
+                    let above = tasks.iter().rposition(|t| t.parent == parent);
+                    1 + if to_top { above.unwrap_or(base) } else { base }
+                }
+                None if to_top => tasks.len(),
+                None => 0,
+            };
+            let root = parent.and_then(|p| tasks.iter().find(|t| t.id == p)?.layer.as_ref());
+            if let Some(layer) = &task.layer {
+                let reparent = |parent: &Layer| {
+                    composer.apply(&[(
+                        layer,
+                        Change {
+                            parent: Some(parent.control(composer.binder())),
+                            ..Default::default()
+                        },
+                    )])
+                };
+                match root {
+                    Some(root) => reparent(root),
+                    None => self.with_display_layer(reparent),
+                }?;
+            }
+            tasks.insert(at, task);
+        }
+        self.place_tasks()?;
+        let change = self.task_change(id, None, None)?;
+        self.apply_task_change(id, change)
+    }
+
+    /// Requested `bounds` of the organizer root task `root` (its parent's,
+    /// the display's, if `None`), which its tasks resolve theirs in.
+    pub(super) fn set_root_bounds(
+        self: &Arc<Self>,
+        root: i32,
+        bounds: Option<Rect>,
+    ) -> Result<(), String> {
+        let display = self.display().map_err(|e| e.message)?;
+        {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == root && t.root.is_some())
+                .ok_or_else(|| format!("no root task {root}"))?;
+            task.bounds = bounds.unwrap_or(Rect {
+                left: 0,
+                top: 0,
+                right: display.0.width,
+                bottom: display.0.height,
+            });
+        }
+        for child in self.tasks.children(Some(root)) {
+            let change = self.task_change(child, None, None)?;
+            self.apply_task_change(child, change)?;
+        }
+        Ok(())
+    }
+
+    /// `positionChildAt` of the organizer root task `root` over or under
+    /// the display's tasks: its tasks come with it in their order, the top
+    /// one focused if it goes on top.
+    pub(super) fn reorder_root_task(
+        self: &Arc<Self>,
+        root: i32,
+        to_top: bool,
+    ) -> Result<(), String> {
+        let children = self.tasks.children(Some(root));
+        if to_top {
+            self.tasks.restack(root, true);
+            for child in children.iter().rev() {
+                self.focus_task(*child)?;
+            }
+        } else {
+            for child in &children {
+                self.reorder_task_to_back(*child)?;
+            }
+            self.tasks.restack(root, false);
+        }
+        self.place_tasks()
+    }
+
+    /// `Task.remove` of the organizer root tasks `roots`: their tasks leave
+    /// them, their surfaces with the roots', and their activities finish.
+    pub(super) fn remove_root_children(self: &Arc<Self>, roots: &[i32]) {
+        let children: Vec<i32> = self
+            .tasks
+            .tasks
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|t| t.parent.is_some_and(|p| roots.contains(&p)))
+            .map(|t| {
+                t.parent = None;
+                t.id
+            })
+            .collect();
+        for child in children {
+            let commands = self.activities.stack.lock().unwrap().remove(child);
+            self.run(commands);
+        }
     }
 
     /// Takes the server's requests until it closes the connection.
@@ -871,14 +1055,22 @@ impl AppHost {
                 .iter()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
-            // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its parent.
-            if mode.unwrap_or(task.windowing_mode) != 5 {
-                return Ok(Rect {
-                    left: 0,
-                    top: 0,
-                    right: display.0.width,
-                    bottom: display.0.height,
-                });
+            // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its
+            // parent; a multi-window task keeps its requested bounds.
+            match mode.unwrap_or(task.windowing_mode) {
+                5 => {}
+                6 => return Ok(bounds),
+                _ => {
+                    return Ok(parent_of(&tasks, task).map_or(
+                        Rect {
+                            left: 0,
+                            top: 0,
+                            right: display.0.width,
+                            bottom: display.0.height,
+                        },
+                        |p| p.1,
+                    ));
+                }
             }
             let default_min = (min_dp as f32 * density) as i32;
             let min = (
@@ -939,7 +1131,9 @@ impl AppHost {
             task.bounds = bounds;
             match requested {
                 Some(r) => task.requested_bounds = r,
-                None if task.windowing_mode == 5 => task.requested_bounds = Some(bounds),
+                None if matches!(task.windowing_mode, 5 | 6) => {
+                    task.requested_bounds = Some(bounds)
+                }
                 None => {}
             }
             if task.windowing_mode == 5 && task.requested_bounds.is_some() {
@@ -982,10 +1176,11 @@ impl AppHost {
     }
 
     /// A WCT `Change` of task `id`, admitted without mutating it, as
-    /// `WindowOrganizerController.applyChanges` would apply it: its windowing
-    /// mode (`mode`), then its requested bounds (`bounds`, `Some(None)` to
-    /// inherit the display's), which it keeps in any mode and which resolve in
-    /// freeform only.
+    /// `WindowOrganizerController.applyChanges` would apply it: its requested
+    /// windowing mode (`mode`), then its requested bounds (`bounds`,
+    /// `Some(None)` to inherit its parent's), which it keeps in any mode and
+    /// which resolve in freeform and multi-window only. Both resolve in its
+    /// parent: its organizer root task, else the display area.
     pub(super) fn task_change(
         &self,
         id: i32,
@@ -999,24 +1194,27 @@ impl AppHost {
             right: display.0.width,
             bottom: display.0.height,
         };
-        let (current, requested, restore) = self
-            .tasks
-            .tasks
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| (t.windowing_mode, t.requested_bounds, t.restore_bounds))
-            .ok_or_else(|| format!("no task {id}"))?;
-        // TaskDisplayArea.isValidWindowingMode: fullscreen, or freeform where the
-        // display area is; any other mode is undefined and inherits the display area's.
-        let mode = mode.map_or(current, |m| {
-            if m == 1 || !self.tasks.window_mode() {
-                1
-            } else {
-                5
-            }
-        });
+        let (current, requested_mode, requested, restore, parent) = {
+            let tasks = self.tasks.tasks.lock().unwrap();
+            let t = tasks
+                .iter()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            (
+                t.windowing_mode,
+                t.requested_mode,
+                t.requested_bounds,
+                t.restore_bounds,
+                parent_of(&tasks, t),
+            )
+        };
+        let requested_mode = mode.unwrap_or(requested_mode);
+        let mode = resolved_mode(
+            self.tasks.window_mode(),
+            requested_mode,
+            parent.map(|p| p.0),
+        );
+        let area = parent.map_or(area, |p| p.1);
         let mut requested = bounds.unwrap_or(requested);
         // Task.onConfigurationChangedInner: a task entering freeform without
         // requested bounds takes its last non-fullscreen bounds; with neither,
@@ -1026,10 +1224,12 @@ impl AppHost {
         }
         let bounds = match requested {
             Some(b) if mode == 5 => self.task_move_bounds(id, Some(mode), b)?,
+            Some(b) if mode == 6 => b,
             _ => area,
         };
         Ok(TaskChange {
             mode,
+            requested_mode,
             bounds,
             requested,
         })
@@ -1049,6 +1249,7 @@ impl AppHost {
                 .iter_mut()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
+            task.requested_mode = c.requested_mode;
             std::mem::replace(&mut task.windowing_mode, c.mode) != c.mode
         };
         if changed {
@@ -1120,8 +1321,31 @@ impl AppHost {
 /// (`AppHost::task_change`).
 pub(super) struct TaskChange {
     mode: i32,
+    requested_mode: i32,
     bounds: Rect,
     requested: Option<Rect>,
+}
+
+/// The windowing mode and bounds of the organizer root task `task` is in.
+fn parent_of(tasks: &[Task], task: &Task) -> Option<(i32, Rect)> {
+    let parent = task.parent?;
+    let p = tasks.iter().find(|t| t.id == parent)?;
+    Some((p.windowing_mode, p.bounds))
+}
+
+/// `getWindowingMode` of a task requesting windowing mode `requested`, in
+/// an organizer root task of windowing mode `parent` if in one, where an
+/// undefined mode (or one this owner does not serve in a root task)
+/// inherits the root task's. On the display area, a mode
+/// `TaskDisplayArea.isValidWindowingMode` rejects is undefined and inherits
+/// the display area's: fullscreen, or freeform in window mode.
+fn resolved_mode(windows: bool, requested: i32, parent: Option<i32>) -> i32 {
+    match parent {
+        Some(_) if matches!(requested, 1 | 5 | 6) => requested,
+        Some(p) => p,
+        None if requested == 1 || !windows => 1,
+        None => 5,
+    }
 }
 
 /// `Task.adjustForMinimalTaskDimensions`: `bounds` at least `min` wide and
@@ -1573,9 +1797,9 @@ pub(super) mod tests {
                     .unwrap()
                     .task;
                 if mode == 5 {
-                    assert_eq!(host.tasks.freeform_bounds(id), Some(bounds));
+                    assert_eq!(host.tasks.own_bounds(id), Some((5, bounds)));
                 } else {
-                    assert!(host.tasks.freeform_bounds(id).is_none());
+                    assert!(host.tasks.own_bounds(id).is_none());
                     let display = host.display().unwrap();
                     assert_eq!(
                         host.tasks.bounds(id),
@@ -1608,8 +1832,8 @@ pub(super) mod tests {
                 )
                 .unwrap();
                 assert_eq!(
-                    host.tasks.freeform_bounds(id),
-                    (mode == 5).then_some(before)
+                    host.tasks.own_bounds(id),
+                    (mode == 5).then_some((5, before))
                 );
             }
             for display in [-2, 1, 123] {
@@ -1658,7 +1882,7 @@ pub(super) mod tests {
             // A fully resolved record keeps its size despite a new orientation.
             info.screen_orientation = 0;
             let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
-            assert_eq!(host.tasks.freeform_bounds(id), Some(saved));
+            assert_eq!(host.tasks.own_bounds(id), Some((5, saved)));
             // PHASE_BOUNDS still avoids another task's corners.
             let next = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
             let shifted = host.tasks.bounds(next).unwrap();
@@ -1767,7 +1991,7 @@ pub(super) mod tests {
                 .unlock_user(0, BTreeSet::from(["p".into()]))
                 .unwrap();
             let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
-            assert_eq!(host.tasks.freeform_bounds(id), None);
+            assert_eq!(host.tasks.own_bounds(id), None);
             let t = &host.tasks.tasks.lock().unwrap()[0];
             assert_eq!((t.windowing_mode, t.restore_bounds), (1, Some(saved)));
         });
@@ -1909,7 +2133,7 @@ pub(super) mod tests {
             );
             let mut records = host.activities.records.lock().unwrap();
             let record = records.get_mut(&token).unwrap();
-            record.reported = Some(global.of_freeform_task(old));
+            record.reported = Some(global.of_task(5, old));
             record.config_changes = i32::MAX;
             // The process follows the activity of task 7.
             record.ident = 9 - id;
@@ -1933,7 +2157,7 @@ pub(super) mod tests {
         use super::super::{
             activity_stack::{State, Visibility},
             task_organizer::tests::apply_wct,
-            window_container_transaction::{Change, Transaction, tests::fixture},
+            window_container_transaction::{Change, Hop, Transaction, tests::fixture},
         };
         crate::system::with_discovery_binders(|host, _, _, export| {
             let old = Rect {
@@ -2000,7 +2224,8 @@ pub(super) mod tests {
             );
             // A valid resize followed by an unknown task must not change either owner or bridge.
             let mut bad = Transaction::read(&mut request.reader()).unwrap();
-            bad.reorders.push((Binder::Local(u64::MAX), false));
+            bad.hierarchy
+                .push(Hop::Reorder(Binder::Local(u64::MAX), false));
             assert!(host.apply_window_transaction(bad).is_err());
             let mut bad = Transaction::read(&mut request.reader()).unwrap();
             bad.changes.push(Change {
@@ -2076,7 +2301,7 @@ pub(super) mod tests {
             drop(records);
             host.apply_window_transaction(Transaction {
                 changes: vec![],
-                reorders: vec![(token, false)],
+                hierarchy: vec![Hop::Reorder(token, false)],
             })
             .unwrap();
             let stack = host.activities.stack.lock().unwrap();
@@ -2155,7 +2380,7 @@ pub(super) mod tests {
             let response = apply_wct(host, &request, 1000);
             response.reader().read_exception().unwrap().unwrap();
             assert_eq!(host.tasks.bounds(7), Some(area));
-            assert_eq!(host.tasks.freeform_bounds(7), None);
+            assert_eq!(host.tasks.own_bounds(7), None);
             assert_eq!(
                 host.tasks
                     .tasks
@@ -2206,7 +2431,7 @@ pub(super) mod tests {
         use super::super::{
             activity_stack::{State, Visibility},
             task_organizer::tests::apply_wct,
-            window_container_transaction::{Change, Transaction, tests::fixture},
+            window_container_transaction::{Change, Hop, Transaction, tests::fixture},
         };
         crate::system::with_discovery_binders(|host, _, _, export| {
             let old = Rect {
@@ -2259,7 +2484,7 @@ pub(super) mod tests {
                     bounds: None,
                     mode: Some(1),
                 }],
-                reorders: vec![(Binder::Local(u64::MAX), true)],
+                hierarchy: vec![Hop::Reorder(Binder::Local(u64::MAX), true)],
             };
             assert!(host.apply_window_transaction(bad).is_err());
             assert_eq!(task7(host), (5, old, Some(old)));
@@ -2277,7 +2502,7 @@ pub(super) mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(task7(host), (1, area, Some(old)));
-            assert_eq!(host.tasks.freeform_bounds(7), None);
+            assert_eq!(host.tasks.own_bounds(7), None);
             assert_eq!(reported(host, 0), (1, area));
             assert_eq!(reported(host, 1), (5, old));
             assert_eq!(last_task_record(&mut receive), Some(vec![0, 0, 1080, 1920]));
@@ -2300,7 +2525,7 @@ pub(super) mod tests {
                     bounds: None,
                     mode: Some(0),
                 }],
-                reorders: vec![],
+                hierarchy: vec![],
             })
             .unwrap();
             let restored = Rect {
@@ -2333,7 +2558,7 @@ pub(super) mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(task7(host), (5, area, Some(restored)));
-            assert_eq!(host.tasks.freeform_bounds(7), Some(area));
+            assert_eq!(host.tasks.own_bounds(7), Some((5, area)));
             assert_eq!(reported(host, 0), (5, area));
         });
     }
@@ -2380,7 +2605,7 @@ pub(super) mod tests {
                         bounds,
                         mode,
                     }],
-                    reorders: vec![],
+                    hierarchy: vec![],
                 })
                 .unwrap()
             };
@@ -2443,6 +2668,8 @@ impl Tasks {
             real_activity: "p/p.Main".into(),
             bounds,
             windowing_mode,
+            requested_mode: windowing_mode,
+            parent: None,
             requested_bounds: (windowing_mode == 5).then_some(bounds),
             restore_bounds: (windowing_mode == 5).then_some(bounds),
             min_size: (-1, -1),
@@ -2490,7 +2717,7 @@ impl AppHost {
 impl Tasks {
     pub(super) fn migrate_organized_layers(
         &self,
-        migrate: impl FnOnce(&[(i32, &Layer, Rect, i32)]) -> Result<Vec<Layer>, String>,
+        migrate: impl FnOnce(&[(i32, &Layer, Rect, i32, Option<i32>)]) -> Result<Vec<Layer>, String>,
     ) -> Result<(), String> {
         let mut tasks = self.tasks.lock().unwrap();
         let current: Vec<_> = tasks
@@ -2502,6 +2729,7 @@ impl Tasks {
                     t.layer.as_ref().filter(|_| t.organized)?,
                     t.bounds,
                     z as i32,
+                    t.parent,
                 ))
             })
             .collect();

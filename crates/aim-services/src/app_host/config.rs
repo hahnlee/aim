@@ -46,7 +46,6 @@ const UI_MODE_NIGHT_NO: i32 = 0x10;
 const UI_MODE_NIGHT_YES: i32 = 0x20;
 /// `WindowConfiguration`'s.
 const WINDOWING_MODE_FULLSCREEN: i32 = 1;
-const WINDOWING_MODE_FREEFORM: i32 = 5;
 const ACTIVITY_TYPE_UNDEFINED: i32 = 0;
 const ALWAYS_ON_TOP_UNDEFINED: i32 = 0;
 const ROTATION_0: i32 = 0;
@@ -813,12 +812,12 @@ impl Configuration {
 }
 
 impl Configuration {
-    /// The configuration of a freeform task of `bounds` on the display of
-    /// this global configuration, merged into it, as `TaskFragment
-    /// .computeConfigResourceOverrides` resolves a floating task's
-    /// (its sizes from its bounds; no insets) and `Configuration
+    /// The configuration of a task in windowing `mode` at `bounds` on the
+    /// display of this global configuration, merged into it, as
+    /// `TaskFragment.computeConfigResourceOverrides` resolves a task of its
+    /// own bounds (its sizes from its bounds; no insets) and `Configuration
     /// .updateFrom` merges it.
-    pub fn of_freeform_task(&self, bounds: Rect) -> Configuration {
+    pub fn of_task(&self, mode: i32, bounds: Rect) -> Configuration {
         let density = self.density_dpi as f32 / 160.0;
         let dp = |px: i32| (px as f32 / density + 0.5) as i32;
         let (width_dp, height_dp) = (
@@ -826,7 +825,7 @@ impl Configuration {
             dp(bounds.height()).min(self.screen_height_dp),
         );
         let mut task = self.clone();
-        task.window.windowing_mode = WINDOWING_MODE_FREEFORM;
+        task.window.windowing_mode = mode;
         task.window.bounds = bounds;
         task.window.app_bounds = Some(bounds);
         task.screen_width_dp = width_dp;
@@ -1341,10 +1340,7 @@ mod tests {
                     right: 810,
                     bottom: 620,
                 };
-                assert_eq!(
-                    actual.of_freeform_task(bounds),
-                    expected.of_freeform_task(bounds)
-                );
+                assert_eq!(actual.of_task(5, bounds), expected.of_task(5, bounds));
             }
         }
     }
@@ -1464,7 +1460,7 @@ mod tests {
             right: 900,
             bottom: 1000,
         };
-        let task = global.of_freeform_task(bounds);
+        let task = global.of_task(5, bounds);
         assert_eq!(
             (
                 task.window.windowing_mode,
@@ -1503,26 +1499,35 @@ mod tests {
             seq: 1,
         };
         let global = Configuration::of(&display, &device);
-        let old = global.of_freeform_task(Rect {
-            left: 0,
-            top: 0,
-            right: 800,
-            bottom: 1400,
-        });
-        let moved = global.of_freeform_task(Rect {
-            left: 50,
-            top: 0,
-            right: 850,
-            bottom: 1400,
-        });
+        let old = global.of_task(
+            5,
+            Rect {
+                left: 0,
+                top: 0,
+                right: 800,
+                bottom: 1400,
+            },
+        );
+        let moved = global.of_task(
+            5,
+            Rect {
+                left: 50,
+                top: 0,
+                right: 850,
+                bottom: 1400,
+            },
+        );
         // A move changes only the window configuration.
         assert_eq!(old.diff(&moved), CONFIG_WINDOW_CONFIGURATION);
-        let wider = global.of_freeform_task(Rect {
-            left: 0,
-            top: 0,
-            right: 900,
-            bottom: 1400,
-        });
+        let wider = global.of_task(
+            5,
+            Rect {
+                left: 0,
+                top: 0,
+                right: 900,
+                bottom: 1400,
+            },
+        );
         let diff = old.diff(&wider);
         // 400 to 450 dp wide: small to normal too.
         assert_eq!(

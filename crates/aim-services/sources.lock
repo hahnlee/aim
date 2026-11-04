@@ -278,7 +278,7 @@ SOURCE_FILES=(
 # their arguments and replies.
 INTERFACES=(
   "android.window.IWindowOrganizerController|system/framework/framework.jar|getTaskOrganizerController"
-  "android.window.ITaskOrganizerController|system/framework/framework.jar|registerTaskOrganizer,unregisterTaskOrganizer,createRootTask,deleteRootTask,getRootTasks"
+  "android.window.ITaskOrganizerController|system/framework/framework.jar|registerTaskOrganizer,unregisterTaskOrganizer,createRootTask,deleteRootTask,getChildTasks,getRootTasks"
   "android.window.ITaskOrganizer|system/framework/framework.jar|onTaskAppeared,onTaskVanished,onTaskInfoChanged"
   "android.app.IUiAutomationConnection|system/framework/framework.jar|shutdown"
   "android.app.IInstrumentationWatcher|system/framework/framework.jar|*"

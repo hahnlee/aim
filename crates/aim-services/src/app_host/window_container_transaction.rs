@@ -14,10 +14,33 @@ pub(super) struct Change {
     /// `Change.mWindowingMode`, unless negative (unchanged).
     pub mode: Option<i32>,
 }
+/// A `HierarchyOp` of a task hierarchy.
+#[derive(Debug, PartialEq)]
+pub(super) enum Hop {
+    /// `reorder`: the task over or under its siblings.
+    Reorder(Binder, bool),
+    /// `reparent`: the task into a new parent, the display area if `None`,
+    /// over or under its tasks.
+    Reparent {
+        task: Binder,
+        parent: Option<Binder>,
+        to_top: bool,
+    },
+    /// `reparentTasks`: the tasks of a parent of the given windowing modes
+    /// and activity types into another, either the display area if `None`.
+    ReparentChildren {
+        from: Option<Binder>,
+        to: Option<Binder>,
+        modes: Option<Vec<i32>>,
+        types: Option<Vec<i32>>,
+        to_top: bool,
+        top_only: bool,
+    },
+}
 #[derive(Debug)]
 pub(super) struct Transaction {
     pub changes: Vec<Change>,
-    pub reorders: Vec<(Binder, bool)>,
+    pub hierarchy: Vec<Hop>,
 }
 fn malformed() -> Exception {
     Exception::illegal_argument("malformed WindowContainerTransaction")
@@ -43,6 +66,9 @@ fn binder(r: &mut Reader<'_>) -> Result<Binder, Exception> {
         .map_err(|_| malformed())?
         .ok_or_else(malformed)
 }
+fn optional_binder(r: &mut Reader<'_>) -> Result<Option<Binder>, Exception> {
+    r.read_binder().map_err(|_| malformed())
+}
 fn null_binder(r: &mut Reader<'_>) -> Result<(), Exception> {
     if r.read_binder().map_err(|_| malformed())?.is_some() {
         return Err(unsupported());
@@ -62,12 +88,24 @@ fn count(r: &mut Reader<'_>) -> Result<usize, Exception> {
     }
     Ok(n)
 }
+/// `Parcel.writeIntArray`: -1 for null.
+fn int_array(r: &mut Reader<'_>) -> Result<Option<Vec<i32>>, Exception> {
+    let n = int(r)?;
+    if n == -1 {
+        return Ok(None);
+    }
+    let n = usize::try_from(n).map_err(|_| malformed())?;
+    if n > r.remaining() / 4 {
+        return Err(malformed());
+    }
+    (0..n).map(|_| int(r)).collect::<Result<_, _>>().map(Some)
+}
 impl Transaction {
     /// The enclosing AIDL typed object has already been unwrapped.
     pub fn read(r: &mut Reader<'_>) -> Result<Self, Exception> {
         let mut out = Self {
             changes: Vec::new(),
-            reorders: Vec::new(),
+            hierarchy: Vec::new(),
         };
         let mut keys = Vec::new();
         for _ in 0..count(r)? {
@@ -101,8 +139,8 @@ impl Transaction {
                 return Err(unsupported());
             }
             let mode = match int(r)? {
-                // Pinned needs the PiP owner; multi-window needs organizer roots (#2616).
-                2 | 6 => return Err(unsupported()),
+                // Pinned needs the PiP owner (#2616).
+                2 => return Err(unsupported()),
                 // `applyChanges` ignores any mode below 0.
                 m => (m >= 0).then_some(m),
             };
@@ -132,25 +170,27 @@ impl Transaction {
         }
         for _ in 0..count(r)? {
             expect(r, 1)?; // typed HierarchyOp present
-            expect(r, 1)?; // HIERARCHY_OP_TYPE_REORDER
-            let token = binder(r)?;
+            // HIERARCHY_OP_TYPE_REPARENT, _REORDER or _CHILDREN_TASKS_REPARENT
+            let kind = int(r)?;
+            if !(0..=2).contains(&kind) {
+                return Err(unsupported());
+            }
+            let container = optional_binder(r)?;
             expect(r, -1)?; // containers array
             expect(r, 0)?; // bounds
             if boolean(r)? {
                 return Err(unsupported());
             } // includingParents
-            if binder(r)? != token {
-                return Err(malformed());
-            } // createForReorder
+            let reparent = optional_binder(r)?;
             expect(r, 0)?; // InsetsFrameProvider
             null_binder(r)?;
             let to_top = boolean(r)?;
-            if boolean(r)? {
-                return Err(unsupported());
-            } // reparentTopOnly
-            for _ in 0..4 {
+            let top_only = boolean(r)?;
+            let modes = int_array(r)?;
+            let types = int_array(r)?;
+            for _ in 0..2 {
                 expect(r, -1)?;
-            } // mode/type arrays, two Bundles
+            } // two Bundles
             for _ in 0..5 {
                 expect(r, 0)?;
             } // Intent, fragment, keyguard, pending, shortcut
@@ -164,18 +204,62 @@ impl Transaction {
                 return Err(unsupported());
             } // launchAdjacentDisabled
             expect(r, 0)?; // safeRegionBounds
-            out.reorders.push((token, to_top));
+            if kind == 2 {
+                out.hierarchy.push(Hop::ReparentChildren {
+                    from: container,
+                    to: reparent,
+                    modes,
+                    types,
+                    to_top,
+                    top_only,
+                });
+                continue;
+            }
+            // reparentTopOnly and the filters are reparentTasks'.
+            if top_only || modes.is_some() || types.is_some() {
+                return Err(unsupported());
+            }
+            let task = container.ok_or_else(malformed)?;
+            out.hierarchy.push(if kind == 1 {
+                // createForReorder
+                if reparent != Some(task) {
+                    return Err(malformed());
+                }
+                Hop::Reorder(task, to_top)
+            } else {
+                Hop::Reparent {
+                    task,
+                    parent: reparent,
+                    to_top,
+                }
+            });
         }
         null_binder(r)?; // error callback token
         null_binder(r)?; // task fragment organizer
         if r.remaining() != 0 {
             return Err(malformed());
         }
-        if out.changes.is_empty() && out.reorders.is_empty() {
+        if out.changes.is_empty() && out.hierarchy.is_empty() {
             return Err(unsupported());
         }
         Ok(out)
     }
+}
+
+/// An admitted hierarchy operation, of task ids.
+enum Admitted {
+    Reorder(i32, bool),
+    Reparent(i32, Option<i32>, bool),
+    ReparentChildren(Children),
+}
+/// An admitted `reparentTasks`.
+struct Children {
+    from: Option<i32>,
+    to: Option<i32>,
+    modes: Option<Vec<i32>>,
+    types: Option<Vec<i32>>,
+    to_top: bool,
+    top_only: bool,
 }
 
 impl super::AppHost {
@@ -188,46 +272,177 @@ impl super::AppHost {
             let id = self
                 .task_of_token(token)
                 .ok_or_else(|| Exception::illegal_argument("unknown WCT task token"))?;
-            // Organizer root task changes and hierarchy (#2616).
-            if self.tasks.root(id).is_some() {
-                return Err(unsupported());
-            }
             if self.tasks.bounds(id).is_none()
-                || self.activities.stack.lock().unwrap().task(id).is_none()
+                || (self.tasks.root(id).is_none()
+                    && self.activities.stack.lock().unwrap().task(id).is_none())
             {
                 return Err(Exception::illegal_argument("removed WCT task"));
             }
             Ok(id)
         };
+        // A parent: an organizer root task, else the display area. Nesting a
+        // task in an app task is not served (#2616).
+        let parent = |token: Option<Binder>| {
+            token
+                .map(|token| {
+                    let id = resolve(token)?;
+                    match self.tasks.root(id) {
+                        Some(_) => Ok(id),
+                        None => Err(unsupported()),
+                    }
+                })
+                .transpose()
+        };
+        let mut roots = Vec::new();
         let mut changes = Vec::new();
         for c in t.changes {
             let id = resolve(c.token)?;
-            changes.push((
-                id,
-                self.task_change(id, c.mode, c.bounds)
-                    .map_err(Exception::illegal_argument)?,
-            ));
+            if self.tasks.root(id).is_some() {
+                // Root tasks of another windowing mode (#2616).
+                if c.mode.is_some_and(|m| m != 6) {
+                    return Err(unsupported());
+                }
+                if let Some(bounds) = c.bounds {
+                    roots.push((id, bounds));
+                }
+                continue;
+            }
+            // Multi-window tasks of the display area (#2616).
+            if c.mode == Some(6) && self.tasks.parent(id).is_none() {
+                return Err(unsupported());
+            }
+            self.task_change(id, c.mode, c.bounds)
+                .map_err(Exception::illegal_argument)?;
+            changes.push((id, c.mode, c.bounds));
         }
-        let reorders = t
-            .reorders
-            .into_iter()
-            .map(|(token, top)| Ok((resolve(token)?, top)))
-            .collect::<Result<Vec<_>, Exception>>()?;
-        if changes.is_empty() && reorders.is_empty() {
+        let mut hierarchy = Vec::new();
+        for hop in t.hierarchy {
+            hierarchy.push(match hop {
+                Hop::Reorder(token, top) => Admitted::Reorder(resolve(token)?, top),
+                Hop::Reparent {
+                    task,
+                    parent: to,
+                    to_top,
+                } => {
+                    let id = resolve(task)?;
+                    // Nested organizer root tasks (#2616).
+                    if self.tasks.root(id).is_some() {
+                        return Err(unsupported());
+                    }
+                    Admitted::Reparent(id, parent(to)?, to_top)
+                }
+                Hop::ReparentChildren { from, to, .. } if from.is_none() && to.is_none() => {
+                    return Err(Exception::illegal_argument(
+                        "reparentChildrenTasksHierarchyOp: no parents",
+                    ));
+                }
+                Hop::ReparentChildren {
+                    from,
+                    to,
+                    modes,
+                    types,
+                    to_top,
+                    top_only,
+                } => Admitted::ReparentChildren(Children {
+                    from: parent(from)?,
+                    to: parent(to)?,
+                    modes,
+                    types,
+                    to_top,
+                    top_only,
+                }),
+            });
+        }
+        if changes.is_empty() && roots.is_empty() && hierarchy.is_empty() {
             return Err(unsupported());
         }
-        for (id, change) in changes {
+        for (id, bounds) in roots {
+            self.set_root_bounds(id, bounds).map_err(owner_error)?;
+        }
+        for (id, mode, bounds) in changes {
+            let change = self.task_change(id, mode, bounds).map_err(owner_error)?;
             self.apply_task_change(id, change).map_err(owner_error)?;
         }
-        for (id, top) in reorders {
-            if top {
-                self.focus_task(id)
-            } else {
-                self.reorder_task_to_back(id)
+        for hop in hierarchy {
+            match hop {
+                Admitted::Reorder(id, top) => self.reorder(id, top),
+                // sanitizeAndApplyHierarchyOpForTask: a task already there
+                // moves with its root task.
+                Admitted::Reparent(id, to, top) if self.tasks.parent(id) == to => {
+                    self.reorder(to.unwrap_or(id), top)
+                }
+                Admitted::Reparent(id, to, top) => {
+                    if to.is_none() || self.organizer_task_info(id)?.supports_multi_window {
+                        self.reparent_task(id, to, top)
+                    } else {
+                        eprintln!("app host: task {id} doesn't support multi-window mode");
+                        Ok(())
+                    }
+                }
+                Admitted::ReparentChildren(c) => self.reparent_children(c),
             }
             .map_err(owner_error)?;
         }
         self.organizer_tasks_changed()
+    }
+
+    fn reorder(self: &std::sync::Arc<Self>, id: i32, top: bool) -> Result<(), String> {
+        if self.tasks.root(id).is_some() {
+            self.reorder_root_task(id, top)
+        } else if top {
+            self.focus_task(id)
+        } else {
+            self.reorder_task_to_back(id)
+        }
+    }
+
+    /// `reparentChildrenTasksHierarchyOp` from the organizer root task
+    /// `from` to `to`, either the display area if `None`: the tasks it did
+    /// not create of the modes and types, in their order, the top one only
+    /// if `top_only`.
+    fn reparent_children(self: &std::sync::Arc<Self>, c: Children) -> Result<(), String> {
+        let Children {
+            from,
+            to,
+            modes,
+            types,
+            to_top,
+            top_only,
+        } = c;
+        if from == to {
+            eprintln!("app host: reparentTasks parent not changing");
+            return Ok(());
+        }
+        let mut tasks = Vec::new();
+        for id in self.tasks.children(from) {
+            if self.tasks.root(id).is_some() {
+                continue;
+            }
+            let info = self.organizer_task_info(id).map_err(|e| e.message)?;
+            let mode = self.tasks.windowing_mode(id).ok_or("task gone")?;
+            if (to.is_some() && !info.supports_multi_window)
+                || types
+                    .as_ref()
+                    .is_some_and(|t| !t.is_empty() && !t.contains(&info.activity_type))
+                || modes
+                    .as_ref()
+                    .is_some_and(|m| !m.is_empty() && !m.contains(&mode))
+            {
+                continue;
+            }
+            if to_top {
+                tasks.insert(0, id);
+            } else {
+                tasks.push(id);
+            }
+            if top_only {
+                break;
+            }
+        }
+        for id in tasks {
+            self.reparent_task(id, to, to_top)?;
+        }
+        Ok(())
     }
 }
 fn owner_error(e: String) -> Exception {

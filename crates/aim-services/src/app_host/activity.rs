@@ -374,7 +374,7 @@ impl AppHost {
 pub struct Launch<'a> {
     pub global: &'a Configuration,
     /// The bounds of its task in window mode, else the display's.
-    pub task: Option<super::config::Rect>,
+    pub task: Option<(i32, super::config::Rect)>,
 }
 
 impl AppHost {
@@ -400,7 +400,7 @@ impl AppHost {
             *next
         };
         let mut override_config = match launch.task {
-            Some(bounds) => launch.global.of_freeform_task(bounds),
+            Some((mode, bounds)) => launch.global.of_task(mode, bounds),
             None => launch.global.clone(),
         };
         override_config.window.activity_type = ACTIVITY_TYPE_STANDARD;
@@ -471,7 +471,7 @@ impl AppHost {
         self.reconfigure(
             |r| r.task == task,
             |uid| globals.get(&uid),
-            |_| self.tasks.freeform_bounds(task).map(|_| bounds),
+            |_| self.tasks.own_bounds(task).map(|(mode, _)| (mode, bounds)),
         )
     }
 
@@ -482,7 +482,7 @@ impl AppHost {
     pub(super) fn reconfigure_all_activities(
         &self,
         global: &Configuration,
-        freeform: impl Fn(i32) -> Option<config::Rect>,
+        freeform: impl Fn(i32) -> Option<(i32, config::Rect)>,
     ) -> ProcessItems {
         self.reconfigure(|_| true, |_| Some(global), freeform).0
     }
@@ -494,7 +494,7 @@ impl AppHost {
         &self,
         pick: impl Fn(&ActivityRecord) -> bool,
         global_of: impl Fn(u32) -> Option<&'g Configuration>,
-        freeform: impl Fn(i32) -> Option<config::Rect>,
+        freeform: impl Fn(i32) -> Option<(i32, config::Rect)>,
     ) -> (ProcessItems, bool) {
         let mut records = self.activities.records.lock().unwrap();
         let mut items: ProcessItems = Vec::new();
@@ -505,7 +505,7 @@ impl AppHost {
                 continue;
             };
             let mut new = match freeform(record.task) {
-                Some(bounds) => global.of_freeform_task(bounds),
+                Some((mode, bounds)) => global.of_task(mode, bounds),
                 None => global.clone(),
             };
             new.window.activity_type = ACTIVITY_TYPE_STANDARD;

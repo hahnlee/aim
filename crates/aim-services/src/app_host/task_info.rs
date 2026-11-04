@@ -607,9 +607,10 @@ impl AppHost {
                     format!("task {task} of no running process"),
                 )
             })?;
-        let bounds = self.tasks.freeform_bounds(task);
+        let bounds = self.tasks.own_bounds(task);
+        let parent = self.tasks.parent(task);
         let mut configuration = match bounds {
-            Some(bounds) => global.of_freeform_task(bounds),
+            Some((mode, bounds)) => global.of_task(mode, bounds),
             None => global.clone(),
         };
         configuration.window.activity_type = ACTIVITY_TYPE_STANDARD;
@@ -663,19 +664,25 @@ impl AppHost {
             is_running: true,
             activity_type: ACTIVITY_TYPE_STANDARD,
             launch_cookie: None,
-            parent_task_id: INVALID_TASK_ID,
+            parent_task_id: parent.unwrap_or(INVALID_TASK_ID),
             top_activity_info: Some(top_info),
             is_resizeable,
             min_width: min_size.0,
             min_height: min_size.1,
             default_min_size,
-            position_in_parent: bounds.map_or((0, 0), |b| (b.left, b.top)),
+            // `getRelativePosition`, in its root task if it is in one.
+            position_in_parent: bounds.map_or((0, 0), |(_, b)| {
+                let origin = parent
+                    .and_then(|p| self.tasks.root(p))
+                    .map_or((0, 0), |r| (r.bounds.left, r.bounds.top));
+                (b.left - origin.0, b.top - origin.1)
+            }),
             is_focused: focused,
             is_visible: visibility != Visibility::Invisible,
             is_top_activity_no_display: top_no_display,
             is_top_activity_transparent: !top_occludes,
             is_activity_stack_transparent: translucent,
-            last_non_fullscreen_bounds: bounds,
+            last_non_fullscreen_bounds: bounds.filter(|b| b.0 == 5).map(|b| b.1),
             top_activity_app_bounds: global.window.app_bounds.unwrap_or(global.window.bounds),
         };
         if !allowed {
@@ -1057,7 +1064,7 @@ pub(super) mod tests {
             bottom: 1480,
         };
         let configuration =
-            Configuration::of(&Display::phone_for_test(), &device).of_freeform_task(bounds);
+            Configuration::of(&Display::phone_for_test(), &device).of_task(5, bounds);
         let task = Task {
             id: 9,
             affinity: None,
