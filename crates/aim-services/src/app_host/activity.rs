@@ -409,7 +409,7 @@ impl AppHost {
         let bounds = override_config.window.bounds;
         let intent: Box<dyn WriteParcelable> = match &record.intent {
             super::activity_start::LaunchIntent::Component => Box::new(Intent {
-                component: (record.package.clone(), record.class.clone()),
+                component: Some((record.package.clone(), record.class.clone())),
                 flags: FLAG_ACTIVITY_NEW_TASK
                     | if record.info.flags & FLAG_EXCLUDE_FROM_RECENTS != 0 {
                         FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
@@ -832,10 +832,11 @@ impl ActivityWindowInfo {
     }
 }
 
-/// An explicit `Intent` to a component, as `Intent.writeToParcel` writes
-/// it with intent redirect prevention (`preventIntentRedirect`) on.
+/// An `Intent` to a component (none for `new Intent()`), as
+/// `Intent.writeToParcel` writes it with intent redirect prevention
+/// (`preventIntentRedirect`) on.
 pub(super) struct Intent {
-    pub component: (String, String),
+    pub component: Option<(String, String)>,
     pub flags: i32,
     pub extended_flags: i32,
     pub content_user_hint: i32,
@@ -850,8 +851,13 @@ impl WriteParcelable for Intent {
         p.write_i32(self.flags);
         p.write_i32(self.extended_flags);
         p.write_string8(None); // package
-        p.write_string16(Some(&self.component.0));
-        p.write_string16(Some(&self.component.1));
+        match &self.component {
+            Some((package, class)) => {
+                p.write_string16(Some(package));
+                p.write_string16(Some(class));
+            }
+            None => p.write_string16(None),
+        }
         p.write_i32(0); // no source bounds
         p.write_i32(0); // no categories
         p.write_i32(0); // no selector

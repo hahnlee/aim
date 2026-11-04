@@ -186,13 +186,12 @@ impl super::AppHost {
         // Resolve every token and validate every operation before invoking a mutating owner.
         let resolve = |token| {
             let id = self
-                .activities
-                .task_tokens
-                .lock()
-                .unwrap()
-                .iter()
-                .find_map(|(id, binder)| (*binder == token).then_some(*id))
+                .task_of_token(token)
                 .ok_or_else(|| Exception::illegal_argument("unknown WCT task token"))?;
+            // Organizer root task changes and hierarchy (#2616).
+            if self.tasks.root(id).is_some() {
+                return Err(unsupported());
+            }
             if self.tasks.bounds(id).is_none()
                 || self.activities.stack.lock().unwrap().task(id).is_none()
             {
