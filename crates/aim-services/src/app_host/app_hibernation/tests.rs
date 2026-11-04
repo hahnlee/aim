@@ -442,3 +442,99 @@ fn removal_for_all_users_drops_the_global_state_without_user_states() {
         assert!(!loaded.global.as_ref().unwrap().contains_key("gone"));
     });
 }
+
+/// ART's `Utils.shouldSkipDexoptDueToHibernation` (android-16.0.0_r1) as its
+/// AppHibernationManager asks it from aim-system, and the package boot leaf's
+/// `isHibernationSuppressed`; both must answer `expected`.
+fn suppressed(host: &Arc<AppHost>, s: &AppHibernation, expected: bool) {
+    use aim_service_aidl::dev_aim_server_ipackagebootlifecycleleaf as leaf;
+    let art = globally(s)
+        && bool_reply(&request(
+            s,
+            ah::IS_OAT_ARTIFACT_DELETION_ENABLED,
+            1000,
+            |_| {},
+        ));
+    let mut p = Parcel::new();
+    p.write_interface_token(leaf::DESCRIPTOR);
+    p.write_string16(Some("p"));
+    let boot = super::super::package_boot_lifecycle::BootLifecycle::new(host.clone())
+        .transact(&mut Call {
+            code: leaf::IS_HIBERNATION_SUPPRESSED,
+            flags: 0,
+            sender_pid: 71,
+            sender_euid: 1000,
+            data: p.reader(),
+        })
+        .unwrap();
+    assert_eq!((art, bool_reply(&boot)), (expected, expected));
+}
+
+#[test]
+fn art_and_the_package_boot_share_the_global_dexopt_suppression() {
+    crate::system::with_discovery_binders(|host, _, _, _| {
+        grant(host);
+        let s = AppHibernation(host.clone());
+        // Before PHASE_BOOT_COMPLETED there is no global state.
+        suppressed(host, &s, false);
+        s.boot_completed().unwrap();
+        // Hibernating for the user alone keeps the package's dexopt.
+        let user = host.data().unwrap().join("system_ce/0/hibernation/states");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, [0x0a, 5, 0x0a, 1, b'p', 0x10, 1]).unwrap();
+        s.user_unlocking().unwrap();
+        assert!(for_user(&s));
+        suppressed(host, &s, false);
+        success(&set_global(&s, 1000, true));
+        suppressed(host, &s, true);
+        // The persisted global state is read again at the next boot.
+        *host.hibernation.0.lock().unwrap() = Loaded::default();
+        suppressed(host, &s, false);
+        s.boot_completed().unwrap();
+        suppressed(host, &s, true);
+        // Use leaves global hibernation, and the package is dexopted again.
+        s.used("p", 0, usage_events::USER_INTERACTION).unwrap();
+        suppressed(host, &s, false);
+        // As does PackageManager's unstop of a package hibernating for the user.
+        s.user_unlocking().unwrap();
+        success(&set_global(&s, 1000, true));
+        suppressed(host, &s, true);
+        s.unhibernate("p", 0).unwrap();
+        suppressed(host, &s, false);
+        // A disabled service hibernates no package.
+        success(&set_global(&s, 1000, true));
+        suppressed(host, &s, true);
+        disable(host);
+        suppressed(host, &s, false);
+    });
+}
+
+#[test]
+fn global_hibernation_without_oat_deletion_keeps_dexopt_and_artifacts() {
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        grant(host);
+        // The image's resource is true; a device's overlay may set it false.
+        host.hibernation.1.set(false).unwrap();
+        let s = AppHibernation(host.clone());
+        s.boot_completed().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let art = || Arc::new(Art(Arc::new(AtomicI64::new(4096)), calls.clone()));
+        let owner = export(art());
+        super::super::sync_owner::tests::install(host, export(art()));
+        let system = host.package_system().unwrap();
+        let epoch = Arc::new(crate::package::boot_captures::Captures::new(
+            system,
+            system.package_bootstrap().unwrap().clone(),
+        ));
+        host.attach_art_owner(42, 100, epoch, Some(owner.binder()))
+            .unwrap();
+        success(&set_global(&s, 1000, true));
+        assert!(globally(&s) && calls.lock().unwrap().is_empty());
+        suppressed(host, &s, false);
+        let global = host.data().unwrap().join("system/hibernation/states");
+        assert_eq!(
+            std::fs::read(&global).unwrap(),
+            [0x0a, 5, 0x0a, 1, b'p', 0x10, 1, 0x0a, 3, 0x0a, 1, b'q']
+        );
+    });
+}

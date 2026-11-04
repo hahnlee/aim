@@ -4,7 +4,8 @@
 //! UserLevelHibernationProto and GlobalLevelHibernationProto, then kept by
 //! the package additions and removals of its receiver and left by use; each
 //! change is written back through AtomicFile. Global hibernation deletes the
-//! package's ART artifacts when the image enables it; leaving a user's
+//! package's ART artifacts when the image enables it, and keeps the package
+//! from the package boot's and ART's dexopt selection; leaving a user's
 //! hibernation replays the boot broadcasts. Entering a user's hibernation
 //! (its force stop, cache deletion and storage statistics), the statsd atoms
 //! and the shell command remain (#2064). The app host's one user is user 0.
@@ -13,7 +14,7 @@
 use std::{
     collections::BTreeMap,
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use aim_binder_host::local::{Call, Reply, Service};
@@ -33,9 +34,10 @@ const RECEIVE_BOOT_COMPLETED: &str = "android.permission.RECEIVE_BOOT_COMPLETED"
 /// The service's own calls (`Process.SYSTEM_UID`).
 const SYSTEM: i32 = 1000;
 
-/// `mUserStates` of user 0 and `mGlobalHibernationStates`, absent until read.
+/// `mUserStates` of user 0 and `mGlobalHibernationStates`, absent until
+/// read, and the constructor's `mOatArtifactDeletionEnabled`, read once.
 #[derive(Default)]
-pub(super) struct States(Mutex<Loaded>);
+pub(super) struct States(Mutex<Loaded>, OnceLock<bool>);
 
 #[derive(Default)]
 struct Loaded {
@@ -270,10 +272,16 @@ impl AppHibernation {
     }
 
     fn deletion_enabled(&self) -> Result<bool, Exception> {
-        self.0
+        let once = &self.0.hibernation.1;
+        if let Some(&enabled) = once.get() {
+            return Ok(enabled);
+        }
+        let enabled = self
+            .0
             .framework()?
             .framework_bool("config_hibernationDeletesOatArtifactsEnabled")
-            .ok_or_else(|| error("missing config_hibernationDeletesOatArtifactsEnabled"))
+            .ok_or_else(|| error("missing config_hibernationDeletesOatArtifactsEnabled"))?;
+        Ok(*once.get_or_init(|| enabled))
     }
 
     fn hibernating(
@@ -438,8 +446,9 @@ impl AppHibernation {
         saved.map(|_| ())
     }
 
-    /// `isHibernatingGlobally && isOatArtifactDeletionEnabled` of the
-    /// package boot's dexopt.
+    /// `isHibernatingGlobally && isOatArtifactDeletionEnabled`: the package
+    /// boot's dexopt suppression, which ART's `Utils.canDexoptPackage` asks
+    /// over Binder as the system.
     pub(super) fn suppresses_dexopt(&self, name: &str) -> Result<bool, Exception> {
         Ok(self.hibernating(SYSTEM, Some(name), 0, true)? && self.deletion_enabled()?)
     }
