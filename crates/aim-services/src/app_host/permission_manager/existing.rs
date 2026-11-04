@@ -69,13 +69,7 @@ impl PermissionManager {
                         }
                         old & !UPGRADE_EXEMPT
                     };
-                    let target = packages
-                        .iter()
-                        .filter_map(|p| p.pkg.as_deref())
-                        .filter(|p| p.requested_permissions.contains(name))
-                        .map(|p| p.target_sdk_version)
-                        .min()
-                        .unwrap_or(10000);
+                    let target = access.app_id_target_sdk(app_id, name);
                     changes.extend(set_flags(
                         new,
                         app_id,

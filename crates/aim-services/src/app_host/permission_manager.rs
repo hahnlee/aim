@@ -20,11 +20,13 @@
 //! told of a runtime permission's change and a uid that lost one killed.
 //! Development permissions use the same grant path; a changed grant of a
 //! permission with GIDs restarts the UID after publishing its new grants.
-//! Allowlist changes, a virtual device's permissions,
-//! one-time sessions, auto-revoke, attribution sources and the permission
-//! states are not implemented (#1508).
+//! The restricted permissions' allowlists change as `PermissionService`
+//! changes them, the exemptions deciding the restrictions. A virtual
+//! device's permissions, one-time sessions, auto-revoke, attribution
+//! sources and the permission states are not implemented (#1508).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+mod allowlist;
 mod boot;
 mod existing;
 mod install;
@@ -689,8 +691,25 @@ impl Access<'_> {
             calling_uid: caller,
         };
         let name = query.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
-        let Some(ps) = self.state.packages.get(&name) else {
+        self.package_by_name(&name, caller, user)
+    }
+
+    /// `PackageManagerLocal.FilteredSnapshot.getPackageStates()[name]`:
+    /// the package by its own name, unless the caller may not see it in
+    /// `user`.
+    fn package_by_name(
+        &self,
+        name: &str,
+        caller: i32,
+        user: i32,
+    ) -> Result<Option<&PackageState>, Exception> {
+        let Some(ps) = self.state.packages.get(name) else {
             return Ok(None);
+        };
+        let query = Query {
+            state: self.state,
+            filter: self.filter,
+            calling_uid: caller,
         };
         Ok((!query
             .filtered(Some(ps), caller, user)
@@ -1447,28 +1466,13 @@ impl Access<'_> {
                 "Querying system allowlist requires {WHITELIST_RESTRICTED_PERMISSIONS}"
             )));
         }
-        // `isCallerInstallerOfRecord`.
-        let installer = ps
-            .install_source
-            .installer
-            .as_deref()
-            .and_then(|name| self.state.packages.get(name))
-            .is_some_and(|i| i.app_id == apps_filter::app_id(caller));
+        let installer = self.installer_of_record(ps, caller);
         if flags & (WHITELIST_UPGRADE | WHITELIST_INSTALLER) != 0 && !privileged && !installer {
             return Err(Exception::security(format!(
                 "Querying upgrade or installer allowlist requires being installer on record or {WHITELIST_RESTRICTED_PERMISSIONS}"
             )));
         }
-        let mut query = 0;
-        for (allowlist, exempt) in [
-            (WHITELIST_SYSTEM, SYSTEM_EXEMPT),
-            (WHITELIST_UPGRADE, UPGRADE_EXEMPT),
-            (WHITELIST_INSTALLER, INSTALLER_EXEMPT),
-        ] {
-            if flags & allowlist != 0 {
-                query |= exempt;
-            }
-        }
+        let query = allowlist::exempt_mask(flags);
         Ok(self
             .user0
             .app_id_permissions
@@ -2425,6 +2429,55 @@ impl Service for PermissionManager {
                     let names: Option<Vec<Option<String>>> =
                         names.map(|n| n.into_iter().map(Some).collect());
                     parcel(|p| pm::write_get_allowlisted_restricted_permissions_reply(p, &names))
+                })
+            }
+            pm::ADD_ALLOWLISTED_RESTRICTED_PERMISSION
+            | pm::REMOVE_ALLOWLISTED_RESTRICTED_PERMISSION => {
+                let add = call.code == pm::ADD_ALLOWLISTED_RESTRICTED_PERMISSION;
+                let (method, package, permission, allowlist, user) = if add {
+                    let a = pm::AddAllowlistedRestrictedPermission::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    let (p, n) = (a.package_name, a.permission_name);
+                    (
+                        "addAllowlistedRestrictedPermission",
+                        p,
+                        n,
+                        a.flags,
+                        a.user_id,
+                    )
+                } else {
+                    let a = pm::RemoveAllowlistedRestrictedPermission::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    let (p, n) = (a.package_name, a.permission_name);
+                    (
+                        "removeAllowlistedRestrictedPermission",
+                        p,
+                        n,
+                        a.flags,
+                        a.user_id,
+                    )
+                };
+                (|| {
+                    let package = non_null(package.as_deref(), method, "packageName")?;
+                    let permission = non_null(permission.as_deref(), method, "permissionName")?;
+                    let mut set = false;
+                    self.mutate(Some(KILL_APP_REASON_PERMISSIONS_REVOKED), |access, new| {
+                        let (s, changes) = access.change_allowlist(
+                            new, caller, package, permission, allowlist, user, add,
+                        )?;
+                        set = s;
+                        Ok(changes)
+                    })?;
+                    Ok(set)
+                })()
+                .map(|set| {
+                    parcel(|p| {
+                        if add {
+                            pm::write_add_allowlisted_restricted_permission_reply(p, set)
+                        } else {
+                            pm::write_remove_allowlisted_restricted_permission_reply(p, set)
+                        }
+                    })
                 })
             }
             pm::SHOULD_SHOW_REQUEST_PERMISSION_RATIONALE => {
@@ -3709,6 +3762,170 @@ mod tests {
                 .unwrap_err()
                 .message
                 .contains("system allowlist")
+        );
+    }
+
+    /// CtsPermissionTestCases' `RestrictedPermissionsTest` shapes:
+    /// removing a hard restricted permission from its only allowlist
+    /// revokes it (and drops its policy fix), adding it back exempts it
+    /// again, a soft restricted one is restricted once unexempt; the
+    /// system allowlist and adding to the upgrade one need
+    /// WHITELIST_RESTRICTED_PERMISSIONS, the installer of record may
+    /// remove from the latter; an immutably restricted permission's
+    /// allowlists are the privileged's; unknown permissions and a second
+    /// removal change nothing, and one allowlist is changed at a time.
+    #[test]
+    fn allowlists_are_changed() {
+        const SMS: &str = "android.permission.READ_SMS";
+        const STORAGE: &str = "android.permission.READ_EXTERNAL_STORAGE";
+        const LOG: &str = "android.permission.READ_CALL_LOG";
+        let (mut state, mut defined, mut user0) = fixture();
+        let android = state.packages.get_mut("android").unwrap();
+        let declared = &mut Arc::make_mut(android.pkg.as_mut().unwrap()).permissions;
+        for (name, flags) in [
+            (SMS, FLAG_HARD_RESTRICTED),
+            (STORAGE, FLAG_SOFT_RESTRICTED),
+            (LOG, FLAG_HARD_RESTRICTED | 1 << 4),
+        ] {
+            declared.push(pkg::Permission {
+                component: Component {
+                    flags,
+                    ..component(name, "android")
+                },
+                protection_level: 1,
+                ..Default::default()
+            });
+            defined.push(definition(name, "android", 1));
+        }
+        let granted = state.packages.get_mut("granted").unwrap();
+        granted.install_source.installer = Some("asked".into());
+        let pkg = Arc::make_mut(granted.pkg.as_mut().unwrap());
+        pkg.requested_permissions = vec![SMS.into(), STORAGE.into(), LOG.into(), CAMERA.into()];
+        // Storage is soft restricted before Q.
+        pkg.target_sdk_version = 28;
+        user0.app_id_permissions[0].1.extend([
+            (SMS.into(), RUNTIME_GRANTED | POLICY_FIXED | SYSTEM_EXEMPT),
+            (
+                STORAGE.into(),
+                RUNTIME_GRANTED | SYSTEM_EXEMPT | UPGRADE_EXEMPT,
+            ),
+            (LOG.into(), RUNTIME_GRANTED | SYSTEM_EXEMPT),
+        ]);
+        state.system.system_permissions = Some(BTreeMap::from([(
+            1041,
+            BTreeSet::from([WHITELIST_RESTRICTED_PERMISSIONS.to_string()]),
+        )]));
+        // The platform is visible to every app.
+        state
+            .packages
+            .get_mut("android")
+            .unwrap()
+            .is
+            .force_queryable_override = true;
+        let groups = permission_groups(&state);
+        let filter = AppsFilter::new(&state, &apps_filter::Config::default()).unwrap();
+        let compat = CompatConfig::default();
+        // Each call mutates the state the previous one left, as `mutate` does.
+        let mut new = user0;
+        let mut change_for = |caller, name, allowlist, add, user| {
+            let before = new.clone();
+            let a = Access {
+                delegate: None,
+                state: &state,
+                filter: &filter,
+                defined: &defined,
+                groups: &groups,
+                user0: &before,
+                compat: &compat,
+            };
+            a.change_allowlist(&mut new, caller, "granted", name, allowlist, user, add)
+                .map(|(set, changes)| {
+                    let changes: Vec<_> = changes.into_iter().map(|c| (c.old, c.new)).collect();
+                    (set, changes)
+                })
+        };
+        let mut change = |caller, name, allowlist, add| change_for(caller, name, allowlist, add, 0);
+        assert_eq!(
+            change(1041, SMS, WHITELIST_SYSTEM, false).unwrap(),
+            (
+                true,
+                vec![(
+                    RUNTIME_GRANTED | POLICY_FIXED | SYSTEM_EXEMPT,
+                    RUNTIME_GRANTED | RESTRICTION_REVOKED
+                )]
+            )
+        );
+        assert_eq!(
+            change(1041, SMS, WHITELIST_SYSTEM, false).unwrap(),
+            (false, vec![])
+        );
+        assert_eq!(
+            change(1000, SMS, WHITELIST_SYSTEM, true).unwrap(),
+            (
+                true,
+                vec![(
+                    RUNTIME_GRANTED | RESTRICTION_REVOKED,
+                    RUNTIME_GRANTED | SYSTEM_EXEMPT
+                )]
+            )
+        );
+        // Still upgrade exempt, so not yet restricted.
+        assert_eq!(
+            change(1041, STORAGE, WHITELIST_SYSTEM, false).unwrap(),
+            (
+                true,
+                vec![(
+                    RUNTIME_GRANTED | SYSTEM_EXEMPT | UPGRADE_EXEMPT,
+                    RUNTIME_GRANTED | UPGRADE_EXEMPT
+                )]
+            )
+        );
+        let message = |r: Result<_, Exception>| r.unwrap_err().message;
+        assert_eq!(
+            message(change(10005, SMS, WHITELIST_UPGRADE, true)),
+            format!("Adding to upgrade allowlist requires{WHITELIST_RESTRICTED_PERMISSIONS}")
+        );
+        assert!(message(change(10002, STORAGE, WHITELIST_UPGRADE, false)).contains("installer"));
+        assert_eq!(
+            change(10005, STORAGE, WHITELIST_UPGRADE, false).unwrap(),
+            (
+                true,
+                vec![(
+                    RUNTIME_GRANTED | UPGRADE_EXEMPT,
+                    RUNTIME_GRANTED | SOFT_RESTRICTED
+                )]
+            )
+        );
+        assert!(message(change(10005, SMS, WHITELIST_SYSTEM, false)).contains("system allowlist"));
+        assert_eq!(
+            message(change(10005, LOG, WHITELIST_INSTALLER, true)),
+            format!("Cannot modify allowlist of an immutably restricted permission: {LOG}")
+        );
+        assert_eq!(
+            change(1041, "no.such.PERMISSION", WHITELIST_SYSTEM, true).unwrap(),
+            (false, vec![])
+        );
+        assert_eq!(
+            change(1041, LOG, 0, true).unwrap_err().code,
+            aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+        );
+        // The app itself adding to its installer allowlist of a user
+        // without state skips the allowlist checks and changes nothing.
+        assert_eq!(
+            change_for(10001, SMS, WHITELIST_INSTALLER, true, 10).unwrap(),
+            (true, vec![])
+        );
+        assert_eq!(
+            new.permission_flags(10001, SMS),
+            RUNTIME_GRANTED | SYSTEM_EXEMPT
+        );
+        assert_eq!(
+            new.permission_flags(10001, LOG),
+            RUNTIME_GRANTED | SYSTEM_EXEMPT
+        );
+        assert_eq!(
+            new.permission_flags(10001, CAMERA),
+            RUNTIME_GRANTED | USER_SET
         );
     }
 
