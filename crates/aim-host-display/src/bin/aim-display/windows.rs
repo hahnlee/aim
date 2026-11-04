@@ -25,9 +25,9 @@
 //! - a task in picture-in-picture floats above the other windows, on every
 //!   space, keeping its proportions;
 //! - a fullscreen task's window is in the Mac's full screen, a space of its
-//!   own, with AppKit's animation, and leaves it when the task does; the
-//!   user's full screen (the green button, Ctrl-Cmd-F) asks the task for
-//!   fullscreen or freeform.
+//!   own, with AppKit's animation, and leaves it when the task does or
+//!   before it minimizes; the user's full screen (the green button,
+//!   Ctrl-Cmd-F) asks the task for fullscreen or freeform.
 //!
 //! A press in a window whose task is not the top one focuses the task first
 //! and holds the touch until Android reports the task in front (or
@@ -437,7 +437,7 @@ fn apply(r: &Record, relative: isize) {
         window::REMOVED => remove(r.task),
         window::MOVED_TO_BACK => {
             if let Some(Some(w)) = with(|s| s.tasks.get(&r.task).map(|t| t.window)) {
-                send!(w, c"miniaturize:" => (), Id = std::ptr::null_mut());
+                minimize(w);
             }
         }
         window::REORDER_TO_BACK => {
@@ -1012,10 +1012,15 @@ fn set_bounds(task: i32, b: [i32; 4]) {
     request(window::SET_BOUNDS, task, b);
 }
 
-/// Completion of an explicit launch also restores its minimized task.
-/// Ordinary focus/stacking records keep the user's minimized windows so.
+/// Completion of an explicit launch also restores its minimized task, or
+/// one on its way out of the full screen to minimize. Ordinary
+/// focus/stacking records keep the user's minimized windows so.
 fn restore(task: i32) {
-    if let Some(Some(w)) = with(|s| s.tasks.get(&task).map(|t| t.window)) {
+    if let Some(Some(w)) = with(|s| {
+        let t = s.tasks.get_mut(&task)?;
+        t.full_screen.back();
+        Some(t.window)
+    }) {
         send!(w, c"deminiaturize:" => (), Id = std::ptr::null_mut());
         front(task, 0);
     }
@@ -1203,7 +1208,23 @@ fn hide(task: i32) {
         return;
     }
     for w in with(|s| app_windows(s, task)).unwrap_or_default() {
+        minimize(w);
+    }
+}
+
+/// Minimize task window `w`, as its task went home or to the back: one in
+/// the full screen leaves it first, and minimizes once out.
+fn minimize(w: Id) {
+    let Some(Some((task, now))) = with(|s| {
+        let (&task, t) = s.tasks.iter_mut().find(|(_, t)| t.window == w)?;
+        Some((task, t.full_screen.away()))
+    }) else {
+        return;
+    };
+    if now {
         send!(w, c"miniaturize:" => (), Id = std::ptr::null_mut());
+    } else {
+        full_screen(task);
     }
 }
 
@@ -1397,9 +1418,13 @@ pub extern "C" fn did_hide(_: Id, _: Sel, _: Id) {
     }
 }
 
+/// A window back from the Dock is in the full screen again for a
+/// fullscreen task.
 extern "C" fn did_deminiaturize(_: Id, _: Sel, note: Id) {
     if let Some((task, w)) = task_of(note) {
         window_order(task, send!(w, c"windowNumber" => isize));
+        with(|s| s.tasks.get_mut(&task).map(|t| t.full_screen.back()));
+        full_screen(task);
     }
 }
 
@@ -1445,12 +1470,13 @@ fn will_full_screen(w: Id, on: bool) {
 }
 
 /// Window `w` is in the full screen (`on`) or not, as it went or as AppKit
-/// left it: it follows its task's windowing mode again.
+/// left it: it follows its task's windowing mode again, and minimizes if
+/// its task went away meanwhile.
 fn did_full_screen(w: Id, on: bool) {
-    let Some(Some(task)) = with(|s| {
+    let Some(Some((task, minimizes))) = with(|s| {
         let (&task, t) = s.tasks.iter_mut().find(|(_, t)| t.window == w)?;
         t.full_screen.did(on);
-        Some(task)
+        Some((task, t.full_screen.minimizes()))
     }) else {
         return;
     };
@@ -1458,7 +1484,11 @@ fn did_full_screen(w: Id, on: bool) {
         follow(task);
         float(task);
     }
-    full_screen(task);
+    if minimizes {
+        send!(w, c"miniaturize:" => (), Id = std::ptr::null_mut());
+    } else {
+        full_screen(task);
+    }
 }
 
 extern "C" fn will_enter_full_screen(_: Id, _: Sel, note: Id) {

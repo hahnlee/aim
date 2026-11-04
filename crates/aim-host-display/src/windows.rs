@@ -104,8 +104,9 @@ pub fn view_to_display(
 
 /// A task window's place in the Mac's full screen, which follows its
 /// task's windowing mode: a fullscreen task's window is in a space of its
-/// own, any other's is not. Toggling either way animates; while it does,
-/// AppKit owns the window's frame.
+/// own, any other's is not, nor is one that minimizes or is minimized
+/// (AppKit does not minimize a window in the full screen). Toggling either
+/// way animates; while it does, AppKit owns the window's frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FullScreen {
     /// In the full screen, or going there.
@@ -114,13 +115,22 @@ pub struct FullScreen {
     pub moving: bool,
     /// The user toggled it, and the task's record has not answered yet.
     pub asked: bool,
+    /// The task went home or to the back: the window minimizes, once out
+    /// of the full screen, and stays out until it is back.
+    pub away: bool,
 }
 
 impl FullScreen {
     /// Whether the window should toggle to follow its task's windowing
     /// `mode`: never while it moves or waits for an answer.
     pub fn toggle(&self, mode: i32) -> bool {
-        !self.moving && !self.asked && self.on != (mode == windowing_mode::FULLSCREEN)
+        !self.moving && !self.asked && self.on != self.wanted(mode)
+    }
+
+    /// Whether the window belongs in the full screen for its task's
+    /// windowing `mode`.
+    fn wanted(&self, mode: i32) -> bool {
+        mode == windowing_mode::FULLSCREEN && !self.away
     }
 
     /// Whether AppKit places the window: in the full screen or on its way
@@ -144,7 +154,7 @@ impl FullScreen {
     pub fn will(&mut self, on: bool, mode: i32) -> Option<i32> {
         self.on = on;
         self.moving = true;
-        if on == (mode == windowing_mode::FULLSCREEN) {
+        if on == self.wanted(mode) {
             return None;
         }
         self.asked = true;
@@ -165,6 +175,25 @@ impl FullScreen {
     /// The task's record (its windowing mode) answers what the user asked.
     pub fn answered(&mut self) {
         self.asked = false;
+    }
+
+    /// The task went home or to the back: whether the window can minimize
+    /// now, else it does once AppKit has taken it out of the full screen
+    /// ([`FullScreen::minimizes`]).
+    pub fn away(&mut self) -> bool {
+        self.away = true;
+        !self.places()
+    }
+
+    /// Whether the window, now out of the full screen, minimizes.
+    pub fn minimizes(&self) -> bool {
+        self.away && !self.places()
+    }
+
+    /// The window is back from the Dock, or its task in front before it
+    /// got there: it follows its task's mode again.
+    pub fn back(&mut self) {
+        self.away = false;
     }
 }
 
@@ -316,6 +345,59 @@ mod tests {
         // again for a task that is fullscreen.
         f.will(true, FULLSCREEN);
         f.did(false);
+        assert!(f.toggle(FULLSCREEN));
+    }
+
+    #[test]
+    fn a_task_going_away_leaves_the_full_screen_and_minimizes() {
+        use windowing_mode::{FREEFORM, FULLSCREEN};
+        // In the full screen, the task goes home: the window leaves it
+        // first, without asking the task (it stays fullscreen), and
+        // minimizes once out.
+        let mut f = FullScreen {
+            on: true,
+            ..Default::default()
+        };
+        assert!(!f.away(), "AppKit does not minimize it in the full screen");
+        assert!(f.toggle(FULLSCREEN));
+        assert_eq!(f.will(false, FULLSCREEN), None);
+        assert!(!f.minimizes(), "not while it moves");
+        f.did(false);
+        assert!(f.minimizes());
+        // Minimized, the fullscreen task's records keep it out.
+        assert!(!f.toggle(FULLSCREEN));
+        // Back from the Dock, it enters again.
+        f.back();
+        assert!(!f.minimizes());
+        assert!(f.toggle(FULLSCREEN));
+        // On its way in, it finishes, then leaves.
+        assert_eq!(f.will(true, FULLSCREEN), None);
+        assert!(!f.away());
+        assert!(!f.toggle(FULLSCREEN), "not while it moves");
+        f.did(true);
+        assert!(f.toggle(FULLSCREEN));
+        // A window out of the full screen minimizes at once.
+        let mut f = FullScreen::default();
+        assert!(f.away());
+        assert!(f.minimizes());
+        assert!(!f.toggle(FREEFORM));
+    }
+
+    #[test]
+    fn a_task_back_while_leaving_the_full_screen_enters_it_again() {
+        use windowing_mode::FULLSCREEN;
+        // The task goes home and comes back before AppKit has taken its
+        // window out: the window does not minimize, and goes back in.
+        let mut f = FullScreen {
+            on: true,
+            ..Default::default()
+        };
+        assert!(!f.away());
+        assert_eq!(f.will(false, FULLSCREEN), None);
+        f.back();
+        assert!(!f.toggle(FULLSCREEN), "not while it moves");
+        f.did(false);
+        assert!(!f.minimizes());
         assert!(f.toggle(FULLSCREEN));
     }
 }
