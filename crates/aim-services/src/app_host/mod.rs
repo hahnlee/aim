@@ -660,6 +660,7 @@ pub struct AppHost {
     isolated_uids: Mutex<IsolatedUids>,
     app_standby: app_standby::AppStandby,
     app_restrictions: app_restrictions::AppRestrictions,
+    hibernation: app_hibernation::States,
     broadcast_responses: broadcast_response::BroadcastResponses,
     webview_zygote: webview_zygote::WebViewZygote,
     storage: storage::Volumes,
@@ -807,6 +808,7 @@ impl AppHost {
             }),
             app_standby: Default::default(),
             app_restrictions: Default::default(),
+            hibernation: Default::default(),
             broadcast_responses: Default::default(),
             webview_zygote: Default::default(),
             storage: Default::default(),
@@ -6145,6 +6147,9 @@ impl Service for Control {
                 if let Some(dropbox) = host.dropbox.get() {
                     dropbox.boot_completed();
                 }
+                if let Err(e) = app_hibernation::AppHibernation(host.clone()).boot_completed() {
+                    eprintln!("app host: app hibernation: {}", e.message);
+                }
                 host.storage.boot_completed.store(true, Ordering::Release);
                 let services = host.clone();
                 let unlocking = move || {
@@ -6155,6 +6160,11 @@ impl Service for Control {
                     }
                     if let Some(text_services) = services.text_services.get() {
                         text_services.on_user_unlocking(0);
+                    }
+                    if let Err(e) =
+                        app_hibernation::AppHibernation(services.clone()).user_unlocking()
+                    {
+                        eprintln!("app host: app hibernation: {}", e.message);
                     }
                     // The user's CE storage is prepared: persisted jobs are read
                     // and run (JobSchedulerService's

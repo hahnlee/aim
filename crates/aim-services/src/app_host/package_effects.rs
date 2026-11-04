@@ -411,6 +411,10 @@ impl PackageEffects {
             .ok_or_else(|| state_error("KnownPackages owner unavailable"))?;
         let verifiers = roles.known_packages(&query, 4, 0).map_err(unavailable)?;
         let installers = roles.known_packages(&query, 2, 0).map_err(unavailable)?;
+        let hibernation = super::app_hibernation::AppHibernation(self.host.clone());
+        for user in first.iter().chain(&first_instant) {
+            hibernation.package_added(name, *user);
+        }
         let first_allow = allow(&first);
         let first_extras = [
             (UID, Value::Int(a.app_id)),
@@ -613,6 +617,7 @@ impl PackageEffects {
                 .unimplemented_named("packageAdded", "profile user properties (#2015)"));
         }
         let instant = user_state(ps, user).instant_app;
+        super::app_hibernation::AppHibernation(self.host.clone()).package_added(name, user);
         let allow = if instant {
             None
         } else {
@@ -979,8 +984,11 @@ impl Service for PackageEffects {
             }
             bridge::UNHIBERNATE => {
                 let a = bridge::Unhibernate::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                super::app_hibernation::AppHibernation(self.host.clone())
-                    .unhibernate(a.user_id)
+                required(a.package_name.as_deref(), "packageName")
+                    .and_then(|name| {
+                        super::app_hibernation::AppHibernation(self.host.clone())
+                            .unhibernate(name, a.user_id)
+                    })
                     .map(|()| bridge::write_unhibernate_reply(&mut p))
             }
             bridge::PACKAGE_UNSTOPPED => {

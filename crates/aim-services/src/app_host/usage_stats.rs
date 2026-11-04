@@ -271,6 +271,15 @@ impl AppHost {
         {
             eprintln!("app host: {}", e.message);
         }
+        if let Some(host) = self.me.upgrade()
+            && let Err(e) = super::app_hibernation::AppHibernation(host).used(
+                &event.package,
+                0,
+                event.event_type,
+            )
+        {
+            eprintln!("app host: app hibernation: {}", e.message);
+        }
         let reported = self.with_usage(|user, clocks, notified| {
             let n = user.report(event, clocks);
             notified.updated |= n.updated;
