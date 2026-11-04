@@ -6,26 +6,31 @@
 //! shares (fork passes it, exec keeps it): a `signalfd4(fd, …)` update in
 //! one is what the others read and poll, as Linux's share the `struct
 //! file`. The guest end is a Darwin datagram socket, so it polls like an
-//! eventfd: the description keeps one token record in it exactly while the
-//! process or one of its threads has a signal in the mask pending
-//! ([`refresh`], called by the signal owner whenever a pending set
-//! changes; [`ready`], whenever a poll looks at it, as `signalfd_poll`
-//! reads the mask then). A Linux poll looks at the polling thread's own
-//! queue; here a signal pending on another thread counts too (#2653). A
-//! blocked read reads the mask whenever a signal is sent to the process
-//! (`signalfd_notify`). It reports
-//! POLLIN only. Each process has its own socket for a
+//! eventfd: the description keeps one token record in it exactly while a
+//! signal in the mask is pending for the process ([`refresh`], called by
+//! the signal owner whenever a pending set changes; [`ready`], whenever a
+//! poll looks at it, as `signalfd_poll` reads the mask then). That much is
+//! readable for every thread. `signalfd_poll` also counts the polling
+//! thread's own queue, so a thread waiting in poll, select or epoll on
+//! signalfds registers as a [`Polling`] and waits on its own wake token as
+//! well, which holds a record while one of them is readable for it; a
+//! signal pending on another thread wakes neither. A blocked read reads the
+//! mask whenever a signal is sent to the process (`signalfd_notify`). It
+//! reports POLLIN only. Each process has its own socket for a
 //! description, so a forked child or a relaunched exec image sees only its
 //! own signals: [`install`] puts a fresh one under every guest fd that
 //! shares the description, keeping its flags.
 
 use std::os::fd::BorrowedFd;
+use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, Weak};
 
 use super::{
     fdtab::{self, Kind},
     sigframe::Siginfo,
-    signal, user_memory,
+    signal,
+    thread::{self, Thread},
+    user_memory,
 };
 use crate::errno::{self, EINVAL, Errno};
 
@@ -33,25 +38,72 @@ const NONBLOCK: u64 = 0o4000;
 const CLOEXEC: u64 = 0o2000000;
 const RECORD: usize = 128;
 
+fn close(fds: &[i32]) {
+    for &fd in fds {
+        if let Err(error) = fdtab::close_fork_private(fd) {
+            crate::diag!("signalfd private end close: errno {error}");
+        }
+    }
+}
+
+/// A hidden datagram pair that holds one record exactly while set: `peer`
+/// sends it, `reader` polls and drains it.
+pub(super) struct Token {
+    peer: i32,
+    reader: i32,
+    set: Mutex<bool>,
+}
+
+impl Token {
+    /// A thread's wake token.
+    fn new() -> Result<Token, Errno> {
+        let (fd, peer) = super::event::pair(0).map_err(|error| (-error) as Errno)?;
+        Ok(Token {
+            peer,
+            reader: fdtab::hide(fd),
+            set: Mutex::new(false),
+        })
+    }
+
+    /// Keep the record iff `ready()`, and say whether it is. The lock
+    /// orders the snapshots, so the last change is the one that stays.
+    fn update(&self, ready: impl FnOnce() -> bool) -> bool {
+        let mut set = self.set.lock().unwrap();
+        let ready = ready();
+        if ready && !*set {
+            *set = super::event::send_record(self.peer, 1);
+        } else if !ready && *set {
+            super::event::recv_record(self.reader);
+            *set = false;
+        }
+        ready
+    }
+}
+
+impl Drop for Token {
+    fn drop(&mut self) {
+        close(&[self.peer, self.reader]);
+    }
+}
+
 pub struct SignalFd {
     /// The hidden unlinked file holding the mask.
     shared: i32,
-    /// The hidden peer that sends the token, and a hidden twin of the guest
-    /// end that drains it and is installed again after fork or exec.
-    peer: i32,
-    reader: i32,
-    token: Mutex<bool>,
+    /// The token for the process's pending signals; its reader is a
+    /// hidden twin of the guest end, installed again after fork or exec.
+    token: Token,
 }
 
 static DESCRIPTIONS: Mutex<Vec<Weak<SignalFd>>> = Mutex::new(Vec::new());
 
+/// Counts the changes of a pending set or a mask, each of which wakes the
+/// waiters (`signalfd_notify`, `do_signalfd4`): an edge-triggered epoll
+/// reports a readable signalfd again only after a newer one.
+static NOTIFIED: AtomicU64 = AtomicU64::new(1);
+
 impl Drop for SignalFd {
     fn drop(&mut self) {
-        for fd in [self.shared, self.peer, self.reader] {
-            if let Err(error) = fdtab::close_fork_private(fd) {
-                crate::diag!("signalfd private end close: errno {error}");
-            }
-        }
+        close(&[self.shared]);
     }
 }
 
@@ -71,9 +123,7 @@ fn mask_file(mask: u64) -> Result<i32, Errno> {
     unsafe { libc::unlink(template.as_ptr().cast()) };
     let fd = fdtab::hide(fd);
     if let Err(error) = write_mask(fd, mask) {
-        if let Err(error) = fdtab::close_fork_private(fd) {
-            crate::diag!("signalfd mask file close: errno {error}");
-        }
+        close(&[fd]);
         return Err(error);
     }
     Ok(fd)
@@ -92,13 +142,6 @@ impl SignalFd {
     /// A description of the mask in `shared`, which it takes, and its
     /// guest end, with the token for what is pending.
     fn open(shared: i32, flags: u64) -> Result<(i32, Arc<SignalFd>), Errno> {
-        let close = |fds: &[i32]| {
-            for &fd in fds {
-                if let Err(error) = fdtab::close_fork_private(fd) {
-                    crate::diag!("signalfd private end close: errno {error}");
-                }
-            }
-        };
         let (fd, peer) = match super::event::pair(flags) {
             Ok(pair) => pair,
             Err(error) => {
@@ -117,9 +160,11 @@ impl SignalFd {
         }
         let description = Arc::new(SignalFd {
             shared,
-            peer,
-            reader: fdtab::hide(reader),
-            token: Mutex::new(false),
+            token: Token {
+                peer,
+                reader: fdtab::hide(reader),
+                set: Mutex::new(false),
+            },
         });
         let mut all = DESCRIPTIONS.lock().unwrap();
         all.retain(|weak| weak.strong_count() > 0);
@@ -139,27 +184,97 @@ impl SignalFd {
         }
     }
 
-    /// Keep the token iff a signal in the mask is pending, and say whether
-    /// it is. The token's lock orders the snapshots, so the last change is
-    /// the one that stays. A mask that cannot be read leaves the
-    /// descriptor readable: its read reports the error.
-    fn sync(&self) -> bool {
-        let mut token = self.token.lock().unwrap();
-        let ready = self
-            .mask()
-            .map_or(true, |mask| mask & signal::all_pending() != 0);
-        if ready && !*token {
-            *token = super::event::send_record(self.peer, 1);
-        } else if !ready && *token {
-            super::event::recv_record(self.reader);
-            *token = false;
+    /// Keep the token iff a signal in the mask is pending for the process.
+    /// A mask that cannot be read leaves the descriptor readable: its read
+    /// reports the error.
+    fn sync(&self) {
+        self.token.update(|| {
+            self.mask()
+                .map_or(true, |mask| mask & signal::process_pending() != 0)
+        });
+    }
+
+    /// Whether a poll in `thread` finds it readable (`signalfd_poll`).
+    fn readable(&self, thread: Option<&Thread>) -> bool {
+        self.mask()
+            .map_or(true, |mask| mask & signal::pending_for(thread) != 0)
+    }
+}
+
+/// A thread waiting on signalfds, each readable for it only once
+/// [`NOTIFIED`] is past the count given with it.
+struct Poller {
+    thread: &'static Thread,
+    watched: Vec<(Arc<SignalFd>, u64)>,
+}
+
+static POLLERS: Mutex<Vec<Arc<Poller>>> = Mutex::new(Vec::new());
+
+impl Poller {
+    fn wake(&self) -> &Token {
+        self.thread
+            .sig
+            .signalfd_wake
+            .get()
+            .expect("a poller's wake token")
+    }
+
+    fn sync(&self) {
+        self.wake().update(|| {
+            let notified = NOTIFIED.load(SeqCst);
+            self.watched.iter().any(|(description, after)| {
+                notified > *after && description.readable(Some(self.thread))
+            })
+        });
+    }
+}
+
+/// The calling thread waits on signalfds while this lives: its wake token,
+/// polled beside them, holds a record while one is readable for it.
+pub(super) struct Polling(Arc<Poller>);
+
+impl Polling {
+    /// Register the calling thread for `watched`, descriptions each with
+    /// the [`notified`] count it is readable only after (0 for always).
+    /// None on a thread with no guest context, which has no queue of its
+    /// own.
+    pub(super) fn begin(watched: Vec<(Arc<SignalFd>, u64)>) -> Result<Option<Polling>, Errno> {
+        let Some(thread) = thread::current() else {
+            return Ok(None);
+        };
+        if thread.sig.signalfd_wake.get().is_none() {
+            let token = Token::new()?;
+            thread.sig.signalfd_wake.get_or_init(|| token);
         }
-        ready
+        let poller = Arc::new(Poller { thread, watched });
+        POLLERS.lock().unwrap().push(Arc::clone(&poller));
+        Ok(Some(Polling(poller)))
+    }
+
+    /// The host fd to poll for readiness.
+    pub(super) fn fd(&self) -> i32 {
+        self.0.wake().reader
+    }
+
+    /// Bring the wake token up to date before each wait, for a mask
+    /// another process changed.
+    pub(super) fn sync(&self) {
+        self.0.sync();
+    }
+}
+
+impl Drop for Polling {
+    fn drop(&mut self) {
+        POLLERS
+            .lock()
+            .unwrap()
+            .retain(|poller| !Arc::ptr_eq(poller, &self.0));
     }
 }
 
 /// The signal owner: a pending set changed.
 pub(super) fn refresh() {
+    NOTIFIED.fetch_add(1, SeqCst);
     let all: Vec<_> = {
         let all = DESCRIPTIONS.lock().unwrap();
         all.iter().filter_map(Weak::upgrade).collect()
@@ -167,12 +282,23 @@ pub(super) fn refresh() {
     for description in all {
         description.sync();
     }
+    let pollers = POLLERS.lock().unwrap().clone();
+    for poller in pollers {
+        poller.sync();
+    }
 }
 
-/// A poll looks at `description`: whether it is readable now, with its
-/// token brought up to date for a mask another process changed.
+/// The current count of [`refresh`]es.
+pub(super) fn notified() -> u64 {
+    NOTIFIED.load(SeqCst)
+}
+
+/// A poll in the calling thread looks at `description`: whether it is
+/// readable now, with its token brought up to date for a mask another
+/// process changed.
 pub(super) fn ready(description: &SignalFd) -> bool {
-    description.sync()
+    description.sync();
+    description.readable(thread::current())
 }
 
 pub fn signalfd4(a: [u64; 6]) -> i64 {
@@ -198,7 +324,7 @@ pub fn signalfd4(a: [u64; 6]) -> i64 {
         if let Err(error) = write_mask(description.shared, mask) {
             return -(error as i64);
         }
-        description.sync();
+        refresh();
         signal::wake_readers();
         return fd as i64;
     }
@@ -296,7 +422,7 @@ pub(super) fn install(fd: i32, description: &SignalFd) -> Result<(), Errno> {
         );
         if fd_flags < 0
             || fl < 0
-            || libc::dup2(description.reader, fd) < 0
+            || libc::dup2(description.token.reader, fd) < 0
             || libc::fcntl(fd, libc::F_SETFD, fd_flags) < 0
             || libc::fcntl(fd, libc::F_SETFL, fl & libc::O_NONBLOCK) < 0
         {
@@ -413,23 +539,27 @@ mod tests {
     }
 
     fn queue(sig: u64, value: u64, thread: bool) {
-        let info = Siginfo::from_sender(sig as i32, -1, 123, 456);
-        let mut info = info;
+        if thread {
+            return directed(sys::thread::gettid() as u64, sig, value);
+        }
+        let mut info = Siginfo::from_sender(sig as i32, -1, 123, 456);
         info.fields[1] = value;
         let pid = sys::process::getpid() as u64;
-        let result = if thread {
-            signal::rt_tgsigqueueinfo([
-                pid,
-                sys::thread::gettid() as u64,
-                sig,
-                &info as *const _ as u64,
-                0,
-                0,
-            ])
-        } else {
-            signal::rt_sigqueueinfo([pid, sig, &info as *const _ as u64, 0, 0, 0])
-        };
-        assert_eq!(result, 0);
+        assert_eq!(
+            signal::rt_sigqueueinfo([pid, sig, &info as *const _ as u64, 0, 0, 0]),
+            0
+        );
+    }
+
+    /// Queue `sig` for this process's thread `tid`.
+    fn directed(tid: u64, sig: u64, value: u64) {
+        let mut info = Siginfo::from_sender(sig as i32, -1, 123, 456);
+        info.fields[1] = value;
+        let pid = sys::process::getpid() as u64;
+        assert_eq!(
+            signal::rt_tgsigqueueinfo([pid, tid, sig, &info as *const _ as u64, 0, 0]),
+            0
+        );
     }
 
     #[test]
@@ -911,6 +1041,160 @@ mod tests {
         );
         assert_eq!((read, write), (1 << fd, 0));
         for fd in [fd, read_write, write_only] {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    fn selected(fd: i64, ms: i64) -> i64 {
+        let mut read = 1u64 << fd;
+        let timeout = [ms / 1000, ms % 1000 * 1_000_000];
+        let n = sys::poll::pselect6([
+            fd as u64 + 1,
+            &mut read as *mut _ as u64,
+            0,
+            0,
+            timeout.as_ptr() as u64,
+            0,
+        ]);
+        assert_eq!(read, if n == 1 { 1 << fd } else { 0 });
+        n
+    }
+
+    fn epoll_for(ep: i64, ms: i64) -> i64 {
+        let mut event = [0u64; 2];
+        let n = sys::epoll::epoll_pwait([ep as u64, event.as_mut_ptr() as u64, 1, ms as u64, 0, 0]);
+        assert!(n == 0 || event == [0x1, 7], "event {event:?}");
+        n
+    }
+
+    /// Each of poll, select and epoll, waiting `ms`.
+    fn waits(fd: i64, ep: i64, ms: i64) -> [i64; 3] {
+        [polled(fd, ms), selected(fd, ms), epoll_for(ep, ms)]
+    }
+
+    fn value(bytes: &[u8]) -> u64 {
+        u64::from_le_bytes(bytes[48..56].try_into().unwrap())
+    }
+
+    /// signalfd_poll: a signal tgkill'ed to another thread, which blocks
+    /// it, is not readable here; this thread's own and the process's are.
+    #[test]
+    fn another_threads_signal_is_not_readable_here() {
+        if isolated("another_threads_signal_is_not_readable_here") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        let ep = epoll_with(fd, 0x1);
+        let (queued, done) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let other = std::thread::spawn(move || {
+            context();
+            block(mask);
+            queue(35, 1, true);
+            queued.0.send(()).unwrap();
+            done.1.recv().unwrap();
+            // Still its own: no other thread took it.
+            let timeout = [0i64; 2];
+            assert_eq!(
+                signal::rt_sigtimedwait([
+                    &mask as *const _ as u64,
+                    0,
+                    timeout.as_ptr() as u64,
+                    8,
+                    0,
+                    0
+                ]),
+                35
+            );
+        });
+        queued.1.recv().unwrap();
+        assert_eq!(waits(fd, ep, 0), [0; 3]);
+        // A wait is not woken for it either.
+        let start = std::time::Instant::now();
+        assert_eq!(waits(fd, ep, 100), [0; 3]);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(300));
+        let mut bytes = [0u8; RECORD];
+        assert_eq!(receive(fd, &mut bytes), -(EAGAIN as i64));
+        queue(35, 2, true);
+        assert_eq!(waits(fd, ep, 0), [1; 3]);
+        assert_eq!((receive(fd, &mut bytes), value(&bytes)), (128, 2));
+        assert_eq!(waits(fd, ep, 0), [0; 3]);
+        queue(35, 3, false);
+        assert_eq!(waits(fd, ep, 0), [1; 3]);
+        assert_eq!((receive(fd, &mut bytes), value(&bytes)), (128, 3));
+        assert_eq!(receive(fd, &mut bytes), -(EAGAIN as i64));
+        done.0.send(()).unwrap();
+        other.join().unwrap();
+        for fd in [fd, ep] {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    /// A signal tgkill'ed to a thread waiting in poll, select or epoll
+    /// wakes it, though only its own queue holds it.
+    #[test]
+    fn a_directed_signal_wakes_the_waiting_thread() {
+        if isolated("a_directed_signal_wakes_the_waiting_thread") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        let ep = epoll_with(fd, 0x1);
+        let tid = sys::thread::gettid() as u64;
+        let mut bytes = [0u8; RECORD];
+        let waits: [(fn(i64, i64) -> i64, i64); 3] =
+            [(polled, fd), (selected, fd), (epoll_for, ep)];
+        for (wait, target) in waits {
+            let sender = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                directed(tid, 35, 4);
+            });
+            assert_eq!(wait(target, 5000), 1);
+            sender.join().unwrap();
+            assert_eq!((receive(fd, &mut bytes), value(&bytes)), (128, 4));
+        }
+        for fd in [fd, ep] {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    /// Edge-triggered and one-shot epoll on this thread's own signal: it
+    /// is reported again only after a newer wakeup (`ep_poll_callback`),
+    /// or once.
+    #[test]
+    fn epoll_edges_on_the_waiters_own_signal() {
+        if isolated("epoll_edges_on_the_waiters_own_signal") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask | 1 << 35);
+        let fd = create(mask, NONBLOCK);
+        let edge = epoll_with(fd, 0x1 | 1 << 31);
+        let once = epoll_with(fd, 0x1 | 1 << 30);
+        queue(35, 1, true);
+        assert_eq!((epoll_for(edge, 0), epoll_for(edge, 0)), (1, 0));
+        let start = std::time::Instant::now();
+        assert_eq!(epoll_for(edge, 100), 0);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(100));
+        // Any signal sent to the process wakes it, outside the mask too.
+        queue(36, 1, false);
+        assert_eq!((epoll_for(edge, 0), epoll_for(edge, 0)), (1, 0));
+        assert_eq!((epoll_for(once, 0), epoll_for(once, 0)), (1, 0));
+        let interest = [0x1u64 | 1 << 30, 7];
+        assert_eq!(
+            sys::epoll::epoll_ctl([once as u64, 3, fd as u64, interest.as_ptr() as u64, 0, 0]),
+            0
+        );
+        assert_eq!(epoll_for(once, 0), 1);
+        for fd in [fd, edge, once] {
             assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
         }
     }

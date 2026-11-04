@@ -1,6 +1,8 @@
 //! ppoll and pselect6 over Darwin poll. Every guest fd (eventfd, timerfd,
 //! epoll and inotify included) is a host fd whose poll readiness already
-//! has Linux meaning, so only the event bits and timeouts are translated.
+//! has Linux meaning, so only the event bits and timeouts are translated;
+//! a signalfd is also readable for the polling thread's own signals, which
+//! its wake token reports.
 
 use crate::errno::{self, EBADF, EINVAL};
 use std::os::fd::AsRawFd;
@@ -54,6 +56,47 @@ fn from_host(h: i16, asked: i16) -> i16 {
 fn signal_events(description: &super::signalfd::SignalFd, asked: i16) -> i16 {
     super::signalfd::ready(description);
     asked & POLLIN
+}
+
+/// Register the calling thread as a poller of the signalfds among `pins`,
+/// whose readiness counts its own pending signals, and add its wake token
+/// to `host`.
+fn watch_signals(
+    pins: &[Option<super::fdtab::Pinned>],
+    host: &mut Vec<libc::pollfd>,
+) -> Result<Option<super::signalfd::Polling>, crate::errno::Errno> {
+    let watched: Vec<_> = pins
+        .iter()
+        .flatten()
+        .filter_map(|pin| match pin.kind() {
+            Some(super::fdtab::Kind::Signal(description)) => Some((description.clone(), 0)),
+            _ => None,
+        })
+        .collect();
+    if watched.is_empty() {
+        return Ok(None);
+    }
+    let polling = super::signalfd::Polling::begin(watched)?;
+    if let Some(polling) = &polling {
+        host.push(libc::pollfd {
+            fd: polling.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    Ok(polling)
+}
+
+/// A signalfd's host revents as the polling thread reads it now: its socket
+/// shows only the process's pending signals.
+fn signal_revents(pin: Option<&super::fdtab::Pinned>, host: &mut libc::pollfd) {
+    if let Some(super::fdtab::Kind::Signal(description)) = pin.and_then(|pin| pin.kind()) {
+        host.revents = if super::signalfd::ready(description) {
+            POLLIN
+        } else {
+            0
+        };
+    }
 }
 
 /// Install `mask` (a guest sigset pointer, 0 for none) for the duration of a
@@ -208,6 +251,10 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             revents: 0,
         });
     }
+    let polling = match watch_signals(&pins, &mut host) {
+        Ok(polling) => polling,
+        Err(error) => return -(error as i64),
+    };
     if pins.iter().flatten().any(super::close_effects::observes) {
         if let Err(error) = super::close_effects::observe_socket() {
             return -(error as i64);
@@ -227,6 +274,9 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         } else {
             (ms as i64 - (now_ns() - t0) / 1_000_000).max(0) as i32
         };
+        if let Some(polling) = &polling {
+            polling.sync();
+        }
         let n = host_poll(&mut host, if invalid { 0 } else { left }, mask);
         if n < 0 {
             return n;
@@ -238,6 +288,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 ready += 1;
                 continue;
             }
+            signal_revents(pin.as_ref(), h);
             if let Some(watch) = pty {
                 h.revents = watch.events(h.revents);
             }
@@ -371,55 +422,76 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         // SAFETY: guest struct.
         user_read!(sig, u64)
     };
+    let polling = match watch_signals(&pins, &mut host) {
+        Ok(polling) => polling,
+        Err(error) => return -(error as i64),
+    };
     if pins.iter().flatten().any(super::close_effects::observes) {
         if let Err(error) = super::close_effects::observe_socket() {
             return -(error as i64);
         }
     }
     let t0 = now_ns();
-    let n = host_poll(&mut host, ms, mask);
-    if n < 0 {
-        return n;
-    }
-    for descriptor in &mut host {
-        if let Some(events) = super::fuse_device::readiness(descriptor.fd) {
-            descriptor.revents = match events {
-                Ok(events) => events,
-                Err(_) => POLLERR,
-            };
+    loop {
+        let left = if ms < 0 {
+            -1
+        } else {
+            (ms as i64 - (now_ns() - t0) / 1_000_000).max(0) as i32
+        };
+        if let Some(polling) = &polling {
+            polling.sync();
         }
-    }
-    for (descriptor, watch) in host.iter_mut().zip(&ptys) {
-        if let Some(watch) = watch {
-            descriptor.revents = watch.events(descriptor.revents);
+        let n = host_poll(&mut host, left, mask);
+        if n < 0 {
+            return n;
         }
-    }
-    if host.iter().any(|p| p.revents & POLLNVAL != 0) {
-        return -(EBADF as i64);
-    }
-    user_try!(update_timeout(ts, t0));
-    let mut output_sets = vec![vec![0u8; nfds.div_ceil(64) * 8]; 3];
-    let mut count = 0;
-    for (p, fd) in host.iter().zip(guest_fds) {
-        let hits = [
-            p.revents & (POLLIN | POLLHUP | POLLERR) != 0,
-            p.revents & (POLLOUT | POLLERR) != 0,
-            p.revents & POLLPRI != 0,
-        ];
-        for (index, ((s, w), hit)) in sets.iter().zip(wanted).zip(hits).enumerate() {
-            if *s != 0 && p.events & w != 0 && hit {
-                // SAFETY: guest fd_set word covering fd.
-                output_sets[index][fd / 8] |= 1 << (fd % 8);
-                count += 1;
+        for descriptor in &mut host {
+            if let Some(events) = super::fuse_device::readiness(descriptor.fd) {
+                descriptor.revents = match events {
+                    Ok(events) => events,
+                    Err(_) => POLLERR,
+                };
             }
         }
-    }
-    for (set, bytes) in sets.iter().zip(&output_sets) {
-        if *set != 0 {
-            user_try!(super::user_memory::write_exact(*set, bytes));
+        for ((descriptor, watch), pin) in host.iter_mut().zip(&ptys).zip(&pins) {
+            if let Some(watch) = watch {
+                descriptor.revents = watch.events(descriptor.revents);
+            }
+            signal_revents(pin.as_ref(), descriptor);
+        }
+        if host.iter().any(|p| p.revents & POLLNVAL != 0) {
+            return -(EBADF as i64);
+        }
+        let mut output_sets = vec![vec![0u8; nfds.div_ceil(64) * 8]; 3];
+        let mut count = 0;
+        for (p, &fd) in host.iter().zip(&guest_fds) {
+            let hits = [
+                p.revents & (POLLIN | POLLHUP | POLLERR) != 0,
+                p.revents & (POLLOUT | POLLERR) != 0,
+                p.revents & POLLPRI != 0,
+            ];
+            for (index, ((s, w), hit)) in sets.iter().zip(wanted).zip(hits).enumerate() {
+                if *s != 0 && p.events & w != 0 && hit {
+                    // SAFETY: guest fd_set word covering fd.
+                    output_sets[index][fd / 8] |= 1 << (fd % 8);
+                    count += 1;
+                }
+            }
+        }
+        // A wake token or a pty notification with nothing ready: wait on.
+        if count > 0 || n == 0 || left == 0 {
+            user_try!(update_timeout(ts, t0));
+            for (set, bytes) in sets.iter().zip(&output_sets) {
+                if *set != 0 {
+                    user_try!(super::user_memory::write_exact(*set, bytes));
+                }
+            }
+            return count;
+        }
+        for descriptor in &mut host {
+            descriptor.revents = 0;
         }
     }
-    count
 }
 
 #[cfg(test)]

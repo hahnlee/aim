@@ -58,7 +58,6 @@ creator!(timerfd_flags, flags, {
 });
 
 #[test]
-#[ignore = "#2648: signalfd4 is not implemented; flag coverage is not run"]
 fn signalfd_flags() {
     let _view = vfs::test_view();
     // SAFETY: all-zero is a valid register context; no guest code runs.

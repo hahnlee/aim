@@ -206,6 +206,8 @@ pub struct ThreadSignals {
     /// Set while the thread waits in a signalfd read, which every signal
     /// sent to the process wakes (`signalfd_notify`).
     reading: AtomicBool,
+    /// The wake token of the thread's signalfd polls, made by the first.
+    pub(super) signalfd_wake: std::sync::OnceLock<super::signalfd::Token>,
     pending: Mutex<Pending>,
     alt: Mutex<AltStack>,
     /// `rt_sigsuspend`'s mask to restore after the handler.
@@ -241,6 +243,7 @@ impl ThreadSignals {
             own: AtomicU64::new(0),
             waitset: AtomicU64::new(0),
             reading: AtomicBool::new(false),
+            signalfd_wake: std::sync::OnceLock::new(),
             pending: Mutex::new(Pending::new()),
             alt: Mutex::new(AltStack::DISABLED),
             saved_mask: Mutex::new(None),
@@ -1374,13 +1377,15 @@ fn dequeue(th: &Thread, set: u64) -> Option<Siginfo> {
     info
 }
 
-/// Every signal pending on the process or one of its threads.
-pub(super) fn all_pending() -> u64 {
-    let threads = thread::with_table(|t| {
-        t.values()
-            .fold(0, |set, th| set | lock(&th.sig.pending).set)
-    });
-    threads | process().set
+/// The signals pending for the process (`shared_pending`).
+pub(super) fn process_pending() -> u64 {
+    process().set
+}
+
+/// The signals pending for `th`, its own and the process's, which a
+/// signalfd poll in it reads (`signalfd_poll`).
+pub(super) fn pending_for(th: Option<&Thread>) -> u64 {
+    th.map_or(0, |th| lock(&th.sig.pending).set) | process().set
 }
 
 /// A signal was sent to the process or one of its threads, or a signalfd's

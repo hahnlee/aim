@@ -9,6 +9,11 @@
 //!   attached epoll then still receives the wakeup, which is the "one or
 //!   more" the flag allows.
 //! - A kqueue is itself pollable, so epoll fds nest and work in poll().
+//! - A signalfd's socket shows only the process's pending signals. An
+//!   epoll_wait reads each signalfd in its interest list as the waiter
+//!   (`ep_item_poll` runs `signalfd_poll` in the waiter's context), waiting
+//!   on the kqueue and its thread's wake token together. A poll of the
+//!   epoll fd, or an epoll watching it, sees only the socket.
 //! - The interest list is kept here too: Darwin does not inherit kqueues
 //!   across fork, so a fork child rebuilds each one on the same fd number.
 //!   The kernel stays authoritative for whether an fd is registered: a
@@ -117,6 +122,10 @@ struct Interest {
     data: u64,
     /// Delivered with EPOLLONESHOT and not re-armed yet.
     disabled: bool,
+    /// An edge-triggered signalfd: the [`super::signalfd::notified`] count
+    /// it was last reported at, as `ep_poll_callback` queues it again only
+    /// on a newer wakeup.
+    seen: u64,
 }
 
 impl Interest {
@@ -157,6 +166,7 @@ fn pty_ctl(
             events: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
             data: u64::from_le_bytes(bytes[8..].try_into().unwrap()),
             disabled: false,
+            seen: 0,
         })
     };
     let mut retired = None;
@@ -460,6 +470,7 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
             events: raw[0] as u32,
             data: raw[1],
             disabled: false,
+            seen: 0,
         })
     } else {
         None
@@ -583,6 +594,36 @@ pub(super) fn observes_sockets(ep: &Epoll, seen: &mut std::collections::HashSet<
     })
 }
 
+/// The armed signalfd interests of `ep` that ask for EPOLLIN, with their
+/// descriptions and the count an edge-triggered one was last reported at.
+fn signal_interests(ep: &Epoll) -> Vec<(i32, Arc<super::signalfd::SignalFd>, u64)> {
+    let interests: Vec<(i32, u64)> = ep
+        .interest
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, i)| !i.disabled && i.events & EPOLLIN != 0)
+        .map(|(fd, i)| (*fd, if i.events & EPOLLET != 0 { i.seen } else { 0 }))
+        .collect();
+    interests
+        .into_iter()
+        .filter_map(|(fd, seen)| match fdtab::get(fd) {
+            Some(Kind::Signal(description)) => Some((fd, description, seen)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Milliseconds for poll(2), rounded up, -1 for none.
+fn poll_ms(timeout: Option<libc::timespec>) -> i32 {
+    timeout.map_or(-1, |t| {
+        t.tv_sec
+            .saturating_mul(1000)
+            .saturating_add((t.tv_nsec + 999_999) / 1_000_000)
+            .min(i32::MAX as i64) as i32
+    })
+}
+
 fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>, mask: u64) -> i64 {
     let ep = match epoll_of(epfd) {
         Ok(e) => e,
@@ -602,7 +643,24 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
     let knotes = 2 * ep.interest.lock().unwrap().len() + 3 * ep.ptys.lock().unwrap().len();
     let fetch = knotes.max(maxevents as usize).min(i32::MAX as usize);
     let mut kevs: Vec<libc::kevent> = Vec::with_capacity(fetch);
+    let signals = signal_interests(&ep);
+    let polling = if signals.is_empty() {
+        None
+    } else {
+        let watched = signals
+            .iter()
+            .map(|(_, description, seen)| (Arc::clone(description), *seen))
+            .collect();
+        match super::signalfd::Polling::begin(watched) {
+            Ok(polling) => polling,
+            Err(error) => return -(error as i64),
+        }
+    };
     let deadline = timeout.map(|t| now_ns() + t.tv_sec * 1_000_000_000 + t.tv_nsec);
+    let zero = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let out = loop {
         let left = deadline.map(|d| {
             let ns = (d - now_ns()).max(0);
@@ -611,17 +669,45 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
                 tv_nsec: ns % 1_000_000_000,
             }
         });
-        let old_mask = user_try!(super::poll::swap_sigmask(mask));
         // SAFETY: output array with capacity `fetch`.
-        let n = unsafe {
+        let mut fetch_events = |wait: Option<&libc::timespec>| unsafe {
             libc::kevent(
                 epfd,
                 std::ptr::null(),
                 0,
                 kevs.as_mut_ptr(),
                 fetch as i32,
-                left.as_ref().map_or(std::ptr::null(), |t| t as *const _),
+                wait.map_or(std::ptr::null(), |t| t as *const _),
             )
+        };
+        let old_mask = user_try!(super::poll::swap_sigmask(mask));
+        // With signalfds the wait is on the kqueue and the wake token, then
+        // the kqueue is read without waiting.
+        let (n, woke) = match &polling {
+            None => {
+                let n = fetch_events(left.as_ref());
+                (n, n != 0)
+            }
+            Some(polling) => {
+                polling.sync();
+                let mut fds = [
+                    libc::pollfd {
+                        fd: epfd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: polling.fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // SAFETY: a pollfd array we own.
+                match unsafe { libc::poll(fds.as_mut_ptr(), 2, poll_ms(left)) } {
+                    woke if woke <= 0 => (woke, woke != 0),
+                    _ => (fetch_events(Some(&zero)), true),
+                }
+            }
         };
         let err = errno::last();
         super::poll::restore_sigmask(old_mask);
@@ -630,10 +716,10 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         }
         // SAFETY: the kernel filled n entries.
         unsafe { kevs.set_len(n as usize) };
-        let (found, rearm) = ready(&ep, &kevs, maxevents as usize);
+        let (found, rearm) = ready(&ep, &kevs, maxevents as usize, &signals);
         apply(epfd, &rearm);
         // An inotify fd that woke the wait with nothing to read: wait on.
-        if !found.is_empty() || n == 0 || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
+        if !found.is_empty() || !woke || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
             break found;
         }
     };
@@ -655,11 +741,13 @@ fn now_ns() -> i64 {
 /// one-shot ones and re-arm the fds past `limit`, which stay ready for the
 /// next wait as on Linux (a retrieved edge-triggered or dispatched knote
 /// would otherwise not fire again), and the one-shot ones whose readiness
-/// was stale, which `ep_item_poll` leaves armed.
+/// was stale, which `ep_item_poll` leaves armed. The `signals` interests
+/// are read as the waiter reads them, whether their socket fired or not.
 fn ready(
     ep: &Epoll,
     kevs: &[libc::kevent],
     limit: usize,
+    signals: &[(i32, Arc<super::signalfd::SignalFd>, u64)],
 ) -> (Vec<(i32, u32, u64)>, Vec<libc::kevent>) {
     let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len().min(limit));
     let mut rearm = Vec::new();
@@ -678,13 +766,8 @@ fn ready(
         if b & EPOLLIN != 0 && super::inotify::spuriously_ready(fd) {
             b &= !(EPOLLIN | EPOLLRDNORM);
         }
-        // A signalfd's token may predate a mask another process changed:
-        // its poll reads the mask now, and drops a stale token.
-        if b & EPOLLIN != 0
-            && matches!(fdtab::get(fd), Some(Kind::Signal(description))
-                if !super::signalfd::ready(&description))
-        {
-            b &= !EPOLLIN;
+        if signals.iter().any(|signal| signal.0 == fd) {
+            b = 0;
         }
         if b == 0 {
             if fired != 0 && i.events & EPOLLONESHOT != 0 && !i.disabled {
@@ -717,6 +800,27 @@ fn ready(
             }
         }
         out.push((fd, b, i.data));
+    }
+    // `signalfd_poll` in the waiter's context, which also drops a token a
+    // mask another process changed made stale.
+    for (fd, description, _) in signals {
+        let Some(i) = interest.get_mut(fd) else {
+            continue;
+        };
+        let notified = super::signalfd::notified();
+        if i.disabled
+            || i.events & EPOLLET != 0 && notified <= i.seen
+            || out.len() == limit
+            || !super::signalfd::ready(description)
+        {
+            continue;
+        }
+        i.seen = notified;
+        if i.events & EPOLLONESHOT != 0 {
+            i.disabled = true;
+            rearm.push(kev(*fd, libc::EVFILT_READ, libc::EV_DISABLE));
+        }
+        out.push((*fd, EPOLLIN, i.data));
     }
     drop(interest);
     use std::os::fd::AsRawFd;
@@ -846,6 +950,7 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
                 events: r.u32(),
                 data: r.u64(),
                 disabled: r.bool(),
+                seen: 0,
             },
         )
     });
@@ -857,6 +962,7 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
             events: r.u32(),
             data: r.u64(),
             disabled: r.bool(),
+            seen: 0,
         };
         let watch = super::pty_owner::Watch::restore(r);
         let valid = match (identity, watch) {
