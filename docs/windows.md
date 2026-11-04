@@ -94,7 +94,7 @@ drops the old connection's tasks. The mode:
 
 | Record | From | Meaning |
 | --- | --- | --- |
-| `TASK` | guest | the task's bounds, new or changed |
+| `TASK` | guest | the task's bounds and windowing mode, new or changed (`aim-windows` sends no mode: its windows never take the full screen) |
 | `PACKAGE`, `TITLE` | guest | the task's package; its `TaskDescription` label |
 | `COLORS` | guest | the task description's ARGB primary and background colors (zero means unset) |
 | `ACTIVITY` | guest | the activity the task was started with, `package/class` (`origActivity`, an alias, else `realActivity`) |
@@ -109,6 +109,7 @@ drops the old connection's tasks. The mode:
 | `FOCUS` | server | `setFocusedTask` |
 | `CLOSE` | server | `removeTask` |
 | `LAUNCH` | server | start a package's launcher activity in a new task (`startActivityAndWait`, in a thread of its own; `DRAWN` when it returns) |
+| `SET_WINDOWING_MODE` | server | the user put the window into or out of the Mac's full screen: fullscreen or freeform (app host only); the bridge answers with `TASK`, also when it refuses |
 
 ## The app host
 
@@ -243,7 +244,22 @@ and letterboxing, are tracked in #2050.
 - **Minimize and close.** A minimized window's task goes behind the
   visible windows' tasks (they are focused back to front, in the screen's
   order). Closing a window removes its task; a removed task closes its
-  window. Zoom (the green button) resizes; full screen is off.
+  window. Zoom (Option and the green button) resizes.
+- **Full screen.** A fullscreen task's window (`setWindowingMode`, a
+  fullscreen launch or saved launch params) is in the Mac's full screen, a
+  space of its own, with AppKit's animation; the display is the main
+  screen, so its content there is the task's display-sized bounds, one
+  pixel per pixel. The window enters from its freeform frame (a fullscreen
+  launch's from where a new freeform task opens), never resized to the
+  display first, and AppKit animates it back there. A task leaving
+  fullscreen takes the window out, and it then takes the task's freeform
+  bounds (requested, else last non-fullscreen; for the user's leaving with
+  neither, a new freeform task's default bounds).
+  The user's full screen (the green button, Ctrl-Cmd-F) asks the app host
+  for fullscreen or freeform (`SET_WINDOWING_MODE`, as `setWindowingMode`
+  does), and the window waits for the task's answer: a refusal (a task in
+  an organizer root task) takes it back. While it moves into or out of
+  the full screen, its frames do not move or resize the task.
 - **Title.** The task's `TaskDescription` label, else what a launcher
   calls it: in a shim, the shim's name; in the server, the label of the
   launcher activity the task was started with, else its app's label (both

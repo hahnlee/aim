@@ -6,6 +6,8 @@
 //! exactly over the task. Android pixels and macOS points stay separate
 //! coordinate systems; this module is the one place that converts.
 //!
+use aim_hostcall::display::windowing_mode;
+
 /// The Mac's main screen: its size in points and pixels per point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Screen {
@@ -98,6 +100,72 @@ pub fn view_to_display(
         origin[0] as f64 + x * scale,
         origin[1] as f64 + (view_height - y) * scale,
     )
+}
+
+/// A task window's place in the Mac's full screen, which follows its
+/// task's windowing mode: a fullscreen task's window is in a space of its
+/// own, any other's is not. Toggling either way animates; while it does,
+/// AppKit owns the window's frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FullScreen {
+    /// In the full screen, or going there.
+    pub on: bool,
+    /// Between AppKit's `windowWill…FullScreen` and its end.
+    pub moving: bool,
+    /// The user toggled it, and the task's record has not answered yet.
+    pub asked: bool,
+}
+
+impl FullScreen {
+    /// Whether the window should toggle to follow its task's windowing
+    /// `mode`: never while it moves or waits for an answer.
+    pub fn toggle(&self, mode: i32) -> bool {
+        !self.moving && !self.asked && self.on != (mode == windowing_mode::FULLSCREEN)
+    }
+
+    /// Whether AppKit places the window: in the full screen or on its way
+    /// in or out.
+    pub fn places(&self) -> bool {
+        self.on || self.moving
+    }
+
+    /// Whether the window takes its task's bounds, for a task in windowing
+    /// `mode`: not while AppKit places it, nor while it is out of the full
+    /// screen for a fullscreen task (on its way in, or waiting for the
+    /// answer to the user's leaving it). AppKit animates into the full
+    /// screen from the window's frame, and back to it.
+    pub fn follows(&self, mode: i32) -> bool {
+        !self.places() && mode != windowing_mode::FULLSCREEN
+    }
+
+    /// AppKit starts to move the window into (`on`) or out of the full
+    /// screen, for the task in windowing `mode`: the mode to ask the task
+    /// for when the user did it, not the task.
+    pub fn will(&mut self, on: bool, mode: i32) -> Option<i32> {
+        self.on = on;
+        self.moving = true;
+        if on == (mode == windowing_mode::FULLSCREEN) {
+            return None;
+        }
+        self.asked = true;
+        Some(if on {
+            windowing_mode::FULLSCREEN
+        } else {
+            windowing_mode::FREEFORM
+        })
+    }
+
+    /// The move ended with the window in the full screen (`on`) or not,
+    /// as it went or after AppKit failed to move it.
+    pub fn did(&mut self, on: bool) {
+        self.on = on;
+        self.moving = false;
+    }
+
+    /// The task's record (its windowing mode) answers what the user asked.
+    pub fn answered(&mut self) {
+        self.asked = false;
+    }
 }
 
 #[cfg(test)]
@@ -194,5 +262,60 @@ mod tests {
             view_to_display(540.0, 0.0, 960.0, [100, 284], 2.0),
             (1180.0, 2204.0)
         );
+    }
+
+    #[test]
+    fn the_full_screen_follows_the_tasks_mode() {
+        use windowing_mode::{FREEFORM, FULLSCREEN, UNDEFINED};
+        // Android makes the task fullscreen: the window toggles in, asks
+        // nothing, and stays there.
+        let mut f = FullScreen::default();
+        assert!(f.follows(FREEFORM));
+        assert!(f.toggle(FULLSCREEN));
+        assert!(!f.follows(FULLSCREEN), "it enters from its freeform frame");
+        assert!(!f.toggle(FREEFORM));
+        assert_eq!(f.will(true, FULLSCREEN), None);
+        assert!(!f.toggle(FREEFORM), "not while it moves");
+        f.did(true);
+        assert!(!f.toggle(FULLSCREEN));
+        // Then freeform: out again, back to that frame, and then to the
+        // task's bounds.
+        assert!(f.toggle(FREEFORM));
+        assert!(!f.follows(FREEFORM), "AppKit restores its frame");
+        assert_eq!(f.will(false, FREEFORM), None);
+        assert!(!f.follows(FREEFORM));
+        f.did(false);
+        assert_eq!(f, FullScreen::default());
+        assert!(f.follows(FREEFORM));
+        // A bridge that does not say keeps the window out.
+        assert!(!f.toggle(UNDEFINED));
+    }
+
+    #[test]
+    fn the_users_full_screen_asks_the_task_and_waits_for_its_answer() {
+        use windowing_mode::{FREEFORM, FULLSCREEN};
+        let mut f = FullScreen::default();
+        // The green button on a freeform task's window asks for fullscreen.
+        assert_eq!(f.will(true, FREEFORM), Some(FULLSCREEN));
+        f.did(true);
+        // Until the task's record answers, its old mode does not toggle back.
+        assert!(!f.toggle(FREEFORM));
+        f.answered();
+        assert!(!f.toggle(FULLSCREEN));
+        // A refusal (freeform still) takes the window out again.
+        assert!(f.toggle(FREEFORM));
+        // Leaving it asks for freeform; out, the window waits for the
+        // answer's bounds instead of taking the fullscreen task's.
+        assert_eq!(f.will(false, FULLSCREEN), Some(FREEFORM));
+        f.did(false);
+        assert!(!f.follows(FULLSCREEN));
+        f.answered();
+        assert!(!f.toggle(FREEFORM));
+        assert!(f.follows(FREEFORM));
+        // AppKit failing to enter keeps the window out, and it toggles
+        // again for a task that is fullscreen.
+        f.will(true, FULLSCREEN);
+        f.did(false);
+        assert!(f.toggle(FULLSCREEN));
     }
 }

@@ -424,7 +424,9 @@ pub fn serve(sock: OwnedFd) {
 /// A host's request, for the task bridge.
 fn request(r: Record) {
     match r.op {
-        window::SET_BOUNDS | window::LAUNCH | window::EXPAND_PIP => crate::windows::send(r),
+        window::SET_BOUNDS | window::LAUNCH | window::EXPAND_PIP | window::SET_WINDOWING_MODE => {
+            crate::windows::send(r)
+        }
         window::FOCUS => on_main(move || crate::windows::focus(r.task)),
         window::CLOSE => {
             crate::windows::send(r);

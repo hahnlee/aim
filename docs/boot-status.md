@@ -66,7 +66,10 @@ inherited from the display. `setWindowingMode` changes the task's own mode as
 `TaskDisplayArea.isValidWindowingMode` resolves it (fullscreen, or freeform in
 window mode; undefined inherits the display area's), and the task's
 configuration, Mac window bounds, visibility and lifecycle follow: a fullscreen
-task fills the display as a fullscreen launch in window mode already does. A
+task (also a fullscreen launch) puts its Mac window into macOS native full
+screen through the bridge's `TASK` windowing mode, and the user's native full
+screen asks for fullscreen or freeform (`SET_WINDOWING_MODE`, #2688; host tests
+only, no live window checked). A
 task keeps its requested bounds in any mode, so a task returning to freeform
 takes them, else its last non-fullscreen bounds, else fills the display. Empty
 bounds (`setBounds(null)`) inherit the display and are not recorded. Reorder-to-bottom preserves visible
