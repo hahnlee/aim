@@ -51,9 +51,19 @@ bounds (`setBounds(null)`) inherit the display and are not recorded. Reorder-to-
 freeform tasks and uses a distinct bridge record instead of minimizing the Mac
 window. Host regressions cover dispatch, permission denial, malformed/unsupported
 requests, mode transitions, configuration and bridge records; pinned and
-multi-window modes, root creation, adjacency, launch roots, empty transactions
-and sync remain explicit failures. No guest boot, CTS or live Mac window
-behavior was checked (2026-11-04).
+multi-window modes, adjacency, launch roots, empty transactions and sync remain
+explicit failures. No guest boot, CTS or live Mac window behavior was checked
+(2026-11-04).
+
+TOC `createRootTask`, `deleteRootTask` and `getRootTasks` serve organizer root
+tasks (#2616): a multi-window root on the default display is made at the
+bottom with a real container layer under the display's and no Mac window of
+its own, appears to the organizer by callback (not in a registration's list)
+with its launch cookie, and goes with its organizer (`TaskOrganizerState.dispose`).
+Other root windowing modes, root-task WCT changes, reparenting and child
+`parentTaskId` remain explicit failures. Host regressions cover modes,
+displays, listing order and filters, deletion and organizer removal; no guest
+boot was run (2026-11-04).
 
 The app host's `wm` user-rotation, fixed-to-user-rotation and ignore-orientation
 commands now use persisted native display policy with Android 16 output (#2630).

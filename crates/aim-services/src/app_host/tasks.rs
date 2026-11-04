@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aim_host_display::wire;
 use aim_hostcall::display::{Window as Record, Windows, mode, window};
 
-use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
+use aim_binder_host::local::Strong;
+use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception};
 
 use super::activity::Item;
 use super::activity_stack::Command;
@@ -53,6 +54,26 @@ pub struct Task {
     window_layout_affinity: Option<String>,
     has_been_visible: bool,
     organized: bool,
+    /// `mCreatedByOrganizer`: an organizer's root task, of no activity
+    /// and no Mac window of its own.
+    root: Option<Root>,
+}
+
+/// An organizer root task's own state (`Task.Builder` in
+/// `TaskOrganizerController.createRootTask`).
+struct Root {
+    /// `lastActiveTime`, set when it was made.
+    last_active: i64,
+    /// `mLaunchCookie`, held while the root task is.
+    cookie: Option<(Binder, Option<Strong>)>,
+}
+
+/// What `TaskInfo` reports of an organizer root task.
+pub(super) struct RootTask {
+    pub windowing_mode: i32,
+    pub bounds: Rect,
+    pub last_active: i64,
+    pub cookie: Option<Binder>,
 }
 
 impl Task {
@@ -165,13 +186,38 @@ impl Tasks {
             .map(|t| t.bounds)
     }
 
-    /// The bounds of the tasks.
+    /// The bounds of the tasks of a Mac window.
     fn all_bounds(&self) -> Vec<Rect> {
         self.tasks
             .lock()
             .unwrap()
             .iter()
+            .filter(|t| t.root.is_none())
             .map(|t| t.bounds)
+            .collect()
+    }
+
+    /// The organizer root task `id`.
+    pub(super) fn root(&self, id: i32) -> Option<RootTask> {
+        let tasks = self.tasks.lock().unwrap();
+        let task = tasks.iter().find(|t| t.id == id)?;
+        let root = task.root.as_ref()?;
+        Some(RootTask {
+            windowing_mode: task.windowing_mode,
+            bounds: task.bounds,
+            last_active: root.last_active,
+            cookie: root.cookie.as_ref().map(|c| c.0),
+        })
+    }
+
+    /// The root tasks, top to bottom (`DisplayContent.forAllRootTasks`).
+    pub(super) fn root_task_ids(&self) -> Vec<i32> {
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .map(|t| t.id)
             .collect()
     }
 
@@ -375,6 +421,7 @@ impl AppHost {
             window_layout_affinity: info.window_layout.as_ref().and_then(|l| l.affinity.clone()),
             has_been_visible: false,
             organized: false,
+            root: None,
         });
         drop(tasks);
         self.activities
@@ -567,13 +614,99 @@ impl AppHost {
         self.activities.task_tokens.lock().unwrap().remove(&id);
         if let Some(task) = removed {
             self.remove_layers(task.layer.into_iter().collect());
-            self.tasks.send(&Record {
-                op: window::REMOVED,
-                task: id,
-                ..Default::default()
-            });
+            if task.root.is_none() {
+                self.tasks.send(&Record {
+                    op: window::REMOVED,
+                    task: id,
+                    ..Default::default()
+                });
+            }
         }
         self.notify_task_organizers();
+    }
+
+    /// `TaskOrganizerController.createRootTask` on the display: a root
+    /// task in windowing `mode` at the display's bounds, at the bottom
+    /// (`Task.Builder`'s default position), its layer a container of the
+    /// display's. It has no Mac window: each app task keeps its own.
+    pub(super) fn create_root_task(
+        &self,
+        mode: i32,
+        cookie: Option<Binder>,
+    ) -> Result<i32, String> {
+        let display = self.display().map_err(|e| e.message)?;
+        let bounds = Rect {
+            left: 0,
+            top: 0,
+            right: display.0.width,
+            bottom: display.0.height,
+        };
+        let composer = self.composer().map_err(|e| e.message)?;
+        let id = {
+            let mut next = self.tasks.next.lock().unwrap();
+            *next += 1;
+            *next
+        };
+        let layer = self.with_display_layer(|parent| {
+            composer.create_surface(
+                &self.process,
+                &format!("Task={id}"),
+                surface::CONTAINER,
+                Some(parent),
+                &[],
+            )
+        })?;
+        let held = match cookie {
+            Some(Binder::Handle(handle)) => Some(self.process.strong(handle)),
+            _ => None,
+        };
+        self.tasks.tasks.lock().unwrap().insert(
+            0,
+            Task {
+                id,
+                uid: 0,
+                package: String::new(),
+                component: String::new(),
+                real_activity: String::new(),
+                bounds,
+                windowing_mode: mode,
+                requested_bounds: None,
+                restore_bounds: None,
+                min_size: (-1, -1),
+                layer: Some(layer),
+                launch: None,
+                window_layout_affinity: None,
+                has_been_visible: false,
+                organized: false,
+                root: Some(Root {
+                    last_active: super::alarm_service::elapsed_ms(),
+                    cookie: cookie.map(|c| (c, held)),
+                }),
+            },
+        );
+        eprintln!("app host: root task {id} in windowing mode {mode}");
+        self.place_tasks()?;
+        Ok(id)
+    }
+
+    /// `TaskOrganizerState.dispose`: the organizer root tasks go with
+    /// their organizer (`removeImmediately`); their ids.
+    pub(super) fn remove_root_tasks(&self) -> Vec<i32> {
+        let roots: Vec<Task> = self
+            .tasks
+            .tasks
+            .lock()
+            .unwrap()
+            .extract_if(.., |t| t.root.is_some())
+            .collect();
+        let mut tokens = self.activities.task_tokens.lock().unwrap();
+        for root in &roots {
+            tokens.remove(&root.id);
+        }
+        drop(tokens);
+        let ids = roots.iter().map(|r| r.id).collect();
+        self.remove_layers(roots.into_iter().filter_map(|r| r.layer).collect());
+        ids
     }
 
     /// Takes the server's requests until it closes the connection.
@@ -1028,20 +1161,21 @@ fn bridge(socket: &Path) -> Result<(UnixStream, bool), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use aim_binder_host::local::{Call, Reply, Service};
     use aim_binder_host::parcel::{Binder, Parcel, Reader};
 
     #[derive(Default)]
-    struct SurfaceTree {
+    pub(in crate::app_host) struct SurfaceTree {
         handles: Vec<Binder>,
         next: usize,
         children: BTreeSet<i32>,
-        removed: Vec<i32>,
-        parents: BTreeMap<i32, Option<i32>>,
+        pub(in crate::app_host) removed: Vec<i32>,
+        pub(in crate::app_host) parents: BTreeMap<i32, Option<i32>>,
         fail_create: Option<usize>,
         fail_apply: bool,
+        held: Vec<aim_binder_host::local::Strong>,
     }
     struct Surfaces(Arc<Mutex<SurfaceTree>>);
     impl Service for Surfaces {
@@ -1685,8 +1819,9 @@ mod tests {
     /// Two freeform tasks 7 and 8 of one resumed activity each at `old` on
     /// the test phone display in window mode, task 7 at least 900x1100 and
     /// followed by its process: the process's thread, the activities and the
-    /// server's end of the task bridge.
-    fn wct_tasks(
+    /// server's end of the task bridge, and the composer's layers, of
+    /// four surface handles.
+    pub(in crate::app_host) fn wct_tasks(
         host: &Arc<AppHost>,
         export: &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
         old: Rect,
@@ -1694,6 +1829,7 @@ mod tests {
         Arc<super::super::process_configuration::tests::Recorder>,
         Vec<u64>,
         UnixStream,
+        Arc<Mutex<SurfaceTree>>,
     ) {
         use super::super::activity_stack::{Activity, State};
         use super::super::process_configuration::tests::Recorder;
@@ -1731,9 +1867,15 @@ mod tests {
             )
             .ok()
             .unwrap();
-        let endpoint = export(Arc::new(Surfaces(Arc::new(Mutex::new(
-            SurfaceTree::default(),
-        )))));
+        let tree = Arc::new(Mutex::new(SurfaceTree::default()));
+        let endpoint = export(Arc::new(Surfaces(tree.clone())));
+        let mut handles = Parcel::new();
+        for _ in 0..4 {
+            let held = export(Arc::new(super::super::activity::Token));
+            handles.write_binder(Some(held.binder()));
+            tree.lock().unwrap().held.push(held);
+        }
+        endpoint.transact(100, &handles, false).unwrap();
         host.composer
             .set(surface::Composer::for_test(&host.process, endpoint.handle))
             .ok()
@@ -1783,7 +1925,7 @@ mod tests {
         let (bridge, receive) = UnixStream::pair().unwrap();
         receive.set_nonblocking(true).unwrap();
         *host.tasks.bridge.lock().unwrap() = Some(bridge);
-        (thread, activity_tokens, receive)
+        (thread, activity_tokens, receive, tree)
     }
 
     #[test]
@@ -1800,7 +1942,7 @@ mod tests {
                 right: 900,
                 bottom: 1500,
             };
-            let (thread, activity_tokens, mut receive) = wct_tasks(host, export, old);
+            let (thread, activity_tokens, mut receive, _) = wct_tasks(host, export, old);
             let token = host.task_token(7);
             let request = fixture(token);
             let denied = apply_wct(host, &request, 10100);
@@ -2073,7 +2215,7 @@ mod tests {
                 right: 900,
                 bottom: 1500,
             };
-            let (_thread, activities, mut receive) = wct_tasks(host, export, old);
+            let (_thread, activities, mut receive, _) = wct_tasks(host, export, old);
             let area = Rect {
                 left: 0,
                 top: 0,
@@ -2309,14 +2451,18 @@ impl Tasks {
             window_layout_affinity: None,
             has_been_visible: true,
             organized: false,
+            root: None,
         });
     }
 }
 
 impl AppHost {
+    /// Each task of a layer, top to bottom: its id, whether it is ready to
+    /// appear (`taskAppearedReady`: once visible, a root task at once),
+    /// whether it is a root task, and its leash.
     pub(super) fn organizer_surfaces(
         &self,
-    ) -> Result<Vec<(i32, bool, super::task_organizer::Leash)>, Exception> {
+    ) -> Result<Vec<(i32, bool, bool, super::task_organizer::Leash)>, Exception> {
         let tasks = self.tasks.tasks.lock().unwrap();
         if !tasks.iter().any(|t| t.layer.is_some()) {
             return Ok(Vec::new());
@@ -2328,7 +2474,8 @@ impl AppHost {
             .filter_map(|task| {
                 Some((
                     task.id,
-                    task.has_been_visible,
+                    task.has_been_visible || task.root.is_some(),
+                    task.root.is_some(),
                     super::task_organizer::Leash::new(self, client, task.layer.as_ref()?),
                 ))
             })
