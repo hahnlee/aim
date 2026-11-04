@@ -88,6 +88,11 @@ fn kind_of(st: &libc::stat) -> Option<Kind> {
     })
 }
 
+/// Whether `st` is a buffer's file: a dma-buf, which has no inode flags.
+pub fn is_buffer(st: &libc::stat) -> bool {
+    kind_of(st) == Some(Kind::Buffer)
+}
+
 fn stat_of(fd: i32) -> Option<libc::stat> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.

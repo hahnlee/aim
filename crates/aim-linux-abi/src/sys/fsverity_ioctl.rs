@@ -11,10 +11,8 @@ use std::os::fd::FromRawFd;
 
 const MEASURE: u64 = 0xc0046686;
 const READ_METADATA: u64 = 0xc0286687;
-const GETFLAGS: u64 = 0x80086601;
 const ENABLE: u64 = 0x40806685;
 pub(super) const VERITY_ATTRIBUTE: u64 = 0x100000;
-const VERITY_FLAG: u32 = 0x100000;
 
 fn core(error: Error) -> Errno {
     match error {
@@ -52,6 +50,10 @@ fn enable(pin: &Pinned, arg: u64) -> Result<i64, Errno> {
     }
     let fd = pin.descriptor().as_raw_fd();
     let stat = super::fs::stat_fd_kernel(fd).map_err(|error| (-error) as Errno)?;
+    // `inode_permission(MAY_WRITE)`: an immutable inode is EPERM.
+    if stat.st_flags & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0 {
+        return Err(errno::EPERM);
+    }
     if !super::attrs::permits(&stat, 2, &super::cred::current(), super::attrs::FS) {
         return Err(errno::EACCES);
     }
@@ -157,15 +159,7 @@ fn enable(pin: &Pinned, arg: u64) -> Result<i64, Errno> {
     }
 }
 fn query(description: &Description, request: u64, arg: u64) -> Result<i64, Errno> {
-    let metadata = enabled(description)?;
-    if request == GETFLAGS {
-        return write(
-            arg,
-            &if metadata.is_some() { VERITY_FLAG } else { 0 }.to_le_bytes(),
-        )
-        .map(|_| 0);
-    }
-    let metadata = metadata.ok_or(ENODATA)?;
+    let metadata = enabled(description)?.ok_or(ENODATA)?;
     match request {
         MEASURE => {
             let capacity =
@@ -202,7 +196,7 @@ pub(super) fn ioctl(pin: &Pinned, request: u64, arg: u64) -> Option<i64> {
         }
         return Some(enable(pin, arg).unwrap_or_else(|error| -(error as i64)));
     }
-    if !matches!(request, MEASURE | READ_METADATA | GETFLAGS) {
+    if !matches!(request, MEASURE | READ_METADATA) {
         return None;
     }
     let Some(Kind::Regular(description)) = pin.kind() else {
@@ -340,6 +334,39 @@ mod tests {
             -(EMSGSIZE as i64)
         );
         argument[12..16].fill(0);
+        let immutable = root.join("data/native-enable-immutable");
+        std::fs::write(&immutable, b"immutable").unwrap();
+        let immutable_name = std::ffi::CString::new("/data/native-enable-immutable").unwrap();
+        let immutable_fd = super::super::fs::openat([
+            crate::vfs::LINUX_AT_FDCWD as u64,
+            immutable_name.as_ptr() as u64,
+            0,
+            0,
+            0,
+            0,
+        ]);
+        assert!(immutable_fd >= 0);
+        let host = std::ffi::CString::new(immutable.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::chflags(host.as_ptr(), libc::UF_IMMUTABLE) },
+            0
+        );
+        assert_eq!(
+            super::super::fs::ioctl([
+                immutable_fd as u64,
+                ENABLE,
+                argument.as_ptr() as u64,
+                0,
+                0,
+                0
+            ]),
+            -(errno::EPERM as i64)
+        );
+        assert_eq!(unsafe { libc::chflags(host.as_ptr(), 0) }, 0);
+        assert_eq!(
+            super::super::fs::close([immutable_fd as u64, 0, 0, 0, 0, 0]),
+            0
+        );
         assert_eq!(
             super::super::fs::ioctl([fd as u64, ENABLE, argument.as_ptr() as u64, 0, 0, 0]),
             0
@@ -348,7 +375,7 @@ mod tests {
         assert_eq!(
             super::super::fs::ioctl([
                 ioctl_only as u64,
-                GETFLAGS,
+                super::super::fileattr::GETFLAGS,
                 (&mut flags as *mut u32) as u64,
                 0,
                 0,
@@ -356,7 +383,7 @@ mod tests {
             ]),
             0
         );
-        assert_eq!(flags, VERITY_FLAG);
+        assert_eq!(flags, super::super::fileattr::VERITY);
         assert_eq!(
             super::super::fs::close([ioctl_only as u64, 0, 0, 0, 0, 0]),
             0
@@ -514,12 +541,6 @@ mod tests {
             query(&description, READ_METADATA, argument.as_ptr() as u64),
             Err(errno::EFAULT)
         );
-        let mut flags = 0u32;
-        assert_eq!(
-            query(&description, GETFLAGS, (&mut flags as *mut u32) as u64),
-            Ok(0)
-        );
-        assert_eq!(flags, VERITY_FLAG);
         let name = std::ffi::CString::new("/data/query-verity").unwrap();
         let fd = super::super::fs::openat([
             crate::vfs::LINUX_AT_FDCWD as u64,
@@ -536,6 +557,19 @@ mod tests {
             0
         );
         assert_eq!(&digest[4..36], metadata.measure(64).unwrap().1);
+        let mut flags = 0u32;
+        assert_eq!(
+            super::super::fs::ioctl([
+                fd as u64,
+                super::super::fileattr::GETFLAGS,
+                (&mut flags as *mut u32) as u64,
+                0,
+                0,
+                0
+            ]),
+            0
+        );
+        assert_eq!(flags, super::super::fileattr::VERITY);
         let mut statx = [0u64; 32];
         assert_eq!(
             super::super::fs::statx([
