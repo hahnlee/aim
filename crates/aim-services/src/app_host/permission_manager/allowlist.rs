@@ -154,6 +154,12 @@ impl Access<'_> {
                 )));
             }
         }
+        // `updatePermissionFlags` changes nothing for a user without state
+        // (AppIdPermissionPolicy.kt:1874), and the access owner has user
+        // 0's state alone.
+        if user != 0 || !self.user_exists(user) {
+            return Ok((true, Vec::new()));
+        }
         let mask = exempt_mask(allowlist);
         let mut changes = Vec::new();
         for name in &pkg.requested_permissions {

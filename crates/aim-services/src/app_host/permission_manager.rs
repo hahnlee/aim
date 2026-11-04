@@ -3827,7 +3827,7 @@ mod tests {
         let compat = CompatConfig::default();
         // Each call mutates the state the previous one left, as `mutate` does.
         let mut new = user0;
-        let mut change = |caller, name, allowlist, add| {
+        let mut change_for = |caller, name, allowlist, add, user| {
             let before = new.clone();
             let a = Access {
                 delegate: None,
@@ -3838,12 +3838,13 @@ mod tests {
                 user0: &before,
                 compat: &compat,
             };
-            a.change_allowlist(&mut new, caller, "granted", name, allowlist, 0, add)
+            a.change_allowlist(&mut new, caller, "granted", name, allowlist, user, add)
                 .map(|(set, changes)| {
                     let changes: Vec<_> = changes.into_iter().map(|c| (c.old, c.new)).collect();
                     (set, changes)
                 })
         };
+        let mut change = |caller, name, allowlist, add| change_for(caller, name, allowlist, add, 0);
         assert_eq!(
             change(1041, SMS, WHITELIST_SYSTEM, false).unwrap(),
             (
@@ -3907,6 +3908,16 @@ mod tests {
         assert_eq!(
             change(1041, LOG, 0, true).unwrap_err().code,
             aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+        );
+        // The app itself adding to its installer allowlist of a user
+        // without state skips the allowlist checks and changes nothing.
+        assert_eq!(
+            change_for(10001, SMS, WHITELIST_INSTALLER, true, 10).unwrap(),
+            (true, vec![])
+        );
+        assert_eq!(
+            new.permission_flags(10001, SMS),
+            RUNTIME_GRANTED | SYSTEM_EXEMPT
         );
         assert_eq!(
             new.permission_flags(10001, LOG),
