@@ -452,6 +452,7 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     if matches!(st.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFDIR) {
         return -(EPERM as i64);
     }
+    let kind = fdtab::get(fd);
     let new = if op != EPOLL_CTL_DEL {
         // SAFETY: guest struct epoll_event (arm64: u32 events, u64 data at 8).
         let raw = user_read!(ev, [u64; 2]);
@@ -465,10 +466,18 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     };
     // The flag's own rules precede the interest list's EEXIST and ENOENT;
     // refusing to modify an exclusive attachment needs the attachment.
-    let epoll = matches!(fdtab::get(fd), Some(Kind::Epoll(_)));
+    let epoll = matches!(kind, Some(Kind::Epoll(_)));
     if exclusive_invalid(op, new.as_ref(), None, epoll) {
         return -(EINVAL as i64);
     }
+    // A signalfd is only ever EPOLLIN (`signalfd_poll`): its socket's
+    // other readiness is not asked for.
+    let new = new.map(|mut n| {
+        if matches!(kind, Some(Kind::Signal(_))) {
+            n.events &= EPOLLIN | EPOLLEXCLUSIVE | EPOLLWAKEUP | EPOLLONESHOT | EPOLLET;
+        }
+        n
+    });
     let mut interest = ep.interest.lock().unwrap();
     let old = interest
         .get(&fd)
@@ -594,7 +603,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
     let fetch = knotes.max(maxevents as usize).min(i32::MAX as usize);
     let mut kevs: Vec<libc::kevent> = Vec::with_capacity(fetch);
     let deadline = timeout.map(|t| now_ns() + t.tv_sec * 1_000_000_000 + t.tv_nsec);
-    let (out, rearm) = loop {
+    let out = loop {
         let left = deadline.map(|d| {
             let ns = (d - now_ns()).max(0);
             libc::timespec {
@@ -621,13 +630,13 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         }
         // SAFETY: the kernel filled n entries.
         unsafe { kevs.set_len(n as usize) };
-        let found = ready(&ep, &kevs, maxevents as usize);
+        let (found, rearm) = ready(&ep, &kevs, maxevents as usize);
+        apply(epfd, &rearm);
         // An inotify fd that woke the wait with nothing to read: wait on.
-        if !found.0.is_empty() || n == 0 || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
+        if !found.is_empty() || n == 0 || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
             break found;
         }
     };
-    apply(epfd, &rearm);
     for (n, (_, b, data)) in out.iter().enumerate() {
         // SAFETY: guest array of `maxevents` 16-byte struct epoll_event.
         user_write!(events + n as u64 * 16, [u64; 2], [*b as u64, *data]);
@@ -645,7 +654,8 @@ fn now_ns() -> i64 {
 /// list gives them; and the changes that disable the other filter of the
 /// one-shot ones and re-arm the fds past `limit`, which stay ready for the
 /// next wait as on Linux (a retrieved edge-triggered or dispatched knote
-/// would otherwise not fire again).
+/// would otherwise not fire again), and the one-shot ones whose readiness
+/// was stale, which `ep_item_poll` leaves armed.
 fn ready(
     ep: &Epoll,
     kevs: &[libc::kevent],
@@ -663,11 +673,23 @@ fn ready(
         let Some(i) = interest.get_mut(&fd) else {
             continue;
         };
-        let mut b = bits(k, i);
+        let fired = bits(k, i);
+        let mut b = fired;
         if b & EPOLLIN != 0 && super::inotify::spuriously_ready(fd) {
             b &= !(EPOLLIN | EPOLLRDNORM);
         }
+        // A signalfd's token may predate a mask another process changed:
+        // its poll reads the mask now, and drops a stale token.
+        if b & EPOLLIN != 0
+            && matches!(fdtab::get(fd), Some(Kind::Signal(description))
+                if !super::signalfd::ready(&description))
+        {
+            b &= !EPOLLIN;
+        }
         if b == 0 {
+            if fired != 0 && i.events & EPOLLONESHOT != 0 && !i.disabled {
+                rearm.push(kev(fd, k.filter, libc::EV_ENABLE));
+            }
             continue;
         }
         if let Some(e) = out.iter_mut().find(|e| e.0 == fd) {

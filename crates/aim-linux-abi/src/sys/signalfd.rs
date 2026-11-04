@@ -1,35 +1,41 @@
 //! signalfd: a descriptor that reads the reader's pending signals in its
 //! mask as Linux's `signalfd_siginfo` records (signalfd(2), `fs/signalfd.c`).
 //!
-//! Pending state belongs to the signal owner; a description holds only its
-//! mask. Its guest end is a Darwin datagram socket, so it polls like an
+//! Pending state belongs to the signal owner. The mask is the open file's,
+//! so it lives in an unlinked host file every process holding the file
+//! shares (fork passes it, exec keeps it): a `signalfd4(fd, …)` update in
+//! one is what the others read and poll, as Linux's share the `struct
+//! file`. The guest end is a Darwin datagram socket, so it polls like an
 //! eventfd: the description keeps one token record in it exactly while the
 //! process or one of its threads has a signal in the mask pending
 //! ([`refresh`], called by the signal owner whenever a pending set
-//! changes). A Linux poll looks at the polling thread's own queue; here a
-//! signal pending on another thread counts too. Each process has its own
-//! socket for a description, so a forked child or a relaunched exec image
-//! sees only its own signals: [`install`] puts a fresh one under every
-//! guest fd that shares the description, keeping its flags.
+//! changes; [`ready`], whenever a poll looks at it, as `signalfd_poll`
+//! reads the mask then). A Linux poll looks at the polling thread's own
+//! queue; here a signal pending on another thread counts too (#2653). A
+//! blocked read reads the mask whenever a signal is sent to the process
+//! (`signalfd_notify`). It reports
+//! POLLIN only. Each process has its own socket for a
+//! description, so a forked child or a relaunched exec image sees only its
+//! own signals: [`install`] puts a fresh one under every guest fd that
+//! shares the description, keeping its flags.
 
-use std::sync::{
-    Arc, Mutex, Weak,
-    atomic::{AtomicU64, Ordering::SeqCst},
-};
+use std::os::fd::BorrowedFd;
+use std::sync::{Arc, Mutex, Weak};
 
 use super::{
     fdtab::{self, Kind},
     sigframe::Siginfo,
-    signal,
+    signal, user_memory,
 };
-use crate::errno::{self, EINVAL};
+use crate::errno::{self, EINVAL, Errno};
 
 const NONBLOCK: u64 = 0o4000;
 const CLOEXEC: u64 = 0o2000000;
 const RECORD: usize = 128;
 
 pub struct SignalFd {
-    mask: AtomicU64,
+    /// The hidden unlinked file holding the mask.
+    shared: i32,
     /// The hidden peer that sends the token, and a hidden twin of the guest
     /// end that drains it and is installed again after fork or exec.
     peer: i32,
@@ -41,7 +47,7 @@ static DESCRIPTIONS: Mutex<Vec<Weak<SignalFd>>> = Mutex::new(Vec::new());
 
 impl Drop for SignalFd {
     fn drop(&mut self) {
-        for fd in [self.peer, self.reader] {
+        for fd in [self.shared, self.peer, self.reader] {
             if let Err(error) = fdtab::close_fork_private(fd) {
                 crate::diag!("signalfd private end close: errno {error}");
             }
@@ -49,23 +55,68 @@ impl Drop for SignalFd {
     }
 }
 
+/// A new unlinked file holding `mask`, hidden.
+fn mask_file(mask: u64) -> Result<i32, Errno> {
+    let mut template = std::env::temp_dir()
+        .join("linux-abi-signalfd.XXXXXX")
+        .into_os_string()
+        .into_encoded_bytes();
+    template.push(0);
+    // SAFETY: mkstemp fills in the template; the name is removed at once.
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr().cast()) };
+    if fd < 0 {
+        return Err(errno::last());
+    }
+    // SAFETY: removing the name just created.
+    unsafe { libc::unlink(template.as_ptr().cast()) };
+    let fd = fdtab::hide(fd);
+    if let Err(error) = write_mask(fd, mask) {
+        if let Err(error) = fdtab::close_fork_private(fd) {
+            crate::diag!("signalfd mask file close: errno {error}");
+        }
+        return Err(error);
+    }
+    Ok(fd)
+}
+
+fn write_mask(fd: i32, mask: u64) -> Result<(), Errno> {
+    // SAFETY: writing 8 bytes from a local.
+    match unsafe { libc::pwrite(fd, (&mask as *const u64).cast(), 8, 0) } {
+        8 => Ok(()),
+        n if n < 0 => Err(errno::last()),
+        _ => Err(errno::EIO),
+    }
+}
+
 impl SignalFd {
-    /// A description and its guest end, with the token for what is pending.
-    fn open(mask: u64, flags: u64) -> Result<(i32, Arc<SignalFd>), i64> {
-        let (fd, peer) = super::event::pair(flags)?;
+    /// A description of the mask in `shared`, which it takes, and its
+    /// guest end, with the token for what is pending.
+    fn open(shared: i32, flags: u64) -> Result<(i32, Arc<SignalFd>), Errno> {
+        let close = |fds: &[i32]| {
+            for &fd in fds {
+                if let Err(error) = fdtab::close_fork_private(fd) {
+                    crate::diag!("signalfd private end close: errno {error}");
+                }
+            }
+        };
+        let (fd, peer) = match super::event::pair(flags) {
+            Ok(pair) => pair,
+            Err(error) => {
+                close(&[shared]);
+                return Err((-error) as Errno);
+            }
+        };
         // SAFETY: duplicating the socket just created.
         let reader = unsafe { libc::dup(fd) };
         if reader < 0 {
             let error = errno::last();
-            // SAFETY: closing the unpublished socket and its hidden peer.
+            // SAFETY: closing the unpublished socket.
             unsafe { libc::close(fd) };
-            if let Err(error) = fdtab::close_fork_private(peer) {
-                crate::diag!("signalfd private end close: errno {error}");
-            }
-            return Err(-(error as i64));
+            close(&[shared, peer]);
+            return Err(error);
         }
         let description = Arc::new(SignalFd {
-            mask: AtomicU64::new(mask & !signal::UNBLOCKABLE),
+            shared,
             peer,
             reader: fdtab::hide(reader),
             token: Mutex::new(false),
@@ -78,17 +129,32 @@ impl SignalFd {
         Ok((fd, description))
     }
 
-    /// Keep the token iff a signal in the mask is pending. The token's lock
-    /// orders the snapshots, so the last change is the one that stays.
-    fn sync(&self) {
+    fn mask(&self) -> Result<u64, Errno> {
+        let mut mask = 0u64;
+        // SAFETY: reading 8 bytes into a local.
+        match unsafe { libc::pread(self.shared, (&mut mask as *mut u64).cast(), 8, 0) } {
+            8 => Ok(mask),
+            n if n < 0 => Err(errno::last()),
+            _ => Err(errno::EIO),
+        }
+    }
+
+    /// Keep the token iff a signal in the mask is pending, and say whether
+    /// it is. The token's lock orders the snapshots, so the last change is
+    /// the one that stays. A mask that cannot be read leaves the
+    /// descriptor readable: its read reports the error.
+    fn sync(&self) -> bool {
         let mut token = self.token.lock().unwrap();
-        let ready = self.mask.load(SeqCst) & signal::all_pending() != 0;
+        let ready = self
+            .mask()
+            .map_or(true, |mask| mask & signal::all_pending() != 0);
         if ready && !*token {
             *token = super::event::send_record(self.peer, 1);
         } else if !ready && *token {
             super::event::recv_record(self.reader);
             *token = false;
         }
+        ready
     }
 }
 
@@ -101,6 +167,12 @@ pub(super) fn refresh() {
     for description in all {
         description.sync();
     }
+}
+
+/// A poll looks at `description`: whether it is readable now, with its
+/// token brought up to date for a mask another process changed.
+pub(super) fn ready(description: &SignalFd) -> bool {
+    description.sync()
 }
 
 pub fn signalfd4(a: [u64; 6]) -> i64 {
@@ -123,14 +195,17 @@ pub fn signalfd4(a: [u64; 6]) -> i64 {
         let Some(Kind::Signal(description)) = pin.kind() else {
             return -(EINVAL as i64);
         };
-        description.mask.store(mask, SeqCst);
+        if let Err(error) = write_mask(description.shared, mask) {
+            return -(error as i64);
+        }
         description.sync();
-        signal::wake_waiters();
+        signal::wake_readers();
         return fd as i64;
     }
-    let (fd, description) = match SignalFd::open(mask, flags) {
+    let opened = mask_file(mask).and_then(|shared| SignalFd::open(shared, flags));
+    let (fd, description) = match opened {
         Ok(open) => open,
-        Err(error) => return error,
+        Err(error) => return -(error as i64),
     };
     fdtab::insert(fd, Kind::Signal(description));
     if let Err(error) = fdtab::publish_guest(fd) {
@@ -143,36 +218,68 @@ pub fn signalfd4(a: [u64; 6]) -> i64 {
 }
 
 /// Read whole records: the first may block, as `signalfd_dequeue`; the
-/// rest take only what is already pending.
+/// rest take only what is already pending. A record that cannot be copied
+/// out ends the read with the ones before it, or EFAULT, as
+/// `signalfd_read_iter` (the signal it held is gone).
 pub fn read(fd: i32, description: &SignalFd, iov: &[libc::iovec]) -> i64 {
     let len: usize = iov.iter().map(|v| v.iov_len).sum();
     if len < RECORD {
         return -(EINVAL as i64);
     }
-    let mut bytes = Vec::new();
-    while bytes.len() + RECORD <= len {
-        let nonblock = !bytes.is_empty() || fdtab::nonblocking(fd);
-        match signal::read_signal(&description.mask, nonblock) {
-            Ok(info) => bytes.extend_from_slice(&record(&info)),
-            Err(_) if !bytes.is_empty() => break,
+    let mut done = 0;
+    while done + RECORD <= len {
+        let nonblock = done != 0 || fdtab::nonblocking(fd);
+        let info = match signal::read_signal(|| description.mask(), nonblock) {
+            Ok(info) => info,
+            Err(_) if done != 0 => break,
             Err(error) => return error,
+        };
+        if let Err(error) = place(iov, done, &record(&info)) {
+            return if done != 0 {
+                done as i64
+            } else {
+                -(error as i64)
+            };
+        }
+        done += RECORD;
+    }
+    done as i64
+}
+
+/// Copy `bytes` into the vectors from byte `offset` on.
+fn place(iov: &[libc::iovec], mut offset: usize, mut bytes: &[u8]) -> Result<(), Errno> {
+    for vector in iov {
+        if offset >= vector.iov_len {
+            offset -= vector.iov_len;
+            continue;
+        }
+        let count = (vector.iov_len - offset).min(bytes.len());
+        user_memory::write_exact(vector.iov_base as u64 + offset as u64, &bytes[..count])?;
+        bytes = &bytes[count..];
+        offset = 0;
+        if bytes.is_empty() {
+            break;
         }
     }
-    match super::user_memory::scatter(iov, &bytes) {
-        Ok(done) => done as i64,
-        Err(error) => -(error as i64),
+    Ok(())
+}
+
+/// Fork and host exec: the mask's file, which a fork child or the new
+/// image receives under the same number.
+pub(super) fn shared(description: &SignalFd) -> BorrowedFd<'_> {
+    // SAFETY: the description's own open fd.
+    unsafe { BorrowedFd::borrow_raw(description.shared) }
+}
+
+/// A new description of this process for the mask file received as
+/// `shared`, which the caller closes once restored.
+pub(super) fn load(shared: i32) -> Result<Arc<SignalFd>, Errno> {
+    // SAFETY: duplicating the received fd.
+    let copy = unsafe { libc::fcntl(shared, libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Err(errno::last());
     }
-}
-
-/// Fork and host exec: the mask, read into a new description of this
-/// process.
-pub(super) fn save(description: &SignalFd) -> u64 {
-    description.mask.load(SeqCst)
-}
-
-pub(super) fn load(mask: u64) -> Result<Arc<SignalFd>, crate::errno::Errno> {
-    let (fd, description) =
-        SignalFd::open(mask, 0).map_err(|error| (-error) as crate::errno::Errno)?;
+    let (fd, description) = SignalFd::open(fdtab::hide(copy), 0)?;
     // SAFETY: the unpublished socket; `reader` keeps it open.
     unsafe { libc::close(fd) };
     Ok(description)
@@ -180,7 +287,7 @@ pub(super) fn load(mask: u64) -> Result<Arc<SignalFd>, crate::errno::Errno> {
 
 /// Put this process's socket of `description` under guest `fd`, keeping
 /// the fd's FD_CLOEXEC and the file's O_NONBLOCK.
-pub(super) fn install(fd: i32, description: &SignalFd) -> Result<(), crate::errno::Errno> {
+pub(super) fn install(fd: i32, description: &SignalFd) -> Result<(), Errno> {
     // SAFETY: fcntl and dup2 on the inherited guest fd and our hidden end.
     unsafe {
         let (fd_flags, fl) = (
@@ -197,12 +304,6 @@ pub(super) fn install(fd: i32, description: &SignalFd) -> Result<(), crate::errn
         }
     }
     Ok(())
-}
-
-/// The reader of a description in a record, which identifies it among
-/// the records of one exec.
-pub(super) fn exec_text(description: &SignalFd) -> String {
-    format!("{}:{}", description.mask.load(SeqCst), description.reader)
 }
 
 // signalfd_copyinfo over siginfo_layout: each layout copies its fields;
@@ -639,13 +740,24 @@ mod tests {
             signalfd4([alias as u64, &other as *const _ as u64, 8, 0, 0, 0]),
             alias
         );
-        let Some(Kind::Signal(description)) = fdtab::get(fd as i32) else {
-            panic!("restored signalfd missing");
-        };
-        assert_eq!(description.mask.load(SeqCst), other);
+        assert_eq!(description_of(fd).mask(), Ok(other));
         for fd in [fd, alias] {
             assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
         }
+    }
+
+    fn description_of(fd: i64) -> Arc<SignalFd> {
+        let Some(Kind::Signal(description)) = fdtab::get(fd as i32) else {
+            panic!("signalfd {fd} missing");
+        };
+        description
+    }
+
+    fn identity(fd: BorrowedFd<'_>) -> (i32, u64) {
+        use std::os::fd::AsRawFd;
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut st) }, 0);
+        (st.st_dev, st.st_ino)
     }
 
     /// Consume this process's pending signal, as a new process has none.
@@ -664,6 +776,7 @@ mod tests {
             return;
         }
         reinstalled(|fd, alias| {
+            let parent = description_of(fd);
             let mut writer = sys::fork_state::Writer::default();
             fdtab::fork_save(&mut writer);
             let saved = writer.into_bytes();
@@ -675,6 +788,19 @@ mod tests {
             let mut reader = sys::fork_state::Reader::new(&saved);
             fdtab::fork_restore(&mut reader);
             assert!(reader.ok());
+            // The child received the parent's mask file, which stays the
+            // parent's here: an update through either is the other's.
+            fdtab::take_restored_private_targets();
+            let child = description_of(fd);
+            assert_eq!(identity(shared(&child)), identity(shared(&parent)));
+            let other = 1u64 << 35;
+            assert_eq!(
+                signalfd4([alias as u64, &other as *const _ as u64, 8, 0, 0, 0]),
+                alias
+            );
+            assert_eq!(parent.mask(), Ok(other));
+            write_mask(parent.shared, 1 << 34).unwrap();
+            assert_eq!(child.mask(), Ok(1 << 34));
         });
     }
 
@@ -684,13 +810,275 @@ mod tests {
             return;
         }
         reinstalled(|fd, alias| {
+            let image = description_of(fd);
+            let file = identity(shared(&image));
             let text = fdtab::regular_exec_text().unwrap();
             for fd in [fd, alias] {
                 fdtab::on_close(fd as i32);
             }
             forget_pending();
             fdtab::restore_regular_exec(&text).unwrap();
+            // The old image ends without dropping its description; the new
+            // one has its mask file.
+            std::mem::forget(image);
+            assert_eq!(identity(shared(&description_of(fd))), file);
         });
+    }
+
+    fn poll_events(fd: i64, events: i16) -> (i64, i16) {
+        let mut entry = libc::pollfd {
+            fd: fd as i32,
+            events,
+            revents: 0,
+        };
+        let timeout = [0i64; 2];
+        let n = sys::poll::ppoll([
+            &mut entry as *mut _ as u64,
+            1,
+            timeout.as_ptr() as u64,
+            0,
+            0,
+            0,
+        ]);
+        (n, entry.revents)
+    }
+
+    fn epoll_with(fd: i64, events: u64) -> i64 {
+        let ep = sys::epoll::epoll_create1([0; 6]);
+        assert!(ep >= 0);
+        let interest = [events, 7];
+        assert_eq!(
+            sys::epoll::epoll_ctl([ep as u64, 1, fd as u64, interest.as_ptr() as u64, 0, 0]),
+            0
+        );
+        ep
+    }
+
+    fn epoll_now(ep: i64) -> (i64, [u64; 2]) {
+        let mut event = [0u64; 2];
+        let n = sys::epoll::epoll_pwait([ep as u64, event.as_mut_ptr() as u64, 1, 0, 0, 0]);
+        (n, event)
+    }
+
+    #[test]
+    fn readiness_is_pollin_only() {
+        if isolated("readiness_is_pollin_only") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        assert!(fd >= 0);
+        // POLLIN, POLLPRI, POLLOUT, POLLRDNORM, POLLWRNORM.
+        let all = 0x1 | 0x2 | 0x4 | 0x40 | 0x100;
+        assert_eq!(poll_events(fd, all), (0, 0));
+        let read_write = epoll_with(fd, 0x1 | 0x4 | 0x40);
+        let write_only = epoll_with(fd, 0x4);
+        assert_eq!(epoll_now(read_write).0, 0);
+        queue(35, 1, false);
+        assert_eq!(poll_events(fd, all), (1, 0x1));
+        assert_eq!(poll_events(fd, 0x4 | 0x40), (0, 0));
+        assert_eq!(epoll_now(read_write), (1, [0x1, 7]));
+        assert_eq!(epoll_now(write_only).0, 0);
+        // The write-only interest is registered all the same.
+        let interest = [0x4u64, 8];
+        assert_eq!(
+            sys::epoll::epoll_ctl([
+                write_only as u64,
+                3,
+                fd as u64,
+                interest.as_ptr() as u64,
+                0,
+                0
+            ]),
+            0
+        );
+        // select: in the read set, never in the write set.
+        let (mut read, mut write) = (1u64 << fd, 1u64 << fd);
+        let timeout = [0i64; 2];
+        assert_eq!(
+            sys::poll::pselect6([
+                fd as u64 + 1,
+                &mut read as *mut _ as u64,
+                &mut write as *mut _ as u64,
+                0,
+                timeout.as_ptr() as u64,
+                0,
+            ]),
+            1
+        );
+        assert_eq!((read, write), (1 << fd, 0));
+        for fd in [fd, read_write, write_only] {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    #[test]
+    fn poll_reads_a_mask_another_process_changed() {
+        if isolated("poll_reads_a_mask_another_process_changed") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let (mask, other) = (1u64 << 34, 1u64 << 35);
+        block(mask | other);
+        let fd = create(mask, NONBLOCK);
+        let ep = epoll_with(fd, 0x1);
+        queue(36, 1, false);
+        assert_eq!(polled(fd, 0), 0);
+        // Another process holding the file writes the mask, with no signal
+        // here to refresh the token.
+        let description = description_of(fd);
+        write_mask(description.shared, other).unwrap();
+        assert_eq!(polled(fd, 0), 1);
+        assert_eq!(epoll_now(ep), (1, [0x1, 7]));
+        write_mask(description.shared, mask).unwrap();
+        assert_eq!(epoll_now(ep).0, 0);
+        assert_eq!(polled(fd, 0), 0);
+        // A one-shot interest whose only readiness was stale stays armed,
+        // as `ep_item_poll` found nothing to report.
+        let once = epoll_with(fd, 0x1 | 1 << 30);
+        write_mask(description.shared, other).unwrap();
+        assert_eq!(polled(fd, 0), 1);
+        write_mask(description.shared, mask).unwrap();
+        assert_eq!(epoll_now(once).0, 0);
+        queue(35, 1, false);
+        assert_eq!(epoll_now(once), (1, [0x1, 7]));
+        assert_eq!(epoll_now(once).0, 0);
+        for fd in [fd, ep, once] {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    #[test]
+    fn a_blocked_read_follows_a_mask_another_process_changed() {
+        if isolated("a_blocked_read_follows_a_mask_another_process_changed") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let (mask, other) = (1u64 << 34, 1u64 << 35);
+        block(mask | other);
+        let fd = create(mask, 0);
+        // Another process holding the file moves the mask, which does not
+        // wake this one's reader; the next signal sent here does, outside
+        // the mask the reader started with (`signalfd_notify`).
+        let description = description_of(fd);
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            write_mask(description.shared, other).unwrap();
+            queue(36, 2, false);
+        });
+        let mut bytes = [0u8; RECORD];
+        assert_eq!(receive(fd, &mut bytes), RECORD as i64);
+        sender.join().unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 36);
+        assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn a_fault_after_a_record_returns_the_records_before_it() {
+        if isolated("a_fault_after_a_record_returns_the_records_before_it") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        // SAFETY: a private anonymous mapping of our own.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                2 * page,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(p, libc::MAP_FAILED);
+        // SAFETY: our second page.
+        assert_eq!(
+            unsafe { libc::mprotect(p.byte_add(page), page, libc::PROT_NONE) },
+            0
+        );
+        for value in 1..=3 {
+            queue(35, value, false);
+        }
+        // The copy itself faults, as when another thread unmaps the buffer
+        // during a read: the syscall layer has checked the range before.
+        let description = description_of(fd);
+        let read = |at: usize, len: usize| {
+            let vector = libc::iovec {
+                iov_base: at as *mut _,
+                iov_len: len,
+            };
+            read(fd as i32, &description, &[vector])
+        };
+        let first = p as usize + page - RECORD;
+        assert_eq!(read(first, 2 * RECORD), RECORD as i64);
+        // SAFETY: the record copied into our first page.
+        assert_eq!(unsafe { ((first + 48) as *const u64).read_unaligned() }, 1);
+        // The signal whose record faulted is consumed, as on Linux; with
+        // no record copied the read fails.
+        assert_eq!(
+            read(p as usize + page, RECORD),
+            -(crate::errno::EFAULT as i64)
+        );
+        let mut bytes = [0u8; RECORD];
+        assert_eq!(receive(fd, &mut bytes), -(crate::errno::EAGAIN as i64));
+        // SAFETY: our mapping.
+        assert_eq!(unsafe { libc::munmap(p, 2 * page) }, 0);
+        assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    extern "C" fn exit_with_a_pending_signal(_: *mut libc::c_void) -> *mut libc::c_void {
+        context();
+        block(1 << 34);
+        queue(35, 1, true);
+        sys::thread::exit([0; 6])
+    }
+
+    #[test]
+    fn an_exiting_thread_takes_its_pending_signals() {
+        if isolated("an_exiting_thread_takes_its_pending_signals") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        // SAFETY: a joinable thread we join.
+        unsafe {
+            let mut thread: libc::pthread_t = std::mem::zeroed();
+            assert_eq!(
+                libc::pthread_create(
+                    &mut thread,
+                    std::ptr::null(),
+                    exit_with_a_pending_signal,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            assert_eq!(libc::pthread_join(thread, std::ptr::null_mut()), 0);
+        }
+        // The token is gone from the socket itself, which a wait already
+        // blocked on it watches, not only from what a new poll reads.
+        let mut host = libc::pollfd {
+            fd: fd as i32,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut host, 1, 0) }, 0);
+        assert_eq!(polled(fd, 0), 0);
+        let mut bytes = [0u8; RECORD];
+        assert_eq!(receive(fd, &mut bytes), -(crate::errno::EAGAIN as i64));
+        assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 
     #[test]

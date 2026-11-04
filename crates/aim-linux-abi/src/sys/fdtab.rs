@@ -1476,7 +1476,7 @@ pub(crate) fn regular_exec_text() -> Result<String, crate::errno::Errno> {
             )),
             Kind::Signal(description) => records.push(format!(
                 "signal\t{fd}\t{}",
-                super::signalfd::exec_text(description)
+                super::signalfd::shared(description).as_raw_fd()
             )),
             _ => {}
         }
@@ -1497,7 +1497,9 @@ pub(crate) fn prepare_regular_exec() -> Result<ExecWriterFlags, crate::errno::Er
     use std::os::fd::AsRawFd;
     let mut changed = ExecWriterFlags(Vec::new());
     let mut writers = std::collections::HashSet::new();
-    for (guest, kind) in fds_where(|kind| matches!(kind, Kind::Regular(_) | Kind::Pty(_))) {
+    for (guest, kind) in
+        fds_where(|kind| matches!(kind, Kind::Regular(_) | Kind::Pty(_) | Kind::Signal(_)))
+    {
         if !visible(guest) {
             continue;
         }
@@ -1511,6 +1513,7 @@ pub(crate) fn prepare_regular_exec() -> Result<ExecWriterFlags, crate::errno::Er
                 .as_ref()
                 .map(|writer| writer.descriptor()),
             Kind::Pty(description) => Some(description.carrier()?),
+            Kind::Signal(description) => Some(super::signalfd::shared(description)),
             _ => None,
         };
         if let Some(descriptor) = descriptor {
@@ -1581,15 +1584,17 @@ pub(crate) fn restore_regular_exec(text: &str) -> Result<(), crate::errno::Errno
         }
         if fields[0] == "signal" {
             let fd = fields[1].parse::<i32>().map_err(|_| crate::errno::EINVAL)?;
-            let (mask, reader) = fields[2].split_once(':').ok_or(crate::errno::EINVAL)?;
-            let mask = mask.parse::<u64>().map_err(|_| crate::errno::EINVAL)?;
+            let shared = fields[2].parse::<i32>().map_err(|_| crate::errno::EINVAL)?;
             require_guest_visible(fd)?;
-            let description = match signals.entry(reader.to_owned()) {
+            let description = match signals.entry(shared) {
                 std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    Arc::clone(entry.insert(super::signalfd::load(mask)?))
+                    Arc::clone(entry.insert(super::signalfd::load(shared)?))
                 }
             };
+            if !inherited.contains(&shared) {
+                inherited.push(shared);
+            }
             super::signalfd::install(fd, &description)?;
             insert(fd, Kind::Signal(description));
             publish_guest(fd)?;
@@ -1951,8 +1956,11 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                 event::save_timer(t, w);
             }
             Kind::Signal(description) => {
+                use std::os::fd::AsRawFd;
                 w.u32(18);
-                w.u64(super::signalfd::save(description));
+                let shared = super::signalfd::shared(description).as_raw_fd();
+                w.retain_private(shared);
+                w.i32(shared);
             }
             Kind::Sock(s) => {
                 w.u32(2);
@@ -2034,14 +2042,20 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             8 => Kind::Random,
             13 => Kind::Ashmem,
             9 => Kind::ProxyFile,
-            18 => match super::signalfd::load(r.u64()) {
-                Ok(description) => Kind::Signal(description),
-                Err(error) => {
-                    eprintln!("signalfd fork restore: errno {error}");
-                    r.invalidate();
-                    return (fd, None);
+            18 => {
+                let shared = r.i32();
+                if !inherited_writers.contains(&shared) {
+                    inherited_writers.push(shared);
                 }
-            },
+                match super::signalfd::load(shared) {
+                    Ok(description) => Kind::Signal(description),
+                    Err(error) => {
+                        eprintln!("signalfd fork restore: errno {error}");
+                        r.invalidate();
+                        return (fd, None);
+                    }
+                }
+            }
             16 => match super::proc_mem::Open::load(fd) {
                 Ok(open) => Kind::ProcMem(open),
                 Err(_) => {
