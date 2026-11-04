@@ -602,6 +602,7 @@ mod tests {
                 },
             )]
             .into(),
+            renamed_packages: Some(Vec::new()),
             ..Default::default()
         })
     }

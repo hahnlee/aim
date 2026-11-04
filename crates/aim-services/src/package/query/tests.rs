@@ -119,6 +119,7 @@ fn state() -> State {
             gl_es_version: 0x30000,
             ..System::default()
         },
+        renamed_packages: Some(Vec::new()),
         ..State::default()
     }
 }
@@ -350,6 +351,54 @@ fn application_info_for_the_user() {
     let ai = get_application_info(&state, 1000, "android", 0);
     assert_eq!(field(&ai, "dataDir"), &Value::Str("/data/system".into()));
     assert_eq!(field(&ai, "credentialProtectedDataDir"), &Value::Null);
+}
+
+#[test]
+fn queries_normalize_renamed_package_names_once() {
+    let mut state = state();
+    state.renamed_packages = Some(vec![
+        ("org.example.new".into(), APP.into()),
+        (APP.into(), OTHER.into()),
+    ]);
+    // ComputerEngine.resolveInternalPackageNameInternalLocked maps the new
+    // name to the setting's original one, without following the chain.
+    let ai = get_application_info(&state, 1000, "org.example.new", 0);
+    assert_eq!(field(&ai, "uid"), &Value::Int(10100));
+    let ai = get_application_info(&state, 1000, APP, 0);
+    assert_eq!(field(&ai, "uid"), &Value::Int(10101));
+    let reply = call(&state, 1000, false, pm::GET_PACKAGE_INFO, |p| {
+        pm::GetPackageInfo {
+            package_name: Some("org.example.new".into()),
+            flags: 0,
+            user_id: 0,
+        }
+        .write(p)
+    });
+    let pi = decoded(pm::GET_PACKAGE_INFO, &reply);
+    assert_eq!(field(&pi, "packageName"), &Value::Str(APP.into()));
+
+    // Without the Settings table, the query cannot be answered.
+    state.renamed_packages = None;
+    let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
+    let q = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 1000,
+    };
+    let mut p = Parcel::new();
+    pm::GetApplicationInfo {
+        package_name: Some(APP.into()),
+        flags: 0,
+        user_id: 0,
+    }
+    .write(&mut p);
+    assert!(
+        q.package(
+            pm::GET_APPLICATION_INFO,
+            &mut Reader::new(p.data(), p.objects())
+        )
+        .is_err()
+    );
 }
 
 #[test]

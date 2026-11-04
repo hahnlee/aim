@@ -1017,8 +1017,9 @@ impl Query<'_> {
         let unlocked = owner
             .ce_storage_unlocked(user)
             .map_err(|_| NotModelled("original CE storage owner query failed"))?;
-        let resolved =
-            name.map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+        let resolved = name
+            .map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST))
+            .transpose()?;
         let package = resolved
             .as_ref()
             .and_then(|name| self.state.packages.get(name));
@@ -1197,8 +1198,9 @@ impl Query<'_> {
         if let Err(error) = self.enforce_cross_user(user, false, false, "can package query")? {
             return Ok(Err(error));
         }
-        let source_name =
-            source.map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+        let source_name = source
+            .map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST))
+            .transpose()?;
         let source_setting = source_name
             .as_ref()
             .and_then(|name| self.state.packages.get(name));
@@ -1211,7 +1213,8 @@ impl Query<'_> {
             }
             let resolved = name
                 .as_ref()
-                .map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+                .map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST))
+                .transpose()?;
             let setting = resolved
                 .as_ref()
                 .and_then(|name| self.state.packages.get(name));
@@ -1298,7 +1301,7 @@ impl Query<'_> {
             ))));
         }
         let name =
-            self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST);
+            self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST)?;
         let Some(package) = self.state.packages.get(&name) else {
             return Ok(Ok(None));
         };
@@ -1603,7 +1606,7 @@ impl Query<'_> {
         if let Err(e) = self.cross_profile_property(user)? {
             return Ok(Err(e));
         }
-        let resolved = self.resolve_internal_package_name(package, VERSION_CODE_HIGHEST);
+        let resolved = self.resolve_internal_package_name(package, VERSION_CODE_HIGHEST)?;
         if self.visible_user_state(&resolved, user)?.is_none() {
             return Ok(Ok(None));
         }
@@ -1655,7 +1658,7 @@ impl Query<'_> {
         if let Some(registry) = &self.state.package_registry {
             let mut result = Vec::new();
             for (package, properties) in registry.property_packages(name, kind) {
-                let resolved = self.resolve_internal_package_name(package, VERSION_CODE_HIGHEST);
+                let resolved = self.resolve_internal_package_name(package, VERSION_CODE_HIGHEST)?;
                 if self
                     .visible_user_state(&resolved, user_id(self.calling_uid))?
                     .is_none()
@@ -2053,8 +2056,9 @@ impl Query<'_> {
                 "android.permission.GET_APP_METADATA required",
             )));
         }
-        let resolved =
-            name.map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+        let resolved = name
+            .map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST))
+            .transpose()?;
         let package = resolved
             .as_ref()
             .and_then(|name| self.state.packages.get(name));
@@ -2920,7 +2924,7 @@ impl Query<'_> {
             return Ok(Ok(None));
         }
         let resolved =
-            self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST);
+            self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST)?;
         let Some((_, package)) = self.package_of(&resolved) else {
             return Ok(Ok(None));
         };
@@ -2948,7 +2952,7 @@ impl Query<'_> {
             return Ok(Ok(false));
         }
         let resolved =
-            self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST);
+            self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST)?;
         let Some((_, package)) = self.package_of(&resolved) else {
             return Ok(Ok(false));
         };
@@ -3747,6 +3751,7 @@ mod permission_tests {
                 },
             )]
             .into(),
+            renamed_packages: Some(Vec::new()),
             ..Default::default()
         };
         let package = |name: &str, id: i32, version: i64| PackageState {

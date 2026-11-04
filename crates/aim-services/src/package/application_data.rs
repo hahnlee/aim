@@ -237,6 +237,8 @@ impl Owner {
         let setting = package
             .as_deref()
             .map(|name| query.resolve_internal_package_name(name, -1))
+            .transpose()
+            .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error.0))?
             .and_then(|name| state.packages.get(&name));
         let execute = state.users.contains_key(&user)
             && setting.is_some_and(|setting| super::info::user_state(setting, user).installed)

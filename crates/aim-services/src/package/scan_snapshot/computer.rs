@@ -1467,7 +1467,7 @@ impl Service for Computer {
             Action::InternalName(a) => match a
                 .package_name
                 .as_deref()
-                .map(|name| query.internal_resolve_name(name, a.version_code))
+                .map(|name| query.resolve_internal_package_name(name, a.version_code))
                 .transpose()
             {
                 Ok(value) => api::write_resolve_internal_package_name_reply(&mut reply, &value),

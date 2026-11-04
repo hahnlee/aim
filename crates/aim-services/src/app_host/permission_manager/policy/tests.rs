@@ -67,6 +67,7 @@ impl Fixture {
                     ("android".into(), android),
                 ]
                 .into(),
+                renamed_packages: Some(Vec::new()),
                 ..Default::default()
             },
             defined: names

@@ -1,23 +1,6 @@
 //! PackageManagerInternal/Computer identity reads, android-16.0.0_r1 AOSP (Apache 2.0).
 use super::*;
 impl Query<'_> {
-    pub(crate) fn internal_resolve_name(
-        &self,
-        name: &str,
-        version: i64,
-    ) -> Result<String, NotModelled> {
-        let renamed = self
-            .state
-            .renamed_packages
-            .as_ref()
-            .ok_or(NotModelled("the Settings renamed package table"))?;
-        let name = renamed
-            .iter()
-            .find(|(from, _)| from == name)
-            .map_or(name, |(_, to)| to.as_str());
-        Ok(self.resolve_internal_package_name(name, version))
-    }
-
     pub(crate) fn internal_has_cross_user_permission(
         &self,
         uid: i32,
@@ -63,7 +46,7 @@ impl Query<'_> {
         else {
             return Ok(Ok(false));
         };
-        let name = self.internal_resolve_name(&component.package, VERSION_CODE_HIGHEST)?;
+        let name = self.resolve_internal_package_name(&component.package, VERSION_CODE_HIGHEST)?;
         let Some(state) = self.state.packages.get(&name) else {
             return Ok(Ok(false));
         };
@@ -215,7 +198,7 @@ impl Query<'_> {
                 "component is null",
             )));
         };
-        let name = self.internal_resolve_name(&component.package, VERSION_CODE_HIGHEST)?;
+        let name = self.resolve_internal_package_name(&component.package, VERSION_CODE_HIGHEST)?;
         let Some(state) = self.state.packages.get(&name) else {
             return Ok(Ok(false));
         };
@@ -242,7 +225,7 @@ impl Query<'_> {
             filter: self.filter,
             calling_uid: SYSTEM_UID,
         };
-        let name = system.internal_resolve_name(name, VERSION_CODE_HIGHEST)?;
+        let name = system.resolve_internal_package_name(name, VERSION_CODE_HIGHEST)?;
         let Some(target) = self.state.packages.get(&name) else {
             return Ok(None);
         };
@@ -463,7 +446,7 @@ impl Query<'_> {
         name: &str,
         user: i32,
     ) -> Result<Option<String>, NotModelled> {
-        let name = self.internal_resolve_name(name, VERSION_CODE_HIGHEST)?;
+        let name = self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST)?;
         let state = self.state.packages.get(&name);
         if self.filtered(state, self.calling_uid, user)? {
             return Ok(None);
@@ -500,7 +483,7 @@ impl Query<'_> {
                 .as_ref()
                 .and_then(|name| name.as_deref())
                 .ok_or(NotModelled("SDK sandbox parsed package owner"))?;
-            let name = self.internal_resolve_name(name, VERSION_CODE_HIGHEST)?;
+            let name = self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST)?;
             uid = self
                 .state
                 .packages
@@ -662,9 +645,18 @@ mod tests {
             filter: &filter,
             calling_uid: SYSTEM_UID,
         };
-        assert_eq!(query.internal_resolve_name("alias", -1).unwrap(), "lib.new");
-        assert_eq!(query.internal_resolve_name("alias", 10).unwrap(), "lib.old");
-        assert_eq!(query.internal_resolve_name("absent", -1).unwrap(), "absent");
+        assert_eq!(
+            query.resolve_internal_package_name("alias", -1).unwrap(),
+            "lib.new"
+        );
+        assert_eq!(
+            query.resolve_internal_package_name("alias", 10).unwrap(),
+            "lib.old"
+        );
+        assert_eq!(
+            query.resolve_internal_package_name("absent", -1).unwrap(),
+            "absent"
+        );
         assert_eq!(
             query
                 .internal_filtered_package_name("alias", 0)
@@ -680,14 +672,17 @@ mod tests {
             filter: &filter,
             calling_uid: 10102,
         };
-        assert_eq!(query.internal_resolve_name("alias", -1).unwrap(), "lib.old");
+        assert_eq!(
+            query.resolve_internal_package_name("alias", -1).unwrap(),
+            "lib.old"
+        );
         state.renamed_packages = None;
         let query = Query {
             state: &state,
             filter: &filter,
             calling_uid: SYSTEM_UID,
         };
-        assert!(query.internal_resolve_name("alias", -1).is_err());
+        assert!(query.resolve_internal_package_name("alias", -1).is_err());
     }
 
     #[test]

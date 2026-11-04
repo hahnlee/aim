@@ -1124,9 +1124,27 @@ impl Query<'_> {
         Some((ps, ps.pkg.as_deref()?))
     }
 
-    /// `resolveInternalPackageName`: a static shared library's package
-    /// for its library name, as the caller may see it.
-    pub(crate) fn resolve_internal_package_name(&self, name: &str, version_code: i64) -> String {
+    /// `resolveInternalPackageName`: the Settings renamed-package table's
+    /// original name, then a static shared library's package for its
+    /// library name, as the caller may see it.
+    pub(crate) fn resolve_internal_package_name(
+        &self,
+        name: &str,
+        version_code: i64,
+    ) -> Result<String, NotModelled> {
+        let renamed = self
+            .state
+            .renamed_packages
+            .as_ref()
+            .ok_or(NotModelled("the Settings renamed package table"))?;
+        let name = renamed
+            .iter()
+            .find(|(new, _)| new == name)
+            .map_or(name, |(_, old)| old.as_str());
+        Ok(self.resolve_static_library_package(name, version_code))
+    }
+
+    fn resolve_static_library_package(&self, name: &str, version_code: i64) -> String {
         let libs: Vec<(&PackageState, &AndroidPackage)> = self
             .state
             .packages
@@ -1280,7 +1298,7 @@ impl Query<'_> {
         if let Err(e) = self.enforce_cross_user(user, false, false, "get package info")? {
             return Ok(Err(e));
         }
-        let name = self.resolve_internal_package_name(name, version_code);
+        let name = self.resolve_internal_package_name(name, version_code)?;
         let uid = filter_uid;
         let visibility = Query {
             state: self.state,
@@ -1555,7 +1573,7 @@ impl Query<'_> {
         if let Err(e) = self.enforce_cross_user(user, false, true, "get application info")? {
             return Ok(Err(e));
         }
-        let name = self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
+        let name = self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST)?;
         let visibility = Query {
             state: self.state,
             filter: self.filter,
@@ -2049,7 +2067,7 @@ impl Query<'_> {
             && (flags & MATCH_SYSTEM_ONLY == 0 || ps.is.system)
         {
             let resolved =
-                visibility.resolve_internal_package_name(&p.package_name, VERSION_CODE_HIGHEST);
+                visibility.resolve_internal_package_name(&p.package_name, VERSION_CODE_HIGHEST)?;
             if let Some(rps) = self.state.packages.get(&resolved)
                 && user_state(rps, user).installed
                 && !self.filtered(Some(rps), uid, user)?

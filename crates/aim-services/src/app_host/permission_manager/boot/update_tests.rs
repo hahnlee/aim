@@ -572,7 +572,10 @@ fn pinned_image_packages_update_existing_access_without_a_system_process() {
         );
     }
     assert!(image.packages.len() > 100);
-    let mut state = State::default();
+    let mut state = State {
+        renamed_packages: Some(Vec::new()),
+        ..State::default()
+    };
     state.users.insert(
         0,
         crate::package::model::User {

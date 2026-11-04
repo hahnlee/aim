@@ -336,7 +336,14 @@ pub fn authorize(
         return Ok(());
     }
     for name in names {
-        let resolved = query.resolve_internal_package_name(name, -1);
+        let resolved = query
+            .resolve_internal_package_name(name, -1)
+            .map_err(|reason| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("installer package owner: {reason:?}"),
+                )
+            })?;
         let Some(package) = query.state.packages.get(&resolved) else {
             return Err(Exception::security(format!(
                 "Caller has no access to package {name}"

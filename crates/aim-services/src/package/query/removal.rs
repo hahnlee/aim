@@ -149,7 +149,9 @@ impl Owner {
     }
     fn decide(&self, query: &Query<'_>, request: Request) -> Result<Decision, Exception> {
         let admission = (self.controller.policy.admission)(query, &request)?;
-        let internal = query.resolve_internal_package_name(&request.package, request.version);
+        let internal = query
+            .resolve_internal_package_name(&request.package, request.version)
+            .map_err(|error| illegal(format!("Removal package owner: {error:?}")))?;
         let package = query.state.packages.get(&internal);
         let mut captured = None;
         if request.existing_only {
