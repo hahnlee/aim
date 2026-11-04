@@ -3,16 +3,18 @@ use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, Parcel};
 
 // oracle.py executes the pinned Java writers; only native transport and
 // unrelated object APIs are substitutes. These are original writeMap offsets.
-pub(in crate::app_host) fn fixture(token: Binder) -> Parcel {
-    let hex = include_str!("../../tests/fixtures/wct/wct.hex");
-    let data: Vec<u8> = hex
+fn pinned() -> Vec<u8> {
+    include_str!("../../tests/fixtures/wct/wct.hex")
         .split_whitespace()
         .flat_map(|line| {
             (0..line.len())
                 .step_by(2)
                 .map(|at| u8::from_str_radix(&line[at..at + 2], 16).unwrap())
         })
-        .collect();
+        .collect()
+}
+pub(in crate::app_host) fn fixture(token: Binder) -> Parcel {
+    let data = pinned();
     let mut p = Parcel::new();
     let mut start = 0;
     for at in [8, 372, 412] {
@@ -22,6 +24,70 @@ pub(in crate::app_host) fn fixture(token: Binder) -> Parcel {
     }
     p.write_raw(&data[start..], &[]);
     p
+}
+/// A `HierarchyOp` as `HierarchyOp.writeToParcel` writes it.
+pub(in crate::app_host) struct Op {
+    pub kind: i32,
+    pub container: Option<Binder>,
+    pub reparent: Option<Binder>,
+    pub to_top: bool,
+    pub top_only: bool,
+    pub modes: Option<Vec<i32>>,
+    pub types: Option<Vec<i32>>,
+}
+/// A transaction of the pinned fixture's Change, with the edits at its
+/// offsets, for each token, then `ops`.
+pub(in crate::app_host) fn transaction(
+    changes: &[(Binder, &[(usize, i32)])],
+    ops: &[Op],
+) -> Parcel {
+    let data = pinned();
+    let mut p = Parcel::new();
+    p.write_i32(changes.len() as i32);
+    for (token, edits) in changes {
+        let mut change = Parcel::new();
+        change.write_raw(&data[36..360], &[]);
+        for &(at, value) in *edits {
+            change.set_i32_at(at - 36, value);
+        }
+        p.write_i32(15);
+        p.write_binder(Some(*token));
+        p.write_raw(change.data(), &[]);
+    }
+    p.write_i32(ops.len() as i32);
+    for op in ops {
+        p.write_i32(1);
+        p.write_i32(op.kind);
+        p.write_binder(op.container);
+        p.write_raw(&data[400..412], &[]);
+        p.write_binder(op.reparent);
+        p.write_raw(&data[440..472], &[]);
+        p.write_bool(op.to_top);
+        p.write_bool(op.top_only);
+        for array in [&op.modes, &op.types] {
+            match array {
+                Some(values) => {
+                    p.write_i32(values.len() as i32);
+                    values.iter().for_each(|&v| p.write_i32(v));
+                }
+                None => p.write_i32(-1),
+            }
+        }
+        p.write_raw(&data[488..540], &[]);
+    }
+    p.write_raw(&data[540..], &[]);
+    p
+}
+pub(in crate::app_host) fn reparent(task: Binder, parent: Option<Binder>, to_top: bool) -> Op {
+    Op {
+        kind: 0,
+        container: Some(task),
+        reparent: parent,
+        to_top,
+        top_only: false,
+        modes: None,
+        types: None,
+    }
 }
 #[test]
 fn pinned_java_wct_map_change_and_reorder_decode() {
@@ -39,7 +105,103 @@ fn pinned_java_wct_map_change_and_reorder_decode() {
             mode: None,
         }]
     );
-    assert_eq!(t.reorders, [(Binder::Local(64), true)]);
+    assert_eq!(t.hierarchy, [Hop::Reorder(Binder::Local(64), true)]);
+    // The same written by the builder.
+    let built = transaction(
+        &[(Binder::Local(64), &[])],
+        &[Op {
+            kind: 1,
+            reparent: Some(Binder::Local(64)),
+            ..reparent(Binder::Local(64), None, true)
+        }],
+    );
+    assert_eq!(built.data(), fixture(Binder::Local(64)).data());
+}
+// HierarchyOp.createForReparent and createForChildrenTasksReparent.
+#[test]
+fn reparent_and_reparent_tasks_decode() {
+    let (task, root) = (Binder::Local(64), Binder::Local(72));
+    let read = |ops: &[Op]| Transaction::read(&mut transaction(&[], ops).reader());
+    assert_eq!(
+        read(&[
+            reparent(task, Some(root), true),
+            reparent(task, None, false)
+        ])
+        .unwrap()
+        .hierarchy,
+        [
+            Hop::Reparent {
+                task,
+                parent: Some(root),
+                to_top: true
+            },
+            Hop::Reparent {
+                task,
+                parent: None,
+                to_top: false
+            }
+        ]
+    );
+    let children = Op {
+        kind: 2,
+        container: Some(root),
+        reparent: None,
+        to_top: true,
+        top_only: true,
+        modes: Some(vec![1, 6, 0]),
+        types: Some(vec![]),
+    };
+    assert_eq!(
+        read(&[children]).unwrap().hierarchy,
+        [Hop::ReparentChildren {
+            from: Some(root),
+            to: None,
+            modes: Some(vec![1, 6, 0]),
+            types: Some(vec![]),
+            to_top: true,
+            top_only: true
+        }]
+    );
+    // The filters and reparentTopOnly are reparentTasks' only; a reparent
+    // names its task, a reorder its own parent.
+    for op in [
+        Op {
+            top_only: true,
+            ..reparent(task, None, true)
+        },
+        Op {
+            modes: Some(vec![1]),
+            ..reparent(task, None, true)
+        },
+        Op {
+            types: Some(vec![]),
+            ..reparent(task, None, true)
+        },
+        Op {
+            kind: 3,
+            ..reparent(task, Some(root), true)
+        },
+    ] {
+        assert_eq!(read(&[op]).unwrap_err().code, EX_UNSUPPORTED_OPERATION);
+    }
+    for op in [
+        Op {
+            container: None,
+            ..reparent(task, None, true)
+        },
+        Op {
+            kind: 1,
+            ..reparent(task, Some(root), true)
+        },
+    ] {
+        assert_eq!(read(&[op]).unwrap_err().code, EX_ILLEGAL_ARGUMENT);
+    }
+    let mut truncated = transaction(&[], &[reparent(task, None, true)]);
+    truncated.set_i32_at(4 + 4 + 4 + 4 + 28 + 12 + 28 + 32 + 8, i32::MAX);
+    assert_eq!(
+        Transaction::read(&mut truncated.reader()).unwrap_err().code,
+        EX_ILLEGAL_ARGUMENT
+    );
 }
 // Field offsets of the pinned writer's Change: window bounds 244..260,
 // mConfigSetMask 340, mWindowSetMask 344, mWindowingMode 352.
@@ -60,7 +222,7 @@ fn windowing_modes_and_inherited_bounds_decode() {
         }]
     };
     // setWindowingMode alone sets no configuration mask.
-    for mode in [0, 1, 5, 3, 999] {
+    for mode in [0, 1, 5, 6, 3, 999] {
         assert_eq!(
             change(&[(340, 0), (344, 0), (352, mode)]).unwrap(),
             only(None, Some(mode))
@@ -75,13 +237,11 @@ fn windowing_modes_and_inherited_bounds_decode() {
     assert_eq!(change(&[(252, -100)]).unwrap(), only(Some(None), None));
     // applyChanges ignores a mode below -1; an empty Change applies nothing.
     assert_eq!(change(&[(340, 0), (344, 0), (352, -2)]).unwrap(), []);
-    // Pinned and multi-window need owners this host does not have yet.
-    for mode in [2, 6] {
-        assert_eq!(
-            change(&[(352, mode)]).unwrap_err().code,
-            EX_UNSUPPORTED_OPERATION
-        );
-    }
+    // Pinned needs an owner this host does not have yet.
+    assert_eq!(
+        change(&[(352, 2)]).unwrap_err().code,
+        EX_UNSUPPORTED_OPERATION
+    );
     for masks in [[(340, 0)], [(344, 0)]] {
         assert_eq!(change(&masks).unwrap_err().code, EX_UNSUPPORTED_OPERATION);
     }
@@ -114,10 +274,9 @@ fn truncated_lengths_unknown_ops_and_unsupported_fields_are_rejected() {
         (344, 2),
         (348, 1),
         (352, 2),
-        (352, 6),
         (356, 1),
         (364, 0),
-        (368, 0),
+        (368, -1),
         (368, 3),
         (368, 4),
         (368, 6),

@@ -278,7 +278,7 @@ pub(super) mod tests {
             };
             // In a freeform task the application's resources take the
             // task window's size, not the display's.
-            let (_, freeform) = launch(7, 10100, 1, Some(window));
+            let (_, freeform) = launch(7, 10100, 1, Some((5, window)));
             assert_eq!(
                 (freeform.screen_width_dp, freeform.screen_height_dp),
                 (824, 1200)
@@ -307,7 +307,7 @@ pub(super) mod tests {
             assert!(same(back, &freeform));
             assert!(back.seq > fullscreen.seq);
             // A system process keeps the global configuration.
-            let (_, system) = launch(8, SYSTEM_UID, 3, Some(window));
+            let (_, system) = launch(8, SYSTEM_UID, 3, Some((5, window)));
             assert!(same(&system, &global));
             assert!(host.process_configuration_changes().is_empty());
             // A global change reaches it merged with that activity's.

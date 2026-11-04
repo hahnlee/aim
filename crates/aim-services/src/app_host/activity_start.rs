@@ -472,7 +472,7 @@ impl AppHost {
                     .unwrap()
                     .get(&t)
                     .map(|r| r.task);
-                let bounds = task.and_then(|id| self.tasks.freeform_bounds(id));
+                let bounds = task.and_then(|id| self.tasks.own_bounds(id));
                 let items = self
                     .launch_items(
                         token_of(t),

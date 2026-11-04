@@ -1,7 +1,7 @@
 //! WindowOrganizerController / TaskOrganizerController, android-16.0.0_r1.
 //! Registration delegates actual native task surfaces; organizer root tasks
-//! are created, listed and deleted. Unsupported hierarchy and transaction
-//! operations stay explicit (#2616).
+//! are created, listed, deleted and hold tasks. Unsupported hierarchy and
+//! transaction operations stay explicit (#2616).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::surface::Layer;
 use super::{AppHost, reply};
@@ -203,6 +203,14 @@ impl Service for Controller {
                     .map_err(|_| BAD_VALUE)?;
                 reply(self.0.delete_root_task(a.task.map(|t| t.0)))
             }
+            (true, toc::GET_CHILD_TASKS) => {
+                let a = toc::GetChildTasks::<ContainerToken>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .organizer_child_tasks(a.parent.map(|t| t.0), a.activity_types),
+                )
+            }
             (true, toc::GET_ROOT_TASKS) => {
                 let a = toc::GetRootTasks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.organizer_root_tasks(a.display_id, a.activity_types))
@@ -332,12 +340,13 @@ impl AppHost {
         Ok(p)
     }
     pub(super) fn unregister_task_organizer(
-        &self,
+        self: &Arc<Self>,
         binder: Option<Binder>,
         expected: Option<&Arc<Strong>>,
     ) -> Result<Parcel, Exception> {
         let binder = binder.ok_or_else(|| Exception::new(EX_NULL_POINTER, "organizer"))?;
         let mut state = self.organizers.state.lock().unwrap();
+        let mut roots = Vec::new();
         if let Some(at) = state.entries.iter().position(|e| {
             e.binder == binder && expected.is_none_or(|held| Arc::ptr_eq(held, &e.held))
         }) {
@@ -357,7 +366,7 @@ impl AppHost {
                 .retain(|(target, _, _)| !Arc::ptr_eq(target, &removed.held));
             if active {
                 // TaskOrganizerState.dispose: its root tasks go with it.
-                let roots = self.remove_root_tasks();
+                roots = self.remove_root_tasks();
                 current.retain(|t| !roots.contains(&t.0));
                 self.set_tasks_organized(!state.entries.is_empty());
                 if !state.entries.is_empty() {
@@ -366,6 +375,7 @@ impl AppHost {
             }
         }
         drop(state);
+        self.remove_root_children(&roots);
         self.dispatch_organizer_reports();
         let mut p = Parcel::new();
         p.write_no_exception();
@@ -402,7 +412,7 @@ impl AppHost {
         Ok(p)
     }
     /// `deleteRootTask`: false for a token of no task.
-    fn delete_root_task(&self, token: Option<Binder>) -> Result<Parcel, Exception> {
+    fn delete_root_task(self: &Arc<Self>, token: Option<Binder>) -> Result<Parcel, Exception> {
         let token = token.ok_or_else(|| Exception::new(EX_NULL_POINTER, "task"))?;
         let deleted = match self.task_of_token(token) {
             None => false,
@@ -412,6 +422,7 @@ impl AppHost {
                 )));
             }
             Some(id) => {
+                self.remove_root_children(&[id]);
                 self.remove_task(id);
                 true
             }
@@ -444,6 +455,35 @@ impl AppHost {
         }
         let mut p = Parcel::new();
         toc::write_get_root_tasks_reply(&mut p, Some(&infos));
+        Ok(p)
+    }
+    /// `getChildTasks`: the tasks of an organizer root task top to bottom,
+    /// of `types` if given; null for a token of no root task.
+    fn organizer_child_tasks(
+        &self,
+        parent: Option<Binder>,
+        types: Option<Vec<i32>>,
+    ) -> Result<Parcel, Exception> {
+        let parent = parent
+            .ok_or_else(|| Exception::illegal_argument("Can't get children of null parent"))?;
+        let infos = match self.task_of_token(parent) {
+            Some(root) if self.tasks.root(root).is_some() => {
+                let mut infos = Vec::new();
+                for child in self.tasks.children(Some(root)) {
+                    let info = self.organizer_task_info(child)?;
+                    if types
+                        .as_ref()
+                        .is_none_or(|t| t.contains(&info.activity_type))
+                    {
+                        infos.push(Some(info));
+                    }
+                }
+                Some(infos)
+            }
+            _ => None,
+        };
+        let mut p = Parcel::new();
+        toc::write_get_child_tasks_reply(&mut p, infos.as_deref());
         Ok(p)
     }
     pub(super) fn organizer_tasks_changed(&self) -> Result<(), Exception> {
