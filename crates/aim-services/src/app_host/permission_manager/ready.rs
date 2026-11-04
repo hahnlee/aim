@@ -17,20 +17,17 @@ impl PermissionManager {
         {
             return Ok(());
         }
+        // LegacyPermissionManagerService constructs the policy among SystemServer's
+        // bootstrap services, before PMS.systemReady. Here aim-system, started with
+        // the app host, attaches it: wait for that publication.
+        let mut owner = None;
+        super::super::package_boot::wait_for("default permission grant owner", |deadline| {
+            owner = self.host.wait_package_bootstrap_java(deadline);
+            Ok(owner.is_some())
+        })?;
+        let owner = owner.expect("waited");
         // DefaultPermissionGrantPolicy.apply returns after its synchronous Binder
         // mutations. Hold no access lock across Java's calls back into this owner.
-        let owner = self
-            .host
-            .package_bootstrap_java
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| {
-                Exception::new(
-                    EX_ILLEGAL_STATE,
-                    "default permission grant owner unavailable",
-                )
-            })?;
         let queries = self
             .host
             .process
@@ -578,12 +575,31 @@ mod tests {
                 commit: Mutex::new(continue_policy),
                 fail,
             }));
-            *host.package_bootstrap_java.lock().unwrap() = Some(Arc::new(policy));
             let boot = host.clone();
+            let (prepared, packages_ready) = mpsc::channel();
             // This fixture publishes constructed package state without a boot
             // lifecycle; exercise the real default-grant/startup boundary.
-            let worker =
-                std::thread::spawn(move || boot.complete_system_ready(|| Ok(()), || Ok(())));
+            let worker = std::thread::spawn(move || {
+                boot.complete_system_ready(
+                    || {
+                        prepared.send(()).unwrap();
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+            });
+            // aim-system attaches the policy after the app host's package
+            // readiness (#2717): default grants wait for it, and so do starts.
+            packages_ready.recv().unwrap();
+            assert!(
+                waiting
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .is_err()
+            );
+            assert!(!worker.is_finished());
+            assert!(host.processes_ready.get().is_none());
+            host.attach_package_bootstrap_java(Some(policy.binder()))
+                .unwrap();
             waiting.recv().unwrap();
             assert!(host.processes_ready.get().is_none());
             assert!(register(host, 1002, observer).is_err());
