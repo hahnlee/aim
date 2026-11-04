@@ -44,9 +44,10 @@ inherited from the display. `setWindowingMode` changes the task's own mode as
 `TaskDisplayArea.isValidWindowingMode` resolves it (fullscreen, or freeform in
 window mode; undefined inherits the display area's), and the task's
 configuration, Mac window bounds, visibility and lifecycle follow: a fullscreen
-task fills the display as a fullscreen launch in window mode already does, and a
-task returning to freeform takes its last non-fullscreen bounds. Empty bounds
-(`setBounds(null)`) inherit the display. Reorder-to-bottom preserves visible
+task fills the display as a fullscreen launch in window mode already does. A
+task keeps its requested bounds in any mode, so a task returning to freeform
+takes them, else its last non-fullscreen bounds, else fills the display. Empty
+bounds (`setBounds(null)`) inherit the display and are not recorded. Reorder-to-bottom preserves visible
 freeform tasks and uses a distinct bridge record instead of minimizing the Mac
 window. Host regressions cover dispatch, permission denial, malformed/unsupported
 requests, mode transitions, configuration and bridge records; pinned and
@@ -935,8 +936,10 @@ now makes (not yet seen live), and still stop at app ops the app host
 does not decide (#1558).
 
 The native task owner persists per-user launch parameters in Android's ABX
-format, restores saved bounds before freeform placement on the recorded
-display, loads them when the user unlocks, and removes package records
+format: in window mode, the mode and last non-fullscreen bounds of visible
+fullscreen and freeform tasks. A launch without launch bounds on the recorded
+display takes the saved mode and bounds before freeform placement. It loads
+them when the user unlocks, and removes package records
 through the PackageList callback.
 Moving a task to the back, including Back at its launcher root, now retains
 its activities, pauses and stops them, and focuses the next task (#1486).

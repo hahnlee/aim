@@ -40,6 +40,9 @@ pub struct Task {
     real_activity: String,
     pub bounds: Rect,
     windowing_mode: i32,
+    /// Its requested override bounds, `None` if empty (inheriting its parent's).
+    requested_bounds: Option<Rect>,
+    /// `mLastNonFullscreenBounds`.
     restore_bounds: Option<Rect>,
     /// Its root activity's window layout's minimum size, -1 for none.
     min_size: (i32, i32),
@@ -290,27 +293,36 @@ impl AppHost {
             bottom: display.height,
         };
         let windows = self.tasks.window_mode();
-        let windowing_mode = options.windowing_mode(windows);
         let activity = super::freeform::Activity::from(info);
         let real_activity = super::activity_start::real_component(info);
-        let bounds = if windowing_mode == 5 {
+        // TaskLaunchParamsModifier: without launch bounds, params persisted for
+        // this display in a freeform display area (window mode) give the mode and
+        // the last non-fullscreen bounds. Only a mode this owner supports is reused.
+        let saved = if windows && options.bounds.is_none() {
             let name = crate::package::preferred::unflatten(&real_activity)
                 .ok_or_else(|| Exception::illegal_argument("invalid task component"))?;
-            let saved = self
-                .tasks
+            self.tasks
                 .launch_params(self.data()?)?
                 .get((uid / super::PER_USER_RANGE) as i32, &name)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+                .filter(|p| {
+                    p.display_unique_id.as_deref() == Some(format!("local:{}", display.id).as_str())
+                        && matches!(p.windowing_mode, 0 | 1 | 5)
+                })
+        } else {
+            None
+        };
+        let windowing_mode = match &saved {
+            Some(p) if p.windowing_mode != 0 => p.windowing_mode,
+            _ => options.windowing_mode(windows),
+        };
+        let saved_bounds = saved
+            .map(|p| p.bounds)
+            .filter(|b| b.width() > 0 && b.height() > 0);
+        let bounds = if windowing_mode == 5 {
             let others = self.tasks.all_bounds();
-            // Display and mode are already selected here. Only reuse params
-            // for this display and a mode the freeform task owner supports.
-            match saved.filter(|p| {
-                p.display_unique_id.as_deref() == Some(format!("local:{}", display.id).as_str())
-                    && matches!(p.windowing_mode, 0 | 5)
-                    && p.bounds.width() > 0
-                    && p.bounds.height() > 0
-            }) {
-                Some(p) => super::freeform::restored_bounds(area, &others, p.bounds),
+            match saved_bounds {
+                Some(b) => super::freeform::restored_bounds(area, &others, b),
                 None => super::freeform::default_bounds(
                     &activity,
                     area,
@@ -352,7 +364,11 @@ impl AppHost {
             real_activity,
             bounds,
             windowing_mode,
-            restore_bounds: (windowing_mode == 5).then_some(bounds).or(options.bounds),
+            requested_bounds: (windowing_mode == 5).then_some(bounds),
+            restore_bounds: (windowing_mode == 5)
+                .then_some(bounds)
+                .or(options.bounds)
+                .or(saved_bounds),
             min_size: activity.min_size,
             layer: None,
             launch,
@@ -767,12 +783,19 @@ impl AppHost {
     }
 
     pub(super) fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
-        self.move_task_recording(id, bounds, true)
+        self.move_task_requesting(id, bounds, None)
     }
 
-    /// `move_task`; a freeform task records its bounds as its last
-    /// non-fullscreen ones only if they are its own (`last`), not its parent's.
-    fn move_task_recording(&self, id: i32, bounds: Rect, last: bool) -> Result<(), String> {
+    /// `move_task`, with the task's requested override bounds `requested` if
+    /// given, else its bounds if it is freeform. Like
+    /// `Task.onConfigurationChangedInner`, a freeform task with requested
+    /// bounds records its bounds as its last non-fullscreen ones.
+    fn move_task_requesting(
+        &self,
+        id: i32,
+        bounds: Rect,
+        requested: Option<Option<Rect>>,
+    ) -> Result<(), String> {
         let bounds = self.task_move_bounds(id, None, bounds)?;
         {
             let mut tasks = self.tasks.tasks.lock().unwrap();
@@ -781,7 +804,12 @@ impl AppHost {
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
             task.bounds = bounds;
-            if task.windowing_mode == 5 && last {
+            match requested {
+                Some(r) => task.requested_bounds = r,
+                None if task.windowing_mode == 5 => task.requested_bounds = Some(bounds),
+                None => {}
+            }
+            if task.windowing_mode == 5 && task.requested_bounds.is_some() {
                 task.restore_bounds = Some(bounds);
             }
             self.save_task_launch_params(task)?;
@@ -822,8 +850,9 @@ impl AppHost {
 
     /// A WCT `Change` of task `id`, admitted without mutating it, as
     /// `WindowOrganizerController.applyChanges` would apply it: its windowing
-    /// mode (`mode`), then its bounds in that mode (`bounds`, `Some(None)` to
-    /// inherit the display's).
+    /// mode (`mode`), then its requested bounds (`bounds`, `Some(None)` to
+    /// inherit the display's), which it keeps in any mode and which resolve in
+    /// freeform only.
     pub(super) fn task_change(
         &self,
         id: i32,
@@ -837,14 +866,14 @@ impl AppHost {
             right: display.0.width,
             bottom: display.0.height,
         };
-        let (current, current_bounds, restore) = self
+        let (current, requested, restore) = self
             .tasks
             .tasks
             .lock()
             .unwrap()
             .iter()
             .find(|t| t.id == id)
-            .map(|t| (t.windowing_mode, t.bounds, t.restore_bounds))
+            .map(|t| (t.windowing_mode, t.requested_bounds, t.restore_bounds))
             .ok_or_else(|| format!("no task {id}"))?;
         // TaskDisplayArea.isValidWindowingMode: fullscreen, or freeform where the
         // display area is; any other mode is undefined and inherits the display area's.
@@ -855,18 +884,21 @@ impl AppHost {
                 5
             }
         });
-        let requested = match bounds {
-            Some(Some(b)) => b,
-            Some(None) => area,
-            // Task.onConfigurationChangedInner: a task entering freeform without
-            // bounds of its own takes its last non-fullscreen bounds.
-            None if mode == 5 && current != 5 => restore.unwrap_or(area),
-            None => current_bounds,
+        let mut requested = bounds.unwrap_or(requested);
+        // Task.onConfigurationChangedInner: a task entering freeform without
+        // requested bounds takes its last non-fullscreen bounds; with neither,
+        // it fills the display area.
+        if mode == 5 && current != 5 && requested.is_none() {
+            requested = restore;
+        }
+        let bounds = match requested {
+            Some(b) if mode == 5 => self.task_move_bounds(id, Some(mode), b)?,
+            _ => area,
         };
         Ok(TaskChange {
             mode,
-            bounds: self.task_move_bounds(id, Some(mode), requested)?,
-            last: bounds != Some(None),
+            bounds,
+            requested,
         })
     }
 
@@ -893,7 +925,7 @@ impl AppHost {
                 .unwrap()
                 .set_task_windowing_mode(id, c.mode);
         }
-        self.move_task_recording(id, c.bounds, c.last)?;
+        self.move_task_requesting(id, c.bounds, Some(c.requested))?;
         if changed {
             let commands = self.activities.stack.lock().unwrap().ensure_visible();
             self.run(commands);
@@ -922,10 +954,14 @@ impl AppHost {
         Ok(())
     }
 
-    /// Task.saveLaunchingStateIfNeeded: visible leaf tasks in a freeform
-    /// display area. This owner currently has only freeform tasks there.
+    /// Task.saveLaunchingStateIfNeeded: visible fullscreen and freeform leaf
+    /// tasks in a freeform display area (window mode), with their last
+    /// non-fullscreen bounds (`LaunchParamsPersister.saveTaskToLaunchParam`).
     fn save_task_launch_params(&self, task: &Task) -> Result<(), String> {
-        if task.windowing_mode != 5 || !task.has_been_visible {
+        if !self.tasks.window_mode()
+            || !task.has_been_visible
+            || !matches!(task.windowing_mode, 1 | 5)
+        {
             return Ok(());
         }
         let display = self.display().map_err(|e| e.message)?;
@@ -939,19 +975,20 @@ impl AppHost {
                 &name,
                 Params {
                     display_unique_id: Some(format!("local:{}", display.0.id)),
-                    windowing_mode: 5, // WINDOWING_MODE_FREEFORM
-                    bounds: task.bounds,
+                    windowing_mode: task.windowing_mode,
+                    bounds: task.restore_bounds.unwrap_or_default(),
                     window_layout_affinity: task.window_layout_affinity.clone(),
                 },
             )
     }
 }
 
-/// A task's admitted windowing mode and bounds (`AppHost::task_change`).
+/// A task's admitted windowing mode, bounds and requested bounds
+/// (`AppHost::task_change`).
 pub(super) struct TaskChange {
     mode: i32,
     bounds: Rect,
-    last: bool,
+    requested: Option<Rect>,
 }
 
 /// `Task.adjustForMinimalTaskDimensions`: `bounds` at least `min` wide and
@@ -1474,7 +1511,8 @@ mod tests {
                 std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
                 let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
                 assert_ne!(host.tasks.bounds(id), Some(saved));
-                host.tasks.tasks.lock().unwrap()[0].bounds = saved;
+                // A freeform task persists its last non-fullscreen bounds.
+                host.tasks.tasks.lock().unwrap()[0].restore_bounds = Some(saved);
                 host.task_idle(id);
             } // Drop drains the real writer; the next host starts with empty memory.
             let host = launch_host(ready, true);
@@ -1509,7 +1547,7 @@ mod tests {
                 right: 847,
                 bottom: 1483,
             };
-            for (display, mode) in [("local:99", 5), ("local:0", 2), ("local:0", 1)] {
+            for (display, mode) in [("local:99", 5), ("local:0", 2), ("local:0", 5)] {
                 {
                     let host = launch_host(ready, true);
                     std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
@@ -1522,7 +1560,12 @@ mod tests {
                             Params {
                                 display_unique_id: Some(display.into()),
                                 windowing_mode: mode,
-                                bounds: saved,
+                                // A freeform record without bounds lays out by default.
+                                bounds: if display == "local:0" && mode == 5 {
+                                    Rect::default()
+                                } else {
+                                    saved
+                                },
                                 ..Default::default()
                             },
                         )
@@ -1551,6 +1594,48 @@ mod tests {
                 assert_eq!(host.tasks.bounds(id), Some(expected), "mode {mode}");
                 assert_ne!(host.tasks.bounds(id), Some(saved));
             }
+        });
+    }
+
+    #[test]
+    fn a_launch_restores_a_saved_fullscreen_mode_and_its_last_bounds() {
+        crate::system::with_discovery_session(|ready, _, _| {
+            let info = ready.activity_info_of("p", "p.Main").unwrap();
+            let component = crate::package::preferred::unflatten("p/p.Main").unwrap();
+            let saved = Rect {
+                left: 47,
+                top: 83,
+                right: 847,
+                bottom: 1483,
+            };
+            {
+                let host = launch_host(ready, true);
+                std::fs::create_dir_all(host.data().unwrap().join("system_ce/0")).unwrap();
+                host.tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
+                    .save(
+                        0,
+                        &component,
+                        Params {
+                            display_unique_id: Some("local:0".into()),
+                            windowing_mode: 1,
+                            bounds: saved,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            let host = launch_host(ready, true);
+            host.tasks
+                .launch_params(host.data().unwrap())
+                .unwrap()
+                .unlock_user(0, BTreeSet::from(["p".into()]))
+                .unwrap();
+            let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
+            assert_eq!(host.tasks.freeform_bounds(id), None);
+            let t = &host.tasks.tasks.lock().unwrap()[0];
+            assert_eq!((t.windowing_mode, t.restore_bounds), (1, Some(saved)));
         });
     }
 
@@ -2110,6 +2195,92 @@ mod tests {
             assert_eq!(reported(host, 0), (5, area));
         });
     }
+
+    #[test]
+    fn wct_mode_changes_keep_requested_bounds_and_persist_last_non_fullscreen_ones() {
+        use super::super::window_container_transaction::{Change, Transaction};
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 1000,
+                bottom: 1500,
+            };
+            let _bridge = wct_tasks(host, export, old);
+            let area = Rect {
+                left: 0,
+                top: 0,
+                right: 1080,
+                bottom: 1920,
+            };
+            let task = |id| {
+                let tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter().find(|t| t.id == id).unwrap();
+                (t.windowing_mode, t.bounds, t.restore_bounds)
+            };
+            let saved = || {
+                let p = host
+                    .tasks
+                    .launch_params(host.data().unwrap())
+                    .unwrap()
+                    .get(
+                        0,
+                        &crate::package::preferred::unflatten("p/p.Main").unwrap(),
+                    )
+                    .unwrap()
+                    .unwrap();
+                (p.windowing_mode, p.bounds)
+            };
+            let change = |id, mode, bounds| {
+                host.apply_window_transaction(Transaction {
+                    changes: vec![Change {
+                        token: host.task_token(id),
+                        bounds,
+                        mode,
+                    }],
+                    reorders: vec![],
+                })
+                .unwrap()
+            };
+            // setBounds(null) fills the display area; the last non-fullscreen
+            // bounds stay those persisted.
+            change(7, None, Some(None));
+            assert_eq!(task(7), (5, area, Some(old)));
+            assert_eq!(saved(), (5, old));
+            // Bounds set with a fullscreen mode are requested, not resolved, and the
+            // fullscreen task persists its mode.
+            let requested = Rect {
+                left: 50,
+                top: 60,
+                right: 1000,
+                bottom: 1260,
+            };
+            change(7, Some(1), Some(Some(requested)));
+            assert_eq!(task(7), (1, area, Some(old)));
+            assert_eq!(saved(), (1, old));
+            // Back in freeform, the requested bounds win over the last ones.
+            change(7, Some(0), None);
+            assert_eq!(task(7), (5, requested, Some(requested)));
+            assert_eq!(saved(), (5, requested));
+
+            // A task launched fullscreen without launch bounds has neither, so in
+            // freeform it fills the display area and records nothing.
+            {
+                let mut tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter_mut().find(|t| t.id == 8).unwrap();
+                (t.windowing_mode, t.bounds) = (1, area);
+                (t.requested_bounds, t.restore_bounds) = (None, None);
+            }
+            host.activities
+                .stack
+                .lock()
+                .unwrap()
+                .set_task_windowing_mode(8, 1);
+            change(8, Some(5), None);
+            assert_eq!(task(8), (5, area, None));
+            assert_eq!(saved(), (5, Rect::default()));
+        });
+    }
 }
 
 #[cfg(test)]
@@ -2130,6 +2301,7 @@ impl Tasks {
             real_activity: "p/p.Main".into(),
             bounds,
             windowing_mode,
+            requested_bounds: (windowing_mode == 5).then_some(bounds),
             restore_bounds: (windowing_mode == 5).then_some(bounds),
             min_size: (-1, -1),
             layer: None,
