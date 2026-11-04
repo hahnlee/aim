@@ -212,7 +212,23 @@ impl Framework {
         id: u32,
         read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
     ) -> Result<T, String> {
-        self.with_resources(root, data, pkg, true, |resources, apks, table_apks| {
+        self.package_xml_resource(
+            root,
+            &PackageResources::open(root, data, pkg, true)?,
+            id,
+            read,
+        )
+    }
+
+    /// `xml_resource` of a package whose resources are already open.
+    pub fn package_xml_resource<T>(
+        &self,
+        root: &Path,
+        package: &PackageResources,
+        id: u32,
+        read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
+    ) -> Result<T, String> {
+        self.with_package(package, |resources, apks, table_apks| {
             let (table, file) = resources
                 .resource_string_source(id)
                 .ok_or_else(|| format!("no XML resource {id:#x}"))?;
@@ -372,6 +388,69 @@ impl Framework {
             &[Option<usize>],
         ) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_package(&PackageResources::open(root, data, pkg, indexed)?, f)
+    }
+
+    /// `f` of `package`'s resources and the framework's, as
+    /// `with_resources` gives them.
+    fn with_package<T>(
+        &self,
+        package: &PackageResources,
+        f: impl FnOnce(
+            &parse::resources::Resources<'_>,
+            &[aim_apps::apk::Files],
+            &[Option<usize>],
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        // Each table's APK: the framework's first, then the package's.
+        let mut table_apks = vec![None];
+        let mut resources = vec![&self.0.framework];
+        for (i, table) in package.tables.iter().enumerate() {
+            if let Some(table) = table {
+                resources.push(table);
+                table_apks.push(Some(i));
+            }
+        }
+        let resources = parse::resources::Resources {
+            tables: resources,
+            overlays: &self.0.framework_overlays,
+            config: self.0.config(),
+        };
+        let result = f(&resources, &package.apks, &table_apks);
+        // Clear every table's deferred errors, so that the next read of a
+        // shared package reports only its own.
+        let errors: Vec<_> = package.tables.iter().flatten().map(|t| t.check()).collect();
+        errors.into_iter().collect::<Result<(), _>>()?;
+        result
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The packages `PackageResources::open` opened on this thread.
+    pub(super) static OPENED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A package's APKs and their resource tables, opened once for any number
+/// of reads, as ResourcesManager shares one package's `ApkAssets` among
+/// the `getResourcesForApplication` calls that ask for them.
+pub struct PackageResources {
+    apks: Vec<aim_apps::apk::Files>,
+    tables: Vec<Option<parse::resources::Table>>,
+}
+
+impl PackageResources {
+    /// `pkg`'s base and split APKs below the image `root` or the guest's
+    /// `/data` at `data`, their tables indexed (decoded as entries are
+    /// read) or parsed whole.
+    pub fn open(
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        indexed: bool,
+    ) -> Result<Self, String> {
+        #[cfg(test)]
+        OPENED.with(|n| n.set(n.get() + 1));
         let base = pkg.base_apk_path.as_deref().ok_or("no base APK")?;
         let mut paths = vec![base];
         for split in pkg.split_code_paths.iter().flatten() {
@@ -400,25 +479,7 @@ impl Framework {
                     .transpose()
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Each table's APK: the framework's first, then the package's.
-        let mut table_apks = vec![None];
-        let mut resources = vec![&self.0.framework];
-        for (i, table) in tables.iter().enumerate() {
-            if let Some(table) = table {
-                resources.push(table);
-                table_apks.push(Some(i));
-            }
-        }
-        let resources = parse::resources::Resources {
-            tables: resources,
-            overlays: &self.0.framework_overlays,
-            config: self.0.config(),
-        };
-        let result = f(&resources, &apks, &table_apks);
-        for table in tables.iter().flatten() {
-            table.check()?;
-        }
-        result
+        Ok(PackageResources { apks, tables })
     }
 }
 
@@ -466,6 +527,44 @@ fn full_name(name: &str) -> Option<(&str, &str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read of a package whose resources other reads share fails for its
+    /// own decoding errors only, as each `parseServiceInfo` throws alone.
+    #[test]
+    fn shared_package_reads_keep_their_own_errors() {
+        let root = std::env::temp_dir().join(format!("aim-shared-res-{}", std::process::id()));
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/discovery");
+        std::fs::create_dir_all(root.join("system/framework")).unwrap();
+        std::fs::write(root.join("system/build.prop"), "ro.build.version.sdk=36\n").unwrap();
+        std::fs::copy(
+            fixtures.join("framework.apk"),
+            root.join("system/framework/framework-res.apk"),
+        )
+        .unwrap();
+        let framework = Framework::load(&root, 160, "en-US").unwrap();
+        let apk = aim_apps::apk::Files::open(&fixtures.join("providers.apk")).unwrap();
+        // Point the widget XML's (0x7f010002) entry past its type chunk.
+        let mut arsc = apk.file("resources.arsc").unwrap();
+        let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let package = u16_at(&arsc, 2) + u32_at(&arsc, u16_at(&arsc, 2) + 4) as usize;
+        let mut chunk = package + u16_at(&arsc, package + 2);
+        while u16_at(&arsc, chunk) != 0x0201 {
+            chunk += u32_at(&arsc, chunk + 4) as usize;
+        }
+        assert_eq!(arsc[chunk + 9], 0, "a dense type chunk");
+        let offset = chunk + u16_at(&arsc, chunk + 2) + 2 * 4;
+        arsc[offset..offset + 4].copy_from_slice(&0x0fff_fff0u32.to_le_bytes());
+        let package = PackageResources {
+            apks: vec![apk],
+            tables: vec![Some(parse::resources::Table::indexed(arsc).unwrap())],
+        };
+        let read = |id| framework.package_xml_resource(&root, &package, id, |e, _| e.name.clone());
+        assert!(read(0x7f010002).is_err());
+        assert_eq!(read(0x7f010000).unwrap(), "account-authenticator");
+        assert!(read(0x7f010002).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     /// `getIdentifier(name, null, null)` takes only a full name, as
     /// `ExtractResourceName` splits it.

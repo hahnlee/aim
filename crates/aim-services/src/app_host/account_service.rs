@@ -2568,6 +2568,78 @@ mod tests {
         });
     }
 
+    /// A generation opens a package's resources once for all of its
+    /// services; the services are kept until `handlePackageEvent`
+    /// regenerates them for a package added, changed or removed.
+    #[test]
+    fn authenticators_are_cached_until_a_package_changes() {
+        use super::super::package_writes::{PackageChanged, PackageMonitor};
+        use super::super::resources::OPENED;
+        let opened = || OPENED.with(|n| n.replace(0));
+        let authenticators = |count: usize| {
+            move |pkg: &mut crate::package::pkg::AndroidPackage| {
+                if pkg.package_name != "p" {
+                    return;
+                }
+                pkg.base_apk_path = Some("/data/app/p/base.apk".into());
+                pkg.services = (0..count)
+                    .map(|i| {
+                        let mut service = crate::package::pkg::Service::default();
+                        service.main.enabled = true;
+                        service.main.exported = true;
+                        service.main.component.name = format!("p.Authenticator{i}");
+                        service.main.component.package_name = "p".into();
+                        service.main.component.meta_data =
+                            Some(crate::package::pkg::MetaData(vec![(
+                                "android.accounts.AccountAuthenticator".into(),
+                                crate::package::pkg::Value::Int(0x7f010000),
+                            )]));
+                        service.main.component.intents =
+                            vec![crate::package::intent_filter::ParsedIntentInfo {
+                                filter: crate::package::intent_filter::IntentFilter {
+                                    actions: vec!["android.accounts.AccountAuthenticator".into()],
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }];
+                        service
+                    })
+                    .collect();
+            }
+        };
+        crate::system::with_discovery_session(|host, publish, _| {
+            publish(&mut authenticators(3));
+            let manager = AccountManager::new(host.clone());
+            opened();
+            let found = manager.authenticators(0).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].description.kind, "fixture.account");
+            assert_eq!(opened(), 1);
+            assert!(Arc::ptr_eq(&found, &manager.authenticators(0).unwrap()));
+            assert_eq!(opened(), 0);
+            let changed = |removed| {
+                manager
+                    .package_changed(&PackageChanged {
+                        package: "p",
+                        user: 0,
+                        components: &[],
+                        removed,
+                    })
+                    .unwrap();
+                manager.authenticators(0).unwrap()
+            };
+            // Unchanged services keep the cache.
+            assert!(Arc::ptr_eq(&found, &changed(false)));
+            assert_eq!(opened(), 1);
+            publish(&mut authenticators(0));
+            assert!(changed(true).is_empty());
+            assert_eq!(opened(), 0);
+            publish(&mut authenticators(3));
+            assert_eq!(*changed(false), *found);
+            assert_eq!(opened(), 1);
+        });
+    }
+
     #[test]
     fn authenticator_notices_replace_changed_lists_and_preserve_unchanged_lists() {
         use super::super::package_writes::{PackageChanged, PackageMonitor};

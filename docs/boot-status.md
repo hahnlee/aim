@@ -286,10 +286,12 @@ strings it needs (#2441, #2656),
 with resolved styles keyed by package, user, code version, theme and
 configuration and dropped on any package change: Settings' first lookup takes
 about 5 ms instead of 0.16-0.43 s. Account authenticator scans read their
-metadata the same way: a user-0 scan (Gmail's three authenticators) takes about
+metadata the same way: a user-0 scan (Gmail's three authenticators) took about
 33 ms instead of 0.19-0.38 s, so #1460 slice 6d's account snapshot adds about
 40 ms, not 210 ms, before the original SyncManager is built (3 cold and 3 warm
-boots each, 2026-11-04).
+boots each, 2026-11-04). A scan now opens each package's resources once for
+all of its authenticators instead of once per service (#2664; host tests only,
+not yet measured on a boot).
 
 Native package mutations prepare and validate their query candidate outside
 the package-bootstrap lock and recheck the capture before persisting, retrying

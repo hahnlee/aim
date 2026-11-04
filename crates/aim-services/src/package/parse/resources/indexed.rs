@@ -124,8 +124,10 @@ impl Index {
         }
     }
 
+    /// The last error a read deferred since the previous check, which
+    /// this clears: a read reports its own errors, not an earlier one's.
     pub(super) fn check(&self) -> std::result::Result<(), String> {
-        self.error.lock().unwrap().clone().map_or(Ok(()), Err)
+        self.error.lock().unwrap().take().map_or(Ok(()), Err)
     }
 
     pub(super) fn full(&self) -> Option<&Table> {
