@@ -6,6 +6,10 @@ use aim_binder_host::parcel::Exception;
 pub(super) struct LaunchOptions {
     pub mode: i32,
     pub bounds: Option<Rect>,
+    /// The activity type of the start's root task (`resolveActivityType`):
+    /// home of a home activity's (`ActivityRecord.setActivityType`) or
+    /// `startHomeActivity`'s, else unset (standard).
+    pub activity_type: i32,
 }
 
 impl LaunchOptions {
@@ -101,6 +105,7 @@ impl AppHost {
                 .rect("android:activity.launchBounds")
                 .map_err(bad)?
                 .filter(|b| b.width() > 0 && b.height() > 0),
+            ..Default::default()
         })
     }
 }

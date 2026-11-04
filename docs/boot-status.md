@@ -50,6 +50,28 @@ the Mac-owned timeout model once #670 implements it. Host tests cover permission
 values, observers and absence of assertions/scheduled sleep; original `svc`
 execution and guest boots remain unverified (2026-11-02).
 
+The app host starts the home at `systemReady` (`startHomeOnAllDisplays`,
+#2705, #2629): it resolves `ACTION_MAIN`/`CATEGORY_HOME` through the package
+manager and starts that activity in the root home task (activity type HOME).
+Once the root home task has gone and no task is left to focus, the home is
+started again (`resumeHomeActivity`).
+In window mode the root home task stays behind the Mac desktop. It is invisible,
+never focused or sent to the display server, and its activity is launched straight
+to stopped. On fresh data GoogleSdkSetup's DefaultActivity resolves first,
+provisions the device and finishes, then `dev.aim.home/.Home` runs stopped in
+the next root home task. `getTasks`, organizer registration and the window dump
+include the task at the bottom, also after its process died. A start of a home
+intent the caller may make home goes to the root home task; `FindTaskResult` never
+puts another start there. The ActivityTaskManager root-task queries
+(`getAllRootTaskInfos`, `getRootTaskInfo`, `moveHomeRootTaskToFront`) are not
+served yet (#2705). On a window-mode boot with fresh data,
+MultiWindowTests#testNonResizeableActivity gets past `getHomeTask()` to
+createRootTask (#2616), and testMinimumDeviceSize passes with no "Empty task"
+post-assertion. No Mac window opened for either home task. Cold boot to
+`sys.boot_completed` from `aimctl start` took 18.1, 20.5 and 18.5 s with this
+change against 19.0, 24.1 and 18.0 s on its base, within the noise of a loaded
+machine (2026-11-04).
+
 The native `window` service serves text and Android 16 proto dumps from its
 task/activity/window owners (#2605), with hash-pinned schemas and no invented
 IME/policy fields. Three dump tests, the configuration round-trip and host/image

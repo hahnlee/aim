@@ -508,6 +508,38 @@ fn organizer_root_tasks_are_created_listed_deleted_and_go_with_their_organizer()
     });
 }
 
+#[test]
+fn get_root_tasks_reports_the_root_home_task_by_its_home_type() {
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let old = super::super::config::Rect {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 1500,
+        };
+        let (_thread, _activities, _bridge, _tree) =
+            super::super::tasks::tests::wct_tasks(host, export, old);
+        let (home, _) = super::super::tasks::tests::home_task(host);
+        for task in &mut host.activities.stack.lock().unwrap().tasks {
+            task.intent.component = Some(crate::package::intent::ComponentName {
+                package: "p".into(),
+                class: "p.Main".into(),
+            });
+        }
+        create_root(host, 0, 6, None)
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        let root = *host.tasks.root_task_ids().last().unwrap();
+        // Top to bottom: the app tasks, the root home task, the organizer's.
+        assert_eq!(host.tasks.root_task_ids(), [8, 7, home, root]);
+        assert_eq!(root_tasks(host, 0, None), Ok((4, 8)));
+        assert_eq!(root_tasks(host, 0, Some(vec![2])), Ok((1, home)));
+        assert_eq!(root_tasks(host, 0, Some(vec![0])), Ok((1, root)));
+    });
+}
+
 /// `getChildTasks`: how many (-1 for null), and the first one's id.
 fn child_tasks(host: &Arc<AppHost>, parent: Binder, types: Option<Vec<i32>>) -> (i32, i32) {
     let mut request = Parcel::new();

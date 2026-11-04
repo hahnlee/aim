@@ -124,8 +124,24 @@ translucent or floating): a task behind it stays visible, paused
 (`TaskFragment.getVisibility`'s visible behind translucent). Within a
 task, an activity hides those under it unless it is translucent. Apps see
 the tasks as `getTasks` lists them (`RunningTaskInfo`, its bounds and
-visibility included). It connects to the display server itself
-(`OP_WINDOWS`, from guest-init) and, in window mode:
+visibility included). At `systemReady` it starts the home activity the
+package manager resolves for `ACTION_MAIN`/`CATEGORY_HOME` in the root
+home task, with the HOME activity type (`startHomeOnAllDisplays`,
+`app_host/home.rs`), and again once that task has gone and no task is
+left to focus (`resumeHomeActivity`): on fresh data the setup wizard,
+which provisions the device and finishes, then the image's
+`dev.aim.home/.Home`. Without window mode that task is an ordinary bottom
+task: the home is resumed until an app covers it. A home record is
+unresizeable unless its activity asked to be resizeable
+(`setActivityType`). In window mode the Mac desktop is the home: the root home task
+stays behind it at the bottom of the tasks, invisible, never focused or
+brought to the front, its activity launched straight to stopped
+(`LaunchActivityItem` with `StopActivityItem`), and it is never reported
+to the display server, so it has no Mac window. `getTasks`, the task
+organizer and the window dump list it. A start whose record is a home
+activity (`ActivityRecord.setActivityType`) goes to that task, and no
+other start is put there (`FindTaskResult` compares activity types). It connects to the display server
+itself (`OP_WINDOWS`, from guest-init) and, in window mode:
 
 - **Opens a task** for each task it makes, at the bounds freeform
   gives a task started without any (`TaskLaunchParamsModifier
