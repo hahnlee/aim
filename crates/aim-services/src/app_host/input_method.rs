@@ -36,6 +36,7 @@ const ON_START_INPUT_RESULT: u32 = 2;
 const CONNECTION_DESCRIPTOR: &str = "com.android.internal.inputmethod.IRemoteInputConnection";
 const DELETE_SURROUNDING_TEXT: u32 = 5;
 const SET_COMPOSING_TEXT: u32 = 7;
+const FINISH_COMPOSING_TEXT: u32 = 9;
 const COMMIT_TEXT: u32 = 10;
 const PERFORM_EDITOR_ACTION: u32 = 15;
 const SEND_KEY_EVENT: u32 = 19;
@@ -407,7 +408,9 @@ impl AppHost {
                 .map_err(|s| format!("input connection #{code}: {s}"))
         };
         // A `CharSequence` (`TextUtils.writeToParcel`): present, plain,
-        // its UTF-8.
+        // its UTF-8. Plain composing text gets the editor's default
+        // composing spans, the theme's underline
+        // (`BaseInputConnection`, `candidatesTextStyleSpans`).
         let text = |p: &mut Parcel, s: &str| {
             p.write_i32(1);
             p.write_i32(1);
@@ -418,6 +421,7 @@ impl AppHost {
                 text(p, t);
                 p.write_i32(*cursor);
             }),
+            Message::Finish => call(FINISH_COMPOSING_TEXT, &|_| {}),
             Message::Commit { text: t } => call(COMMIT_TEXT, &|p| {
                 text(p, t);
                 p.write_i32(1);

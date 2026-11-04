@@ -112,9 +112,9 @@ migration from the ADR 0012 stack, not a rewrite.
       provides the shell; the task bridge (`aim-windows`) takes over task
       organization.
    2. **Services with a macOS owner**: notification (display and actions,
-      #4), clipboard, input method (#23), display, power and battery,
-      location, connectivity state, locale, time zone and appearance
-      (#281-#283), audio policy, vibrator.
+      #4), clipboard, input method (#23, ADR 0015), display, power and
+      battery, location, connectivity state, locale, time zone and
+      appearance (#281-#283), audio policy, vibrator.
    3. **Services that start on demand**: SystemServer services that no
       replacement covers yet start when first requested instead of at boot
       (a SystemServer exception under ADR 0012's rules), until they are

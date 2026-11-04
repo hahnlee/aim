@@ -335,7 +335,7 @@ through the server's own path from a window host's records
 On the app host image ([app-host.md](app-host.md)) no Android input method
 runs: the app host's native InputMethodManager makes the Mac's input
 method the input method (the owner's choice, 2026-10-17; option A below
-without the APK).
+without the APK; [ADR 0015](adr/0015-host-input-method.md)).
 
 - **No Android input method.** To Android the device has a physical
   keyboard and no input method: `getInputMethodList`,
@@ -352,8 +352,9 @@ without the APK).
   without Command or Control goes through `interpretKeyEvents:`: the
   content view is an `NSTextInputClient`, and what the input method
   gives becomes the app's `InputConnection` calls: marked text
-  `setComposingText`, inserted text `commitText`, Delete
-  `deleteSurroundingText`, Return the editor's action as
+  `setComposingText` (underlined by the editor's default composing
+  spans), inserted text `commitText`, `unmarkText`
+  `finishComposingText`, Delete `deleteSurroundingText`, Return the editor's action as
   `InputMethodService.sendDefaultEditorAction` sends it (else Enter), Tab,
   Esc and the arrows as soft keyboard key events. Other keys still go out
   as physical keys.
@@ -363,8 +364,11 @@ without the APK).
   syllable by replacing the one before the caret (`insertText:` with a
   replacement range), which becomes `deleteSurroundingText` and
   `commitText`. G K S R M F, Space, A K give 한글 마, and Backspace takes a
-  syllable apart, as in an `NSTextView`. The candidate window stays at the
-  window's bottom left (#1458).
+  syllable apart, as in an `NSTextView`
+  (`aim_host_display::text_input::Composition`). A new start or the
+  editor's end discards the input method's marked text: the app's
+  InputMethodManager has finished it on the old connection. The candidate
+  window stays at the window's bottom left (#1458).
 
 ### The original image
 
@@ -374,9 +378,9 @@ Japanese and Chinese input methods that compose from key codes: the
 image's Gboard, with Korean as its language, turns G K S R M F into 한글
 (its language switches with Ctrl+Space). The Mac's input method (its
 candidate window, dictionaries, dictation, emoji picker and input-source
-switching) is not used. The options, none built yet (an input method is
-a service in an app: adding one is a new system component, the user's
-decision):
+switching) is not used. The options for the original image, none built
+(an input method is a service in an app: adding one is a new system
+component, the user's decision):
 
 | Option | How | For | Against |
 | --- | --- | --- | --- |
@@ -384,5 +388,5 @@ decision):
 | B. Android's IME, following the Mac's input source | Keys as now; a system tool (as `aim-keyboard`) switches Gboard's subtype when the Mac's input source changes (`com.apple.inputmethod.Korean` → Korean) | No new component; Gboard's composition works today | Gboard's candidates and dictionaries, not the Mac's; subtype switching needs the IME's own subtype ids; the Mac keeps intercepting its switching keys (Caps Lock, Ctrl+Space) |
 | C. Committed text as key events | `injectInputEvent` of `ACTION_MULTIPLE` key events with characters | Nothing in the guest | No composing text, no candidates; apps handle it unevenly; deprecated |
 
-A needs an ADR on input method ownership (a host input method provider
-and an APK in the derived image).
+The app host takes A without the APK: its native InputMethodManager is
+the bridge (ADR 0015).
