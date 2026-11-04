@@ -6,10 +6,14 @@ with every boot-relevant change: the table, the date and the run it came
 from.
 
 `signalfd4` (#2648) creates and updates signal descriptors whose reads take the
-reader's pending signals as `signalfd_siginfo` records; poll and epoll see a
-masked pending signal of the process or any of its threads. Fork and host exec
-give each process its own readiness under the same fds and mask. Host checks
-only; no guest boot (2026-11-02).
+reader's pending signals as `signalfd_siginfo` records, returning the records
+copied before a fault. Poll, select and epoll report POLLIN alone, for a masked
+pending signal of the process or any of its threads (Linux counts only the
+polling thread's own, #2653), and read the mask when they look, as a blocked read
+does whenever a signal is sent to the process. Fork and host exec give
+each process its own readiness under the same fds, and the mask is the open
+file's: an update in one process is the others'. A thread's exit drops its
+pending signals from readiness. Host checks only; no guest boot (2026-11-04).
 
 The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep requests,
 with timestamp ordering, shared interactive/display queries, display-state callbacks

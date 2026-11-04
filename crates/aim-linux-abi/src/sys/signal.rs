@@ -203,6 +203,9 @@ pub struct ThreadSignals {
     /// Signals `rt_sigtimedwait` is waiting for: routable here although
     /// blocked, as Linux's `real_blocked`.
     waitset: AtomicU64,
+    /// Set while the thread waits in a signalfd read, which every signal
+    /// sent to the process wakes (`signalfd_notify`).
+    reading: AtomicBool,
     pending: Mutex<Pending>,
     alt: Mutex<AltStack>,
     /// `rt_sigsuspend`'s mask to restore after the handler.
@@ -237,6 +240,7 @@ impl ThreadSignals {
             mask: AtomicU64::new(mask),
             own: AtomicU64::new(0),
             waitset: AtomicU64::new(0),
+            reading: AtomicBool::new(false),
             pending: Mutex::new(Pending::new()),
             alt: Mutex::new(AltStack::DISABLED),
             saved_mask: Mutex::new(None),
@@ -324,6 +328,7 @@ fn send_thread(th: &Thread, info: Siginfo) -> i64 {
         return e;
     }
     super::signalfd::refresh();
+    wake_readers();
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
             if t.contains_key(&th.tid) {
@@ -349,6 +354,7 @@ fn send_process(info: Siginfo) -> i64 {
         Ok(false) => 0,
         Ok(true) => {
             super::signalfd::refresh();
+            wake_readers();
             route(sig);
             0
         }
@@ -368,6 +374,7 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
         let queued = process().push(info) == Ok(true);
         if queued {
             super::signalfd::refresh();
+            wake_readers();
             route(sig);
         }
         return queued;
@@ -382,6 +389,7 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
         return false;
     }
     super::signalfd::refresh();
+    wake_readers();
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
             if t.contains_key(&th.tid) {
@@ -410,9 +418,11 @@ fn route(sig: i32) {
     });
 }
 
-/// Called by an exiting thread: pending process signals it was poked for
-/// go to another thread.
+/// Called by an exiting thread, out of the table: pending process signals
+/// it was poked for go to another thread, and its own pending ones are
+/// gone with it (`flush_sigqueue`), for signalfd readiness too.
 pub fn reroute_process_pending() {
+    super::signalfd::refresh();
     let set = process().set;
     for sig in 1..=NSIG {
         if set & bit(sig) != 0 {
@@ -523,6 +533,7 @@ fn take(th: &Thread) -> Option<Taken> {
     }
     if own != 0 {
         super::signalfd::refresh();
+        wake_readers();
     }
     loop {
         let (info, more) = {
@@ -1372,23 +1383,32 @@ pub(super) fn all_pending() -> u64 {
     threads | process().set
 }
 
-/// A signalfd's mask changed: threads waiting in [`read_signal`] look again.
-pub(super) fn wake_waiters() {
+/// A signal was sent to the process or one of its threads, or a signalfd's
+/// mask changed here: threads waiting in [`read_signal`] read their mask
+/// and look again (`signalfd_notify`, `do_signalfd4`).
+pub(super) fn wake_readers() {
     thread::with_table(|t| {
-        for th in t.values().filter(|th| th.sig.waitset.load(SeqCst) != 0) {
+        for th in t.values().filter(|th| th.sig.reading.load(SeqCst)) {
             th.park.unpark();
         }
     });
 }
 
 /// A signalfd read: take a pending signal in `mask`, waiting for one
-/// unless `nonblock`. Waiting makes the set routable here, as Linux's
-/// signalfd wait queue is woken by any signal sent to the process.
-pub(super) fn read_signal(mask: &AtomicU64, nonblock: bool) -> Result<Siginfo, i64> {
+/// unless `nonblock`. The wait does not make the mask routable here, as
+/// another process may change it meanwhile: any signal sent to the process
+/// wakes it to read the mask again (`signalfd_dequeue`).
+pub(super) fn read_signal(
+    mask: impl Fn() -> Result<u64, crate::errno::Errno>,
+    nonblock: bool,
+) -> Result<Siginfo, i64> {
     let th = current();
+    th.sig.reading.store(true, SeqCst);
     let result = loop {
-        let set = mask.load(SeqCst);
-        th.sig.waitset.store(set, SeqCst);
+        let set = match mask() {
+            Ok(set) => set,
+            Err(error) => break Err(-(error as i64)),
+        };
         if let Some(info) = dequeue(th, set) {
             break Ok(info);
         }
@@ -1400,7 +1420,7 @@ pub(super) fn read_signal(mask: &AtomicU64, nonblock: bool) -> Result<Siginfo, i
         }
         th.park.park(th.tid, None);
     };
-    th.sig.waitset.store(0, SeqCst);
+    th.sig.reading.store(false, SeqCst);
     result
 }
 

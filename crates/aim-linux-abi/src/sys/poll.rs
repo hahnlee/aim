@@ -49,6 +49,13 @@ fn from_host(h: i16, asked: i16) -> i16 {
     e
 }
 
+/// The host events to poll a signalfd for: POLLIN alone is ever ready
+/// (`signalfd_poll`), as of a mask read now.
+fn signal_events(description: &super::signalfd::SignalFd, asked: i16) -> i16 {
+    super::signalfd::ready(description);
+    asked & POLLIN
+}
+
 /// Install `mask` (a guest sigset pointer, 0 for none) for the duration of a
 /// wait; returns the mask to restore.
 pub fn swap_sigmask(mask: u64) -> Result<Option<u64>, i32> {
@@ -180,7 +187,12 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         }
         host.push(libc::pollfd {
             fd,
-            events: to_host(entry.events),
+            events: match pin.as_ref().and_then(|pin| pin.kind()) {
+                Some(super::fdtab::Kind::Signal(description)) => {
+                    signal_events(&description, entry.events)
+                }
+                _ => to_host(entry.events),
+            },
             revents: 0,
         });
         pins.push(pin);
@@ -328,6 +340,9 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
             );
             if ev & POLLIN != 0 {
                 super::binder::poll(host_fd);
+            }
+            if let Some(super::fdtab::Kind::Signal(description)) = pin.kind() {
+                ev = signal_events(&description, ev);
             }
             host.push(libc::pollfd {
                 fd: host_fd,
