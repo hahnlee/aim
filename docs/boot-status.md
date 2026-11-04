@@ -1032,7 +1032,12 @@ hibernation deletes OAT artifacts through the original ART owner when
 `config_hibernationDeletesOatArtifactsEnabled` (an unavailable owner, as ART's
 mapped failures, saves no bytes and leaves the transition successful); leaving a user's hibernation sends
 the package LOCKED_BOOT_COMPLETED and BOOT_COMPLETED. The package boot's dexopt
-suppression reads this global state. Entering a user's hibernation (force stop,
+suppression and original ART's AppHibernationManager queries from aim-system
+(`Utils.canDexoptPackage`) answer from this one global state and the deletion
+resource, read once as the original constructor does; host tests cover their
+agreement across disabled, user-only, reload, use/unstop and deletion-off cases
+(#2063 slice 6). ART's batch selection itself is not yet reached, since boot and
+background dexopt remain inactive (#2063). Entering a user's hibernation (force stop,
 cache deletion, storage stats), the statsd atoms and the shell command remain
 explicitly unsupported (#2064, #2063). Host regressions cover these paths; no
 guest boot or Safety Center rerun verifies recovery. The retained
