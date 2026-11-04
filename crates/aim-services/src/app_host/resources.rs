@@ -212,7 +212,23 @@ impl Framework {
         id: u32,
         read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
     ) -> Result<T, String> {
-        self.with_resources(root, data, pkg, true, |resources, apks, table_apks| {
+        self.package_xml_resource(
+            root,
+            &PackageResources::open(root, data, pkg, true)?,
+            id,
+            read,
+        )
+    }
+
+    /// `xml_resource` of a package whose resources are already open.
+    pub fn package_xml_resource<T>(
+        &self,
+        root: &Path,
+        package: &PackageResources,
+        id: u32,
+        read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
+    ) -> Result<T, String> {
+        self.with_package(package, |resources, apks, table_apks| {
             let (table, file) = resources
                 .resource_string_source(id)
                 .ok_or_else(|| format!("no XML resource {id:#x}"))?;
@@ -372,6 +388,68 @@ impl Framework {
             &[Option<usize>],
         ) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_package(&PackageResources::open(root, data, pkg, indexed)?, f)
+    }
+
+    /// `f` of `package`'s resources and the framework's, as
+    /// `with_resources` gives them.
+    fn with_package<T>(
+        &self,
+        package: &PackageResources,
+        f: impl FnOnce(
+            &parse::resources::Resources<'_>,
+            &[aim_apps::apk::Files],
+            &[Option<usize>],
+        ) -> Result<T, String>,
+    ) -> Result<T, String> {
+        // Each table's APK: the framework's first, then the package's.
+        let mut table_apks = vec![None];
+        let mut resources = vec![&self.0.framework];
+        for (i, table) in package.tables.iter().enumerate() {
+            if let Some(table) = table {
+                resources.push(table);
+                table_apks.push(Some(i));
+            }
+        }
+        let resources = parse::resources::Resources {
+            tables: resources,
+            overlays: &self.0.framework_overlays,
+            config: self.0.config(),
+        };
+        let result = f(&resources, &package.apks, &table_apks);
+        for table in package.tables.iter().flatten() {
+            table.check()?;
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The packages `PackageResources::open` opened on this thread.
+    pub(super) static OPENED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A package's APKs and their resource tables, opened once for any number
+/// of reads, as ResourcesManager shares one package's `ApkAssets` among
+/// the `getResourcesForApplication` calls that ask for them.
+pub struct PackageResources {
+    apks: Vec<aim_apps::apk::Files>,
+    tables: Vec<Option<parse::resources::Table>>,
+}
+
+impl PackageResources {
+    /// `pkg`'s base and split APKs below the image `root` or the guest's
+    /// `/data` at `data`, their tables indexed (decoded as entries are
+    /// read) or parsed whole.
+    pub fn open(
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        indexed: bool,
+    ) -> Result<Self, String> {
+        #[cfg(test)]
+        OPENED.with(|n| n.set(n.get() + 1));
         let base = pkg.base_apk_path.as_deref().ok_or("no base APK")?;
         let mut paths = vec![base];
         for split in pkg.split_code_paths.iter().flatten() {
@@ -400,25 +478,7 @@ impl Framework {
                     .transpose()
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Each table's APK: the framework's first, then the package's.
-        let mut table_apks = vec![None];
-        let mut resources = vec![&self.0.framework];
-        for (i, table) in tables.iter().enumerate() {
-            if let Some(table) = table {
-                resources.push(table);
-                table_apks.push(Some(i));
-            }
-        }
-        let resources = parse::resources::Resources {
-            tables: resources,
-            overlays: &self.0.framework_overlays,
-            config: self.0.config(),
-        };
-        let result = f(&resources, &apks, &table_apks);
-        for table in tables.iter().flatten() {
-            table.check()?;
-        }
-        result
+        Ok(PackageResources { apks, tables })
     }
 }
 

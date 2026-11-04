@@ -5,13 +5,15 @@
 //! The uid that first registered a type keeps it, unless an app of the
 //! system image claims it or the first one is gone, as
 //! `registered_services/android.accounts.AccountAuthenticator.xml` in the
-//! user's system directory persists. Packages do not change while the
-//! app host runs, so a user's services are generated once
-//! (`updateServices` would find nothing to do) and nobody is told of a
-//! change: AccountManagerService validates a user's accounts against them
-//! when it opens them.
+//! user's system directory persists. A generation opens each package's
+//! resources once for all of its services, as ResourcesManager shares
+//! them; AccountManagerService keeps a user's services until a package
+//! changes or it validates the user's accounts (`invalidateCache`). The
+//! pinned framework fixes `optimize_parsing_in_registered_services_cache`
+//! off, so a generation parses every service again.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::collections::HashMap;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -22,6 +24,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::AppHost;
+use super::resources::PackageResources;
 use crate::package::component_resolver::Info;
 use crate::package::info::flags::{
     GET_META_DATA, MATCH_DIRECT_BOOT_AWARE, MATCH_DIRECT_BOOT_UNAWARE,
@@ -102,6 +105,8 @@ pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Excepti
         })?;
     let inputs = host.platform()?;
     let root = host.root()?;
+    let framework = host.framework()?;
+    let mut opened = HashMap::new();
     let mut services = Vec::new();
     for r in found {
         let Info::Service(si) = r.info else { continue };
@@ -121,9 +126,13 @@ pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Excepti
             .filter(|id| *id != 0);
         let pkg = state.packages.get(&package).and_then(|ps| ps.pkg.clone());
         let parsed = match (id, pkg) {
-            (Some(id), Some(pkg)) => {
-                host.framework()?
-                    .xml_resource(root, &inputs.data, &pkg, id, |e, ctx| {
+            (Some(id), Some(pkg)) => opened
+                .entry(package.clone())
+                .or_insert_with(|| PackageResources::open(root, &inputs.data, &pkg, true))
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|resources| {
+                    framework.package_xml_resource(root, resources, id, |e, ctx| {
                         if e.name != ATTRIBUTES {
                             return Err(format!("Meta-data does not start with {ATTRIBUTES} tag"));
                         }
@@ -140,7 +149,7 @@ pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Excepti
                             custom_tokens: a.boolean("customTokens", false),
                         }))
                     })
-            }
+                }),
             (None, _) => Ok(Err(format!("No {META_DATA} meta-data"))),
             (_, None) => Ok(Err(format!(
                 "Unable to load resources for package {package}"
