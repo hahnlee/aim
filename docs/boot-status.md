@@ -41,11 +41,17 @@ same fds, and the mask is the open file's: an update in one process is the
 others'. Host checks only; no guest boot (2026-11-04).
 Poll, select and epoll ask a descriptor only for the events its Linux `_poll`
 reports (#2667): a timerfd is POLLIN alone, once expired, never writable as its
-socket is; an eventfd is POLLIN|POLLOUT without POLLRDNORM/POLLWRNORM; an epoll,
-inotify or pidfd (each a kqueue) is POLLIN|POLLRDNORM, so a write event asked of
-one is not ready instead of POLLNVAL/EBADF, and epoll_ctl accepts EPOLLOUT on
-it. An epoll interest left with no event keeps a disabled knote, so closing its
-fd still removes it. Host checks only; no guest boot (2026-11-04).
+socket is; an eventfd is POLLIN|POLLOUT without POLLRDNORM/POLLWRNORM, with
+POLLOUT cleared and writes blocking (EAGAIN if non-blocking) where they would
+take the count past ULLONG_MAX - 1 (#2698), one lock across the processes a
+fork shares it with; an epoll, inotify or pidfd (each a
+kqueue) is POLLIN|POLLRDNORM, so a write event asked of one is not ready instead
+of POLLNVAL/EBADF, and epoll_ctl accepts EPOLLOUT on it; a pidfd adds POLLHUP
+once its process is reaped (#2699). Every other epoll interest also reports
+EPOLLERR|EPOLLHUP, events=0 included (#2701), though only at EOF, not on a
+full buffer; one left with no event keeps a
+knote, so closing its fd still removes it (#2700). Host checks only; no guest
+boot (2026-11-04).
 
 The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep requests,
 with timestamp ordering, shared interactive/display queries, display-state callbacks

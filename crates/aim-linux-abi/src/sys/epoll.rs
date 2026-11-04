@@ -136,9 +136,18 @@ impl Interest {
         self.events & (EPOLLOUT | EPOLLWRNORM) != 0
     }
     /// Whether the interest has an EVFILT_READ knote: one that wants no
-    /// filter keeps a disabled one, so that closing the fd still drops it.
+    /// filter keeps one, so that closing the fd still drops it.
     fn read_knote(&self) -> bool {
         self.wants_read() || !self.wants_write()
+    }
+    /// Whether the interest is only for the EPOLLERR and EPOLLHUP that
+    /// `ep_item_poll` always reports. Its EVFILT_READ knote's low-water
+    /// mark is out of reach, but Darwin caps it at the buffer's size, so a
+    /// full buffer fires it too: the knote is edge-triggered, ignored
+    /// unless at EOF, and armed again after a hangup it reports, which
+    /// stays level-triggered.
+    fn hangup_only(&self) -> bool {
+        !self.wants_read() && !self.wants_write() && self.events & (EPOLLERR | EPOLLHUP) != 0
     }
 }
 fn pty_ctl(
@@ -371,19 +380,25 @@ fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc:
             v.push(kev(fd, filter, libc::EV_DELETE));
         }
         if let Some(n) = new.filter(|n| want(n)) {
+            let hangup = filter == libc::EVFILT_READ && n.hangup_only();
             let mut f = libc::EV_ADD;
-            f |= if n.disabled || filter == libc::EVFILT_READ && !n.wants_read() {
+            f |= if n.disabled || filter == libc::EVFILT_READ && !n.wants_read() && !hangup {
                 libc::EV_DISABLE
             } else {
                 libc::EV_ENABLE
             };
-            if n.events & EPOLLET != 0 {
+            if n.events & EPOLLET != 0 || hangup {
                 f |= libc::EV_CLEAR;
             }
             if n.events & EPOLLONESHOT != 0 {
                 f |= libc::EV_DISPATCH;
             }
-            v.push(kev(fd, filter, f));
+            let mut k = kev(fd, filter, f);
+            if hangup {
+                k.fflags = libc::NOTE_LOWAT;
+                k.data = isize::MAX;
+            }
+            v.push(k);
         }
     }
     v
@@ -486,10 +501,15 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     }
     // Only the events the fd's Linux `_poll` can report are asked of its
     // knotes (`poll::reportable`): a timerfd's or signalfd's socket is
-    // writable, and a kqueue takes no EVFILT_WRITE.
+    // writable, and a kqueue takes no EVFILT_WRITE. Any other fd is also
+    // watched for EPOLLERR and EPOLLHUP, as `ep_insert` and `ep_modify`
+    // add them.
     let new = new.map(|mut n| {
-        if let Some(events) = super::poll::reportable(fd, kind.as_ref()) {
-            n.events &= events as u32 | EPOLLEXCLUSIVE | EPOLLWAKEUP | EPOLLONESHOT | EPOLLET;
+        match super::poll::reportable(fd, kind.as_ref()) {
+            Some(events) => {
+                n.events &= events as u32 | EPOLLEXCLUSIVE | EPOLLWAKEUP | EPOLLONESHOT | EPOLLET
+            }
+            None => n.events |= EPOLLERR | EPOLLHUP,
         }
         n
     });
@@ -566,6 +586,9 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
                 b |= EPOLLERR;
             }
         }
+        if b & EPOLLIN != 0 && super::wait::pidfd_reaped(k.ident as i32) {
+            b |= EPOLLHUP;
+        }
     } else if k.filter == libc::EVFILT_WRITE {
         b |= i.events & (EPOLLOUT | EPOLLWRNORM);
         if eof {
@@ -588,7 +611,9 @@ pub(super) fn observes_sockets(ep: &Epoll, seen: &mut std::collections::HashSet<
         .unwrap()
         .iter()
         .filter_map(|(fd, interest)| {
-            (!interest.disabled && (interest.wants_read() || interest.wants_write())).then_some(*fd)
+            (!interest.disabled
+                && (interest.wants_read() || interest.wants_write() || interest.hangup_only()))
+            .then_some(*fd)
         })
         .collect();
     fds.into_iter().any(|fd| match fdtab::get(fd) {
@@ -776,7 +801,9 @@ fn ready(
             b = 0;
         }
         if b == 0 {
-            if fired != 0 && i.events & EPOLLONESHOT != 0 && !i.disabled {
+            // A dispatched knote that fired for nothing (a hangup-only one
+            // on a full buffer) waits on.
+            if (fired != 0 || i.hangup_only()) && i.events & EPOLLONESHOT != 0 && !i.disabled {
                 rearm.push(kev(fd, k.filter, libc::EV_ENABLE));
             }
             continue;
@@ -804,6 +831,8 @@ fn ready(
             {
                 rearm.push(kev(fd, other, libc::EV_DISABLE));
             }
+        } else if i.hangup_only() && i.events & EPOLLET == 0 {
+            rearm.extend(changes(fd, None, Some(i)));
         }
         out.push((fd, b, i.data));
     }

@@ -5,9 +5,19 @@
 //! when a read would not block.
 //!
 //! - **eventfd:** the counter lives in the socket as 8-byte records sent
-//!   from the hidden peer end; a read drains and sums them (or takes one
-//!   unit with EFD_SEMAPHORE). The count therefore survives fork and is
-//!   shared by every process holding the fd.
+//!   from the hidden peer end; a read or write drains and sums them and
+//!   leaves the new count as one record. The count therefore survives fork
+//!   and is shared by every process holding the fd. The guest end is
+//!   writable while the peer end has room to receive, so filling the peer
+//!   end with empty records makes it unwritable: that is done while a write
+//!   of 1 would block (`eventfd_poll` drops EPOLLOUT at ULLONG_MAX - 1),
+//!   and while a write waits for a read to make room (`eventfd_write`), so
+//!   it sleeps on that writability; a read, or the waiter giving up,
+//!   empties it again (a writer killed while it waits leaves it until
+//!   then). A read or write is one step under one lock, `wqh.lock`: the
+//!   description's mutex, and once a fork shares the count, also a record
+//!   lock on an unlinked file the processes share, which Darwin drops with
+//!   a process that dies holding it.
 //! - **timerfd:** the timer kqueue's thread (`park`) sends a token record
 //!   when a timer expires; a read computes the expirations from the
 //!   timer's settings and drains the token. Timer settings are per
@@ -19,11 +29,11 @@
 //!   ECANCELED.
 
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use super::clock::{self, Base, Deadline};
 use super::fdtab::{self, Kind};
-use crate::errno::{self, EAGAIN, EBADF, EINVAL, EPERM};
+use crate::errno::{self, EAGAIN, EBADF, EINTR, EINVAL, EPERM};
 
 /// Linux's ECANCELED.
 const ECANCELED: crate::errno::Errno = 125;
@@ -98,12 +108,67 @@ pub struct EventFd {
     peer: AtomicI32,
     semaphore: bool,
     lock: Mutex<()>,
+    /// The file whose record lock the processes sharing the count take;
+    /// -1 until a fork shares it.
+    shared: AtomicI32,
 }
 
 impl Drop for EventFd {
     fn drop(&mut self) {
         close_peer(&self.peer);
+        close_peer(&self.shared);
     }
+}
+
+/// A read or write's hold on the count ([`EventFd::locked`]).
+struct Locked<'a> {
+    _local: MutexGuard<'a, ()>,
+    shared: i32,
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        if self.shared >= 0 {
+            if let Err(error) = record_lock(self.shared, libc::F_UNLCK) {
+                crate::diag!("eventfd shared unlock: errno {error}");
+            }
+        }
+    }
+}
+
+/// Takes (F_WRLCK) or drops (F_UNLCK) this process's lock on all of `fd`.
+fn record_lock(fd: i32, kind: i16) -> Result<(), crate::errno::Errno> {
+    // SAFETY: a zeroed flock is a valid whole-file range.
+    let mut range: libc::flock = unsafe { std::mem::zeroed() };
+    range.l_type = kind;
+    range.l_whence = libc::SEEK_SET as i16;
+    loop {
+        // SAFETY: fcntl with a flock on our stack.
+        if unsafe { libc::fcntl(fd, libc::F_SETLKW, &range) } == 0 {
+            return Ok(());
+        }
+        match errno::last() {
+            EINTR => continue,
+            error => return Err(error),
+        }
+    }
+}
+
+/// A new unlinked file for a shared count's record lock, hidden.
+fn lock_file() -> Result<i32, crate::errno::Errno> {
+    let mut template = std::env::temp_dir()
+        .join("linux-abi-eventfd.XXXXXX")
+        .into_os_string()
+        .into_encoded_bytes();
+    template.push(0);
+    // SAFETY: mkstemp fills in the template; the name is removed at once.
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr().cast()) };
+    if fd < 0 {
+        return Err(errno::last());
+    }
+    // SAFETY: removing the name just created.
+    unsafe { libc::unlink(template.as_ptr().cast()) };
+    Ok(fdtab::hide(fd))
 }
 
 fn close_peer(peer: &AtomicI32) {
@@ -116,14 +181,31 @@ fn close_peer(peer: &AtomicI32) {
 }
 
 impl EventFd {
-    fn add(&self, fd: i32, v: u64) {
-        let peer = self.peer.load(Ordering::Relaxed);
-        if send_record(peer, v) {
-            return;
+    /// Holds the count against every other read and write of it.
+    fn locked(&self) -> Result<Locked<'_>, crate::errno::Errno> {
+        let local = self.lock.lock().unwrap();
+        let shared = self.shared.load(Ordering::Relaxed);
+        if shared >= 0 {
+            record_lock(shared, libc::F_WRLCK)?;
         }
-        // The socket buffer is full of records: fold them into one.
-        let sum = drain(fd).saturating_add(v).min(u64::MAX - 1);
-        send_record(peer, sum);
+        Ok(Locked {
+            _local: local,
+            shared,
+        })
+    }
+
+    /// Leaves `count` in the socket as one record (it was drained, so
+    /// there is room), and the guest end writable unless `full`.
+    fn put(&self, fd: i32, count: u64, full: bool) {
+        let peer = self.peer.load(Ordering::Relaxed);
+        if count > 0 {
+            send_record(peer, count);
+        }
+        if full {
+            while send_record(fd, 0) {}
+        } else {
+            while recv_record(peer).is_some() {}
+        }
     }
 
     fn read(&self, fd: i32, buf: u64, len: usize) -> i64 {
@@ -132,18 +214,14 @@ impl EventFd {
         }
         loop {
             {
-                let _g = self.lock.lock().unwrap();
-                let v = if self.semaphore {
-                    recv_record(fd).map(|v| {
-                        if v > 1 {
-                            self.add(fd, v - 1);
-                        }
-                        1
-                    })
-                } else {
-                    Some(drain(fd)).filter(|&s| s > 0)
+                let _g = match self.locked() {
+                    Ok(g) => g,
+                    Err(error) => return -(error as i64),
                 };
-                if let Some(v) = v {
+                let count = drain(fd);
+                if count > 0 {
+                    let v = if self.semaphore { 1 } else { count };
+                    self.put(fd, count - v, false);
                     // SAFETY: guest buffer of at least 8 bytes.
                     user_write!(buf, u64, v);
                     trace_event(fd, "read", v, self.semaphore);
@@ -169,9 +247,36 @@ impl EventFd {
         if v == u64::MAX {
             return -(EINVAL as i64);
         }
-        if v > 0 {
-            let _g = self.lock.lock().unwrap();
-            self.add(fd, v);
+        // A write of 0 never blocks: the count is at most ULLONG_MAX - 1.
+        while v > 0 {
+            let nonblocking = fdtab::nonblocking(fd);
+            {
+                let _g = match self.locked() {
+                    Ok(g) => g,
+                    Err(error) => return -(error as i64),
+                };
+                let count = drain(fd);
+                if u64::MAX - count > v {
+                    self.put(fd, count + v, count + v >= u64::MAX - 1);
+                    break;
+                }
+                self.put(fd, count, !nonblocking || count >= u64::MAX - 1);
+            }
+            if nonblocking {
+                return -(EAGAIN as i64);
+            }
+            let r = fdtab::wait_for(fd, libc::POLLOUT);
+            if r < 0 {
+                // No longer waiting: writable again unless at the limit.
+                match self.locked() {
+                    Ok(_g) => {
+                        let count = drain(fd);
+                        self.put(fd, count, count >= u64::MAX - 1);
+                    }
+                    Err(error) => crate::diag!("eventfd write wait end: errno {error}"),
+                }
+                return r;
+            }
         }
         trace_event(fd, "write", v, self.semaphore);
         8
@@ -196,6 +301,7 @@ pub fn eventfd2(a: [u64; 6]) -> i64 {
             peer: AtomicI32::new(peer),
             semaphore: flags & EFD_SEMAPHORE != 0,
             lock: Mutex::new(()),
+            shared: AtomicI32::new(-1),
         })),
     );
     if let Err(error) = fdtab::publish_guest(fd) {
@@ -356,12 +462,29 @@ fn register(t: &Arc<TimerFd>) {
     g.push(Arc::downgrade(t));
 }
 
-/// Fork: an eventfd is its hidden peer (inherited) and its mode.
+/// Fork: an eventfd is its hidden peer (inherited), its mode and the lock
+/// file the parent and child share from now on, made under the local lock
+/// so that no read or write of the parent's straddles the change.
 pub(super) fn save_event(e: &EventFd, w: &mut super::fork_state::Writer) {
     let peer = e.peer.load(Ordering::Relaxed);
     w.retain_private(peer);
     w.i32(peer);
     w.bool(e.semaphore);
+    let _g = e.lock.lock().unwrap();
+    let mut shared = e.shared.load(Ordering::Relaxed);
+    if shared < 0 {
+        match lock_file() {
+            Ok(fd) => {
+                e.shared.store(fd, Ordering::Relaxed);
+                shared = fd;
+            }
+            Err(error) => w.error(error),
+        }
+    }
+    if shared >= 0 {
+        w.retain_private(shared);
+    }
+    w.i32(shared);
 }
 
 pub(super) fn load_event(r: &mut super::fork_state::Reader) -> Arc<EventFd> {
@@ -370,6 +493,7 @@ pub(super) fn load_event(r: &mut super::fork_state::Reader) -> Arc<EventFd> {
         peer: AtomicI32::new(peer),
         semaphore: r.bool(),
         lock: Mutex::new(()),
+        shared: AtomicI32::new(r.i32()),
     })
 }
 
@@ -817,5 +941,145 @@ mod clock_set_tests {
         assert!(Base::Boottime.now() >= at);
         assert_eq!(read_once(fd), 8);
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    fn write_count(fd: i64, v: u64) -> i64 {
+        super::write(fd as i32, &v as *const u64 as u64, 8).unwrap()
+    }
+
+    fn read_count(fd: i64) -> i64 {
+        let mut v = 0u64;
+        match super::read(fd as i32, &mut v as *mut u64 as u64, 8).unwrap() {
+            8 => v as i64,
+            error => error,
+        }
+    }
+
+    /// Whether the guest end is writable now, as poll, select and epoll
+    /// see it.
+    fn writable(fd: i64) -> bool {
+        let mut entry = libc::pollfd {
+            fd: fd as i32,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one pollfd on the stack.
+        unsafe { libc::poll(&mut entry, 1, 0) == 1 }
+    }
+
+    extern "C" fn interrupt(_: i32) {}
+
+    /// A blocked overflowing write that a signal interrupts stops waiting:
+    /// the eventfd is writable again, as `eventfd_poll` reports it from the
+    /// count alone.
+    #[test]
+    fn an_interrupted_overflowing_write_leaves_the_count_writable() {
+        // A signal handler is installed for the process.
+        if fdtab::isolated_kernel_test(
+            "sys::event::count_tests::an_interrupted_overflowing_write_leaves_the_count_writable",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        // SAFETY: a handler without SA_RESTART, for this process only.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = interrupt as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut()),
+                0
+            );
+        }
+        let counter = eventfd2([10, 0, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            // SAFETY: this thread's own handle.
+            tx.send(unsafe { libc::pthread_self() } as usize).unwrap();
+            write_count(counter, u64::MAX - 10)
+        });
+        let thread = rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while writable(counter) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Until it lands in the wait rather than just before it.
+        while !writer.is_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            // SAFETY: signalling the writer thread, which is still joinable.
+            assert_eq!(
+                unsafe { libc::pthread_kill(thread as libc::pthread_t, libc::SIGUSR2) },
+                0
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(writer.join().unwrap(), -(EINTR as i64));
+        assert!(writable(counter));
+        assert_eq!(read_count(counter), 10);
+        assert_eq!(super::super::fs::close([counter as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// Once a fork shares the count, a write waits for a read or write of
+    /// another process sharing it to finish (`wqh.lock` is one lock).
+    #[test]
+    fn a_shared_count_is_one_lock_across_processes() {
+        // A Darwin fork child runs below.
+        if fdtab::isolated_kernel_test(
+            "sys::event::count_tests::a_shared_count_is_one_lock_across_processes",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let counter = eventfd2([0, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        let Some(Kind::Event(e)) = fdtab::get(counter as i32) else {
+            panic!("no eventfd")
+        };
+        save_event(&e, &mut super::super::fork_state::Writer::default());
+        let shared = e.shared.load(Ordering::Relaxed);
+        assert!(shared >= 0);
+        let mut ready = [0i32; 2];
+        // SAFETY: a pipe into a local array.
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        // SAFETY: the child only locks, writes, sleeps and exits.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe {
+                if record_lock(shared, libc::F_WRLCK).is_ok() {
+                    libc::write(ready[1], [1u8].as_ptr().cast(), 1);
+                    libc::usleep(200_000);
+                }
+                libc::_exit(0);
+            }
+        }
+        assert!(child > 0);
+        let mut byte = 0u8;
+        // SAFETY: reading a byte into a local.
+        assert_eq!(
+            unsafe { libc::read(ready[0], (&mut byte as *mut u8).cast(), 1) },
+            1
+        );
+        let start = std::time::Instant::now();
+        assert_eq!(write_count(counter, 1), 8);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(100));
+        // SAFETY: reaping the child forked above.
+        assert_eq!(
+            unsafe { libc::waitpid(child, std::ptr::null_mut(), 0) },
+            child
+        );
+        assert_eq!(read_count(counter), 1);
+        // SAFETY: our pipe.
+        unsafe {
+            libc::close(ready[0]);
+            libc::close(ready[1]);
+        }
+        assert_eq!(super::super::fs::close([counter as u64, 0, 0, 0, 0, 0]), 0);
     }
 }

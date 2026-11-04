@@ -59,7 +59,7 @@ fn from_host(h: i16, asked: i16) -> i16 {
 /// POLLWRNORM (`eventfd_poll`); an epoll, inotify or pidfd is a kqueue,
 /// which Darwin poll reports POLLNVAL for when asked a write event, and
 /// Linux reports only readable (`ep_eventpoll_poll`, `inotify_poll`,
-/// `pidfd_poll`).
+/// `pidfd_poll`, which adds POLLHUP once the process is reaped).
 pub(super) fn reportable(fd: i32, kind: Option<&super::fdtab::Kind>) -> Option<i16> {
     use super::fdtab::Kind;
     match kind {
@@ -347,6 +347,9 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 }
                 None => from_host(h.revents, g.events),
             };
+            if h.revents & libc::POLLIN != 0 && super::wait::pidfd_reaped(g.fd) {
+                g.revents |= POLLHUP;
+            }
             if g.revents != 0 {
                 ready += 1;
             }
@@ -732,6 +735,211 @@ mod reportable_tests {
         assert_eq!(ctl(3), -(crate::errno::ENOENT as i64));
         assert_eq!(ctl(1), 0);
         close(&[fd, other, ep]);
+    }
+
+    fn write_count(fd: i64, v: u64) -> i64 {
+        event::write(fd as i32, &v as *const u64 as u64, 8).unwrap()
+    }
+
+    fn read_count(fd: i64) -> Result<u64, i64> {
+        let mut v = 0u64;
+        match event::read(fd as i32, &mut v as *mut u64 as u64, 8).unwrap() {
+            8 => Ok(v),
+            error => Err(error),
+        }
+    }
+
+    /// eventfd_write: a write that would take the count past
+    /// ULLONG_MAX - 1 fails with EAGAIN without blocking, and eventfd_poll
+    /// drops POLLOUT while a write of 1 would (LTP eventfd01).
+    #[test]
+    fn an_eventfd_count_stops_at_its_maximum() {
+        let _view = crate::vfs::test_view();
+        let counter = event::eventfd2([5, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        let ep = watching(counter, 0x4);
+        assert_eq!(write_count(counter, u64::MAX), -(EINVAL as i64));
+        assert_eq!(
+            write_count(counter, u64::MAX - 5),
+            -(crate::errno::EAGAIN as i64)
+        );
+        assert_eq!(polled(counter, ALL), (1, POLLIN | POLLOUT));
+        assert_eq!(write_count(counter, u64::MAX - 6), 8);
+        assert_eq!(polled(counter, ALL), (1, POLLIN));
+        assert_eq!(selected(counter), (1, true, false));
+        assert_eq!(waited(ep, 0).0, 0);
+        assert_eq!(write_count(counter, 1), -(crate::errno::EAGAIN as i64));
+        assert_eq!(write_count(counter, 0), 8);
+        assert_eq!(read_count(counter), Ok(u64::MAX - 1));
+        assert_eq!(polled(counter, ALL), (1, POLLOUT));
+        assert_eq!(waited(ep, 0), (1, 0x4));
+        assert_eq!(read_count(counter), Err(-(crate::errno::EAGAIN as i64)));
+        close(&[counter, ep]);
+    }
+
+    /// A blocking write that would overflow the count sleeps until a read
+    /// makes room, and is then added (LTP eventfd01's blocking case).
+    #[test]
+    fn an_overflowing_eventfd_write_waits_for_a_read() {
+        let _view = crate::vfs::test_view();
+        let counter = event::eventfd2([0, 0, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        assert_eq!(write_count(counter, 10), 8);
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            read_count(counter)
+        });
+        let start = std::time::Instant::now();
+        assert_eq!(write_count(counter, u64::MAX - 10), 8);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(40));
+        assert_eq!(reader.join().unwrap(), Ok(10));
+        assert_eq!(polled(counter, ALL), (1, POLLIN | POLLOUT));
+        assert_eq!(read_count(counter), Ok(u64::MAX - 10));
+        close(&[counter]);
+    }
+
+    /// pidfd_poll: an exited process's pidfd is readable, and also hung up
+    /// once the process is reaped (LTP pidfd_open03).
+    #[test]
+    fn a_reaped_process_pidfd_hangs_up() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_reaped_process_pidfd_hangs_up",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let pidfd = wait::open_pidfd(pid, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let ep = watching(pidfd, 0x1);
+        let mut entry = libc::pollfd {
+            fd: pidfd as i32,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd on the stack.
+        assert_eq!(unsafe { libc::poll(&mut entry, 1, 5_000) }, 1);
+        assert_eq!(polled(pidfd, POLLIN | POLLRDNORM), (1, POLLIN | POLLRDNORM));
+        assert_eq!(waited(ep, 0), (1, 0x1));
+        // SAFETY: reaping the child spawned above.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
+        assert_eq!(polled(pidfd, POLLIN), (1, POLLIN | POLLHUP));
+        assert_eq!(waited(ep, 0), (1, 0x1 | 0x10));
+        assert_eq!(selected(pidfd), (1, true, false));
+        close(&[pidfd, ep]);
+    }
+
+    /// This thread's CPU time in nanoseconds.
+    fn thread_cpu() -> i64 {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a timespec on the stack.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) },
+            0
+        );
+        t.tv_sec * 1_000_000_000 + t.tv_nsec
+    }
+
+    /// ep_item_poll always reports EPOLLERR and EPOLLHUP: an interest with
+    /// no events still reports the peer's close, level-triggered unless
+    /// one-shot, and nothing before it, not even for a full buffer
+    /// (`sock_poll`, `pipe_poll`; LTP epoll_ctl01 style).
+    #[test]
+    fn an_eventless_interest_reports_hangup() {
+        // The socketpair's and pipe's numbers are not in the guest table,
+        // which other tests' descriptors would take.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::an_eventless_interest_reports_hangup",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let (mut socket, mut pipe) = ([0i32; 2], [0i32; 2]);
+        // SAFETY: a socketpair and a pipe into local arrays.
+        unsafe {
+            assert_eq!(
+                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, socket.as_mut_ptr()),
+                0
+            );
+            assert_eq!(libc::pipe(pipe.as_mut_ptr()), 0);
+        }
+        // A receive buffer smaller than what the peer can send, which
+        // Darwin caps the low-water mark at.
+        let small: i32 = 2048;
+        // SAFETY: setting an int option on our socket.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    socket[0],
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&small as *const i32).cast(),
+                    4,
+                )
+            },
+            0
+        );
+        for [local, peer] in [socket, pipe] {
+            let level = watching(local as i64, 0);
+            let oneshot = watching(local as i64, 1 << 30);
+            // SAFETY: filling our own descriptor's buffer without blocking.
+            unsafe {
+                libc::fcntl(peer, libc::F_SETFL, libc::O_NONBLOCK);
+                while libc::write(peer, [0u8; 512].as_ptr().cast(), 512) > 0 {}
+            }
+            // Waited for, not spun on.
+            let cpu = thread_cpu();
+            assert_eq!(waited(level, 50).0, 0);
+            assert!(thread_cpu() - cpu < 25_000_000);
+            assert_eq!(waited(oneshot, 0).0, 0);
+            // SAFETY: our descriptor.
+            unsafe { libc::close(peer) };
+            assert_eq!(waited(level, 2_000), (1, 0x10));
+            assert_eq!(waited(level, 0), (1, 0x10));
+            assert_eq!(waited(oneshot, 0), (1, 0x10));
+            assert_eq!(waited(oneshot, 0).0, 0);
+            // SAFETY: our descriptor, not published to the guest table.
+            unsafe { libc::close(local) };
+            close(&[level, oneshot]);
+        }
+    }
+
+    /// Closing the last reference to a file drops its eventless interest
+    /// (`eventpoll_release`): a new file under the number is not in the
+    /// interest list.
+    #[test]
+    fn an_eventless_interest_goes_with_its_close() {
+        // A closed number is reused below, which only this process's own
+        // descriptors can keep vacant.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::an_eventless_interest_goes_with_its_close",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let counter = event::eventfd2([0, O_NONBLOCK, 0, 0, 0, 0]);
+        let timer = event::timerfd_create([1, O_NONBLOCK, 0, 0, 0, 0]);
+        let other = event::eventfd2([0, O_NONBLOCK, 0, 0, 0, 0]);
+        let ep = epoll::epoll_create1([0; 6]);
+        assert!(counter >= 0 && timer >= 0 && other >= 0 && ep >= 0);
+        for (fd, events) in [(counter, 0u64), (timer, 0x4)] {
+            let interest = [events, fd as u64];
+            let ctl = |op: u64| {
+                epoll::epoll_ctl([ep as u64, op, fd as u64, interest.as_ptr() as u64, 0, 0])
+            };
+            assert_eq!(ctl(1), 0);
+            close(&[fd]);
+            assert_eq!(fs::dup3([other as u64, fd as u64, 0, 0, 0, 0]), fd);
+            assert_eq!(ctl(3), -(crate::errno::ENOENT as i64));
+            assert_eq!(ctl(2), -(crate::errno::ENOENT as i64));
+            assert_eq!(ctl(1), 0);
+            close(&[fd]);
+        }
+        close(&[other, ep]);
     }
 
     /// ep_eventpoll_poll, inotify_poll and pidfd_poll report only
