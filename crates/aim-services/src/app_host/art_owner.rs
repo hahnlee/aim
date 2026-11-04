@@ -138,6 +138,32 @@ impl AppHost {
         Ok((generation, strong))
     }
 
+    /// `deleteOatArtifactsOfPackage` as `caller`: Java opens the caller-filtered
+    /// scope and retains ART's -1/0 mappings.
+    pub(super) fn delete_oat_artifacts(
+        &self,
+        name: Option<String>,
+        caller: i32,
+    ) -> Result<i64, Exception> {
+        use aim_service_aidl::dev_aim_server_iartdeletion as art;
+        let (generation, owner) = self.art_deletion_owner()?;
+        let mut request = aim_binder_host::parcel::Parcel::new();
+        art::DeleteDexoptArtifacts {
+            generation,
+            package_name: name,
+            calling_uid: caller,
+            user_id: caller / 100_000, // UserHandle.getUserId.
+        }
+        .write(&mut request);
+        let response = owner
+            .transact(art::DELETE_DEXOPT_ARTIFACTS, &request, false)
+            .map_err(|s| {
+                Exception::new(EX_ILLEGAL_STATE, format!("ART deletion transport: {s}"))
+            })?;
+        art::read_delete_dexopt_artifacts_reply(&mut response.reader())
+            .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("ART deletion reply: {s}")))?
+    }
+
     /// AppDataHelper.destroyAppProfilesLIF: only a disappearing package is ignored.
     pub(super) fn clear_art_profiles(
         &self,

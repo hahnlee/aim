@@ -3,7 +3,7 @@
 These two unsigned, resource-only archives are synthetic test data, built from
 the adjacent XML with the pinned Android 16 aapt2. They contain no app code or
 original image resources. `framework.apk` supplies just the attributes these
-parsers read; it is not an Android framework implementation or a conformance
+parsers read and the app hibernation OAT deletion configuration; it is not an Android framework implementation or a conformance
 oracle. `providers.apk` supplies authenticator, spell-checker and widget XML.
 
 Regenerate from the repository root with:

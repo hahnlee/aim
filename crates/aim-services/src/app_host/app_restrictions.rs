@@ -288,7 +288,7 @@ impl AppHost {
             .settings
             .device_config("activity_manager", AUTO)
             .is_some_and(|s| s.eq_ignore_ascii_case("true"));
-        super::app_hibernation::AppHibernation(self.clone()).unhibernate(0)?;
+        super::app_hibernation::AppHibernation(self.clone()).restrictions_unmodelled(0)?;
         let mut settings = Settings {
             auto,
             ..Default::default()
@@ -389,7 +389,7 @@ impl AppHost {
         };
         let host = self.me.upgrade().ok_or_else(|| error("host gone"))?;
         let api = self.flag(API)?;
-        super::app_hibernation::AppHibernation(host.clone()).unhibernate(0)?;
+        super::app_hibernation::AppHibernation(host.clone()).restrictions_unmodelled(0)?;
         let mut next = current.clone();
         next.auto = self
             .platform()?

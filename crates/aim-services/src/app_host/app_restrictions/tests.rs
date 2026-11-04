@@ -251,7 +251,14 @@ fn typed_backend_answers_and_unavailable_inputs_remain_errors() {
         );
         let path = h.data().unwrap().join("system_ce/0/hibernation/states");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, [0x0a, 0xff]).unwrap();
+        std::fs::write(path, [0x0a, 5, 0x0a, 1, b'p', 0x10, 1]).unwrap();
+        h.package_system()
+            .unwrap()
+            .internal_set_package_stopped_state(Some("p".into()), true, 0, 1000, 0)
+            .unwrap();
+        let hibernation = super::super::app_hibernation::AppHibernation(h.clone());
+        hibernation.boot_completed().unwrap();
+        hibernation.user_unlocking().unwrap();
         assert!(h.restrictions_changed(None).is_err());
         assert!(h.restriction_level(uid(h)).is_err());
     });

@@ -176,11 +176,10 @@ impl BootLifecycle {
     }
 
     /// `isHibernationSuppressed`: AppHibernationManagerInternal's global
-    /// hibernation with oat artifact deletion; the app host performs no
-    /// hibernation transitions (#2064), so none is hibernating.
+    /// hibernation with oat artifact deletion.
     fn hibernation_suppressed(&self, name: Option<String>) -> Result<bool, Exception> {
-        name.ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
-        Ok(false)
+        let name = name.ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))?;
+        super::app_hibernation::AppHibernation(self.host.clone()).suppresses_dexopt(&name)
     }
 
     /// `performFstrim`: idle maintenance run when the mandatory interval
@@ -360,7 +359,8 @@ mod tests {
 
     /// The leaf served as the app host's own node, called as the native
     /// boot calls it: carrier apps (none in the image), the registrations
-    /// once each until closed, hibernation, the first maintenance's record,
+    /// once each until closed, hibernation's null name (its owner's answers
+    /// are app_hibernation's), the first maintenance's record,
     /// ART Service's stages and the null arguments the original refuses.
     #[test]
     fn the_leaf_answers_the_native_boot_as_its_own_node() {
@@ -441,11 +441,6 @@ mod tests {
         );
         let null = call(leaf::REGISTER_STORAGE_LISTENERS, &|p| p.write_binder(None));
         assert_eq!(null.unwrap_err().code, EX_NULL_POINTER);
-        assert_eq!(
-            call(leaf::IS_HIBERNATION_SUPPRESSED, &|p| p
-                .write_string16(Some("a.b"))),
-            Ok(false)
-        );
         let null = call(leaf::IS_HIBERNATION_SUPPRESSED, &|p| p.write_string16(None));
         assert_eq!(null.unwrap_err().code, EX_NULL_POINTER);
         // No record yet: one is made, and the maintenance is due.

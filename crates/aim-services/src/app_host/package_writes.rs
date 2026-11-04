@@ -219,6 +219,11 @@ impl Writes {
                 removed: true,
             })
             .err();
+        if let Err(e) =
+            super::app_hibernation::AppHibernation(self.host.clone()).package_removed(package, user)
+        {
+            failure.get_or_insert(e);
+        }
         for intent in removed_intents(package, uid, data_removed, fully_removed, uid_removed) {
             if let Err(e) =
                 self.host

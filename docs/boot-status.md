@@ -493,9 +493,7 @@ restriction getter now reads native AppRestrictionController settings initialize
 from standby and AppOps, then restored from the pinned per-user XML (#2575).
 AppOps, bucket, package and UID notifications update that state and its standby
 effects. Public restriction writes and abuse trackers remain outside this slice;
-persisted hibernation read queries now decode the original user/global protobufs
-and recover AtomicFile backups; transition effects, writes and dexopt suppression
-remain explicit or unserved (#2064, #2063; incomplete host-only candidate, 2026-11-01).
+a package hibernating for the user makes restriction levels explicitly unsupported (#2064).
 Device-services and AIDL builds pass, including pinned-image
 linkage and concrete-method checks for these retained calls. Adapter JVM fixtures
 and the missing-abstract-method regression pass. These are scoped method checks,
@@ -1004,10 +1002,20 @@ the original service in aim-system, reports supported/available/enabled config,
 returns aggregate data and renders the original Safety Center page. The initial
 PermissionController process later crashed in HibernatedPackagesLiveData because
 `getSystemService("app_hibernation")` returned null (#2512; pinned APK DEX line 48).
-The app host now publishes that service: fresh-state reads return false and a
-nonnull empty package list, with MANAGE_APP_HIBERNATION and full cross-user checks.
-Persisted states and transitions remain unsupported (#2064). Host regressions cover
-these paths; no guest boot or Safety Center rerun verifies recovery. The retained
+The app host now publishes that service natively with MANAGE_APP_HIBERNATION and
+full cross-user checks. It keeps the original in-memory states, the global ones
+loaded at PHASE_BOOT_COMPLETED and user 0's at unlocking from the original
+protobufs (AtomicFile backups recovered, stale unstopped rows corrected), written
+back on each change, kept by non-replacing package additions and removals and left
+on use (user interaction, resumed activity, used component) and on unstop. Global
+hibernation deletes OAT artifacts through the original ART owner when
+`config_hibernationDeletesOatArtifactsEnabled` (an unavailable owner, as ART's
+mapped failures, saves no bytes and leaves the transition successful); leaving a user's hibernation sends
+the package LOCKED_BOOT_COMPLETED and BOOT_COMPLETED. The package boot's dexopt
+suppression reads this global state. Entering a user's hibernation (force stop,
+cache deletion, storage stats), the statsd atoms and the shell command remain
+explicitly unsupported (#2064, #2063). Host regressions cover these paths; no
+guest boot or Safety Center rerun verifies recovery. The retained
 capture follows the earlier relaunch. This is scoped
 page/aggregate validation, not sustained app acceptance or listener, persistence,
 stats, refresh/action or notification conformance. Install permission PREPARE now

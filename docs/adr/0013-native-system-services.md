@@ -841,6 +841,17 @@ bridge for the original LocaleList/system-asset supported-locale selection used
 by pinned ATMS. Configuration state, persistence and propagation stay native;
 this adds vendor methods and compile-only declarations, with no original replacement.
 
+AppHibernationService (#2064) stays a native app-host service rather than the
+original in `aim-system`. Its AppHibernationManagerInternal readers are native
+owners that run before or without `aim-system`: the package boot's dexopt
+suppression, PackageManager's unstop, the package receiver and the usage
+listener; its one effect outside them, OAT deletion, already crosses to the
+original ART owner. Hosting the original would need a bridge back into each of
+these. The native service ports the original state machine (per-user and global
+states, their protobufs, the receiver's events, the deletion's -1/0 mapping) with
+host tests; entering a user's hibernation, the statsd atoms and the shell
+command are unsupported, so it has not passed CtsHibernationTestCases (#2064).
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

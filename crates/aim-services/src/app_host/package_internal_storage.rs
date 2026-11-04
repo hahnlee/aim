@@ -351,31 +351,15 @@ impl Service for PackageInternalStorage {
                 reply(self.void(installd::FIXUP_APP_DATA, &data))
             }
             bridge::DELETE_OAT => {
-                use aim_service_aidl::dev_aim_server_iartdeletion as art;
                 let a = bridge::DeleteOat::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply((|| {
-                    let (generation, owner) = self.host.art_deletion_owner()?;
-                    let mut request = Parcel::new();
-                    art::DeleteDexoptArtifacts {
-                        generation,
-                        package_name: a.package_name,
-                        calling_uid: a.caller_uid,
-                        user_id: a.caller_uid / 100_000, // UserHandle.getUserId.
-                    }
-                    .write(&mut request);
-                    // Java opens the caller-filtered scope and retains ART's -1/0 mappings.
-                    let response = owner
-                        .transact(art::DELETE_DEXOPT_ARTIFACTS, &request, false)
-                        .map_err(|s| {
-                            Exception::new(EX_ILLEGAL_STATE, format!("ART deletion transport: {s}"))
-                        })?;
-                    let bytes = art::read_delete_dexopt_artifacts_reply(&mut response.reader())
-                        .map_err(|s| {
-                        Exception::new(EX_ILLEGAL_STATE, format!("ART deletion reply: {s}"))
-                    })??;
-                    bridge::write_delete_oat_reply(&mut p, bytes);
-                    Ok(p)
-                })())
+                reply(
+                    self.host
+                        .delete_oat_artifacts(a.package_name, a.caller_uid)
+                        .map(|bytes| {
+                            bridge::write_delete_oat_reply(&mut p, bytes);
+                            p
+                        }),
+                )
             }
             _ => reply(Err(self.host.unimplemented_named(
                 "package internal storage",
