@@ -60,6 +60,10 @@ final class SyncOwnerStartup {
         // native unlock waits for startup, then for lifecycle delivery, before broadcasting.
         startup.unlocked = host.attachSystemUserLifecycle(generation, new ISystemUserLifecycle.Stub() {
             @Override public void onUserUnlocking(int userId) { startup.onUserUnlocking(userId); }
+            @Override public void onShutdown() {
+                Bridge.enforceSystemUid();
+                java.util.Objects.requireNonNull(startup.content, "sync construction incomplete").flush();
+            }
         });
         var content = new PrivateContentService(context, new NativeSyncAccounts(accounts));
         startup.content = content;

@@ -87,25 +87,61 @@ pub struct Strings(Vec<String>);
 
 impl Strings {
     pub fn parse(c: &[u8]) -> Result<Strings> {
-        let count = u32_at(c, 8)? as usize;
-        let flags = u32_at(c, 16)?;
-        let start = u32_at(c, 20)? as usize;
-        let header = u16_at(c, 2)? as usize;
-        let utf8 = flags & (1 << 8) != 0;
-        let mut out = Vec::with_capacity(count);
-        for i in 0..count {
-            let at = start + u32_at(c, header + 4 * i)? as usize;
-            out.push(if utf8 {
-                utf8_at(c, at)?
-            } else {
-                utf16_at(c, at)?
-            });
-        }
-        Ok(Strings(out))
+        let pool = Pool::new(c)?;
+        (0..pool.count())
+            .map(|i| pool.string(c, i))
+            .collect::<Result<_>>()
+            .map(Strings)
     }
 
     pub fn get(&self, i: u32) -> Option<&str> {
         self.0.get(i as usize).map(String::as_str)
+    }
+}
+
+/// A `ResStringPool` chunk's header: its strings decode one at a time, as
+/// `ResStringPool::stringAt` decodes them.
+pub struct Pool {
+    count: usize,
+    utf8: bool,
+    start: usize,
+    header: usize,
+}
+
+impl Pool {
+    /// The header of the pool chunk `c`, its string offsets inside it.
+    pub fn new(c: &[u8]) -> Result<Pool> {
+        let count = u32_at(c, 8)? as usize;
+        let flags = u32_at(c, 16)?;
+        let start = u32_at(c, 20)? as usize;
+        let header = u16_at(c, 2)? as usize;
+        if count
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(header))
+            .is_none_or(|end| end > c.len())
+        {
+            return Err(bad("truncated resource data"));
+        }
+        Ok(Pool {
+            count,
+            utf8: flags & (1 << 8) != 0,
+            start,
+            header,
+        })
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// String `i` (below `count`) of the pool chunk `c` this header is of.
+    pub fn string(&self, c: &[u8], i: usize) -> Result<String> {
+        let at = self.start + u32_at(c, self.header + 4 * i)? as usize;
+        if self.utf8 {
+            utf8_at(c, at)
+        } else {
+            utf16_at(c, at)
+        }
     }
 }
 

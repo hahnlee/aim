@@ -593,6 +593,10 @@ fn sync_namespace_migration_and_proxy_replacement_are_isolated_and_repeatable() 
     crate::system::with_discovery_binders(|host, _, _, _| {
         install_sync_manifest(host);
         let jobs = scheduler(host);
+        let mut empty = (false, false);
+        migrate(&jobs, &mut empty);
+        assert_eq!(empty, (true, true));
+        assert!(jobs.jobs_of(1000).unwrap().is_empty());
         schedule_sync(&jobs, None, None);
         schedule_sync(&jobs, Some("other"), None);
         schedule_sync(&jobs, Some("SyncManager"), None);
@@ -807,4 +811,130 @@ fn proxy_attribution_uses_installed_source_and_target_user_quota() {
                 .is_err()
         );
     });
+}
+
+#[test]
+fn shutdown_commits_jobs_before_original_state_and_after_guest_exit() {
+    struct Flush(Arc<JobScheduler>, std::path::PathBuf);
+    impl Service for Flush {
+        fn descriptor(&self) -> &str {
+            aim_service_aidl::dev_aim_server_isystemuserlifecycle::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            use aim_service_aidl::dev_aim_server_isystemuserlifecycle as lc;
+            assert_eq!(call.sender_euid, 1000);
+            assert_eq!(call.code, lc::ON_SHUTDOWN);
+            lc::OnShutdown::read(&mut call.data)?;
+            assert_eq!(job_store::read(&self.1, elapsed_ms(), wall_ms()).0.len(), 1);
+            // Original shutdown logging reenters JobSchedulerInternal; no lock spans Java.
+            assert_eq!(self.0.persist_stats().unwrap()[3..], [1, 1, 1]);
+            let mut reply = Parcel::new();
+            lc::write_on_shutdown_reply(&mut reply);
+            Ok(reply)
+        }
+    }
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        install_sync_manifest(host);
+        let jobs = scheduler(host);
+        assert!(host.job_scheduler.set(jobs.clone()).is_ok());
+        schedule_sync(&jobs, Some("SyncManager"), Some(("p", 0, "shutdown")));
+        let owner = export(Arc::new(Flush(
+            jobs.clone(),
+            host.inputs().unwrap().data.join("system/job"),
+        )));
+        super::super::sync_owner::tests::install(host, host.process.strong(owner.handle));
+        host.attach_system_user_lifecycle(42, 100, Some(owner.binder()))
+            .unwrap();
+        let mut services =
+            crate::NativeServices::new(&aim_binder_driver::Driver::new(), &[]).unwrap();
+        services.app_host = Some(host.clone());
+        services.prepare_shutdown();
+        cancel_sync(&jobs, Some("SyncManager"));
+        host.system_user_lifecycle_died(100);
+        services.shutdown().unwrap();
+        assert!(scheduler(host).jobs_of(1000).unwrap().is_empty());
+    });
+}
+
+#[test]
+fn shutdown_bounds_hung_owner_and_records_only_live_errors_before_final_job_flush() {
+    struct Flush(&'static str, Arc<(Mutex<bool>, Condvar)>, mpsc::Sender<()>);
+    impl Service for Flush {
+        fn descriptor(&self) -> &str {
+            aim_service_aidl::dev_aim_server_isystemuserlifecycle::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            use aim_service_aidl::dev_aim_server_isystemuserlifecycle as lc;
+            assert_eq!(call.code, lc::ON_SHUTDOWN);
+            lc::OnShutdown::read(&mut call.data)?;
+            self.2.send(()).unwrap();
+            if self.0 == "hung" {
+                let (lock, wake) = &*self.1;
+                let mut stopped = lock.lock().unwrap();
+                while !*stopped {
+                    stopped = wake.wait(stopped).unwrap();
+                }
+            }
+            if self.0 == "dead-reply" {
+                return Err(aim_binder_host::parcel::DEAD_OBJECT);
+            }
+            let mut reply = Parcel::new();
+            if self.0 == "error" {
+                reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, "live sync flush error"));
+            } else {
+                lc::write_on_shutdown_reply(&mut reply);
+            }
+            Ok(reply)
+        }
+    }
+    for mode in ["detached", "dead", "dead-reply", "error", "hung"] {
+        crate::system::with_discovery_binders_lifecycle(&[], true, |host, _, _, export, die| {
+            install_sync_manifest(host);
+            let jobs = scheduler(host);
+            assert!(host.job_scheduler.set(jobs.clone()).is_ok());
+            schedule_sync(&jobs, Some("SyncManager"), Some(("p", 0, mode)));
+            let stopped = Arc::new((Mutex::new(false), Condvar::new()));
+            let (entered, called) = mpsc::channel();
+            let owner = export(Arc::new(Flush(mode, stopped.clone(), entered)));
+            super::super::sync_owner::tests::install(host, host.process.strong(owner.handle));
+            if mode != "detached" {
+                host.attach_system_user_lifecycle(42, 100, Some(owner.binder()))
+                    .unwrap();
+            }
+            if mode == "dead" {
+                die();
+            }
+            let mut services =
+                crate::NativeServices::new(&aim_binder_driver::Driver::new(), &[]).unwrap();
+            services.app_host = Some(host.clone());
+            let start = std::time::Instant::now();
+            services.prepare_shutdown_until(start + Duration::from_millis(100));
+            let elapsed = start.elapsed();
+            // Simulate guest stop, releasing the blocked owner before fixture teardown.
+            *stopped.0.lock().unwrap() = true;
+            stopped.1.notify_all();
+            if mode != "dead" {
+                die();
+            }
+            assert!(elapsed < Duration::from_secs(1), "{mode}: {elapsed:?}");
+            if mode == "hung" {
+                assert!(called.try_recv().is_ok(), "owner must actually be blocked");
+                assert!(elapsed >= Duration::from_millis(100));
+            }
+            let errors = services.shutdown.lock().unwrap().errors.clone();
+            assert_eq!(
+                errors.len(),
+                usize::from(mode == "error"),
+                "{mode}: {errors:?}"
+            );
+            cancel_sync(&jobs, Some("SyncManager"));
+            let result = services.shutdown();
+            if mode == "error" {
+                assert!(result.unwrap_err().contains("live sync flush error"));
+            } else {
+                result.unwrap();
+            }
+            assert!(scheduler(host).jobs_of(1000).unwrap().is_empty(), "{mode}");
+        });
+    }
 }

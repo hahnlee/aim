@@ -1681,6 +1681,9 @@ impl Boot {
                     .fatal
                     .get_or_insert_with(|| format!("init namespace retirement: {error}"));
             }
+            if let Some(services) = &self.native_services {
+                services.prepare_shutdown();
+            }
             self.stop_services_for_shutdown();
             self.executor
                 .supervisor

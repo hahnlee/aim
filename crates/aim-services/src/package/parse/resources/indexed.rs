@@ -23,7 +23,8 @@ struct Group {
 pub(super) struct Index {
     data: Vec<u8>,
     string_pool: Range<usize>,
-    strings: OnceLock<Result<Strings>>,
+    /// The global pool's header, then each string as it is first asked for.
+    strings: OnceLock<Result<(aim_apps::res::Pool, Vec<OnceLock<Result<String>>>)>>,
     packages: Vec<(u8, HashMap<u8, Group>)>,
     pub(super) full: OnceLock<Result<Table>>,
     error: Mutex<Option<String>>,
@@ -132,11 +133,15 @@ impl Index {
     }
 
     pub(super) fn string(&self, index: u32) -> Option<&str> {
-        self.retain_error(
-            self.strings
-                .get_or_init(|| Strings::parse(&self.data[self.string_pool.clone()])),
-        )?
-        .get(index)
+        let c = &self.data[self.string_pool.clone()];
+        let (pool, strings) = self.retain_error(self.strings.get_or_init(|| {
+            let pool = aim_apps::res::Pool::new(c)?;
+            let strings = (0..pool.count()).map(|_| OnceLock::new()).collect();
+            Ok((pool, strings))
+        }))?;
+        let string = strings.get(index as usize)?;
+        self.retain_error(string.get_or_init(|| pool.string(c, index as usize)))
+            .map(String::as_str)
     }
 
     pub(super) fn flags(&self, id: u32) -> u32 {

@@ -405,6 +405,22 @@ impl NativeServices {
         Ok(endpoints)
     }
 
+    /// Flush before service stop; retain failures for reporting after final persistence.
+    pub fn prepare_shutdown(&self) {
+        // Android 16 r1 ShutdownThread.MAX_BROADCAST_TIME bounds ACTION_SHUTDOWN,
+        // whose SyncManager receiver calls writeAllState: use that same 10 seconds.
+        self.prepare_shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(10));
+    }
+
+    fn prepare_shutdown_until(&self, deadline: std::time::Instant) {
+        if let Some(host) = &self.app_host
+            && let Err(error) = host.flush_sync_before_stop(deadline)
+        {
+            eprintln!("{error}");
+            self.shutdown.lock().unwrap().errors.push(error);
+        }
+    }
+
     /// Retire boot-scoped service resources before the data volume detaches,
     /// even when another holder still retains this facade.
     pub fn shutdown(&self) -> Result<(), String> {

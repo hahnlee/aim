@@ -1356,6 +1356,12 @@ impl JobScheduler {
         }
     }
 
+    pub(super) fn flush(&self) -> Result<(), Exception> {
+        let mut state = self.state.lock().unwrap();
+        self.ensure_loaded(&mut state)?;
+        self.flush_pending(&mut state)
+    }
+
     /// A pending-job snapshot may let a client persist migration completion in
     /// another store (SyncManager.verifyJobScheduler). Commit its inputs first.
     fn flush_pending(&self, state: &mut State) -> Result<(), Exception> {

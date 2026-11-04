@@ -4,6 +4,7 @@ use super::AppHost;
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{Binder, DEAD_OBJECT, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_isystemuserlifecycle as lifecycle;
+use std::{sync::mpsc, time::Instant};
 
 #[derive(Default)]
 pub(super) struct State {
@@ -13,6 +14,54 @@ pub(super) struct State {
 }
 
 impl AppHost {
+    pub(crate) fn flush_sync_before_stop(&self, deadline: Instant) -> Result<(), String> {
+        if let Some(jobs) = self.job_scheduler.get() {
+            jobs.flush().map_err(|e| e.message)?;
+        }
+        let owner = {
+            let state = self.user_lifecycle.lock().unwrap();
+            state
+                .owner
+                .as_ref()
+                .map(|owner| (state.generation, self.process.strong(owner.handle)))
+        };
+        if let Some((generation, owner)) = owner {
+            let (sent, received) = mpsc::sync_channel(1);
+            // Binder has no transaction timeout. The worker holds only the capability;
+            // after a timeout, stopping its guest releases the outstanding transaction.
+            std::thread::Builder::new()
+                .name("sync-shutdown".into())
+                .spawn(move || {
+                    let mut data = Parcel::new();
+                    lifecycle::OnShutdown {}.write(&mut data);
+                    let result =
+                        owner
+                            .transact(lifecycle::ON_SHUTDOWN, &data, false)
+                            .map(|reply| {
+                                lifecycle::read_on_shutdown_reply(&mut reply.reader())
+                                    .map_err(|e| format!("sync shutdown reply: {e}"))?
+                                    .map_err(|e| e.message)
+                            });
+                    let _ = sent.send(result);
+                })
+                .map_err(|e| format!("sync shutdown worker: {e}"))?;
+            match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Err(DEAD_OBJECT)) => {
+                    self.system_user_lifecycle_died(generation);
+                    eprintln!("sync shutdown: owner died; continuing service stop");
+                }
+                Ok(result) => result.map_err(|e| format!("sync shutdown: {e}"))??,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!("sync shutdown: deadline timed out; continuing service stop");
+                }
+                Err(e) => return Err(format!("sync shutdown worker: {e}")),
+            }
+        } else {
+            eprintln!("sync shutdown: no attached owner; continuing service stop");
+        }
+        Ok(())
+    }
+
     pub(super) fn before_user_unlocked(&self, broadcast: impl FnOnce()) -> Result<(), String> {
         self.deliver_user_unlocking(0)?;
         broadcast();

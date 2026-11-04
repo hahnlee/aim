@@ -40,6 +40,11 @@ public final class SyncOwnerLifecycleTest {
     }
     private static void drain() { while (!handler.isEmpty()) handler.remove().run(); }
     static void run(Context context, ISystemProcess host) throws Exception {
+        int claims = com.android.server.content.SyncStorageOwner.claims;
+        NativeSyncAccounts.missing = true;
+        try { SyncOwnerStartup.start(context, host); throw new AssertionError("missing snapshot accepted"); }
+        catch (NullPointerException expected) {} finally { NativeSyncAccounts.missing = false; }
+        require(com.android.server.content.SyncStorageOwner.claims == claims);
         // Startup snapshot, including a restart after unlock and a broadcast queued at construction.
         for (int attempt = 0; attempt < 2; attempt++) {
             unlocked = true;
@@ -49,6 +54,13 @@ public final class SyncOwnerLifecycleTest {
             original.broadcast(context, 0); // First possible main-looper receiver execution.
             drain();
             require(ready && acknowledgements == 1);
+            int writes = com.android.server.content.SyncStorageEngine.writes;
+            Bridge.system = false;
+            try { lifecycle.onShutdown(); throw new AssertionError(); }
+            catch (SecurityException expected) {} finally { Bridge.system = true; }
+            require(com.android.server.content.SyncStorageEngine.writes == writes);
+            lifecycle.onShutdown();
+            require(com.android.server.content.SyncStorageEngine.writes == writes + 1);
             lifecycle.onUserUnlocking(0);
             drain();
             require(replays == 1 && acknowledgements == 1);
