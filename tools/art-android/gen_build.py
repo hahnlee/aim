@@ -98,6 +98,8 @@ BP_FILES = [
     "art/dex2oat/Android.bp",
     "art/openjdkjvmti/Android.bp",
     "art/odrefresh/Android.bp",
+    "art/perfetto_hprof/Android.bp",
+    "external/perfetto/Android.bp",
     "external/protobuf/Android.bp",
 ]
 # stats-log-api-gen and libstats_proto_host, with the filegroups they name.
@@ -497,7 +499,8 @@ class Build:
 
         # libstatslog_art and libodrstatslog (its Android variant): the atom
         # writers their genrules make with stats-log-api-gen.
-        gen = self.stats_log_api_gen()
+        protoc = self.host_protoc()
+        gen = self.stats_log_api_gen(protoc)
         statslog_headers = (self.genrule("statslog_art.h", gen) +
                             self.genrule("statslog_odrefresh.h", gen))
         statslog = self.static_lib("libstatslog_art", self.genrule("statslog_art.cpp", gen),
@@ -561,6 +564,23 @@ class Build:
         self.shared_lib("libopenjdkjvmti", jvmti_objs, [],
                         [libart, artbase, dexfile, libbase, libcxx_so] + libc)
 
+        # libperfetto_hprof: the plugin that writes Java heap graphs into
+        # perfetto traces; it uses libart internals. Its other static library,
+        # perfetto_trace_protos (protobuf-lite trace protos), would give no
+        # member: the plugin uses only the protozero ones the client carries.
+        perfetto, perfetto_includes, perfetto_headers = self.perfetto_client(protoc, libcxx)
+        hprof_objs = self.objects(
+            "libperfetto_hprof",
+            self.srcs("libperfetto_hprof") +
+            self.operator_srcs("art_perfetto_hprof_operator_srcs", "art/perfetto_hprof"),
+            flags_for("libperfetto_hprof",  # with the module directory, as Soong adds it
+                      [f"-I{d}" for d in [os.path.join(self.art, "perfetto_hprof")] +
+                       perfetto_includes]),
+            order=perfetto_headers)
+        self.shared_lib("libperfetto_hprof", hprof_objs, [],
+                        [libart, artbase, dexfile, palette, libbase, liblog, libcxx_so] + libc,
+                        archives=[perfetto])
+
         # dex2oat64: regenerates the boot image with the same reference encoding.
         # It links BoringSSL's libcrypto_static (for the SHA-1 build id) as
         # upstream does: the ART namespace cannot see the platform libcrypto.so.
@@ -597,32 +617,38 @@ class Build:
         return self.static_lib("libcrypto_static",
                                [os.path.join(root, s) for s in files], flags)
 
-    def stats_log_api_gen(self):
+    def host_flags(self, module, extra=()):
+        dirs = self.query(module, "local_include_dirs") + \
+            self.query(module, "export_include_dirs") + self.query(module, "include_dirs")
+        cflags = [f for f in self.query(module, "cflags") if f != "-Werror"]
+        return {"host_cxx": " ".join([f"-I{self.fetched(d)}" for d in dirs] +
+                                     [shlex.quote(f) for f in cflags] + list(extra))}
+
+    def host_protoc(self):
+        """external/protobuf's aprotoc for the host, and the libprotoc and
+        libprotobuf-cpp-full objects protoc plugins link."""
+        protobuf_src = self.fetched("external/protobuf/src")
+        full = self.srcs("libprotobuf-cpp-full")
+        full_objs = self.objects("host/libprotobuf-cpp-full", full,
+                                 self.host_flags("libprotobuf-cpp-full"), host=True)
+        protoc_objs = self.objects("host/libprotoc",
+                                   [s for s in self.srcs("libprotoc") if s not in full],
+                                   self.host_flags("libprotoc"), host=True)
+        main_objs = self.objects("host/aprotoc", self.srcs("aprotoc"),
+                                 self.host_flags("aprotoc", [f"-I{protobuf_src}"]), host=True)
+        aprotoc = os.path.join(self.out, "host/bin/aprotoc")
+        self.emit(f"build {aprotoc}: host_link {' '.join(main_objs + protoc_objs + full_objs)}")
+        self.emit("  libs = -lz")
+        return aprotoc, protoc_objs, full_objs
+
+    def stats_log_api_gen(self, protoc):
         """frameworks/proto_logging's stats-log-api-gen for the host, built as
         Soong builds it: aprotoc (external/protobuf) generates
         libstats_proto_host from the atom protos, and the tool links it with
         libprotobuf-cpp-full. Every atom object is linked, so the generated
         pool holds the extension atoms too, as with Soong's shared library."""
+        aprotoc, _, full_objs = protoc
         protobuf_src = self.fetched("external/protobuf/src")
-
-        def host_flags(module, extra=()):
-            dirs = self.query(module, "local_include_dirs") + \
-                self.query(module, "export_include_dirs")
-            cflags = [f for f in self.query(module, "cflags") if f != "-Werror"]
-            return {"host_cxx": " ".join([f"-I{self.fetched(d)}" for d in dirs] +
-                                         [shlex.quote(f) for f in cflags] + list(extra))}
-
-        full = self.srcs("libprotobuf-cpp-full")
-        full_objs = self.objects("host/libprotobuf-cpp-full", full,
-                                 host_flags("libprotobuf-cpp-full"), host=True)
-        protoc_objs = self.objects("host/libprotoc",
-                                   [s for s in self.srcs("libprotoc") if s not in full],
-                                   host_flags("libprotoc"), host=True)
-        main_objs = self.objects("host/aprotoc", self.srcs("aprotoc"),
-                                 host_flags("aprotoc", [f"-I{protobuf_src}"]), host=True)
-        aprotoc = os.path.join(self.out, "host/bin/aprotoc")
-        self.emit(f"build {aprotoc}: host_link {' '.join(main_objs + protoc_objs + full_objs)}")
-        self.emit("  libs = -lz")
 
         # Soong's proto paths are relative to the source root.
         protos = list(dict.fromkeys(self.srcs("libstats_proto_host")))
@@ -637,11 +663,12 @@ class Build:
         self.emit(f"  protos = {' '.join(relative)}")
         self.emit(f"  outdir = {out}")
         proto_objs = self.objects("host/libstats_proto_host", sources,
-                                  host_flags("libstats_proto_host",
-                                             [f"-I{out}", f"-I{protobuf_src}"]), host=True)
+                                  self.host_flags("libstats_proto_host",
+                                                  [f"-I{out}", f"-I{protobuf_src}"]), host=True)
 
         tool_objs = self.objects("host/stats-log-api-gen", self.srcs("stats-log-api-gen"),
-                                 host_flags("stats-log-api-gen", [f"-I{out}", f"-I{protobuf_src}"]),
+                                 self.host_flags("stats-log-api-gen",
+                                                 [f"-I{out}", f"-I{protobuf_src}"]),
                                  host=True, order=headers)
         tool = os.path.join(self.out, "host/bin/stats-log-api-gen")
         self.emit(f"build {tool}: host_link {' '.join(tool_objs + proto_objs + full_objs)}")
@@ -669,6 +696,83 @@ class Build:
         self.emit(f"build {' '.join(outputs)}: genrule | {tool} {' '.join(data)}")
         self.emit(f"  cmd = cd {sandbox} && {cmd.replace('$(genDir)', gen_dir)}")
         return outputs
+
+    def perfetto_client(self, protoc, libcxx):
+        """Perfetto's client SDK, libperfetto_client_experimental
+        (external/perfetto/Android.bp): its sources and the C++ its genrules
+        make from the trace protos, with aprotoc and Perfetto's protoc plugins
+        built for the host as Soong builds them.
+
+        Returns the archive, the include directories it exports and the
+        generated headers.
+        """
+        lib = "libperfetto_client_experimental"
+        aprotoc, protoc_objs, full_objs = protoc
+        tools = {"aprotoc": aprotoc}
+        for plugin in ("protozero_plugin", "ipc_plugin",
+                       "perfetto_src_protozero_protoc_plugin_cppgen_plugin"):
+            objs = self.objects(f"host/{plugin}", self.srcs(plugin),
+                                self.host_flags(plugin,
+                                                [f"-I{self.fetched('external/protobuf/src')}"]),
+                                host=True)
+            tools[plugin] = os.path.join(self.out, "host/bin", plugin)
+            self.emit(f"build {tools[plugin]}: host_link {' '.join(objs + protoc_objs + full_objs)}")
+            self.emit("  libs = -lz")
+
+        gen_dir = os.path.join(self.gen, "perfetto")
+        header_rules = self.query(lib, "generated_headers")
+        generated = self.genrules(
+            [s[1:] for s in self.query(lib, "srcs")
+             if s.startswith(":") and self.modules[s[1:]][0] == "genrule"] + header_rules,
+            tools, gen_dir)
+        headers = [o for o in generated if o.endswith(".h")]
+
+        # A genrule exports its genDir, or the export_include_dirs below the
+        # genDir's copy of its module directory.
+        exported = [self.fetched(d) for d in self.query(lib, "export_include_dirs")]
+        for name in header_rules:
+            _, body, directory = self.modules[name]
+            dirs = body.get("export_include_dirs")
+            exported += [os.path.normpath(os.path.join(gen_dir, directory, d)) for d in dirs] \
+                if dirs else [gen_dir]
+        exported = list(dict.fromkeys(exported))
+        includes = [libcxx] + [self.fetched(d) for d in self.query(lib, "include_dirs")] + \
+            exported + [self.fetched("system/logging/liblog/include")]
+        cflags = " ".join(f"-I{d}" for d in includes) + " " + " ".join(
+            shlex.quote(f) for f in DEVICE_CFLAGS + self.query(lib, "cflags"))
+        sources = self.srcs(lib) + [o for o in generated if o.endswith(".cc")]
+        archive = self.static_lib(lib, sources, {"cxx": cflags}, order=headers)
+        return archive, exported, headers
+
+    def genrules(self, names, tools, gen_dir):
+        """Runs genrules' own commands from the source root, all in one
+        genDir: their outputs are distinct, and each genrule and its
+        _headers twin (same command) run once.
+
+        Returns the outputs.
+        """
+        edges = {}
+        for name in names:
+            _, body, directory = self.modules[name]
+            outputs = [os.path.join(gen_dir, o) for o in body["out"]]
+
+            def location(match, body=body, directory=directory):
+                ref = match.group(1)
+                if ref in body.get("tools", []):
+                    return tools[ref]
+                if ref.startswith(":"):
+                    return " ".join(os.path.relpath(p, self.src_root) for p in self.srcs(ref[1:]))
+                return os.path.join(directory, ref)
+
+            cmd = re.sub(r"\$\(locations? ([^)]+)\)", location, body["cmd"])
+            cmd = cmd.replace("$(genDir)", gen_dir).replace("$(out)", " ".join(outputs))
+            deps = self.srcs(name) + [tools[t] for t in body.get("tools", [])] + \
+                [self.fetched(directory, f) for f in body.get("tool_files", [])]
+            edges.setdefault(cmd, ([], deps))[0].extend(outputs)
+        for cmd, (outputs, deps) in edges.items():
+            self.emit(f"build {' '.join(outputs)}: genrule | {' '.join(deps)}")
+            self.emit(f"  cmd = cd {self.src_root} && {cmd}")
+        return [o for outputs, _ in edges.values() for o in outputs]
 
     def libcap_names(self):
         """libcap's cap_names.h, made the way external/libcap/Android.bp does.

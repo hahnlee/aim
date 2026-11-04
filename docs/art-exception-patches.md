@@ -346,7 +346,8 @@ cargo aim build art
 - **Output:** `target/aim/art/` (~0.9 GB with debug info): `lib64/`
   `libartbase.so`, `libdexfile.so`, `libprofile.so`, `libart.so`
   (runtime + JIT compiler, same DT_NEEDED set as the original),
-  `libopenjdkjvm.so`, and `bin/dex2oat64`; `stripped/` holds the same files
+  `libopenjdkjvm.so`, `libadbconnection.so`, `libopenjdkjvmti.so`,
+  `libperfetto_hprof.so`, and `bin/dex2oat64`; `stripped/` holds the same files
   without debug info, which `image/overlay.toml` puts into the derived image.
 - **Status:** runs on the syscall layer (P2, ADR 0012): the image's
   `dalvikvm64` runs Java with and without a boot image, interpreted and with
@@ -357,13 +358,20 @@ cargo aim build art
 
 The rebuilt set must replace, as a unit, every ART APEX library that links
 libart's C++ internals: libart, libartbase, libdexfile, libprofile,
-libopenjdkjvm (and libopenjdkjvmti, libadbconnection, libperfetto_hprof when
-those plugins are used). The `art` node builds libadbconnection
-too (zygote loads it) and libopenjdkjvmti (JVMTI agents, DDMS, JDWP's class
-redefinition), from `openjdkjvmti/Android.bp`'s sources with no change;
-libperfetto_hprof is not rebuilt yet (#220: it links Perfetto's client SDK
-and generated trace protos), so its dlopen fails and perfetto's Java heap
-profiles are unavailable; `Debug.dumpHprofData` is libart's own hprof.
+libopenjdkjvm, libopenjdkjvmti, libadbconnection and libperfetto_hprof (the
+image ships no debug `d` variants). The `art` node builds libadbconnection
+(zygote loads it), libopenjdkjvmti (JVMTI agents, DDMS, JDWP's class
+redefinition), from `openjdkjvmti/Android.bp`'s sources with no change, and
+libperfetto_hprof (perfetto's Java heap graphs: zygote loads it eagerly and
+system_server initializes it), from `perfetto_hprof/Android.bp`'s.
+libperfetto_hprof links Perfetto's client SDK, `libperfetto_client_experimental`,
+built from `external/perfetto/Android.bp`'s sources and genrules: the
+protozero, cppgen and IPC protoc plugins are built for the host with the
+`aprotoc` of stats-log-api-gen, and each genrule's own command runs from the
+source root. Its other static library, `perfetto_trace_protos` (protobuf-lite
+trace protos), contributes no member, as in the original (no
+libprotobuf-cpp-lite in its DT_NEEDED), and is not built.
+`Debug.dumpHprofData` is libart's own hprof.
 Libraries with C APIs (libnativebridge,
 libnativeloader, libsigchain, libartpalette, libjavacore, libopenjdk) stay
 original.
