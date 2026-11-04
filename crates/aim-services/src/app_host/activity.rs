@@ -45,8 +45,9 @@ pub(super) fn unsupported_start(flags: i32, profiler: bool) -> Option<&'static s
 /// is reported.
 const PROCESS_STATE_UNKNOWN: i32 = -1;
 const PROCESS_STATE_CACHED_EMPTY: i32 = 19;
-/// `WindowConfiguration.ACTIVITY_TYPE_STANDARD`.
+/// `WindowConfiguration.ACTIVITY_TYPE_STANDARD`, `ACTIVITY_TYPE_HOME`.
 pub(super) const ACTIVITY_TYPE_STANDARD: i32 = 1;
+pub(super) const ACTIVITY_TYPE_HOME: i32 = 2;
 /// `Display.DEFAULT_DISPLAY`, `Display.INVALID_DISPLAY`.
 pub(super) const DEFAULT_DISPLAY: i32 = 0;
 pub(super) const INVALID_DISPLAY: i32 = -1;
@@ -144,6 +145,8 @@ pub struct ActivityRecord {
     pub launched_from: LaunchedFrom,
     /// Its task (the stack's key).
     pub task: i32,
+    /// `getActivityType`: home in the root home task, else standard.
+    pub activity_type: i32,
     /// Who asked for its result, and how (`resultTo`, `resultWho`,
     /// `requestCode`).
     pub result_to: Option<u64>,
@@ -375,11 +378,13 @@ pub struct Launch<'a> {
     pub global: &'a Configuration,
     /// The bounds of its task in window mode, else the display's.
     pub task: Option<(i32, super::config::Rect)>,
+    /// Whether it is resumed, else stopped.
+    pub resume: bool,
 }
 
 impl AppHost {
-    /// `realStartActivityLocked`: the items that launch and resume the
-    /// activity of `token`.
+    /// `realStartActivityLocked`: the items that launch the activity of
+    /// `token`, then resume or stop it.
     pub(super) fn launch_items(
         &self,
         token: Binder,
@@ -403,7 +408,7 @@ impl AppHost {
             Some((mode, bounds)) => launch.global.of_task(mode, bounds),
             None => launch.global.clone(),
         };
-        override_config.window.activity_type = ACTIVITY_TYPE_STANDARD;
+        override_config.window.activity_type = record.activity_type;
         record.reported = Some(override_config.clone());
         record.ident = ident;
         let bounds = override_config.window.bounds;
@@ -428,6 +433,15 @@ impl AppHost {
         );
         drop(records);
         let current = self.launching_process_configuration(start_seq, launch.global);
+        let lifecycle: Box<dyn Item> = if launch.resume {
+            Box::new(ResumeActivityItem {
+                token,
+                proc_state: PROCESS_STATE_UNKNOWN,
+                forward: true,
+            })
+        } else {
+            Box::new(super::activity_start::StopActivityItem(token))
+        };
         let items: Vec<Box<dyn Item>> = vec![
             Box::new(LaunchActivityItem {
                 token,
@@ -446,11 +460,7 @@ impl AppHost {
                 intent,
                 info,
             }),
-            Box::new(ResumeActivityItem {
-                token,
-                proc_state: PROCESS_STATE_UNKNOWN,
-                forward: true,
-            }),
+            lifecycle,
         ];
         Some(items)
     }
@@ -508,7 +518,7 @@ impl AppHost {
                 Some((mode, bounds)) => global.of_task(mode, bounds),
                 None => global.clone(),
             };
-            new.window.activity_type = ACTIVITY_TYPE_STANDARD;
+            new.window.activity_type = record.activity_type;
             let Some(old) = record.reported.replace(new.clone()) else {
                 continue;
             };

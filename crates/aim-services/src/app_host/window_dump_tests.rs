@@ -26,6 +26,25 @@ fn multi_task_window_dump_decodes_with_pinned_schema() {
             seq: 1,
         },
     );
+    // The root home task, behind the desktop with its activity stopped.
+    host.tasks.home_test_task(global.window.bounds);
+    {
+        let mut stack = host.activities.stack.lock().unwrap();
+        stack.home = Some(1);
+        stack.tasks.push(Task {
+            id: 1,
+            affinity: Some("h".into()),
+            real_activity: "h/h.Home".into(),
+            intent: Default::default(),
+            base: super::super::super::activity_start::LaunchIntent::Component,
+            uid: 10050,
+            user: 0,
+            last_active: 1,
+        });
+        let mut home = Activity::new(1, 1, 1, "h/h.Home", 2, 0, None);
+        home.state = State::Stopped;
+        stack.activities.push(home);
+    }
     for (id, left) in [(7, 20), (8, 600)] {
         let bounds = Rect {
             left,

@@ -252,7 +252,7 @@ impl WindowDump<'_> {
 impl AppHost {
     fn window_dump(&self, global: &Configuration) -> Message {
         // Never hold an owner lock while calling another owner or writing the fd.
-        let (tasks, activities, focused, shown) = {
+        let (tasks, activities, focused, shown, home) = {
             let stack = self.activities.stack.lock().unwrap();
             (
                 stack.tasks.clone(),
@@ -263,6 +263,7 @@ impl AppHost {
                     .iter()
                     .map(|a| (a.token, stack.shown(a)))
                     .collect::<HashMap<_, _>>(),
+                stack.home,
             )
         };
         let configs: HashMap<_, _> = self
@@ -308,7 +309,11 @@ impl AppHost {
                 Some((mode, _)) => global.of_task(mode, bounds),
                 None => global.clone(),
             };
-            config.window.activity_type = super::super::activity::ACTIVITY_TYPE_STANDARD;
+            config.window.activity_type = if home == Some(task.id) {
+                super::super::activity::ACTIVITY_TYPE_HOME
+            } else {
+                super::super::activity::ACTIVITY_TYPE_STANDARD
+            };
             task_configs.insert(task.id, config);
         }
         let min_sizes: HashMap<_, _> = tasks

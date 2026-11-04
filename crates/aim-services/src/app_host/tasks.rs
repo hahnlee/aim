@@ -14,6 +14,7 @@ use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_host_display::wire;
@@ -22,7 +23,7 @@ use aim_hostcall::display::{Window as Record, Windows, mode, window};
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception};
 
-use super::activity::Item;
+use super::activity::{ACTIVITY_TYPE_HOME, Item};
 use super::activity_stack::Command;
 use super::config::{Configuration, Rect};
 use super::launch_params::{Params, Persister};
@@ -86,6 +87,9 @@ impl Task {
     }
 }
 
+/// `Tasks::home` once the root home task has gone (`INVALID_TASK_ID`).
+const HOME_GONE: i32 = -1;
+
 /// The tasks, back to front, and the server's connection.
 #[derive(Default)]
 pub struct Tasks {
@@ -96,6 +100,9 @@ pub struct Tasks {
     bridge: Mutex<Option<UnixStream>>,
     tasks: Mutex<Vec<Task>>,
     next: Mutex<i32>,
+    /// The root home task's id: 0 before the home first starts, `HOME_GONE`
+    /// from its task's removal until the home starts again.
+    home: AtomicI32,
     launch_params: Mutex<Option<Arc<Persister>>>,
 }
 
@@ -125,8 +132,12 @@ impl Tasks {
         self.windows.get().copied().unwrap_or(false)
     }
 
-    /// Sends `record` to the server.
+    /// Sends `record` to the server, unless it is the root home task's:
+    /// that is behind the desktop, never a Mac window.
     fn send(&self, record: &Record) {
+        if record.task != 0 && record.task == self.home.load(Ordering::Relaxed) {
+            return;
+        }
         let mut bridge = self.bridge.lock().unwrap();
         if let Some(stream) = bridge.as_mut()
             && let Err(e) = stream.write_all(wire::bytes(record))
@@ -205,13 +216,14 @@ impl Tasks {
             .map(|t| (t.windowing_mode, t.bounds))
     }
 
-    /// The bounds of the tasks of a Mac window.
+    /// The bounds of the tasks of a Mac window: not the organizer root
+    /// tasks nor the root home task, behind the desktop.
     fn all_bounds(&self) -> Vec<Rect> {
         self.tasks
             .lock()
             .unwrap()
             .iter()
-            .filter(|t| t.root.is_none())
+            .filter(|t| t.root.is_none() && t.id != self.home.load(Ordering::Relaxed))
             .map(|t| t.bounds)
             .collect()
     }
@@ -401,12 +413,15 @@ impl AppHost {
             bottom: display.height,
         };
         let windows = self.tasks.window_mode();
+        // `startHomeActivity`'s root home task (`WINDOWING_MODE_UNDEFINED`:
+        // the display area's) takes neither launch params nor a launch.
+        let home = options.activity_type == ACTIVITY_TYPE_HOME;
         let activity = super::freeform::Activity::from(info);
         let real_activity = super::activity_start::real_component(info);
         // TaskLaunchParamsModifier: without launch bounds, params persisted for
         // this display in a freeform display area (window mode) give the mode and
         // the last non-fullscreen bounds. Only a mode this owner supports is reused.
-        let saved = if windows && options.bounds.is_none() {
+        let saved = if windows && !home && options.bounds.is_none() {
             let name = crate::package::preferred::unflatten(&real_activity)
                 .ok_or_else(|| Exception::illegal_argument("invalid task component"))?;
             self.tasks
@@ -421,6 +436,7 @@ impl AppHost {
             None
         };
         let windowing_mode = match &saved {
+            _ if home => 0,
             Some(p) if p.windowing_mode != 0 => p.windowing_mode,
             _ => options.windowing_mode(windows),
         };
@@ -451,8 +467,11 @@ impl AppHost {
             *next += 1;
             *next
         };
+        if home {
+            self.tasks.home.store(id, Ordering::Relaxed);
+        }
         let component = format!("{package}/{class}");
-        let launch = if windows {
+        let launch = if windows && !home {
             self.pending_launches.lock().unwrap().remove(package)
         } else {
             None
@@ -487,12 +506,24 @@ impl AppHost {
             organized: false,
             root: None,
         });
+        // The root home task goes behind the desktop, under the others.
+        if home && windows {
+            tasks.rotate_right(1);
+        }
         drop(tasks);
-        self.activities
-            .stack
-            .lock()
-            .unwrap()
-            .set_task_windowing_mode(id, windowing_mode);
+        // Its surface is made with it (`WindowContainer.setParent`), as it
+        // may never have a window; an app task's is made with its first.
+        if home {
+            self.task_layer(id, |_| Ok(()))
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        }
+        {
+            let mut stack = self.activities.stack.lock().unwrap();
+            stack.set_task_windowing_mode(id, windowing_mode);
+            if home {
+                stack.home = Some(id);
+            }
+        }
         if windows {
             self.tasks.send_task(id, bounds, windowing_mode);
             self.tasks.send_text(window::PACKAGE, id, package);
@@ -671,7 +702,11 @@ impl AppHost {
     }
 
     /// Task `id` has no activities left: it goes (`Task.removeIfPossible`),
-    /// its layer with it; its processes stay.
+    /// its layer with it; its processes stay. Once the root home task has
+    /// gone, the home starts again when no task is left to focus
+    /// (`resumeFocusedTasksTopActivities` to `resumeHomeActivity`), as the
+    /// one resolved may have finished for another (a setup wizard once
+    /// provisioned).
     pub(super) fn remove_task(&self, id: i32) {
         let removed = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
@@ -692,6 +727,23 @@ impl AppHost {
             }
         }
         self.notify_task_organizers();
+        let _ =
+            self.tasks
+                .home
+                .compare_exchange(id, HOME_GONE, Ordering::Relaxed, Ordering::Relaxed);
+        if self.home_to_restart()
+            && let Some(host) = self.me.upgrade()
+            && let Err(e) = host.start_home()
+        {
+            eprintln!("app host: home: {}", e.message);
+        }
+    }
+
+    /// Whether the home is to start again: its root task has gone and no
+    /// task is left to focus.
+    fn home_to_restart(&self) -> bool {
+        self.tasks.home.load(Ordering::Relaxed) == HOME_GONE
+            && self.activities.stack.lock().unwrap().focused().is_none()
     }
 
     /// `TaskOrganizerController.createRootTask` on the display: a root
@@ -1046,7 +1098,13 @@ impl AppHost {
         let found = {
             let stack = self.activities.stack.lock().unwrap();
             stack
-                .find_task(&real, info.task_affinity.as_deref(), user, None)
+                .find_task(
+                    &real,
+                    info.task_affinity.as_deref(),
+                    user,
+                    None,
+                    super::activity::ACTIVITY_TYPE_STANDARD,
+                )
                 .and_then(|t| stack.get(t))
                 .map(|a| a.task)
         };
@@ -1915,7 +1973,10 @@ pub(super) mod tests {
             for mode in [1, 5] {
                 host.apply_task_launch_options(
                     id,
-                    super::super::activity_options::LaunchOptions { mode, bounds: None },
+                    super::super::activity_options::LaunchOptions {
+                        mode,
+                        ..Default::default()
+                    },
                     &info,
                 )
                 .unwrap();
@@ -2240,6 +2301,106 @@ pub(super) mod tests {
         (thread, activity_tokens, receive, tree)
     }
 
+    /// `startHomeActivity` of process 7's `p/p.Main`, left resizeable by
+    /// default (`RESIZE_MODE_FORCE_RESIZEABLE`), into a new root home task
+    /// after `wct_tasks`: its id and its activity's token. The activity is
+    /// stopped behind the desktop.
+    pub(in crate::app_host) fn home_task(host: &Arc<AppHost>) -> (i32, u64) {
+        use super::super::activity::ACTIVITY_TYPE_HOME;
+        use super::super::activity_stack::{Activity, State};
+        let mut info = host.activity_info_of("p", "p.Main").unwrap();
+        info.resize_mode = 4;
+        let options = super::super::activity_options::LaunchOptions {
+            activity_type: ACTIVITY_TYPE_HOME,
+            ..Default::default()
+        };
+        let home = host
+            .new_task_with_options(10100, "p", "p.Main", &info, None, options)
+            .unwrap();
+        super::super::task_info::tests::add_app_task(host, home);
+        let mut request = super::super::activity_start::StartRequest::launcher("A");
+        request.launch_options = options;
+        let token = host.new_activity(
+            7,
+            10100,
+            "p",
+            info,
+            super::super::resources::WindowStyle::default(),
+            home,
+            request,
+        );
+        let mut stack = host.activities.stack.lock().unwrap();
+        let mut task = stack.tasks.pop().unwrap();
+        task.intent.component = Some(crate::package::intent::ComponentName {
+            package: "p".into(),
+            class: "p.Main".into(),
+        });
+        stack.tasks.insert(0, task);
+        let mut a = Activity::new(token, home, 7, "p/p.Main", 0, 0, None);
+        a.state = State::Stopped;
+        stack.activities.insert(0, a);
+        (home, token)
+    }
+
+    #[test]
+    fn the_root_home_task_is_behind_the_desktop_and_restarts_once_nothing_is_focused() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 1500,
+            };
+            let (_thread, _activities, mut receive, _) = wct_tasks(host, export, old);
+            let (home, token) = home_task(host);
+            // Under the app tasks, of no Mac window: the bridge hears nothing
+            // of it, and the Mac-window bounds leave it out.
+            assert_eq!(host.tasks.root_task_ids(), [8, 7, home]);
+            assert_eq!(
+                receive.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert_eq!(host.tasks.all_bounds(), [old, old]);
+            // `setActivityType`: a home activity is resizeable only if it
+            // asked to be, so its task has no multi-window on a phone.
+            assert_eq!(
+                host.activities.records.lock().unwrap()[&token]
+                    .info
+                    .resize_mode,
+                0
+            );
+            let info = host.organizer_task_info(home).unwrap();
+            assert_eq!(
+                (
+                    info.activity_type,
+                    info.configuration.window.activity_type,
+                    info.resize_mode,
+                    info.is_resizeable,
+                    info.supports_multi_window,
+                ),
+                (2, 2, 0, false, false)
+            );
+            // Its process dies behind the focused apps: it goes unreported
+            // and stays gone while an app is left to focus.
+            {
+                let mut stack = host.activities.stack.lock().unwrap();
+                stack.activities.retain(|a| a.task != home);
+                stack.tasks.retain(|t| t.id != home);
+                stack.home = None;
+            }
+            host.remove_task(home);
+            assert_eq!(
+                receive.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert_eq!(host.tasks.home.load(Ordering::Relaxed), HOME_GONE);
+            assert!(!host.home_to_restart());
+            // With nothing left to focus, the home starts again.
+            host.activities.stack.lock().unwrap().activities.clear();
+            assert!(host.home_to_restart());
+        });
+    }
+
     #[test]
     fn wct_dispatch_permission_admission_bounds_configuration_and_visible_reorder() {
         use super::super::{
@@ -2457,7 +2618,7 @@ pub(super) mod tests {
                 7,
                 super::super::activity_options::LaunchOptions {
                     mode: 1,
-                    bounds: None,
+                    ..Default::default()
                 },
                 &host.activity_info_of("p", "p.Main").unwrap(),
             )
@@ -2849,6 +3010,34 @@ impl Tasks {
         self.animation_test_task(id, bounds);
         self.tasks.lock().unwrap().last_mut().unwrap().launch = Some("p/p.Main".into());
         *self.bridge.lock().unwrap() = Some(bridge);
+    }
+
+    /// The root home task 1, of `h/h.Home`, filling `display`.
+    pub(super) fn home_test_task(&self, display: Rect) {
+        self.home.store(1, Ordering::Relaxed);
+        self.tasks.lock().unwrap().insert(
+            0,
+            Task {
+                id: 1,
+                uid: 10050,
+                package: "h".into(),
+                component: "h/h.Home".into(),
+                real_activity: "h/h.Home".into(),
+                bounds: display,
+                windowing_mode: 0,
+                requested_mode: 0,
+                parent: None,
+                requested_bounds: None,
+                restore_bounds: None,
+                min_size: (-1, -1),
+                layer: None,
+                launch: None,
+                window_layout_affinity: None,
+                has_been_visible: false,
+                organized: false,
+                root: None,
+            },
+        );
     }
 
     pub(super) fn animation_test_task(&self, id: i32, bounds: Rect) {

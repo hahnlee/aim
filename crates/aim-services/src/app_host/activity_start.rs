@@ -24,7 +24,7 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iactivitytaskmanager as atm;
 use aim_service_aidl::android_app_iapplicationthread as thread;
 
-use super::activity::{ActivityRecord, Item, Token};
+use super::activity::{ACTIVITY_TYPE_HOME, ACTIVITY_TYPE_STANDARD, ActivityRecord, Item, Token};
 use super::activity_stack::{self as stack, Command, Decision, Outcome, Then};
 use super::kept::{KeptIntent, RawBundle, RawIntent};
 use super::resources::WindowStyle;
@@ -47,6 +47,11 @@ const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
 /// `ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS`, `FLAG_NO_HISTORY`.
 pub const FLAG_EXCLUDE_FROM_RECENTS: i32 = 0x20;
 const FLAG_NO_HISTORY: i32 = 0x80;
+/// `ActivityInfo.RESIZE_MODE_UNRESIZEABLE`,
+/// `RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION`, `RESIZE_MODE_FORCE_RESIZEABLE`.
+const RESIZE_MODE_UNRESIZEABLE: i32 = 0;
+const RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION: i32 = 1;
+const RESIZE_MODE_FORCE_RESIZEABLE: i32 = 4;
 /// `Activity.RESULT_CANCELED`.
 const RESULT_CANCELED: i32 = 0;
 /// `ActivityTaskSupervisor.TOP_RESUMED_STATE_LOSS_TIMEOUT`.
@@ -244,7 +249,7 @@ impl Item for StartActivityItem {
     }
 }
 
-struct StopActivityItem(Binder);
+pub(super) struct StopActivityItem(pub(super) Binder);
 
 impl Item for StopActivityItem {
     fn class(&self) -> &'static str {
@@ -318,7 +323,7 @@ impl AppHost {
         start_seq: i64,
         uid: u32,
         package: &str,
-        info: ActivityInfo,
+        mut info: ActivityInfo,
         style: WindowStyle,
         task: i32,
         mut request: StartRequest,
@@ -327,6 +332,17 @@ impl AppHost {
             unreachable!("a local binder")
         };
         let grants = request.grants.take();
+        // `ActivityRecord.setActivityType`, as the start resolved it.
+        let home = request.launch_options.activity_type == ACTIVITY_TYPE_HOME;
+        // A home activity is resizeable only if it asked to be.
+        if home
+            && matches!(
+                info.resize_mode,
+                RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION | RESIZE_MODE_FORCE_RESIZEABLE
+            )
+        {
+            info.resize_mode = RESIZE_MODE_UNRESIZEABLE;
+        }
         let record = ActivityRecord {
             package: package.to_string(),
             class: request.class,
@@ -352,6 +368,11 @@ impl AppHost {
             referrer: request.referrer,
             launched_from: request.launched_from,
             task,
+            activity_type: if home {
+                ACTIVITY_TYPE_HOME
+            } else {
+                ACTIVITY_TYPE_STANDARD
+            },
             result_to: request.result_to,
             result_who: request.result_who,
             request_code: request.request_code,
@@ -432,7 +453,8 @@ impl AppHost {
             )
         };
         match command {
-            Command::Launch(t) => {
+            Command::Launch(t) | Command::LaunchStopped(t) => {
+                let resume = matches!(command, Command::Launch(_));
                 let (start_seq, uid) = start_of(t).ok_or("no activity to launch")?;
                 if start_seq == 0 {
                     let (package, process, request) = {
@@ -463,7 +485,9 @@ impl AppHost {
                         .map(|_| ())
                         .map_err(|e| e.message);
                 }
-                self.activity_usage(t, super::app_standby::Event::ActivityResumed);
+                if resume {
+                    self.activity_usage(t, super::app_standby::Event::ActivityResumed);
+                }
                 let global = self.global_config(uid).ok_or("launch before bind")?;
                 let task = self
                     .activities
@@ -479,6 +503,7 @@ impl AppHost {
                         super::activity::Launch {
                             global: &global,
                             task: bounds,
+                            resume,
                         },
                     )
                     .ok_or("no activity to launch")?;
@@ -741,6 +766,17 @@ impl AppHost {
         class: &str,
         info: ActivityInfo,
     ) -> Result<(), Exception> {
+        self.start_in_new_task(package, info, StartRequest::launcher(class))
+    }
+
+    /// `request`'s start of `package`'s activity `info` in a new task, in
+    /// its process if that runs, else in the process started for it.
+    pub(super) fn start_in_new_task(
+        self: &Arc<Self>,
+        package: &str,
+        info: ActivityInfo,
+        request: StartRequest,
+    ) -> Result<(), Exception> {
         let process = super::providers::process_name(&info.info);
         let uid = info.info.application_info.uid as u32;
         match self
@@ -753,18 +789,13 @@ impl AppHost {
                     uid,
                     package,
                     info,
-                    StartRequest::launcher(class),
+                    request,
                     &Decision::default(),
                     None,
                 )
                 .map(|_| ()),
             None => self
-                .start_process_for(
-                    package,
-                    &process,
-                    Some(StartRequest::launcher(class)),
-                    false,
-                )
+                .start_process_for(package, &process, Some(request), false)
                 .map(|_| ()),
         }
     }
@@ -1072,7 +1103,9 @@ impl AppHost {
                 "the resolver for an intent of several activities (#1485)",
             ));
         }
-        let launch_options = self.activity_launch_options(args.options.as_ref(), uid)?;
+        let mut launch_options = self.activity_launch_options(args.options.as_ref(), uid)?;
+        // Of the intent as the caller gave it.
+        launch_options.activity_type = self.start_activity_type(&intent.intent, uid)?;
         let target_uid = info.info.application_info.uid;
         let package = info
             .info
@@ -1187,6 +1220,11 @@ impl AppHost {
             user: target_uid / PER_USER_RANGE,
             source,
             result_to,
+            activity_type: if launch_options.activity_type == ACTIVITY_TYPE_HOME {
+                ACTIVITY_TYPE_HOME
+            } else {
+                ACTIVITY_TYPE_STANDARD
+            },
         };
         let d = self
             .activities

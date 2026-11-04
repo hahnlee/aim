@@ -90,6 +90,7 @@ pub mod generations;
 mod gfxinfo;
 pub mod grammatical_inflection;
 pub mod hint_manager;
+mod home;
 pub mod input_manager;
 pub mod input_method;
 pub mod input_shell;
@@ -6140,7 +6141,11 @@ impl Service for Control {
                 if let Some(bluetooth) = host.bluetooth.get() {
                     bluetooth.on_user_starting();
                 }
-                // `systemReady`.
+                // `systemReady`: the home on the display, then the user's
+                // start broadcasts.
+                if let Err(e) = host.start_home() {
+                    eprintln!("app host: home: {}", e.message);
+                }
                 host.send_user_start_broadcasts();
                 // StatsCompanionService's `PHASE_THIRD_PARTY_APPS_CAN_START`
                 // and `PHASE_BOOT_COMPLETED`, then `finishBooting`'s.

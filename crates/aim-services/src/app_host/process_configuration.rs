@@ -271,6 +271,7 @@ pub(super) mod tests {
                         Launch {
                             global: &global,
                             task: bounds,
+                            resume: true,
                         },
                     )
                     .unwrap();

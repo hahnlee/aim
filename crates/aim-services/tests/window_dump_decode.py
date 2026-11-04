@@ -86,7 +86,18 @@ assert display['resumed_activity']['title'] == 'p/.A8'
 assert 'input_method_input_target_identifier' not in display
 area = display['root_display_area']['window_container']['children'][0]['display_area']
 assert area['is_task_display_area'] == 1 and area['feature_id'] == 1
-for index, child in enumerate(area['window_container']['children']):
+home, *tasks = area['window_container']['children']
+home = home['task']
+assert home['id'] == home['root_task_id'] == 1 and home['fills_parent'] == 1
+assert home['task_fragment']['activity_type'] == 2  # ACTIVITY_TYPE_HOME
+home_wc = home['task_fragment']['window_container']
+assert 'visible' not in home_wc  # proto3 zero: behind the desktop
+home_window = home_wc['configuration_container']['full_configuration']['window_configuration']
+assert home_window['activity_type'] == 2 and home_window['bounds'] == dict(right=1920, bottom=1080)
+home_activity = home_wc['children'][0]['activity']
+assert home_activity['name'] == 'h/.Home' and home_activity['state'] == 'STOPPED'
+assert 'visible' not in home_activity and 'resumed_activity' not in home
+for index, child in enumerate(tasks):
     task = child['task']
     ident = 7 + index
     assert task['id'] == task['root_task_id'] == ident
@@ -109,4 +120,4 @@ for index, child in enumerate(area['window_container']['children']):
         assert len(win['window_container']['children']) == 1
         popup = win['window_container']['children'][0]['window']
         assert 'children' not in popup['window_container']
-print('Pinned WM schema: multi-task hierarchy, configuration, focus, resumed and subwindows verified')
+print('Pinned WM schema: root home task, multi-task hierarchy, configuration, focus, resumed and subwindows verified')

@@ -57,9 +57,8 @@ const CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW: i64 = 197654537;
 /// the focused visible one first, then the other visible ones, then the
 /// rest, at most `max`; each with its last active time, a visible one's
 /// after `now` (`elapsedRealtime`), the most recent first.
-/// `filterOnlyVisibleRecents` keeps them all: they are standard tasks,
-/// neither pinned nor locked, on a display that shows its tasks in
-/// recents (`RecentTasks.isVisibleRecentTask`).
+/// The root home task is one of them, as `getTasks` does not filter by
+/// `RecentTasks.isVisibleRecentTask`.
 pub fn running_tasks(
     stack: &Stack,
     max: i32,
@@ -546,6 +545,21 @@ impl AppHost {
         })
     }
 
+    /// The global configuration of a task whose top activity's uid is
+    /// `top_uid` and base activity's `base_uid`: the one its process was
+    /// bound with. A task whose processes died keeps its records (a stopped
+    /// home behind the desktop is not relaunched) and takes the global
+    /// configuration, its container's.
+    fn task_global_config(&self, top_uid: u32, base_uid: u32) -> Result<Configuration, Exception> {
+        match self
+            .global_config(top_uid)
+            .or_else(|| self.global_config(base_uid))
+        {
+            Some(global) => Ok(global),
+            None => self.global_configuration(),
+        }
+    }
+
     /// `Task.fillTaskInfo` of `task` (`RunningTasks.createRunningTaskInfo`):
     /// its last active time `last_active`, its base intent's extras
     /// stripped if `strip`, what a caller not `allowed` may not see of
@@ -563,7 +577,7 @@ impl AppHost {
             c.split_once('/')
                 .map(|(p, c)| (p.to_string(), c.to_string()))
         };
-        let (t, running, top, focused, visibility, translucent, top_occludes) = {
+        let (t, running, top, focused, visibility, translucent, top_occludes, activity_type) = {
             let stack = self.activities.stack.lock().unwrap();
             let t = stack.task(task).ok_or_else(gone)?.clone();
             let running: Vec<u64> = stack
@@ -581,6 +595,7 @@ impl AppHost {
                 stack.visibility(task),
                 stack.translucent(task),
                 top.occludes_parent,
+                stack.activity_type(task),
             )
         };
         let base_token = *running.first().ok_or_else(gone)?;
@@ -598,25 +613,19 @@ impl AppHost {
         };
         let top_component = super::activity_start::real_component(&top_info);
         let base_activity = super::activity_start::real_component(&root_info);
-        let global = self
-            .global_config(top_uid)
-            .or_else(|| self.global_config(base_uid))
-            .ok_or_else(|| {
-                Exception::new(
-                    EX_ILLEGAL_STATE,
-                    format!("task {task} of no running process"),
-                )
-            })?;
+        let global = self.task_global_config(top_uid, base_uid)?;
         let bounds = self.tasks.own_bounds(task);
         let parent = self.tasks.parent(task);
         let mut configuration = match bounds {
             Some((mode, bounds)) => global.of_task(mode, bounds),
             None => global.clone(),
         };
-        configuration.window.activity_type = ACTIVITY_TYPE_STANDARD;
+        configuration.window.activity_type = activity_type;
         let resize_mode = root_info.resize_mode;
         let min_size = self.tasks.min_size(task).ok_or_else(gone)?;
-        let force_resizable = multi_window.force_resizable;
+        // Forced resizeability is a standard task's (`Task.isResizeable`).
+        let force_resizable =
+            multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD;
         let is_resizeable = force_resizable
             || RESIZEABLE_MODES.contains(&resize_mode)
             || root_info.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
@@ -662,7 +671,7 @@ impl AppHost {
             configuration,
             token: self.task_token(task),
             is_running: true,
-            activity_type: ACTIVITY_TYPE_STANDARD,
+            activity_type,
             launch_cookie: None,
             parent_task_id: parent.unwrap_or(INVALID_TASK_ID),
             top_activity_info: Some(top_info),
@@ -1201,6 +1210,26 @@ pub(super) mod tests {
         assert_eq!(ints(&mut r, 2), [1, 0]);
         assert_eq!(rect(&mut r), None); // topActivityMainWindowFrame
         assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn a_task_whose_process_died_has_the_global_configuration() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let metrics = crate::app_host::display::Metrics::of(&Display::phone_for_test());
+            host.display_metrics.set(Ok(metrics)).unwrap();
+            let global = host.global_configuration().unwrap();
+            // No process of uid 10100 runs, as after a killed home's death.
+            assert_eq!(host.task_global_config(10_100, 10_100).unwrap(), global);
+            let f = crate::app_host::tests::host_with_start(1, Arc::new(|| {}));
+            let mut app = f.apps.lock().unwrap().remove(&1).unwrap();
+            app.uid = 10_100;
+            app.thread = Some(export(Arc::new(Token)));
+            let mut bound = global.clone();
+            bound.font_scale = 1.5;
+            app.config = Some(bound.clone());
+            host.apps.lock().unwrap().insert(1, app);
+            assert_eq!(host.task_global_config(10_200, 10_100).unwrap(), bound);
+        });
     }
 }
 

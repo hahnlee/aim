@@ -183,6 +183,9 @@ pub enum Visibility {
 pub enum Command {
     /// `LaunchActivityItem` and `ResumeActivityItem`.
     Launch(u64),
+    /// `LaunchActivityItem` and `StopActivityItem`: `realStartActivityLocked`
+    /// of an activity neither resumed nor visible.
+    LaunchStopped(u64),
     /// `PauseActivityItem`: finishing, user leaving.
     Pause {
         token: u64,
@@ -282,6 +285,8 @@ pub struct Start<'a> {
     /// result goes to (`resultRecord`).
     pub source: Option<u64>,
     pub result_to: Option<u64>,
+    /// The activity type of its record (`ActivityRecord.setActivityType`).
+    pub activity_type: i32,
 }
 
 /// What a start comes to once decided.
@@ -304,6 +309,10 @@ pub struct Stack {
     fullscreen: BTreeSet<i32>,
     /// Tasks behind the desktop, also hidden on a freeform display.
     background: BTreeSet<i32>,
+    /// The root home task (`TaskDisplayArea.mRootHomeTask`). In window mode
+    /// it stays behind the Mac desktop, which is the user's home: never
+    /// visible, focused or brought to the front.
+    pub(super) home: Option<i32>,
     /// `RecentTasks.remove`: finishing tasks can remain attached until destroyed.
     removed_from_recents: BTreeSet<i32>,
     /// The task last reported focused.
@@ -375,7 +384,22 @@ impl Stack {
             .iter()
             .rev()
             .map(|t| t.id)
-            .find(|&t| !self.background.contains(&t) && self.top(t).is_some())
+            .find(|&t| !self.behind_desktop(t) && self.top(t).is_some())
+    }
+
+    /// Whether `task` is behind the desktop: moved there, or the root home
+    /// task in window mode.
+    fn behind_desktop(&self, task: i32) -> bool {
+        self.background.contains(&task) || (self.freeform && self.home == Some(task))
+    }
+
+    /// The activity type of `task`: the root home task's is home.
+    pub(super) fn activity_type(&self, task: i32) -> i32 {
+        if self.home == Some(task) {
+            super::activity::ACTIVITY_TYPE_HOME
+        } else {
+            super::activity::ACTIVITY_TYPE_STANDARD
+        }
     }
 
     /// The focused task's top activity (`topRunningActivity`).
@@ -389,12 +413,12 @@ impl Stack {
     /// tasks neither fill the display nor match its bounds, so do not
     /// hide one another.
     pub fn visibility(&self, task: i32) -> Visibility {
-        if self.background.contains(&task) || self.top(task).is_none() {
+        if self.behind_desktop(task) || self.top(task).is_none() {
             return Visibility::Invisible;
         }
         let mut translucent = false;
         for other in self.tasks.iter().rev().take_while(|t| t.id != task) {
-            if self.background.contains(&other.id) || self.top(other.id).is_none() {
+            if self.behind_desktop(other.id) || self.top(other.id).is_none() {
                 continue;
             }
             if self.freeform && !self.fullscreen.contains(&other.id) {
@@ -454,17 +478,24 @@ impl Stack {
     /// `FindTaskResult`: the top activity of the front task of
     /// `component` with the same document data, else (neither being a
     /// document) of the front task of `affinity`, skipping tasks topped by
-    /// a `singleInstance` activity. `document` is the data of a start that
-    /// is a document (`Intent.isDocument`), none of another.
+    /// a `singleInstance` activity and tasks of another activity type than
+    /// `activity_type` (`isCompatibleActivityType`). `document` is the data
+    /// of a start that is a document (`Intent.isDocument`), none of another.
     pub fn find_task(
         &self,
         component: &str,
         affinity: Option<&str>,
         user: u32,
         document: Option<Option<&Uri>>,
+        activity_type: i32,
     ) -> Option<u64> {
         let mut candidate = None;
-        for task in self.tasks.iter().rev().filter(|t| t.user == user) {
+        for task in self
+            .tasks
+            .iter()
+            .rev()
+            .filter(|t| t.user == user && self.activity_type(t.id) == activity_type)
+        {
             let Some(top) = self
                 .top(task.id)
                 .filter(|a| a.user == user && a.launch_mode != LAUNCH_SINGLE_INSTANCE)
@@ -579,7 +610,7 @@ impl Stack {
                 // `FindTaskResult` of the start's intent, with its flags.
                 let document =
                     (flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0).then_some(s.intent.data.as_ref());
-                self.find_task(s.component, s.affinity, s.user, document)
+                self.find_task(s.component, s.affinity, s.user, document, s.activity_type)
                     .and_then(|t| self.get(t))
                     .map(|a| a.task)
             }
@@ -591,10 +622,13 @@ impl Stack {
         {
             reused = None;
         }
-        // `computeTargetTask`.
+        // `computeTargetTask`; else a home activity's root task
+        // (`getOrCreateRootTask`) is the root home task, reused as its leaf
+        // task (`reuseOrCreateTask`).
         let target = reused.or_else(|| {
             if d.result_to.is_none() && flags & FLAG_ACTIVITY_NEW_TASK != 0 {
-                None
+                self.home
+                    .filter(|_| s.activity_type == super::activity::ACTIVITY_TYPE_HOME)
             } else {
                 source.map(|a| a.task)
             }
@@ -771,11 +805,16 @@ impl Stack {
             let a = self.activities.remove(at);
             self.activities.push(a);
         }
+        let mut added = None;
         match then {
             Then::Add(activity, task) => {
                 if let Some(mut task) = task {
                     task.last_active = super::alarm_service::elapsed_ms();
-                    self.tasks.push(*task);
+                    if self.behind_desktop(task.id) {
+                        self.tasks.insert(0, *task);
+                    } else {
+                        self.tasks.push(*task);
+                    }
                 } else {
                     self.move_to_front(activity.task);
                 }
@@ -784,6 +823,7 @@ impl Stack {
                 {
                     self.set_intent(activity.task, identity);
                 }
+                added = Some(activity.token);
                 self.activities.push(activity);
             }
             Then::Deliver(token, payload) => {
@@ -799,7 +839,27 @@ impl Stack {
         }
         self.resume_focused(user_leaving, &mut out);
         self.settle(&mut out);
+        if let Some(token) = added {
+            self.launch_behind_desktop(token, &mut out);
+        }
         out
+    }
+
+    /// `realStartActivityLocked` of `token`, in an attached process, when
+    /// its task is behind the desktop: not to be resumed nor visible, it is
+    /// launched to stopped.
+    fn launch_behind_desktop(&mut self, token: u64, out: &mut Vec<Command>) {
+        let Some(task) = self
+            .get(token)
+            .filter(|a| a.state == State::Initializing && !a.pending)
+            .map(|a| a.task)
+        else {
+            return;
+        };
+        if self.behind_desktop(task) {
+            self.get_mut(token).unwrap().state = State::Stopping;
+            out.push(Command::LaunchStopped(token));
+        }
     }
 
     /// `Task.setIntent` of a start into it.
@@ -824,6 +884,10 @@ impl Stack {
 
     fn move_to_front(&mut self, task: i32) {
         self.background.remove(&task);
+        // The desktop, not the root home task, comes to the front.
+        if self.behind_desktop(task) {
+            return;
+        }
         if let Some(at) = self.tasks.iter().position(|t| t.id == task) {
             let t = self.tasks.remove(at);
             self.tasks.push(t);
@@ -1103,10 +1167,7 @@ impl Stack {
             self.complete_finishing(token, &mut out);
         }
         self.resume_focused(false, &mut out);
-        if self.focused().is_none()
-            || self
-                .get(token)
-                .is_some_and(|a| self.background.contains(&a.task))
+        if self.focused().is_none() || self.get(token).is_some_and(|a| self.behind_desktop(a.task))
         {
             self.stop_hidden(None, &mut out);
         }
@@ -1211,6 +1272,9 @@ impl Stack {
             self.background.remove(&task);
             self.removed_from_recents.remove(&task);
             self.fullscreen.remove(&task);
+            if self.home == Some(task) {
+                self.home = None;
+            }
             out.push(Command::TaskEmpty(task));
         }
     }
@@ -1642,6 +1706,7 @@ mod tests {
             user: 0,
             source,
             result_to: None,
+            activity_type: crate::app_host::activity::ACTIVITY_TYPE_STANDARD,
         }
     }
 
