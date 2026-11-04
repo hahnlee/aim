@@ -791,12 +791,14 @@ impl AppHost {
             .filter_map(|uid| Some((uid, self.global_config(uid)?)))
             .collect();
         let (mut items, relaunching) = self.reconfigure_activities(id, &globals, bounds);
+        // Each process following one of them is told first.
+        let processes = self.process_configuration_changes();
         // A relaunching activity's windows are not told (`reportResized`).
         if !relaunching {
             items.extend(self.resize_windows(id, &globals, bounds)?);
         }
         let mut by_start: BTreeMap<i64, Vec<Box<dyn Item>>> = BTreeMap::new();
-        for (start_seq, item) in items {
+        for (start_seq, item) in processes.into_iter().chain(items) {
             by_start.entry(start_seq).or_default().push(item);
         }
         for (start_seq, items) in by_start {

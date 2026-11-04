@@ -50,6 +50,15 @@ bounds ([window mode](windows.md#display-rotation-policy-2630)). Host shell,
 permission, persistence/reload and fixed-rotation checks cover this path; no
 guest boot or live CtsWindowManager rerun was performed (2026-11-01).
 
+An app process's configuration now follows the activity it launched last
+(`WindowProcessController`'s registration, #2629), so in a freeform task window
+its Application resources report the task window's size, not the display's.
+Host tests cover launch, takeover, destruction and the system-uid exception. On a
+window-mode boot with fresh data, AppConfigurationTests'
+testAppConfigurationMatchesActivityInFreeform passes, and
+testAppConfigurationMatchesTopActivityInMultiWindow passes its fullscreen size
+check, then stops at createRootTask (#2616) (2026-11-04).
+
 Regular-file writes and admitted fallocate allocation/in-file hole punching clear
 set-ID modes without CAP_FSETID (#779, #2515); a shared generation invalidates
 cached modes. Host syscall/metadata checks pass; no guest boot was run (2026-10-31).

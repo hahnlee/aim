@@ -111,6 +111,7 @@ fn system_deliveries(ordered: bool) {
                 thread: Some(thread),
                 activities: vec![],
                 config: Some(Default::default()),
+                reported_config: None,
                 providers: vec![],
                 removed: false,
                 first_frame: None,

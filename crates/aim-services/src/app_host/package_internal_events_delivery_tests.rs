@@ -62,6 +62,7 @@ pub(in crate::app_host) fn register_filter(
             thread: Some(thread),
             activities: vec![],
             config: None,
+            reported_config: None,
             providers: vec![],
             removed: false,
             first_frame: None,

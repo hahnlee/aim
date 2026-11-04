@@ -344,6 +344,7 @@ impl AppHost {
             config_changes: ActivityRecord::real_config_changes(&info),
             size_buckets: None,
             reported: None,
+            ident: 0,
             info,
             style,
             resolved_type: request.resolved_type,
@@ -1556,6 +1557,15 @@ impl AppHost {
                 }
             }
         };
+        if destroyed {
+            // `WindowProcessController.removeActivity`: its process follows
+            // the activity it launched before, or none.
+            for (start_seq, item) in self.process_configuration_changes() {
+                if let Err(e) = self.schedule(start_seq, vec![item]) {
+                    eprintln!("app host: configuration of start {start_seq}: {e}");
+                }
+            }
+        }
         if destroyed {
             self.activities.finish_launch(token, Some((false, -1, 0)));
             self.cancel_activity_transition(token);

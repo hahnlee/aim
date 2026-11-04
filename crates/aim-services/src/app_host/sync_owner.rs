@@ -190,6 +190,7 @@ pub(super) mod tests {
                 thread: Some(thread),
                 activities: vec![],
                 config: None,
+                reported_config: None,
                 providers: vec![],
                 removed: false,
                 first_frame: None,
