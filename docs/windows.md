@@ -259,7 +259,11 @@ and letterboxing, are tracked in #2050.
   for fullscreen or freeform (`SET_WINDOWING_MODE`, as `setWindowingMode`
   does), and the window waits for the task's answer: a refusal (a task in
   an organizer root task) takes it back. While it moves into or out of
-  the full screen, its frames do not move or resize the task.
+  the full screen, its frames do not move or resize the task. AppKit does
+  not minimize a window in the full screen: a fullscreen task that goes
+  home or to the back takes its window out first (the task stays
+  fullscreen), and the window minimizes once out; back from the Dock, it
+  enters the full screen again.
 - **Title.** The task's `TaskDescription` label, else what a launcher
   calls it: in a shim, the shim's name; in the server, the label of the
   launcher activity the task was started with, else its app's label (both
