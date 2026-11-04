@@ -1502,18 +1502,10 @@ mod tests {
     fn wct_dispatch_permission_admission_bounds_configuration_and_visible_reorder() {
         use super::super::{
             activity_stack::{Activity, State, Visibility},
+            process_configuration::tests::Recorder,
             task_organizer::tests::apply_wct,
             window_container_transaction::{Transaction, tests::fixture},
         };
-        struct Thread;
-        impl Service for Thread {
-            fn descriptor(&self) -> &str {
-                "android.app.IApplicationThread"
-            }
-            fn transact(&self, _: &mut Call<'_>) -> Reply {
-                Ok(Parcel::new())
-            }
-        }
         crate::system::with_discovery_binders(|host, _, _, export| {
             let permissions = super::super::permission_manager::PermissionManager::with_system(
                 host.clone(),
@@ -1566,7 +1558,8 @@ mod tests {
             app.uid = 10100;
             app.package = "p".into();
             app.packages = vec!["p".into()];
-            app.thread = Some(export(Arc::new(Thread)));
+            let thread = Arc::new(Recorder::default());
+            app.thread = Some(export(thread.clone()));
             app.config = Some(global.clone());
             host.apps.lock().unwrap().insert(7, app);
             let old = Rect {
@@ -1592,6 +1585,8 @@ mod tests {
                 let record = records.get_mut(&token).unwrap();
                 record.reported = Some(global.of_freeform_task(old));
                 record.config_changes = i32::MAX;
+                // The process follows the activity of task 7.
+                record.ident = 9 - id;
                 drop(records);
                 let mut a = Activity::new(token, id, 7, "p/p.Main", 0, 0, None);
                 a.state = State::Resumed;
@@ -1709,6 +1704,20 @@ mod tests {
             assert_eq!(
                 (config.screen_width_dp, config.screen_height_dp),
                 (450, 550)
+            );
+            // Its process is told before it, of its new size.
+            let sent = thread.take(1);
+            let [(Some(process), Some(next))] = &sent[..] else {
+                panic!("{sent:?}");
+            };
+            assert_eq!(
+                (process.screen_width_dp, process.screen_height_dp),
+                (450, 550)
+            );
+            assert_eq!(process.window.bounds, expected);
+            assert_eq!(
+                next,
+                "android.app.servertransaction.ActivityConfigurationChangeItem"
             );
             assert_eq!(
                 records[&activity_tokens[1]]

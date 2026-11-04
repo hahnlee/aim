@@ -427,8 +427,7 @@ impl AppHost {
             record.info.clone(),
         );
         drop(records);
-        let current =
-            self.launching_process_configuration(start_seq, launch.global, &override_config);
+        let current = self.launching_process_configuration(start_seq, launch.global);
         let items: Vec<Box<dyn Item>> = vec![
             Box::new(LaunchActivityItem {
                 token,

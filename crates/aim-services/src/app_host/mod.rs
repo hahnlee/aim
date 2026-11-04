@@ -597,6 +597,11 @@ pub struct AppHost {
     /// The global configuration's sequence number.
     global_seq: AtomicI64,
     configuration_update: Mutex<()>,
+    /// Held from reading the activity each process follows until its
+    /// configuration is updated (the WindowManager lock's part in
+    /// `WindowProcessController.onConfigurationChanged`), before `records`
+    /// and `apps`.
+    process_configuration_update: Mutex<()>,
     /// GrammaticalInflectionService's `mGrammaticalGenderCache`: each
     /// user's system grammatical gender, read from its file once.
     grammatical_genders: Mutex<HashMap<i32, i32>>,
@@ -763,6 +768,7 @@ impl AppHost {
             config_seq: AtomicI64::new(1),
             global_seq: AtomicI64::new(1),
             configuration_update: Mutex::new(()),
+            process_configuration_update: Mutex::new(()),
             grammatical_genders: Mutex::new(HashMap::new()),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             unlocked_users: Mutex::new(Default::default()),
