@@ -172,6 +172,7 @@ pub mod platform_compat;
 pub mod playback;
 pub mod power_service;
 mod preferred_records;
+mod process_configuration;
 mod process_start;
 mod provider_queries;
 pub mod providers;
@@ -459,6 +460,9 @@ struct App {
     activities: Vec<activity_start::StartRequest>,
     /// The global configuration it was bound with.
     config: Option<config::Configuration>,
+    /// The configuration it was last sent (`WindowProcessController
+    /// .mLastReportedConfiguration`).
+    reported_config: Option<config::Configuration>,
     /// The providers it was handed (`ProcessRecord.mProviders`).
     providers: Vec<package::info::ProviderInfo>,
     /// Whether its services go with it: it crashed too often to keep
@@ -587,9 +591,17 @@ pub struct AppHost {
     instrumentation: instrumentation::State,
     /// The services of this host, by name, once registered.
     published: Mutex<Vec<(String, Binder)>>,
-    /// The global configuration's sequence number.
+    /// The last sequence number a configuration took
+    /// (`ActivityTaskManagerService.mConfigurationSeq`).
     config_seq: AtomicI64,
+    /// The global configuration's sequence number.
+    global_seq: AtomicI64,
     configuration_update: Mutex<()>,
+    /// Held from reading the activity each process follows until its
+    /// configuration is updated (the WindowManager lock's part in
+    /// `WindowProcessController.onConfigurationChanged`), before `records`
+    /// and `apps`.
+    process_configuration_update: Mutex<()>,
     /// GrammaticalInflectionService's `mGrammaticalGenderCache`: each
     /// user's system grammatical gender, read from its file once.
     grammatical_genders: Mutex<HashMap<i32, i32>>,
@@ -754,7 +766,9 @@ impl AppHost {
             instrumentation: instrumentation::State::default(),
             published: Mutex::new(Vec::new()),
             config_seq: AtomicI64::new(1),
+            global_seq: AtomicI64::new(1),
             configuration_update: Mutex::new(()),
+            process_configuration_update: Mutex::new(()),
             grammatical_genders: Mutex::new(HashMap::new()),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             unlocked_users: Mutex::new(Default::default()),
@@ -1594,6 +1608,7 @@ impl AppHost {
                 thread: None,
                 activities: Vec::new(),
                 config: None,
+                reported_config: None,
                 providers: Vec::new(),
                 removed: false,
                 first_frame: None,
@@ -1724,6 +1739,7 @@ impl AppHost {
                 thread: None,
                 activities: Vec::new(),
                 config: None,
+                reported_config: None,
                 providers: Vec::new(),
                 removed: false,
                 first_frame: None,
@@ -1995,6 +2011,7 @@ impl AppHost {
                 thread: None,
                 activities: request.into_iter().collect(),
                 config: None,
+                reported_config: None,
                 providers: Vec::new(),
                 removed: false,
                 first_frame: None,
@@ -2247,6 +2264,7 @@ impl AppHost {
         }
         let providers = self.process_providers(&app.process, app.uid)?;
         let (bind, config) = self.bind_application(app, providers.clone())?;
+        app.reported_config = Some(config.clone());
         app.config = Some(config);
         for provider in providers {
             app.add_provider(provider);
@@ -2349,6 +2367,7 @@ impl AppHost {
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
                 thread: Some(strong),
                 activities: Vec::new(),
+                reported_config: Some(config.clone()),
                 config: Some(config),
                 providers: Vec::new(),
                 removed: false,
@@ -4339,7 +4358,7 @@ impl AppHost {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
                 grammatical_gender: grammatical_inflection::merged_final(self)?,
-                seq: self.config_seq.load(Ordering::Relaxed) as i32,
+                seq: self.global_seq.load(Ordering::Relaxed) as i32,
             },
         );
         configuration.user_set_locale = locales.user_set;
@@ -4389,7 +4408,8 @@ impl AppHost {
             }
             return Ok(());
         }
-        self.config_seq.fetch_add(1, Ordering::Relaxed);
+        let seq = self.increase_configuration_seq();
+        self.global_seq.store(seq.into(), Ordering::Relaxed);
         let global = self.global_configuration()?;
         eprintln!("app host: Config changes={changes:x}");
         // `UsageStatsManagerInternal.reportConfigurationChange`.
@@ -4404,20 +4424,16 @@ impl AppHost {
             flags: 0,
             extra: usage_events::Extra::Configuration(global.to_proto()),
         });
-        let bound: Vec<i64> = {
-            let mut apps = self.apps.lock().unwrap();
-            apps.iter_mut()
-                .filter(|(_, a)| a.thread.is_some())
-                .map(|(seq, a)| {
-                    a.config = Some(global.clone());
-                    *seq
-                })
-                .collect()
-        };
-        for start_seq in bound {
-            let item: Box<dyn activity::Item> = Box::new(activity::ConfigurationChangeItem {
-                config: global.clone(),
-            });
+        for app in self.apps.lock().unwrap().values_mut() {
+            if app.thread.is_some() {
+                app.config = Some(global.clone());
+            }
+        }
+        // Each process is told first, of the activity it follows as that
+        // activity is now.
+        let activities =
+            self.reconfigure_all_activities(&global, |task| self.tasks.freeform_bounds(task));
+        for (start_seq, item) in self.process_configuration_changes() {
             if let Err(e) = self.schedule(start_seq, vec![item]) {
                 eprintln!("app host: configuration of start {start_seq}: {e}");
             }
@@ -4426,9 +4442,7 @@ impl AppHost {
         for (start_seq, item) in self.reconfigure_window_contexts(&global) {
             by_start.entry(start_seq).or_default().push(item);
         }
-        for (start_seq, item) in
-            self.reconfigure_all_activities(&global, |task| self.tasks.freeform_bounds(task))
-        {
+        for (start_seq, item) in activities {
             by_start.entry(start_seq).or_default().push(item);
         }
         for (start_seq, items) in by_start {
@@ -6446,6 +6460,7 @@ mod tests {
                 thread: None,
                 activities: Vec::new(),
                 config: None,
+                reported_config: None,
                 providers: Vec::new(),
                 removed: false,
                 first_frame: None,

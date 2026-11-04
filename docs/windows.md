@@ -154,8 +154,14 @@ visibility included). It connects to the display server itself
   (`SizeConfigurationBuckets.filterDiff`), relaunches it, keeping its
   window when only sizes changed; anything else is a configuration change
   (`ActivityConfigurationChangeItem`) and its windows' new frames
-  (`WindowStateResizeItem`); `CLOSE` finishes the task's activities and
-  kills its package's processes, as `removeTask` does
+  (`WindowStateResizeItem`). An app's process follows the configuration
+  of the activity it launched last and still has, as
+  `WindowProcessController` registers to it (a system-uid process keeps
+  the global one): its Application resources take that task window's
+  size, at launch (`LaunchActivityItem`) and in a `ConfigurationChangeItem`
+  sent before the activity's when the task resizes, the global
+  configuration changes or that activity is destroyed. `CLOSE` finishes
+  the task's activities and kills its package's processes, as `removeTask` does
   (`killTaskProcessesIfPossible`), unless one has an activity in another
   task: closing Clock's alarm window leaves Clock's own window.
 - **Input**: the agent sends a touch to the front window under it, in the

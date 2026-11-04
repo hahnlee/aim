@@ -703,6 +703,7 @@ fn kill_package_scopes_app_id_and_user_and_preserves_the_exit_reason() {
                     thread: None,
                     activities: vec![],
                     config: None,
+                    reported_config: None,
                     providers: vec![],
                     removed: false,
                     first_frame: None,

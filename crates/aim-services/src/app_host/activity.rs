@@ -131,6 +131,10 @@ pub struct ActivityRecord {
     /// The configuration it was last sent (`mLastReportedConfiguration`'s
     /// merged one).
     pub reported: Option<Configuration>,
+    /// The number of its last launch (`LaunchActivityItem`'s ident), 0
+    /// before: its process follows the configuration of the one it
+    /// launched last.
+    pub(super) ident: i32,
     /// What it launches with and as, and its theme's window style.
     pub info: ActivityInfo,
     pub style: WindowStyle,
@@ -401,6 +405,7 @@ impl AppHost {
         };
         override_config.window.activity_type = ACTIVITY_TYPE_STANDARD;
         record.reported = Some(override_config.clone());
+        record.ident = ident;
         let bounds = override_config.window.bounds;
         let intent: Box<dyn WriteParcelable> = match &record.intent {
             super::activity_start::LaunchIntent::Component => Box::new(Intent {
@@ -416,13 +421,20 @@ impl AppHost {
             }),
             super::activity_start::LaunchIntent::Raw(kept) => Box::new(kept.intent.clone()),
         };
+        let (start_seq, referrer, info) = (
+            record.start_seq,
+            record.referrer.clone(),
+            record.info.clone(),
+        );
+        drop(records);
+        let current = self.launching_process_configuration(start_seq, launch.global);
         let items: Vec<Box<dyn Item>> = vec![
             Box::new(LaunchActivityItem {
                 token,
                 ident,
-                current: launch.global.clone(),
+                current,
                 overrides: override_config,
-                referrer: record.referrer.clone(),
+                referrer,
                 assist,
                 shareable,
                 caller_info,
@@ -432,7 +444,7 @@ impl AppHost {
                     task_fragment_bounds: bounds,
                 },
                 intent,
-                info: record.info.clone(),
+                info,
             }),
             Box::new(ResumeActivityItem {
                 token,
