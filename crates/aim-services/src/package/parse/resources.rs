@@ -648,7 +648,8 @@ impl Table {
     }
 
     /// Index chunk headers and type specs; decode entries only when requested.
-    /// Consumers must check deferred errors after resolving their values.
+    /// Consumers must check deferred errors after resolving their values;
+    /// each check reports the errors of the reads since the previous one.
     pub fn indexed(data: Vec<u8>) -> Result<Self> {
         Ok(Self {
             indexed: Some(Arc::new(indexed::Index::new(data)?)),
@@ -1196,7 +1197,12 @@ mod tests {
         indexed.check().unwrap();
         assert!(indexed.string(1).is_none());
         assert!(indexed.check().is_err());
+        // A later read reports only its own errors; the failed string
+        // fails again when asked.
         assert_eq!(indexed.string(0), Some("a"));
+        indexed.check().unwrap();
+        assert!(indexed.string(1).is_none());
+        assert!(indexed.check().is_err());
     }
 
     #[test]

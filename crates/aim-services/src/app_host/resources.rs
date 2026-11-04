@@ -417,9 +417,10 @@ impl Framework {
             config: self.0.config(),
         };
         let result = f(&resources, &package.apks, &table_apks);
-        for table in package.tables.iter().flatten() {
-            table.check()?;
-        }
+        // Clear every table's deferred errors, so that the next read of a
+        // shared package reports only its own.
+        let errors: Vec<_> = package.tables.iter().flatten().map(|t| t.check()).collect();
+        errors.into_iter().collect::<Result<(), _>>()?;
         result
     }
 }
@@ -526,6 +527,44 @@ fn full_name(name: &str) -> Option<(&str, &str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A read of a package whose resources other reads share fails for its
+    /// own decoding errors only, as each `parseServiceInfo` throws alone.
+    #[test]
+    fn shared_package_reads_keep_their_own_errors() {
+        let root = std::env::temp_dir().join(format!("aim-shared-res-{}", std::process::id()));
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/discovery");
+        std::fs::create_dir_all(root.join("system/framework")).unwrap();
+        std::fs::write(root.join("system/build.prop"), "ro.build.version.sdk=36\n").unwrap();
+        std::fs::copy(
+            fixtures.join("framework.apk"),
+            root.join("system/framework/framework-res.apk"),
+        )
+        .unwrap();
+        let framework = Framework::load(&root, 160, "en-US").unwrap();
+        let apk = aim_apps::apk::Files::open(&fixtures.join("providers.apk")).unwrap();
+        // Point the widget XML's (0x7f010002) entry past its type chunk.
+        let mut arsc = apk.file("resources.arsc").unwrap();
+        let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]) as usize;
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let package = u16_at(&arsc, 2) + u32_at(&arsc, u16_at(&arsc, 2) + 4) as usize;
+        let mut chunk = package + u16_at(&arsc, package + 2);
+        while u16_at(&arsc, chunk) != 0x0201 {
+            chunk += u32_at(&arsc, chunk + 4) as usize;
+        }
+        assert_eq!(arsc[chunk + 9], 0, "a dense type chunk");
+        let offset = chunk + u16_at(&arsc, chunk + 2) + 2 * 4;
+        arsc[offset..offset + 4].copy_from_slice(&0x0fff_fff0u32.to_le_bytes());
+        let package = PackageResources {
+            apks: vec![apk],
+            tables: vec![Some(parse::resources::Table::indexed(arsc).unwrap())],
+        };
+        let read = |id| framework.package_xml_resource(&root, &package, id, |e, _| e.name.clone());
+        assert!(read(0x7f010002).is_err());
+        assert_eq!(read(0x7f010000).unwrap(), "account-authenticator");
+        assert!(read(0x7f010002).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     /// `getIdentifier(name, null, null)` takes only a full name, as
     /// `ExtractResourceName` splits it.
