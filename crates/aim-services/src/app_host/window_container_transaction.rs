@@ -5,9 +5,18 @@ use super::config::{CONFIG_WINDOW_CONFIGURATION, Configuration, Rect};
 use aim_binder_host::parcel::{Binder, EX_UNSUPPORTED_OPERATION, Exception, Reader};
 use aim_service_aidl::ReadParcelable;
 
+#[derive(Debug, PartialEq)]
+pub(super) struct Change {
+    pub token: Binder,
+    /// `WINDOW_CONFIG_BOUNDS`: `Some(None)` is an empty rectangle, which
+    /// inherits the parent's bounds (`setBounds(null)`).
+    pub bounds: Option<Option<Rect>>,
+    /// `Change.mWindowingMode`, unless negative (unchanged).
+    pub mode: Option<i32>,
+}
 #[derive(Debug)]
 pub(super) struct Transaction {
-    pub bounds: Vec<(Binder, Rect)>,
+    pub changes: Vec<Change>,
     pub reorders: Vec<(Binder, bool)>,
 }
 fn malformed() -> Exception {
@@ -57,15 +66,17 @@ impl Transaction {
     /// The enclosing AIDL typed object has already been unwrapped.
     pub fn read(r: &mut Reader<'_>) -> Result<Self, Exception> {
         let mut out = Self {
-            bounds: Vec::new(),
+            changes: Vec::new(),
             reorders: Vec::new(),
         };
+        let mut keys = Vec::new();
         for _ in 0..count(r)? {
             expect(r, 15)?; // VAL_IBINDER
             let token = binder(r)?;
-            if out.bounds.iter().any(|(b, _)| *b == token) {
+            if keys.contains(&token) {
                 return Err(malformed());
             }
+            keys.push(token);
             expect(r, 4)?; // VAL_PARCELABLE
             let len = usize::try_from(int(r)?).map_err(|_| malformed())?;
             let end = r.position().checked_add(len).ok_or_else(malformed)?;
@@ -85,24 +96,39 @@ impl Transaction {
             }
             // No conditional Change payloads (PiP, surface transaction, relative bounds).
             expect(r, 0)?;
-            expect(r, CONFIG_WINDOW_CONFIGURATION)?;
-            expect(r, 1)?; // WINDOW_CONFIG_BOUNDS only
+            let masks = (int(r)?, int(r)?);
             if boolean(r)? {
                 return Err(unsupported());
             }
-            expect(r, -1)?; // unchanged task/activity windowing modes
-            expect(r, -1)?;
+            let mode = match int(r)? {
+                // Pinned needs the PiP owner; multi-window needs organizer roots (#2616).
+                2 | 6 => return Err(unsupported()),
+                // `applyChanges` ignores any mode below 0.
+                m => (m >= 0).then_some(m),
+            };
+            expect(r, -1)?; // unchanged activity windowing mode
             if r.position() != end {
                 return Err(malformed());
             }
-            let b = c.window.bounds;
-            // Clearing/inheriting bounds remains outside this slice (#2616).
-            let width = b.right.checked_sub(b.left).ok_or_else(malformed)?;
-            let height = b.bottom.checked_sub(b.top).ok_or_else(malformed)?;
-            if width <= 0 || height <= 0 {
-                return Err(unsupported());
+            let bounds = match masks {
+                (0, 0) => None,
+                (CONFIG_WINDOW_CONFIGURATION, 1) => {
+                    // WINDOW_CONFIG_BOUNDS only
+                    let b = c.window.bounds;
+                    let width = b.right.checked_sub(b.left).ok_or_else(malformed)?;
+                    let height = b.bottom.checked_sub(b.top).ok_or_else(malformed)?;
+                    Some((width > 0 && height > 0).then_some(b))
+                }
+                _ => return Err(unsupported()),
+            };
+            // An empty Change applies nothing (`applyChanges`).
+            if bounds.is_some() || mode.is_some() {
+                out.changes.push(Change {
+                    token,
+                    bounds,
+                    mode,
+                });
             }
-            out.bounds.push((token, b));
         }
         for _ in 0..count(r)? {
             expect(r, 1)?; // typed HierarchyOp present
@@ -145,7 +171,7 @@ impl Transaction {
         if r.remaining() != 0 {
             return Err(malformed());
         }
-        if out.bounds.is_empty() && out.reorders.is_empty() {
+        if out.changes.is_empty() && out.reorders.is_empty() {
             return Err(unsupported());
         }
         Ok(out)
@@ -174,12 +200,12 @@ impl super::AppHost {
             }
             Ok(id)
         };
-        let mut bounds = Vec::new();
-        for (token, b) in t.bounds {
-            let id = resolve(token)?;
-            bounds.push((
+        let mut changes = Vec::new();
+        for c in t.changes {
+            let id = resolve(c.token)?;
+            changes.push((
                 id,
-                self.task_move_bounds(id, b)
+                self.task_change(id, c.mode, c.bounds)
                     .map_err(Exception::illegal_argument)?,
             ));
         }
@@ -188,11 +214,11 @@ impl super::AppHost {
             .into_iter()
             .map(|(token, top)| Ok((resolve(token)?, top)))
             .collect::<Result<Vec<_>, Exception>>()?;
-        if bounds.is_empty() && reorders.is_empty() {
+        if changes.is_empty() && reorders.is_empty() {
             return Err(unsupported());
         }
-        for (id, b) in bounds {
-            self.move_task(id, b).map_err(owner_error)?;
+        for (id, change) in changes {
+            self.apply_task_change(id, change).map_err(owner_error)?;
         }
         for (id, top) in reorders {
             if top {

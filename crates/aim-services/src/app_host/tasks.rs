@@ -702,8 +702,13 @@ impl AppHost {
     /// minimal size; its activities and windows are told, as
     /// `ActivityRecord.updateReportedConfigurationAndSend` and
     /// `WindowState.reportResized` tell them. The server takes the bounds
-    /// the task got.
-    pub(super) fn task_move_bounds(&self, id: i32, bounds: Rect) -> Result<Rect, String> {
+    /// the task got. In windowing `mode` if given, else in its own.
+    pub(super) fn task_move_bounds(
+        &self,
+        id: i32,
+        mode: Option<i32>,
+        bounds: Rect,
+    ) -> Result<Rect, String> {
         let min_dp = self
             .framework()
             .ok()
@@ -718,7 +723,7 @@ impl AppHost {
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
             // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its parent.
-            if task.windowing_mode != 5 {
+            if mode.unwrap_or(task.windowing_mode) != 5 {
                 return Ok(Rect {
                     left: 0,
                     top: 0,
@@ -762,7 +767,13 @@ impl AppHost {
     }
 
     pub(super) fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
-        let bounds = self.task_move_bounds(id, bounds)?;
+        self.move_task_recording(id, bounds, true)
+    }
+
+    /// `move_task`; a freeform task records its bounds as its last
+    /// non-fullscreen ones only if they are its own (`last`), not its parent's.
+    fn move_task_recording(&self, id: i32, bounds: Rect, last: bool) -> Result<(), String> {
+        let bounds = self.task_move_bounds(id, None, bounds)?;
         {
             let mut tasks = self.tasks.tasks.lock().unwrap();
             let task = tasks
@@ -770,7 +781,7 @@ impl AppHost {
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
             task.bounds = bounds;
-            if task.windowing_mode == 5 {
+            if task.windowing_mode == 5 && last {
                 task.restore_bounds = Some(bounds);
             }
             self.save_task_launch_params(task)?;
@@ -806,6 +817,87 @@ impl AppHost {
         }
         self.tasks.send_bounds(id, bounds);
         self.organizer_tasks_changed().map_err(|e| e.message)?;
+        Ok(())
+    }
+
+    /// A WCT `Change` of task `id`, admitted without mutating it, as
+    /// `WindowOrganizerController.applyChanges` would apply it: its windowing
+    /// mode (`mode`), then its bounds in that mode (`bounds`, `Some(None)` to
+    /// inherit the display's).
+    pub(super) fn task_change(
+        &self,
+        id: i32,
+        mode: Option<i32>,
+        bounds: Option<Option<Rect>>,
+    ) -> Result<TaskChange, String> {
+        let display = self.display().map_err(|e| e.message)?;
+        let area = Rect {
+            left: 0,
+            top: 0,
+            right: display.0.width,
+            bottom: display.0.height,
+        };
+        let (current, current_bounds, restore) = self
+            .tasks
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| (t.windowing_mode, t.bounds, t.restore_bounds))
+            .ok_or_else(|| format!("no task {id}"))?;
+        // TaskDisplayArea.isValidWindowingMode: fullscreen, or freeform where the
+        // display area is; any other mode is undefined and inherits the display area's.
+        let mode = mode.map_or(current, |m| {
+            if m == 1 || !self.tasks.window_mode() {
+                1
+            } else {
+                5
+            }
+        });
+        let requested = match bounds {
+            Some(Some(b)) => b,
+            Some(None) => area,
+            // Task.onConfigurationChangedInner: a task entering freeform without
+            // bounds of its own takes its last non-fullscreen bounds.
+            None if mode == 5 && current != 5 => restore.unwrap_or(area),
+            None => current_bounds,
+        };
+        Ok(TaskChange {
+            mode,
+            bounds: self.task_move_bounds(id, Some(mode), requested)?,
+            last: bounds != Some(None),
+        })
+    }
+
+    /// Applies a `task_change` of task `id`: the stack's visibility and
+    /// lifecycle follow a changed windowing mode (`setWindowingMode`, then
+    /// `ensureActivitiesVisible` and `resumeFocusedTasksTopActivities`).
+    pub(super) fn apply_task_change(
+        self: &Arc<Self>,
+        id: i32,
+        c: TaskChange,
+    ) -> Result<(), String> {
+        let changed = {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            std::mem::replace(&mut task.windowing_mode, c.mode) != c.mode
+        };
+        if changed {
+            self.activities
+                .stack
+                .lock()
+                .unwrap()
+                .set_task_windowing_mode(id, c.mode);
+        }
+        self.move_task_recording(id, c.bounds, c.last)?;
+        if changed {
+            let commands = self.activities.stack.lock().unwrap().ensure_visible();
+            self.run(commands);
+        }
         Ok(())
     }
 
@@ -853,6 +945,13 @@ impl AppHost {
                 },
             )
     }
+}
+
+/// A task's admitted windowing mode and bounds (`AppHost::task_change`).
+pub(super) struct TaskChange {
+    mode: i32,
+    bounds: Rect,
+    last: bool,
 }
 
 /// `Task.adjustForMinimalTaskDimensions`: `bounds` at least `min` wide and
@@ -1498,107 +1597,125 @@ mod tests {
         assert_eq!(minimal_dimensions(previous, previous, (440, 440)), previous);
     }
 
+    /// Two freeform tasks 7 and 8 of one resumed activity each at `old` on
+    /// the test phone display in window mode, task 7 at least 900x1100 and
+    /// followed by its process: the process's thread, the activities and the
+    /// server's end of the task bridge.
+    fn wct_tasks(
+        host: &Arc<AppHost>,
+        export: &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+        old: Rect,
+    ) -> (
+        Arc<super::super::process_configuration::tests::Recorder>,
+        Vec<u64>,
+        UnixStream,
+    ) {
+        use super::super::activity_stack::{Activity, State};
+        use super::super::process_configuration::tests::Recorder;
+        let permissions = super::super::permission_manager::PermissionManager::with_system(
+            host.clone(),
+            Default::default(),
+        );
+        assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+        host.tasks.windows.set(true).unwrap();
+        host.display_metrics
+            .set(Ok(super::super::display::Metrics::of(
+                &super::super::display::Display::phone_for_test(),
+            )))
+            .unwrap();
+        host.display
+            .set(Arc::new((
+                super::super::display::Display::phone_for_test(),
+                super::super::display_service::Resources {
+                    name: "test".into(),
+                    density_dpi: 320,
+                    brightness: (10, 255, 102),
+                    brightness_dim: 0.05,
+                },
+            )))
+            .ok()
+            .unwrap();
+        host.framework
+            .set(
+                super::super::resources::Framework::load(
+                    &aim_paths::original_image(),
+                    320,
+                    "en-US",
+                )
+                .unwrap(),
+            )
+            .ok()
+            .unwrap();
+        let endpoint = export(Arc::new(Surfaces(Arc::new(Mutex::new(
+            SurfaceTree::default(),
+        )))));
+        host.composer
+            .set(surface::Composer::for_test(&host.process, endpoint.handle))
+            .ok()
+            .unwrap();
+        let global = host.global_configuration().unwrap();
+        let mut app = super::super::tests::host_with_start(7, Arc::new(|| {}))
+            .apps
+            .lock()
+            .unwrap()
+            .remove(&7)
+            .unwrap();
+        app.uid = 10100;
+        app.package = "p".into();
+        app.packages = vec!["p".into()];
+        let thread = Arc::new(Recorder::default());
+        app.thread = Some(export(thread.clone()));
+        app.config = Some(global.clone());
+        host.apps.lock().unwrap().insert(7, app);
+        let mut activity_tokens = Vec::new();
+        for id in [7, 8] {
+            host.tasks.animation_test_task(id, old);
+            super::super::task_info::tests::add_app_task(host, id);
+            let token = host.new_activity(
+                7,
+                10100,
+                "p",
+                host.activity_info_of("p", "p.Main").unwrap(),
+                super::super::resources::WindowStyle::default(),
+                id,
+                super::super::activity_start::StartRequest::launcher("A"),
+            );
+            let mut records = host.activities.records.lock().unwrap();
+            let record = records.get_mut(&token).unwrap();
+            record.reported = Some(global.of_freeform_task(old));
+            record.config_changes = i32::MAX;
+            // The process follows the activity of task 7.
+            record.ident = 9 - id;
+            drop(records);
+            let mut a = Activity::new(token, id, 7, "p/p.Main", 0, 0, None);
+            a.state = State::Resumed;
+            a.never_resumed = false;
+            host.activities.stack.lock().unwrap().activities.push(a);
+            activity_tokens.push(token);
+        }
+        host.activities.stack.lock().unwrap().freeform = true;
+        host.tasks.tasks.lock().unwrap()[0].min_size = (900, 1100);
+        let (bridge, receive) = UnixStream::pair().unwrap();
+        receive.set_nonblocking(true).unwrap();
+        *host.tasks.bridge.lock().unwrap() = Some(bridge);
+        (thread, activity_tokens, receive)
+    }
+
     #[test]
     fn wct_dispatch_permission_admission_bounds_configuration_and_visible_reorder() {
         use super::super::{
-            activity_stack::{Activity, State, Visibility},
-            process_configuration::tests::Recorder,
+            activity_stack::{State, Visibility},
             task_organizer::tests::apply_wct,
-            window_container_transaction::{Transaction, tests::fixture},
+            window_container_transaction::{Change, Transaction, tests::fixture},
         };
         crate::system::with_discovery_binders(|host, _, _, export| {
-            let permissions = super::super::permission_manager::PermissionManager::with_system(
-                host.clone(),
-                Default::default(),
-            );
-            assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
-            host.tasks.windows.set(true).unwrap();
-            host.display_metrics
-                .set(Ok(super::super::display::Metrics::of(
-                    &super::super::display::Display::phone_for_test(),
-                )))
-                .unwrap();
-            host.display
-                .set(Arc::new((
-                    super::super::display::Display::phone_for_test(),
-                    super::super::display_service::Resources {
-                        name: "test".into(),
-                        density_dpi: 320,
-                        brightness: (10, 255, 102),
-                        brightness_dim: 0.05,
-                    },
-                )))
-                .ok()
-                .unwrap();
-            host.framework
-                .set(
-                    super::super::resources::Framework::load(
-                        &aim_paths::original_image(),
-                        320,
-                        "en-US",
-                    )
-                    .unwrap(),
-                )
-                .ok()
-                .unwrap();
-            let endpoint = export(Arc::new(Surfaces(Arc::new(Mutex::new(
-                SurfaceTree::default(),
-            )))));
-            host.composer
-                .set(surface::Composer::for_test(&host.process, endpoint.handle))
-                .ok()
-                .unwrap();
-            let global = host.global_configuration().unwrap();
-            let mut app = super::super::tests::host_with_start(7, Arc::new(|| {}))
-                .apps
-                .lock()
-                .unwrap()
-                .remove(&7)
-                .unwrap();
-            app.uid = 10100;
-            app.package = "p".into();
-            app.packages = vec!["p".into()];
-            let thread = Arc::new(Recorder::default());
-            app.thread = Some(export(thread.clone()));
-            app.config = Some(global.clone());
-            host.apps.lock().unwrap().insert(7, app);
             let old = Rect {
                 left: 100,
                 top: 100,
                 right: 900,
                 bottom: 1500,
             };
-            let mut activity_tokens = Vec::new();
-            for id in [7, 8] {
-                host.tasks.animation_test_task(id, old);
-                super::super::task_info::tests::add_app_task(host, id);
-                let token = host.new_activity(
-                    7,
-                    10100,
-                    "p",
-                    host.activity_info_of("p", "p.Main").unwrap(),
-                    super::super::resources::WindowStyle::default(),
-                    id,
-                    super::super::activity_start::StartRequest::launcher("A"),
-                );
-                let mut records = host.activities.records.lock().unwrap();
-                let record = records.get_mut(&token).unwrap();
-                record.reported = Some(global.of_freeform_task(old));
-                record.config_changes = i32::MAX;
-                // The process follows the activity of task 7.
-                record.ident = 9 - id;
-                drop(records);
-                let mut a = Activity::new(token, id, 7, "p/p.Main", 0, 0, None);
-                a.state = State::Resumed;
-                a.never_resumed = false;
-                host.activities.stack.lock().unwrap().activities.push(a);
-                activity_tokens.push(token);
-            }
-            host.activities.stack.lock().unwrap().freeform = true;
-            host.tasks.tasks.lock().unwrap()[0].min_size = (900, 1100);
-            let (bridge, mut receive) = UnixStream::pair().unwrap();
-            receive.set_nonblocking(true).unwrap();
-            *host.tasks.bridge.lock().unwrap() = Some(bridge);
+            let (thread, activity_tokens, mut receive) = wct_tasks(host, export, old);
             let token = host.task_token(7);
             let request = fixture(token);
             let denied = apply_wct(host, &request, 10100);
@@ -1659,15 +1776,16 @@ mod tests {
             bad.reorders.push((Binder::Local(u64::MAX), false));
             assert!(host.apply_window_transaction(bad).is_err());
             let mut bad = Transaction::read(&mut request.reader()).unwrap();
-            bad.bounds.push((
-                host.task_token(8),
-                Rect {
+            bad.changes.push(Change {
+                token: host.task_token(8),
+                bounds: Some(Some(Rect {
                     left: i32::MAX - 1,
                     top: 0,
                     right: i32::MAX,
                     bottom: 1,
-                },
-            ));
+                })),
+                mode: None,
+            });
             assert!(host.apply_window_transaction(bad).is_err());
             assert_eq!(host.tasks.bounds(7), Some(old));
             assert_eq!(
@@ -1730,7 +1848,7 @@ mod tests {
             );
             drop(records);
             host.apply_window_transaction(Transaction {
-                bounds: vec![],
+                changes: vec![],
                 reorders: vec![(token, false)],
             })
             .unwrap();
@@ -1853,6 +1971,143 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [area.left, area.top, area.right, area.bottom]
             );
+        });
+    }
+
+    #[test]
+    fn wct_windowing_modes_own_task_geometry_configuration_and_lifecycle() {
+        use super::super::{
+            activity_stack::{State, Visibility},
+            task_organizer::tests::apply_wct,
+            window_container_transaction::{Change, Transaction, tests::fixture},
+        };
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 1500,
+            };
+            let (_thread, activities, mut receive) = wct_tasks(host, export, old);
+            let area = Rect {
+                left: 0,
+                top: 0,
+                right: 1080,
+                bottom: 1920,
+            };
+            let token = host.task_token(7);
+            let task7 = |host: &AppHost| {
+                let tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter().find(|t| t.id == 7).unwrap();
+                (t.windowing_mode, t.bounds, t.restore_bounds)
+            };
+            let reported = |host: &AppHost, at: usize| {
+                let records = host.activities.records.lock().unwrap();
+                let c = records[&activities[at]].reported.clone().unwrap();
+                (c.window.windowing_mode, c.window.bounds)
+            };
+            let last_task_record = |receive: &mut UnixStream| {
+                let mut bytes = Vec::new();
+                assert_eq!(
+                    receive.read_to_end(&mut bytes).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                let last = bytes
+                    .chunks_exact(size_of::<Record>())
+                    .filter(|r| u32::from_ne_bytes(r[..4].try_into().unwrap()) == window::TASK)
+                    .last()
+                    .map(|r| {
+                        (0..4)
+                            .map(|i| {
+                                i32::from_ne_bytes(r[8 + i * 4..12 + i * 4].try_into().unwrap())
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                last
+            };
+            // A mode change with a later unknown token is admitted as a whole, so nothing moves.
+            let bad = Transaction {
+                changes: vec![Change {
+                    token,
+                    bounds: None,
+                    mode: Some(1),
+                }],
+                reorders: vec![(Binder::Local(u64::MAX), true)],
+            };
+            assert!(host.apply_window_transaction(bad).is_err());
+            assert_eq!(task7(host), (5, old, Some(old)));
+            assert_eq!(last_task_record(&mut receive), None);
+
+            // setWindowingMode(FULLSCREEN) and reorder(onTop): the Change has no
+            // configuration masks, so the pinned writer's bounds are not applied.
+            let mut request = fixture(token);
+            request.set_i32_at(340, 0);
+            request.set_i32_at(344, 0);
+            request.set_i32_at(352, 1);
+            apply_wct(host, &request, 1000)
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap();
+            assert_eq!(task7(host), (1, area, Some(old)));
+            assert_eq!(host.tasks.freeform_bounds(7), None);
+            assert_eq!(reported(host, 0), (1, area));
+            assert_eq!(reported(host, 1), (5, old));
+            assert_eq!(last_task_record(&mut receive), Some(vec![0, 0, 1080, 1920]));
+            {
+                let stack = host.activities.stack.lock().unwrap();
+                assert_eq!(stack.focused(), Some(7));
+                // The fullscreen task in front hides the freeform one behind it.
+                assert_eq!(stack.visibility(8), Visibility::Invisible);
+                assert_ne!(stack.get(activities[1]).unwrap().state, State::Resumed);
+            }
+
+            let paused = host.activities.stack.lock().unwrap().paused(activities[1]);
+            host.run(paused);
+            // setWindowingMode(UNDEFINED), without a reorder, inherits the freeform
+            // display area and takes the last non-fullscreen bounds, at least the
+            // task's minimal size; the task behind it shows and resumes again.
+            host.apply_window_transaction(Transaction {
+                changes: vec![Change {
+                    token,
+                    bounds: None,
+                    mode: Some(0),
+                }],
+                reorders: vec![],
+            })
+            .unwrap();
+            let restored = Rect {
+                left: 100,
+                top: 100,
+                right: 1000,
+                bottom: 1500,
+            };
+            assert_eq!(task7(host), (5, restored, Some(restored)));
+            assert_eq!(reported(host, 0), (5, restored));
+            assert_eq!(
+                last_task_record(&mut receive),
+                Some(vec![100, 100, 1000, 1500])
+            );
+            {
+                let stack = host.activities.stack.lock().unwrap();
+                assert_eq!(stack.visibility(8), Visibility::Visible);
+                assert_eq!(stack.get(activities[1]).unwrap().state, State::Resumed);
+            }
+
+            // setBounds(null) on a freeform task fills the display area but is not
+            // recorded as its last non-fullscreen bounds.
+            let mut request = fixture(token);
+            for at in [244, 248, 252, 256] {
+                request.set_i32_at(at, 0);
+            }
+            apply_wct(host, &request, 1000)
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap();
+            assert_eq!(task7(host), (5, area, Some(restored)));
+            assert_eq!(host.tasks.freeform_bounds(7), Some(area));
+            assert_eq!(reported(host, 0), (5, area));
         });
     }
 }

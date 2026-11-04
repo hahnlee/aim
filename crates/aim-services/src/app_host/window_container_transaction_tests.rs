@@ -27,18 +27,70 @@ pub(in crate::app_host) fn fixture(token: Binder) -> Parcel {
 fn pinned_java_wct_map_change_and_reorder_decode() {
     let t = Transaction::read(&mut fixture(Binder::Local(64)).reader()).unwrap();
     assert_eq!(
-        t.bounds,
-        [(
-            Binder::Local(64),
-            Rect {
+        t.changes,
+        [Change {
+            token: Binder::Local(64),
+            bounds: Some(Some(Rect {
                 left: -80,
                 top: 120,
                 right: 720,
                 bottom: 1120
-            }
-        )]
+            })),
+            mode: None,
+        }]
     );
     assert_eq!(t.reorders, [(Binder::Local(64), true)]);
+}
+// Field offsets of the pinned writer's Change: window bounds 244..260,
+// mConfigSetMask 340, mWindowSetMask 344, mWindowingMode 352.
+#[test]
+fn windowing_modes_and_inherited_bounds_decode() {
+    let change = |edits: &[(usize, i32)]| {
+        let mut p = fixture(Binder::Local(64));
+        for &(at, value) in edits {
+            p.set_i32_at(at, value);
+        }
+        Transaction::read(&mut p.reader()).map(|t| t.changes)
+    };
+    let only = |bounds, mode| {
+        vec![Change {
+            token: Binder::Local(64),
+            bounds,
+            mode,
+        }]
+    };
+    // setWindowingMode alone sets no configuration mask.
+    for mode in [0, 1, 5, 3, 999] {
+        assert_eq!(
+            change(&[(340, 0), (344, 0), (352, mode)]).unwrap(),
+            only(None, Some(mode))
+        );
+    }
+    // setBounds(null) is an empty rectangle with the bounds mask, also an inverted one.
+    let null = [(244, 0), (248, 0), (252, 0), (256, 0)];
+    assert_eq!(
+        change(&[null.as_slice(), &[(352, 1)]].concat()).unwrap(),
+        only(Some(None), Some(1))
+    );
+    assert_eq!(change(&[(252, -100)]).unwrap(), only(Some(None), None));
+    // applyChanges ignores a mode below -1; an empty Change applies nothing.
+    assert_eq!(change(&[(340, 0), (344, 0), (352, -2)]).unwrap(), []);
+    // Pinned and multi-window need owners this host does not have yet.
+    for mode in [2, 6] {
+        assert_eq!(
+            change(&[(352, mode)]).unwrap_err().code,
+            EX_UNSUPPORTED_OPERATION
+        );
+    }
+    for masks in [[(340, 0)], [(344, 0)]] {
+        assert_eq!(change(&masks).unwrap_err().code, EX_UNSUPPORTED_OPERATION);
+    }
+    assert_eq!(
+        change(&[(244, i32::MIN), (252, i32::MAX)])
+            .unwrap_err()
+            .code,
+        EX_ILLEGAL_ARGUMENT
+    );
 }
 #[test]
 fn truncated_lengths_unknown_ops_and_unsupported_fields_are_rejected() {
@@ -61,7 +113,8 @@ fn truncated_lengths_unknown_ops_and_unsupported_fields_are_rejected() {
         (340, 0),
         (344, 2),
         (348, 1),
-        (352, 5),
+        (352, 2),
+        (352, 6),
         (356, 1),
         (364, 0),
         (368, 0),

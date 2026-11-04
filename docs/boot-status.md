@@ -40,12 +40,19 @@ before its class was retried on fresh data (2026-11-01).
 Native WOC `applyTransaction` decodes the pinned WCT map, Change and reorder
 layout and admits all supported operations before mutation (#2616). Bounds use
 #1678's per-task owner: freeform minima and restore bounds, fullscreen geometry
-inherited from the display. Reorder-to-bottom preserves visible freeform tasks
-and uses a distinct bridge record instead of minimizing the Mac window. Host
-regressions cover dispatch, permission denial, malformed/unsupported requests,
-configuration and bridge records; root creation, adjacency, launch roots, empty
-transactions and sync remain explicit failures. No guest boot, CTS or live Mac
-window behavior was checked (2026-11-02).
+inherited from the display. `setWindowingMode` changes the task's own mode as
+`TaskDisplayArea.isValidWindowingMode` resolves it (fullscreen, or freeform in
+window mode; undefined inherits the display area's), and the task's
+configuration, Mac window bounds, visibility and lifecycle follow: a fullscreen
+task fills the display as a fullscreen launch in window mode already does, and a
+task returning to freeform takes its last non-fullscreen bounds. Empty bounds
+(`setBounds(null)`) inherit the display. Reorder-to-bottom preserves visible
+freeform tasks and uses a distinct bridge record instead of minimizing the Mac
+window. Host regressions cover dispatch, permission denial, malformed/unsupported
+requests, mode transitions, configuration and bridge records; pinned and
+multi-window modes, root creation, adjacency, launch roots, empty transactions
+and sync remain explicit failures. No guest boot, CTS or live Mac window
+behavior was checked (2026-11-04).
 
 The app host's `wm` user-rotation, fixed-to-user-rotation and ignore-orientation
 commands now use persisted native display policy with Android 16 output (#2630).
