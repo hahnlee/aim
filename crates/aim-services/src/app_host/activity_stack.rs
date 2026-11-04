@@ -1168,11 +1168,19 @@ impl Stack {
         };
         let changed = std::mem::replace(&mut a.occludes_parent, occludes) != occludes;
         if changed || !occludes {
-            self.resume_focused(false, &mut out);
-            self.stop_hidden(None, &mut out);
-            self.settle(&mut out);
+            out = self.ensure_visible();
         }
         (changed, out)
+    }
+
+    /// `ensureActivitiesVisible` and `resumeFocusedTasksTopActivities`
+    /// after what hides what changed: those now hidden stopped.
+    pub(super) fn ensure_visible(&mut self) -> Vec<Command> {
+        let mut out = Vec::new();
+        self.resume_focused(false, &mut out);
+        self.stop_hidden(None, &mut out);
+        self.settle(&mut out);
+        out
     }
 
     /// `activityStopped`.

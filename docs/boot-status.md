@@ -40,12 +40,20 @@ before its class was retried on fresh data (2026-11-01).
 Native WOC `applyTransaction` decodes the pinned WCT map, Change and reorder
 layout and admits all supported operations before mutation (#2616). Bounds use
 #1678's per-task owner: freeform minima and restore bounds, fullscreen geometry
-inherited from the display. Reorder-to-bottom preserves visible freeform tasks
-and uses a distinct bridge record instead of minimizing the Mac window. Host
-regressions cover dispatch, permission denial, malformed/unsupported requests,
-configuration and bridge records; root creation, adjacency, launch roots, empty
-transactions and sync remain explicit failures. No guest boot, CTS or live Mac
-window behavior was checked (2026-11-02).
+inherited from the display. `setWindowingMode` changes the task's own mode as
+`TaskDisplayArea.isValidWindowingMode` resolves it (fullscreen, or freeform in
+window mode; undefined inherits the display area's), and the task's
+configuration, Mac window bounds, visibility and lifecycle follow: a fullscreen
+task fills the display as a fullscreen launch in window mode already does. A
+task keeps its requested bounds in any mode, so a task returning to freeform
+takes them, else its last non-fullscreen bounds, else fills the display. Empty
+bounds (`setBounds(null)`) inherit the display and are not recorded. Reorder-to-bottom preserves visible
+freeform tasks and uses a distinct bridge record instead of minimizing the Mac
+window. Host regressions cover dispatch, permission denial, malformed/unsupported
+requests, mode transitions, configuration and bridge records; pinned and
+multi-window modes, root creation, adjacency, launch roots, empty transactions
+and sync remain explicit failures. No guest boot, CTS or live Mac window
+behavior was checked (2026-11-04).
 
 The app host's `wm` user-rotation, fixed-to-user-rotation and ignore-orientation
 commands now use persisted native display policy with Android 16 output (#2630).
@@ -930,8 +938,10 @@ now makes (not yet seen live), and still stop at app ops the app host
 does not decide (#1558).
 
 The native task owner persists per-user launch parameters in Android's ABX
-format, restores saved bounds before freeform placement on the recorded
-display, loads them when the user unlocks, and removes package records
+format: in window mode, the mode and last non-fullscreen bounds of visible
+fullscreen and freeform tasks. A launch without launch bounds on the recorded
+display takes the saved mode and bounds before freeform placement. It loads
+them when the user unlocks, and removes package records
 through the PackageList callback.
 Moving a task to the back, including Back at its launcher root, now retains
 its activities, pauses and stops them, and focuses the next task (#1486).
