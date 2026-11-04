@@ -450,10 +450,7 @@ mod tests {
         // No record yet: one is made, and the maintenance is due.
         assert!(call(leaf::PERFORM_FSTRIM, &|_| {}).is_ok());
         assert!(data.join("system/last-fstrim").exists());
-        // No ART attachment: systemReady waits for the next owner, once,
-        // and boot dexopt stays unavailable.
-        assert!(call(leaf::SCHEDULE_MAINTENANCE, &|_| {}).is_ok());
-        assert!(call(leaf::SCHEDULE_MAINTENANCE, &|_| {}).is_err());
+        // Boot dexopt stays unavailable (art_owner tests stages 4 and 9).
         let art = call(leaf::UPGRADE_DEXOPT, &|p| {
             p.write_string16(Some("first-boot"));
             p.write_binder(Some(events));

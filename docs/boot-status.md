@@ -1392,22 +1392,26 @@ The app host now runs native package lifecycle stages 1–9 at
 PackageManagerService.systemReady's points before application forks (#2063
 slice 7): storage listeners, installer staging cleanup, ART readiness and app
 reconciliation before default grants; overlay observers, module metadata,
-staged sessions and maintenance after them. Stage 4 waits for aim-system's live
-original ArtManagerLocal attachment, including a replacement after a crash;
-package queries never wait for it. Broadcast cold starts before system ready
-are held as AMS's processes on hold, not waited for by their caller: without
-this, aim-system's attachment blocked on a held broadcast start and deadlocked
-stage 4. Stage 9 delivers DexUseManagerLocal.systemReady (with ArtManagerLocal's)
-once per system process: by Binder to the attached owner, or by a replacement
-told at attachment that the stage passed. Boot dexopt (stage 10) still reports
-ART unavailable. In the two disposable fresh-data boots with readable logcat,
-each aim-system process logs ART's systemReady exactly once (the first by stage
-9 on a Binder thread, before LOCKED_BOOT_COMPLETED and BOOT_COMPLETED delivery;
-replacements on their main thread), through aim-system's existing crash loop (RoleController's removeAllowlistedRestrictedPermission,
-#1508, also on main). Interleaved cold boots to sys.boot_completed under host
-load 25–45: candidate median 12.57 s versus main 11.75 s (three pairs; all
-samples 13.23 s over seven versus 11.71 s over six), a flagged possible
-regression while that crash loop delays ART attachment. ACTION_SHUTDOWN is not
+staged sessions and maintenance after them. Stages 4 and 9 wait for
+aim-system's live original ArtManagerLocal attachment: an owner whose process
+died (record or Binder death, either first) is retired and init's replacement
+awaited, without bound (#2063); package queries never wait for it. Before
+system ready, broadcast cold starts are held as AMS's processes on hold and
+provider launches outside the system process fail fast as
+getContentProviderImpl's do, so aim-system's own startup calls cannot wait on
+the readiness that waits for it (a held broadcast start once deadlocked stage
+4); activity starts still wait. Stage 9 calls DexUseManagerLocal.systemReady
+(with ArtManagerLocal's) by Binder on a live owner, a replacement when the
+owner died first, and passes only on its reply, so it precedes the completion
+broadcasts; a process attaching later runs its own. Boot dexopt (stage 10)
+still reports ART unavailable. Fresh-data cold boots to sys.boot_completed,
+four interleaved pairs on current main under host load 19–44: candidate median
+13.52 s versus main 11.83 s, a regression. Its cause is #1508: RoleController's
+removeAllowlistedRestrictedPermission kills aim-system 3–4 s after it
+starts in both. On main its main thread was still stalled behind a broadcast
+start that waited for readiness, so readiness finished first; with starts held
+it reaches RoleController sooner, and readiness (stage 4 onward) waits for
+the restarted process. ACTION_SHUTDOWN is not
 broadcast at guest stop, so the original shutdown save does not run (2026-11-04).
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`

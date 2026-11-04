@@ -10,7 +10,9 @@ use std::sync::Arc;
 pub(super) struct State {
     generation: i64,
     owner: Option<Attachment>,
-    /// The package lifecycle's DexUseManagerLocal.systemReady stage passed.
+    /// The package lifecycle's DexUseManagerLocal.systemReady stage began.
+    system_ready_requested: bool,
+    /// That stage reached a live owner: later owners run their own.
     system_ready: bool,
 }
 struct Attachment {
@@ -125,56 +127,82 @@ impl AppHost {
             state.owner.take();
         }
     }
-    /// `dexOptimizerReady`: PackageManagerService.main registered
-    /// ArtManagerLocal before systemReady; here aim-system attaches it, so
-    /// the lifecycle waits for a live attachment. init restarts a system
-    /// process that died first, and package queries never wait for it.
-    pub(super) fn wait_art_owner(&self) -> Result<(), Exception> {
-        let mut state = self.art_owner.lock().unwrap();
-        while state.owner.is_none() {
-            state = self.art_owner_changed.wait(state).unwrap();
+    /// The attached owner once it is live. One whose process died (its
+    /// Binder death or `process_died` may still be in flight) is retired
+    /// and its replacement awaited: init restarts the system process, and
+    /// nothing bounds the wait (#2063). Only a retired package epoch fails.
+    fn live_art_owner(&self) -> Result<(i64, Arc<Strong>), Exception> {
+        loop {
+            let (pid, generation, epoch, strong) = {
+                let mut state = self.art_owner.lock().unwrap();
+                loop {
+                    if let Some(a) = &state.owner {
+                        break (a.pid, state.generation, a.epoch.clone(), a.strong.clone());
+                    }
+                    state = self.art_owner_changed.wait(state).unwrap();
+                }
+            };
+            match self.check_art_owner(pid, generation, &epoch) {
+                Ok(()) => return Ok((generation, strong)),
+                Err(error) if epoch.current().is_err() => return Err(error),
+                Err(_) => self.art_owner_died(generation),
+            }
         }
-        drop(state);
-        self.art_deletion_owner().map(drop)
     }
 
-    /// `scheduleMaintenance`'s DexUseManagerLocal.systemReady, once: by the
-    /// attached owner now, or by the next one as it attaches.
+    /// `dexOptimizerReady`: PackageManagerService.main registered
+    /// ArtManagerLocal before systemReady; here aim-system attaches it, so
+    /// the lifecycle waits for a live attachment. Package queries never
+    /// wait for it.
+    pub(super) fn wait_art_owner(&self) -> Result<(), Exception> {
+        self.live_art_owner().map(drop)
+    }
+
+    /// `scheduleMaintenance`'s DexUseManagerLocal.systemReady, once, by
+    /// Binder to a live owner before the stage passes: an owner that died
+    /// first is replaced and its replacement called, so the call precedes
+    /// the completion broadcasts. An owner attaching later runs its own.
     pub(super) fn art_system_ready(&self) -> Result<(), Exception> {
         use aim_service_aidl::dev_aim_server_iartdeletion as art;
-        let owner = {
+        {
             let mut state = self.art_owner.lock().unwrap();
-            if state.system_ready {
+            if state.system_ready_requested {
                 return Err(Exception::new(
                     EX_ILLEGAL_STATE,
                     "ART system ready already delivered",
                 ));
             }
-            state.system_ready = true;
-            state
-                .owner
-                .as_ref()
-                .map(|a| (a.pid, state.generation, a.epoch.clone(), a.strong.clone()))
-        };
-        let Some((pid, generation, epoch, strong)) = owner else {
-            return Ok(());
-        };
-        self.check_art_owner(pid, generation, &epoch)?;
-        let mut request = aim_binder_host::parcel::Parcel::new();
-        art::SystemReady { generation }.write(&mut request);
-        let response = match strong.transact(art::SYSTEM_READY, &request, false) {
-            // The owner died first: its replacement attaches told to run it.
-            Err(aim_binder_host::parcel::DEAD_OBJECT) => return Ok(()),
-            Err(s) => {
-                return Err(Exception::new(
-                    EX_ILLEGAL_STATE,
-                    format!("ART systemReady transport: {s}"),
-                ));
+            state.system_ready_requested = true;
+        }
+        loop {
+            let (generation, strong) = self.live_art_owner()?;
+            let mut request = aim_binder_host::parcel::Parcel::new();
+            art::SystemReady { generation }.write(&mut request);
+            match strong.transact(art::SYSTEM_READY, &request, false) {
+                Err(aim_binder_host::parcel::DEAD_OBJECT) => {
+                    self.art_owner_died(generation);
+                    continue;
+                }
+                Err(s) => {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("ART systemReady transport: {s}"),
+                    ));
+                }
+                Ok(response) => {
+                    art::read_system_ready_reply(&mut response.reader()).map_err(|s| {
+                        Exception::new(EX_ILLEGAL_STATE, format!("ART systemReady reply: {s}"))
+                    })??
+                }
             }
-            Ok(response) => response,
-        };
-        art::read_system_ready_reply(&mut response.reader())
-            .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("ART systemReady reply: {s}")))?
+            let mut state = self.art_owner.lock().unwrap();
+            // A replacement that attached during the call was told the stage
+            // had not passed: it is called too.
+            if state.generation == generation {
+                state.system_ready = true;
+                return Ok(());
+            }
+        }
     }
 
     pub(super) fn art_deletion_owner(&self) -> Result<(i64, Arc<Strong>), Exception> {
@@ -294,6 +322,23 @@ mod tests {
             Err(aim_binder_host::parcel::DEAD_OBJECT)
         }
     }
+    /// Runs `f` on a thread; it must still be waiting after 50 ms.
+    fn pending<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> (std::sync::mpsc::Receiver<T>, std::thread::JoinHandle<()>) {
+        let (sent, waited) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || sent.send(f()).unwrap());
+        let early = waited.recv_timeout(std::time::Duration::from_millis(50));
+        assert!(early.is_err(), "returned before an owner attached");
+        (waited, worker)
+    }
+    /// The system process record `from` replaced by `to`'s, of pid `pid`.
+    fn replace(host: &AppHost, from: i64, to: i64, pid: i32) {
+        let mut apps = host.apps.lock().unwrap();
+        let mut app = apps.remove(&from).unwrap();
+        app.pid = pid;
+        apps.insert(to, app);
+    }
     #[test]
     fn dex_optimizer_ready_waits_for_a_live_attachment() {
         crate::system::with_discovery_binders(|host, _, _, export| {
@@ -301,16 +346,8 @@ mod tests {
             let epoch = Arc::new(Captures::new(system, system.package_bootstrap().unwrap()));
             let owner = export(Arc::new(NoCalls));
             super::super::sync_owner::tests::install(host, export(Arc::new(NoCalls)));
-            let wait = || {
-                let (sent, waited) = std::sync::mpsc::channel();
-                let waiter = host.me.upgrade().unwrap();
-                let worker =
-                    std::thread::spawn(move || sent.send(waiter.wait_art_owner()).unwrap());
-                let pending = waited.recv_timeout(std::time::Duration::from_millis(50));
-                assert_eq!(pending, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
-                (waited, worker)
-            };
-            let (waited, worker) = wait();
+            let waiter = host.me.upgrade().unwrap();
+            let (waited, worker) = pending(move || waiter.wait_art_owner());
             assert!(
                 !host
                     .attach_art_owner(42, 100, epoch.clone(), Some(owner.binder()))
@@ -319,22 +356,32 @@ mod tests {
             waited.recv().unwrap().unwrap();
             worker.join().unwrap();
             host.wait_art_owner().unwrap();
-            // The system process died: the wait is for its replacement's.
-            host.process_died(100, 42);
-            assert!(host.art_deletion_owner().is_err());
-            let (waited, worker) = wait();
-            super::super::sync_owner::tests::install(host, export(Arc::new(NoCalls)));
+            // process_died removed the record but has not yet retired the
+            // owner: the wait does not fail, it is for the replacement's.
             let mut app = host.apps.lock().unwrap().remove(&100).unwrap();
+            let waiter = host.me.upgrade().unwrap();
+            let (waited, worker) = pending(move || waiter.wait_art_owner());
             app.pid = 43;
             host.apps.lock().unwrap().insert(101, app);
-            host.attach_art_owner(43, 101, epoch, Some(owner.binder()))
+            host.attach_art_owner(43, 101, epoch.clone(), Some(owner.binder()))
+                .unwrap();
+            waited.recv().unwrap().unwrap();
+            worker.join().unwrap();
+            // The system process died: the wait is for its replacement's.
+            host.process_died(101, 43);
+            assert!(host.art_deletion_owner().is_err());
+            let waiter = host.me.upgrade().unwrap();
+            let (waited, worker) = pending(move || waiter.wait_art_owner());
+            super::super::sync_owner::tests::install(host, export(Arc::new(NoCalls)));
+            replace(host, 100, 102, 44);
+            host.attach_art_owner(44, 102, epoch, Some(owner.binder()))
                 .unwrap();
             waited.recv().unwrap().unwrap();
             worker.join().unwrap();
         });
     }
     #[test]
-    fn system_ready_reaches_one_owner_once_now_or_at_the_next_attachment() {
+    fn system_ready_reaches_a_live_owner_once_before_the_stage_passes() {
         crate::system::with_discovery_binders(|host, _, _, export| {
             let system = host.package_system().unwrap();
             let epoch = Arc::new(Captures::new(system, system.package_bootstrap().unwrap()));
@@ -352,39 +399,50 @@ mod tests {
             assert_eq!(*calls.lock().unwrap(), [100]);
             // A replacement process runs its own systemReady as it attaches.
             host.art_owner_died(100);
-            let mut app = host.apps.lock().unwrap().remove(&100).unwrap();
-            app.pid = 43;
-            host.apps.lock().unwrap().insert(101, app);
+            replace(host, 100, 101, 43);
             assert!(
                 host.attach_art_owner(43, 101, epoch.clone(), Some(owner.binder()))
                     .unwrap()
             );
             assert_eq!(*calls.lock().unwrap(), [100]);
         });
-        // An owner dead before the call leaves it to the replacement.
-        crate::system::with_discovery_binders(|host, _, _, export| {
-            let system = host.package_system().unwrap();
-            let epoch = Arc::new(Captures::new(system, system.package_bootstrap().unwrap()));
-            super::super::sync_owner::tests::install(host, export(Arc::new(NoCalls)));
-            host.attach_art_owner(42, 100, epoch, Some(export(Arc::new(Dead)).binder()))
-                .unwrap();
-            host.art_system_ready().unwrap();
-            assert!(host.art_system_ready().is_err());
-        });
-        // Before any attachment, the stage defers to the first owner.
-        crate::system::with_discovery_binders(|host, _, _, export| {
-            let system = host.package_system().unwrap();
-            let epoch = Arc::new(Captures::new(system, system.package_bootstrap().unwrap()));
-            let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let owner = export(Arc::new(Ready(calls.clone())));
-            host.art_system_ready().unwrap();
-            super::super::sync_owner::tests::install(host, export(Arc::new(NoCalls)));
-            assert!(
-                host.attach_art_owner(42, 100, epoch, Some(owner.binder()))
-                    .unwrap()
-            );
-            assert!(calls.lock().unwrap().is_empty());
-        });
+        // An owner dead at the call, one whose record went first, and no
+        // owner yet: the stage waits and calls the live replacement.
+        for case in 0..3 {
+            crate::system::with_discovery_binders(|host, _, _, export| {
+                let system = host.package_system().unwrap();
+                let epoch = Arc::new(Captures::new(system, system.package_bootstrap().unwrap()));
+                let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let owner = export(Arc::new(Ready(calls.clone())));
+                super::super::sync_owner::tests::install(host, export(Arc::new(NoCalls)));
+                if case < 2 {
+                    let first = if case == 0 {
+                        export(Arc::new(Dead))
+                    } else {
+                        export(Arc::new(Ready(calls.clone())))
+                    };
+                    host.attach_art_owner(42, 100, epoch.clone(), Some(first.binder()))
+                        .unwrap();
+                }
+                if case == 1 {
+                    replace(host, 100, 101, 43);
+                }
+                let ready = host.me.upgrade().unwrap();
+                let (waited, worker) = pending(move || ready.art_system_ready());
+                if case != 1 {
+                    replace(host, 100, 101, 43);
+                }
+                assert!(
+                    !host
+                        .attach_art_owner(43, 101, epoch, Some(owner.binder()))
+                        .unwrap()
+                );
+                waited.recv().unwrap().unwrap();
+                worker.join().unwrap();
+                assert_eq!(*calls.lock().unwrap(), [101]);
+                assert!(host.art_system_ready().is_err());
+            });
+        }
     }
     #[test]
     fn retired_package_epoch_revokes_art_readiness() {
