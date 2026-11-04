@@ -34,8 +34,9 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
 };
@@ -177,6 +178,7 @@ impl AppHost {
         };
         let owner = Arc::new(self.process.strong(handle));
         *self.package_bootstrap_java.lock().unwrap() = Some(owner.clone());
+        self.package_bootstrap_java_attached.notify_all();
         let weak = self.me.clone();
         self.process.link_to_death(
             &owner,
@@ -190,6 +192,20 @@ impl AppHost {
             }),
         );
         Ok(())
+    }
+
+    /// The bridge once the system process has attached it, waiting until
+    /// `deadline`: aim-system starts with the app host, not before it.
+    pub(super) fn wait_package_bootstrap_java(&self, deadline: Instant) -> Option<Arc<Strong>> {
+        let (owner, _) = self
+            .package_bootstrap_java_attached
+            .wait_timeout_while(
+                self.package_bootstrap_java.lock().unwrap(),
+                deadline.saturating_duration_since(Instant::now()),
+                |owner| owner.is_none(),
+            )
+            .unwrap();
+        owner.clone()
     }
 }
 

@@ -56,8 +56,7 @@ IME/policy fields. Three dump tests, the configuration round-trip and host/image
 builds pass; all eight saved live protos decode with the pinned schema. The eight
 diagnostic WM classes pass organizer setup (#2616): 5 pass / 63 fail / 32 skip;
 remaining failures span task, shell, configuration and display owners. Installer #2606 and
-#1173 remain. One earlier fresh-data boot failed default-grant owner readiness
-before its class was retried on fresh data (2026-11-01).
+#1173 remain.
 
 Native WOC `applyTransaction` decodes the pinned WCT map, Change and reorder
 layout and admits all supported operations before mutation (#2616). Bounds use
@@ -1108,7 +1107,12 @@ PMS's synchronous default grants precede AMS application startup (#2361).
 The original policy runs in `aim-system` over the native access owner, whose
 committed grants and default-grant fingerprint precede readiness. Its retained
 `PackageManagerInternal` is now the same facade that `PackageLocalOwners`
-publishes, in either initialization order (#2410). Early service binds retain
+publishes, in either initialization order (#2410). The original constructs the
+policy among the bootstrap services, before PMS.systemReady; aim-system starts
+with the app host, so default grants wait (60 s) for its bridge's attachment
+instead of failing when package boot finishes first (#2717). With aim-system
+delayed 15 s, 3/3 fresh-data boots failed systemReady before and 3/3 booted after;
+undelayed, 0/20 failed before and 0/20 after (2026-11-04). Early service binds retain
 pending records and return without waiting on grants under the service lock;
 the boot worker resumes them only after successful readiness. Grant failures
 remain boot failures and do not cross back through unrelated service bindings.

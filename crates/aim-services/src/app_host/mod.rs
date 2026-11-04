@@ -627,6 +627,7 @@ pub struct AppHost {
     storage_stats: OnceLock<Arc<storage_stats::StorageStatsService>>,
     /// Cold package helpers in the current system process.
     package_bootstrap_java: Mutex<Option<Arc<Strong>>>,
+    package_bootstrap_java_attached: Condvar,
     device_policy_defaults: Mutex<Option<Arc<Strong>>>,
     user_switcher_policy: Mutex<Option<Arc<Strong>>>,
     package_shell_read: Mutex<Option<Arc<Strong>>>,
@@ -789,6 +790,7 @@ impl AppHost {
             storage_crates: Mutex::new(None),
             storage_stats: OnceLock::new(),
             package_bootstrap_java: Mutex::new(None),
+            package_bootstrap_java_attached: Condvar::new(),
             device_policy_defaults: Mutex::new(None),
             user_switcher_policy: Mutex::new(None),
             package_shell_read: Mutex::new(None),
