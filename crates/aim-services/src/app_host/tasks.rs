@@ -2363,11 +2363,16 @@ pub(super) mod tests {
                 (config.screen_width_dp, config.screen_height_dp),
                 (450, 550)
             );
-            // Its process is told before it, of its new size.
-            let sent = thread.take(1);
-            let [(Some(process), Some(next))] = &sent[..] else {
+            // Its process is told before it, of its new size; then the
+            // reorder moves the top resumed activity.
+            let sent = thread.take(2);
+            let [(Some(process), Some(next)), (None, Some(top))] = &sent[..] else {
                 panic!("{sent:?}");
             };
+            assert_eq!(
+                top,
+                "android.app.servertransaction.TopResumedActivityChangeItem"
+            );
             assert_eq!(
                 (process.screen_width_dp, process.screen_height_dp),
                 (450, 550)
