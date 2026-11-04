@@ -1928,7 +1928,7 @@ const ST_RDONLY: u64 = 1;
 const ST_NOSUID: u64 = 2;
 
 /// The statfs type of a kernel filesystem the path map provides.
-fn kernel_fs_magic(fstype: &str) -> Option<u64> {
+pub(super) fn kernel_fs_magic(fstype: &str) -> Option<u64> {
     Some(match fstype {
         "bpf" => 0xcafe_4a11,
         "cgroup2" => 0x6367_7270,
@@ -2755,6 +2755,9 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
         return super::fuse_client::ioctl(&file, req as u32, arg)
             .map(|result| result as i64)
             .unwrap_or_else(|error| -(error as i64));
+    }
+    if let Some(r) = super::fileattr::ioctl(fd, req, arg) {
+        return r;
     }
     if let Some(r) = super::binder::ioctl(fd, req, arg) {
         return r;

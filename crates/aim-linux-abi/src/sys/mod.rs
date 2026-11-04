@@ -52,6 +52,7 @@ mod exec;
 mod exec_fd_receipt;
 mod fd_visibility;
 pub(crate) mod fdtab;
+mod fileattr;
 mod fork;
 mod fs;
 mod fsops;

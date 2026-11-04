@@ -633,7 +633,7 @@ fn resolve_metadata(
     check_writable(&resolved)?;
     Ok(resolved)
 }
-struct MetadataFd(Option<OwnedFd>);
+pub(super) struct MetadataFd(Option<OwnedFd>);
 impl AsRawFd for MetadataFd {
     fn as_raw_fd(&self) -> i32 {
         self.0.as_ref().unwrap().as_raw_fd()
@@ -653,7 +653,7 @@ fn private_metadata_fd(fd: i32) -> MetadataFd {
         OwnedFd::from_raw_fd(super::fdtab::hide(fd))
     }))
 }
-fn metadata_fd_copy(fd: i32) -> Result<MetadataFd, i64> {
+pub(super) fn metadata_fd_copy(fd: i32) -> Result<MetadataFd, i64> {
     let _creating = super::fork::spawn::own_fds();
     let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     if copy < 0 {
@@ -661,7 +661,7 @@ fn metadata_fd_copy(fd: i32) -> Result<MetadataFd, i64> {
     }
     Ok(private_metadata_fd(copy))
 }
-fn inode_mutation(
+pub(super) fn inode_mutation(
     host: Host,
     guest: &str,
     follow: bool,
@@ -780,10 +780,10 @@ fn metadata_stat(host: Host, guest: &str, follow: bool) -> Result<libc::stat, i6
     attrs::apply(host, || guest.to_owned(), &mut stat);
     Ok(stat)
 }
-fn fd_guest(fd: i32) -> Option<String> {
+pub(super) fn fd_guest(fd: i32) -> Option<String> {
     procfs::fd_guest_path(fd).ok()
 }
-fn writable_fd_metadata(fd: i32, stat: &libc::stat) -> Result<(), i64> {
+pub(super) fn writable_fd_metadata(fd: i32, stat: &libc::stat) -> Result<(), i64> {
     if vfs::on_read_only_root(stat.st_dev) {
         return Err(-(crate::errno::EROFS as i64));
     }
@@ -811,6 +811,11 @@ fn writable_fd_metadata(fd: i32, stat: &libc::stat) -> Result<(), i64> {
     Ok(())
 }
 fn chmod_mode(stat: &libc::stat, mode: u32, id: &super::cred::Identity) -> Result<u32, i64> {
+    // `may_setattr`: an immutable or append-only inode keeps its mode and
+    // owner, even when the host mode would not change.
+    if super::fileattr::fixed(stat) {
+        return Err(-EPERM);
+    }
     if stat.st_uid != id.uid[attrs::FS] && id.cap_eff & (1 << 3) == 0 {
         return Err(-EPERM);
     }
@@ -828,6 +833,9 @@ fn chown_change(
     id: &super::cred::Identity,
 ) -> Result<Attr, i64> {
     let mut change = owner(uid, gid);
+    if (change.uid.is_some() || change.gid.is_some()) && super::fileattr::fixed(stat) {
+        return Err(-EPERM);
+    }
     let capable = id.cap_eff & 1 != 0;
     let own = stat.st_uid == id.uid[attrs::FS];
     if change
@@ -987,7 +995,7 @@ fn fchmodat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
 pub fn fchmod(a: [u64; 6]) -> i64 {
     fchmod_as(a, &super::cred::current())
 }
-fn fchmod_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+pub(super) fn fchmod_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     let pinned = match super::fdtab::pin_guest(a[0] as i32) {
         Ok(fd) => fd,
         Err(error) => return -(error as i64),

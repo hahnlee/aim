@@ -3784,14 +3784,19 @@ Atomic existing-open/create-exclusive admission with a bounded EEXIST reopen
 fixes the actual race; seven primitive checks and the strict four-thread
 duplicate verified-read/position test pass without skips. No filesystem error
 is swallowed or converted to successful admission.
-Original AppSecurity retains thirty fs-verity ENOTTY failures (#226). A shared
-storage core now streams Merkle construction, measures from a fixed header,
-authenticates returned bytes and binds durable metadata to actual inode
+Original AppSecurity's thirty fs-verity failures (#226) were recorded while
+FS_IOC_ENABLE_VERITY answered ENOTTY; their replay against the current ENABLE is
+pending. A shared storage core streams Merkle construction, measures from a fixed
+header, authenticates returned bytes and binds durable metadata to actual inode
 incarnation. Nine focused checks plus a real short-read temporary cleanup
 regression pass; five actual writer/enable/alias/fork/crash/SCM lease checks pass.
-This core does not expose ENABLE ioctl success. Guest FD/Binder carriers, mmap
-page verification, native writer admission, signature policy and private descriptor
-lifetimes must be connected before activation or CTS acceptance. Shared private
+FS_IOC_GETFLAGS and FS_IOC_SETFLAGS answer regular files and directories with
+ext4's rules where statfs reports ext4 and shmem's on tmpfs and memfd; device nodes
+(ashmem, dma-buf), procfs, sysfs, selinuxfs, cgroup and bpf answer ENOTTY as on Linux.
+Flags are the host's immutable and append-only flags and fs-verity; only immutable is
+settable (on ext4, with CAP_LINUX_IMMUTABLE), since Darwin's append-only refuses a
+touch Linux allows, and changing any other flag, casefold among them, is EOPNOTSUPP.
+An immutable or append-only inode refuses chmod, chown and xattr writes with EPERM. Shared private
 descriptor wrappers now enter owner serialization before allocation and close the
 actual FD before releasing its hidden role; registered carrier extraction cannot
 detach that role. One genuine isolated lifecycle test and five lease regressions
@@ -8945,7 +8950,7 @@ keeps exiting and init restarts it every 5 s.
 | odsign | exits 0 | its keystore key initializes (#200); odrefresh accepts the shipped system preopts after correcting the product's GC property, creates cache metadata on fresh data without dex2oat, and finds it valid on later boots; verification succeeds (#2418, #2432) |
 | misctrl | exit 1 | no `/misc` partition |
 | exec `recovery-refresh` | exit 254 | no pstore |
-| exec `chattr +F /data/media` | exit 1 | `FS_IOC_GETFLAGS` is ENOTTY |
+| exec `chattr +F /data/media` | exit 1 | `FS_IOC_SETFLAGS` with casefold is EOPNOTSUPP: `/data` has no casefold |
 | exec `otapreopt_slot` | exit 1 | not an A/B device ("Slot property empty") |
 | exec `kcmdlinectrl update-props` | exit 1 | no `/misc` partition |
 | lmkd | restarting (exit 0) | no PSI or memcg (P3 replaced it; see "Memory pressure") |

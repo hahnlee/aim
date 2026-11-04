@@ -64,7 +64,8 @@ fn target_stat(t: &Target) -> Result<libc::stat, i64> {
     }
 }
 
-/// `xattr_permission` (fs/xattr.c): `trusted.*` needs CAP_SYS_ADMIN;
+/// `xattr_permission` (fs/xattr.c): an immutable or append-only inode's
+/// attributes are not written; `trusted.*` needs CAP_SYS_ADMIN;
 /// `user.*` is only on regular files and directories, a sticky
 /// directory's only for its owner or CAP_FOWNER to write, and then
 /// `inode_permission` for reading or writing; the other namespaces are
@@ -72,6 +73,9 @@ fn target_stat(t: &Target) -> Result<libc::stat, i64> {
 fn permission(t: &Target, name: &[u8], write: bool) -> Result<(), i64> {
     let refused = -(if write { EPERM } else { ENODATA } as i64);
     let id = super::cred::current();
+    if write && super::fileattr::fixed(&target_stat(t)?) {
+        return Err(-(EPERM as i64));
+    }
     if name.starts_with(b"trusted.") {
         return if id.cap_eff & CAP_SYS_ADMIN != 0 {
             Ok(())
