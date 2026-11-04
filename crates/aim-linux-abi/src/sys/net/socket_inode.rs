@@ -30,8 +30,6 @@ impl Private {
 }
 impl Drop for Private {
     fn drop(&mut self) {
-        // Unhide before closing: once closed, the number can be hidden
-        // again by another thread, whose entry the unhide would remove.
         let file = self.0.take().unwrap();
         fdtab::unhide(file.as_raw_fd());
         drop(file);
