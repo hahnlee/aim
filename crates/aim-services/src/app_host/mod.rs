@@ -25,6 +25,7 @@ mod activity_start_tests;
 mod activity_stats;
 mod activity_transitions;
 mod activity_user;
+mod adjacency;
 pub mod alarm_service;
 pub mod apex_manager;
 mod app_data;

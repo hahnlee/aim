@@ -36,6 +36,13 @@ pub(super) enum Hop {
         to_top: bool,
         top_only: bool,
     },
+    /// `setAdjacentRootSet`: root tasks adjacent to each other.
+    SetAdjacentRoots(Vec<Binder>),
+    /// `clearAdjacentRoots`: the root task leaves its adjacent set.
+    ClearAdjacentRoots(Binder),
+    /// `setLaunchAdjacentFlagRoot`, or `clearLaunchAdjacentFlagRoot` if
+    /// `clear`.
+    LaunchAdjacentFlagRoot { root: Binder, clear: bool },
 }
 #[derive(Debug)]
 pub(super) struct Transaction {
@@ -88,8 +95,11 @@ fn count(r: &mut Reader<'_>) -> Result<usize, Exception> {
     }
     Ok(n)
 }
-/// `Parcel.writeIntArray`: -1 for null.
-fn int_array(r: &mut Reader<'_>) -> Result<Option<Vec<i32>>, Exception> {
+/// `Parcel.writeIntArray` or `writeBinderArray` of `item`s: -1 for null.
+fn array<T>(
+    r: &mut Reader<'_>,
+    item: fn(&mut Reader<'_>) -> Result<T, Exception>,
+) -> Result<Option<Vec<T>>, Exception> {
     let n = int(r)?;
     if n == -1 {
         return Ok(None);
@@ -98,7 +108,7 @@ fn int_array(r: &mut Reader<'_>) -> Result<Option<Vec<i32>>, Exception> {
     if n > r.remaining() / 4 {
         return Err(malformed());
     }
-    (0..n).map(|_| int(r)).collect::<Result<_, _>>().map(Some)
+    (0..n).map(|_| item(r)).collect::<Result<_, _>>().map(Some)
 }
 impl Transaction {
     /// The enclosing AIDL typed object has already been unwrapped.
@@ -170,13 +180,15 @@ impl Transaction {
         }
         for _ in 0..count(r)? {
             expect(r, 1)?; // typed HierarchyOp present
-            // HIERARCHY_OP_TYPE_REPARENT, _REORDER or _CHILDREN_TASKS_REPARENT
+            // HIERARCHY_OP_TYPE_REPARENT, _REORDER, _CHILDREN_TASKS_REPARENT,
+            // _SET_ADJACENT_ROOTS, _SET_LAUNCH_ADJACENT_FLAG_ROOT or
+            // _CLEAR_ADJACENT_ROOTS
             let kind = int(r)?;
-            if !(0..=2).contains(&kind) {
+            if !matches!(kind, 0..=2 | 4 | 6 | 15) {
                 return Err(unsupported());
             }
             let container = optional_binder(r)?;
-            expect(r, -1)?; // containers array
+            let containers = array(r, binder)?;
             expect(r, 0)?; // bounds
             if boolean(r)? {
                 return Err(unsupported());
@@ -186,8 +198,8 @@ impl Transaction {
             null_binder(r)?;
             let to_top = boolean(r)?;
             let top_only = boolean(r)?;
-            let modes = int_array(r)?;
-            let types = int_array(r)?;
+            let modes = array(r, int)?;
+            let types = array(r, int)?;
             for _ in 0..2 {
                 expect(r, -1)?;
             } // two Bundles
@@ -204,6 +216,38 @@ impl Transaction {
                 return Err(unsupported());
             } // launchAdjacentDisabled
             expect(r, 0)?; // safeRegionBounds
+            // The adjacency ops' builders set their tokens and clearRoot only.
+            if matches!(kind, 4 | 6 | 15)
+                && (reparent.is_some()
+                    || top_only
+                    || modes.is_some()
+                    || types.is_some()
+                    || (to_top && kind != 6))
+            {
+                return Err(unsupported());
+            }
+            match (kind, containers) {
+                // setAdjacentRootsHierarchyOp reads the containers alone.
+                (4, Some(roots)) if container.is_none() => {
+                    out.hierarchy.push(Hop::SetAdjacentRoots(roots));
+                    continue;
+                }
+                (4, None) => return Err(malformed()),
+                (6, None) => {
+                    out.hierarchy.push(Hop::LaunchAdjacentFlagRoot {
+                        root: container.ok_or_else(malformed)?,
+                        clear: to_top,
+                    });
+                    continue;
+                }
+                (15, None) => {
+                    out.hierarchy
+                        .push(Hop::ClearAdjacentRoots(container.ok_or_else(malformed)?));
+                    continue;
+                }
+                (0..=2, None) => {}
+                _ => return Err(unsupported()),
+            }
             if kind == 2 {
                 out.hierarchy.push(Hop::ReparentChildren {
                     from: container,
@@ -315,9 +359,66 @@ impl super::AppHost {
                 .map_err(Exception::illegal_argument)?;
             changes.push((id, c.mode, c.bounds));
         }
+        // The adjacency the hops leave, each admitted in the adjacency the
+        // ones before it left (`setLaunchAdjacentFlagRoot` after
+        // `setAdjacentRoots`).
+        let mut adjacency = self.tasks.adjacency.lock().unwrap().clone();
+        let mut adjacency_ops = false;
+        let created = |id, op| match self.tasks.root(id) {
+            Some(_) => Ok(id),
+            None => Err(Exception::illegal_argument(format!(
+                "{op}: Not created by organizer root={id}"
+            ))),
+        };
         let mut hierarchy = Vec::new();
         for hop in t.hierarchy {
+            adjacency_ops |= matches!(
+                hop,
+                Hop::SetAdjacentRoots(_)
+                    | Hop::ClearAdjacentRoots(_)
+                    | Hop::LaunchAdjacentFlagRoot { .. }
+            );
             hierarchy.push(match hop {
+                Hop::SetAdjacentRoots(tokens) => {
+                    let mut ids = Vec::new();
+                    for token in tokens {
+                        let id = created(resolve(token)?, "setAdjacentRootsHierarchyOp")?;
+                        if ids.contains(&id) {
+                            return Err(Exception::illegal_argument(format!(
+                                "setAdjacentRootsHierarchyOp: called with same root twice={id}"
+                            )));
+                        }
+                        ids.push(id);
+                    }
+                    if ids.len() < 2 {
+                        return Err(Exception::illegal_argument(
+                            "Adjacent TaskFragments must contain at least two TaskFragments",
+                        ));
+                    }
+                    adjacency.join(&ids);
+                    continue;
+                }
+                Hop::ClearAdjacentRoots(token) => {
+                    adjacency.leave(created(resolve(token)?, "clearAdjacentRootsHierarchyOp")?);
+                    continue;
+                }
+                Hop::LaunchAdjacentFlagRoot { root, clear } => {
+                    let id = resolve(root)?;
+                    if self.tasks.root(id).is_none() {
+                        return Err(Exception::new(
+                            EX_UNSUPPORTED_OPERATION,
+                            format!("Cannot set non-organized task as adjacent flag root: {id}"),
+                        ));
+                    }
+                    if !clear && adjacency.of(id).is_empty() {
+                        return Err(Exception::new(
+                            EX_UNSUPPORTED_OPERATION,
+                            format!("Cannot set non-adjacent task as adjacent flag root: {id}"),
+                        ));
+                    }
+                    adjacency.launch_root = (!clear).then_some(id);
+                    continue;
+                }
                 Hop::Reorder(token, top) => Admitted::Reorder(resolve(token)?, top),
                 Hop::Reparent {
                     task,
@@ -353,9 +454,10 @@ impl super::AppHost {
                 }),
             });
         }
-        if changes.is_empty() && roots.is_empty() && hierarchy.is_empty() {
+        if changes.is_empty() && roots.is_empty() && hierarchy.is_empty() && !adjacency_ops {
             return Err(unsupported());
         }
+        *self.tasks.adjacency.lock().unwrap() = adjacency;
         for (id, bounds) in roots {
             self.set_root_bounds(id, bounds).map_err(owner_error)?;
         }

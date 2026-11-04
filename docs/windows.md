@@ -264,6 +264,13 @@ and letterboxing, are tracked in #2050.
   home or to the back takes its window out first (the task stays
   fullscreen), and the window minimizes once out; back from the Dock, it
   enters the full screen again.
+- **Split screen.** The tasks of an organizer's adjacent root tasks
+  (`setAdjacentRoots`) keep a Mac window each, at their root task's bounds,
+  so the two windows tile side by side. The user's move or resize of one
+  moves its root task, and the adjacent root's edges that met it follow, as
+  the split divider moves both stages; bounds that would leave the other
+  empty are refused and the window goes back. Once adjacency is cleared
+  each window moves on its own.
 - **Title.** The task's `TaskDescription` label, else what a launcher
   calls it: in a shim, the shim's name; in the server, the label of the
   launcher activity the task was started with, else its app's label (both

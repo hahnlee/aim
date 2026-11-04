@@ -92,7 +92,7 @@ bounds (`setBounds(null)`) inherit the display and are not recorded. Reorder-to-
 freeform tasks and uses a distinct bridge record instead of minimizing the Mac
 window. Host regressions cover dispatch, permission denial, malformed/unsupported
 requests, mode transitions, configuration and bridge records; pinned mode,
-adjacency, launch roots, empty transactions and sync remain explicit failures. No guest boot, CTS or live Mac window behavior was checked
+launch roots, empty transactions and sync remain explicit failures. No guest boot, CTS or live Mac window behavior was checked
 (2026-11-04).
 
 TOC `createRootTask`, `deleteRootTask`, `getRootTasks` and `getChildTasks`
@@ -105,11 +105,19 @@ and `reparentTasks` (mode/type filters, top-only) move app tasks into and out
 of a root: the task's layer becomes the root's child, its `parentTaskId`,
 windowing mode (undefined inherits the root's multi-window) and bounds resolve
 in the root, and it keeps its own Mac window at those bounds. A root's
-`setBounds` re-resolves its tasks and `reorder` brings them with it. Other root
-windowing modes, multi-window tasks of the display area, nested roots and
-adjacency remain explicit failures. Host regressions cover the wire, modes,
-listing, reparenting, deletion and organizer removal; no guest boot was run
-(2026-11-04).
+`setBounds` re-resolves its tasks and `reorder` brings them with it. WCT
+`setAdjacentRoots`, `clearAdjacentRoots` and `setLaunchAdjacentFlagRoot` /
+`clearLaunchAdjacentFlagRoot` keep the roots' adjacent sets and the display
+area's flag root (`AdjacentSet`, `setLaunchAdjacentFlagRootTask`), admitted in
+order and dropped with their roots. In window mode the tasks of adjacent roots
+are two Mac windows tiled side by side at their roots' bounds: the user's
+resize of one moves the shared edge of the roots, as the split divider does,
+and the other window follows; clearing adjacency makes them independent.
+`setLaunchRoot`, a launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT` into the flag
+root, other root windowing modes, multi-window tasks of the display area and
+nested roots remain explicit failures. Host regressions cover the wire, modes,
+listing, reparenting, adjacency, tiling, deletion and organizer removal; no
+guest boot or live Mac window was checked (2026-11-04).
 
 The app host's `wm` user-rotation, fixed-to-user-rotation and ignore-orientation
 commands now use persisted native display policy with Android 16 output (#2630).
@@ -127,8 +135,8 @@ window-mode boot with fresh data, AppConfigurationTests'
 testAppConfigurationMatchesActivityInFreeform passes, and
 testAppConfigurationMatchesTopActivityInMultiWindow passes its fullscreen size
 check, then stopped at createRootTask (#2616) (2026-11-04). Root creation is now
-served; the pinned `TestTaskOrganizer.createRootTasksIfNeeded` next applies
-`setAdjacentRoots`, still unsupported, before any reparent. Not rerun since.
+served, and so is the adjacency `TestTaskOrganizer.createRootTasksIfNeeded`
+applies next. Not rerun since.
 
 Regular-file writes and admitted fallocate allocation/in-file hole punching clear
 set-ID modes without CAP_FSETID (#779, #2515); a shared generation invalidates
