@@ -517,7 +517,8 @@ pub mod display {
     /// changes. Bounds are the task's, in display pixels.
     pub mod window {
         /// Guest: a task that gets a window, new or changed:
-        /// [`super::Window::bounds`].
+        /// [`super::Window::bounds`] and [`super::Window::windowing_mode`].
+        /// It also answers [`SET_WINDOWING_MODE`], refused or not.
         pub const TASK: u32 = 1;
         /// Guest: the task's title (its `TaskDescription` label), in
         /// [`super::Window::text`].
@@ -567,6 +568,20 @@ pub mod display {
         pub const LAUNCH: u32 = 19;
         /// Server: expand a picture-in-picture task to its normal window.
         pub const EXPAND_PIP: u32 = 20;
+        /// Server: the user put the task's window into or out of the Mac's
+        /// full screen: give the task windowing mode
+        /// [`super::Window::windowing_mode`], fullscreen or freeform.
+        pub const SET_WINDOWING_MODE: u32 = 21;
+    }
+
+    /// [`Window::windowing_mode`] values the server reads: the task's
+    /// `WindowConfiguration` windowing mode.
+    pub mod windowing_mode {
+        /// The bridge does not say: the window never takes the full screen.
+        pub const UNDEFINED: i32 = 0;
+        /// The task's window is in the Mac's full screen, a space of its own.
+        pub const FULLSCREEN: i32 = 1;
+        pub const FREEFORM: i32 = 5;
     }
 
     /// [`Window::orientation`] values.
@@ -586,8 +601,9 @@ pub mod display {
         pub task: i32,
         /// Left, top, right, bottom.
         pub bounds: [i32; 4],
-        /// Reserved, zero. Retains the window record ABI.
-        pub _reserved: i32,
+        /// The task's windowing mode ([`windowing_mode`]), with
+        /// [`window::TASK`] and [`window::SET_WINDOWING_MODE`].
+        pub windowing_mode: i32,
         /// One of [`orientation`], with [`window::ORIENTATION`].
         pub orientation: u32,
         /// Task description colors, with [`window::COLORS`].
@@ -603,7 +619,7 @@ pub mod display {
                 op: 0,
                 task: 0,
                 bounds: [0; 4],
-                _reserved: 0,
+                windowing_mode: 0,
                 orientation: 0,
                 primary_color: 0,
                 background_color: 0,

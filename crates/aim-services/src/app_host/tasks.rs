@@ -140,11 +140,14 @@ impl Tasks {
         self.send(&Record::with_text(op, task, text));
     }
 
-    fn send_bounds(&self, task: i32, bounds: Rect) {
+    /// Sends task `task`'s `bounds` and windowing `mode`: its window's
+    /// place, or the Mac's full screen.
+    fn send_task(&self, task: i32, bounds: Rect, mode: i32) {
         self.send(&Record {
             op: window::TASK,
             task,
             bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+            windowing_mode: mode,
             ..Default::default()
         });
     }
@@ -168,6 +171,16 @@ impl Tasks {
             .iter()
             .find(|t| t.id == id)
             .map(|t| t.bounds)
+    }
+
+    /// The bounds and windowing mode of task `id`.
+    fn place(&self, id: i32) -> Option<(Rect, i32)> {
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| (t.bounds, t.windowing_mode))
     }
 
     /// The minimal size of task `id` (`mMinWidth`, `mMinHeight`).
@@ -481,7 +494,7 @@ impl AppHost {
             .unwrap()
             .set_task_windowing_mode(id, windowing_mode);
         if windows {
-            self.tasks.send_bounds(id, bounds);
+            self.tasks.send_task(id, bounds, windowing_mode);
             self.tasks.send_text(window::PACKAGE, id, package);
             self.tasks.send_text(window::ACTIVITY, id, &component);
         }
@@ -922,6 +935,16 @@ impl AppHost {
             window::LAUNCH => self.launch(r.text()),
             window::FOCUS => self.focus_task(r.task),
             window::CLOSE => self.close_task(r.task),
+            window::SET_WINDOWING_MODE => {
+                let set = self.set_task_windowing_mode(r.task, r.windowing_mode);
+                // The task's record answers a refusal too.
+                if set.is_err()
+                    && let Some((bounds, mode)) = self.tasks.place(r.task)
+                {
+                    self.tasks.send_task(r.task, bounds, mode);
+                }
+                set
+            }
             window::SET_BOUNDS => {
                 // `resizeTask`.
                 let [left, top, right, bottom] = r.bounds;
@@ -937,6 +960,70 @@ impl AppHost {
             }
             op => Err(format!("unknown request {op}")),
         }
+    }
+
+    /// `SET_WINDOWING_MODE`: the user put task `id`'s window into or out of
+    /// the Mac's full screen, which asks for fullscreen or freeform as
+    /// `WindowContainerTransaction.setWindowingMode` does. A task in an
+    /// organizer root task takes the root task's place, not the screen.
+    fn set_task_windowing_mode(self: &Arc<Self>, id: i32, mode: i32) -> Result<(), String> {
+        if !matches!(mode, 1 | 5) {
+            return Err(format!("windowing mode {mode}"));
+        }
+        if self.tasks.root(id).is_some() || self.tasks.parent(id).is_some() {
+            return Err(format!("task {id} is organized in a root task"));
+        }
+        let bounds = if mode == 5 {
+            self.desktop_bounds(id)?.map(Some)
+        } else {
+            None
+        };
+        let change = self.task_change(id, Some(mode), bounds)?;
+        self.apply_task_change(id, change)
+    }
+
+    /// The bounds task `id` takes on leaving the Mac's full screen when it
+    /// has neither requested nor last non-fullscreen bounds (launched
+    /// fullscreen): a new freeform task's, as the shell gives a task it
+    /// moves to the desktop, rather than the display area's, whose window
+    /// would have its title bar above the screen.
+    fn desktop_bounds(&self, id: i32) -> Result<Option<Rect>, String> {
+        let (component, others) = {
+            let tasks = self.tasks.tasks.lock().unwrap();
+            let t = tasks
+                .iter()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            if t.requested_bounds.is_some() || t.restore_bounds.is_some() {
+                return Ok(None);
+            }
+            let others: Vec<Rect> = tasks
+                .iter()
+                .filter(|o| o.root.is_none() && o.id != id)
+                .map(|o| o.bounds)
+                .collect();
+            (t.component.clone(), others)
+        };
+        let (package, class) = component
+            .split_once('/')
+            .ok_or_else(|| format!("task {id} component {component}"))?;
+        let info = self
+            .activity_info_of(package, class)
+            .map_err(|e| e.message)?;
+        let display = self.display().map_err(|e| e.message)?;
+        let area = Rect {
+            left: 0,
+            top: 0,
+            right: display.0.width,
+            bottom: display.0.height,
+        };
+        Ok(Some(super::freeform::default_bounds(
+            &super::freeform::Activity::from(&info),
+            area,
+            display.0.density_dpi(),
+            false,
+            &others,
+        )))
     }
 
     /// `LAUNCH` of `package/class`: the task a launcher's start would find
@@ -1122,7 +1209,7 @@ impl AppHost {
         requested: Option<Option<Rect>>,
     ) -> Result<(), String> {
         let bounds = self.task_move_bounds(id, None, bounds)?;
-        {
+        let mode = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
             let task = tasks
                 .iter_mut()
@@ -1140,7 +1227,8 @@ impl AppHost {
                 task.restore_bounds = Some(bounds);
             }
             self.save_task_launch_params(task)?;
-        }
+            task.windowing_mode
+        };
         self.place_tasks()?;
         self.move_windows_of(id, bounds)?;
         let uids: BTreeSet<u32> = self
@@ -1170,7 +1258,7 @@ impl AppHost {
         for (start_seq, items) in by_start {
             self.schedule(start_seq, items)?;
         }
-        self.tasks.send_bounds(id, bounds);
+        self.tasks.send_task(id, bounds, mode);
         self.organizer_tasks_changed().map_err(|e| e.message)?;
         Ok(())
     }
@@ -2560,6 +2648,106 @@ pub(super) mod tests {
             assert_eq!(task7(host), (5, area, Some(restored)));
             assert_eq!(host.tasks.own_bounds(7), Some((5, area)));
             assert_eq!(reported(host, 0), (5, area));
+        });
+    }
+
+    #[test]
+    fn the_macs_full_screen_sets_the_windowing_mode_and_records_answer() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let old = Rect {
+                left: 100,
+                top: 100,
+                right: 1000,
+                bottom: 1500,
+            };
+            let (_thread, _, mut receive, _) = wct_tasks(host, export, old);
+            let task7 = || {
+                let tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter().find(|t| t.id == 7).unwrap();
+                (t.windowing_mode, t.bounds)
+            };
+            // The last TASK record: its bounds and windowing mode.
+            let last = |receive: &mut UnixStream| {
+                let mut bytes = Vec::new();
+                assert_eq!(
+                    receive.read_to_end(&mut bytes).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                bytes
+                    .chunks_exact(size_of::<Record>())
+                    // SAFETY: `Record` is plain old data, `r` one's bytes.
+                    .map(|r| unsafe { std::ptr::read_unaligned(r.as_ptr().cast::<Record>()) })
+                    .filter(|r| r.op == window::TASK && r.task == 7)
+                    .last()
+                    .map(|r| (r.bounds, r.windowing_mode))
+            };
+            let set = |mode| {
+                host.request(&Record {
+                    op: window::SET_WINDOWING_MODE,
+                    task: 7,
+                    windowing_mode: mode,
+                    ..Default::default()
+                })
+            };
+            // The green button: fullscreen fills the display, and the record
+            // says so, for the Mac's full screen.
+            set(1).unwrap();
+            assert_eq!(
+                task7(),
+                (
+                    1,
+                    Rect {
+                        left: 0,
+                        top: 0,
+                        right: 1080,
+                        bottom: 1920
+                    }
+                )
+            );
+            assert_eq!(last(&mut receive), Some(([0, 0, 1080, 1920], 1)));
+            // Leaving it gives the task its last non-fullscreen bounds back.
+            set(5).unwrap();
+            assert_eq!(task7(), (5, old));
+            assert_eq!(last(&mut receive), Some(([100, 100, 1000, 1500], 5)));
+            // Another mode is refused, and the task's record answers that.
+            assert!(set(6).is_err());
+            assert_eq!(task7(), (5, old));
+            assert_eq!(last(&mut receive), Some(([100, 100, 1000, 1500], 5)));
+
+            // A task launched fullscreen has no freeform bounds to go back
+            // to: leaving takes a new freeform task's, not the display's.
+            {
+                let mut tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter_mut().find(|t| t.id == 7).unwrap();
+                (t.requested_bounds, t.restore_bounds) = (None, None);
+                t.min_size = (-1, -1);
+            }
+            set(1).unwrap();
+            set(5).unwrap();
+            let display = host.display().unwrap();
+            let others = [host.tasks.bounds(8).unwrap()];
+            let expected = super::super::freeform::default_bounds(
+                &super::super::freeform::Activity::from(
+                    &host.activity_info_of("p", "p.Main").unwrap(),
+                ),
+                Rect {
+                    left: 0,
+                    top: 0,
+                    right: display.0.width,
+                    bottom: display.0.height,
+                },
+                display.0.density_dpi(),
+                false,
+                &others,
+            );
+            assert_eq!(task7(), (5, expected));
+            assert_eq!(
+                last(&mut receive),
+                Some((
+                    [expected.left, expected.top, expected.right, expected.bottom],
+                    5
+                ))
+            );
         });
     }
 

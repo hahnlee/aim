@@ -23,7 +23,11 @@
 //!   portrait proportions around its centre, within the screen, and a
 //!   request for none turns it back to the user's size;
 //! - a task in picture-in-picture floats above the other windows, on every
-//!   space, keeping its proportions.
+//!   space, keeping its proportions;
+//! - a fullscreen task's window is in the Mac's full screen, a space of its
+//!   own, with AppKit's animation, and leaves it when the task does; the
+//!   user's full screen (the green button, Ctrl-Cmd-F) asks the task for
+//!   fullscreen or freeform.
 //!
 //! A press in a window whose task is not the top one focuses the task first
 //! and holds the touch until Android reports the task in front (or
@@ -49,8 +53,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_host_display::input::translate::Phase;
-use aim_host_display::windows::{Frame, Screen, fit, turn, view_to_display};
-use aim_hostcall::display::{Window as Record, orientation, window};
+use aim_host_display::windows::{Frame, FullScreen, Screen, fit, turn, view_to_display};
+use aim_hostcall::display::{Window as Record, orientation, window, windowing_mode};
 
 use crate::hosts::Host;
 use crate::metal::{Show, Target};
@@ -67,6 +71,8 @@ const HOLD_MS: u64 = 250;
 const SETTLE_MS: u64 = 500;
 /// `NSWindowCollectionBehaviorFullScreenNone`: the green button zooms.
 const FULL_SCREEN_NONE: usize = 1 << 9;
+/// `NSWindowCollectionBehaviorFullScreenPrimary`: it takes the full screen.
+const FULL_SCREEN_PRIMARY: usize = 1 << 7;
 /// `NSWindowCollectionBehaviorCanJoinAllSpaces`.
 const ALL_SPACES: usize = 1 << 0;
 /// `NSFloatingWindowLevel` and `NSNormalWindowLevel`.
@@ -113,6 +119,7 @@ struct TaskWindow {
     /// The content's size (points) the user gave the window, while it is
     /// turned for an orientation an activity asked for.
     user: Option<CGSize>,
+    full_screen: FullScreen,
 }
 
 /// Touches held for a task to come to the front.
@@ -133,6 +140,8 @@ struct Info {
     background_color: u32,
     /// Its bounds, once it has a window.
     bounds: Option<[i32; 4]>,
+    /// Its windowing mode, with its bounds.
+    windowing_mode: i32,
     /// The window host that shows it (in the server).
     host: Option<Arc<Host>>,
     /// Its window asked to close it.
@@ -315,7 +324,10 @@ fn note(s: &mut State, r: &Record) -> Info {
             info.primary_color = r.primary_color;
             info.background_color = r.background_color;
         }
-        window::TASK => info.bounds = Some(r.bounds),
+        window::TASK => {
+            info.bounds = Some(r.bounds);
+            info.windowing_mode = r.windowing_mode;
+        }
         window::ORIENTATION => info.orientation = r.orientation,
         window::PINNED => info.pinned = true,
         window::UNPINNED => info.pinned = false,
@@ -478,6 +490,7 @@ fn route(task: i32) -> bool {
                     op: window::TASK,
                     task,
                     bounds,
+                    windowing_mode: info.windowing_mode,
                     ..Default::default()
                 });
             }
@@ -630,6 +643,7 @@ fn task(task: i32, b: [i32; 4]) {
     with(|s| {
         if let Some(t) = s.tasks.get_mut(&task) {
             t.bounds = b;
+            t.full_screen.answered();
             let c = t.bounds;
             send!(t.layer, c"setDrawableSize:" => (), CGSize = CGSize {
                 width: (c[2] - c[0]).max(1) as f64,
@@ -640,6 +654,7 @@ fn task(task: i32, b: [i32; 4]) {
     follow(task);
     // A PiP's new aspect ratio (the app's params).
     float(task);
+    full_screen(task);
     update_targets(Some(task));
 }
 
@@ -651,7 +666,10 @@ fn follow(task: i32) {
         let t = s.tasks.get(&task)?;
         let c = t.bounds;
         let live = send!(t.window, c"inLiveResize" => bool);
-        if t.closed || live || window_content(&s.screen, t.window) == c {
+        // In and around the full screen, AppKit places the window.
+        let mode = s.infos.get(&task).map_or(0, |i| i.windowing_mode);
+        let full = !t.full_screen.follows(mode);
+        if t.closed || live || full || window_content(&s.screen, t.window) == c {
             return None;
         }
         let recent = t
@@ -680,7 +698,15 @@ fn create(task: i32, b: [i32; 4]) {
         return;
     };
     let c = b;
-    let f = screen.to_frame(c);
+    // A fullscreen task's window goes into the full screen from where a
+    // new freeform task opens, and AppKit puts it back there when it
+    // leaves.
+    let full = info.windowing_mode == windowing_mode::FULLSCREEN;
+    let f = if full {
+        freeform_frame()
+    } else {
+        screen.to_frame(c)
+    };
     let w = send!(class(c"NSWindow"), c"alloc" => Id);
     let w = send!(w, c"initWithContentRect:styleMask:backing:defer:" => Id,
         CGRect = cg(f), usize = NS_WINDOW_STYLE, usize = NS_BACKING_STORE_BUFFERED, bool = false);
@@ -718,7 +744,9 @@ fn create(task: i32, b: [i32; 4]) {
     send!(w, c"makeFirstResponder:" => bool, Id = view);
     back_hint(container);
     send!(w, c"setDelegate:" => (), Id = delegate());
-    place(&screen, w, c);
+    if !full {
+        place(&screen, w, c);
+    }
     let t = TaskWindow {
         window: w,
         layer,
@@ -728,6 +756,7 @@ fn create(task: i32, b: [i32; 4]) {
         closed: false,
         moved: None,
         user: None,
+        full_screen: FullScreen::default(),
     };
     send!(w, c"setTitle:" => (), Id = nsstring(&info.title()));
     crate::titlebar::set(w, info.primary_color, info.background_color);
@@ -750,30 +779,43 @@ fn create(task: i32, b: [i32; 4]) {
     let number = send!(w, c"windowNumber" => isize);
     eprintln!("aim-display: task {task} window {number}");
     window_order(task, number);
-    if placed != c {
+    if placed != c && !full {
         set_bounds(task, placed);
     }
     float(task);
+    full_screen(task);
     update_targets(Some(task));
 }
 
 /// A window whose task is in picture-in-picture floats above the others,
 /// on every space, and keeps its proportions when resized; one whose task
-/// left it no longer does.
+/// left it no longer does. A fullscreen or freeform task's can take the
+/// full screen; another's (a task in a root task, or one whose bridge
+/// does not say) zooms. A window in the full screen keeps all that until
+/// it leaves.
 fn float(task: i32) {
-    let Some(Some((w, c, pinned))) = with(|s| {
+    let Some(Some((w, c, info))) = with(|s| {
         let t = s.tasks.get(&task)?;
-        Some((t.window, t.bounds, s.infos.get(&task)?.pinned))
+        if t.full_screen.places() {
+            return None;
+        }
+        Some((t.window, t.bounds, s.infos.get(&task)?.clone()))
     }) else {
         return;
     };
-    let (level, spaces) = if pinned {
-        (FLOATING_LEVEL, ALL_SPACES)
+    let pinned = info.pinned;
+    let (level, behavior) = if pinned {
+        (FLOATING_LEVEL, FULL_SCREEN_NONE | ALL_SPACES)
+    } else if matches!(
+        info.windowing_mode,
+        windowing_mode::FULLSCREEN | windowing_mode::FREEFORM
+    ) {
+        (NORMAL_LEVEL, FULL_SCREEN_PRIMARY)
     } else {
-        (NORMAL_LEVEL, 0)
+        (NORMAL_LEVEL, FULL_SCREEN_NONE)
     };
     send!(w, c"setLevel:" => (), isize = level);
-    send!(w, c"setCollectionBehavior:" => (), usize = FULL_SCREEN_NONE | spaces);
+    send!(w, c"setCollectionBehavior:" => (), usize = behavior);
     // Either replaces the other.
     if pinned {
         send!(w, c"setContentAspectRatio:" => (), CGSize = CGSize {
@@ -788,6 +830,27 @@ fn float(task: i32) {
     }
 }
 
+/// The window goes into or out of the full screen as its task's windowing
+/// mode says, unless it is on its way or the task has yet to answer the
+/// user.
+fn full_screen(task: i32) {
+    let Some(Some(w)) = with(|s| {
+        let t = s.tasks.get(&task).filter(|t| !t.closed)?;
+        let mode = s.infos.get(&task)?.windowing_mode;
+        t.full_screen.toggle(mode).then_some(t.window)
+    }) else {
+        return;
+    };
+    send!(w, c"toggleFullScreen:" => (), Id = std::ptr::null_mut());
+}
+
+/// A window's frame centered where Android places a new freeform task.
+fn freeform_frame() -> Frame {
+    let screen = send!(class(c"NSScreen"), c"mainScreen" => Id);
+    let area = frame(send!(screen, c"visibleFrame" => CGRect));
+    fit(area, SPLASH.width, SPLASH.height, area)
+}
+
 /// The app's launch starts (in a window host): until it has drawn its
 /// first frame, a window shows the splash at once, and then the task's
 /// window over the task (docs/m1-shell.md, D4). Android draws no starting
@@ -796,10 +859,7 @@ pub fn splash() {
     if with(|s| s.tasks.is_empty() && s.splash.is_none()) != Some(true) {
         return;
     }
-    // Centered where Android places a new freeform task.
-    let screen = send!(class(c"NSScreen"), c"mainScreen" => Id);
-    let area = frame(send!(screen, c"visibleFrame" => CGRect));
-    let c = fit(area, SPLASH.width, SPLASH.height, area);
+    let c = freeform_frame();
     let w = send!(class(c"NSWindow"), c"alloc" => Id);
     let w = send!(w, c"initWithContentRect:styleMask:backing:defer:" => Id,
         CGRect = cg(c), usize = NS_WINDOW_STYLE, usize = NS_BACKING_STORE_BUFFERED, bool = false);
@@ -905,7 +965,10 @@ fn drawn() {
 /// window's resize resizes the task, as the user's does.
 fn orient(task: i32, o: u32) {
     let Some(Some((w, user))) = with(|s| {
-        let t = s.tasks.get(&task).filter(|t| !t.closed)?;
+        let t = s
+            .tasks
+            .get(&task)
+            .filter(|t| !t.closed && !t.full_screen.places())?;
         Some((t.window, t.user))
     }) else {
         return;
@@ -1218,6 +1281,10 @@ fn moved(note: Id) {
     };
     let Some(Some(b)) = with(|s| {
         let t = s.tasks.get_mut(&task)?;
+        // AppKit's frames in and out of the full screen are not the user's.
+        if t.full_screen.places() {
+            return None;
+        }
         t.moved = Some(Instant::now());
         let b = window_content(&s.screen, w);
         (b != t.bounds).then_some(b)
@@ -1358,6 +1425,66 @@ pub fn restack() {
     }
 }
 
+/// AppKit moves window `w` into (`on`) or out of the full screen: what the
+/// user did asks the task for fullscreen or freeform.
+fn will_full_screen(w: Id, on: bool) {
+    let asked = with(|s| {
+        let (&task, t) = s.tasks.iter_mut().find(|(_, t)| t.window == w)?;
+        let mode = s.infos.get(&task).map_or(0, |i| i.windowing_mode);
+        Some((task, t.full_screen.will(on, mode)?))
+    })
+    .flatten();
+    if let Some((task, mode)) = asked {
+        send(Record {
+            op: window::SET_WINDOWING_MODE,
+            task,
+            windowing_mode: mode,
+            ..Default::default()
+        });
+    }
+}
+
+/// Window `w` is in the full screen (`on`) or not, as it went or as AppKit
+/// left it: it follows its task's windowing mode again.
+fn did_full_screen(w: Id, on: bool) {
+    let Some(Some(task)) = with(|s| {
+        let (&task, t) = s.tasks.iter_mut().find(|(_, t)| t.window == w)?;
+        t.full_screen.did(on);
+        Some(task)
+    }) else {
+        return;
+    };
+    if !on {
+        follow(task);
+        float(task);
+    }
+    full_screen(task);
+}
+
+extern "C" fn will_enter_full_screen(_: Id, _: Sel, note: Id) {
+    will_full_screen(send!(note, c"object" => Id), true);
+}
+
+extern "C" fn did_enter_full_screen(_: Id, _: Sel, note: Id) {
+    did_full_screen(send!(note, c"object" => Id), true);
+}
+
+extern "C" fn will_exit_full_screen(_: Id, _: Sel, note: Id) {
+    will_full_screen(send!(note, c"object" => Id), false);
+}
+
+extern "C" fn did_exit_full_screen(_: Id, _: Sel, note: Id) {
+    did_full_screen(send!(note, c"object" => Id), false);
+}
+
+extern "C" fn did_fail_to_enter_full_screen(_: Id, _: Sel, w: Id) {
+    did_full_screen(w, false);
+}
+
+extern "C" fn did_fail_to_exit_full_screen(_: Id, _: Sel, w: Id) {
+    did_full_screen(w, true);
+}
+
 extern "C" fn did_change_occlusion(_: Id, _: Sel, note: Id) {
     let w = send!(note, c"object" => Id);
     let visible = send!(w, c"occlusionState" => usize) & OCCLUSION_VISIBLE != 0;
@@ -1463,6 +1590,18 @@ fn delegate() -> Id {
                 (c"windowDidMiniaturize:", did_miniaturize),
                 (c"windowDidDeminiaturize:", did_deminiaturize),
                 (c"windowDidChangeOcclusionState:", did_change_occlusion),
+                (c"windowWillEnterFullScreen:", will_enter_full_screen),
+                (c"windowDidEnterFullScreen:", did_enter_full_screen),
+                (c"windowWillExitFullScreen:", will_exit_full_screen),
+                (c"windowDidExitFullScreen:", did_exit_full_screen),
+                (
+                    c"windowDidFailToEnterFullScreen:",
+                    did_fail_to_enter_full_screen,
+                ),
+                (
+                    c"windowDidFailToExitFullScreen:",
+                    did_fail_to_exit_full_screen,
+                ),
             ],
         );
         // SAFETY: adds a BOOL method to the class registered above.
@@ -1588,6 +1727,7 @@ mod tests {
                 closed: false,
                 moved: None,
                 user: None,
+                full_screen: FullScreen::default(),
             },
         );
         note(
