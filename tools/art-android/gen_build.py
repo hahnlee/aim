@@ -97,7 +97,11 @@ BP_FILES = [
     "art/libelffile/Android.bp",
     "art/dex2oat/Android.bp",
     "art/openjdkjvmti/Android.bp",
+    "art/odrefresh/Android.bp",
+    "external/protobuf/Android.bp",
 ]
+# stats-log-api-gen and libstats_proto_host, with the filegroups they name.
+STATS_BP_GLOB = "frameworks/proto_logging/stats/**/Android.bp"
 
 
 def run(cmd, **kwargs):
@@ -125,7 +129,9 @@ class Build:
         self.ndk = os.path.abspath(args.ndk)
         self.toolchain = os.path.join(self.ndk, "toolchains/llvm/prebuilt/darwin-x86_64")
         self.lines = []
-        self.modules = bp_query.load(self.src_root, BP_FILES)
+        stats_bp = sorted(os.path.relpath(p, self.src_root) for p in
+                          glob.glob(os.path.join(self.src_root, STATS_BP_GLOB), recursive=True))
+        self.modules = bp_query.load(self.src_root, BP_FILES + stats_bp)
 
     # -- helpers ------------------------------------------------------------
 
@@ -146,10 +152,14 @@ class Build:
         excluded = set(self.query(module, "exclude_srcs"))
         result = []
         for src in self.query(module, "srcs"):
-            if src.startswith(":") or src in excluded:
+            if src.startswith(":"):
+                if self.modules.get(src[1:], ("",))[0] == "filegroup":
+                    result.extend(self.srcs(src[1:], root))
+                continue
+            if src in excluded:
                 continue
             if "*" in src:
-                result.extend(sorted(glob.glob(os.path.join(root, src))))
+                result.extend(sorted(glob.glob(os.path.join(root, src), recursive=True)))
             else:
                 result.append(os.path.join(root, src))
         return result
@@ -223,6 +233,8 @@ class Build:
             os.path.join(self.gen, "asm_defines"),
             os.path.join(self.gen, "xsdc/apex/include"),
             os.path.join(self.gen, "xsdc/art/include"),
+            os.path.join(self.gen, "genrule/statslog_art.h"),
+            os.path.join(self.gen, "genrule/statslog_odrefresh.h"),
             os.path.join(art, "runtime"),
             os.path.join(art, "compiler"),
             os.path.join(art, "compiler/export"),
@@ -308,8 +320,17 @@ class Build:
         self.emit("rule link_exe\n  command = $cxx $target -pie -nostdlib++ "
                   "-Wl,--build-id=sha1 -Wl,-z,defs -Wl,--gc-sections "
                   "-o $out $in $libs $ldflags\n  description = LINK $out")
+        # Host tools (stats-log-api-gen and its aprotoc), built with Xcode's clang.
+        self.emit("rule host_cxx\n  command = xcrun clang++ -MMD -MF $out.d $flags -std=gnu++17 "
+                  "-c $in -o $out\n  depfile = $out.d\n  deps = gcc\n  description = HOST CXX $out")
+        self.emit("rule host_link\n  command = xcrun clang++ -o $out $in $libs\n"
+                  "  description = HOST LINK $out")
+        self.emit("rule aprotoc\n  command = cd $root && $aprotoc $flags $protos\n"
+                  "  description = APROTOC $outdir")
+        self.emit("rule genrule\n  command = $cmd\n  description = GEN $out")
+        self.emit("rule copy\n  command = cp $in $out\n  description = COPY $out")
 
-    def objects(self, name, sources, flags):
+    def objects(self, name, sources, flags, host=False, order=()):
         objs = []
         for source in sources:
             rel = os.path.relpath(source, "/")
@@ -322,24 +343,29 @@ class Build:
                 rule = "asm"
             else:
                 raise ValueError(source)
-            self.emit(f"build {obj}: {rule} {source}")
+            if host:
+                rule = "host_" + rule
+            self.emit(f"build {obj}: {rule} {source}" + (f" || {' '.join(order)}" if order else ""))
             self.emit(f"  flags = {flags[rule]}")
             objs.append(obj)
         return objs
 
-    def static_lib(self, name, sources, flags):
-        objs = self.objects(name, sources, flags)
+    def static_lib(self, name, sources, flags, order=()):
+        objs = self.objects(name, sources, flags, order=order)
         lib = os.path.join(self.out, "obj", f"{name}.a")
         self.emit(f"build {lib}: ar {' '.join(objs)}")
         return lib
 
-    def shared_lib(self, name, objs, static_libs, shared_libs, extra_ldflags=""):
+    def shared_lib(self, name, objs, static_libs, shared_libs, extra_ldflags="", archives=()):
+        """Links `static_libs` whole and `archives` as Soong's static_libs:
+        only the members something needs."""
         out = os.path.join(self.out, "lib64", f"{name}.so")
         whole = " ".join(static_libs)
         libs = f"-Wl,--whole-archive {whole} -Wl,--no-whole-archive" if static_libs else ""
-        self.emit(f"build {out}: link {' '.join(objs)} | {' '.join(static_libs + shared_libs)}")
+        inputs = static_libs + list(archives) + shared_libs
+        self.emit(f"build {out}: link {' '.join(objs)} | {' '.join(inputs)}")
         self.emit(f"  soname = {name}.so")
-        self.emit(f"  libs = {libs} {' '.join(shared_libs)}")
+        self.emit(f"  libs = {libs} {' '.join(list(archives) + shared_libs)}")
         self.emit(f"  ldflags = {extra_ldflags}")
         return out
 
@@ -469,16 +495,24 @@ class Build:
         # libelffile (static, into libart)
         elffile = self.static_lib("libelffile", self.srcs("libelffile"), flags_for("libelffile"))
 
+        # libstatslog_art and libodrstatslog (its Android variant): the atom
+        # writers their genrules make with stats-log-api-gen.
+        gen = self.stats_log_api_gen()
+        statslog_headers = (self.genrule("statslog_art.h", gen) +
+                            self.genrule("statslog_odrefresh.h", gen))
+        statslog = self.static_lib("libstatslog_art", self.genrule("statslog_art.cpp", gen),
+                                   flags_for("libstatslog_art"), order=statslog_headers)
+        odrstatslog = self.static_lib(
+            "libodrstatslog",
+            self.srcs("libodrstatslog") + self.genrule("statslog_odrefresh.cpp", gen),
+            flags_for("libodrstatslog"), order=statslog_headers)
+
         # libart = libart-compiler + libart-runtime
         runtime_flags = flags_for("libart-runtime")
         runtime_srcs = self.srcs("libart-runtime") + [self.mterp()] + apex_srcs + art_srcs
         runtime_srcs += self.operator_srcs("art_operator_srcs", "art/runtime")
-        # Upstream's host variant of odrefresh metrics (no statsd pulled atoms).
-        runtime_srcs.append(os.path.join(self.art, "odrefresh/odr_statslog_host.cc"))
-        runtime_srcs = [s for s in runtime_srcs if not s.endswith("metrics/statsd.cc")]
-        runtime_srcs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                         "statsd_unavailable.cc"))
-        runtime_objs = self.objects("libart-runtime", runtime_srcs, runtime_flags)
+        runtime_objs = self.objects("libart-runtime", runtime_srcs, runtime_flags,
+                                    order=statslog_headers)
 
         compiler_flags = flags_for("libart-compiler")
         compiler_srcs = self.srcs("libart-compiler") + \
@@ -496,7 +530,8 @@ class Build:
         libart = self.shared_lib("libart", runtime_objs + compiler_objs,
                         [elffile, vixl, cpu_features], art_shared,
                         "-Wl,--keep-unique,__jit_debug_register_code"
-                        " -Wl,--keep-unique,__dex_debug_register_code")
+                        " -Wl,--keep-unique,__dex_debug_register_code",
+                        archives=[statslog, odrstatslog])
 
         # libopenjdkjvm: the JVM_* interface libopenjdk.so calls; it uses libart
         # internals, so it must be rebuilt with the patched runtime.
@@ -561,6 +596,79 @@ class Build:
         flags = {"cxx": base, "cc": base, "asm": f"{include} {defines}"}
         return self.static_lib("libcrypto_static",
                                [os.path.join(root, s) for s in files], flags)
+
+    def stats_log_api_gen(self):
+        """frameworks/proto_logging's stats-log-api-gen for the host, built as
+        Soong builds it: aprotoc (external/protobuf) generates
+        libstats_proto_host from the atom protos, and the tool links it with
+        libprotobuf-cpp-full. Every atom object is linked, so the generated
+        pool holds the extension atoms too, as with Soong's shared library."""
+        protobuf_src = self.fetched("external/protobuf/src")
+
+        def host_flags(module, extra=()):
+            dirs = self.query(module, "local_include_dirs") + \
+                self.query(module, "export_include_dirs")
+            cflags = [f for f in self.query(module, "cflags") if f != "-Werror"]
+            return {"host_cxx": " ".join([f"-I{self.fetched(d)}" for d in dirs] +
+                                         [shlex.quote(f) for f in cflags] + list(extra))}
+
+        full = self.srcs("libprotobuf-cpp-full")
+        full_objs = self.objects("host/libprotobuf-cpp-full", full,
+                                 host_flags("libprotobuf-cpp-full"), host=True)
+        protoc_objs = self.objects("host/libprotoc",
+                                   [s for s in self.srcs("libprotoc") if s not in full],
+                                   host_flags("libprotoc"), host=True)
+        main_objs = self.objects("host/aprotoc", self.srcs("aprotoc"),
+                                 host_flags("aprotoc", [f"-I{protobuf_src}"]), host=True)
+        aprotoc = os.path.join(self.out, "host/bin/aprotoc")
+        self.emit(f"build {aprotoc}: host_link {' '.join(main_objs + protoc_objs + full_objs)}")
+        self.emit("  libs = -lz")
+
+        # Soong's proto paths are relative to the source root.
+        protos = list(dict.fromkeys(self.srcs("libstats_proto_host")))
+        relative = [os.path.relpath(p, self.src_root) for p in protos]
+        out = os.path.join(self.gen, "proto")
+        sources = [os.path.join(out, r[:-len(".proto")] + ".pb.cc") for r in relative]
+        headers = [s[:-len(".cc")] + ".h" for s in sources]
+        self.emit(f"build {' '.join(sources + headers)}: aprotoc {' '.join(protos)} | {aprotoc}")
+        self.emit(f"  root = {self.src_root}")
+        self.emit(f"  aprotoc = {aprotoc}")
+        self.emit(f"  flags = -I. -I{protobuf_src} --cpp_out={out}")
+        self.emit(f"  protos = {' '.join(relative)}")
+        self.emit(f"  outdir = {out}")
+        proto_objs = self.objects("host/libstats_proto_host", sources,
+                                  host_flags("libstats_proto_host",
+                                             [f"-I{out}", f"-I{protobuf_src}"]), host=True)
+
+        tool_objs = self.objects("host/stats-log-api-gen", self.srcs("stats-log-api-gen"),
+                                 host_flags("stats-log-api-gen", [f"-I{out}", f"-I{protobuf_src}"]),
+                                 host=True, order=headers)
+        tool = os.path.join(self.out, "host/bin/stats-log-api-gen")
+        self.emit(f"build {tool}: host_link {' '.join(tool_objs + proto_objs + full_objs)}")
+        self.emit("  libs = -lz")
+
+        # The tool reads the data files of its `required` modules from
+        # tools/out/etc in its working directory, a genrule sandbox's layout.
+        sandbox = os.path.join(self.out, "host/sandbox")
+        data = []
+        for required in self.query("stats-log-api-gen", "required"):
+            sub_dir = bp_query.resolve(self.modules, required)["sub_dir"]
+            for source in self.srcs(required):
+                copy = os.path.join(sandbox, "tools/out/etc", sub_dir, os.path.basename(source))
+                self.emit(f"build {copy}: copy {source}")
+                data.append(copy)
+        return tool, sandbox, data
+
+    def genrule(self, name, gen):
+        """Runs a stats-log-api-gen genrule's own command in the sandbox."""
+        tool, sandbox, data = gen
+        body = self.modules[name][1]
+        gen_dir = os.path.join(self.gen, "genrule", name)
+        cmd = body["cmd"].replace("$(location stats-log-api-gen)", tool)
+        outputs = [os.path.join(gen_dir, o) for o in body["out"]]
+        self.emit(f"build {' '.join(outputs)}: genrule | {tool} {' '.join(data)}")
+        self.emit(f"  cmd = cd {sandbox} && {cmd.replace('$(genDir)', gen_dir)}")
+        return outputs
 
     def libcap_names(self):
         """libcap's cap_names.h, made the way external/libcap/Android.bp does.

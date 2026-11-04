@@ -307,7 +307,8 @@ cargo aim build art
   libbase/liblog/libcutils/libunwindstack headers, libziparchive, vixl, lzma,
   zlib, tinyxml2, dlmalloc, fmtlib, BoringSSL, bionic platform headers, lz4,
   cpu_features, libcap, perfetto heapprofd header, modules-utils, statsd
-  headers, and apexd's `ApexInfoList.xsd`. The series is applied to a
+  headers, protobuf's sources, proto_logging's `stats` tree, and apexd's
+  `ApexInfoList.xsd`. The series is applied to a
   staged copy of the ART subtrees (`target/aim/art/src/art`), rewriting only
   the files whose content changes. No Soong and no full AOSP
   checkout: `tools/art-android/bp_query.py` evaluates ART's `Android.bp` for an
@@ -320,7 +321,17 @@ cargo aim build art
   nterp (`gen_mterp.py`), `asm_defines.h` (cpp-define-generator, compiled for
   the target), ART aconfig flags (all `is_fixed_read_only`, declaration
   defaults), `com_android_apex`/`com_android_art` XML parsers (xsdc),
-  libcap `cap_names.h` (upstream awk + `_makenames`).
+  libcap `cap_names.h` (upstream awk + `_makenames`), and the statsd atom
+  writers `statslog_art` and `statslog_odrefresh` (their genrules' own
+  commands, run in a genrule sandbox layout). Their generator,
+  `stats-log-api-gen`, is built for the host with Xcode's clang from its
+  `Android.bp`, linked with `libstats_proto_host`, the atom protos compiled
+  by `aprotoc`, itself built from `external/protobuf`'s `Android.bp`
+  (protobuf 3.21.12). libart links `libstatslog_art` and the Android variant
+  of `libodrstatslog` as upstream does, so it reports `ART_DATUM_REPORTED`,
+  `ART_DATUM_DELTA_REPORTED` and `ART_DEVICE_DATUM_REPORTED` through the
+  statsd APEX's `libstatssocket` and serves the `ART_DEVICE_STATUS` pull
+  through `libstatspull`.
 - **Soong's device defaults** that change behaviour are passed too:
   `-ftrivial-auto-var-init=zero` (ART relies on it: `AssignVTableIndexes`
   keeps a `BitVector` in an `alloca` buffer it never clears, so without it
@@ -341,12 +352,7 @@ cargo aim build art
   `dalvikvm64` runs Java with and without a boot image, interpreted and with
   the JIT, and `dex2oat64` regenerates the boot image. A full build takes
   about 3.5 minutes on this machine (NDK clang runs under Rosetta).
-- **Deviations:** `metrics/statsd.cc` is replaced by
-  `tools/art-android/statsd_unavailable.cc` (upstream's own non-Android stubs),
-  so ART reports no metrics to statsd, until `statslog_art` is generated
-  (#162: that needs `stats-log-api-gen` built for the host from
-  `frameworks/proto_logging`, which is not cheap); odrefresh metrics use
-  upstream's host variant; `-Werror` is off (NDK clang 19 vs the platform's
+- **Deviations:** `-Werror` is off (NDK clang 19 vs the platform's
   newer clang).
 
 The rebuilt set must replace, as a unit, every ART APEX library that links
