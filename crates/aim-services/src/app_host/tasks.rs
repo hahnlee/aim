@@ -104,6 +104,8 @@ pub struct Tasks {
     /// from its task's removal until the home starts again.
     home: AtomicI32,
     launch_params: Mutex<Option<Arc<Persister>>>,
+    /// The organizer root tasks adjacent to each other.
+    pub(super) adjacency: Mutex<super::adjacency::Adjacency>,
 }
 
 impl Tasks {
@@ -257,6 +259,19 @@ impl Tasks {
             .filter(|t| t.parent == parent)
             .map(|t| t.id)
             .collect()
+    }
+
+    /// The organizer root task whose bounds task `id` takes (it requests
+    /// none of its own) if the root task is adjacent to others: the task's
+    /// window is a tile.
+    fn tile_root(&self, id: i32) -> Option<i32> {
+        let root = {
+            let tasks = self.tasks.lock().unwrap();
+            let t = tasks.iter().find(|t| t.id == id)?;
+            t.parent.filter(|_| t.requested_bounds.is_none())?
+        };
+        let adjacent = !self.adjacency.lock().unwrap().of(root).is_empty();
+        adjacent.then_some(root)
     }
 
     /// The organizer root task task `id` is in.
@@ -718,7 +733,9 @@ impl AppHost {
         self.activities.task_tokens.lock().unwrap().remove(&id);
         if let Some(task) = removed {
             self.remove_layers(task.layer.into_iter().collect());
-            if task.root.is_none() {
+            if task.root.is_some() {
+                self.tasks.adjacency.lock().unwrap().remove(id);
+            } else {
                 self.tasks.send(&Record {
                     op: window::REMOVED,
                     task: id,
@@ -822,11 +839,17 @@ impl AppHost {
             .unwrap()
             .extract_if(.., |t| t.root.is_some())
             .collect();
+        // The adjacency is locked alone: a WCT reads tokens under it.
         let mut tokens = self.activities.task_tokens.lock().unwrap();
         for root in &roots {
             tokens.remove(&root.id);
         }
         drop(tokens);
+        let mut adjacency = self.tasks.adjacency.lock().unwrap();
+        for root in &roots {
+            adjacency.remove(root.id);
+        }
+        drop(adjacency);
         let ids = roots.iter().map(|r| r.id).collect();
         self.remove_layers(roots.into_iter().filter_map(|r| r.layer).collect());
         ids
@@ -1000,18 +1023,56 @@ impl AppHost {
             window::SET_BOUNDS => {
                 // `resizeTask`.
                 let [left, top, right, bottom] = r.bounds;
-                self.move_task(
-                    r.task,
-                    Rect {
-                        left,
-                        top,
-                        right,
-                        bottom,
-                    },
-                )
+                let bounds = Rect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                };
+                match self.tasks.tile_root(r.task) {
+                    Some(root) => self.resize_tile(r.task, root, bounds),
+                    None => self.move_task(r.task, bounds),
+                }
             }
             op => Err(format!("unknown request {op}")),
         }
+    }
+
+    /// `SET_BOUNDS` of task `task`, a tile of the adjacent organizer root
+    /// task `root`: the root task takes the bounds and the root tasks
+    /// adjacent to it keep tiling with it (`adjacency::tiled`), moving with
+    /// it, or as the split divider resizes the stages. Bounds that would
+    /// leave a root task empty
+    /// are refused, and the task's record answers that.
+    fn resize_tile(self: &Arc<Self>, task: i32, root: i32, bounds: Rect) -> Result<(), String> {
+        let old = self
+            .tasks
+            .bounds(root)
+            .ok_or_else(|| format!("no root task {root}"))?;
+        let adjacent = self.tasks.adjacency.lock().unwrap().of(root);
+        let mut tiles = vec![(root, bounds)];
+        for id in adjacent {
+            let b = self
+                .tasks
+                .bounds(id)
+                .ok_or_else(|| format!("no root task {id}"))?;
+            tiles.push((id, super::adjacency::tiled(b, old, bounds)));
+        }
+        if let Some((id, _)) = tiles
+            .iter()
+            .find(|(_, b)| b.width() <= 0 || b.height() <= 0)
+        {
+            if let Some((bounds, mode)) = self.tasks.place(task) {
+                self.tasks.send_task(task, bounds, mode);
+            }
+            return Err(format!("task {task}'s bounds leave root task {id} empty"));
+        }
+        for (id, b) in tiles {
+            if self.tasks.bounds(id) != Some(b) {
+                self.set_root_bounds(id, Some(b))?;
+            }
+        }
+        self.organizer_tasks_changed().map_err(|e| e.message)
     }
 
     /// `SET_WINDOWING_MODE`: the user put task `id`'s window into or out of
@@ -2914,6 +2975,178 @@ pub(super) mod tests {
                     5
                 ))
             );
+        });
+    }
+
+    /// `TestTaskOrganizer`'s split: adjacent roots and a launch-adjacent
+    /// flag root, then a task in each root at half the display. The Mac
+    /// windows of the two tasks tile.
+    #[test]
+    fn adjacent_root_tasks_tile_their_tasks_windows() {
+        use super::super::task_organizer::tests::apply_wct;
+        use super::super::window_container_transaction::tests::{Op, reparent, transaction};
+        use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_UNSUPPORTED_OPERATION};
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let r = |left, top, right, bottom| Rect {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            let (_thread, activities, mut receive, _) =
+                wct_tasks(host, export, r(100, 100, 900, 1500));
+            for a in &activities {
+                let mut records = host.activities.records.lock().unwrap();
+                records.get_mut(a).unwrap().info.resize_mode = 2;
+            }
+            for task in &mut host.activities.stack.lock().unwrap().tasks {
+                task.intent.component = Some(crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                });
+            }
+            let primary = host.create_root_task(6, None).unwrap();
+            let secondary = host.create_root_task(6, None).unwrap();
+            let (p, s) = (host.task_token(primary), host.task_token(secondary));
+            let apply = |ops: &[Op]| {
+                let reply = apply_wct(host, &transaction(&[], ops), 1000);
+                reply.reader().read_exception().unwrap().map_err(|e| e.code)
+            };
+            let op = |kind, container, containers| Op {
+                kind,
+                container,
+                containers,
+                ..reparent(p, None, false)
+            };
+            let adjacent = |roots: Vec<Binder>| op(4, None, Some(roots));
+            let flag = |root| op(6, Some(root), None);
+            // A flag root must be adjacent; adjacent roots are distinct
+            // organizer roots, two or more. Refusals apply nothing.
+            for (ops, code) in [
+                (vec![flag(s)], EX_UNSUPPORTED_OPERATION),
+                (
+                    vec![adjacent(vec![p, s]), flag(host.task_token(7))],
+                    EX_UNSUPPORTED_OPERATION,
+                ),
+                (
+                    vec![adjacent(vec![p, host.task_token(7)])],
+                    EX_ILLEGAL_ARGUMENT,
+                ),
+                (vec![adjacent(vec![p, p])], EX_ILLEGAL_ARGUMENT),
+                (vec![adjacent(vec![p])], EX_ILLEGAL_ARGUMENT),
+                (
+                    vec![op(15, Some(host.task_token(7)), None)],
+                    EX_ILLEGAL_ARGUMENT,
+                ),
+            ] {
+                assert_eq!(apply(&ops), Err(code));
+                assert_eq!(*host.tasks.adjacency.lock().unwrap(), Default::default());
+            }
+            // createRootTasksIfNeeded.
+            apply(&[adjacent(vec![p, s]), flag(s)]).unwrap();
+            let adjacency = host.tasks.adjacency.lock().unwrap().clone();
+            assert_eq!(
+                (adjacency.of(primary), adjacency.launch_root),
+                (vec![secondary], Some(secondary))
+            );
+            // putTaskInSplitPrimary / putTaskInSplitSecondary.
+            let (left, right) = (r(0, 0, 540, 1920), r(540, 0, 1080, 1920));
+            let bounds = |b: Rect| [(244, b.left), (248, b.top), (252, b.right), (256, b.bottom)];
+            // The tasks inherit their roots' bounds and windowing mode.
+            let inherit = [(244, 0), (248, 0), (252, 0), (256, 0), (352, 0)];
+            let (t7, t8) = (host.task_token(7), host.task_token(8));
+            let split = transaction(
+                &[
+                    (p, &bounds(left)),
+                    (s, &bounds(right)),
+                    (t7, &inherit),
+                    (t8, &inherit),
+                ],
+                &[reparent(t7, Some(p), true), reparent(t8, Some(s), true)],
+            );
+            let reply = apply_wct(host, &split, 1000);
+            reply.reader().read_exception().unwrap().unwrap();
+            assert_eq!(
+                (host.tasks.bounds(7), host.tasks.bounds(8)),
+                (Some(left), Some(right))
+            );
+            // The last TASK record of each task: its window's place.
+            let mut records = HashMap::new();
+            let mut last = |receive: &mut UnixStream| {
+                let mut bytes = Vec::new();
+                let _ = receive.read_to_end(&mut bytes);
+                for c in bytes.chunks_exact(size_of::<Record>()) {
+                    // SAFETY: `Record` is plain old data, `c` one's bytes.
+                    let r = unsafe { std::ptr::read_unaligned(c.as_ptr().cast::<Record>()) };
+                    if r.op == window::TASK {
+                        records.insert(r.task, (r.bounds, r.windowing_mode));
+                    }
+                }
+                (records[&7], records[&8])
+            };
+            assert_eq!(
+                last(&mut receive),
+                (([0, 0, 540, 1920], 6), ([540, 0, 1080, 1920], 6))
+            );
+            let set_bounds = |task, bounds| {
+                host.request(&Record {
+                    op: window::SET_BOUNDS,
+                    task,
+                    bounds,
+                    ..Default::default()
+                })
+            };
+            // The user resizes one window below the menu bar: the root
+            // tasks follow, the other window keeps tiling with it.
+            set_bounds(7, [0, 70, 600, 1920]).unwrap();
+            assert_eq!(
+                (host.tasks.bounds(primary), host.tasks.bounds(secondary)),
+                (Some(r(0, 70, 600, 1920)), Some(r(600, 70, 1080, 1920)))
+            );
+            assert_eq!(
+                last(&mut receive),
+                (([0, 70, 600, 1920], 6), ([600, 70, 1080, 1920], 6))
+            );
+            // Bounds leaving the other root empty are refused, and the
+            // window goes back.
+            assert!(set_bounds(8, [0, 70, 1080, 1920]).is_err());
+            assert_eq!(host.tasks.bounds(8), Some(r(600, 70, 1080, 1920)));
+            assert_eq!(last(&mut receive).1, ([600, 70, 1080, 1920], 6));
+            // A window dragged by its title bar takes the other with it.
+            set_bounds(8, [800, 90, 1280, 1940]).unwrap();
+            assert_eq!(
+                last(&mut receive),
+                (([200, 90, 800, 1940], 6), ([800, 90, 1280, 1940], 6))
+            );
+            set_bounds(7, [0, 70, 600, 1920]).unwrap();
+            assert_eq!(host.tasks.bounds(8), Some(r(600, 70, 1080, 1920)));
+            // Cleared adjacency: the windows move on their own; the flag root
+            // stays until its root task goes.
+            apply(&[op(15, Some(p), None)]).unwrap();
+            set_bounds(7, [0, 70, 500, 1920]).unwrap();
+            assert_eq!(host.tasks.bounds(8), Some(r(600, 70, 1080, 1920)));
+            assert_eq!(host.tasks.bounds(7), Some(r(0, 70, 500, 1920)));
+            assert_eq!(
+                host.tasks.adjacency.lock().unwrap().launch_root,
+                Some(secondary)
+            );
+            apply(&[adjacent(vec![p, s])]).unwrap();
+            host.remove_task(secondary);
+            assert_eq!(*host.tasks.adjacency.lock().unwrap(), Default::default());
+            // Adjacency ops on the deleted root are skipped, the rest applied.
+            let clear_flag = Op {
+                to_top: true,
+                ..flag(s)
+            };
+            apply(&[
+                clear_flag,
+                op(15, Some(s), None),
+                adjacent(vec![p, s]),
+                reparent(host.task_token(7), None, true),
+            ])
+            .unwrap();
+            assert_eq!(host.tasks.parent(7), None);
+            assert_eq!(*host.tasks.adjacency.lock().unwrap(), Default::default());
         });
     }
 

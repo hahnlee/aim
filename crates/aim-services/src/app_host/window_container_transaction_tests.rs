@@ -29,6 +29,7 @@ pub(in crate::app_host) fn fixture(token: Binder) -> Parcel {
 pub(in crate::app_host) struct Op {
     pub kind: i32,
     pub container: Option<Binder>,
+    pub containers: Option<Vec<Binder>>,
     pub reparent: Option<Binder>,
     pub to_top: bool,
     pub top_only: bool,
@@ -59,7 +60,14 @@ pub(in crate::app_host) fn transaction(
         p.write_i32(1);
         p.write_i32(op.kind);
         p.write_binder(op.container);
-        p.write_raw(&data[400..412], &[]);
+        match &op.containers {
+            Some(binders) => {
+                p.write_i32(binders.len() as i32);
+                binders.iter().for_each(|&b| p.write_binder(Some(b)));
+            }
+            None => p.write_i32(-1),
+        }
+        p.write_raw(&data[404..412], &[]);
         p.write_binder(op.reparent);
         p.write_raw(&data[440..472], &[]);
         p.write_bool(op.to_top);
@@ -82,6 +90,7 @@ pub(in crate::app_host) fn reparent(task: Binder, parent: Option<Binder>, to_top
     Op {
         kind: 0,
         container: Some(task),
+        containers: None,
         reparent: parent,
         to_top,
         top_only: false,
@@ -145,6 +154,7 @@ fn reparent_and_reparent_tasks_decode() {
     let children = Op {
         kind: 2,
         container: Some(root),
+        containers: None,
         reparent: None,
         to_top: true,
         top_only: true,
@@ -202,6 +212,69 @@ fn reparent_and_reparent_tasks_decode() {
         Transaction::read(&mut truncated.reader()).unwrap_err().code,
         EX_ILLEGAL_ARGUMENT
     );
+}
+// setAdjacentRootSet (its containers only), clearAdjacentRoots and
+// setLaunchAdjacentFlagRoot / clearLaunchAdjacentFlagRoot (clearRoot in mToTop).
+#[test]
+fn adjacency_ops_decode() {
+    let (a, b) = (Binder::Local(64), Binder::Local(72));
+    let read = |ops: &[Op]| Transaction::read(&mut transaction(&[], ops).reader());
+    let op = |kind, container, containers: Option<Vec<Binder>>, to_top| Op {
+        kind,
+        container,
+        containers,
+        to_top,
+        ..reparent(a, None, false)
+    };
+    assert_eq!(
+        read(&[
+            op(4, None, Some(vec![a, b]), false),
+            op(6, Some(b), None, false),
+            op(6, Some(a), None, true),
+            op(15, Some(a), None, false),
+        ])
+        .unwrap()
+        .hierarchy,
+        [
+            Hop::SetAdjacentRoots(vec![a, b]),
+            Hop::LaunchAdjacentFlagRoot {
+                root: b,
+                clear: false
+            },
+            Hop::LaunchAdjacentFlagRoot {
+                root: a,
+                clear: true
+            },
+            Hop::ClearAdjacentRoots(a),
+        ]
+    );
+    // createForAdjacentRoots' container and reparent, which the server
+    // does not read, and other ops' containers are not served.
+    for bad in [
+        op(4, Some(a), Some(vec![a, b]), false),
+        Op {
+            reparent: Some(b),
+            ..op(4, None, Some(vec![a, b]), false)
+        },
+        op(4, None, Some(vec![a, b]), true),
+        op(15, Some(a), None, true),
+        Op {
+            modes: Some(vec![6]),
+            ..op(6, Some(a), None, false)
+        },
+        op(6, Some(a), Some(vec![a]), false),
+        op(0, Some(a), Some(vec![]), false),
+    ] {
+        assert_eq!(read(&[bad]).unwrap_err().code, EX_UNSUPPORTED_OPERATION);
+    }
+    // The server dereferences the containers and the container.
+    for bad in [
+        op(4, None, None, false),
+        op(6, None, None, false),
+        op(15, None, None, false),
+    ] {
+        assert_eq!(read(&[bad]).unwrap_err().code, EX_ILLEGAL_ARGUMENT);
+    }
 }
 // Field offsets of the pinned writer's Change: window bounds 244..260,
 // mConfigSetMask 340, mWindowSetMask 344, mWindowingMode 352.

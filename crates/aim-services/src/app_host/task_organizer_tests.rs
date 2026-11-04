@@ -698,6 +698,7 @@ fn organizer_root_tasks_hold_reparented_tasks_in_their_bounds() {
         let dismiss = Op {
             kind: 2,
             container: Some(token),
+            containers: None,
             reparent: None,
             to_top: true,
             top_only: false,
