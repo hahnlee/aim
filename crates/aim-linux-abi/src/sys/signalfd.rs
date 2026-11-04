@@ -96,9 +96,10 @@ pub struct SignalFd {
 
 static DESCRIPTIONS: Mutex<Vec<Weak<SignalFd>>> = Mutex::new(Vec::new());
 
-/// Counts the changes of a pending set or a mask, each of which wakes the
-/// waiters (`signalfd_notify`, `do_signalfd4`): an edge-triggered epoll
-/// reports a readable signalfd again only after a newer one.
+/// Counts the signals sent and the masks changed, each of which wakes the
+/// waiters (`signalfd_notify`, `do_signalfd4`); a dequeue or a delivery
+/// does not. An edge-triggered epoll reports a readable signalfd again only
+/// after a newer one.
 static NOTIFIED: AtomicU64 = AtomicU64::new(1);
 
 impl Drop for SignalFd {
@@ -202,12 +203,16 @@ impl SignalFd {
 }
 
 /// A thread waiting on signalfds, each readable for it only once
-/// [`NOTIFIED`] is past the count given with it.
+/// [`NOTIFIED`] is past the count given with it. It holds the thread's
+/// record, and with it the wake token.
 struct Poller {
-    thread: &'static Thread,
+    thread: Arc<Thread>,
     watched: Vec<(Arc<SignalFd>, u64)>,
 }
 
+/// The registered pollers. [`refresh`] syncs them under the lock, so one
+/// whose [`Polling`] has ended, which a newer wait of its thread may have
+/// replaced, never writes the token again.
 static POLLERS: Mutex<Vec<Arc<Poller>>> = Mutex::new(Vec::new());
 
 impl Poller {
@@ -223,7 +228,7 @@ impl Poller {
         self.wake().update(|| {
             let notified = NOTIFIED.load(SeqCst);
             self.watched.iter().any(|(description, after)| {
-                notified > *after && description.readable(Some(self.thread))
+                notified > *after && description.readable(Some(&self.thread))
             })
         });
     }
@@ -239,7 +244,7 @@ impl Polling {
     /// None on a thread with no guest context, which has no queue of its
     /// own.
     pub(super) fn begin(watched: Vec<(Arc<SignalFd>, u64)>) -> Result<Option<Polling>, Errno> {
-        let Some(thread) = thread::current() else {
+        let Some(thread) = thread::current().and_then(|thread| thread::find(thread.tid)) else {
             return Ok(None);
         };
         if thread.sig.signalfd_wake.get().is_none() {
@@ -272,9 +277,16 @@ impl Drop for Polling {
     }
 }
 
+/// The signal owner: a signal was sent to the process or one of its
+/// threads, or a signalfd's mask changed here, which wakes the waiters
+/// (`signalfd_notify`, `do_signalfd4`).
+pub(super) fn notify() {
+    NOTIFIED.fetch_add(1, SeqCst);
+    refresh();
+}
+
 /// The signal owner: a pending set changed.
 pub(super) fn refresh() {
-    NOTIFIED.fetch_add(1, SeqCst);
     let all: Vec<_> = {
         let all = DESCRIPTIONS.lock().unwrap();
         all.iter().filter_map(Weak::upgrade).collect()
@@ -282,13 +294,12 @@ pub(super) fn refresh() {
     for description in all {
         description.sync();
     }
-    let pollers = POLLERS.lock().unwrap().clone();
-    for poller in pollers {
+    for poller in POLLERS.lock().unwrap().iter() {
         poller.sync();
     }
 }
 
-/// The current count of [`refresh`]es.
+/// The current count of [`notify`]s.
 pub(super) fn notified() -> u64 {
     NOTIFIED.load(SeqCst)
 }
@@ -324,7 +335,6 @@ pub fn signalfd4(a: [u64; 6]) -> i64 {
         if let Err(error) = write_mask(description.shared, mask) {
             return -(error as i64);
         }
-        refresh();
         signal::wake_readers();
         return fd as i64;
     }
@@ -1195,6 +1205,131 @@ mod tests {
         );
         assert_eq!(epoll_for(once, 0), 1);
         for fd in [fd, edge, once] {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    /// The calling thread's CPU time, which a busy wait would spend.
+    fn cpu() -> std::time::Duration {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a timespec we own.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) },
+            0
+        );
+        std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    }
+
+    /// `f` returns `n` after sleeping at least `ms` without spinning.
+    fn sleeps(ms: u64, n: i64, f: impl FnOnce() -> i64) {
+        let (start, spent) = (std::time::Instant::now(), cpu());
+        assert_eq!(f(), n);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(ms));
+        assert!(cpu() - spent < std::time::Duration::from_millis(ms / 20));
+    }
+
+    /// signalfd_poll reports POLLIN alone: a poll or select for anything
+    /// else sleeps through a signal readable for the thread.
+    #[test]
+    fn a_wait_without_pollin_sleeps_on_a_readable_signalfd() {
+        if isolated("a_wait_without_pollin_sleeps_on_a_readable_signalfd") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        queue(35, 1, true);
+        let mut entry = libc::pollfd {
+            fd: fd as i32,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let timeout = [0i64, 300_000_000];
+        sleeps(300, 0, || {
+            sys::poll::ppoll([
+                &mut entry as *mut _ as u64,
+                1,
+                timeout.as_ptr() as u64,
+                0,
+                0,
+                0,
+            ])
+        });
+        let (mut write, timeout) = (1u64 << fd, [0i64, 300_000_000]);
+        sleeps(300, 0, || {
+            sys::poll::pselect6([
+                fd as u64 + 1,
+                0,
+                &mut write as *mut _ as u64,
+                0,
+                timeout.as_ptr() as u64,
+                0,
+            ])
+        });
+        let mut bytes = [0u8; RECORD];
+        assert_eq!((receive(fd, &mut bytes), value(&bytes)), (128, 1));
+        assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// A read dequeues without waking the waiters (`signalfd_dequeue`), so
+    /// an edge-triggered epoll does not report what is left again.
+    #[test]
+    fn a_read_does_not_requeue_an_edge() {
+        if isolated("a_read_does_not_requeue_an_edge") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34 | 1 << 35;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        let edge = epoll_with(fd, 0x1 | 1 << 31);
+        queue(35, 1, true);
+        queue(36, 2, false);
+        assert_eq!(epoll_for(edge, 0), 1);
+        let mut bytes = [0u8; RECORD];
+        assert_eq!((receive(fd, &mut bytes), value(&bytes)), (128, 1));
+        assert_eq!(epoll_for(edge, 0), 0);
+        queue(35, 3, true);
+        assert_eq!(epoll_for(edge, 0), 1);
+        for fd in [fd, edge] {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    /// A signalfd another thread removes from the interest list during a
+    /// wait no longer wakes it.
+    #[test]
+    fn a_removed_interest_does_not_wake_the_waiter() {
+        if isolated("a_removed_interest_does_not_wake_the_waiter") {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        context();
+        let mask = 1u64 << 34;
+        block(mask);
+        let fd = create(mask, NONBLOCK);
+        let ep = epoll_with(fd, 0x1);
+        let tid = sys::thread::gettid() as u64;
+        let remover = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let none = [0u64; 2];
+            assert_eq!(
+                sys::epoll::epoll_ctl([ep as u64, 2, fd as u64, none.as_ptr() as u64, 0, 0]),
+                0
+            );
+            directed(tid, 35, 1);
+        });
+        sleeps(300, 0, || epoll_for(ep, 300));
+        remover.join().unwrap();
+        let mut bytes = [0u8; RECORD];
+        assert_eq!((receive(fd, &mut bytes), value(&bytes)), (128, 1));
+        for fd in [fd, ep] {
             assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
         }
     }

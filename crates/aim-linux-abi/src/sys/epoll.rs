@@ -643,19 +643,6 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
     let knotes = 2 * ep.interest.lock().unwrap().len() + 3 * ep.ptys.lock().unwrap().len();
     let fetch = knotes.max(maxevents as usize).min(i32::MAX as usize);
     let mut kevs: Vec<libc::kevent> = Vec::with_capacity(fetch);
-    let signals = signal_interests(&ep);
-    let polling = if signals.is_empty() {
-        None
-    } else {
-        let watched = signals
-            .iter()
-            .map(|(_, description, seen)| (Arc::clone(description), *seen))
-            .collect();
-        match super::signalfd::Polling::begin(watched) {
-            Ok(polling) => polling,
-            Err(error) => return -(error as i64),
-        }
-    };
     let deadline = timeout.map(|t| now_ns() + t.tv_sec * 1_000_000_000 + t.tv_nsec);
     let zero = libc::timespec {
         tv_sec: 0,
@@ -669,6 +656,21 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
                 tv_nsec: ns % 1_000_000_000,
             }
         });
+        // The signalfd interests as of now, as another thread may have
+        // changed them, or reported or disabled one, since the last wait.
+        let signals = signal_interests(&ep);
+        let polling = if signals.is_empty() {
+            None
+        } else {
+            let watched = signals
+                .iter()
+                .map(|(_, description, seen)| (Arc::clone(description), *seen))
+                .collect();
+            match super::signalfd::Polling::begin(watched) {
+                Ok(polling) => polling,
+                Err(error) => return -(error as i64),
+            }
+        };
         // SAFETY: output array with capacity `fetch`.
         let mut fetch_events = |wait: Option<&libc::timespec>| unsafe {
             libc::kevent(

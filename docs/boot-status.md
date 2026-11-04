@@ -32,7 +32,8 @@ reader's pending signals as `signalfd_siginfo` records, returning the records
 copied before a fault. Poll, select and epoll report POLLIN alone, for a masked
 signal pending for the process or for the polling (epoll: waiting) thread itself,
 as `signalfd_poll`; a signal pending on another thread neither makes it readable
-nor wakes the wait. Edge-triggered epoll reports it again after a newer signal.
+nor wakes the wait. Edge-triggered epoll reports it again after a newer signal
+or mask change, not after a read.
 A poll of an epoll fd, or a nested epoll, sees only the process's signals. Waits
 read the mask when they look, as a blocked read does whenever a signal is sent
 to the process. Fork and host exec give each process its own readiness under the

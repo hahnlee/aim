@@ -58,17 +58,18 @@ fn signal_events(description: &super::signalfd::SignalFd, asked: i16) -> i16 {
     asked & POLLIN
 }
 
-/// Register the calling thread as a poller of the signalfds among `pins`,
-/// whose readiness counts its own pending signals, and add its wake token
-/// to `host`.
+/// Register the calling thread as a poller of the signalfds among `pins`
+/// polled for POLLIN, the only event they report, whose readiness counts
+/// its own pending signals, and add its wake token to `host`.
 fn watch_signals(
     pins: &[Option<super::fdtab::Pinned>],
     host: &mut Vec<libc::pollfd>,
 ) -> Result<Option<super::signalfd::Polling>, crate::errno::Errno> {
     let watched: Vec<_> = pins
         .iter()
-        .flatten()
-        .filter_map(|pin| match pin.kind() {
+        .zip(host.iter())
+        .filter(|(_, h)| h.events & POLLIN != 0)
+        .filter_map(|(pin, _)| match pin.as_ref()?.kind() {
             Some(super::fdtab::Kind::Signal(description)) => Some((description.clone(), 0)),
             _ => None,
         })
