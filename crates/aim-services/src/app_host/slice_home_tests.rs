@@ -449,14 +449,17 @@ fn queued_app_pin_waits_for_package_settings_readiness_or_its_failure() {
             });
             queued.recv().unwrap();
             let mut pending = None;
-            let ready = host.complete_system_ready(|| {
-                pending = Some(received.recv_timeout(Duration::from_millis(50)));
-                if fail {
-                    return Err(phase_error.clone());
-                }
-                settings.begin_system_ready()?;
-                settings.system_ready().map(|_| ())
-            });
+            let ready = host.complete_system_ready(
+                || {
+                    pending = Some(received.recv_timeout(Duration::from_millis(50)));
+                    if fail {
+                        return Err(phase_error.clone());
+                    }
+                    settings.begin_system_ready()?;
+                    settings.system_ready().map(|_| ())
+                },
+                || Ok(()),
+            );
             let result = received.recv_timeout(Duration::from_secs(5));
             worker.join().unwrap();
             assert_eq!(pending.unwrap(), Err(mpsc::RecvTimeoutError::Timeout));
@@ -471,7 +474,7 @@ fn queued_app_pin_waits_for_package_settings_readiness_or_its_failure() {
             }
             // The package lifecycle is one-shot, including failed readiness.
             assert_eq!(
-                host.complete_system_ready(|| panic!("repeated phase")),
+                host.complete_system_ready(|| panic!("repeated phase"), || Ok(())),
                 ready
             );
         });

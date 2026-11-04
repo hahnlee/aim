@@ -351,6 +351,15 @@ impl AppHost {
                         );
                         return Ok(None);
                     }
+                    // getContentProviderImpl fails fast, not hanging, before
+                    // processes other than the system's may start.
+                    None if process != super::SYSTEM_PROCESS
+                        && self.processes_ready.get().is_none() =>
+                    {
+                        return Err(Exception::illegal_argument(
+                            "Attempt to launch content provider before system ready",
+                        ));
+                    }
                     None => Next::Start(
                         cpi.info
                             .application_info
@@ -918,6 +927,42 @@ mod tests {
         let mut r = Reader::new(p.data(), &[]);
         assert_eq!(provider_status(&mut r), Ok(Ok(())));
         assert_eq!(r.read_i32(), Ok(7));
+    }
+
+    /// Before system ready a provider's process is not waited for: a
+    /// system-process caller (aim-system before its ART attachment) must
+    /// not block on the readiness that waits for it.
+    #[test]
+    fn providers_fail_fast_before_system_ready() {
+        crate::system::with_boot_discovery_binders(|host, publish, _, _| {
+            publish(&mut |package| {
+                if package.package_name == "p" {
+                    let mut provider = crate::package::pkg::Provider {
+                        main: package.activities[0].main.clone(),
+                        authority: Some("fixture.early".into()),
+                        ..Default::default()
+                    };
+                    provider.main.component.name = "p.Early".into();
+                    package.providers.push(provider);
+                }
+            });
+            let (sent, received) = std::sync::mpsc::channel();
+            let caller = host.clone();
+            std::thread::spawn(move || {
+                let result = caller.provider(None, 1000, "fixture.early", 0, true);
+                sent.send(result.map(|h| h.is_some())).unwrap();
+            });
+            let result = received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("provider acquisition waited for system ready");
+            assert_eq!(
+                result,
+                Err(Exception::illegal_argument(
+                    "Attempt to launch content provider before system ready"
+                ))
+            );
+            assert!(host.processes_ready.get().is_none());
+        });
     }
 
     #[test]

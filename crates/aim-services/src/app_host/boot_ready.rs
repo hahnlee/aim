@@ -4,7 +4,7 @@ use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 use std::sync::{Arc, Mutex};
 
-/// Early boot failure also releases pending starts, with the boot failure.
+/// Early boot failure also releases pending and held starts, with the boot failure.
 pub(super) struct BootReady<'a>(pub &'a AppHost);
 impl Drop for BootReady<'_> {
     fn drop(&mut self) {
@@ -12,31 +12,47 @@ impl Drop for BootReady<'_> {
             EX_ILLEGAL_STATE,
             "boot stopped before system ready",
         )));
+        // The held broadcast starts then fail with that error.
+        self.0.broadcasts.processes_ready(self.0);
     }
 }
 impl AppHost {
     pub(super) fn system_ready(&self) -> Result<(), Exception> {
-        self.complete_system_ready(|| self.package_system()?.run_native_package_lifecycle(1))
+        let stages = |stages: std::ops::RangeInclusive<i32>| {
+            let system = self.package_system()?;
+            stages
+                .into_iter()
+                .try_for_each(|stage| system.run_native_package_lifecycle(stage))
+        };
+        self.complete_system_ready(|| stages(1..=5), || stages(6..=9))
     }
 
     pub(super) fn complete_system_ready(
         &self,
         packages: impl FnOnce() -> Result<(), Exception>,
+        after_grants: impl FnOnce() -> Result<(), Exception>,
     ) -> Result<(), Exception> {
-        self.processes_ready
+        let ready = self
+            .processes_ready
             .get_or_init(|| {
                 // SystemServer calls PMS.systemReady before AMS.systemReady:
-                // package prepare-ready (including SettingsProvider access)
-                // and default grants must both precede application forks.
+                // package prepare-ready (including SettingsProvider access),
+                // storage listeners, installer and ART readiness, and app
+                // reconciliation precede the default grants; the observers,
+                // module metadata, staged sessions and maintenance follow
+                // them. All precede application forks.
                 packages()?;
                 self.permission_manager
                     .get()
                     .ok_or_else(|| {
                         Exception::new(EX_ILLEGAL_STATE, "permission owner unavailable")
                     })?
-                    .system_ready()
+                    .system_ready()?;
+                after_grants()
             })
-            .clone()?;
+            .clone();
+        self.broadcasts.processes_ready(self);
+        ready?;
         self.start_pending_services()
     }
 }
@@ -69,7 +85,7 @@ mod tests {
     #[test]
     fn readiness_requires_a_permission_owner() {
         let host = AppHost::new(crate::test_process(1000));
-        assert!(host.complete_system_ready(|| Ok(())).is_err());
+        assert!(host.complete_system_ready(|| Ok(()), || Ok(())).is_err());
         assert!(host.processes_ready.wait().is_err());
         host.process.shutdown().unwrap();
     }

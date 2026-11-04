@@ -6,8 +6,8 @@
 //! (`CarrierAppUtils`), private volumes' readiness (`StorageEventListener`),
 //! the overlay observer, apexd's staged sessions, hibernation, and idle
 //! maintenance (`StorageManager.runMaintenance` after
-//! `FSTRIM_MANDATORY_INTERVAL`). ART Service's stages are not implemented
-//! (#2063).
+//! `FSTRIM_MANDATORY_INTERVAL`). ART Service is aim-system's original
+//! ArtManagerLocal (`art_owner`); its boot dexopt is not implemented (#2063).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex};
@@ -228,7 +228,7 @@ impl BootLifecycle {
             .unwrap_or(default))
     }
 
-    /// ART Service's stages: not implemented (#2063).
+    /// ART Service's boot dexopt: not implemented (#2063).
     fn art_service(&self, what: &str) -> Exception {
         self.host
             .unimplemented_named("package", &format!("{what}: ART Service (#2063)"))
@@ -268,7 +268,9 @@ impl Service for BootLifecycle {
             }
             leaf::DEX_OPTIMIZER_READY => {
                 leaf::DexOptimizerReady::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                Err(self.art_service("dexOptimizerReady"))
+                self.host
+                    .wait_art_owner()
+                    .map(|()| leaf::write_dex_optimizer_ready_reply(&mut p))
             }
             leaf::REGISTER_PACKAGE_OBSERVERS => {
                 let a =
@@ -296,7 +298,9 @@ impl Service for BootLifecycle {
             }
             leaf::SCHEDULE_MAINTENANCE => {
                 leaf::ScheduleMaintenance::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                Err(self.art_service("scheduleMaintenance"))
+                self.host
+                    .art_system_ready()
+                    .map(|()| leaf::write_schedule_maintenance_reply(&mut p))
             }
             leaf::APEX_SESSION_STATE => {
                 let a = leaf::ApexSessionState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -446,10 +450,13 @@ mod tests {
         // No record yet: one is made, and the maintenance is due.
         assert!(call(leaf::PERFORM_FSTRIM, &|_| {}).is_ok());
         assert!(data.join("system/last-fstrim").exists());
-        for code in [leaf::DEX_OPTIMIZER_READY, leaf::SCHEDULE_MAINTENANCE] {
-            let art = call(code, &|_| {}).unwrap_err();
-            assert!(art.message.contains("#2063"), "{}", art.message);
-        }
+        // Boot dexopt stays unavailable (art_owner tests stages 4 and 9).
+        let art = call(leaf::UPGRADE_DEXOPT, &|p| {
+            p.write_string16(Some("first-boot"));
+            p.write_binder(Some(events));
+        })
+        .unwrap_err();
+        assert!(art.message.contains("#2063"), "{}", art.message);
         let null = call(leaf::RELEASE_COMPRESSED_BLOCKS, &|p| p.write_i32(-1));
         assert_eq!(null.unwrap_err().code, EX_NULL_POINTER);
         // An unchanged boot has no compressed paths and needs no guest agent.

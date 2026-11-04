@@ -1388,6 +1388,31 @@ returned 8,619 bytes equal their logical sizes (allocated APFS blocks are record
 separately); a repeated call returns zero. Immutable system-image files, APKs,
 roots and unrelated package artifacts survive, and the fixture launches afterward.
 Full ART CTS and compilation/job lifecycle remain unrun.
+The app host now runs native package lifecycle stages 1–9 at
+PackageManagerService.systemReady's points before application forks (#2063
+slice 7): storage listeners, installer staging cleanup, ART readiness and app
+reconciliation before default grants; overlay observers, module metadata,
+staged sessions and maintenance after them. Stages 4 and 9 wait for
+aim-system's live original ArtManagerLocal attachment: an owner whose process
+died (record or Binder death, either first) is retired and init's replacement
+awaited, without bound (#2063); package queries never wait for it. Before
+system ready, broadcast cold starts are held as AMS's processes on hold and
+provider launches outside the system process fail fast as
+getContentProviderImpl's do, so aim-system's own startup calls cannot wait on
+the readiness that waits for it (a held broadcast start once deadlocked stage
+4); activity starts still wait. Stage 9 calls DexUseManagerLocal.systemReady
+(with ArtManagerLocal's) by Binder on a live owner, a replacement when the
+owner died first, and passes only on its reply, so it precedes the completion
+broadcasts; a process attaching later runs its own. Boot dexopt (stage 10)
+still reports ART unavailable. Fresh-data cold boots to sys.boot_completed,
+four interleaved pairs on current main under host load 19–44: candidate median
+13.52 s versus main 11.83 s, a regression. Its cause is #1508: RoleController's
+removeAllowlistedRestrictedPermission kills aim-system 3–4 s after it
+starts in both. On main its main thread was still stalled behind a broadcast
+start that waited for readiness, so readiness finished first; with starts held
+it reaches RoleController sooner, and readiness (stage 4 onward) waits for
+the restarted process. ACTION_SHUTDOWN is not
+broadcast at guest stop, so the original shutdown save does not run (2026-11-04).
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions

@@ -143,7 +143,7 @@ fn retained_package_helpers_use_java_owners_and_system_uid_guards() {
         .arg(&classpath)
         .arg("dev.aim.server.PackageBootstrapJavaTest")
         .arg(&data.0));
-    for mode in ["packages", "dex", "dependency", "attach", "normal"] {
+    for mode in ["packages", "dex", "dependency", "attach", "ready", "normal"] {
         let output = run(Command::new(jdk.join("bin/java"))
             .arg("-cp")
             .arg(&classpath)
