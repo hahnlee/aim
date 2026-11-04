@@ -135,6 +135,11 @@ impl Interest {
     fn wants_write(&self) -> bool {
         self.events & (EPOLLOUT | EPOLLWRNORM) != 0
     }
+    /// Whether the interest has an EVFILT_READ knote: one that wants no
+    /// filter keeps a disabled one, so that closing the fd still drops it.
+    fn read_knote(&self) -> bool {
+        self.wants_read() || !self.wants_write()
+    }
 }
 fn pty_ctl(
     ep: &Arc<Epoll>,
@@ -358,7 +363,7 @@ fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc:
     for (filter, want) in [
         (
             libc::EVFILT_READ,
-            Interest::wants_read as fn(&Interest) -> bool,
+            Interest::read_knote as fn(&Interest) -> bool,
         ),
         (libc::EVFILT_WRITE, Interest::wants_write),
     ] {
@@ -367,7 +372,7 @@ fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc:
         }
         if let Some(n) = new.filter(|n| want(n)) {
             let mut f = libc::EV_ADD;
-            f |= if n.disabled {
+            f |= if n.disabled || filter == libc::EVFILT_READ && !n.wants_read() {
                 libc::EV_DISABLE
             } else {
                 libc::EV_ENABLE
@@ -387,12 +392,10 @@ fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc:
 /// Whether the kernel still has a knote for `fd` in `kq`. A change with no
 /// action flags only reports whether the knote exists.
 fn registered(kq: i32, fd: i32, i: &Interest) -> bool {
-    let filter = if i.wants_read() {
+    let filter = if i.read_knote() {
         libc::EVFILT_READ
-    } else if i.wants_write() {
-        libc::EVFILT_WRITE
     } else {
-        return true;
+        libc::EVFILT_WRITE
     };
     apply(kq, &[kev(fd, filter, 0)]) == 0
 }
@@ -481,11 +484,12 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     if exclusive_invalid(op, new.as_ref(), None, epoll) {
         return -(EINVAL as i64);
     }
-    // A signalfd is only ever EPOLLIN (`signalfd_poll`): its socket's
-    // other readiness is not asked for.
+    // Only the events the fd's Linux `_poll` can report are asked of its
+    // knotes (`poll::reportable`): a timerfd's or signalfd's socket is
+    // writable, and a kqueue takes no EVFILT_WRITE.
     let new = new.map(|mut n| {
-        if matches!(kind, Some(Kind::Signal(_))) {
-            n.events &= EPOLLIN | EPOLLEXCLUSIVE | EPOLLWAKEUP | EPOLLONESHOT | EPOLLET;
+        if let Some(events) = super::poll::reportable(fd, kind.as_ref()) {
+            n.events &= events as u32 | EPOLLEXCLUSIVE | EPOLLWAKEUP | EPOLLONESHOT | EPOLLET;
         }
         n
     });

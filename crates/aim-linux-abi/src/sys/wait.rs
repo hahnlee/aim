@@ -456,6 +456,11 @@ fn pidfd_lookup(fd: i32) -> Option<(i32, bool)> {
     has_tag(fd, p.pid).then_some((p.pid, p.nonblock))
 }
 
+/// Whether `fd` is a pidfd.
+pub(super) fn is_pidfd(fd: i32) -> bool {
+    pidfd_lookup(fd).is_some()
+}
+
 pub fn pidfd_open(a: [u64; 6]) -> i64 {
     let mut a = a;
     a[0] = match super::pidns::syscall_pid(a[0] as i32) {
