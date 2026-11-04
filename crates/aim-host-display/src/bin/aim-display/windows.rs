@@ -1012,10 +1012,15 @@ fn set_bounds(task: i32, b: [i32; 4]) {
     request(window::SET_BOUNDS, task, b);
 }
 
-/// Completion of an explicit launch also restores its minimized task.
-/// Ordinary focus/stacking records keep the user's minimized windows so.
+/// Completion of an explicit launch also restores its minimized task, or
+/// one on its way out of the full screen to minimize. Ordinary
+/// focus/stacking records keep the user's minimized windows so.
 fn restore(task: i32) {
-    if let Some(Some(w)) = with(|s| s.tasks.get(&task).map(|t| t.window)) {
+    if let Some(Some(w)) = with(|s| {
+        let t = s.tasks.get_mut(&task)?;
+        t.full_screen.back();
+        Some(t.window)
+    }) {
         send!(w, c"deminiaturize:" => (), Id = std::ptr::null_mut());
         front(task, 0);
     }

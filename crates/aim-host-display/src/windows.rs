@@ -190,7 +190,8 @@ impl FullScreen {
         self.away && !self.places()
     }
 
-    /// The window is back from the Dock: it follows its task's mode again.
+    /// The window is back from the Dock, or its task in front before it
+    /// got there: it follows its task's mode again.
     pub fn back(&mut self) {
         self.away = false;
     }
@@ -380,5 +381,23 @@ mod tests {
         assert!(f.away());
         assert!(f.minimizes());
         assert!(!f.toggle(FREEFORM));
+    }
+
+    #[test]
+    fn a_task_back_while_leaving_the_full_screen_enters_it_again() {
+        use windowing_mode::FULLSCREEN;
+        // The task goes home and comes back before AppKit has taken its
+        // window out: the window does not minimize, and goes back in.
+        let mut f = FullScreen {
+            on: true,
+            ..Default::default()
+        };
+        assert!(!f.away());
+        assert_eq!(f.will(false, FULLSCREEN), None);
+        f.back();
+        assert!(!f.toggle(FULLSCREEN), "not while it moves");
+        f.did(false);
+        assert!(!f.minimizes());
+        assert!(f.toggle(FULLSCREEN));
     }
 }
