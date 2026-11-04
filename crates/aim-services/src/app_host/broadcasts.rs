@@ -3424,4 +3424,39 @@ mod wait_tests {
         waiter.join().unwrap();
         completed.unwrap();
     }
+
+    #[test]
+    fn a_cold_start_exiting_before_its_watch_is_retired_after_the_queue_lock() {
+        use std::time::{Duration, Instant};
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let host = super::super::tests::host_with_start(7, Arc::new(|| {}));
+        host.apps.lock().unwrap().get_mut(&7).unwrap().pid = pid;
+        // start_cold watches its start with the state held; the death
+        // retires the queue (process_died) under the same lock.
+        let (send, receive) = std::sync::mpsc::channel();
+        let starter = host.clone();
+        std::thread::spawn(move || {
+            let state = starter.broadcasts.state.lock().unwrap();
+            starter.watch_start(7);
+            drop(state);
+            send.send(()).unwrap();
+        });
+        receive
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the start's death re-entered the broadcast state lock");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while host.apps.lock().unwrap().contains_key(&7) {
+            assert!(
+                Instant::now() < deadline,
+                "the early exit was not delivered"
+            );
+            std::thread::yield_now();
+        }
+    }
 }

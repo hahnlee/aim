@@ -389,7 +389,9 @@ The app host watches each started process for exit (NOTE_EXIT) until it
 attaches, since there is no ApplicationThread Binder death before then
 (#2433): a process killed before attaching retires its start at once, and a
 provider caller waiting for it no longer sleeps until the ten-second attach
-timeout.
+timeout. The watcher thread delivers every such exit, including a process gone
+before its watch registered, so a starter holding its own state (a broadcast
+queue's cold start) never re-enters that lock through the death (#2718).
 
 View start timestamps use the authenticated UID and PackageManager's first
 package for that UID, as Android 16's AMS does; oneway Binder reports carry no
