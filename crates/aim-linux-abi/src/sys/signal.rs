@@ -206,6 +206,8 @@ pub struct ThreadSignals {
     /// Set while the thread waits in a signalfd read, which every signal
     /// sent to the process wakes (`signalfd_notify`).
     reading: AtomicBool,
+    /// The wake token of the thread's signalfd polls, made by the first.
+    pub(super) signalfd_wake: std::sync::OnceLock<super::signalfd::Token>,
     pending: Mutex<Pending>,
     alt: Mutex<AltStack>,
     /// `rt_sigsuspend`'s mask to restore after the handler.
@@ -241,6 +243,7 @@ impl ThreadSignals {
             own: AtomicU64::new(0),
             waitset: AtomicU64::new(0),
             reading: AtomicBool::new(false),
+            signalfd_wake: std::sync::OnceLock::new(),
             pending: Mutex::new(Pending::new()),
             alt: Mutex::new(AltStack::DISABLED),
             saved_mask: Mutex::new(None),
@@ -327,7 +330,6 @@ fn send_thread(th: &Thread, info: Siginfo) -> i64 {
     if let Err(e) = lock(&th.sig.pending).push(info) {
         return e;
     }
-    super::signalfd::refresh();
     wake_readers();
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
@@ -353,7 +355,6 @@ fn send_process(info: Siginfo) -> i64 {
         Err(e) => e,
         Ok(false) => 0,
         Ok(true) => {
-            super::signalfd::refresh();
             wake_readers();
             route(sig);
             0
@@ -373,7 +374,6 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
     let Some(tid) = tid else {
         let queued = process().push(info) == Ok(true);
         if queued {
-            super::signalfd::refresh();
             wake_readers();
             route(sig);
         }
@@ -388,7 +388,6 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
     if lock(&th.sig.pending).push(info) != Ok(true) {
         return false;
     }
-    super::signalfd::refresh();
     wake_readers();
     if th.sig.eligible(sig) {
         thread::with_table(|t| {
@@ -532,7 +531,6 @@ fn take(th: &Thread) -> Option<Taken> {
         }
     }
     if own != 0 {
-        super::signalfd::refresh();
         wake_readers();
     }
     loop {
@@ -1374,19 +1372,23 @@ fn dequeue(th: &Thread, set: u64) -> Option<Siginfo> {
     info
 }
 
-/// Every signal pending on the process or one of its threads.
-pub(super) fn all_pending() -> u64 {
-    let threads = thread::with_table(|t| {
-        t.values()
-            .fold(0, |set, th| set | lock(&th.sig.pending).set)
-    });
-    threads | process().set
+/// The signals pending for the process (`shared_pending`).
+pub(super) fn process_pending() -> u64 {
+    process().set
+}
+
+/// The signals pending for `th`, its own and the process's, which a
+/// signalfd poll in it reads (`signalfd_poll`).
+pub(super) fn pending_for(th: Option<&Thread>) -> u64 {
+    th.map_or(0, |th| lock(&th.sig.pending).set) | process().set
 }
 
 /// A signal was sent to the process or one of its threads, or a signalfd's
-/// mask changed here: threads waiting in [`read_signal`] read their mask
-/// and look again (`signalfd_notify`, `do_signalfd4`).
+/// mask changed here: signalfd readiness is brought up to date, and threads
+/// waiting in [`read_signal`] read their mask and look again
+/// (`signalfd_notify`, `do_signalfd4`).
 pub(super) fn wake_readers() {
+    super::signalfd::notify();
     thread::with_table(|t| {
         for th in t.values().filter(|th| th.sig.reading.load(SeqCst)) {
             th.park.unpark();

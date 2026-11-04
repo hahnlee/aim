@@ -365,7 +365,7 @@ mod tests {
         let buffer = u32::from_le_bytes(allocation[8..12].try_into().unwrap()) as i32;
         none(buffer);
         // A synthesized /proc file, and a sysfs directory with a host tree.
-        let content = super::super::procfs::content_fd_unpublished(b"status", true) as i32;
+        let content = super::super::procfs::content_fd(b"status", true) as i32;
         none(content);
         let sys = view.join("fileattr-sys");
         std::fs::create_dir_all(sys.join("fs")).unwrap();
@@ -379,8 +379,10 @@ mod tests {
         .unwrap();
         let kernfs = std::fs::File::open(sys.join("fs")).unwrap();
         none(kernfs.as_raw_fd());
+        // The guest's close: a host close would leave their entries in the
+        // fd table for the next file that reuses the number.
         for fd in [heap as i32, buffer, content] {
-            unsafe { libc::close(fd) };
+            assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
         }
         assert!(crate::vfs::remove_mount("/sys").unwrap());
         std::fs::remove_dir_all(sys).unwrap();

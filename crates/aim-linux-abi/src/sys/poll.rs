@@ -1,6 +1,9 @@
 //! ppoll and pselect6 over Darwin poll. Every guest fd (eventfd, timerfd,
-//! epoll and inotify included) is a host fd whose poll readiness already
-//! has Linux meaning, so only the event bits and timeouts are translated.
+//! epoll and inotify included) is a host fd whose poll readiness has Linux
+//! meaning for the events its Linux `_poll` can report ([`reportable`]),
+//! so only those are asked and the event bits and timeouts translated; a
+//! signalfd is also readable for the polling thread's own signals, which
+//! its wake token reports.
 
 use crate::errno::{self, EBADF, EINVAL};
 use std::os::fd::AsRawFd;
@@ -49,11 +52,75 @@ fn from_host(h: i16, asked: i16) -> i16 {
     e
 }
 
-/// The host events to poll a signalfd for: POLLIN alone is ever ready
-/// (`signalfd_poll`), as of a mask read now.
-fn signal_events(description: &super::signalfd::SignalFd, asked: i16) -> i16 {
-    super::signalfd::ready(description);
-    asked & POLLIN
+/// The events guest fd `fd`'s Linux `_poll` can report, when its host
+/// readiness has others: a signalfd or timerfd is only ever readable
+/// (`signalfd_poll`, `timerfd_poll`), not writable as its socket is; an
+/// eventfd is POLLIN and POLLOUT without their socket's POLLRDNORM and
+/// POLLWRNORM (`eventfd_poll`); an epoll, inotify or pidfd is a kqueue,
+/// which Darwin poll reports POLLNVAL for when asked a write event, and
+/// Linux reports only readable (`ep_eventpoll_poll`, `inotify_poll`,
+/// `pidfd_poll`, which adds POLLHUP once the process is reaped).
+pub(super) fn reportable(fd: i32, kind: Option<&super::fdtab::Kind>) -> Option<i16> {
+    use super::fdtab::Kind;
+    match kind {
+        Some(Kind::Signal(_) | Kind::Timer(_)) => Some(POLLIN),
+        Some(Kind::Event(_)) => Some(POLLIN | POLLOUT),
+        Some(Kind::Epoll(_) | Kind::Inotify(_)) => Some(POLLIN | POLLRDNORM),
+        None if super::wait::is_pidfd(fd) => Some(POLLIN | POLLRDNORM),
+        _ => None,
+    }
+}
+
+/// The events of `asked` that guest fd `fd` can report, a signalfd's as
+/// of a mask read now: those polled for, and the only ones its host
+/// readiness is translated back to.
+fn asked_events(fd: i32, kind: Option<&super::fdtab::Kind>, asked: i16) -> i16 {
+    if let Some(super::fdtab::Kind::Signal(description)) = kind {
+        super::signalfd::ready(description);
+    }
+    reportable(fd, kind).map_or(asked, |events| asked & events)
+}
+
+/// Register the calling thread as a poller of the signalfds among `pins`
+/// polled for POLLIN, the only event they report, whose readiness counts
+/// its own pending signals, and add its wake token to `host`.
+fn watch_signals(
+    pins: &[Option<super::fdtab::Pinned>],
+    host: &mut Vec<libc::pollfd>,
+) -> Result<Option<super::signalfd::Polling>, crate::errno::Errno> {
+    let watched: Vec<_> = pins
+        .iter()
+        .zip(host.iter())
+        .filter(|(_, h)| h.events & POLLIN != 0)
+        .filter_map(|(pin, _)| match pin.as_ref()?.kind() {
+            Some(super::fdtab::Kind::Signal(description)) => Some((description.clone(), 0)),
+            _ => None,
+        })
+        .collect();
+    if watched.is_empty() {
+        return Ok(None);
+    }
+    let polling = super::signalfd::Polling::begin(watched)?;
+    if let Some(polling) = &polling {
+        host.push(libc::pollfd {
+            fd: polling.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    Ok(polling)
+}
+
+/// A signalfd's host revents as the polling thread reads it now: its socket
+/// shows only the process's pending signals.
+fn signal_revents(pin: Option<&super::fdtab::Pinned>, host: &mut libc::pollfd) {
+    if let Some(super::fdtab::Kind::Signal(description)) = pin.and_then(|pin| pin.kind()) {
+        host.revents = if super::signalfd::ready(description) {
+            POLLIN
+        } else {
+            0
+        };
+    }
 }
 
 /// Install `mask` (a guest sigset pointer, 0 for none) for the duration of a
@@ -151,7 +218,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
     let mut ptys = Vec::with_capacity(guest.len());
     let mut invalid = false;
     let mut host = Vec::with_capacity(guest.len());
-    for entry in guest.iter() {
+    for entry in guest.iter_mut() {
         let mut pin = if entry.fd < 0 {
             None
         } else {
@@ -179,6 +246,11 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             || pin.as_ref().map_or(-1, |pin| pin.descriptor().as_raw_fd()),
             |watch| watch.observation.data().as_raw_fd(),
         );
+        entry.events = asked_events(
+            entry.fd,
+            pin.as_ref().and_then(|pin| pin.kind()),
+            entry.events,
+        );
         if pty.is_some() {
             pin = None;
         }
@@ -187,12 +259,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         }
         host.push(libc::pollfd {
             fd,
-            events: match pin.as_ref().and_then(|pin| pin.kind()) {
-                Some(super::fdtab::Kind::Signal(description)) => {
-                    signal_events(&description, entry.events)
-                }
-                _ => to_host(entry.events),
-            },
+            events: to_host(entry.events),
             revents: 0,
         });
         pins.push(pin);
@@ -208,6 +275,10 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             revents: 0,
         });
     }
+    let polling = match watch_signals(&pins, &mut host) {
+        Ok(polling) => polling,
+        Err(error) => return -(error as i64),
+    };
     if pins.iter().flatten().any(super::close_effects::observes) {
         if let Err(error) = super::close_effects::observe_socket() {
             return -(error as i64);
@@ -227,6 +298,9 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         } else {
             (ms as i64 - (now_ns() - t0) / 1_000_000).max(0) as i32
         };
+        if let Some(polling) = &polling {
+            polling.sync();
+        }
         let n = host_poll(&mut host, if invalid { 0 } else { left }, mask);
         if n < 0 {
             return n;
@@ -238,6 +312,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 ready += 1;
                 continue;
             }
+            signal_revents(pin.as_ref(), h);
             if let Some(watch) = pty {
                 h.revents = watch.events(h.revents);
             }
@@ -272,6 +347,9 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 }
                 None => from_host(h.revents, g.events),
             };
+            if h.revents & libc::POLLIN != 0 && super::wait::pidfd_reaped(g.fd) {
+                g.revents |= POLLHUP;
+            }
             if g.revents != 0 {
                 ready += 1;
             }
@@ -341,9 +419,7 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
             if ev & POLLIN != 0 {
                 super::binder::poll(host_fd);
             }
-            if let Some(super::fdtab::Kind::Signal(description)) = pin.kind() {
-                ev = signal_events(&description, ev);
-            }
+            ev = to_host(asked_events(fd as i32, pin.kind(), ev));
             host.push(libc::pollfd {
                 fd: host_fd,
                 events: ev,
@@ -371,55 +447,76 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         // SAFETY: guest struct.
         user_read!(sig, u64)
     };
+    let polling = match watch_signals(&pins, &mut host) {
+        Ok(polling) => polling,
+        Err(error) => return -(error as i64),
+    };
     if pins.iter().flatten().any(super::close_effects::observes) {
         if let Err(error) = super::close_effects::observe_socket() {
             return -(error as i64);
         }
     }
     let t0 = now_ns();
-    let n = host_poll(&mut host, ms, mask);
-    if n < 0 {
-        return n;
-    }
-    for descriptor in &mut host {
-        if let Some(events) = super::fuse_device::readiness(descriptor.fd) {
-            descriptor.revents = match events {
-                Ok(events) => events,
-                Err(_) => POLLERR,
-            };
+    loop {
+        let left = if ms < 0 {
+            -1
+        } else {
+            (ms as i64 - (now_ns() - t0) / 1_000_000).max(0) as i32
+        };
+        if let Some(polling) = &polling {
+            polling.sync();
         }
-    }
-    for (descriptor, watch) in host.iter_mut().zip(&ptys) {
-        if let Some(watch) = watch {
-            descriptor.revents = watch.events(descriptor.revents);
+        let n = host_poll(&mut host, left, mask);
+        if n < 0 {
+            return n;
         }
-    }
-    if host.iter().any(|p| p.revents & POLLNVAL != 0) {
-        return -(EBADF as i64);
-    }
-    user_try!(update_timeout(ts, t0));
-    let mut output_sets = vec![vec![0u8; nfds.div_ceil(64) * 8]; 3];
-    let mut count = 0;
-    for (p, fd) in host.iter().zip(guest_fds) {
-        let hits = [
-            p.revents & (POLLIN | POLLHUP | POLLERR) != 0,
-            p.revents & (POLLOUT | POLLERR) != 0,
-            p.revents & POLLPRI != 0,
-        ];
-        for (index, ((s, w), hit)) in sets.iter().zip(wanted).zip(hits).enumerate() {
-            if *s != 0 && p.events & w != 0 && hit {
-                // SAFETY: guest fd_set word covering fd.
-                output_sets[index][fd / 8] |= 1 << (fd % 8);
-                count += 1;
+        for descriptor in &mut host {
+            if let Some(events) = super::fuse_device::readiness(descriptor.fd) {
+                descriptor.revents = match events {
+                    Ok(events) => events,
+                    Err(_) => POLLERR,
+                };
             }
         }
-    }
-    for (set, bytes) in sets.iter().zip(&output_sets) {
-        if *set != 0 {
-            user_try!(super::user_memory::write_exact(*set, bytes));
+        for ((descriptor, watch), pin) in host.iter_mut().zip(&ptys).zip(&pins) {
+            if let Some(watch) = watch {
+                descriptor.revents = watch.events(descriptor.revents);
+            }
+            signal_revents(pin.as_ref(), descriptor);
+        }
+        if host.iter().any(|p| p.revents & POLLNVAL != 0) {
+            return -(EBADF as i64);
+        }
+        let mut output_sets = vec![vec![0u8; nfds.div_ceil(64) * 8]; 3];
+        let mut count = 0;
+        for (p, &fd) in host.iter().zip(&guest_fds) {
+            let hits = [
+                p.revents & (POLLIN | POLLHUP | POLLERR) != 0,
+                p.revents & (POLLOUT | POLLERR) != 0,
+                p.revents & POLLPRI != 0,
+            ];
+            for (index, ((s, w), hit)) in sets.iter().zip(wanted).zip(hits).enumerate() {
+                if *s != 0 && p.events & w != 0 && hit {
+                    // SAFETY: guest fd_set word covering fd.
+                    output_sets[index][fd / 8] |= 1 << (fd % 8);
+                    count += 1;
+                }
+            }
+        }
+        // A wake token or a pty notification with nothing ready: wait on.
+        if count > 0 || n == 0 || left == 0 {
+            user_try!(update_timeout(ts, t0));
+            for (set, bytes) in sets.iter().zip(&output_sets) {
+                if *set != 0 {
+                    user_try!(super::user_memory::write_exact(*set, bytes));
+                }
+            }
+            return count;
+        }
+        for descriptor in &mut host {
+            descriptor.revents = 0;
         }
     }
-    count
 }
 
 #[cfg(test)]
@@ -504,5 +601,373 @@ mod pin_tests {
             ]),
             -(EBADF as i64)
         );
+    }
+}
+
+#[cfg(test)]
+mod reportable_tests {
+    use super::*;
+    use crate::sys::{epoll, event, fs, inotify, wait};
+
+    const O_NONBLOCK: u64 = 0o4000;
+    /// Every event bit a guest may ask poll for.
+    const ALL: i16 = POLLIN | POLLPRI | POLLOUT | POLLRDNORM | POLLRDBAND | POLLWRNORM | POLLWRBAND;
+
+    /// ppoll on one fd without waiting: (count, revents).
+    fn polled(fd: i64, events: i16) -> (i64, i16) {
+        let mut entry = libc::pollfd {
+            fd: fd as i32,
+            events,
+            revents: 0,
+        };
+        let timeout = [0i64; 2];
+        let n = ppoll([
+            &mut entry as *mut _ as u64,
+            1,
+            timeout.as_ptr() as u64,
+            0,
+            0,
+            0,
+        ]);
+        (n, entry.revents)
+    }
+
+    /// pselect6 on one fd in the read and write sets, without waiting:
+    /// (count, in the read set, in the write set).
+    fn selected(fd: i64) -> (i64, bool, bool) {
+        let (word, bit) = (fd as usize / 64, 1u64 << (fd % 64));
+        let (mut read, mut write) = ([0u64; 16], [0u64; 16]);
+        read[word] = bit;
+        write[word] = bit;
+        let timeout = [0i64; 2];
+        let n = pselect6([
+            fd as u64 + 1,
+            read.as_mut_ptr() as u64,
+            write.as_mut_ptr() as u64,
+            0,
+            timeout.as_ptr() as u64,
+            0,
+        ]);
+        (n, read[word] == bit, write[word] == bit)
+    }
+
+    /// A new epoll watching `fd` for `events`, with `fd` as data.
+    fn watching(fd: i64, events: u32) -> i64 {
+        let ep = epoll::epoll_create1([0; 6]);
+        assert!(ep >= 0);
+        let interest = [events as u64, fd as u64];
+        assert_eq!(
+            epoll::epoll_ctl([ep as u64, 1, fd as u64, interest.as_ptr() as u64, 0, 0]),
+            0
+        );
+        ep
+    }
+
+    /// epoll_pwait on `ep` for up to `ms`: (count, events of the first).
+    fn waited(ep: i64, ms: i64) -> (i64, u64) {
+        let mut event = [0u64; 2];
+        let n = epoll::epoll_pwait([ep as u64, event.as_mut_ptr() as u64, 1, ms as u64, 0, 0]);
+        (n, event[0])
+    }
+
+    fn close(fds: &[i64]) {
+        for &fd in fds {
+            assert_eq!(fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    /// timerfd_poll: a timerfd is never writable, and readable only once
+    /// it expired (LTP timerfd01, poll01).
+    #[test]
+    fn a_timerfd_is_only_readable() {
+        let _view = crate::vfs::test_view();
+        const MONOTONIC: u64 = 1;
+        let fd = event::timerfd_create([MONOTONIC, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(fd >= 0);
+        let read_write = watching(fd, 0x1 | 0x4 | 0x100);
+        let write_only = watching(fd, 0x4 | 0x100);
+        assert_eq!(polled(fd, ALL), (0, 0));
+        assert_eq!(selected(fd), (0, false, false));
+        assert_eq!(waited(read_write, 0).0, 0);
+        let spec = [0i64, 0, 0, 20_000_000];
+        assert_eq!(
+            event::timerfd_settime([fd as u64, 0, spec.as_ptr() as u64, 0, 0, 0]),
+            0
+        );
+        assert_eq!(waited(read_write, 2_000), (1, 0x1));
+        assert_eq!(polled(fd, ALL), (1, POLLIN));
+        assert_eq!(polled(fd, POLLOUT | POLLWRNORM | POLLRDNORM), (0, 0));
+        assert_eq!(selected(fd), (1, true, false));
+        assert_eq!(waited(write_only, 50).0, 0);
+        close(&[fd, read_write, write_only]);
+    }
+
+    /// eventfd_poll reports EPOLLIN and EPOLLOUT, never their socket's
+    /// EPOLLRDNORM and EPOLLWRNORM.
+    #[test]
+    fn an_eventfd_is_never_rdnorm_or_wrnorm() {
+        let _view = crate::vfs::test_view();
+        let counter = event::eventfd2([1, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        assert_eq!(polled(counter, ALL), (1, POLLIN | POLLOUT));
+        assert_eq!(polled(counter, POLLRDNORM | POLLWRNORM), (0, 0));
+        assert_eq!(selected(counter), (2, true, true));
+        let ep = watching(counter, 0x1 | 0x4 | 0x40 | 0x100);
+        assert_eq!(waited(ep, 0), (1, 0x1 | 0x4));
+        close(&[counter, ep]);
+    }
+
+    /// An interest stripped of every event is still the fd's: replacing
+    /// the file under its number (dup3 closes it, so `eventpoll_release`
+    /// drops the item) lets ADD take the number again, and MOD find none.
+    #[test]
+    fn an_eventless_interest_goes_with_its_file() {
+        let _view = crate::vfs::test_view();
+        let fd = event::timerfd_create([1, O_NONBLOCK, 0, 0, 0, 0]);
+        let other = event::eventfd2([0, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(fd >= 0 && other >= 0);
+        let ep = watching(fd, 0x4);
+        let interest = [0x1u64, fd as u64];
+        let ctl =
+            |op: u64| epoll::epoll_ctl([ep as u64, op, fd as u64, interest.as_ptr() as u64, 0, 0]);
+        assert_eq!(ctl(1), -(crate::errno::EEXIST as i64));
+        assert_eq!(fs::dup3([other as u64, fd as u64, 0, 0, 0, 0]), fd);
+        assert_eq!(ctl(3), -(crate::errno::ENOENT as i64));
+        assert_eq!(ctl(1), 0);
+        close(&[fd, other, ep]);
+    }
+
+    fn write_count(fd: i64, v: u64) -> i64 {
+        event::write(fd as i32, &v as *const u64 as u64, 8).unwrap()
+    }
+
+    fn read_count(fd: i64) -> Result<u64, i64> {
+        let mut v = 0u64;
+        match event::read(fd as i32, &mut v as *mut u64 as u64, 8).unwrap() {
+            8 => Ok(v),
+            error => Err(error),
+        }
+    }
+
+    /// eventfd_write: a write that would take the count past
+    /// ULLONG_MAX - 1 fails with EAGAIN without blocking, and eventfd_poll
+    /// drops POLLOUT while a write of 1 would (LTP eventfd01).
+    #[test]
+    fn an_eventfd_count_stops_at_its_maximum() {
+        let _view = crate::vfs::test_view();
+        let counter = event::eventfd2([5, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        let ep = watching(counter, 0x4);
+        assert_eq!(write_count(counter, u64::MAX), -(EINVAL as i64));
+        assert_eq!(
+            write_count(counter, u64::MAX - 5),
+            -(crate::errno::EAGAIN as i64)
+        );
+        assert_eq!(polled(counter, ALL), (1, POLLIN | POLLOUT));
+        assert_eq!(write_count(counter, u64::MAX - 6), 8);
+        assert_eq!(polled(counter, ALL), (1, POLLIN));
+        assert_eq!(selected(counter), (1, true, false));
+        assert_eq!(waited(ep, 0).0, 0);
+        assert_eq!(write_count(counter, 1), -(crate::errno::EAGAIN as i64));
+        assert_eq!(write_count(counter, 0), 8);
+        assert_eq!(read_count(counter), Ok(u64::MAX - 1));
+        assert_eq!(polled(counter, ALL), (1, POLLOUT));
+        assert_eq!(waited(ep, 0), (1, 0x4));
+        assert_eq!(read_count(counter), Err(-(crate::errno::EAGAIN as i64)));
+        close(&[counter, ep]);
+    }
+
+    /// A blocking write that would overflow the count sleeps until a read
+    /// makes room, and is then added (LTP eventfd01's blocking case).
+    #[test]
+    fn an_overflowing_eventfd_write_waits_for_a_read() {
+        let _view = crate::vfs::test_view();
+        let counter = event::eventfd2([0, 0, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        assert_eq!(write_count(counter, 10), 8);
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            read_count(counter)
+        });
+        let start = std::time::Instant::now();
+        assert_eq!(write_count(counter, u64::MAX - 10), 8);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(40));
+        assert_eq!(reader.join().unwrap(), Ok(10));
+        assert_eq!(polled(counter, ALL), (1, POLLIN | POLLOUT));
+        assert_eq!(read_count(counter), Ok(u64::MAX - 10));
+        close(&[counter]);
+    }
+
+    /// pidfd_poll: an exited process's pidfd is readable, and also hung up
+    /// once the process is reaped (LTP pidfd_open03).
+    #[test]
+    fn a_reaped_process_pidfd_hangs_up() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_reaped_process_pidfd_hangs_up",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let pidfd = wait::open_pidfd(pid, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let ep = watching(pidfd, 0x1);
+        let mut entry = libc::pollfd {
+            fd: pidfd as i32,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd on the stack.
+        assert_eq!(unsafe { libc::poll(&mut entry, 1, 5_000) }, 1);
+        assert_eq!(polled(pidfd, POLLIN | POLLRDNORM), (1, POLLIN | POLLRDNORM));
+        assert_eq!(waited(ep, 0), (1, 0x1));
+        // SAFETY: reaping the child spawned above.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
+        assert_eq!(polled(pidfd, POLLIN), (1, POLLIN | POLLHUP));
+        assert_eq!(waited(ep, 0), (1, 0x1 | 0x10));
+        assert_eq!(selected(pidfd), (1, true, false));
+        close(&[pidfd, ep]);
+    }
+
+    /// This thread's CPU time in nanoseconds.
+    fn thread_cpu() -> i64 {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a timespec on the stack.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) },
+            0
+        );
+        t.tv_sec * 1_000_000_000 + t.tv_nsec
+    }
+
+    /// ep_item_poll always reports EPOLLERR and EPOLLHUP: an interest with
+    /// no events still reports the peer's close, level-triggered unless
+    /// one-shot, and nothing before it, not even for a full buffer
+    /// (`sock_poll`, `pipe_poll`; LTP epoll_ctl01 style).
+    #[test]
+    fn an_eventless_interest_reports_hangup() {
+        // The socketpair's and pipe's numbers are not in the guest table,
+        // which other tests' descriptors would take.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::an_eventless_interest_reports_hangup",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let (mut socket, mut pipe) = ([0i32; 2], [0i32; 2]);
+        // SAFETY: a socketpair and a pipe into local arrays.
+        unsafe {
+            assert_eq!(
+                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, socket.as_mut_ptr()),
+                0
+            );
+            assert_eq!(libc::pipe(pipe.as_mut_ptr()), 0);
+        }
+        // A receive buffer smaller than what the peer can send, which
+        // Darwin caps the low-water mark at.
+        let small: i32 = 2048;
+        // SAFETY: setting an int option on our socket.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    socket[0],
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&small as *const i32).cast(),
+                    4,
+                )
+            },
+            0
+        );
+        for [local, peer] in [socket, pipe] {
+            let level = watching(local as i64, 0);
+            let oneshot = watching(local as i64, 1 << 30);
+            // SAFETY: filling our own descriptor's buffer without blocking.
+            unsafe {
+                libc::fcntl(peer, libc::F_SETFL, libc::O_NONBLOCK);
+                while libc::write(peer, [0u8; 512].as_ptr().cast(), 512) > 0 {}
+            }
+            // Waited for, not spun on.
+            let cpu = thread_cpu();
+            assert_eq!(waited(level, 50).0, 0);
+            assert!(thread_cpu() - cpu < 25_000_000);
+            assert_eq!(waited(oneshot, 0).0, 0);
+            // SAFETY: our descriptor.
+            unsafe { libc::close(peer) };
+            assert_eq!(waited(level, 2_000), (1, 0x10));
+            assert_eq!(waited(level, 0), (1, 0x10));
+            assert_eq!(waited(oneshot, 0), (1, 0x10));
+            assert_eq!(waited(oneshot, 0).0, 0);
+            // SAFETY: our descriptor, not published to the guest table.
+            unsafe { libc::close(local) };
+            close(&[level, oneshot]);
+        }
+    }
+
+    /// Closing the last reference to a file drops its eventless interest
+    /// (`eventpoll_release`): a new file under the number is not in the
+    /// interest list.
+    #[test]
+    fn an_eventless_interest_goes_with_its_close() {
+        // A closed number is reused below, which only this process's own
+        // descriptors can keep vacant.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::an_eventless_interest_goes_with_its_close",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let counter = event::eventfd2([0, O_NONBLOCK, 0, 0, 0, 0]);
+        let timer = event::timerfd_create([1, O_NONBLOCK, 0, 0, 0, 0]);
+        let other = event::eventfd2([0, O_NONBLOCK, 0, 0, 0, 0]);
+        let ep = epoll::epoll_create1([0; 6]);
+        assert!(counter >= 0 && timer >= 0 && other >= 0 && ep >= 0);
+        for (fd, events) in [(counter, 0u64), (timer, 0x4)] {
+            let interest = [events, fd as u64];
+            let ctl = |op: u64| {
+                epoll::epoll_ctl([ep as u64, op, fd as u64, interest.as_ptr() as u64, 0, 0])
+            };
+            assert_eq!(ctl(1), 0);
+            close(&[fd]);
+            assert_eq!(fs::dup3([other as u64, fd as u64, 0, 0, 0, 0]), fd);
+            assert_eq!(ctl(3), -(crate::errno::ENOENT as i64));
+            assert_eq!(ctl(2), -(crate::errno::ENOENT as i64));
+            assert_eq!(ctl(1), 0);
+            close(&[fd]);
+        }
+        close(&[other, ep]);
+    }
+
+    /// ep_eventpoll_poll, inotify_poll and pidfd_poll report only
+    /// EPOLLIN|EPOLLRDNORM: asked for write events, an epoll, inotify or
+    /// pidfd is not ready, and epoll takes the interest.
+    #[test]
+    fn a_kqueue_descriptor_is_never_writable() {
+        let _view = crate::vfs::test_view();
+        let inner = epoll::epoll_create1([0; 6]);
+        let notify = inotify::inotify_init1([O_NONBLOCK, 0, 0, 0, 0, 0]);
+        let pidfd = wait::pidfd_open([unsafe { libc::getpid() } as u64, 0, 0, 0, 0, 0]);
+        for fd in [inner, notify, pidfd] {
+            assert!(fd >= 0, "{fd}");
+            assert_eq!(polled(fd, ALL), (0, 0), "fd {fd}");
+            assert_eq!(polled(fd, POLLOUT), (0, 0), "fd {fd}");
+            assert_eq!(selected(fd), (0, false, false), "fd {fd}");
+            let ep = watching(fd, 0x1 | 0x4 | 0x100);
+            assert_eq!(waited(ep, 0).0, 0);
+            close(&[ep]);
+        }
+        // An epoll with a ready interest is readable, not writable.
+        let counter = event::eventfd2([1, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(counter >= 0);
+        let ready = watching(counter, 0x1);
+        let outer = watching(ready, 0x4);
+        assert_eq!(polled(ready, ALL), (1, POLLIN | POLLRDNORM));
+        assert_eq!(selected(ready), (1, true, false));
+        assert_eq!(waited(outer, 0).0, 0);
+        close(&[inner, notify, pidfd, counter, ready, outer]);
     }
 }

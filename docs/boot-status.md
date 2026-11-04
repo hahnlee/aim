@@ -30,12 +30,28 @@ non-debuggable process (`Process not debuggable: android`), as Android does
 `signalfd4` (#2648) creates and updates signal descriptors whose reads take the
 reader's pending signals as `signalfd_siginfo` records, returning the records
 copied before a fault. Poll, select and epoll report POLLIN alone, for a masked
-pending signal of the process or any of its threads (Linux counts only the
-polling thread's own, #2653), and read the mask when they look, as a blocked read
-does whenever a signal is sent to the process. Fork and host exec give
-each process its own readiness under the same fds, and the mask is the open
-file's: an update in one process is the others'. A thread's exit drops its
-pending signals from readiness. Host checks only; no guest boot (2026-11-04).
+signal pending for the process or for the polling (epoll: waiting) thread itself,
+as `signalfd_poll`; a signal pending on another thread neither makes it readable
+nor wakes the wait. Edge-triggered epoll reports it again after a newer signal
+or mask change, not after a read.
+A poll of an epoll fd, or a nested epoll, sees only the process's signals. Waits
+read the mask when they look, as a blocked read does whenever a signal is sent
+to the process. Fork and host exec give each process its own readiness under the
+same fds, and the mask is the open file's: an update in one process is the
+others'. Host checks only; no guest boot (2026-11-04).
+Poll, select and epoll ask a descriptor only for the events its Linux `_poll`
+reports (#2667): a timerfd is POLLIN alone, once expired, never writable as its
+socket is; an eventfd is POLLIN|POLLOUT without POLLRDNORM/POLLWRNORM, with
+POLLOUT cleared and writes blocking (EAGAIN if non-blocking) where they would
+take the count past ULLONG_MAX - 1 (#2698), one lock across the processes a
+fork shares it with; an epoll, inotify or pidfd (each a
+kqueue) is POLLIN|POLLRDNORM, so a write event asked of one is not ready instead
+of POLLNVAL/EBADF, and epoll_ctl accepts EPOLLOUT on it; a pidfd adds POLLHUP
+once its process is reaped (#2699). Every other epoll interest also reports
+EPOLLERR|EPOLLHUP, events=0 included (#2701), though only at EOF, not on a
+full buffer; one left with no event keeps a
+knote, so closing its fd still removes it (#2700). Host checks only; no guest
+boot (2026-11-04).
 
 The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep requests,
 with timestamp ordering, shared interactive/display queries, display-state callbacks
@@ -170,8 +186,7 @@ Descriptor creation now initializes CLOEXEC even when clear, including kqueue
 backends; Linux F_GETFD reports only the descriptor's current CLOEXEC bit, never
 Darwin's CLOFORK (#2646). Host creator/round-trip and exec-close selection checks
 pass (2026-11-02). Actual epoll inheritance across exec remains #2571;
-signalfd4 is unimplemented (#2648), so its flag coverage is not run. No guest boot
-was run.
+signalfd4's creator round trip passes too (#2668). No guest boot was run.
 
 Fork child descriptor reconstruction propagates epoll, inotify and pidfd
 kqueue creation and installation failures to the restore owner before guest
