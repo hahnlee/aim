@@ -384,8 +384,6 @@ is `crates/aim-linux-abi/tests/art.rs`.
     process's `/proc/<pid>/fd`, and tombstoned could not make its file with
     `O_TMPFILE` (closed in #557 and #642: see "A process's agent" below).
   - `/sys/kernel/tracing/trace_marker` does not exist (libcutils trace).
-  - ART's statsd metrics are stubbed until `statslog_art` is generated
-    (#162).
 
 ## P3 SystemServer (2026-09-28)
 
