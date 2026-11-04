@@ -461,8 +461,8 @@ impl Drop for ForkPrivateFd {
         use std::os::fd::AsRawFd;
         let close = |held: std::os::fd::OwnedFd| {
             let fd = held.as_raw_fd();
-            drop(held);
             unhide(fd);
+            drop(held);
             super::fd_visibility::private_closed(fd);
         };
         let held = self.held.take().unwrap();
@@ -511,11 +511,11 @@ pub(crate) fn close_fork_private(fd: i32) -> Result<(), crate::errno::Errno> {
         if visible(fd) {
             return Err(crate::errno::EBADF);
         }
+        unhide(fd);
         let result = unsafe { libc::close(fd) };
         if result < 0 {
             return Err(crate::errno::last());
         }
-        unhide(fd);
         super::fd_visibility::private_closed(fd);
         Ok(())
     }
@@ -766,8 +766,10 @@ impl aim_storage::private_fd::Registrar for StorageRegistrar {
         }
         Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
     }
-    fn closed(&self, fd: i32) {
+    fn closing(&self, fd: i32) {
         unhide(fd);
+    }
+    fn closed(&self, fd: i32) {
         super::fd_visibility::private_closed(fd);
     }
 }
@@ -1624,10 +1626,10 @@ pub(crate) fn restore_regular_exec(text: &str) -> Result<(), crate::errno::Errno
     }
     for fd in inherited {
         let _guard = lifecycle();
+        unhide(fd);
         if unsafe { libc::close(fd) } < 0 {
             return Err(crate::errno::last());
         }
-        unhide(fd);
         super::fd_visibility::private_closed(fd);
     }
     Ok(())
@@ -1860,6 +1862,9 @@ pub fn keep_hidden(fd: i32) {
     set_slow(fd, true);
 }
 
+/// Return `fd` to the guest's view. Call it before closing `fd`: once
+/// closed, the number can be hidden again by another thread, whose entry
+/// this would remove.
 pub fn unhide(fd: i32) {
     HIDDEN.lock().unwrap().retain(|&h| h != fd);
     if !TABLE.read().unwrap().contains_key(&fd) {

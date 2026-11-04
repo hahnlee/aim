@@ -31,9 +31,8 @@ impl Private {
 impl Drop for Private {
     fn drop(&mut self) {
         let file = self.0.take().unwrap();
-        let fd = file.as_raw_fd();
+        fdtab::unhide(file.as_raw_fd());
         drop(file);
-        fdtab::unhide(fd);
     }
 }
 struct Locked(Private);
@@ -512,7 +511,12 @@ mod creator_tests {
             -(errno::EBADF as i64)
         );
         drop(_lock);
-        assert!(!fdtab::is_hidden(hidden));
+        // A parallel test may take the freed number and hide it again; a
+        // leaked entry is one that stays hidden while the number is closed.
+        assert!((0..1000).any(|_| {
+            std::thread::yield_now();
+            !fdtab::is_hidden(hidden) || unsafe { libc::fcntl(hidden, libc::F_GETFD) } >= 0
+        }));
         // Atomic publication failures leave the previous actual owner intact.
         let broken = path.with_extension("owned-directory-error");
         std::fs::create_dir(&broken).unwrap();

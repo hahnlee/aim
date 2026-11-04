@@ -14,6 +14,9 @@ pub trait Registrar: Send + Sync {
     fn enter(&self) -> Box<dyn AllocationGuard>;
     /// Consumes the actual fd, relocates/hides it, and rolls back on failure.
     fn adopt(&self, descriptor: OwnedFd) -> io::Result<OwnedFd>;
+    /// Called under enter's guard just before the descriptor closes: once
+    /// closed, its number can be reallocated and registered again.
+    fn closing(&self, descriptor: RawFd);
     /// Called only after the actual descriptor has closed, under enter's guard.
     fn closed(&self, descriptor: RawFd);
 }
@@ -112,6 +115,7 @@ impl Drop for PrivateFd {
             if let Some(registrar) = &self.registrar {
                 let _guard = registrar.enter();
                 let fd = descriptor.as_raw_fd();
+                registrar.closing(fd);
                 drop(descriptor);
                 registrar.closed(fd);
             } else {
@@ -224,6 +228,11 @@ mod tests {
             EVENTS.lock().unwrap().push(('h', copied));
             Ok(unsafe { OwnedFd::from_raw_fd(copied) })
         }
+        fn closing(&self, fd: i32) {
+            assert!(ENTERED.load(Ordering::SeqCst));
+            assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+            EVENTS.lock().unwrap().push(('u', fd));
+        }
         fn closed(&self, fd: i32) {
             assert!(ENTERED.load(Ordering::SeqCst));
             assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
@@ -289,7 +298,14 @@ mod tests {
         );
         assert_eq!(
             EVENTS.lock().unwrap().as_slice(),
-            &[('h', first), ('h', second), ('c', first), ('c', second)]
+            &[
+                ('h', first),
+                ('h', second),
+                ('u', first),
+                ('c', first),
+                ('u', second),
+                ('c', second)
+            ]
         );
         let descriptor = native.into_file().unwrap();
         drop(descriptor);

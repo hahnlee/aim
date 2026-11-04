@@ -155,9 +155,9 @@ impl Socket {
 
 impl Drop for Socket {
     fn drop(&mut self) {
+        super::fdtab::unhide(self.peer);
         // SAFETY: the layer's end, which only this socket uses.
         unsafe { libc::close(self.peer) };
-        super::fdtab::unhide(self.peer);
     }
 }
 

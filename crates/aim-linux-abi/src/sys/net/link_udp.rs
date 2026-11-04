@@ -66,9 +66,8 @@ impl<T: AsRawFd> std::ops::DerefMut for Hidden<T> {
 impl<T: AsRawFd> Drop for Hidden<T> {
     fn drop(&mut self) {
         let value = self.0.take().unwrap();
-        let fd = value.as_raw_fd();
+        fdtab::unhide(value.as_raw_fd());
         drop(value);
-        fdtab::unhide(fd);
     }
 }
 struct Registry {

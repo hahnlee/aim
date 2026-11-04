@@ -642,9 +642,8 @@ impl AsRawFd for MetadataFd {
 impl Drop for MetadataFd {
     fn drop(&mut self) {
         if let Some(fd) = self.0.take() {
-            let raw = fd.as_raw_fd();
+            super::fdtab::unhide(fd.as_raw_fd());
             drop(fd);
-            super::fdtab::unhide(raw);
         }
     }
 }
@@ -1864,6 +1863,49 @@ mod tests {
         assert!(fd >= 0, "create {path}: {fd}");
         // SAFETY: the fd just opened.
         assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// A dropped metadata fd unhides its number before closing it, so a
+    /// thread that hides the freed number at once keeps it hidden.
+    #[test]
+    fn dropping_a_metadata_fd_leaves_a_reused_number_hidden() {
+        use super::super::fdtab;
+        if fdtab::isolated_kernel_test(
+            "sys::fsops::tests::dropping_a_metadata_fd_leaves_a_reused_number_hidden",
+        ) {
+            return;
+        }
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let source = file.as_raw_fd();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hiders = (0..4)
+            .map(|_| {
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    let mut lost = 0;
+                    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                        // SAFETY: a copy of our own fd, closed here.
+                        let fd = fdtab::hide(unsafe { libc::dup(source) });
+                        for _ in 0..64 {
+                            lost += usize::from(!fdtab::is_hidden(fd));
+                        }
+                        fdtab::unhide(fd);
+                        unsafe { libc::close(fd) };
+                    }
+                    lost
+                })
+            })
+            .collect::<Vec<_>>();
+        for _ in 0..20_000 {
+            // SAFETY: a copy of our own fd, which the MetadataFd owns.
+            drop(private_metadata_fd(unsafe { libc::dup(source) }));
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let lost = hiders
+            .into_iter()
+            .map(|hider| hider.join().unwrap())
+            .sum::<usize>();
+        assert_eq!(lost, 0);
     }
 
     #[test]
