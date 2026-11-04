@@ -237,7 +237,7 @@ mod tests {
                 )
                 .unwrap();
             let (tx, rx) = mpsc::channel();
-            owner.listeners.lock().unwrap().push(
+            owner.add_listener(
                 host.process
                     .add_service(Arc::new(Listener(host.clone(), tx))),
             );
