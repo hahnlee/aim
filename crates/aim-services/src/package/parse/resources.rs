@@ -1175,6 +1175,31 @@ mod tests {
     }
 
     #[test]
+    fn indexed_strings_decode_only_when_asked() {
+        // A UTF-8 pool of "a" and a string whose offset is past the chunk.
+        let mut data = vec![0u8; 52];
+        data[..2].copy_from_slice(&TABLE.to_le_bytes());
+        data[2..4].copy_from_slice(&12u16.to_le_bytes());
+        data[4..8].copy_from_slice(&52u32.to_le_bytes());
+        data[12..14].copy_from_slice(&STRING_POOL.to_le_bytes());
+        data[14..16].copy_from_slice(&28u16.to_le_bytes());
+        data[16..20].copy_from_slice(&40u32.to_le_bytes());
+        data[20..24].copy_from_slice(&2u32.to_le_bytes());
+        data[28..32].copy_from_slice(&0x100u32.to_le_bytes());
+        data[32..36].copy_from_slice(&36u32.to_le_bytes());
+        data[44..48].copy_from_slice(&1000u32.to_le_bytes());
+        data[48..51].copy_from_slice(&[1, 1, b'a']);
+        assert!(Table::parse(&data).is_err());
+        let indexed = Table::indexed(data).unwrap();
+        assert_eq!(indexed.string(0), Some("a"));
+        assert_eq!(indexed.string(2), None);
+        indexed.check().unwrap();
+        assert!(indexed.string(1).is_none());
+        assert!(indexed.check().is_err());
+        assert_eq!(indexed.string(0), Some("a"));
+    }
+
+    #[test]
     #[ignore = "requires pinned original APK resources; no guest boot"]
     fn pinned_indexed_strings_match_without_full_entry_decoding() {
         let root = aim_paths::original_image();

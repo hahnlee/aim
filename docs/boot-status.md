@@ -244,10 +244,15 @@ sets stopped state and invokes the existing kill owner; lifecycle cleanup remain
 #1570. Host Binder regressions only, no guest/CTS/app rerun (2026-10-31).
 
 A launching activity's window theme is read through file-only APK access and
-an indexed resource table that decodes only the entries it needs (#2441),
+an indexed resource table that decodes only the entries and global-pool
+strings it needs (#2441, #2656),
 with resolved styles keyed by package, user, code version, theme and
 configuration and dropped on any package change: Settings' first lookup takes
-about 5 ms instead of 0.16-0.43 s.
+about 5 ms instead of 0.16-0.43 s. Account authenticator scans read their
+metadata the same way: a user-0 scan (Gmail's three authenticators) takes about
+33 ms instead of 0.19-0.38 s, so #1460 slice 6d's account snapshot adds about
+40 ms, not 210 ms, before the original SyncManager is built (3 cold and 3 warm
+boots each, 2026-11-04).
 
 Native package mutations prepare and validate their query candidate outside
 the package-bootstrap lock and recheck the capture before persisting, retrying
