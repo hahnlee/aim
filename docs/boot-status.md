@@ -58,10 +58,25 @@ takes them, else its last non-fullscreen bounds, else fills the display. Empty
 bounds (`setBounds(null)`) inherit the display and are not recorded. Reorder-to-bottom preserves visible
 freeform tasks and uses a distinct bridge record instead of minimizing the Mac
 window. Host regressions cover dispatch, permission denial, malformed/unsupported
-requests, mode transitions, configuration and bridge records; pinned and
-multi-window modes, root creation, adjacency, launch roots, empty transactions
-and sync remain explicit failures. No guest boot, CTS or live Mac window
-behavior was checked (2026-11-04).
+requests, mode transitions, configuration and bridge records; pinned mode,
+adjacency, launch roots, empty transactions and sync remain explicit failures. No guest boot, CTS or live Mac window behavior was checked
+(2026-11-04).
+
+TOC `createRootTask`, `deleteRootTask`, `getRootTasks` and `getChildTasks`
+serve organizer root tasks (#2616): a multi-window root on the default display
+is made at the bottom with a real container layer under the display's and no
+Mac window of its own, appears to the organizer by callback (not in a
+registration's list) with its launch cookie, and goes with its organizer
+(`TaskOrganizerState.dispose`), its tasks' activities finishing. WCT `reparent`
+and `reparentTasks` (mode/type filters, top-only) move app tasks into and out
+of a root: the task's layer becomes the root's child, its `parentTaskId`,
+windowing mode (undefined inherits the root's multi-window) and bounds resolve
+in the root, and it keeps its own Mac window at those bounds. A root's
+`setBounds` re-resolves its tasks and `reorder` brings them with it. Other root
+windowing modes, multi-window tasks of the display area, nested roots and
+adjacency remain explicit failures. Host regressions cover the wire, modes,
+listing, reparenting, deletion and organizer removal; no guest boot was run
+(2026-11-04).
 
 The app host's `wm` user-rotation, fixed-to-user-rotation and ignore-orientation
 commands now use persisted native display policy with Android 16 output (#2630).
@@ -78,7 +93,9 @@ and the system-uid exception. On a
 window-mode boot with fresh data, AppConfigurationTests'
 testAppConfigurationMatchesActivityInFreeform passes, and
 testAppConfigurationMatchesTopActivityInMultiWindow passes its fullscreen size
-check, then stops at createRootTask (#2616) (2026-11-04).
+check, then stopped at createRootTask (#2616) (2026-11-04). Root creation is now
+served; the pinned `TestTaskOrganizer.createRootTasksIfNeeded` next applies
+`setAdjacentRoots`, still unsupported, before any reparent. Not rerun since.
 
 Regular-file writes and admitted fallocate allocation/in-file hole punching clear
 set-ID modes without CAP_FSETID (#779, #2515); a shared generation invalidates

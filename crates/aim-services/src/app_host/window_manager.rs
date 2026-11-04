@@ -736,13 +736,16 @@ impl Session {
                     .map(|r| r.task)
             })
             .or_else(|| self.host.tasks.of_uid(self.uid));
-        let freeform = task.and_then(|id| self.host.tasks.freeform_bounds(id));
-        let bounds = freeform.unwrap_or(Rect {
-            left: 0,
-            top: 0,
-            right: display.width,
-            bottom: display.height,
-        });
+        let freeform = task.and_then(|id| self.host.tasks.own_bounds(id));
+        let bounds = freeform.map_or(
+            Rect {
+                left: 0,
+                top: 0,
+                right: display.width,
+                bottom: display.height,
+            },
+            |(_, bounds)| bounds,
+        );
         let requested = (UNSPECIFIED_LENGTH, UNSPECIFIED_LENGTH);
         let frames =
             window_layout::compute_frames(&attrs, bounds, attached, freeform.is_some(), requested);
@@ -855,7 +858,7 @@ impl Session {
         let task = w
             .task
             .and_then(|id| self.host.tasks.bounds(id).map(|bounds| (id, bounds)));
-        let freeform = w.task.and_then(|id| self.host.tasks.freeform_bounds(id));
+        let freeform = w.task.and_then(|id| self.host.tasks.own_bounds(id));
         if let Some(attrs) = attrs {
             w.attrs = attrs;
         }
@@ -945,7 +948,7 @@ impl Session {
         p.write_i32(1);
         write_frames(&mut p, &w.frames, w.frames_seq);
         let mut overrides: Configuration = match freeform {
-            Some(bounds) => global.of_freeform_task(bounds),
+            Some((mode, bounds)) => global.of_task(mode, bounds),
             None => global.clone(),
         };
         overrides.window.activity_type = 1;
@@ -1238,7 +1241,7 @@ impl super::AppHost {
         id: i32,
         task: Rect,
     ) -> Result<Vec<(u32, Frames, u32, i32)>, String> {
-        let freeform = self.tasks.freeform_bounds(id).is_some();
+        let freeform = self.tasks.own_bounds(id).is_some();
         let mut windows = self.windows.windows.lock().unwrap();
         let mut of_task: Vec<(u32, u32)> = windows
             .iter()
@@ -1280,7 +1283,7 @@ impl super::AppHost {
         frame: Rect,
     ) -> Result<ProcessItems, String> {
         let display = self.display().map_err(|e| format!("{e:?}"))?.0.clone();
-        let freeform = self.tasks.freeform_bounds(id).is_some();
+        let freeform = self.tasks.own_bounds(id).map(|(mode, _)| mode);
         let laid = self.relayout_windows_of(id, frame)?;
         let laid: Vec<_> = laid
             .into_iter()
@@ -1295,10 +1298,9 @@ impl super::AppHost {
                 let w = windows.get_mut(&window)?;
                 w.frames_seq += 1;
                 w.insets_seq += 1;
-                let mut config = if freeform {
-                    global.of_freeform_task(frame)
-                } else {
-                    global.clone()
+                let mut config = match freeform {
+                    Some(mode) => global.of_task(mode, frame),
+                    None => global.clone(),
                 };
                 config.window.activity_type = 1;
                 Some((
@@ -2203,7 +2205,7 @@ impl AppHost {
             let composer = self.composer().map_err(|e| e.message)?;
             let mut replacements = Vec::new();
             let result = (|| {
-                for (_, old, _, _) in tasks {
+                for (_, old, _, _, _) in tasks {
                     replacements.push(self.with_display_layer(|parent| {
                         composer.create_surface(
                             &self.process,
@@ -2215,7 +2217,10 @@ impl AppHost {
                     })?);
                 }
                 let mut changes = Vec::new();
-                for ((id, old, bounds, z), layer) in tasks.iter().zip(&replacements) {
+                for ((id, old, bounds, z, parent), layer) in tasks.iter().zip(&replacements) {
+                    // A task in an organizer root task stays its child, placed in it.
+                    let root = parent.and_then(|p| tasks.iter().position(|t| t.0 == p));
+                    let origin = root.map_or((0, 0), |at| (tasks[at].2.left, tasks[at].2.top));
                     changes.extend(
                         windows
                             .values()
@@ -2234,8 +2239,12 @@ impl AppHost {
                     changes.push((
                         layer,
                         surface::Change {
-                            position: Some((bounds.left as f32, bounds.top as f32)),
+                            position: Some((
+                                (bounds.left - origin.0) as f32,
+                                (bounds.top - origin.1) as f32,
+                            )),
                             z: Some(*z),
+                            parent: root.map(|at| replacements[at].control(composer.binder())),
                             crop: Some([0., 0., bounds.width() as f32, bounds.height() as f32]),
                             ..Default::default()
                         },
@@ -2273,7 +2282,7 @@ impl AppHost {
                 tasks
                     .iter()
                     .zip(&replacements)
-                    .map(|((id, _, _, _), layer)| {
+                    .map(|((id, _, _, _, _), layer)| {
                         (
                             *id,
                             super::task_organizer::Leash::new(self, composer.binder(), layer),

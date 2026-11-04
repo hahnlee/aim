@@ -1,15 +1,17 @@
 //! WindowOrganizerController / TaskOrganizerController, android-16.0.0_r1.
-//! Registration delegates actual native task surfaces; unsupported hierarchy and
+//! Registration delegates actual native task surfaces; organizer root tasks
+//! are created, listed, deleted and hold tasks. Unsupported hierarchy and
 //! transaction operations stay explicit (#2616).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::surface::Layer;
 use super::{AppHost, reply};
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
+    Parcel,
 };
 use aim_service_aidl::{
-    WriteParcelable, android_window_itaskorganizer as callback,
+    ReadParcelable, WriteParcelable, android_window_itaskorganizer as callback,
     android_window_itaskorganizercontroller as toc,
     android_window_iwindoworganizercontroller as woc,
 };
@@ -75,6 +77,18 @@ impl WriteParcelable for Appeared {
         self.leash.write_to(p);
     }
 }
+/// A `WindowContainerToken`: its strong binder.
+struct ContainerToken(Binder);
+impl ReadParcelable for ContainerToken {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
+        Ok(Self(r.read_binder()?.ok_or(BAD_VALUE)?))
+    }
+}
+/// A task of the organizer snapshot: its id, whether it is ready to appear,
+/// whether it is an organizer root task, and what appears.
+type Current = (i32, bool, bool, Appeared);
 impl State {
     fn report(&mut self, target: Arc<Strong>, code: u32, task: &Appeared) {
         let mut p = Parcel::new();
@@ -87,7 +101,10 @@ impl State {
         }
         self.reports.push_back((target, code, p));
     }
-    fn update(&mut self, current: &[(i32, bool, Appeared)], initial: bool) -> Vec<Appeared> {
+    /// Records `current` for the active organizer and reports what changed;
+    /// on `initial` registration, returns the tasks the organizer did not
+    /// create and reports its root tasks appeared (`registerTaskOrganizer`).
+    fn update(&mut self, current: &[Current], initial: bool) -> Vec<Appeared> {
         let Some(entry) = self.entries.last_mut() else {
             return Vec::new();
         };
@@ -95,12 +112,12 @@ impl State {
         let mut previous = std::mem::take(&mut entry.tasks);
         let mut reports = Vec::new();
         let mut returned = Vec::new();
-        for (id, ready, task) in current {
+        for (id, ready, root, task) in current {
             let before = previous.remove(id);
             if before.is_none() && !initial && !ready {
                 continue;
             }
-            if initial {
+            if initial && !root {
                 returned.push(task.clone());
             } else if before.is_none() {
                 reports.push((callback::ON_TASK_APPEARED, task.clone()));
@@ -173,6 +190,31 @@ impl Service for Controller {
                     toc::UnregisterTaskOrganizer::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.unregister_task_organizer(a.organizer, None))
             }
+            (true, toc::CREATE_ROOT_TASK) => {
+                let a = toc::CreateRootTask::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.create_organizer_root_task(
+                    a.display_id,
+                    a.windowing_mode,
+                    a.launch_cookie,
+                ))
+            }
+            (true, toc::DELETE_ROOT_TASK) => {
+                let a = toc::DeleteRootTask::<ContainerToken>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(self.0.delete_root_task(a.task.map(|t| t.0)))
+            }
+            (true, toc::GET_CHILD_TASKS) => {
+                let a = toc::GetChildTasks::<ContainerToken>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .organizer_child_tasks(a.parent.map(|t| t.0), a.activity_types),
+                )
+            }
+            (true, toc::GET_ROOT_TASKS) => {
+                let a = toc::GetRootTasks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.organizer_root_tasks(a.display_id, a.activity_types))
+            }
             (_, code) => reply(Err(self.0.unimplemented(
                 if self.1 {
                     "task_organizer"
@@ -216,22 +258,19 @@ impl AppHost {
         p.write_no_exception();
         Ok(p)
     }
-    fn organizer_snapshot(&self) -> Result<Vec<(i32, bool, Appeared)>, Exception> {
+    fn organizer_snapshot(&self) -> Result<Vec<Current>, Exception> {
         self.organizer_surfaces()?
             .into_iter()
-            .map(|(id, ready, leash)| {
+            .map(|(id, ready, root, leash)| {
                 let mut info = Parcel::new();
                 self.organizer_task_info(id)?.write_to(&mut info);
-                Ok((id, ready, Appeared { info, leash }))
+                Ok((id, ready, root, Appeared { info, leash }))
             })
             .collect()
     }
-    fn migrate_organizer_snapshot(
-        &self,
-        current: &mut [(i32, bool, Appeared)],
-    ) -> Result<(), Exception> {
+    fn migrate_organizer_snapshot(&self, current: &mut [Current]) -> Result<(), Exception> {
         for (id, leash) in self.migrate_organized_tasks().map_err(state_error)? {
-            if let Some((_, _, task)) = current.iter_mut().find(|t| t.0 == id) {
+            if let Some((_, _, _, task)) = current.iter_mut().find(|t| t.0 == id) {
                 task.leash = leash;
             }
         }
@@ -280,7 +319,11 @@ impl AppHost {
         }
         let returned = if existing.is_some_and(|at| at + 1 != state.entries.len()) {
             // A known inactive caller does not become active or rewrite its successor's history.
-            current.into_iter().map(|(_, _, task)| task).collect()
+            current
+                .into_iter()
+                .filter(|t| !t.2)
+                .map(|(_, _, _, task)| task)
+                .collect()
         } else {
             self.set_tasks_organized(true);
             state.update(&current, true)
@@ -297,12 +340,13 @@ impl AppHost {
         Ok(p)
     }
     pub(super) fn unregister_task_organizer(
-        &self,
+        self: &Arc<Self>,
         binder: Option<Binder>,
         expected: Option<&Arc<Strong>>,
     ) -> Result<Parcel, Exception> {
         let binder = binder.ok_or_else(|| Exception::new(EX_NULL_POINTER, "organizer"))?;
         let mut state = self.organizers.state.lock().unwrap();
+        let mut roots = Vec::new();
         if let Some(at) = state.entries.iter().position(|e| {
             e.binder == binder && expected.is_none_or(|held| Arc::ptr_eq(held, &e.held))
         }) {
@@ -321,6 +365,9 @@ impl AppHost {
                 .reports
                 .retain(|(target, _, _)| !Arc::ptr_eq(target, &removed.held));
             if active {
+                // TaskOrganizerState.dispose: its root tasks go with it.
+                roots = self.remove_root_tasks();
+                current.retain(|t| !roots.contains(&t.0));
                 self.set_tasks_organized(!state.entries.is_empty());
                 if !state.entries.is_empty() {
                     state.update(&current, false);
@@ -328,9 +375,115 @@ impl AppHost {
             }
         }
         drop(state);
+        self.remove_root_children(&roots);
         self.dispatch_organizer_reports();
         let mut p = Parcel::new();
         p.write_no_exception();
+        Ok(p)
+    }
+    /// `createRootTask`: an unknown display creates nothing, as the
+    /// original logs and returns.
+    fn create_organizer_root_task(
+        &self,
+        display: i32,
+        mode: i32,
+        cookie: Option<Binder>,
+    ) -> Result<Parcel, Exception> {
+        if display != super::activity::DEFAULT_DISPLAY {
+            eprintln!("app host: createRootTask unknown displayId={display}");
+        } else {
+            // Task.Builder.validateRootTask: TaskDisplayArea.isWindowingModeSupported.
+            let multi_window = self.supports_multi_window()?;
+            match mode {
+                6 if multi_window => {}
+                0 | 1 => return Err(unsupported_root(mode)),
+                2 | 5 if multi_window => return Err(unsupported_root(mode)),
+                _ => {
+                    return Err(Exception::illegal_argument(format!(
+                        "Can't create root task for unsupported windowingMode={mode}"
+                    )));
+                }
+            }
+            self.create_root_task(mode, cookie).map_err(state_error)?;
+            self.organizer_tasks_changed()?;
+        }
+        let mut p = Parcel::new();
+        toc::write_create_root_task_reply(&mut p);
+        Ok(p)
+    }
+    /// `deleteRootTask`: false for a token of no task.
+    fn delete_root_task(self: &Arc<Self>, token: Option<Binder>) -> Result<Parcel, Exception> {
+        let token = token.ok_or_else(|| Exception::new(EX_NULL_POINTER, "task"))?;
+        let deleted = match self.task_of_token(token) {
+            None => false,
+            Some(id) if self.tasks.root(id).is_none() => {
+                return Err(Exception::illegal_argument(format!(
+                    "Attempt to delete task not created by organizer task={id}"
+                )));
+            }
+            Some(id) => {
+                self.remove_root_children(&[id]);
+                self.remove_task(id);
+                true
+            }
+        };
+        let mut p = Parcel::new();
+        toc::write_delete_root_task_reply(&mut p, deleted);
+        Ok(p)
+    }
+    /// `getRootTasks`: the display's root tasks of `types` if given, top to
+    /// bottom.
+    fn organizer_root_tasks(
+        &self,
+        display: i32,
+        types: Option<Vec<i32>>,
+    ) -> Result<Parcel, Exception> {
+        if display != super::activity::DEFAULT_DISPLAY {
+            return Err(Exception::illegal_argument(format!(
+                "Display {display} doesn't exist"
+            )));
+        }
+        let mut infos = Vec::new();
+        for id in self.tasks.root_task_ids() {
+            let info = self.organizer_task_info(id)?;
+            if types
+                .as_ref()
+                .is_none_or(|t| t.contains(&info.activity_type))
+            {
+                infos.push(Some(info));
+            }
+        }
+        let mut p = Parcel::new();
+        toc::write_get_root_tasks_reply(&mut p, Some(&infos));
+        Ok(p)
+    }
+    /// `getChildTasks`: the tasks of an organizer root task top to bottom,
+    /// of `types` if given; null for a token of no root task.
+    fn organizer_child_tasks(
+        &self,
+        parent: Option<Binder>,
+        types: Option<Vec<i32>>,
+    ) -> Result<Parcel, Exception> {
+        let parent = parent
+            .ok_or_else(|| Exception::illegal_argument("Can't get children of null parent"))?;
+        let infos = match self.task_of_token(parent) {
+            Some(root) if self.tasks.root(root).is_some() => {
+                let mut infos = Vec::new();
+                for child in self.tasks.children(Some(root)) {
+                    let info = self.organizer_task_info(child)?;
+                    if types
+                        .as_ref()
+                        .is_none_or(|t| t.contains(&info.activity_type))
+                    {
+                        infos.push(Some(info));
+                    }
+                }
+                Some(infos)
+            }
+            _ => None,
+        };
+        let mut p = Parcel::new();
+        toc::write_get_child_tasks_reply(&mut p, infos.as_deref());
         Ok(p)
     }
     pub(super) fn organizer_tasks_changed(&self) -> Result<(), Exception> {
@@ -366,6 +519,12 @@ impl AppHost {
             state = self.organizers.state.lock().unwrap();
         }
     }
+}
+fn unsupported_root(mode: i32) -> Exception {
+    Exception::new(
+        EX_UNSUPPORTED_OPERATION,
+        format!("organizer root tasks in windowing mode {mode} (#2616)"),
+    )
 }
 fn state_error(e: String) -> Exception {
     Exception::new(EX_ILLEGAL_STATE, e)

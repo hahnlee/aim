@@ -374,7 +374,7 @@ impl AppHost {
 pub struct Launch<'a> {
     pub global: &'a Configuration,
     /// The bounds of its task in window mode, else the display's.
-    pub task: Option<super::config::Rect>,
+    pub task: Option<(i32, super::config::Rect)>,
 }
 
 impl AppHost {
@@ -400,7 +400,7 @@ impl AppHost {
             *next
         };
         let mut override_config = match launch.task {
-            Some(bounds) => launch.global.of_freeform_task(bounds),
+            Some((mode, bounds)) => launch.global.of_task(mode, bounds),
             None => launch.global.clone(),
         };
         override_config.window.activity_type = ACTIVITY_TYPE_STANDARD;
@@ -409,7 +409,7 @@ impl AppHost {
         let bounds = override_config.window.bounds;
         let intent: Box<dyn WriteParcelable> = match &record.intent {
             super::activity_start::LaunchIntent::Component => Box::new(Intent {
-                component: (record.package.clone(), record.class.clone()),
+                component: Some((record.package.clone(), record.class.clone())),
                 flags: FLAG_ACTIVITY_NEW_TASK
                     | if record.info.flags & FLAG_EXCLUDE_FROM_RECENTS != 0 {
                         FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
@@ -471,7 +471,7 @@ impl AppHost {
         self.reconfigure(
             |r| r.task == task,
             |uid| globals.get(&uid),
-            |_| self.tasks.freeform_bounds(task).map(|_| bounds),
+            |_| self.tasks.own_bounds(task).map(|(mode, _)| (mode, bounds)),
         )
     }
 
@@ -482,7 +482,7 @@ impl AppHost {
     pub(super) fn reconfigure_all_activities(
         &self,
         global: &Configuration,
-        freeform: impl Fn(i32) -> Option<config::Rect>,
+        freeform: impl Fn(i32) -> Option<(i32, config::Rect)>,
     ) -> ProcessItems {
         self.reconfigure(|_| true, |_| Some(global), freeform).0
     }
@@ -494,7 +494,7 @@ impl AppHost {
         &self,
         pick: impl Fn(&ActivityRecord) -> bool,
         global_of: impl Fn(u32) -> Option<&'g Configuration>,
-        freeform: impl Fn(i32) -> Option<config::Rect>,
+        freeform: impl Fn(i32) -> Option<(i32, config::Rect)>,
     ) -> (ProcessItems, bool) {
         let mut records = self.activities.records.lock().unwrap();
         let mut items: ProcessItems = Vec::new();
@@ -505,7 +505,7 @@ impl AppHost {
                 continue;
             };
             let mut new = match freeform(record.task) {
-                Some(bounds) => global.of_freeform_task(bounds),
+                Some((mode, bounds)) => global.of_task(mode, bounds),
                 None => global.clone(),
             };
             new.window.activity_type = ACTIVITY_TYPE_STANDARD;
@@ -832,10 +832,11 @@ impl ActivityWindowInfo {
     }
 }
 
-/// An explicit `Intent` to a component, as `Intent.writeToParcel` writes
-/// it with intent redirect prevention (`preventIntentRedirect`) on.
+/// An `Intent` to a component (none for `new Intent()`), as
+/// `Intent.writeToParcel` writes it with intent redirect prevention
+/// (`preventIntentRedirect`) on.
 pub(super) struct Intent {
-    pub component: (String, String),
+    pub component: Option<(String, String)>,
     pub flags: i32,
     pub extended_flags: i32,
     pub content_user_hint: i32,
@@ -850,8 +851,13 @@ impl WriteParcelable for Intent {
         p.write_i32(self.flags);
         p.write_i32(self.extended_flags);
         p.write_string8(None); // package
-        p.write_string16(Some(&self.component.0));
-        p.write_string16(Some(&self.component.1));
+        match &self.component {
+            Some((package, class)) => {
+                p.write_string16(Some(package));
+                p.write_string16(Some(class));
+            }
+            None => p.write_string16(None),
+        }
         p.write_i32(0); // no source bounds
         p.write_i32(0); // no categories
         p.write_i32(0); // no selector

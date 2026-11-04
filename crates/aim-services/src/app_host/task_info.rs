@@ -120,6 +120,14 @@ pub struct RunningTaskInfo {
     pub configuration: Configuration,
     /// Its `WindowContainerToken`.
     pub token: Binder,
+    /// Whether it has a running activity (`isRunning`).
+    pub is_running: bool,
+    /// `topActivityType`.
+    pub activity_type: i32,
+    /// Its launch cookie (`Task.mLaunchCookie`).
+    pub launch_cookie: Option<Binder>,
+    /// The organizer root task it is in, else `INVALID_TASK_ID`.
+    pub parent_task_id: i32,
     pub top_activity_info: Option<ActivityInfo>,
     pub is_resizeable: bool,
     pub min_width: i32,
@@ -146,6 +154,8 @@ pub enum BaseIntent {
         strip: bool,
     },
     Raw(Box<super::kept::RawIntent>),
+    /// `new Intent()`, an organizer root task's.
+    Empty,
 }
 
 impl BaseIntent {
@@ -187,7 +197,7 @@ impl WriteParcelable for BaseIntent {
                 flags,
                 strip,
             } => super::activity::Intent {
-                component: component.clone(),
+                component: Some(component.clone()),
                 flags: *flags,
                 extended_flags: if *strip {
                     0
@@ -198,6 +208,13 @@ impl WriteParcelable for BaseIntent {
             }
             .write_to(p),
             BaseIntent::Raw(raw) => raw.write_to(p),
+            BaseIntent::Empty => super::activity::Intent {
+                component: None,
+                flags: 0,
+                extended_flags: 0,
+                content_user_hint: USER_CURRENT,
+            }
+            .write_to(p),
         }
     }
 }
@@ -249,7 +266,7 @@ impl RunningTaskInfo {
         p.write_i32(self.task_id);
         p.write_i32(self.effective_uid);
         p.write_i32(DEFAULT_DISPLAY);
-        p.write_bool(true); // isRunning: it has a running activity
+        p.write_bool(self.is_running);
         p.write_i32(1);
         self.base_intent.write_to(p);
         for c in [
@@ -279,7 +296,7 @@ impl RunningTaskInfo {
         p.write_i32(self.resize_mode);
         self.configuration.write_to(p);
         p.write_binder(Some(self.token));
-        p.write_i32(ACTIVITY_TYPE_STANDARD);
+        p.write_i32(self.activity_type);
         p.write_i32(0); // no PictureInPictureParams
         p.write_bool(false); // shouldDockBigOverlays
         p.write_i32(INVALID_TASK_ID); // launchIntoPipHostTaskId
@@ -296,11 +313,15 @@ impl RunningTaskInfo {
         p.write_i32(self.min_width);
         p.write_i32(self.min_height);
         p.write_i32(self.default_min_size);
-        p.write_i32(0); // no launch cookies (`writeBinderList`)
+        // `writeBinderList` of the launch cookies.
+        p.write_i32(self.launch_cookie.is_some() as i32);
+        if let Some(cookie) = self.launch_cookie {
+            p.write_binder(Some(cookie));
+        }
         p.write_i32(1);
         p.write_i32(self.position_in_parent.0);
         p.write_i32(self.position_in_parent.1);
-        p.write_i32(INVALID_TASK_ID); // parentTaskId: no organizer's
+        p.write_i32(self.parent_task_id);
         p.write_bool(self.is_focused);
         p.write_bool(self.is_visible);
         p.write_bool(self.is_visible); // isVisibleRequested
@@ -586,9 +607,10 @@ impl AppHost {
                     format!("task {task} of no running process"),
                 )
             })?;
-        let bounds = self.tasks.freeform_bounds(task);
+        let bounds = self.tasks.own_bounds(task);
+        let parent = self.tasks.parent(task);
         let mut configuration = match bounds {
-            Some(bounds) => global.of_freeform_task(bounds),
+            Some((mode, bounds)) => global.of_task(mode, bounds),
             None => global.clone(),
         };
         configuration.window.activity_type = ACTIVITY_TYPE_STANDARD;
@@ -604,12 +626,7 @@ impl AppHost {
             package,
             root_info.info.application_info.target_sdk_version,
         );
-        let default_min_size = self
-            .framework()?
-            .framework_dimension_dp("default_minimal_size_resizable_task")
-            .ok_or_else(|| {
-                Exception::new(EX_ILLEGAL_STATE, "no default_minimal_size_resizable_task")
-            })? as i32;
+        let default_min_size = self.default_min_size()?;
         let base_intent = BaseIntent::of(&t, strip).map_err(|e| {
             Exception::new(
                 EX_ILLEGAL_STATE,
@@ -644,18 +661,28 @@ impl AppHost {
             resize_mode,
             configuration,
             token: self.task_token(task),
+            is_running: true,
+            activity_type: ACTIVITY_TYPE_STANDARD,
+            launch_cookie: None,
+            parent_task_id: parent.unwrap_or(INVALID_TASK_ID),
             top_activity_info: Some(top_info),
             is_resizeable,
             min_width: min_size.0,
             min_height: min_size.1,
             default_min_size,
-            position_in_parent: bounds.map_or((0, 0), |b| (b.left, b.top)),
+            // `getRelativePosition`, in its root task if it is in one.
+            position_in_parent: bounds.map_or((0, 0), |(_, b)| {
+                let origin = parent
+                    .and_then(|p| self.tasks.root(p))
+                    .map_or((0, 0), |r| (r.bounds.left, r.bounds.top));
+                (b.left - origin.0, b.top - origin.1)
+            }),
             is_focused: focused,
             is_visible: visibility != Visibility::Invisible,
             is_top_activity_no_display: top_no_display,
             is_top_activity_transparent: !top_occludes,
             is_activity_stack_transparent: translucent,
-            last_non_fullscreen_bounds: bounds,
+            last_non_fullscreen_bounds: bounds.filter(|b| b.0 == 5).map(|b| b.1),
             top_activity_app_bounds: global.window.app_bounds.unwrap_or(global.window.bounds),
         };
         if !allowed {
@@ -664,7 +691,70 @@ impl AppHost {
         Ok(info)
     }
 
+    /// `DisplayContent.mMinSizeOfResizeableTaskDp`.
+    fn default_min_size(&self) -> Result<i32, Exception> {
+        Ok(self
+            .framework()?
+            .framework_dimension_dp("default_minimal_size_resizable_task")
+            .ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "no default_minimal_size_resizable_task")
+            })? as i32)
+    }
+
+    /// `Task.fillTaskInfo` of the organizer root task `root`
+    /// (`TaskOrganizerController.createRootTask`): a resizeable task of no
+    /// activity, user or uid, in its windowing mode at its bounds.
+    pub(super) fn root_task_info(&self, root: i32) -> Result<RunningTaskInfo, Exception> {
+        let r = self
+            .tasks
+            .root(root)
+            .ok_or_else(|| Exception::illegal_argument("unknown root task"))?;
+        let mut configuration = self.global_configuration()?;
+        configuration.window.windowing_mode = r.windowing_mode;
+        configuration.window.bounds = r.bounds;
+        let supports_multi_window =
+            self.multi_window()?
+                .supports(true, (-1, -1), false, &configuration);
+        Ok(RunningTaskInfo {
+            user_id: 0,
+            task_id: root,
+            effective_uid: 0,
+            base_intent: BaseIntent::Empty,
+            base_activity: None,
+            top_activity: None,
+            orig_activity: None,
+            real_activity: None,
+            num_activities: 0,
+            last_active_time: r.last_active,
+            supports_multi_window,
+            resize_mode: 2, // RESIZE_MODE_RESIZEABLE, `new ActivityInfo()`'s
+            configuration,
+            token: self.task_token(root),
+            is_running: false,
+            activity_type: 0, // ACTIVITY_TYPE_UNDEFINED
+            launch_cookie: r.cookie,
+            parent_task_id: INVALID_TASK_ID,
+            top_activity_info: None,
+            is_resizeable: true,
+            min_width: -1,
+            min_height: -1,
+            default_min_size: self.default_min_size()?,
+            position_in_parent: (r.bounds.left, r.bounds.top),
+            is_focused: false,
+            is_visible: false,
+            is_top_activity_no_display: false,
+            is_top_activity_transparent: false,
+            // `!forAllActivities(occludesParent)` of no activity.
+            is_activity_stack_transparent: true,
+            last_non_fullscreen_bounds: None,
+            top_activity_app_bounds: Rect::default(),
+        })
+    }
+
     pub(super) fn organizer_task_info(&self, task: i32) -> Result<RunningTaskInfo, Exception> {
+        if self.tasks.root(task).is_some() {
+            return self.root_task_info(task);
+        }
         let last_active = self
             .activities
             .stack
@@ -674,6 +764,21 @@ impl AppHost {
             .ok_or_else(|| Exception::illegal_argument("unknown task"))?
             .last_active;
         self.task_info(task, last_active, true, true, &self.multi_window()?)
+    }
+
+    /// `retrieveSettings`' `mSupportsMultiWindow`.
+    pub(super) fn supports_multi_window(&self) -> Result<bool, Exception> {
+        Ok(self.multi_window()?.supported)
+    }
+
+    /// The task of the `WindowContainerToken` `token` (`fromBinder`).
+    pub(super) fn task_of_token(&self, token: Binder) -> Option<i32> {
+        self.activities
+            .task_tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(id, binder)| (*binder == token).then_some(*id))
     }
 
     /// The `WindowContainerToken` of `task`, made at its first use.
@@ -959,7 +1064,7 @@ pub(super) mod tests {
             bottom: 1480,
         };
         let configuration =
-            Configuration::of(&Display::phone_for_test(), &device).of_freeform_task(bounds);
+            Configuration::of(&Display::phone_for_test(), &device).of_task(5, bounds);
         let task = Task {
             id: 9,
             affinity: None,
@@ -992,6 +1097,10 @@ pub(super) mod tests {
             resize_mode: 2,
             configuration: configuration.clone(),
             token: Binder::Local(0x40),
+            is_running: true,
+            activity_type: ACTIVITY_TYPE_STANDARD,
+            launch_cookie: None,
+            parent_task_id: INVALID_TASK_ID,
             top_activity_info: None,
             is_resizeable: true,
             min_width: -1,

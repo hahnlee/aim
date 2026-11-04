@@ -304,10 +304,9 @@ impl AppHost {
             let Some(bounds) = self.tasks.bounds(task.id) else {
                 continue;
             };
-            let mut config = if self.tasks.freeform_bounds(task.id).is_some() {
-                global.of_freeform_task(bounds)
-            } else {
-                global.clone()
+            let mut config = match self.tasks.own_bounds(task.id) {
+                Some((mode, _)) => global.of_task(mode, bounds),
+                None => global.clone(),
             };
             config.window.activity_type = super::super::activity::ACTIVITY_TYPE_STANDARD;
             task_configs.insert(task.id, config);

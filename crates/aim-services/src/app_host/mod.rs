@@ -4435,7 +4435,7 @@ impl AppHost {
         // Each process is told first, of the activity it follows as that
         // activity is now.
         let activities =
-            self.reconfigure_all_activities(&global, |task| self.tasks.freeform_bounds(task));
+            self.reconfigure_all_activities(&global, |task| self.tasks.own_bounds(task));
         for (start_seq, item) in self.process_configuration_changes() {
             if let Err(e) = self.schedule(start_seq, vec![item]) {
                 eprintln!("app host: configuration of start {start_seq}: {e}");
