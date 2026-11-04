@@ -582,7 +582,8 @@ mod tests {
             let boot = host.clone();
             // This fixture publishes constructed package state without a boot
             // lifecycle; exercise the real default-grant/startup boundary.
-            let worker = std::thread::spawn(move || boot.complete_system_ready(|| Ok(())));
+            let worker =
+                std::thread::spawn(move || boot.complete_system_ready(|| Ok(()), || Ok(())));
             waiting.recv().unwrap();
             assert!(host.processes_ready.get().is_none());
             assert!(register(host, 1002, observer).is_err());
@@ -644,7 +645,7 @@ mod tests {
                 let reload = PermissionManager::new(host.clone()).user0().unwrap();
                 assert_eq!(*reload, *owner.user0().unwrap());
                 let writes = owner.access_writes.lock().unwrap().len();
-                host.complete_system_ready(|| panic!("package readiness repeated"))
+                host.complete_system_ready(|| panic!("package readiness repeated"), || Ok(()))
                     .unwrap();
                 assert_eq!(owner.access_writes.lock().unwrap().len(), writes);
             }

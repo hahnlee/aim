@@ -2183,6 +2183,11 @@ impl Broadcasts {
     /// type `broadcast`), its deliveries waiting for it to attach; the
     /// receiver it could not be started for fails.
     fn start_cold(&self, host: &AppHost, st: &mut State, process: &str, uid: u32) {
+        // Before systemReady, `startProcessLocked` puts the process on hold
+        // (`mProcessesOnHold`): its deliveries wait, not the caller.
+        if host.processes_ready.get().is_none() {
+            return;
+        }
         let Some(at) = st
             .cold
             .iter()
@@ -2362,6 +2367,20 @@ impl Broadcasts {
 
     /// The process of `start_seq` attached: the queue started for it runs
     /// (`onApplicationAttachedLocked`), and another process may be started.
+    /// `systemReady`'s start of the processes on hold: the cold queues run.
+    pub fn processes_ready(&self, host: &AppHost) {
+        let mut st = self.state.lock().unwrap();
+        let cold: Vec<_> = st
+            .cold
+            .iter()
+            .map(|c| QueueId::Cold(c.process.clone(), c.uid))
+            .collect();
+        for queue in cold {
+            Self::make_runnable(&mut st, queue);
+        }
+        self.update_running(host, &mut st);
+    }
+
     pub fn process_attached(&self, host: &AppHost, start_seq: i64) {
         let mut st = self.state.lock().unwrap();
         if st.cold_start == Some(start_seq) {
@@ -3008,6 +3027,30 @@ mod tests {
             action: action.map(Into::into),
             data: data.map(Uri::parse),
             ..Intent::default()
+        }
+    }
+
+    /// Before systemReady a cold queue's start is held, not waited for by
+    /// its caller; readiness, or the boot's failure, runs it.
+    #[test]
+    fn cold_starts_are_held_until_processes_are_ready() {
+        for ready in [Ok(()), Err(Exception::new(EX_ILLEGAL_STATE, "boot failed"))] {
+            let host = super::super::AppHost::new(crate::test_process(1000));
+            let broadcasts = &host.broadcasts;
+            let mut st = broadcasts.state.lock().unwrap();
+            st.cold.push(Cold {
+                process: "p".into(),
+                uid: 10100,
+                package: "p".into(),
+                deliveries: VecDeque::new(),
+            });
+            broadcasts.start_cold(&host, &mut st, "p", 10100);
+            assert_eq!(st.cold.len(), 1);
+            drop(st);
+            host.processes_ready.set(ready).unwrap();
+            broadcasts.processes_ready(&host);
+            assert!(broadcasts.state.lock().unwrap().cold.is_empty());
+            host.process.shutdown().unwrap();
         }
     }
 

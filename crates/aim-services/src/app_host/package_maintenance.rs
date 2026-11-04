@@ -438,7 +438,7 @@ impl Service for DexUsePackages {
                                 a.owner,
                             )
                     })
-                    .map(|()| packages::write_attach_art_owner_reply(&mut p))
+                    .map(|ready| packages::write_attach_art_owner_reply(&mut p, ready))
             }
             packages::CHECK_ART_OWNER => {
                 let a = packages::CheckArtOwner::read(&mut call.data)?;

@@ -1388,6 +1388,27 @@ returned 8,619 bytes equal their logical sizes (allocated APFS blocks are record
 separately); a repeated call returns zero. Immutable system-image files, APKs,
 roots and unrelated package artifacts survive, and the fixture launches afterward.
 Full ART CTS and compilation/job lifecycle remain unrun.
+The app host now runs native package lifecycle stages 1–9 at
+PackageManagerService.systemReady's points before application forks (#2063
+slice 7): storage listeners, installer staging cleanup, ART readiness and app
+reconciliation before default grants; overlay observers, module metadata,
+staged sessions and maintenance after them. Stage 4 waits for aim-system's live
+original ArtManagerLocal attachment, including a replacement after a crash;
+package queries never wait for it. Broadcast cold starts before system ready
+are held as AMS's processes on hold, not waited for by their caller: without
+this, aim-system's attachment blocked on a held broadcast start and deadlocked
+stage 4. Stage 9 delivers DexUseManagerLocal.systemReady (with ArtManagerLocal's)
+once per system process: by Binder to the attached owner, or by a replacement
+told at attachment that the stage passed. Boot dexopt (stage 10) still reports
+ART unavailable. In the two disposable fresh-data boots with readable logcat,
+each aim-system process logs ART's systemReady exactly once (the first by stage
+9 on a Binder thread, before LOCKED_BOOT_COMPLETED and BOOT_COMPLETED delivery;
+replacements on their main thread), through aim-system's existing crash loop (RoleController's removeAllowlistedRestrictedPermission,
+#1508, also on main). Interleaved cold boots to sys.boot_completed under host
+load 25–45: candidate median 12.57 s versus main 11.75 s (three pairs; all
+samples 13.23 s over seven versus 11.71 s over six), a flagged possible
+regression while that crash loop delays ART attachment. ACTION_SHUTDOWN is not
+broadcast at guest stop, so the original shutdown save does not run (2026-11-04).
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions

@@ -828,8 +828,17 @@ filtered snapshots, int64 bytes and original -1/0 mappings. External session cac
 reclamation still requires StorageSessionController (#2156). Physical deletion
 acceptance is unrun.
 Construction/attachment failures close the package Store and require process
-restart. ART systemReady, shutdown cleanup and dexopt remain #2063; no original
-class or image replacement is added. JVM lifecycle checks cover initialization
+restart. The app host runs the native package lifecycle's stages 1–9 in
+PackageManagerService.systemReady's order before application forks (#2063,
+slice 7): 1–5, default grants, then 6–9. PMS.main registered ArtManagerLocal
+before systemReady; here aim-system attaches it independently, so stage 4
+(dexOptimizerReady) waits for that attachment and fails, as SystemServer's
+boot would, if the system process dies without attaching. Package queries
+never wait for it. Stage 9 delivers DexUseManagerLocal.systemReady once
+through the same capability; a replacement process told at attachment that it
+already passed runs its own. Boot dexopt (stage 10), background/APEX
+scheduling and the dexopt done callback remain #2063; no original class or
+image replacement is added. JVM lifecycle checks cover initialization
 order and a missing-initializer control. An isolated ART process executes the
 original constructor over empty and populated protobuf state, JNI path validation,
 load recording, atomic save and separate-process reload, with package snapshots

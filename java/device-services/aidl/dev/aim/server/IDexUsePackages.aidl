@@ -10,6 +10,7 @@ interface IDexUsePackages {
     boolean crossUserSuspensions();
     /** ART attachment uses this same package epoch, after application-thread attachment. */
     long getArtOwnerGeneration();
-    void attachArtOwner(long generation, IArtDeletion owner);
+    /** True when the package lifecycle's systemReady already passed: the owner runs it. */
+    boolean attachArtOwner(long generation, IArtDeletion owner);
     void checkArtOwner(long generation);
 }

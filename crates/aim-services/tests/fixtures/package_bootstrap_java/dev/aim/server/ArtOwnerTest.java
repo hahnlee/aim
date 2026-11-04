@@ -42,7 +42,7 @@ public final class ArtOwnerTest {
                     case "attachArtOwner" -> {
                         check((long)a[0] == 7 && attached[0] == null);
                         if (mode.equals("attach")) throw new android.os.RemoteException("native attachment failed");
-                        attached[0] = (IArtDeletion)a[1]; yield null;
+                        attached[0] = (IArtDeletion)a[1]; yield mode.equals("ready");
                     }
                     case "checkArtOwner" -> { checks[0]++; check((long)a[0] == 7);
                         if (!alive[0]) throw new IllegalStateException("native epoch ended"); yield null; }
@@ -52,6 +52,15 @@ public final class ArtOwnerTest {
         var dex = new DexUseManagerLocal();
         if (!mode.equals("dex")) LocalManagerRegistry.addManager(DexUseManagerLocal.class, dex);
         ArtManagerLocal.missingDependency = mode.equals("dependency");
+        if (mode.equals("ready")) {
+            // Attached after the package systemReady: the owner runs it once itself.
+            ArtOwnerStartup.start(context, epoch);
+            check(DexUseManagerLocal.systemReady == 1);
+            rejected(IllegalStateException.class, () -> attached[0].systemReady(7));
+            check(DexUseManagerLocal.systemReady == 1);
+            local.closeEpoch();
+            return;
+        }
         if (!mode.equals("normal")) {
             rejected(mode.equals("attach") ? android.os.RemoteException.class : NullPointerException.class,
                     () -> ArtOwnerStartup.start(context, epoch));
@@ -73,8 +82,16 @@ public final class ArtOwnerTest {
             rejected(SecurityException.class, () -> attached[0].clearAppProfiles(7, "p"));
             rejected(SecurityException.class, () -> attached[0].deleteDexoptArtifacts(7, "p", 10100, 10));
         }
+        Binder.uid = 0;
+        rejected(SecurityException.class, () -> attached[0].systemReady(7));
         Binder.uid = 1000;
         check(checks[0] == 1 && ArtManagerLocal.calls == 0);
+        rejected(IllegalStateException.class, () -> attached[0].systemReady(6));
+        check(DexUseManagerLocal.systemReady == 0);
+        attached[0].systemReady(7);
+        check(DexUseManagerLocal.systemReady == 1);
+        rejected(IllegalStateException.class, () -> attached[0].systemReady(7));
+        check(DexUseManagerLocal.systemReady == 1 && checks[0] == 3);
         rejected(IllegalStateException.class, () -> attached[0].clearAppProfiles(6, "p"));
         attached[0].clearAppProfiles(7, "p");
         check(attached[0].deleteDexoptArtifacts(7, "p", 10100, 10) == 1L << 40);

@@ -6,6 +6,7 @@ import android.os.RemoteException;
 import android.os.UserHandle;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.art.ArtManagerLocal;
+import com.android.server.art.DexUseManagerLocal;
 import com.android.server.pm.PackageManagerLocal;
 import java.util.Objects;
 
@@ -15,6 +16,7 @@ final class ArtOwnerStartup extends IArtDeletion.Stub {
     private final long generation;
     private final PackageLocal packages;
     private final ArtManagerLocal art;
+    private boolean systemReady;
 
     static void start(Context context, IDexUsePackages epoch) throws RemoteException {
         var packages = (PackageLocal) Objects.requireNonNull(
@@ -22,8 +24,11 @@ final class ArtOwnerStartup extends IArtDeletion.Stub {
         try {
             long generation = epoch.getArtOwnerGeneration();
             var art = NativePackageManagerService.OriginalArtOwner.construct(context, packages);
-            epoch.attachArtOwner(generation, new ArtOwnerStartup(epoch, generation, packages, art));
+            var owner = new ArtOwnerStartup(epoch, generation, packages, art);
+            boolean ready = epoch.attachArtOwner(generation, owner);
             epoch.checkArtOwner(generation);
+            // A replacement process attaching after the package systemReady runs its own.
+            if (ready) owner.dexUseSystemReady();
         } catch (RemoteException | RuntimeException failure) {
             try { packages.closeEpoch(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
             throw failure;
@@ -43,6 +48,18 @@ final class ArtOwnerStartup extends IArtDeletion.Stub {
             finally { android.os.Process.killProcess(android.os.Process.myPid()); }
             throw failure;
         }
+    }
+
+    /** PackageManagerService.systemReady's last step, once per registry. */
+    private synchronized void dexUseSystemReady() {
+        if (systemReady) throw new IllegalStateException("ART system ready twice");
+        Objects.requireNonNull(LocalManagerRegistry.getManager(DexUseManagerLocal.class)).systemReady();
+        systemReady = true;
+    }
+
+    @Override public void systemReady(long requested) throws RemoteException {
+        enforce(requested);
+        dexUseSystemReady();
     }
 
     @Override public void clearAppProfiles(long requested, String name) throws RemoteException {
