@@ -45,7 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
     Parcel,
@@ -1532,10 +1532,14 @@ pub struct PermissionManager {
     installs: Mutex<BTreeMap<u64, install::Candidate>>,
     groups: Mutex<Option<(Weak<State>, Arc<Vec<PermissionGroupInfo>>)>>,
     gid_permissions: OnceLock<BTreeSet<String>>,
-    listeners: Mutex<Vec<Binder>>,
+    listeners: Arc<Mutex<Listeners>>,
     /// `PermissionService.isDelayedPermissionBackupFinished`.
     delayed_backup_finished: Mutex<BTreeSet<i32>>,
 }
+
+/// `OnPermissionsChangeListeners`, a `RemoteCallbackList`: each listener
+/// once, with its death link, until removed or dead.
+type Listeners = Vec<(Binder, Option<(Strong, u64)>)>;
 
 impl Drop for PermissionManager {
     fn drop(&mut self) {
@@ -1558,8 +1562,86 @@ impl PermissionManager {
             installs: Mutex::new(BTreeMap::new()),
             groups: Mutex::new(None),
             gid_permissions: OnceLock::new(),
-            listeners: Mutex::new(Vec::new()),
+            listeners: Arc::default(),
             delayed_backup_finished: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// `RemoteCallbackList.register`: a listener already kept is replaced,
+    /// and a remote one is dropped when its process dies.
+    fn add_listener(&self, listener: Binder) {
+        let mut listeners = self.listeners.lock().unwrap();
+        self.unregister(&mut listeners, listener);
+        let death = match listener {
+            Binder::Handle(handle) => {
+                let strong = self.host.process.strong(handle);
+                let kept = Arc::downgrade(&self.listeners);
+                // Held under the lock, the death cannot run before the push.
+                let cookie = self.host.process.link_to_death(
+                    &strong,
+                    Box::new(move || {
+                        if let Some(kept) = kept.upgrade() {
+                            kept.lock().unwrap().retain(|(l, _)| *l != listener);
+                        }
+                    }),
+                );
+                Some((strong, cookie))
+            }
+            Binder::Local(_) => None,
+        };
+        listeners.push((listener, death));
+    }
+
+    /// `RemoteCallbackList.unregister`.
+    fn remove_listener(&self, listener: Binder) {
+        self.unregister(&mut self.listeners.lock().unwrap(), listener);
+    }
+
+    fn unregister(&self, listeners: &mut Listeners, listener: Binder) {
+        if let Some(i) = listeners.iter().position(|(l, _)| *l == listener)
+            && let (_, Some((strong, cookie))) = listeners.remove(i)
+        {
+            self.host.process.clear_death(&strong, cookie);
+        }
+    }
+
+    /// `OnPermissionsChangeListeners.onPermissionsChanged` for `uid`.
+    fn notify_listeners(&self, uid: i32) {
+        let listeners: Vec<Binder> = self
+            .listeners
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(l, _)| *l)
+            .collect();
+        let mut data = Parcel::new();
+        data.write_interface_token(changed_listener::DESCRIPTOR);
+        data.write_i32(uid);
+        data.write_string16(Some(DEFAULT_DEVICE));
+        for listener in listeners {
+            let sent = match listener {
+                Binder::Handle(handle) => self
+                    .host
+                    .process
+                    .transact(
+                        handle,
+                        changed_listener::ON_PERMISSIONS_CHANGED,
+                        &data,
+                        true,
+                    )
+                    .map(drop),
+                Binder::Local(ptr) => match self.host.process.local_service(ptr) {
+                    Some(service) => service
+                        .transact(changed_listener::ON_PERMISSIONS_CHANGED, &data, true)
+                        .map(drop),
+                    None => Ok(()),
+                },
+            };
+            if let Err(e) = sent {
+                eprintln!(
+                    "app host: permissionmgr: Error when calling OnPermissionsChangeListener: {e:?}"
+                );
+            }
         }
     }
 
@@ -2127,38 +2209,9 @@ impl PermissionManager {
                 changed.push(uid);
             }
         }
-        let listeners = self.listeners.lock().unwrap().clone();
         for uid in changed {
             self.synchronize_permission_app_ops(uid, None, true)?;
-            let mut data = Parcel::new();
-            data.write_interface_token(changed_listener::DESCRIPTOR);
-            data.write_i32(uid);
-            data.write_string16(Some(DEFAULT_DEVICE));
-            for listener in &listeners {
-                let sent = match *listener {
-                    Binder::Handle(handle) => self
-                        .host
-                        .process
-                        .transact(
-                            handle,
-                            changed_listener::ON_PERMISSIONS_CHANGED,
-                            &data,
-                            true,
-                        )
-                        .map(drop),
-                    Binder::Local(ptr) => match self.host.process.local_service(ptr) {
-                        Some(service) => service
-                            .transact(changed_listener::ON_PERMISSIONS_CHANGED, &data, true)
-                            .map(drop),
-                        None => Ok(()),
-                    },
-                };
-                if let Err(e) = sent {
-                    eprintln!(
-                        "app host: permissionmgr: Error when calling OnPermissionsChangeListener: {e:?}"
-                    );
-                }
-            }
+            self.notify_listeners(uid);
         }
         if let Some(reason) = kill {
             for (uid, only_notifications) in revoked {
@@ -2404,12 +2457,11 @@ impl Service for PermissionManager {
                         })
                     })
                     .map(|listener| {
-                        let mut listeners = self.listeners.lock().unwrap();
                         if add {
-                            listeners.push(listener);
+                            self.add_listener(listener);
                             parcel(pm::write_add_on_permissions_change_listener_reply)
                         } else {
-                            listeners.retain(|l| *l != listener);
+                            self.remove_listener(listener);
                             parcel(pm::write_remove_on_permissions_change_listener_reply)
                         }
                     })
@@ -2660,6 +2712,137 @@ mod tests {
     use super::*;
     use crate::package::model::{PackageUserState, SharedUser, User};
     use crate::package::pkg::{self, AndroidPackage, Component};
+
+    /// `OnPermissionsChangeListeners` is a `RemoteCallbackList`: a listener
+    /// is kept once, and one whose process died is no longer called.
+    #[test]
+    fn a_dead_listener_is_dropped_and_not_called_again() {
+        use aim_binder_driver::uapi::{BINDER_SET_CONTEXT_MGR_EXT, BINDER_TYPE_BINDER};
+        use aim_binder_driver::{Credentials, Device, Driver, File, GuestProcess, errno};
+        use aim_binder_host::local::LocalProcess;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        struct NoMemory;
+        impl GuestProcess for NoMemory {
+            fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), i32> {
+                Err(errno::EFAULT)
+            }
+            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), i32> {
+                Err(errno::EFAULT)
+            }
+            fn get_file(&mut self, _: u32) -> Result<File, i32> {
+                Err(errno::EBADF)
+            }
+            fn install_file(&mut self, _: File) -> Result<u32, i32> {
+                Err(errno::EBADF)
+            }
+            fn close_fd(&mut self, _: u32) {}
+        }
+        /// Registers each received listener, as `addOnPermissionsChangeListener`
+        /// does once its caller is allowed.
+        struct Registrar(Arc<PermissionManager>);
+        impl Service for Registrar {
+            fn descriptor(&self) -> &str {
+                pm::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                self.0.add_listener(call.data.read_binder()?.unwrap());
+                Ok(Parcel::new())
+            }
+        }
+        struct Listener(i32, mpsc::Sender<(i32, i32)>);
+        impl Service for Listener {
+            fn descriptor(&self) -> &str {
+                changed_listener::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                let a = changed_listener::OnPermissionsChanged::read(&mut call.data)?;
+                self.1.send((self.0, a.uid)).unwrap();
+                Ok(Parcel::new())
+            }
+        }
+
+        let driver = Driver::new();
+        let open = |pid| {
+            let process = LocalProcess::open(
+                &driver,
+                Device::Binder,
+                Credentials {
+                    pid,
+                    euid: 1000,
+                    security_context: None,
+                },
+            );
+            process.set_max_threads(0);
+            process.start();
+            process
+        };
+        let host = AppHost::new(open(98390));
+        let owner = Arc::new(PermissionManager::new(host.clone()));
+        let Binder::Local(ptr) = host.process.add_service(Arc::new(Registrar(owner.clone())))
+        else {
+            unreachable!()
+        };
+        let mut object = aim_binder_driver::uapi::FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: 0,
+            binder: ptr,
+            cookie: ptr,
+        }
+        .encode();
+        driver
+            .ioctl(
+                host.process.proc_handle(),
+                98390,
+                BINDER_SET_CONTEXT_MGR_EXT,
+                &mut object,
+                &mut NoMemory,
+            )
+            .unwrap();
+        let (tx, calls) = mpsc::channel();
+        let register = |process: &LocalProcess, id| {
+            let listener = process.add_service(Arc::new(Listener(id, tx.clone())));
+            let mut p = Parcel::new();
+            p.write_binder(Some(listener));
+            process.transact(0, 0, &p, false).unwrap();
+            listener
+        };
+        let alive = open(98391);
+        let dying = open(98392);
+        register(&alive, 1);
+        // Registering the same binder again keeps it once.
+        let twice = register(&dying, 2);
+        let mut p = Parcel::new();
+        p.write_binder(Some(twice));
+        dying.transact(0, 0, &p, false).unwrap();
+        assert_eq!(owner.listeners.lock().unwrap().len(), 2);
+        owner.notify_listeners(10001);
+        let mut heard = [
+            calls.recv_timeout(Duration::from_secs(5)).unwrap(),
+            calls.recv_timeout(Duration::from_secs(5)).unwrap(),
+        ];
+        heard.sort();
+        assert_eq!(heard, [(1, 10001), (2, 10001)]);
+
+        dying.shutdown().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owner.listeners.lock().unwrap().len() != 1 {
+            assert!(Instant::now() < deadline, "the dead listener was kept");
+            std::thread::yield_now();
+        }
+        owner.notify_listeners(10002);
+        assert_eq!(
+            calls.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (1, 10002)
+        );
+        assert!(calls.recv_timeout(Duration::from_millis(200)).is_err());
+        let alive_listener = owner.listeners.lock().unwrap()[0].0;
+        owner.remove_listener(alive_listener);
+        assert!(owner.listeners.lock().unwrap().is_empty());
+        alive.shutdown().unwrap();
+        host.process.shutdown().unwrap();
+    }
 
     #[test]
     fn delayed_restore_caches_only_the_controllers_no_more_backup_for_each_user() {
