@@ -707,11 +707,11 @@ mod tests {
             events: 1,
             revents: 0,
         };
-        let timeout = [ms / 1000, ms % 1000 * 1_000_000];
+        let mut timeout = [ms / 1000, ms % 1000 * 1_000_000];
         let n = sys::poll::ppoll([
             &mut entry as *mut _ as u64,
             1,
-            timeout.as_ptr() as u64,
+            timeout.as_mut_ptr() as u64,
             0,
             0,
             0,
@@ -971,11 +971,11 @@ mod tests {
             events,
             revents: 0,
         };
-        let timeout = [0i64; 2];
+        let mut timeout = [0i64; 2];
         let n = sys::poll::ppoll([
             &mut entry as *mut _ as u64,
             1,
-            timeout.as_ptr() as u64,
+            timeout.as_mut_ptr() as u64,
             0,
             0,
             0,
@@ -1037,14 +1037,14 @@ mod tests {
         );
         // select: in the read set, never in the write set.
         let (mut read, mut write) = (1u64 << fd, 1u64 << fd);
-        let timeout = [0i64; 2];
+        let mut timeout = [0i64; 2];
         assert_eq!(
             sys::poll::pselect6([
                 fd as u64 + 1,
                 &mut read as *mut _ as u64,
                 &mut write as *mut _ as u64,
                 0,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
             ]),
             1
@@ -1057,13 +1057,13 @@ mod tests {
 
     fn selected(fd: i64, ms: i64) -> i64 {
         let mut read = 1u64 << fd;
-        let timeout = [ms / 1000, ms % 1000 * 1_000_000];
+        let mut timeout = [ms / 1000, ms % 1000 * 1_000_000];
         let n = sys::poll::pselect6([
             fd as u64 + 1,
             &mut read as *mut _ as u64,
             0,
             0,
-            timeout.as_ptr() as u64,
+            timeout.as_mut_ptr() as u64,
             0,
         ]);
         assert_eq!(read, if n == 1 { 1 << fd } else { 0 });
@@ -1249,25 +1249,26 @@ mod tests {
             events: libc::POLLOUT,
             revents: 0,
         };
-        let timeout = [0i64, 300_000_000];
+        // ppoll and pselect6 write the time left back into their timespec.
+        let mut timeout = [0i64, 300_000_000];
         sleeps(300, 0, || {
             sys::poll::ppoll([
                 &mut entry as *mut _ as u64,
                 1,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
                 0,
                 0,
             ])
         });
-        let (mut write, timeout) = (1u64 << fd, [0i64, 300_000_000]);
+        let (mut write, mut timeout) = (1u64 << fd, [0i64, 300_000_000]);
         sleeps(300, 0, || {
             sys::poll::pselect6([
                 fd as u64 + 1,
                 0,
                 &mut write as *mut _ as u64,
                 0,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
             ])
         });
