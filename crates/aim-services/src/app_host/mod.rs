@@ -1647,7 +1647,7 @@ impl AppHost {
             "app host: Start proc {pid}:{process}/{uid} for {entry} in {:?}",
             started.elapsed()
         );
-        self.watch_start(start_seq)?;
+        self.watch_start(start_seq);
         Ok(pid)
     }
 
@@ -1766,7 +1766,7 @@ impl AppHost {
             "app host: Start proc {pid}:{process}/{uid} by the WebView zygote in {:?}",
             started.elapsed()
         );
-        self.watch_start(start_seq)?;
+        self.watch_start(start_seq);
         Ok((start_seq, pid))
     }
 
@@ -2048,7 +2048,7 @@ impl AppHost {
             started.elapsed()
         );
         drop(zygote);
-        self.watch_start(start_seq)?;
+        self.watch_start(start_seq);
         Ok((start_seq, pid))
     }
 
@@ -2430,39 +2430,27 @@ impl AppHost {
     }
 
     /// `PROC_START_TIMEOUT_MSG` for the start `start_seq`, posted once it
-    /// started (`handleProcessStartedLocked`).
-    fn watch_start(&self, start_seq: i64) -> Result<(), Exception> {
+    /// started (`handleProcessStartedLocked`). The watcher delivers its
+    /// process's exit, even one before the watch, and retires a start it
+    /// cannot watch as the timeout does: never under the starter's locks (a
+    /// broadcast queue starts with its state held, which a death retires).
+    fn watch_start(&self, start_seq: i64) {
         const PROC_START_TIMEOUT: Duration = Duration::from_secs(10);
         let Some(pid) = self.apps.lock().unwrap().get(&start_seq).map(|app| app.pid) else {
-            return Ok(());
+            return;
         };
-        let watch = match process_start::ExitWatch::new(pid) {
-            Ok(watch) => watch,
-            Err(error) => {
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    if let Err(kill) = self.kill_process(
-                        start_seq,
-                        exit_info::REASON_INITIALIZATION_FAILURE,
-                        exit_info::SUBREASON_UNKNOWN,
-                        "process death notification failed",
-                    ) {
-                        eprintln!("app host: kill after start watch failure: {kill}");
-                    }
-                }
-                self.process_died(start_seq, pid);
-                return Err(Exception::new(
-                    EX_ILLEGAL_STATE,
-                    format!("watch process {pid}: {error}"),
-                ));
-            }
-        };
+        let watch = process_start::ExitWatch::new(pid);
         let multiplier = self
             .property("ro.hw_timeout_multiplier")
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
         let host = self.me.clone();
         std::thread::spawn(move || {
-            let exited = watch.wait(PROC_START_TIMEOUT * multiplier);
+            let exited = match watch {
+                Ok(watch) => watch.wait(PROC_START_TIMEOUT * multiplier),
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(true),
+                Err(error) => Err(error),
+            };
             if let Some(host) = host.upgrade() {
                 match exited {
                     Ok(true) => host.process_died(start_seq, pid),
@@ -2474,7 +2462,6 @@ impl AppHost {
                 }
             }
         });
-        Ok(())
     }
 
     /// `handleProcessStartOrKillTimeoutLocked` of a start: a process that

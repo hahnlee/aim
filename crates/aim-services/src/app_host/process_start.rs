@@ -110,7 +110,7 @@ mod tests {
         let pid = child.0.id() as i32;
         let host = super::super::tests::host_with_start(7, std::sync::Arc::new(|| {}));
         host.apps.lock().unwrap().get_mut(&7).unwrap().pid = pid;
-        host.watch_start(7).unwrap();
+        host.watch_start(7);
         child.0.kill().unwrap();
         child.0.wait().unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -143,7 +143,7 @@ mod tests {
     fn a_start_retired_before_registration_needs_no_watcher() {
         let host = super::super::tests::host_with_start(7, std::sync::Arc::new(|| {}));
         host.apps.lock().unwrap().remove(&7);
-        host.watch_start(7).unwrap();
+        host.watch_start(7);
     }
 
     #[test]
