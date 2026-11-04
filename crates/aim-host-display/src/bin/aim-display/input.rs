@@ -27,7 +27,7 @@ use aim_host_display::input::translate::{COMMAND, Input, Phase, double_tap};
 use aim_host_display::input::{KEYBOARD, device_dir, devices, keymap};
 use aim_host_display::wire::{HostInput, input as kind};
 
-use aim_host_display::text_input::Message as Text;
+use aim_host_display::text_input::{Composition, Message as Text, NOT_FOUND};
 
 use crate::objc::{CGPoint, CGRect, Id, Sel, class, class_addMethod, sel};
 use crate::objc::{objc_allocateClassPair, objc_registerClassPair};
@@ -124,7 +124,7 @@ fn pointer(view: Id, event: Id, phase: Phase, t: i64) {
 
 extern "C" fn mouse_down(this: Id, _: Sel, event: Id) {
     // A touch may move the caret.
-    forget_typed();
+    COMPOSITION.lock().unwrap().forget_typed();
     pointer(this, event, Phase::Down, time(event));
 }
 
@@ -325,6 +325,7 @@ fn key(view: Id, event: Id, down: bool) {
     if down && editing(view).is_some() && flags & (COMMAND | CONTROL) == 0 {
         // The view's input context is made at its first use: it is the
         // current one before the input method sees the key.
+        COMPOSITION.lock().unwrap().key();
         let context = send!(view, c"inputContext" => Id);
         if !context.is_null()
             && send!(class(c"NSTextInputContext"), c"currentInputContext" => Id) != context
@@ -360,8 +361,6 @@ fn key(view: Id, event: Id, down: bool) {
 
 /// `NSEventModifierFlagControl`.
 const CONTROL: u64 = 1 << 18;
-/// `NSNotFound`.
-const NOT_FOUND: usize = isize::MAX as usize;
 /// `EditorInfo.IME_MASK_ACTION`, `IME_ACTION_NONE`, `IME_FLAG_NO_ENTER_ACTION`;
 /// the Android key codes of the editing commands.
 const IME_MASK_ACTION: i32 = 0xff;
@@ -378,14 +377,8 @@ const KEYCODE_DPAD_RIGHT: i32 = 22;
 /// The editor this process's views type into: its task (-1: the
 /// display, in device mode) and its `EditorInfo.imeOptions`.
 static EDITOR: Mutex<Option<(i32, i32)>> = Mutex::new(None);
-/// The input method's marked text.
-static MARKED: Mutex<String> = Mutex::new(String::new());
-/// The text the input method put before the caret since the editor
-/// started, the caret last moved or the view was touched: what the input
-/// method reads back and replaces (Korean input composes a syllable by
-/// replacing the one before the caret). The editor's other text is the
-/// app's.
-static TYPED: Mutex<String> = Mutex::new(String::new());
+/// What the input method composes in the editor.
+static COMPOSITION: Mutex<Composition> = Mutex::new(Composition::new());
 /// The keys whose press went to the keyboard device.
 static PRESSED: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
@@ -400,51 +393,32 @@ pub fn editor(m: &Text) {
     else {
         return;
     };
-    let mut editor = EDITOR.lock().unwrap();
-    // A restart of the same task's input keeps what the input method is
-    // composing; another editor, or none, ends it.
-    let same = editor.is_some_and(|(t, _)| t == task);
-    if active {
-        *editor = Some((task, ime_options));
-    } else if same {
-        *editor = None;
+    {
+        let mut editor = EDITOR.lock().unwrap();
+        let same = editor.is_some_and(|(t, _)| t == task);
+        if active {
+            *editor = Some((task, ime_options));
+        } else if same {
+            *editor = None;
+        } else {
+            return;
+        }
     }
-    if !(active && same) {
-        MARKED.lock().unwrap().clear();
-        TYPED.lock().unwrap().clear();
+    // A start, a restart included, or the end of the editor: the app's
+    // InputMethodManager has finished its composing text
+    // (`RemoteInputConnectionImpl.deactivate`), so the input method
+    // starts over.
+    if COMPOSITION.lock().unwrap().reset() {
+        let context = send!(class(c"NSTextInputContext"), c"currentInputContext" => Id);
+        if !context.is_null() {
+            send!(context, c"discardMarkedText" => ());
+        }
     }
 }
 
-/// The caret moved where the input method does not know: what it typed
-/// is no longer before it.
-fn forget_typed() {
-    TYPED.lock().unwrap().clear();
-}
-
-/// The typed text and the marked text after it, in UTF-16 units.
-fn document() -> Vec<u16> {
-    let mut d: Vec<u16> = TYPED.lock().unwrap().encode_utf16().collect();
-    d.extend(MARKED.lock().unwrap().encode_utf16());
-    d
-}
-
-/// A replacement of the typed text from `range` on: the app's text
-/// before the caret goes as far back (`deleteSurroundingText`), and so
-/// does the typed text.
-fn replace(range: NsRange) {
-    if range.location == NOT_FOUND {
-        return;
-    }
-    let mut typed = TYPED.lock().unwrap();
-    let units: Vec<u16> = typed.encode_utf16().collect();
-    let from = range.location.min(units.len());
-    if from < units.len() {
-        give(Text::Delete {
-            before: (units.len() - from) as i32,
-            after: 0,
-        });
-        *typed = String::from_utf16_lossy(&units[..from]);
-    }
+/// What the input method gave.
+fn give_all(messages: Vec<Text>) {
+    messages.into_iter().for_each(give);
 }
 
 /// The editor's `imeOptions`, if `view` shows its task.
@@ -481,51 +455,43 @@ fn string_of(s: Id) -> String {
 }
 
 extern "C" fn insert_text(_: Id, _: Sel, s: Id, replacement: NsRange) {
-    replace(replacement);
-    let text = string_of(s);
-    MARKED.lock().unwrap().clear();
-    TYPED.lock().unwrap().push_str(&text);
-    give(Text::Commit { text });
+    let m = COMPOSITION
+        .lock()
+        .unwrap()
+        .insert(string_of(s), replacement.location);
+    give_all(m);
 }
 
 extern "C" fn set_marked_text(_: Id, _: Sel, s: Id, _: NsRange, replacement: NsRange) {
-    replace(replacement);
-    let text = string_of(s);
-    *MARKED.lock().unwrap() = text.clone();
-    // The cursor after the marked text, as the input method keeps it.
-    give(Text::Compose { text, cursor: 1 });
+    let m = COMPOSITION
+        .lock()
+        .unwrap()
+        .mark(string_of(s), replacement.location);
+    give_all(m);
 }
 
-/// The marked text is taken as it is.
 extern "C" fn unmark_text(_: Id, _: Sel) {
-    let text = std::mem::take(&mut *MARKED.lock().unwrap());
-    if !text.is_empty() {
-        TYPED.lock().unwrap().push_str(&text);
-        give(Text::Commit { text });
-    }
+    let m = COMPOSITION.lock().unwrap().unmark();
+    give_all(m.into_iter().collect());
 }
 
 extern "C" fn has_marked_text(_: Id, _: Sel) -> bool {
-    !MARKED.lock().unwrap().is_empty()
+    COMPOSITION.lock().unwrap().marked_range().is_some()
 }
 
 extern "C" fn marked_range(_: Id, _: Sel) -> NsRange {
-    let length = MARKED.lock().unwrap().encode_utf16().count();
-    let location = TYPED.lock().unwrap().encode_utf16().count();
-    if length == 0 {
-        NsRange {
-            location: NOT_FOUND,
-            length: 0,
-        }
-    } else {
-        NsRange { location, length }
-    }
+    let (location, length) = COMPOSITION
+        .lock()
+        .unwrap()
+        .marked_range()
+        .unwrap_or((NOT_FOUND, 0));
+    NsRange { location, length }
 }
 
 /// The caret: after the typed and the marked text.
 extern "C" fn selected_range(_: Id, _: Sel) -> NsRange {
     NsRange {
-        location: document().len(),
+        location: COMPOSITION.lock().unwrap().document().len(),
         length: 0,
     }
 }
@@ -544,7 +510,7 @@ extern "C" fn valid_attributes(_: Id, _: Sel) -> Id {
 /// The part of the typed and marked text in `range`: the input method
 /// reads what is before the caret back to go on composing it.
 extern "C" fn attributed_substring(_: Id, _: Sel, range: NsRange, actual: *mut NsRange) -> Id {
-    let marked = document();
+    let marked = COMPOSITION.lock().unwrap().document();
     let start = range.location.min(marked.len());
     let end = range
         .location
@@ -603,14 +569,7 @@ extern "C" fn do_command(view: Id, _: Sel, command: Sel) {
     let options = editing(view).unwrap_or(0);
     let m = match name {
         b"deleteBackward:" | b"deleteBackwardByDecomposingPreviousCharacter:" => {
-            let mut typed = TYPED.lock().unwrap();
-            let mut units: Vec<u16> = typed.encode_utf16().collect();
-            units.pop();
-            *typed = String::from_utf16_lossy(&units);
-            Text::Delete {
-                before: 1,
-                after: 0,
-            }
+            COMPOSITION.lock().unwrap().delete_backward()
         }
         b"deleteForward:" => Text::Delete {
             before: 0,
@@ -645,9 +604,9 @@ extern "C" fn do_command(view: Id, _: Sel, command: Sel) {
         _ => return,
     };
     if !matches!(m, Text::Delete { .. }) {
-        forget_typed();
+        COMPOSITION.lock().unwrap().forget_typed();
     }
-    give(m);
+    give_all(vec![m]);
 }
 
 extern "C" fn key_down(this: Id, _: Sel, event: Id) {

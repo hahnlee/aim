@@ -41,6 +41,9 @@ pub enum Message {
     /// Host to app host: an Android key code, pressed and released
     /// (`sendKeyEvent`).
     Key { code: i32 },
+    /// Host to app host: the marked text is taken as it is
+    /// (`finishComposingText`).
+    Finish,
 }
 
 const EDITOR: u8 = 1;
@@ -49,6 +52,7 @@ const COMMIT: u8 = 3;
 const DELETE: u8 = 4;
 const ACTION: u8 = 5;
 const KEY: u8 = 6;
+const FINISH: u8 = 7;
 
 fn bad() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "malformed text input frame")
@@ -121,6 +125,7 @@ impl Message {
                 o.push(KEY);
                 i32(&mut o, *code);
             }
+            Message::Finish => o.push(FINISH),
         }
         o
     }
@@ -145,6 +150,7 @@ impl Message {
             },
             ACTION => Message::Action { code: i.i32()? },
             KEY => Message::Key { code: i.i32()? },
+            FINISH => Message::Finish,
             _ => return Err(bad()),
         };
         if !i.0.is_empty() {
@@ -184,6 +190,145 @@ impl Message {
     }
 }
 
+/// `NSNotFound`: no range.
+pub const NOT_FOUND: usize = isize::MAX as usize;
+
+/// What the Mac's input method composes in an editor, as its client (the
+/// window's `NSTextInputClient`) keeps it: the text the input method put
+/// before the caret since the editor started, the caret last moved or the
+/// view was touched (what it reads back and replaces: Korean input
+/// composes a syllable by replacing the one before the caret), and the
+/// marked text after it. The editor's other text is the app's. Each
+/// change gives the [`Message`]s that make it on the editor, in UTF-16
+/// units as `NSRange` and `InputConnection` count.
+#[derive(Default)]
+pub struct Composition {
+    typed: String,
+    marked: String,
+    /// Whether the input method's answer to the discard of the old
+    /// editor's marked text may still come: until its next key.
+    discarding: bool,
+}
+
+impl Composition {
+    pub const fn new() -> Self {
+        Composition {
+            typed: String::new(),
+            marked: String::new(),
+            discarding: false,
+        }
+    }
+
+    /// A new editor, or none: nothing is typed or marked. Whether there
+    /// was marked text, for the input method to discard.
+    ///
+    /// The app has already finished that text in the old editor. The input
+    /// method answers the discard with its own commit or marked text, in
+    /// the call or later from its process, but before it takes the next
+    /// key: what it gives until then is the old editor's and changes
+    /// nothing.
+    pub fn reset(&mut self) -> bool {
+        self.typed.clear();
+        let marked = !std::mem::take(&mut self.marked).is_empty();
+        self.discarding |= marked;
+        marked
+    }
+
+    /// The input method takes a key: what it gives now is this editor's.
+    pub fn key(&mut self) {
+        self.discarding = false;
+    }
+
+    /// The caret moved where the input method does not know: what it
+    /// typed is no longer before it.
+    pub fn forget_typed(&mut self) {
+        self.typed.clear();
+    }
+
+    /// The typed text and the marked text after it.
+    pub fn document(&self) -> Vec<u16> {
+        self.typed
+            .encode_utf16()
+            .chain(self.marked.encode_utf16())
+            .collect()
+    }
+
+    /// The marked text's range (`markedRange`), if there is marked text.
+    pub fn marked_range(&self) -> Option<(usize, usize)> {
+        (!self.marked.is_empty()).then(|| {
+            (
+                self.typed.encode_utf16().count(),
+                self.marked.encode_utf16().count(),
+            )
+        })
+    }
+
+    /// A replacement of the typed text from `from` on: the app's text
+    /// before the caret goes as far back (`deleteSurroundingText`), and so
+    /// does the typed text.
+    fn replace(&mut self, from: usize, out: &mut Vec<Message>) {
+        if from == NOT_FOUND {
+            return;
+        }
+        let units: Vec<u16> = self.typed.encode_utf16().collect();
+        if from < units.len() {
+            out.push(Message::Delete {
+                before: (units.len() - from) as i32,
+                after: 0,
+            });
+            self.typed = String::from_utf16_lossy(&units[..from]);
+        }
+    }
+
+    /// `insertText:replacementRange:`, the replacement from `from`.
+    pub fn insert(&mut self, text: String, from: usize) -> Vec<Message> {
+        let mut out = Vec::new();
+        if self.discarding {
+            return out;
+        }
+        self.replace(from, &mut out);
+        self.marked.clear();
+        self.typed.push_str(&text);
+        out.push(Message::Commit { text });
+        out
+    }
+
+    /// `setMarkedText:selectedRange:replacementRange:`, the replacement
+    /// from `from`; the cursor after the marked text, as the input method
+    /// keeps it.
+    pub fn mark(&mut self, text: String, from: usize) -> Vec<Message> {
+        let mut out = Vec::new();
+        if self.discarding {
+            return out;
+        }
+        self.replace(from, &mut out);
+        self.marked = text.clone();
+        out.push(Message::Compose { text, cursor: 1 });
+        out
+    }
+
+    /// `unmarkText`: the marked text is taken as it is.
+    pub fn unmark(&mut self) -> Option<Message> {
+        if self.discarding {
+            return None;
+        }
+        let text = std::mem::take(&mut self.marked);
+        (!text.is_empty()).then(|| {
+            self.typed.push_str(&text);
+            Message::Finish
+        })
+    }
+
+    /// `deleteBackward:`: the character before the caret.
+    pub fn delete_backward(&mut self) -> Message {
+        let before = self.typed.pop().map_or(1, char::len_utf16);
+        Message::Delete {
+            before: before as i32,
+            after: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +355,7 @@ mod tests {
             },
             Message::Action { code: 6 },
             Message::Key { code: 66 },
+            Message::Finish,
         ];
         let mut stream = Vec::new();
         for m in &messages {
@@ -221,5 +367,127 @@ mod tests {
         }
         assert_eq!(Message::read(&mut r).unwrap(), None);
         assert!(Message::decode(&[COMMIT, 9, 0, 0, 0]).is_err());
+    }
+
+    fn commit(text: &str) -> Message {
+        Message::Commit { text: text.into() }
+    }
+
+    fn compose(text: &str) -> Message {
+        Message::Compose {
+            text: text.into(),
+            cursor: 1,
+        }
+    }
+
+    /// Korean input as marked text: a syllable is marked until the next
+    /// one starts, then inserted, and the last one taken as it is.
+    #[test]
+    fn marked_hangul_composes_and_commits() {
+        let mut c = Composition::new();
+        assert_eq!(c.mark("ㅎ".into(), NOT_FOUND), [compose("ㅎ")]);
+        assert_eq!(c.mark("하".into(), NOT_FOUND), [compose("하")]);
+        assert_eq!(c.mark("한".into(), NOT_FOUND), [compose("한")]);
+        assert_eq!(c.marked_range(), Some((0, 1)));
+        assert_eq!(c.insert("한".into(), NOT_FOUND), [commit("한")]);
+        assert_eq!(c.mark("ㄱ".into(), NOT_FOUND), [compose("ㄱ")]);
+        assert_eq!(c.mark("글".into(), NOT_FOUND), [compose("글")]);
+        assert_eq!(c.marked_range(), Some((1, 1)));
+        assert_eq!(c.unmark(), Some(Message::Finish));
+        assert_eq!(c.unmark(), None);
+        assert_eq!(c.marked_range(), None);
+        assert_eq!(c.document(), "한글".encode_utf16().collect::<Vec<_>>());
+    }
+
+    /// Korean input by replacement: each key inserts the syllable again
+    /// over the one before the caret, as the input method reads it back.
+    #[test]
+    fn replaced_hangul_deletes_what_it_replaces() {
+        let mut c = Composition::new();
+        assert_eq!(c.insert("ㅎ".into(), NOT_FOUND), [commit("ㅎ")]);
+        let replace = |c: &mut Composition, s: &str| c.insert(s.into(), 0);
+        let delete = Message::Delete {
+            before: 1,
+            after: 0,
+        };
+        assert_eq!(replace(&mut c, "하"), [delete.clone(), commit("하")]);
+        assert_eq!(replace(&mut c, "한"), [delete.clone(), commit("한")]);
+        // Backspace takes the syllable apart: what is left replaces it.
+        assert_eq!(replace(&mut c, "하"), [delete.clone(), commit("하")]);
+        assert_eq!(c.document(), "하".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(c.delete_backward(), delete);
+        assert_eq!(c.document(), []);
+    }
+
+    /// The editor's text before what the input method typed is the app's:
+    /// a replacement never reaches back into it, and a new editor or a
+    /// moved caret starts over.
+    #[test]
+    fn replacement_stays_within_the_typed_text() {
+        let mut c = Composition::new();
+        c.insert("😀a".into(), NOT_FOUND);
+        assert_eq!(
+            c.delete_backward(),
+            Message::Delete {
+                before: 1,
+                after: 0
+            }
+        );
+        assert_eq!(
+            c.delete_backward(),
+            Message::Delete {
+                before: 2,
+                after: 0
+            }
+        );
+        c.mark("ㅎ".into(), NOT_FOUND);
+        assert!(c.reset());
+        assert!(!c.reset());
+        c.key();
+        c.insert("ab".into(), NOT_FOUND);
+        c.forget_typed();
+        assert_eq!(c.insert("c".into(), 0), [commit("c")]);
+    }
+
+    /// The input method's answer to the discard of the old editor's
+    /// marked text, in the call or after it, is the old editor's: the new
+    /// editor gets none of it, and a replacement in the new editor never
+    /// deletes the app's text for it.
+    #[test]
+    fn discarded_text_stays_with_the_old_editor() {
+        let mut c = Composition::new();
+        c.mark("한".into(), NOT_FOUND);
+        assert!(c.reset());
+        assert_eq!(c.insert("한".into(), NOT_FOUND), []);
+        assert_eq!(c.mark("한".into(), NOT_FOUND), []);
+        assert_eq!(c.unmark(), None);
+        assert_eq!(c.marked_range(), None);
+        assert_eq!(c.document(), []);
+        // A start without marked text leaves the discard pending.
+        assert!(!c.reset());
+        assert_eq!(c.insert("한".into(), NOT_FOUND), []);
+        c.key();
+        assert_eq!(c.insert("ㄱ".into(), NOT_FOUND), [commit("ㄱ")]);
+        assert_eq!(
+            c.insert("가".into(), 0),
+            [
+                Message::Delete {
+                    before: 1,
+                    after: 0
+                },
+                commit("가")
+            ]
+        );
+        assert_eq!(
+            c.insert("나".into(), 0),
+            [
+                Message::Delete {
+                    before: 1,
+                    after: 0
+                },
+                commit("나")
+            ]
+        );
+        assert_eq!(c.document(), "나".encode_utf16().collect::<Vec<_>>());
     }
 }
