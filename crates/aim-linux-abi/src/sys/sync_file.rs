@@ -403,12 +403,12 @@ mod tests {
             events: libc::POLLIN,
             revents: 0,
         };
-        let timeout = [0i64; 2];
+        let mut timeout = [0i64; 2];
         assert_eq!(
             super::super::poll::ppoll([
                 &mut poll as *mut libc::pollfd as u64,
                 1,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
                 0,
                 0

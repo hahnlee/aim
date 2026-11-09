@@ -264,7 +264,7 @@ mod tests {
             events: libc::POLLOUT,
             revents: 0,
         };
-        let zero = libc::timespec {
+        let mut zero = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
@@ -272,7 +272,7 @@ mod tests {
             super::super::poll::ppoll([
                 &mut descriptor as *mut _ as u64,
                 1,
-                &zero as *const _ as u64,
+                &mut zero as *mut _ as u64,
                 0,
                 0,
                 0
@@ -288,7 +288,7 @@ mod tests {
                 0,
                 set.as_mut_ptr() as u64,
                 0,
-                &zero as *const _ as u64,
+                &mut zero as *mut _ as u64,
                 0
             ]),
             1,

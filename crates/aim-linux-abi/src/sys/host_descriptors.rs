@@ -75,12 +75,12 @@ mod tests {
             events: libc::POLLIN,
             revents: 0,
         };
-        let timeout = [1i64, 0];
+        let mut timeout = [1i64, 0];
         assert_eq!(
             super::super::poll::ppoll([
                 &mut poll as *mut _ as u64,
                 1,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
                 0,
                 0
@@ -172,12 +172,12 @@ mod tests {
             events: libc::POLLIN,
             revents: 0,
         };
-        let timeout = [1i64, 0];
+        let mut timeout = [1i64, 0];
         assert_eq!(
             super::super::poll::ppoll([
                 &mut poll as *mut _ as u64,
                 1,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
                 0,
                 0

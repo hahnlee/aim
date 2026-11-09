@@ -559,12 +559,12 @@ mod pin_tests {
                 revents: 0,
             },
         ];
-        let timeout = [0u64; 2];
+        let mut timeout = [0u64; 2];
         assert_eq!(
             ppoll([
                 entries.as_mut_ptr() as u64,
                 3,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
                 0,
                 0
@@ -583,7 +583,7 @@ mod pin_tests {
                 selected.as_mut_ptr() as u64,
                 0,
                 0,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0
             ]),
             1
@@ -596,7 +596,7 @@ mod pin_tests {
                 selected.as_mut_ptr() as u64,
                 0,
                 0,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0
             ]),
             -(EBADF as i64)

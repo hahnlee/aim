@@ -573,7 +573,7 @@ fn fuse_device_guest_syscall_vectors_clone_poll_and_character_metadata() {
         events: 4,
         revents: 0,
     };
-    let timeout = libc::timespec {
+    let mut timeout = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
@@ -581,7 +581,7 @@ fn fuse_device_guest_syscall_vectors_clone_poll_and_character_metadata() {
         super::super::poll::ppoll([
             &mut poll as *mut _ as u64,
             1,
-            &timeout as *const _ as u64,
+            &mut timeout as *mut _ as u64,
             0,
             0,
             0
