@@ -355,19 +355,20 @@ impl Keystore2 {
         })()
         .map_err(|e| io_error("createOperation", e))?;
         let op = op.as_binder();
-        let mut data = KeyBuffer(Vec::new());
+        // Reserved so that no reallocation leaves a copy of plaintext.
+        let mut data = KeyBuffer(Vec::with_capacity(input.len() + GCM_MAC_BYTES));
         let result = (|| {
             for chunk in input.chunks(UPDATE_INPUT_MAX_SIZE) {
                 let reply = call(&op, operation::UPDATE, |p| p.write(chunk))?;
-                let output: Option<Vec<u8>> = reply.read()?;
-                data.0.extend(output.unwrap_or_default());
+                let output = KeyBuffer(reply.read::<Option<Vec<u8>>>()?.unwrap_or_default());
+                data.0.extend_from_slice(&output.0);
             }
             let reply = call(&op, operation::FINISH, |p| {
                 p.write(&None::<Vec<u8>>)?;
                 p.write(&None::<Vec<u8>>)
             })?;
-            let output: Option<Vec<u8>> = reply.read()?;
-            data.0.extend(output.unwrap_or_default());
+            let output = KeyBuffer(reply.read::<Option<Vec<u8>>>()?.unwrap_or_default());
+            data.0.extend_from_slice(&output.0);
             Ok::<_, Status>(())
         })();
         if let Err(e) = result {

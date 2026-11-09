@@ -48,6 +48,16 @@ impl std::fmt::Debug for KeyBuffer {
     }
 }
 
+/// A secret file's bytes, read into a buffer that is never reallocated, so
+/// no copy is left unzeroed.
+fn read_key(path: &Path) -> io::Result<KeyBuffer> {
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len() as usize;
+    let mut bytes = KeyBuffer(Vec::with_capacity(size + 1));
+    file.read_to_end(&mut bytes.0)?;
+    Ok(bytes)
+}
+
 /// ReadRandomBytes: `count` bytes of /dev/urandom.
 pub fn random(count: usize) -> io::Result<KeyBuffer> {
     let mut bytes = KeyBuffer(vec![0; count]);
@@ -103,11 +113,13 @@ fn other(what: impl std::fmt::Display) -> io::Error {
 }
 
 pub(crate) fn write_file(path: &Path, data: &[u8]) -> io::Result<()> {
-    // writeStringToFile: written, then synced.
+    // writeStringToFile: not through a symlink, written, then synced.
+    use std::os::unix::fs::OpenOptionsExt;
     let file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     io::Write::write_all(&mut &file, data)?;
     file.sync_all()
@@ -163,8 +175,8 @@ impl<K: Keystore> KeyStorage<K> {
             write_file(path, &bytes.0)?;
             bytes
         } else {
-            match fs::read(path) {
-                Ok(bytes) => KeyBuffer(bytes),
+            match read_key(path) {
+                Ok(bytes) => bytes,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(e),
             }
@@ -290,7 +302,7 @@ impl<K: Keystore> KeyStorage<K> {
         }
         let hash = Self::secdiscardable_hash(&dir.join(SECDISCARDABLE), false)?;
         let app_id = self.app_id(auth, &hash);
-        let encrypted = KeyBuffer(fs::read(dir.join(ENCRYPTED_KEY))?);
+        let encrypted = read_key(&dir.join(ENCRYPTED_KEY))?;
         if !auth.uses_keystore() {
             return decrypt_without_keystore(&app_id.0, &encrypted.0);
         }

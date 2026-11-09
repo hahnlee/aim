@@ -593,7 +593,8 @@ impl IVold::IVold for Vold {
     }
     fn fbeEnable(&self) -> binder::Result<()> {
         let fstab = default_fstab().map_err(|e| io_error("fbeEnable fstab", e))?;
-        let options = vold::fscrypt::data_encryption_options(&fstab).unwrap_or("");
+        let options = vold::fscrypt::data_encryption_options(&fstab)
+            .map_err(|e| io_error("fbeEnable fstab", e))?;
         self.crypt
             .lock()
             .unwrap()

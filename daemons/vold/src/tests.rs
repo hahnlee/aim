@@ -245,13 +245,37 @@ fn options_parse_as_libfscrypt() {
         /dev/block/vda /system ext4 ro wait\n\
         /data /data none bind latemount,fileencryption=aes-256-xts:aes-256-cts:v2,quota\n";
     assert_eq!(
-        fscrypt::data_encryption_options(fstab),
-        Some("aes-256-xts:aes-256-cts:v2")
+        fscrypt::data_encryption_options(fstab).unwrap(),
+        "aes-256-xts:aes-256-cts:v2"
     );
     assert_eq!(
-        fscrypt::data_encryption_options("/data /data none bind wait\n"),
-        None
+        fscrypt::data_encryption_options("\n/data /data none bind wait\n").unwrap(),
+        ""
     );
+    assert!(fscrypt::data_encryption_options("# /data /data none bind\n").is_err());
+}
+
+/// A key stored with a secret as the original stores it: its 64 bytes
+/// 0..63 sealed by AES-256-GCM (nonce a0..ab) under the first 32 bytes of
+/// SHA-512 of the keygen prefix, padded to 128 bytes, and the secret
+/// (computed with Python's hashlib and CryptoKit).
+#[test]
+fn a_golden_secret_protected_key_is_read() {
+    let scratch = Scratch::new("golden");
+    let dir = scratch.0.join("current");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("version"), b"1").unwrap();
+    let sealed = "a0a1a2a3a4a5a6a7a8a9aaab2226744ec8f9fab82ccc7e339d8e356f958b82c1\
+                  ae4edf887f2ed353cd5b23547bba4f33612c284dc9456e01b9016b38b1fbe520\
+                  4f2162fee037b161d34872e9903b4aa7069d48fcdba4d35bc944c5bd";
+    let sealed: Vec<u8> = (0..sealed.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&sealed[i..i + 2], 16).unwrap())
+        .collect();
+    std::fs::write(dir.join("encrypted_key"), sealed).unwrap();
+    let key = store().retrieve_key(&dir, &Auth(b"golden secret")).unwrap();
+    assert_eq!(key.0, (0..64).collect::<Vec<u8>>());
+    assert!(store().retrieve_key(&dir, &Auth(b"other secret")).is_err());
 }
 
 #[test]

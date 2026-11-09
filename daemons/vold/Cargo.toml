@@ -11,7 +11,7 @@ description = "vold (IVold) for a host directory /data: user storage and the emu
 program = "vold"
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 aim-framework-aidl = { path = "../aidl/aim-framework-aidl" }
 android_os_vold = { path = "../aidl/android_os_vold" }
 binder = { workspace = true, features = ["system"] }

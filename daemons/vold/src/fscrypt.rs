@@ -174,15 +174,25 @@ impl Options {
     }
 }
 
-/// The `fileencryption=` options of /data's entry in an fstab.
-pub fn data_encryption_options(fstab: &str) -> Option<&str> {
-    fstab
+/// The `fileencryption=` options of /data's entry in an fstab, empty when
+/// it has none; an error when there is no entry
+/// (init_data_file_encryption_options).
+pub fn data_encryption_options(fstab: &str) -> io::Result<&str> {
+    let entry = fstab
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>())
-        .find(|fields| fields.get(1) == Some(&"/data"))?
-        .get(4)?
-        .split(',')
-        .find_map(|flag| flag.strip_prefix("fileencryption="))
+        .find(|fields| {
+            fields.first().is_some_and(|f| !f.starts_with('#')) && fields.get(1) == Some(&"/data")
+        })
+        .ok_or_else(|| other("No mount point entry for /data"))?;
+    Ok(entry
+        .get(4)
+        .and_then(|flags| {
+            flags
+                .split(',')
+                .find_map(|f| f.strip_prefix("fileencryption="))
+        })
+        .unwrap_or(""))
 }
 
 /// libfscrypt's EncryptionPolicy: options, and the key's descriptor (v1)
@@ -531,7 +541,11 @@ impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
         let paths = self.ce_key_paths(user);
         for path in &paths {
             if let Ok(key) = self.storage.retrieve_key(path, auth) {
-                self.fixate_ce_key(user, path, &paths)?;
+                // As in the original, a failed fixation leaves the key
+                // usable; the next one retries it.
+                if let Err(e) = self.fixate_ce_key(user, path, &paths) {
+                    log::error!("Failed to fixate CE key {}: {e}", path.display());
+                }
                 return Ok(key);
             }
         }
