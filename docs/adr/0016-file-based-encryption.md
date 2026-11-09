@@ -3,8 +3,11 @@
 Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
 option B, CE protected by a Mac Keychain item, FileVault for confidentiality
 at rest (D not now), and existing data directories recreated by a breaking
-migration on a branch. Slice 1 is implemented (#2845, #2846); the guest is
-a device without file-based encryption (FBE) until slices 2-3 land.
+migration on a branch. Slices 1 and 2 are implemented (#2845, #2846,
+#2847): vold manages the keys as `FsCrypt.cpp` does once `ro.crypto.type`
+is `file`, which only slice 3 sets, so the guest is a device without
+file-based encryption (FBE) until slice 3 lands, and slice 3 lands only
+with or after slice 4.
 
 ## Context
 
@@ -128,7 +131,8 @@ independent of B; one key for DE and CE, so CE locking stays B's.
 ## Recommended path and slices
 
 B, with D left to decision 3. Each slice is independently correct and
-under the ~900-line review budget except the first, split in two:
+under the ~900-line review budget except the first, split in two. Slice 3
+turns FBE on and depends on slice 4: it lands with or after it.
 
 1. **fscrypt ABI** (`aim-linux-abi`, a keyring/policy owner in guest-init):
    (a) keyring ioctls, set/get policy, nonce, flags and statx, inheritance
@@ -140,6 +144,14 @@ under the ~900-line review budget except the first, split in two:
    `prepareUserStorage` and key destruction as `FsCrypt.cpp`, keys stored
    where the original stores them (`/data/misc/vold/user_keys`,
    `/data/unencrypted`), wrapped by the software KeyMint (ADR 0012).
+   Implemented (#2847). As in the original, a key stored without a secret
+   is sealed by a keystore2 key bound to its `secdiscardable`, one stored
+   with a secret by AES-GCM under the secret's hash, and a new user's CE
+   key is stored only when `setCeStorageProtection` gives its secret.
+   Until something calls it, user 0's CE key is never stored, so each FBE
+   boot would generate a different one (see Risks). The
+   device has no adoptable storage, so no volume keys, and no inline
+   encryption hardware, so hardware-wrapped keys are refused.
 3. **guest-init and the image**: `fileencryption=aes-256-xts:aes-256-cts:v2`
    in `fstab.aim`, `mount_all` reporting FILE_ENCRYPTED
    (`ro.crypto.state=encrypted`, `ro.crypto.type=file`), `installkey`, and
@@ -170,3 +182,15 @@ under the ~900-line review budget except the first, split in two:
   `startup_bench` and a boot before and after.
 - A partial FBE (properties before slices 1-3) is worse than none: the
   properties flip only in slice 3, after the ABI and vold are in.
+- FBE without CE protection loses CE data. vold stores a new user's CE
+  key only when LockSettings calls `setCeStorageProtection`; on a device
+  where nothing does, user 0's CE key is generated anew on the next FBE
+  boot, setting it on the non-empty `/data/data` fails (`ENOTEMPTY`), the
+  boot stops and the previous CE key, and with it CE data, is gone. So
+  slice 3 must not land before slice 4 (or lands with it).
+- `secdiscard` cannot securely erase on a `/data` backed by APFS: its F2FS
+  and block-discard ioctls do not exist there, so it falls back to
+  overwriting, which a copy-on-write filesystem and SSD remapping do not
+  guarantee reaches the old blocks. Destroyed keys' wrapped material may
+  remain on the Mac's disk; FileVault bounds the exposure to someone with
+  the Mac user's credentials.

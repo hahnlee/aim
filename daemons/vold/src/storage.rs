@@ -1,11 +1,13 @@
 //! Directories vold prepares, as the original's FsCrypt.cpp and
-//! VolumeManager.cpp lay them out. /data is a host directory without file
-//! encryption, so there are no keys or policies: preparing storage is
-//! making the directories with their modes and owners.
+//! VolumeManager.cpp lay them out: made with their modes and owners and,
+//! with file-based encryption, given the policy of their user's DE or CE
+//! key.
 
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+use crate::fscrypt::{Ioctl, Policy, ensure_policy};
 
 pub const AID_ROOT: u32 = 0;
 pub const AID_SYSTEM: u32 = 1000;
@@ -27,6 +29,33 @@ pub fn prepare_dir(path: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<()>
     }
     std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// prepare_dir_with_policy: an existing directory is prepared, then given
+/// `policy` or checked to have it; a new one is prepared and given it as
+/// `<dir>.new`, then renamed, so it is never seen without it.
+pub fn prepare_dir_with_policy(
+    kernel: &impl Ioctl,
+    path: &Path,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    policy: Option<&Policy>,
+) -> io::Result<()> {
+    let ensure = |dir: &Path| policy.map_or(Ok(()), |p| ensure_policy(kernel, p, dir));
+    if path.exists() {
+        prepare_dir(path, mode, uid, gid)?;
+        return ensure(path);
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".new");
+    let tmp = PathBuf::from(tmp);
+    if tmp.exists() {
+        std::fs::remove_dir_all(&tmp)?;
+    }
+    prepare_dir(&tmp, mode, uid, gid)?;
+    ensure(&tmp)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// A symlink `link` -> `target`, replacing a different one, or the empty
@@ -64,12 +93,25 @@ fn volume_root(uuid: Option<&str>) -> PathBuf {
     }
 }
 
+/// The key whose policy a user directory gets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Key {
+    /// None: the directory inherits its parent's.
+    Inherit,
+    De,
+    Ce,
+}
+
 /// The per-user directories vold owns on a volume (FsCrypt.cpp's
-/// prepare and destroy lists), with their mode and owner.
-fn user_storage_dirs(uuid: Option<&str>, user: u32, flags: i32) -> Vec<(PathBuf, u32, u32, u32)> {
+/// prepare and destroy lists), with their mode, owner and key.
+fn user_storage_dirs(
+    uuid: Option<&str>,
+    user: u32,
+    flags: i32,
+) -> Vec<(PathBuf, u32, u32, u32, Key)> {
     let internal = uuid.is_none_or(str::is_empty);
     let root = volume_root(uuid);
-    let mut dirs: Vec<(PathBuf, u32, u32, u32)> = Vec::new();
+    let mut dirs: Vec<(PathBuf, u32, u32, u32, Key)> = Vec::new();
     if flags & STORAGE_FLAG_DE != 0 {
         if internal {
             dirs.push((
@@ -77,24 +119,28 @@ fn user_storage_dirs(uuid: Option<&str>, user: u32, flags: i32) -> Vec<(PathBuf,
                 0o700,
                 AID_SYSTEM,
                 AID_SYSTEM,
+                Key::Inherit,
             ));
             dirs.push((
                 format!("/data/misc/profiles/cur/{user}").into(),
                 0o771,
                 AID_SYSTEM,
                 AID_SYSTEM,
+                Key::Inherit,
             ));
             dirs.push((
                 format!("/data/system_de/{user}").into(),
                 0o770,
                 AID_SYSTEM,
                 AID_SYSTEM,
+                Key::De,
             ));
             dirs.push((
                 format!("/data/vendor_de/{user}").into(),
                 0o771,
                 AID_ROOT,
                 AID_ROOT,
+                Key::De,
             ));
         }
         dirs.push((
@@ -102,12 +148,14 @@ fn user_storage_dirs(uuid: Option<&str>, user: u32, flags: i32) -> Vec<(PathBuf,
             0o1771,
             AID_SYSTEM,
             AID_MISC,
+            Key::De,
         ));
         dirs.push((
             root.join(format!("user_de/{user}")),
             0o771,
             AID_SYSTEM,
             AID_SYSTEM,
+            Key::De,
         ));
     }
     if flags & STORAGE_FLAG_CE != 0 {
@@ -117,12 +165,14 @@ fn user_storage_dirs(uuid: Option<&str>, user: u32, flags: i32) -> Vec<(PathBuf,
                 0o770,
                 AID_SYSTEM,
                 AID_SYSTEM,
+                Key::Ce,
             ));
             dirs.push((
                 format!("/data/vendor_ce/{user}").into(),
                 0o771,
                 AID_ROOT,
                 AID_ROOT,
+                Key::Ce,
             ));
         }
         dirs.push((
@@ -130,12 +180,14 @@ fn user_storage_dirs(uuid: Option<&str>, user: u32, flags: i32) -> Vec<(PathBuf,
             0o2770,
             AID_MEDIA_RW,
             AID_MEDIA_RW,
+            Key::Ce,
         ));
         dirs.push((
             root.join(format!("misc_ce/{user}")),
             0o1771,
             AID_SYSTEM,
             AID_MISC,
+            Key::Ce,
         ));
         // User 0's internal CE app data is /data/data (bound on /data/user/0).
         let user_ce = if internal && user == 0 {
@@ -143,20 +195,32 @@ fn user_storage_dirs(uuid: Option<&str>, user: u32, flags: i32) -> Vec<(PathBuf,
         } else {
             root.join(format!("user/{user}"))
         };
-        dirs.push((user_ce, 0o771, AID_SYSTEM, AID_SYSTEM));
+        dirs.push((user_ce, 0o771, AID_SYSTEM, AID_SYSTEM, Key::Ce));
     }
     dirs
 }
 
-/// `fscrypt_prepare_user_storage` without keys. Returns the prepared
+/// `fscrypt_prepare_user_storage`: the user's directories, those of a key
+/// with its policy (`de`, `ce`; None without FBE). Returns the prepared
 /// directories.
-pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Result<Vec<PathBuf>> {
+pub fn prepare_user_storage(
+    kernel: &impl Ioctl,
+    uuid: Option<&str>,
+    user: u32,
+    flags: i32,
+    de: Option<&Policy>,
+    ce: Option<&Policy>,
+) -> io::Result<Vec<PathBuf>> {
     let dirs = user_storage_dirs(uuid, user, flags);
-    for (path, mode, uid, gid) in &dirs {
+    for (path, mode, uid, gid, key) in &dirs {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        prepare_dir(path, *mode, *uid, *gid)?;
+        match key {
+            Key::Inherit => prepare_dir(path, *mode, *uid, *gid)?,
+            Key::De => prepare_dir_with_policy(kernel, path, *mode, *uid, *gid, de)?,
+            Key::Ce => prepare_dir_with_policy(kernel, path, *mode, *uid, *gid, ce)?,
+        }
     }
     // FsCrypt.cpp delegates per-user subdirectories to the original helper.
     let status = std::process::Command::new("/system/bin/vold_prepare_subdirs")
@@ -209,14 +273,33 @@ pub fn destroy_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
     failure.map_or(Ok(removed), Err)
 }
 
-/// `fscrypt_init_user0` without keys: `prepare_special_dirs` and user 0's
-/// DE storage. The original bind-mounts /data/data onto /data/user/0, a
-/// mount /data's shared propagation shows every process and init's data
-/// mirror (zygote finds apps' CE storage there). Mounts on the syscall
-/// layer are per process, so that bind is an entry of guest-init's path
-/// map, and vold checks that it is there.
-pub fn init_user0() -> io::Result<Vec<PathBuf>> {
-    prepare_dir(Path::new("/data/data"), 0o771, AID_SYSTEM, AID_SYSTEM)?;
+/// `fscrypt_init_user0` after its keys: `prepare_special_dirs` and user
+/// 0's DE storage. /data/data gets user 0's CE policy when that key was
+/// just created (`ce`), else later with the rest of CE storage; a new
+/// /data/media/obb gets the system DE policy (`device`). The original
+/// bind-mounts /data/data onto /data/user/0, a mount /data's shared
+/// propagation shows every process and init's data mirror (zygote finds
+/// apps' CE storage there). Mounts on the syscall layer are per process,
+/// so that bind is an entry of guest-init's path map, and vold checks that
+/// it is there.
+pub fn init_user0(
+    kernel: &impl Ioctl,
+    de: Option<&Policy>,
+    ce: Option<&Policy>,
+    device: Option<&Policy>,
+) -> io::Result<Vec<PathBuf>> {
+    let data = Path::new("/data/data");
+    if ce.is_some() {
+        if let Err(e) = prepare_dir_with_policy(kernel, data, 0o771, AID_SYSTEM, AID_SYSTEM, ce) {
+            // It may be left with another policy by an interrupted first
+            // boot.
+            log::warn!("{e}; recreating {}", data.display());
+            std::fs::remove_dir(data)?;
+            prepare_dir_with_policy(kernel, data, 0o771, AID_SYSTEM, AID_SYSTEM, ce)?;
+        }
+    } else {
+        prepare_dir(data, 0o771, AID_SYSTEM, AID_SYSTEM)?;
+    }
     let (data, user0) = (
         std::fs::metadata("/data/data")?,
         std::fs::metadata("/data/user/0")?,
@@ -227,13 +310,14 @@ pub fn init_user0() -> io::Result<Vec<PathBuf>> {
         ));
     }
     prepare_dir(Path::new("/data/media"), 0o770, AID_MEDIA_RW, AID_MEDIA_RW)?;
-    prepare_dir(
-        Path::new("/data/media/obb"),
-        0o770,
-        AID_MEDIA_RW,
-        AID_MEDIA_RW,
-    )?;
-    prepare_user_storage(None, 0, STORAGE_FLAG_DE)
+    // An existing /data/media/obb may be unencrypted (b/64566063).
+    let obb = Path::new("/data/media/obb");
+    if obb.exists() {
+        prepare_dir(obb, 0o770, AID_MEDIA_RW, AID_MEDIA_RW)?;
+    } else {
+        prepare_dir_with_policy(kernel, obb, 0o770, AID_MEDIA_RW, AID_MEDIA_RW, device)?;
+    }
+    prepare_user_storage(kernel, None, 0, STORAGE_FLAG_DE, de, None)
 }
 
 /// The lower (data) path of an app directory named under a volume's

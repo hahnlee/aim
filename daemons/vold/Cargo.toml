@@ -11,12 +11,17 @@ description = "vold (IVold) for a host directory /data: user storage and the emu
 program = "vold"
 
 [dependencies]
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 aim-framework-aidl = { path = "../aidl/aim-framework-aidl" }
 android_os_vold = { path = "../aidl/android_os_vold" }
 binder = { workspace = true, features = ["system"] }
 daemon-log.workspace = true
 libc.workspace = true
 log.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+aim-storage.workspace = true
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
