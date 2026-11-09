@@ -28,6 +28,17 @@ fn resolve_w(dirfd: u64, path: u64, follow: bool) -> Result<Resolved, i64> {
     let owned = guest_cstr(path).map_err(|error| -(error as i64))?;
     resolve_w_bytes(dirfd, &owned, follow)
 }
+/// [`resolve_w`] of a name to be created (`vfs::resolve_new`).
+fn resolve_new(dirfd: u64, path: u64) -> Result<Resolved, i64> {
+    // SAFETY: guest path pointer.
+    let p = guest_cstr(path).map_err(|error| -(error as i64))?;
+    if !p.starts_with(b"/") && super::fdtab::is_hidden(dirfd as i32) {
+        return Err(-(crate::errno::EBADF as i64));
+    }
+    let r = vfs::resolve_new(dirfd as i32, &p).map_err(|e| -(e as i64))?;
+    check_writable(&r)?;
+    Ok(r)
+}
 fn resolve_w_bytes(dirfd: u64, p: &[u8], follow: bool) -> Result<Resolved, i64> {
     if !p.starts_with(b"/") && super::fdtab::is_hidden(dirfd as i32) {
         return Err(-(crate::errno::EBADF as i64));
@@ -38,7 +49,7 @@ fn resolve_w_bytes(dirfd: u64, p: &[u8], follow: bool) -> Result<Resolved, i64> 
 }
 
 pub fn mkdirat(a: [u64; 6]) -> i64 {
-    match resolve_w(a[0], a[1], false) {
+    match resolve_new(a[0], a[1]) {
         Ok(r) => {
             if let Some(result) = devpts_make(&r) {
                 return result;
@@ -96,7 +107,7 @@ pub fn mkdirat(a: [u64; 6]) -> i64 {
 
 pub fn mknodat(a: [u64; 6]) -> i64 {
     let mode = a[2] as u32;
-    let r = match resolve_w(a[0], a[1], false) {
+    let r = match resolve_new(a[0], a[1]) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -271,6 +282,7 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         if !attrs::recording() {
             return Ok(());
         }
+        let directory = vfs::visible(directory.to_string())?;
         let st = super::fs::stat_at(crate::vfs::LINUX_AT_FDCWD, directory.as_bytes(), 0)
             .map_err(|error| -error as i32)?;
         if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
@@ -405,7 +417,7 @@ pub fn symlinkat(a: [u64; 6]) -> i64 {
     let Ok(t) = std::ffi::CString::new(target) else {
         return -(EINVAL as i64);
     };
-    match resolve_w(a[1], a[2], false) {
+    match resolve_new(a[1], a[2]) {
         Ok(r) => {
             if let Some(result) = devpts_make(&r) {
                 return result;
@@ -478,7 +490,7 @@ pub fn linkat(a: [u64; 6]) -> i64 {
             Err(e) => return e,
         }
     };
-    let new = match resolve_w(a[2], a[3], false) {
+    let new = match resolve_new(a[2], a[3]) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -553,7 +565,7 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let new = match resolve_w(a[2], a[3], false) {
+    let new = match resolve_new(a[2], a[3]) {
         Ok(r) => r,
         Err(e) => return e,
     };

@@ -115,6 +115,7 @@ pub(crate) fn open_kernel_authorized(
 ) -> Result<aim_storage::private_fd::PrivateFile, errno::Errno> {
     let resolved = resolve_as(vfs::LINUX_AT_FDCWD, guest, true, id, attrs::FS)?;
     open_permissions(&resolved, 0, false, id)?;
+    super::fscrypt::open(&resolved.host)?;
     aim_storage::private_fd::PrivateFile::allocate(|| {
         std::fs::File::open(std::path::Path::new(std::ffi::OsStr::from_bytes(
             resolved.host.as_bytes(),
@@ -211,10 +212,25 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         };
     }
     let follow = flags & O_NOFOLLOW == 0 && flags & (O_CREAT | O_EXCL) != (O_CREAT | O_EXCL);
-    let r = match resolve_as(dirfd, path, follow, id, attrs::FS) {
+    let r = if flags & O_CREAT != 0 {
+        vfs::resolve_checked_new(dirfd, path, follow, |directory| {
+            attrs::search(directory, id, attrs::FS)
+        })
+    } else {
+        resolve_as(dirfd, path, follow, id, attrs::FS)
+    };
+    let r = match r {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    // An existing file O_CREAT | O_EXCL refuses is EEXIST; the host open
+    // says so.
+    if flags & O_PATH == 0
+        && flags & (O_CREAT | O_EXCL) != O_CREAT | O_EXCL
+        && let Err(error) = super::fscrypt::open(&r.host)
+    {
+        return -(error as i64);
+    }
     if r.guest == "/dev/fuse" {
         return match vfs::runtime_dir() {
             Some(runtime) => super::fuse::open_device(runtime, flags as i32)
@@ -2118,7 +2134,10 @@ pub fn readlinkat(a: [u64; 6]) -> i64 {
             return -(errno::last() as i64);
         }
         tmp.truncate(n as usize);
-        tmp
+        match super::fscrypt::link_target(&r.host, tmp) {
+            Ok(target) => target,
+            Err(error) => return -(error as i64),
+        }
     };
     let n = target.len().min(size);
     // SAFETY: guest buffer of `size` bytes.

@@ -1,28 +1,38 @@
-//! The fscrypt state of the data filesystem (ADR 0016): its keyring and
-//! whether any inode has a policy, shared by every guest process as the
-//! kernel keeps them per superblock.
+//! The fscrypt state of the data filesystem (ADR 0016): its keyring, its
+//! policy roots and the secret that names entries of locked directories,
+//! shared by every guest process as the kernel keeps them per superblock.
 //!
-//! guest-init prepares both when it mounts the data directory
+//! guest-init prepares them when it mounts the data directory
 //! ([`Owner::prepare`]): the keyring is empty at every boot, as a mounted
-//! filesystem's is, and lives in the runtime directory; the marker
-//! `policies`, created when a directory is first given a policy, persists
-//! with the data. The locator `<runtime>/fscrypt-root` names the
-//! persistent directory, as `fs-verity-root` names the verity store.
-//! A change of the keyring is serialized by `flock` on its lock file and
-//! replaces the keyring by a rename, so a writer killed mid-way leaves the
-//! previous keyring whole.
+//! filesystem's is, and lives in the runtime directory; the table
+//! `policies` of policy roots and the per-volume `secret` persist with the
+//! data. The locator `<runtime>/fscrypt-root` names the persistent
+//! directory, as `fs-verity-root` names the verity store. A change of the
+//! keyring or the table is serialized by `flock` on the keyring's lock file
+//! and replaces the file by a rename, so a writer killed mid-way leaves the
+//! previous one whole.
 //!
 //! The keyring keeps key specifiers and, for v2 keys, the users who added
 //! them; never a raw key. The data stays plaintext on the host (ADR 0016,
 //! option B), and an identifier is all that tells keys apart.
+//!
+//! A policy root is an inode with a policy whose parent has none: a
+//! directory given a policy, or an encrypted inode moved or linked out of
+//! its tree. Each change publishes, in the shared page `fscrypt-state`, a
+//! generation and how many keys the roots name are absent: while none is,
+//! no directory is locked and lookups need not ask (the steady state once
+//! user 0 is unlocked). A boot drops the roots that are gone, such as the
+//! previous boot's `/data/per_boot`.
 
-use std::ffi::OsStr;
+use std::ffi::{CStr, OsStr};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha512};
 
@@ -32,7 +42,19 @@ const LOCATOR: &str = "fscrypt-root";
 const KEYRING: &str = "fscrypt-keyring";
 const KEYRING_LOCK: &str = "fscrypt-keyring.lock";
 const KEYRING_NEXT: &str = "fscrypt-keyring.next";
+const STATE: &str = "fscrypt-state";
+const TABLE: &str = "policies";
+const TABLE_NEXT: &str = "policies.next";
+const SECRET: &str = "secret";
 const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
+const PAGE: usize = 4096;
+/// The host attribute holding an inode's `struct fscrypt_context`.
+pub const CONTEXT: &CStr = c"dev.aim.fscrypt-context";
+
+unsafe extern "C" {
+    /// `fsgetpath(2)`: the path of an inode of a mounted volume.
+    fn fsgetpath(buf: *mut libc::c_char, size: usize, fsid: *mut libc::fsid_t, id: u64) -> isize;
+}
 
 /// `struct fscrypt_key_specifier`: a v1 key by its descriptor, a v2 key by
 /// its identifier.
@@ -43,6 +65,16 @@ pub enum Spec {
 }
 
 impl Spec {
+    /// The key a `struct fscrypt_context` names; None for a context that
+    /// is not valid.
+    pub fn of_context(context: &[u8]) -> Option<Self> {
+        match (context.first(), context.len()) {
+            (Some(1), 28) => Some(Spec::Descriptor(context[4..12].try_into().unwrap())),
+            (Some(2), 40) => Some(Spec::Identifier(context[8..24].try_into().unwrap())),
+            _ => None,
+        }
+    }
+
     fn encode(&self) -> String {
         let (kind, bytes): (char, &[u8]) = match self {
             Spec::Descriptor(bytes) => ('d', bytes),
@@ -79,34 +111,91 @@ struct Entry {
     users: Option<Vec<u32>>,
 }
 
+/// A policy root: the key its policy names and its host inode number.
+#[derive(Clone, PartialEq, Eq)]
+struct Root {
+    spec: String,
+    inode: u64,
+}
+
 pub struct Owner {
-    marker: PathBuf,
+    table: PathBuf,
     keyring: PathBuf,
     runtime: PathBuf,
     device: u64,
+    secret: [u8; 32],
+    /// The shared page: the generation, then the number of absent keys.
+    state: *const [AtomicU64; 2],
+    /// The keyring's specifiers as this process last read them, with the
+    /// generation then.
+    added: Mutex<(u64, Vec<String>)>,
+}
+
+// SAFETY: the page is shared memory read and written only atomically.
+unsafe impl Send for Owner {}
+unsafe impl Sync for Owner {}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.state as *mut _, PAGE) };
+    }
 }
 
 impl Owner {
-    /// Creates the persistent directory under `data`, an empty keyring for
-    /// this boot and the locator, both under `runtime`.
+    /// Creates the persistent directory and its secret under `data`, and
+    /// an empty keyring, the shared page and the locator under `runtime`,
+    /// then drops the policy roots that are gone.
     pub fn prepare(runtime: &Path, data: &Path) -> io::Result<()> {
         let dir = data.join("fscrypt");
         fs::create_dir_all(&dir)?;
         if fs::symlink_metadata(&dir)?.file_type().is_symlink() {
             return Err(io::Error::from_raw_os_error(libc::ELOOP));
         }
+        let dir = fs::canonicalize(dir)?;
+        match File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir.join(SECRET))
+        {
+            Ok(mut file) => {
+                let mut secret = [0u8; 32];
+                unsafe { libc::arc4random_buf(secret.as_mut_ptr().cast(), secret.len()) };
+                file.write_all(&secret)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
         let mut locator = MAGIC.to_vec();
-        locator.extend_from_slice(fs::canonicalize(dir)?.as_os_str().as_bytes());
+        locator.extend_from_slice(dir.as_os_str().as_bytes());
         for (name, bytes) in [
             (KEYRING, &b""[..]),
             (KEYRING_LOCK, b""),
+            (STATE, &[0; PAGE]),
             (LOCATOR, &locator),
         ] {
             let path = runtime.join(name);
             fs::write(&path, bytes)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         }
-        Ok(())
+        let owner =
+            Self::locate(runtime)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let mut fsid: libc::statfs = unsafe { std::mem::zeroed() };
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
+        if unsafe { libc::statfs(path.as_ptr(), &mut fsid) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        owner.change(|_, roots| {
+            let mut kept = Vec::new();
+            for root in roots.drain(..) {
+                if live(&root, fsid.f_fsid)? {
+                    kept.push(root);
+                }
+            }
+            *roots = kept;
+            Ok(())
+        })
     }
 
     /// The owner guest-init prepared under `runtime`, if any.
@@ -122,11 +211,33 @@ impl Owner {
             .filter(|dir| !dir.is_empty() && !dir.contains(&0))
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
         let dir = Path::new(OsStr::from_bytes(dir));
+        let mut secret = Vec::new();
+        open(&dir.join(SECRET), false)?.read_to_end(&mut secret)?;
+        let secret = secret
+            .try_into()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let page = open(&runtime.join(STATE), false)?;
+        let state = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                PAGE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                page.as_raw_fd(),
+                0,
+            )
+        };
+        if state == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
         Ok(Some(Self {
-            marker: dir.join("policies"),
+            table: dir.join(TABLE),
             keyring: runtime.join(KEYRING),
             runtime: runtime.to_path_buf(),
             device: fs::symlink_metadata(dir)?.dev(),
+            secret,
+            state: state.cast(),
+            added: Mutex::new((0, Vec::new())),
         }))
     }
 
@@ -139,22 +250,68 @@ impl Owner {
     /// Whether any directory of the filesystem was given a policy: until
     /// one is, no inode has one to read or inherit.
     pub fn has_policies(&self) -> io::Result<bool> {
-        match fs::symlink_metadata(&self.marker) {
+        match fs::symlink_metadata(&self.table) {
             Ok(_) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
 
-    /// Records that a directory is being given a policy.
-    pub fn policy_set(&self) -> io::Result<()> {
-        open(&self.marker, true).map(drop)
+    /// Records the policy root `inode`, whose policy names `spec`.
+    pub fn policy_root(&self, spec: Spec, inode: u64) -> io::Result<()> {
+        self.change(|_, roots| {
+            let root = Root {
+                spec: spec.encode(),
+                inode,
+            };
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+            Ok(())
+        })
+    }
+
+    /// Whether a key some policy root names is absent: until one is, no
+    /// directory is locked.
+    pub fn locking(&self) -> bool {
+        unsafe { (*self.state)[1].load(Ordering::Acquire) != 0 }
+    }
+
+    /// Whether the key is in the keyring, for any user.
+    pub fn has_key(&self, spec: Spec) -> io::Result<bool> {
+        let generation = unsafe { (*self.state)[0].load(Ordering::Acquire) };
+        let mut added = self.added.lock().unwrap();
+        if added.0 != generation {
+            let specs = read(&mut open(&self.keyring, false)?)?;
+            *added = (
+                generation,
+                specs.into_iter().map(|entry| entry.spec).collect(),
+            );
+        }
+        Ok(added.1.contains(&spec.encode()))
+    }
+
+    /// Enciphers, or deciphers, `bytes` (a name in a directory, or a
+    /// symlink's target) of the inode with `nonce`: the stand-in for
+    /// fscrypt's ciphertext, deterministic per inode as Linux's is and keyed
+    /// by the volume's secret, so only the owner can decode it.
+    pub fn cipher(&self, nonce: &[u8], bytes: &mut [u8]) {
+        for (block, chunk) in bytes.chunks_mut(64).enumerate() {
+            let stream = hmac(
+                &self.secret,
+                &[b"fscrypt name\0", nonce, &(block as u32).to_le_bytes()],
+            );
+            chunk
+                .iter_mut()
+                .zip(stream)
+                .for_each(|(byte, key)| *byte ^= key);
+        }
     }
 
     /// Adds `user`'s claim to a key (v2), or the key (v1, `user` None).
     /// Adding a key again succeeds.
     pub fn add_key(&self, spec: Spec, user: Option<u32>) -> io::Result<()> {
-        self.change(|entries| {
+        self.change(|entries, _| {
             let spec = spec.encode();
             let index = match entries.iter().position(|entry| entry.spec == spec) {
                 Some(index) => index,
@@ -178,7 +335,7 @@ impl Owner {
     /// Drops `user`'s claim to a key (every user's with `all_users`), and
     /// the key once nobody else holds it.
     pub fn remove_key(&self, spec: Spec, user: u32, all_users: bool) -> io::Result<Removal> {
-        self.change(|entries| {
+        self.change(|entries, _| {
             let spec = spec.encode();
             let Some(index) = entries.iter().position(|entry| entry.spec == spec) else {
                 return Ok(Removal::NotAdded);
@@ -216,10 +373,17 @@ impl Owner {
             }))
     }
 
-    fn change<T>(&self, apply: impl FnOnce(&mut Vec<Entry>) -> io::Result<T>) -> io::Result<T> {
+    /// Applies a change to the keyring and the roots, then publishes the
+    /// generation and the number of absent keys.
+    fn change<T>(
+        &self,
+        apply: impl FnOnce(&mut Vec<Entry>, &mut Vec<Root>) -> io::Result<T>,
+    ) -> io::Result<T> {
         let _lock = Lock::exclusive(&open(&self.runtime.join(KEYRING_LOCK), false)?)?;
         let mut entries = read(&mut open(&self.keyring, false)?)?;
-        let result = apply(&mut entries)?;
+        let mut roots = self.roots()?;
+        let before = roots.clone();
+        let result = apply(&mut entries, &mut roots)?;
         let text: String = entries
             .iter()
             .map(|entry| {
@@ -230,15 +394,94 @@ impl Owner {
                 line + "\n"
             })
             .collect();
-        let next = self.runtime.join(KEYRING_NEXT);
-        let mut file = open(&next, true)?;
-        if unsafe { libc::ftruncate(file.as_raw_fd(), 0) } < 0 {
-            return Err(io::Error::last_os_error());
+        replace(&self.runtime.join(KEYRING_NEXT), &self.keyring, &text)?;
+        if roots != before {
+            let text: String = roots
+                .iter()
+                .map(|root| format!("{} {}\n", root.spec, root.inode))
+                .collect();
+            replace(&self.table.with_file_name(TABLE_NEXT), &self.table, &text)?;
         }
-        file.write_all(text.as_bytes())?;
-        fs::rename(next, &self.keyring)?;
+        let mut absent: Vec<&String> = roots
+            .iter()
+            .map(|root| &root.spec)
+            .filter(|spec| !entries.iter().any(|entry| &entry.spec == *spec))
+            .collect();
+        absent.sort();
+        absent.dedup();
+        unsafe {
+            (*self.state)[1].store(absent.len() as u64, Ordering::Release);
+            (*self.state)[0].fetch_add(1, Ordering::AcqRel);
+        }
         Ok(result)
     }
+
+    /// The table of policy roots: one line each, its key's encoded
+    /// specifier and its inode number.
+    fn roots(&self) -> io::Result<Vec<Root>> {
+        let mut text = String::new();
+        match open(&self.table, false) {
+            Ok(mut file) => file.read_to_string(&mut text)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        text.lines()
+            .map(|line| {
+                let (spec, inode) = line
+                    .split_once(' ')
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+                let inode = inode
+                    .parse()
+                    .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+                Ok(Root {
+                    spec: spec.to_string(),
+                    inode,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Writes `text` to `next` and renames it over `path`.
+fn replace(next: &Path, path: &Path, text: &str) -> io::Result<()> {
+    let mut file = open(next, true)?;
+    if unsafe { libc::ftruncate(file.as_raw_fd(), 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    file.write_all(text.as_bytes())?;
+    fs::rename(next, path)
+}
+
+/// Whether the root's inode still exists on the volume `fsid` with a
+/// policy naming its key (the inode numbers of APFS are not reused).
+fn live(root: &Root, mut fsid: libc::fsid_t) -> io::Result<bool> {
+    let mut path = [0 as libc::c_char; libc::PATH_MAX as usize];
+    if unsafe { fsgetpath(path.as_mut_ptr(), path.len(), &mut fsid, root.inode) } < 0 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) => Ok(false),
+            _ => Err(error),
+        };
+    }
+    let mut context = [0u8; 40];
+    let n = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            CONTEXT.as_ptr(),
+            context.as_mut_ptr().cast(),
+            context.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if n < 0 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOATTR | libc::ERANGE) => Ok(false),
+            _ => Err(error),
+        };
+    }
+    Ok(Spec::of_context(&context[..n as usize]).is_some_and(|spec| spec.encode() == root.spec))
 }
 
 /// One line per key: its encoded specifier, then for a v2 key ('i') the
@@ -346,13 +589,13 @@ mod tests {
 
     /// The users of keys are the syscall layer's tests (`sys/fscrypt.rs`).
     #[test]
-    fn a_boot_empties_the_keyring_and_keeps_the_marker() {
+    fn a_boot_empties_the_keyring_and_drops_the_roots_that_are_gone() {
         let dir = crate::scratch_dir("fscrypt-owner");
         let (runtime, data) = (dir.join("run"), dir.join("data"));
         fs::create_dir_all(&runtime).unwrap();
-        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(data.join("root")).unwrap();
         Owner::prepare(&runtime, &data).unwrap();
-        for name in [KEYRING, KEYRING_LOCK, LOCATOR] {
+        for name in [KEYRING, KEYRING_LOCK, LOCATOR, STATE] {
             let mode = fs::metadata(runtime.join(name))
                 .unwrap()
                 .permissions()
@@ -362,13 +605,47 @@ mod tests {
         let owner = Owner::locate(&runtime).unwrap().unwrap();
         assert_eq!(owner.device(), fs::metadata(&data).unwrap().dev());
         assert!(!owner.has_policies().unwrap());
-        owner.policy_set().unwrap();
+        assert!(!owner.locking());
+        // A v1 context naming the descriptor [1; 8], as the layer stores it.
+        let root = data.join("root");
+        let context = [&[1u8, 1, 4, 0][..], &[1; 8], &[0; 16]].concat();
+        let path = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+        let set = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                CONTEXT.as_ptr(),
+                context.as_ptr().cast(),
+                context.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(set, 0);
         let v1 = Spec::Descriptor([1; 8]);
+        let inode = fs::metadata(&root).unwrap().ino();
+        owner.policy_root(v1, inode).unwrap();
+        assert!(owner.has_policies().unwrap());
+        assert!(owner.locking());
+        assert!(!owner.has_key(v1).unwrap());
         owner.add_key(v1, None).unwrap();
-        assert!(owner.key_status(v1, 0).unwrap().is_some());
+        assert!(!owner.locking());
+        assert!(owner.has_key(v1).unwrap());
+        // The next boot: the keyring is empty, the root is kept.
         Owner::prepare(&runtime, &data).unwrap();
         assert_eq!(owner.key_status(v1, 0).unwrap(), None);
+        assert!(!owner.has_key(v1).unwrap());
+        assert!(owner.locking());
+        // A root that is gone is dropped, and with it the absent key.
+        fs::remove_dir(&root).unwrap();
+        Owner::prepare(&runtime, &data).unwrap();
         assert!(owner.has_policies().unwrap());
+        assert!(!owner.locking());
+        // The secret persists, so names stay stable across boots.
+        let mut name = *b"name";
+        owner.cipher(&[0; 16], &mut name);
+        let again = Owner::locate(&runtime).unwrap().unwrap();
+        again.cipher(&[0; 16], &mut name);
+        assert_eq!(&name, b"name");
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -193,6 +193,9 @@ pub fn getdents64(a: [u64; 6]) -> i64 {
                         Err(error) => return -(error as i64),
                     }
                 }
+                if let Err(error) = super::fscrypt::list(fd, &mut e) {
+                    return -(error as i64);
+                }
                 d.entries = Some(e)
             }
             Err(e) => return e,
