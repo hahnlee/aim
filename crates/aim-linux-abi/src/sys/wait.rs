@@ -17,6 +17,7 @@
 
 use super::fdtab;
 use aim_storage::process_namespace::ProcessIdentity;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, ESRCH};
@@ -82,16 +83,73 @@ pub(super) fn status_of(pid: i32, st: i32) -> i32 {
     status_from_host(st)
 }
 
-/// Linux `si_code` and `si_status` of a `CLD_*` event of host child `pid`
-/// that Darwin reports as `code` and `status`.
-pub(super) fn child_info(pid: i32, code: i32, status: i32) -> (i32, i32) {
+/// Linux `si_code` and `si_status` of a `CLD_*` event that Darwin reports
+/// as `code` and `status`, of a child that recorded `fatal`.
+fn cld(code: i32, status: i32, fatal: Option<i32>) -> (i32, i32) {
     if code != libc::CLD_EXITED {
         return (code, signal_from_host(status));
     }
-    match fatal_exit(pid, status) {
+    match fatal.filter(|&sig| status == 128 + sig) {
         Some(sig) => (libc::CLD_KILLED, sig),
         None => (code, status),
     }
+}
+
+/// [`cld`] of host child `pid`, which still has its record.
+fn child_info(pid: i32, code: i32, status: i32) -> (i32, i32) {
+    let fatal = (code == libc::CLD_EXITED)
+        .then(|| fatal_exit(pid, status))
+        .flatten();
+    cld(code, status, fatal)
+}
+
+/// Children this process reaped, with their real uid and recorded fatal
+/// signal read before their entry and record went: a SIGCHLD routed after
+/// the reap ([`sigchld_info`]) still reports them, as Linux fills its
+/// siginfo at the child's exit (`do_notify_parent`). The latest
+/// [`REAPED_KEPT`]; one goes when its SIGCHLD is routed.
+static REAPED: Mutex<VecDeque<(i32, u32, Option<i32>)>> = Mutex::new(VecDeque::new());
+const REAPED_KEPT: usize = 32;
+
+/// Host child `pid` was reaped: keep what its SIGCHLD reports, then drop
+/// its entry and record.
+fn reaped(pid: i32) {
+    let child = (
+        pid,
+        super::signal::sender_uid(pid),
+        super::procrec::fatal_of(pid),
+    );
+    {
+        let mut r = REAPED.lock().unwrap();
+        r.retain(|c| c.0 != pid);
+        if r.len() == REAPED_KEPT {
+            r.pop_front();
+        }
+        r.push_back(child);
+    }
+    super::cred::forget(pid);
+}
+
+/// The guest's `si_pid`, `si_uid`, `si_code` and `si_status` of a SIGCHLD
+/// that Darwin reports from host child `pid` as `code` and `status`.
+pub(super) fn sigchld_info(pid: i32, code: i32, status: i32) -> (i32, u32, i32, i32) {
+    // The record goes after the entry: read first, it was there while the
+    // entry is.
+    let fatal = super::procrec::fatal_of(pid);
+    let (uid, fatal) = match super::cred::real_uid_of(pid) {
+        Some(uid) => (uid, fatal),
+        None => {
+            let mut r = REAPED.lock().unwrap();
+            match r.iter().position(|c| c.0 == pid) {
+                Some(i) => r.remove(i).map_or((0, None), |c| (c.1, c.2)),
+                None => (0, None),
+            }
+        }
+    };
+    let (code, status) = cld(code, status, fatal);
+    // Darwin sends a CLD_* SIGCHLD only from a child, a member of the
+    // namespace even once reaped.
+    (super::pidns::guest_pid(pid).unwrap_or(0), uid, code, status)
 }
 
 /// Linux arm64 `struct rusage` (timevals with 64-bit microseconds, the
@@ -192,7 +250,7 @@ pub fn wait4(a: [u64; 6]) -> i64 {
         let st = status_of(r, st);
         if st & 0x7f != 0x7f {
             // Exited or killed: reaped.
-            super::cred::forget(r);
+            reaped(r);
         }
         if status != 0 {
             // SAFETY: guest int.
@@ -336,7 +394,7 @@ pub fn waitid(a: [u64; 6]) -> i64 {
         )
     });
     if info.si_pid != 0 && ended && options & WNOWAIT == 0 {
-        super::cred::forget(info.si_pid);
+        reaped(info.si_pid);
     }
     if infop != 0 {
         user_try!(put_wait_siginfo(infop, child));

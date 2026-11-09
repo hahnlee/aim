@@ -1441,6 +1441,38 @@ static void child_end(int sig, int code) {
   CHECK(sigprocmask(SIG_SETMASK, &old, NULL) == 0, "restore mask");
 }
 
+// SIGCHLD reports the child as it exited even when the parent reaps it
+// before taking the signal: its pid, uid and the signal it died of.
+static void sigchld_after_reap(void) {
+  sigset_t set, old;
+  sigemptyset(&set);
+  sigaddset(&set, SIGCHLD);
+  CHECK(sigprocmask(SIG_BLOCK, &set, &old) == 0, "block SIGCHLD");
+  for (int round = 0; round < 50; round++) {
+    int sig = round % 2 ? SIGRTMIN + 4 : SIGUSR1;
+    pid_t child = fork();
+    CHECK(child >= 0, "fork");
+    if (child == 0) {
+      if (setresuid(10057, 10057, 10057) != 0) _exit(9);
+      sigprocmask(SIG_SETMASK, &old, NULL);
+      kill(getpid(), sig);
+      for (;;) pause();
+    }
+    int st;
+    CHECK(waitpid(child, &st, 0) == child && WIFSIGNALED(st) && WTERMSIG(st) == sig,
+          "round %d: status %#x", round, st);
+    siginfo_t si = {0};
+    struct timespec timeout = {.tv_sec = 10};
+    CHECK(sigtimedwait(&set, &si, &timeout) == SIGCHLD, "round %d: SIGCHLD", round);
+    CHECK(si.si_pid == child && si.si_uid == 10057 && si.si_code == CLD_KILLED &&
+              si.si_status == sig,
+          "round %d: pid %d/%d uid %d code %d status %d", round, si.si_pid, child, si.si_uid,
+          si.si_code, si.si_status);
+  }
+  CHECK(sigprocmask(SIG_SETMASK, &old, NULL) == 0, "restore mask");
+  printf("ok sigchld_after_reap\n");
+}
+
 static void wait_signal_status(void) {
   // Carried by Darwin under another number; real-time, SIGSTKFLT and
   // SIGPWR, which it cannot carry; exits of 128 + such a signal.
@@ -1921,6 +1953,7 @@ int main(int argc, char** argv) {
       {"permissions", permissions}, {"peer_ids", peer_ids},
       {"peer_thread_signals", peer_thread_signals},
       {"peer_fatal_rt", peer_fatal_rt}, {"wait_signal_status", wait_signal_status},
+      {"sigchld_after_reap", sigchld_after_reap},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
       {"ns_init_unkillable", ns_init_unkillable},
