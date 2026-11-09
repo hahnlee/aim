@@ -297,8 +297,8 @@ pub struct Decision {
     pub clear: Vec<u64>,
     /// An activity moved to the top of its task (`REORDER_TO_FRONT`).
     pub reorder: Option<u64>,
-    /// The target task takes the start's intent (`Task.setIntent`).
-    pub set_intent: bool,
+    /// The target task, to take the start's intent (`Task.setIntent`).
+    pub set_intent: Option<i32>,
     pub outcome: Outcome,
 }
 
@@ -853,7 +853,7 @@ impl Stack {
                     .filter(|a| a.task == task && !a.finishing && !reset.contains(&a.token))
                     .map(|a| a.token)
                     .collect();
-                d.set_intent = true;
+                d.set_intent = Some(task);
                 adding = true;
             } else if flags & FLAG_ACTIVITY_CLEAR_TOP != 0
                 || single
@@ -878,8 +878,10 @@ impl Stack {
                             d.clear.push(r.token);
                             adding = true;
                         } else {
-                            d.set_intent =
-                                self.root(task).is_some_and(|root| root.token == r.token);
+                            d.set_intent = self
+                                .root(task)
+                                .filter(|root| root.token == r.token)
+                                .map(|_| task);
                             deliver = Some(r.token);
                         }
                     }
@@ -898,7 +900,10 @@ impl Stack {
                     && top.component == s.component
                     && d.result_to.is_none()
                 {
-                    d.set_intent = self.root(task).is_some_and(|root| root.token == top.token);
+                    d.set_intent = self
+                        .root(task)
+                        .filter(|root| root.token == top.token)
+                        .map(|_| task);
                     deliver = Some(top.token);
                 } else if !same_intent_filter(&task_record.intent, s.intent) || reused_top.is_none()
                 {
@@ -909,7 +914,7 @@ impl Stack {
             } else if !task_record.root_was_reset {
                 // A task not yet started from its front door takes the
                 // start's identity.
-                d.set_intent = true;
+                d.set_intent = Some(task);
             }
             // The reset finishes first.
             d.clear.splice(0..0, reset);
@@ -983,6 +988,11 @@ impl Stack {
             let a = self.activities.remove(at);
             self.activities.push(a);
         }
+        if let Some(task) = d.set_intent
+            && let Some(identity) = identity
+        {
+            self.set_intent(task, identity);
+        }
         let mut added = None;
         match then {
             Then::Add(activity, task) => {
@@ -1002,33 +1012,13 @@ impl Stack {
                 if d.home_front {
                     self.move_to_front(activity.task);
                 }
-                if d.set_intent
-                    && let Some(identity) = identity
-                {
-                    self.set_intent(activity.task, identity);
-                }
                 added = Some(activity.token);
                 self.activities.push(activity);
             }
             Then::Deliver(token, payload) => {
-                if d.set_intent
-                    && let Some(identity) = identity
-                    && let Some(task) = self.get(token).map(|a| a.task)
-                {
-                    self.set_intent(task, identity);
-                }
                 out.extend(self.new_intent(token, payload));
             }
-            Then::Nothing => {
-                // The task it brought to the front, or the focused one,
-                // takes its identity.
-                if d.set_intent
-                    && let Some(identity) = identity
-                    && let Some(task) = d.front.or_else(|| self.focused())
-                {
-                    self.set_intent(task, identity);
-                }
-            }
+            Then::Nothing => {}
         }
         self.resume_focused(user_leaving, &mut out);
         self.settle(&mut out);
@@ -2048,7 +2038,7 @@ mod tests {
                 let d = s.decide_only_if_needed(&request, true).unwrap();
                 assert_eq!(d.outcome, Outcome::Front(1));
                 assert!(d.clear.is_empty());
-                assert!(!d.set_intent);
+                assert_eq!(d.set_intent, None);
             }
         }
         let intent = Intent {
@@ -2535,6 +2525,101 @@ mod tests {
         );
     }
 
+    // ResetTargetTaskHelper.test of the tasks behind the target: an
+    // activity of its affinity that may be reparented is finished with
+    // those returning it results if it finishes on a task's launch, or by
+    // clearTaskOnLaunch, else refused as a reparenting.
+    #[test]
+    fn a_reset_finishes_activities_of_its_affinity_in_tasks_behind() {
+        let reset = |flags| Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | flags,
+            ..Default::default()
+        };
+        // Task 8, behind, rooted in another affinity, holds `x` of
+        // `affinity` under an activity returning `x` a result.
+        let behind = |affinity: &str, finish_on_task_launch| {
+            let mut s = behind_launcher(vec![]);
+            s.tasks.insert(0, *task(8, "Other", Some("other")));
+            let mut x = activity(21, 8, "X", 0);
+            x.affinity = Some(affinity.into());
+            (x.allow_task_reparenting, x.finish_on_task_launch) = (true, finish_on_task_launch);
+            let mut y = activity(22, 8, "Y", 0);
+            y.result_to = Some(21);
+            s.activities
+                .splice(0..0, [activity(20, 8, "Other", 0), x, y]);
+            s
+        };
+        // The app's existing task brought back.
+        let s = behind(APP, true);
+        let d = s
+            .decide(&start("com.example/Main", 0, &reset(0), None))
+            .unwrap();
+        assert_eq!(
+            (d.outcome, d.clear),
+            (Outcome::Front(START_TASK_TO_FRONT), vec![22, 21])
+        );
+
+        // A new task (`startActivityLocked`): the same, of the new
+        // activity's affinity.
+        let fresh = |s: &Stack, clear_task_on_launch| {
+            s.decide(&super::Start {
+                affinity: Some("fresh"),
+                clear_task_on_launch,
+                ..start("com.example/Fresh", 0, &reset(0), None)
+            })
+        };
+        let d = fresh(&behind("fresh", true), false).unwrap();
+        assert_eq!((d.outcome, d.clear), (Outcome::New(None), vec![22, 21]));
+        // Without finishOnTaskLaunch it would be reparented into the new
+        // task: refused, where the start succeeded before resets.
+        assert!(fresh(&behind("fresh", false), false).is_err());
+        assert_eq!(
+            fresh(&behind("fresh", false), true).unwrap().clear,
+            [22, 21]
+        );
+        // Of another affinity, the reset leaves it.
+        assert!(fresh(&behind(APP, false), false).unwrap().clear.is_empty());
+    }
+
+    // complyActivityFlags after resetTaskIfNeeded: the flags' clearing and
+    // reordering do not see what the reset finished, nor finish it twice.
+    #[test]
+    fn a_reset_precedes_clear_top_clear_task_and_reorder() {
+        let mut cleared = activity(3, 7, "Cleared", 0);
+        cleared.clear_when_task_reset = true;
+        let s = behind_launcher(vec![
+            activity(2, 7, "Second", 0),
+            cleared,
+            activity(4, 7, "Inner", 0),
+        ]);
+        let decide = |component, flags| {
+            let intent = Intent {
+                flags: FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | flags,
+                ..Default::default()
+            };
+            s.decide(&start(component, 0, &intent, None)).unwrap()
+        };
+        // CLEAR_TOP of the standard root: made anew.
+        let d = decide("com.example/Main", FLAG_ACTIVITY_CLEAR_TOP);
+        assert_eq!(
+            (d.outcome, d.clear),
+            (Outcome::New(Some(7)), vec![4, 3, 2, 1])
+        );
+        let d = decide("com.example/Main", FLAG_ACTIVITY_CLEAR_TASK);
+        assert_eq!(d.clear, [4, 3, 2, 1]);
+        assert_eq!((d.outcome, d.set_intent), (Outcome::New(Some(7)), Some(7)));
+        // REORDER_TO_FRONT of one the reset finished: added anew.
+        let d = decide("com.example/Inner", FLAG_ACTIVITY_REORDER_TO_FRONT);
+        assert_eq!(
+            (d.outcome, d.reorder, d.clear),
+            (Outcome::New(Some(7)), None, vec![4, 3])
+        );
+        // Of one it kept: moved to the top.
+        let d = decide("com.example/Second", FLAG_ACTIVITY_REORDER_TO_FRONT);
+        assert_eq!(d.outcome, Outcome::Deliver(2, START_TASK_TO_FRONT));
+        assert_eq!((d.reorder, d.clear), (Some(2), vec![4, 3]));
+    }
+
     // complyActivityFlags: a reset task not started from its front door
     // takes the start's identity, and nothing is added.
     #[test]
@@ -2551,7 +2636,7 @@ mod tests {
                 .decide(&start("com.example/Alias", 0, &intent, None))
                 .unwrap();
             assert_eq!(d.outcome, Outcome::Front(START_TASK_TO_FRONT));
-            assert_eq!(d.set_intent, !root_was_reset);
+            assert_eq!(d.set_intent, (!root_was_reset).then_some(7));
             let identity = Identity {
                 component: "com.example/Alias",
                 intent: &intent,
