@@ -1610,39 +1610,11 @@ impl Query<'_> {
         if self.visible_user_state(&resolved, user)?.is_none() {
             return Ok(Ok(None));
         }
-        if let Some(registry) = &self.state.package_registry {
-            return Ok(Ok(registry
-                .property(name, package, class)
-                .cloned()
-                .map(Property::checked)
-                .transpose()?));
-        }
-        let Some((_, pkg)) = self.package_of(package) else {
-            return Ok(Ok(None));
-        };
-        if class.is_none() {
-            return Ok(Ok(pkg
-                .properties
-                .iter()
-                .flatten()
-                .rev()
-                .find(|(key, _)| key == name)
-                .map(|(_, property)| Property::checked(property.clone()))
-                .transpose()?));
-        }
-        for kind in [1, 4, 2, 3] {
-            if let Some(property) = properties(pkg, kind)
-                .into_iter()
-                .rev()
-                .flat_map(|p| p.iter().rev())
-                .find(|(key, p)| key == name && p.class_name.as_deref() == class)
-                .map(|(_, p)| Property::checked(p.clone()))
-                .transpose()?
-            {
-                return Ok(Ok(Some(property)));
-            }
-        }
-        Ok(Ok(None))
+        Ok(Ok(self
+            .state
+            .property(name, package, class)
+            .map(Property::checked)
+            .transpose()?))
     }
 
     pub(super) fn query_properties(&self, name: Option<&str>, kind: i32) -> Thrown<Vec<Property>> {
@@ -1688,7 +1660,7 @@ impl Query<'_> {
             if self.filtered_including_uninstalled(Some(ps), user_id(self.calling_uid))? {
                 continue;
             }
-            for group in properties(pkg, kind) {
+            for group in super::super::model::properties(pkg, kind) {
                 for (key, property) in group {
                     if key == name {
                         result.push(Property::checked(property.clone())?);
@@ -4112,32 +4084,6 @@ impl aim_service_aidl::WriteParcelable for Property {
             PropertyWireValue::Int(v) | PropertyWireValue::Resource(v) => p.write_i32(*v),
             PropertyWireValue::String(v) => p.write_string16(v.as_deref()),
         }
-    }
-}
-fn properties(pkg: &AndroidPackage, kind: i32) -> Vec<&[(String, super::super::pkg::Property)]> {
-    match kind {
-        1 => pkg
-            .activities
-            .iter()
-            .filter_map(|p| p.main.component.properties.as_deref())
-            .collect(),
-        2 => pkg
-            .receivers
-            .iter()
-            .filter_map(|p| p.main.component.properties.as_deref())
-            .collect(),
-        3 => pkg
-            .services
-            .iter()
-            .filter_map(|p| p.main.component.properties.as_deref())
-            .collect(),
-        4 => pkg
-            .providers
-            .iter()
-            .filter_map(|p| p.main.component.properties.as_deref())
-            .collect(),
-        5 => pkg.properties.as_deref().into_iter().collect(),
-        _ => Vec::new(),
     }
 }
 struct EmptyListSlice;
