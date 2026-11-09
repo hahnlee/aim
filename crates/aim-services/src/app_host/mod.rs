@@ -690,6 +690,9 @@ pub struct AppHost {
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
     account_manager: OnceLock<Arc<account_service::AccountManager>>,
+    /// Where `lock_settings` keeps the users' CE secrets: the Mac user's
+    /// keychain unless a test set another.
+    ce_secrets: OnceLock<Box<dyn lock_settings::CeSecrets>>,
     role_service: OnceLock<Arc<role_service::RoleManager>>,
     original_role: Mutex<Option<Arc<Strong>>>,
     /// The window contexts attached, by their client token's handle.
@@ -844,6 +847,7 @@ impl AppHost {
             text_input: Default::default(),
             content_service: OnceLock::new(),
             account_manager: OnceLock::new(),
+            ce_secrets: OnceLock::new(),
             role_service: OnceLock::new(),
             original_role: Mutex::new(None),
             window_contexts: Arc::new(Mutex::new(HashMap::new())),

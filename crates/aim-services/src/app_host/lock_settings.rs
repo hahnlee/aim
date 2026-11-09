@@ -100,6 +100,56 @@ const NAMESPACE_LOCKSETTINGS: i64 = 103;
 /// `KeyPermission.USE | GET_INFO | DELETE`, a grant's access.
 const GRANT_ACCESS: i32 = 0x100 | 0x4 | 0x1;
 
+/// `LockSettingsService.CURRENT_LSKF_BASED_PROTECTOR_ID_KEY`,
+/// `PREV_LSKF_BASED_PROTECTOR_ID_KEY`, `LSKF_LAST_CHANGED_TIME_KEY`,
+/// `MIGRATED_SP_FULL`.
+const CURRENT_PROTECTOR_ID_KEY: &str = "sp-handle";
+const PREV_PROTECTOR_ID_KEY: &str = "prev-sp-handle";
+const LSKF_LAST_CHANGED_TIME_KEY: &str = "sp-handle-ts";
+const MIGRATED_SP_FULL: &str = "migrated_all_users_to_sp_and_bound_keys";
+/// `SyntheticPasswordManager.NULL_PROTECTOR_ID`.
+const NULL_PROTECTOR_ID: i64 = 0;
+/// The keychain service of the CE secrets, and a secret's length.
+const CE_SECRET_SERVICE: &str = "dev.aim.ce-secret";
+const CE_SECRET_LEN: usize = 32;
+
+/// Where users' CE secrets are kept, by account.
+pub(super) trait CeSecrets: Send + Sync {
+    /// The secret of `account`, none if there is none.
+    fn read(&self, account: &str) -> Result<Option<Vec<u8>>, String>;
+    /// Keeps `secret` as `account`'s, which has none.
+    fn create(&self, account: &str, secret: &[u8]) -> Result<(), String>;
+}
+
+/// The Mac user's keychain: available while the Mac user's session is.
+struct MacKeychain;
+
+impl CeSecrets for MacKeychain {
+    fn read(&self, account: &str) -> Result<Option<Vec<u8>>, String> {
+        aim_host_lock::keychain::Keychain::user()
+            .read(CE_SECRET_SERVICE, account)
+            .map_err(|status| format!("keychain: {CE_SECRET_SERVICE} {account}: OSStatus {status}"))
+    }
+
+    fn create(&self, account: &str, secret: &[u8]) -> Result<(), String> {
+        aim_host_lock::keychain::Keychain::user()
+            .add(
+                CE_SECRET_SERVICE,
+                account,
+                "Android CE storage (aim)",
+                secret,
+            )
+            .map_err(|status| format!("keychain: {CE_SECRET_SERVICE} {account}: OSStatus {status}"))
+    }
+}
+
+/// The account of `user`'s CE secret: the user and the protector the
+/// data directory's lock settings name, so that each data directory has
+/// its own.
+fn ce_secret_account(user: i32, protector: i64) -> String {
+    format!("user {user} protector {protector:016x}")
+}
+
 /// keystore2's `KeyDescriptor`.
 struct KeyDescriptor {
     domain: i32,
@@ -583,6 +633,80 @@ impl AppHost {
         *self.recoverable_keys.lock().unwrap() = Some(owner);
         Ok(())
     }
+
+    fn ce_secrets(&self) -> &dyn CeSecrets {
+        self.ce_secrets
+            .get_or_init(|| Box::new(MacKeychain))
+            .as_ref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_ce_secrets(&self, secrets: Box<dyn CeSecrets>) {
+        assert!(self.ce_secrets.set(secrets).is_ok());
+    }
+
+    fn lock_settings(&self) -> Result<LockSettings, String> {
+        let host = self.me.upgrade().ok_or("the app host stopped")?;
+        Ok(LockSettings::new(host))
+    }
+
+    /// `onThirdPartyAppsStarted`'s one-time migration of the unsecured
+    /// users of a device with file-based encryption, before they start:
+    /// the user's CE key protected by its secret (`setCeStorageProtection`
+    /// through StorageManagerService), the secret made first if the user
+    /// has none (`initializeSyntheticPassword`). Every user is unsecured
+    /// here: the Mac's session, which the keychain follows, is the
+    /// credential.
+    pub(super) fn protect_ce_storage(&self, vold: &Strong, user: i32) -> Result<(), String> {
+        let settings = self.lock_settings()?;
+        let failed = |e: Exception| format!("lock_settings: {}", e.message);
+        if settings
+            .boolean(MIGRATED_SP_FULL, false, 0)
+            .map_err(failed)?
+        {
+            return Ok(());
+        }
+        let protector = settings
+            .long(CURRENT_PROTECTOR_ID_KEY, NULL_PROTECTOR_ID, user)
+            .map_err(failed)?;
+        let secret = if protector == NULL_PROTECTOR_ID {
+            settings.initialize_ce_secret(user)?
+        } else {
+            self.ce_secret(user, protector)?
+        };
+        super::storage::set_ce_storage_protection(vold, user, &secret)?;
+        settings
+            .set_boolean(MIGRATED_SP_FULL, true, 0)
+            .map_err(failed)
+    }
+
+    /// `unlockUserKeyIfUnsecured` of a user whose CE storage vold has
+    /// not unlocked: its secret from the keychain to `unlockCeStorage`.
+    /// The keychain being locked or the secret missing is an error here
+    /// where the original logs it and leaves the user locked.
+    pub(super) fn unlock_user_key_if_unsecured(
+        &self,
+        vold: &Strong,
+        user: i32,
+    ) -> Result<(), String> {
+        let protector = self
+            .lock_settings()?
+            .long(CURRENT_PROTECTOR_ID_KEY, NULL_PROTECTOR_ID, user)
+            .map_err(|e| format!("lock_settings: {}", e.message))?;
+        if protector == NULL_PROTECTOR_ID {
+            return Err(format!("lock_settings: user {user} has no CE secret"));
+        }
+        let secret = self.ce_secret(user, protector)?;
+        super::storage::unlock_ce_storage(vold, user, &secret)
+    }
+
+    /// `unlockLskfBasedProtector` of no credential: `user`'s CE secret.
+    fn ce_secret(&self, user: i32, protector: i64) -> Result<Vec<u8>, String> {
+        let account = ce_secret_account(user, protector);
+        self.ce_secrets()
+            .read(&account)?
+            .ok_or_else(|| format!("lock_settings: no CE secret {CE_SECRET_SERVICE} {account}"))
+    }
 }
 
 impl LockSettings {
@@ -657,6 +781,42 @@ impl LockSettings {
         write_key_value(&db, key, value, user).map_err(failed)?;
         keep_system_owned(&path)
             .map_err(|e| Exception::new(BAD_VALUE, format!("{}: {e}", path.display())))
+    }
+
+    /// `LockSettingsStorage.setLong`.
+    fn set_long(&self, key: &str, value: i64, user: i32) -> Result<(), Exception> {
+        self.set_string(key, Some(&value.to_string()), user)
+    }
+
+    /// `initializeSyntheticPassword` of an unsecured user: a new secret
+    /// kept in the keychain under a new protector (`newSyntheticPassword`,
+    /// `createLskfBasedProtector`), the protector made the user's
+    /// (`setCurrentLskfBasedProtectorId`).
+    fn initialize_ce_secret(&self, user: i32) -> Result<Vec<u8>, String> {
+        let failed = |e: Exception| format!("lock_settings: {}", e.message);
+        // `generateProtectorId`.
+        let protector = loop {
+            let mut id = 0i64;
+            // SAFETY: arc4random_buf fills the eight bytes of a local.
+            unsafe { libc::arc4random_buf((&raw mut id).cast(), size_of::<i64>()) };
+            if id != NULL_PROTECTOR_ID {
+                break id;
+            }
+        };
+        let mut secret = vec![0; CE_SECRET_LEN];
+        // SAFETY: arc4random_buf fills the vector's bytes.
+        unsafe { libc::arc4random_buf(secret.as_mut_ptr().cast(), secret.len()) };
+        self.host
+            .ce_secrets()
+            .create(&ce_secret_account(user, protector), &secret)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        self.set_long(CURRENT_PROTECTOR_ID_KEY, protector, user)
+            .and_then(|()| self.set_long(PREV_PROTECTOR_ID_KEY, NULL_PROTECTOR_ID, user))
+            .and_then(|()| self.set_long(LSKF_LAST_CHANGED_TIME_KEY, now, user))
+            .map_err(failed)?;
+        Ok(secret)
     }
 
     /// `LockSettingsStorage.setBoolean`.
@@ -1819,3 +1979,7 @@ mod tests {
 #[cfg(test)]
 #[path = "lock_settings_keys_tests.rs"]
 mod keys_tests;
+
+#[cfg(test)]
+#[path = "lock_settings_ce_tests.rs"]
+mod ce_tests;

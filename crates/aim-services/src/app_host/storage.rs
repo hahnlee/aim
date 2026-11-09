@@ -31,6 +31,9 @@ const RESET: u32 = 4;
 const ON_USER_ADDED: u32 = 6;
 const ON_USER_STARTED: u32 = 8;
 const SETUP_APP_DIR: u32 = 23;
+const SET_CE_STORAGE_PROTECTION: u32 = 44;
+const GET_UNLOCKED_USERS: u32 = 45;
+const UNLOCK_CE_STORAGE: u32 = 46;
 const FIXUP_APP_DIR: u32 = 24;
 const FSTRIM: u32 = 28;
 const NEEDS_CHECKPOINT: u32 = 53;
@@ -211,6 +214,69 @@ pub(super) struct StartedUser {
     /// last logged in with (a system update: `PRE_BOOT_COMPLETED`).
     fingerprint: String,
     pub updated: bool,
+    /// Whether vold's CE storage of the user is unlocked already, as on
+    /// the first boot of a device with file-based encryption, where vold
+    /// made the key (`restoreCeUnlockedUsers`).
+    ce_unlocked: bool,
+}
+
+/// `IVold` call `code` of `user` and `secret`.
+fn ce_storage_call(
+    vold: &Strong,
+    code: u32,
+    name: &str,
+    user: i32,
+    secret: &[u8],
+) -> Result<(), String> {
+    let mut data = Parcel::new();
+    data.write_interface_token(VOLD_DESCRIPTOR);
+    data.write_i32(user);
+    aim_service_aidl::write_byte_array(&mut data, Some(secret));
+    let reply = vold
+        .transact(code, &data, false)
+        .map_err(|e| format!("vold {name} {user}: {e}"))?;
+    reply
+        .reader()
+        .read_exception()
+        .map_err(|e| format!("vold {name} {user}: {e}"))?
+        .map_err(|e| format!("vold {name} {user}: {e:?}"))
+}
+
+/// `setCeStorageProtection`: vold's.
+pub(super) fn set_ce_storage_protection(
+    vold: &Strong,
+    user: i32,
+    secret: &[u8],
+) -> Result<(), String> {
+    ce_storage_call(
+        vold,
+        SET_CE_STORAGE_PROTECTION,
+        "setCeStorageProtection",
+        user,
+        secret,
+    )
+}
+
+/// `unlockCeStorage` of a device with file-based encryption: vold's.
+pub(super) fn unlock_ce_storage(vold: &Strong, user: i32, secret: &[u8]) -> Result<(), String> {
+    ce_storage_call(vold, UNLOCK_CE_STORAGE, "unlockCeStorage", user, secret)
+}
+
+/// `restoreCeUnlockedUsers`: the users whose CE storage vold unlocked.
+fn ce_unlocked_users(vold: &Strong) -> Result<Vec<i32>, String> {
+    let mut data = Parcel::new();
+    data.write_interface_token(VOLD_DESCRIPTOR);
+    let reply = vold
+        .transact(GET_UNLOCKED_USERS, &data, false)
+        .map_err(|e| format!("vold getUnlockedUsers: {e}"))?;
+    let mut reader = reply.reader();
+    reader
+        .read_exception()
+        .map_err(|e| format!("vold getUnlockedUsers: {e}"))?
+        .map_err(|e| format!("vold getUnlockedUsers: {e:?}"))?;
+    aim_service_aidl::read_int_array(&mut reader)
+        .map(Option::unwrap_or_default)
+        .map_err(|e| format!("vold getUnlockedUsers: {e}"))
 }
 
 impl AppHost {
@@ -247,12 +313,21 @@ impl AppHost {
         call(SET_LISTENER, "setListener", &|p| {
             p.write_binder(Some(listener))
         })?;
+        // Without file-based encryption vold has no CE keys to report or
+        // protect.
+        let encrypted = self.file_encrypted();
+        let ce_unlocked = encrypted && ce_unlocked_users(&vold)?.contains(&USER);
         call(RESET, "reset", &|_| {})?;
         call(ON_USER_ADDED, "onUserAdded", &|p| {
             p.write_i32(USER);
             p.write_i32(SERIAL);
             p.write_i32(-1); // shares storage with no user
         })?;
+        // LockSettingsService's `PHASE_THIRD_PARTY_APPS_CAN_START`, before
+        // the user starts.
+        if encrypted {
+            self.protect_ce_storage(&vold, USER)?;
+        }
         // UserManagerService's `onBeforeStartUser`: the user's DE
         // storage and apps' data (the CE storage at its unlock),
         // migrated when the build's fingerprint is not the one the
@@ -266,6 +341,7 @@ impl AppHost {
             installd,
             fingerprint,
             updated,
+            ce_unlocked,
         };
         self.prepare_user_storage(&started, super::app_data::FLAG_STORAGE_DE)?;
         *self.storage.vold.lock().unwrap() = Some(self.process.strong(vold.handle));
@@ -336,6 +412,11 @@ impl AppHost {
     /// `onBeforeUnlockUser`, its CE storage and apps' data, then the user
     /// unlocking, then StorageManagerService's `onUserUnlocking`.
     pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<(), String> {
+        // `unlockUserCleared`: CE storage vold has not unlocked is unlocked
+        // first, through LockSettingsService.
+        if self.file_encrypted() && !user.ce_unlocked {
+            self.unlock_user_key_if_unsecured(&user.vold, USER)?;
+        }
         self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE)?;
         self.finish_storage_unlock(&user.vold, &user.installd)
     }
@@ -1906,6 +1987,7 @@ mod tests {
                     installd: host.process.strong(installd.handle),
                     fingerprint: String::new(),
                     updated: false,
+                    ce_unlocked: false,
                 };
                 assert!(host.unlock_user_storage(&user).is_err());
                 assert!(calls.lock().unwrap().is_empty());

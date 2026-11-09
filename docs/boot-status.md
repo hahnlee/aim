@@ -973,7 +973,7 @@ host load not recorded. Admission now follows `boot_completed` within
 construction in every boot: 1.14-1.34 s fresh, 0.50-0.68 s warm. The
 guest reports no file-based encryption, so the original `fixAppsDataOnBoot`
 prepares DE and CE data, then migrates and recreates every system app's
-data on each boot (#2761; being an FBE device is accepted in ADR 0016; the syscall layer serves fscrypt's policy and keyring ioctls and locked directories (ENOKEY, no-key names), and vold creates, stores, installs and evicts the users' keys and sets their policies as `FsCrypt.cpp` does once `ro.crypto.type=file`, but the device is not FBE until slice 3); batching the creations through installd's
+data on each boot (#2761; being an FBE device is accepted in ADR 0016; the syscall layer serves fscrypt's policy and keyring ioctls and locked directories (ENOKEY, no-key names), vold creates, stores, installs and evicts the users' keys and sets their policies as `FsCrypt.cpp` does once `ro.crypto.type=file`, and the app host then protects user 0's CE key with a secret of the Mac user's keychain and unlocks it with that secret, but the device is not FBE until slice 3); batching the creations through installd's
 `createAppDataBatched` did not shorten it. Settings'
 warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
 about 0.2 s on warm data; fresh data also waits for init to apply the locale.
