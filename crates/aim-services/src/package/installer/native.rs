@@ -110,6 +110,26 @@ pub struct NativeOwners {
     >,
     writes: Arc<super::file_bridge::Registry>,
 }
+/// `reconcileApps`' orphans among `/data/app`'s entries: APK files and
+/// directories, not install stages (`PackageInstallerService.isStageName`),
+/// that no code path starts with.
+fn orphaned_app_paths<'a>(
+    entries: Vec<(String, bool)>,
+    code_paths: impl Iterator<Item = &'a str> + Clone,
+) -> Vec<(String, bool)> {
+    let stage = |name: &str| {
+        (name.starts_with("vmdl") || name.starts_with("smdl")) && name.ends_with(".tmp")
+            || name.starts_with("smdl2tmp")
+    };
+    entries
+        .into_iter()
+        .filter(|(name, directory)| (*directory || name.ends_with(".apk")) && !stage(name))
+        .filter(|(name, _)| {
+            let path = format!("/data/app/{name}");
+            !code_paths.clone().any(|code| code.starts_with(&path))
+        })
+        .collect()
+}
 fn disk_error(error: storage::Error) -> Exception {
     Exception::new(
         EX_ILLEGAL_STATE,
@@ -223,6 +243,42 @@ impl NativeOwners {
         Ok(owner)
     }
 
+    /// `StorageEventHelper.reconcileApps` of internal storage: a top-level
+    /// `/data/app` package path that no package's code path starts with is
+    /// destroyed as orphaned (`RemovePackageHelper.removeCodePath`), a
+    /// failure logged as the original logs it.
+    pub fn reconcile_apps<'a>(
+        &self,
+        code_paths: impl Iterator<Item = &'a str> + Clone,
+    ) -> Result<(), Exception> {
+        let entries = self
+            .disk
+            .lock()
+            .unwrap()
+            .app_entries()
+            .map_err(disk_error)?;
+        let removal = self.removal_owner()?;
+        for (name, directory) in orphaned_app_paths(entries, code_paths) {
+            let path = format!("/data/app/{name}");
+            eprintln!("native package: Destroying orphaned at {path}");
+            let removed = if directory {
+                removal.external.remove_code(&name, &path)
+            } else {
+                self.disk
+                    .lock()
+                    .unwrap()
+                    .remove_app_file(&name)
+                    .map_err(disk_error)
+            };
+            if let Err(error) = removed {
+                eprintln!(
+                    "native package: Failed to remove code path {path}: {}",
+                    error.message
+                );
+            }
+        }
+        Ok(())
+    }
     pub fn free_stage_dirs(&self, volume: Option<&str>) -> Result<(), Exception> {
         if volume.is_some() {
             return Err(Exception::new(
@@ -2043,6 +2099,30 @@ impl Owners for NativeOwners {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reconcile_apps_destroys_only_unowned_package_paths() {
+        let entries = [
+            ("~~a==", true),
+            ("~~b==", true),
+            ("orphan.apk", false),
+            ("notes.txt", false),
+            ("vmdl12.tmp", true),
+            ("smdl3.tmp", true),
+            ("smdl2tmp1", true),
+            ("lost.apk", false),
+        ]
+        .map(|(name, directory)| (name.to_owned(), directory))
+        .to_vec();
+        let code = [
+            "/data/app/~~a==/com.a-1==",
+            "/data/app/lost.apk",
+            "/system/app/X",
+        ];
+        assert_eq!(
+            orphaned_app_paths(entries, code.iter().copied()),
+            [("~~b==".to_owned(), true), ("orphan.apk".to_owned(), false)]
+        );
+    }
     use super::*;
     use crate::package::{
         installer::pipeline,
