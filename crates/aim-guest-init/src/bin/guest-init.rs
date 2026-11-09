@@ -55,15 +55,21 @@ fn reboot_arguments(args: impl IntoIterator<Item = OsString>, captures: &[usize]
 
 fn main() {
     // SIGINT, SIGTERM and SIGHUP (the terminal it runs in gone) stop the
-    // services before exiting, as a timeout does.
-    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        // SAFETY: the handler only stores to an atomic.
-        unsafe {
+    // services before exiting, as a timeout does. They are unblocked too:
+    // a signal mask survives exec, and a launcher's blocked one would keep
+    // them from ever arriving (#2704).
+    // SAFETY: a local signal set; the handler only stores to an atomic.
+    unsafe {
+        let mut set: libc::sigset_t = 0;
+        libc::sigemptyset(&mut set);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
             libc::signal(
                 signal,
                 stop as extern "C" fn(libc::c_int) as libc::sighandler_t,
-            )
-        };
+            );
+            libc::sigaddset(&mut set, signal);
+        }
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
     }
     let mut args = std::env::args().skip(1);
     let argument_count = args.len();

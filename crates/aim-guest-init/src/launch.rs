@@ -861,7 +861,7 @@ impl Drop for HostLauncher {
 
 /// `posix_spawn` with only the listed descriptors inherited
 /// (`POSIX_SPAWN_CLOEXEC_DEFAULT`), stdin from `/dev/null`, stdout and
-/// stderr to `log_fd`, in a new process group.
+/// stderr to `log_fd`, in a new process group with no signal blocked.
 fn spawn(
     argv: &[String],
     env: &[(String, String)],
@@ -894,9 +894,15 @@ fn spawn(
             libc::posix_spawnattr_destroy(&mut attr);
             return Err(format!("spawn responsibility: {error}"));
         }
+        // A service starts with no signal blocked, as init's children do
+        // (its `UnblockSignals` at fork), whatever mask this process has.
+        let mut unblocked: libc::sigset_t = 0;
+        libc::sigemptyset(&mut unblocked);
+        libc::posix_spawnattr_setsigmask(&mut attr, &unblocked);
         libc::posix_spawnattr_setflags(
             &mut attr,
             (libc::POSIX_SPAWN_SETPGROUP
+                | libc::POSIX_SPAWN_SETSIGMASK
                 | libc::POSIX_SPAWN_CLOEXEC_DEFAULT
                 | if suspended {
                     libc::POSIX_SPAWN_START_SUSPENDED
@@ -1104,6 +1110,39 @@ mod tests {
             "owned child must already be reaped"
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A service's SIGTERM reaches it even when init's thread has it
+    /// blocked, as a launcher's inherited mask would (#2704).
+    #[test]
+    fn a_service_starts_with_no_signal_blocked() {
+        let log = fs::File::open("/dev/null").unwrap();
+        let mut term: libc::sigset_t = 0;
+        let mut old: libc::sigset_t = 0;
+        // SAFETY: masks of this test's own thread, restored below.
+        unsafe {
+            libc::sigemptyset(&mut term);
+            libc::sigaddset(&mut term, libc::SIGTERM);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &term, &mut old);
+        }
+        let spawned = spawn(
+            &["/bin/sleep".into(), "60".into()],
+            &[],
+            &[],
+            log.as_raw_fd(),
+            false,
+        );
+        // SAFETY: as above.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+        let pid = spawned.unwrap() as i32;
+        let mut status = 0;
+        // SAFETY: signalling and reaping the child this test started.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+        }
+        assert!(libc::WIFSIGNALED(status));
+        assert_eq!(libc::WTERMSIG(status), libc::SIGTERM);
     }
 
     #[test]

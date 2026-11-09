@@ -326,8 +326,16 @@ guest-init --image <derived> --data <data> --run \
 - `--exclude` keeps services (and `exec` programs) from starting. A
   `wait_for_prop` or `exec` that only an excluded service would end is
   satisfied after two seconds, as with `--only`.
-- Shutdown cleanup is incomplete on SIGINT: guest processes and the
-  mounted data volume can remain after guest-init exits (#796).
+- SIGINT, SIGTERM or SIGHUP to `cargo aim boot` stops the guest and
+  leaves no guest process. `cargo aim boot` catches those signals rather
+  than blocking them (a blocked mask survives exec, so guest-init never saw
+  its stop and was killed after a minute, orphaning logd, prng_seeder,
+  hwservicemanager and tombstoned), guest-init unblocks them itself, and
+  services start with no signal blocked, as init's children do (#2704).
+  Three disposable boots stopped in 3.5 s each (2026-11-10). About 25
+  native services, mostly binder HALs, still outlast SIGTERM's 3 s and end
+  at SIGKILL, and `cargo aim boot` leaves the DATA image that guest-init
+  hands off attached after it exits.
 - `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
   attaches at `<data>` for the boot and detaches when it stops
   (docs/storage.md); `cargo aim storage` shows what it occupies.
