@@ -77,7 +77,12 @@ never sent to the display server, and its activity is launched straight
 to stopped. A start that brings it to the front (a HOME intent) brings the
 desktop there: the focused app's tasks go behind it and stop, the server hides
 that app (`HIDE`), and the home is resumed and focused until another task comes
-to the front (#2715; host tests only, no guest boot). On fresh data GoogleSdkSetup's DefaultActivity resolves first,
+to the front (#2715; host tests only, no guest boot). When an app process
+dies, its stopped activities that saved instance state (or need none) stay in
+their tasks, the root home task's home included, and are relaunched from that
+state when next resumed or visible; a relaunch is resumed only as the top of a
+visible task, else launched to stopped, as behind the desktop (#2736, #2716;
+host tests only). On fresh data GoogleSdkSetup's DefaultActivity resolves first,
 provisions the device and finishes, then `dev.aim.home/.Home` runs stopped in
 the next root home task. `getTasks`, organizer registration and the window dump
 include the task at the bottom, also after its process died. A start of a home

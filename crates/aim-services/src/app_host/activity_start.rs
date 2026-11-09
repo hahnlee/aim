@@ -44,7 +44,9 @@ pub(super) const START_CANCELED: i32 = -96;
 /// `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
 const FLAG_ACTIVITY_FORWARD_RESULT: i32 = 0x0200_0000;
 const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
-/// `ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS`, `FLAG_NO_HISTORY`.
+/// `ActivityInfo.FLAG_STATE_NOT_NEEDED`, `FLAG_EXCLUDE_FROM_RECENTS`,
+/// `FLAG_NO_HISTORY`.
+const FLAG_STATE_NOT_NEEDED: i32 = 0x10;
 pub const FLAG_EXCLUDE_FROM_RECENTS: i32 = 0x20;
 const FLAG_NO_HISTORY: i32 = 0x80;
 /// `ActivityInfo.RESIZE_MODE_UNRESIZEABLE`,
@@ -377,6 +379,8 @@ impl AppHost {
             result_who: request.result_who,
             request_code: request.request_code,
             transition_overrides: Default::default(),
+            saved_state: None,
+            persistent_state: None,
         };
         self.activities
             .records
@@ -720,6 +724,7 @@ impl AppHost {
         let style = self.window_style(&info);
         let no_history = intent.flags & stack::FLAG_ACTIVITY_NO_HISTORY != 0
             || info.flags & FLAG_NO_HISTORY != 0;
+        let state_not_needed = info.flags & FLAG_STATE_NOT_NEEDED != 0;
         let (launch_mode, result_to) = (info.launch_mode, request.result_to);
         // Its result, `RESULT_CANCELED` until it sets one.
         let result = result_to.map(|_| {
@@ -741,7 +746,13 @@ impl AppHost {
             activity.result,
             activity.occludes_parent,
             activity.no_history,
-        ) = (result, style.occludes_parent(), no_history);
+            activity.state_not_needed,
+        ) = (
+            result,
+            style.occludes_parent(),
+            no_history,
+            state_not_needed,
+        );
         activity.affinity = affinity.clone();
         activity.pending = start_seq == 0;
         let identity = stack::Identity {
@@ -1587,8 +1598,19 @@ impl AppHost {
             match report {
                 Report::Paused => stack.paused(token),
                 Report::Idle => stack.idle(token),
-                Report::Stopped => {
-                    stack.stopped(token);
+                Report::Stopped { state, persistent } => {
+                    // `activityStopped` of a stopping activity:
+                    // `setSavedState` of what it saved.
+                    if stack.stopped(token, state.is_some())
+                        && let Some(r) = self.activities.records.lock().unwrap().get_mut(&token)
+                    {
+                        if state.is_some() {
+                            r.saved_state = state;
+                        }
+                        if persistent.is_some() {
+                            r.persistent_state = persistent;
+                        }
+                    }
                     Vec::new()
                 }
                 Report::Destroyed => {
@@ -1680,7 +1702,11 @@ impl AppHost {
 pub enum Report {
     Paused,
     Idle,
-    Stopped,
+    /// With the instance and persistent state it saved, if it did.
+    Stopped {
+        state: Option<super::kept::KeptBundle>,
+        persistent: Option<super::kept::RawBundle>,
+    },
     Destroyed,
 }
 

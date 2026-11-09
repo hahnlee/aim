@@ -2366,7 +2366,7 @@ pub(super) mod tests {
             drop(records);
             let mut a = Activity::new(token, id, 7, "p/p.Main", 0, 0, None);
             a.state = State::Resumed;
-            a.never_resumed = false;
+            a.have_state = false;
             host.activities.stack.lock().unwrap().activities.push(a);
             activity_tokens.push(token);
         }
