@@ -219,6 +219,7 @@ fn a_blocked_queue_becomes_runnable_past_its_tranche() {
         id_for_response_event: 0,
         temp_allowlist: None,
         urgent: false,
+        receivers: std::sync::OnceLock::new(),
     });
     let to = |start_seq, priority| Registered {
         handle: 1,
@@ -322,6 +323,7 @@ pub(super) fn unordered(host: &AppHost) -> Arc<Record> {
         id_for_response_event: 0,
         temp_allowlist: None,
         urgent: false,
+        receivers: std::sync::OnceLock::new(),
     })
 }
 

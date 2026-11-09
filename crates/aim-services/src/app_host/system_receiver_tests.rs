@@ -143,6 +143,7 @@ fn system_deliveries(ordered: bool) {
             id_for_response_event: 0,
             temp_allowlist: None,
             urgent: false,
+            receivers: std::sync::OnceLock::new(),
         });
         let targets = [
             receiver("android", "com.android.server.BootReceiver", 1000),
