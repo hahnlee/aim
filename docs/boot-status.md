@@ -44,8 +44,10 @@ with a result, waited for up to `MAX_BROADCAST_TIME` (10 s), then
 stats and app standby flushed). The original receivers in aim-system run
 (SyncManager writes its state, 50-180 ms after `aimctl stop`), replacing the
 private sync flush that stood in for its receiver; five of six disposable boots
-stopped in 0.89-1.15 s, one in 7.0 s after the broadcast had finished
-(2026-11-10). Activities are not put to sleep first, and app ops, battery stats
+stopped in 0.89-1.15 s, one in 7.0 s after the broadcast had finished, as in
+#2657 (2026-11-10). ACTION_SHUTDOWN, not
+ordered, goes to every process at once, so one receiver that does not finish
+holds back none of the others. Activities are not put to sleep first, and app ops, battery stats
 and process stats write nothing at shutdown (#1872).
 
 `signalfd4` (#2648) creates and updates signal descriptors whose reads take the

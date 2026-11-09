@@ -27,6 +27,8 @@ impl AppHost {
         let jobs = self.job_scheduler.get().map_or(Ok(()), |jobs| jobs.flush());
         eprintln!("app host: Sending shutdown broadcast...");
         let (sent, done) = mpsc::sync_channel(1);
+        // Its options' DEFERRAL_POLICY_UNTIL_ACTIVE is not modelled: the
+        // broadcast queue defers no delivery to a cached process.
         self.broadcasts.send_from_system_with_callback(
             self,
             RawIntent::new(ACTION_SHUTDOWN, SHUTDOWN_FLAGS, &[]),

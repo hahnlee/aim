@@ -5,9 +5,10 @@
 //! manifest ones merged by priority, each process's in the order sent. A
 //! manifest receiver's process is started for it, and it is sent
 //! (`scheduleReceiver`) once the process attached; its process waits for
-//! its `finishReceiver` before its next. An ordered broadcast, or one with
-//! a result receiver, goes to one receiver at a time, each finishing before
-//! the next. A receiver is checked as a broadcast is enqueued, a
+//! its `finishReceiver` before its next. An ordered broadcast goes to one
+//! receiver at a time, each finishing before the next; one not ordered with
+//! a result receiver goes to all at once, its result after their finishes.
+//! A receiver is checked as a broadcast is enqueued, a
 //! preflight's checks (`shouldSkipAtEnqueueMessage`) with
 //! `avoid_note_op_at_enqueue`, its permissions' and the broadcast's app ops
 //! checked rather than noted, and checked again as it is delivered
@@ -233,12 +234,16 @@ struct Sticky {
     resolved_type: Option<String>,
 }
 
-/// A broadcast going to its receivers one after another, each finishing
-/// (`finishReceiver`) before the next, then to its result receiver.
+/// A broadcast with a result: an ordered one goes to its receivers one
+/// after another, each finishing (`finishReceiver`) before the next; one
+/// not ordered goes to all of them at once, each process's queue in turn
+/// (`BroadcastQueueModernImpl`). Then it goes to its result receiver.
 struct Chain {
     record: Arc<Record>,
     /// The receivers to come.
     targets: VecDeque<Target>,
+    /// Of a broadcast not ordered, the receivers sent it and not finished.
+    outstanding: usize,
     result_code: i32,
     result_data: Option<String>,
     result_extras: Option<KeptBundle>,
@@ -1436,6 +1441,7 @@ impl Broadcasts {
                         result_extras: record.result_extras.clone(),
                         record,
                         targets: targets.into(),
+                        outstanding: 0,
                         aborted: false,
                         result_to: result_to.map(|h| (host.process.strong(h), result_to_app)),
                         done: None,
@@ -1621,8 +1627,8 @@ impl Broadcasts {
 
     /// `ActivityManagerInternal.broadcastIntentWithCallback` of a system
     /// service of the app host, to `user`'s registered receivers when the
-    /// intent says so: not serialized, its receivers cannot abort it, and
-    /// `done` runs once it has gone through them.
+    /// intent says so: not serialized, it goes to them all at once, they
+    /// cannot abort it, and `done` runs once each has finished.
     pub fn send_from_system_with_callback(
         &self,
         host: &AppHost,
@@ -1767,6 +1773,7 @@ impl Broadcasts {
                         result_extras: None,
                         record: record.clone(),
                         targets: targets.into(),
+                        outstanding: 0,
                         aborted: false,
                         result_to: None,
                         done: Some(done),
@@ -2695,8 +2702,41 @@ impl Broadcasts {
     }
 
     /// Moves chain `id` on to its next receiver, or, past its last or
-    /// aborted, to its result receiver.
+    /// aborted, to its result receiver. One not ordered is sent to all its
+    /// receivers at its start, and each finish counts down to its result.
     fn advance(&self, host: &AppHost, st: &mut State, id: u64) {
+        if let Some(chain) = st.chains.get_mut(&id)
+            && !chain.record.ordered
+        {
+            if chain.outstanding > 0 {
+                chain.outstanding -= 1;
+            } else {
+                let record = chain.record.clone();
+                let targets = std::mem::take(&mut chain.targets);
+                let mut sent = 0;
+                for target in targets {
+                    match target {
+                        Target::Registered(r) => {
+                            if !st.receivers.iter().any(|x| x.receiver.handle == r.handle) {
+                                continue;
+                            }
+                            let delivery = Delivery::Chained(id, r);
+                            self.queue_delivery(st, QueueId::Warm(r.start_seq), None, delivery);
+                        }
+                        Target::Manifest(m) => {
+                            let to = self.manifest_queue(host, &m);
+                            let delivery = Delivery::Manifest(record.clone(), m.clone(), Some(id));
+                            self.queue_delivery(st, to, Some(&m), delivery);
+                        }
+                    }
+                    sent += 1;
+                }
+                st.chains.get_mut(&id).unwrap().outstanding = sent;
+            }
+            if st.chains[&id].outstanding > 0 {
+                return;
+            }
+        }
         loop {
             let Some(chain) = st.chains.get_mut(&id) else {
                 return;
@@ -3425,6 +3465,7 @@ mod wait_tests {
             Chain {
                 record: earlier.clone(),
                 targets: VecDeque::new(),
+                outstanding: 0,
                 result_code: 0,
                 result_data: None,
                 result_extras: None,
