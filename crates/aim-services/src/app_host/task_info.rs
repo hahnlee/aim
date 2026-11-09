@@ -482,6 +482,23 @@ fn universal_for_user(
     )
 }
 
+/// `Task.isResizeable` of a task forced resizeable if `forced` (a
+/// standard one, by `mForceResizableActivities`), else of its root
+/// activity's `overrides` (`mForceResizeOverride`,
+/// `mForceNonResizeOverride`) and own resizeability `own`, each asked only
+/// if it counts.
+fn task_resizeable(
+    forced: bool,
+    overrides: impl FnOnce() -> Result<(bool, bool), Exception>,
+    own: impl FnOnce() -> Result<bool, Exception>,
+) -> Result<bool, Exception> {
+    if forced {
+        return Ok(true);
+    }
+    let (force_resize, force_non_resize) = overrides()?;
+    Ok(!force_non_resize && (force_resize || own()?))
+}
+
 /// `IPackageManager.getUserMinAspectRatio` of the user of the activity
 /// `info` of `package`.
 fn user_min_aspect_ratio(
@@ -513,16 +530,12 @@ fn app_compat_resize_overrides(
     enabled: impl Fn(i64) -> bool,
     user_fullscreen: impl FnOnce() -> Result<bool, Exception>,
 ) -> Result<(bool, bool), Exception> {
-    // An `OptProp` of the app is false unless absent (or of a type read as
-    // none) or true: `getBoolean` of a property of another type is false.
+    // An `OptProp` of the app is false unless absent or true: `getBoolean`
+    // of a property of another type is false.
     let allows = |name| {
-        use crate::package::pkg::PropertyValue;
-        state.property(name, package, None).is_none_or(|p| {
-            matches!(
-                p.value,
-                PropertyValue::Bool(true) | PropertyValue::Unknown(_)
-            )
-        })
+        state
+            .property(name, package, None)
+            .is_none_or(|p| p.value == crate::package::pkg::PropertyValue::Bool(true))
     };
     let ratio = user_min_aspect_ratio(state, package, info);
     // `shouldApplyUserFullscreenOverride`; the option implies the user's
@@ -769,17 +782,15 @@ impl AppHost {
         // then the root activity's overrides (`mForceNonResizeOverride`,
         // `mForceResizeOverride`) and its universal resizeability
         // (`updateForceResizeOverrides`) count.
-        let is_resizeable =
-            if multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD {
-                true
-            } else {
-                let (force_resize, force_non_resize) = self.force_resize_overrides(root)?;
-                !force_non_resize
-                    && (force_resize
-                        || RESIZEABLE_MODES.contains(&root.resize_mode)
-                        || root.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0
-                        || self.universal_resizeable(&multi_window.universal, root, true)?)
-            };
+        let is_resizeable = task_resizeable(
+            multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD,
+            || self.force_resize_overrides(root),
+            || {
+                Ok(RESIZEABLE_MODES.contains(&root.resize_mode)
+                    || root.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0
+                    || self.universal_resizeable(&multi_window.universal, root, true)?)
+            },
+        )?;
         let checks_min_size = self.platform()?.compat.is_enabled(
             CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
             root.info.application_info.item.package_name.as_deref(),
@@ -1641,6 +1652,10 @@ pub(super) mod tests {
         // The option is asked only if it counts.
         let read = app_compat_resize_overrides(&state(&[], unset), "p", &info, forced, || panic!());
         assert_eq!(read.unwrap(), (true, false));
+        // A forced resizeable standard task is resizeable whatever its
+        // overrides; else FORCE_NON_RESIZE_APP vetoes the rest.
+        assert!(task_resizeable(true, || panic!(), || panic!()).unwrap());
+        assert!(!task_resizeable(false, || Ok((true, true)), || panic!()).unwrap());
     }
 
     #[test]

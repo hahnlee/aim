@@ -1458,7 +1458,7 @@ fn declare_app_compat_overrides(image: &std::path::Path) {
         .map(|id| format!(r#"<compat-change id="{id}" disabled="true" overridable="true"/>"#))
         .concat();
     std::fs::write(
-        dir.join("services-platform-compat-config.xml"),
+        dir.join("framework-platform-compat-config.xml"),
         format!("<config>{changes}</config>"),
     )
     .unwrap();
