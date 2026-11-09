@@ -56,11 +56,11 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
 3. **State.** The layer's per-process state is written into one blob
    (`sys/fork/state.rs`). Each module saves and restores its own part:
    - the fd table: each fd's kind (eventfd, timerfd, socket, epoll,
-     inotify, directory stream, memfd), with dup'ed fds sharing one object,
-     and the hidden fds;
+     inotify, pidfd, directory stream, memfd), with dup'ed fds sharing one
+     object, and the hidden fds;
    - identity and the by-pid entry, the executable, the stack areas,
      personality, prctl state, the program break, file-copy records,
-     memfds and where they are mapped, SELinux attributes and pidfds;
+     memfds and where they are mapped and SELinux attributes;
    - the owner attributes read so far (`sys/attrs.rs`), so an app does
      not read again what zygote read (a first stat of an image file costs
      about 20 µs, a known one 1.5-2.6 µs);
@@ -97,7 +97,9 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    fault, so apps forked from zygote made each other refault the shared
    libraries' code without end (#444). It then restores the
    state and rebuilds what the state names:
-   - kqueues for epolls, inotifies and pidfds on their numbers;
+   - kqueues for epolls, inotifies and pidfds on their numbers, one per
+     open file and duplicated onto each of its fds, with one close-on-exec
+     flag per open file rather than each fd's own (#2840);
    - the timerfds' expiries on the timer kqueue;
    - its by-pid entry;
    - a new binder connection;

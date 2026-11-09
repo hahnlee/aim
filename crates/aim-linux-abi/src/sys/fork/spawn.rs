@@ -813,9 +813,7 @@ fn spawn(
     private_fds: &[(i32, i32)],
     port: Port,
 ) -> Result<i32, i64> {
-    let mut kqueues: Vec<i32> = fdtab::kqueue_fds();
-    kqueues.extend(super::super::wait::pidfd_fds());
-    let kqueues = reservation_text(&kqueues, fds, private_fds)?;
+    let kqueues = reservation_text(&fdtab::kqueue_fds(), fds, private_fds)?;
     let mut argv: Vec<*const libc::c_char> = vec![exe.as_ptr()];
     argv.extend(runtime.iter().map(|a| a.as_ptr()));
     let fork_child = c"--fork-child";

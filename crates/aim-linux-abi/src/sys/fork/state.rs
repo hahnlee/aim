@@ -240,7 +240,6 @@ pub fn save(w: &mut Writer, mounts: &str) {
     ashmem::fork_save(w);
     attrs::fork_save(w);
     selinuxfs::fork_save(w);
-    wait::fork_save(w);
     w.str(mounts);
     fdtab::fork_save(w);
     ptrace::fork_save(w);
@@ -295,8 +294,6 @@ pub fn restore(r: &mut Reader) -> bool {
     attrs::fork_restore(r);
     r.stage("selinuxfs");
     selinuxfs::fork_restore(r);
-    r.stage("wait");
-    wait::fork_restore(r);
     r.stage("mount-namespace");
     if let Err(error) = crate::vfs::load_own_mounts(&r.str()) {
         eprintln!("fork mount namespace restore failed: errno={error}");

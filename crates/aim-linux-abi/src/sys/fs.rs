@@ -964,7 +964,9 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
         Kind::Cgroup(open) => Some(super::cgroup::read(&open, iov, None)),
         Kind::Sock(_) => net::read_pinned(pin, iov),
         Kind::Dir(_) => Some(-EISDIR),
-        Kind::Epoll(_) | Kind::SyncFile | Kind::Binder(_) => Some(-(EINVAL as i64)),
+        Kind::Epoll(_) | Kind::PidFd(_) | Kind::SyncFile | Kind::Binder(_) => {
+            Some(-(EINVAL as i64))
+        }
         Kind::TracePipe(_) if iov.iter().all(|v| v.iov_len == 0) => Some(0),
         Kind::TracePipe(_) | Kind::Content | Kind::Knob(_) | Kind::Random | Kind::Ashmem => None,
         Kind::Memfd(_) => {
@@ -1023,7 +1025,7 @@ fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64>
         Kind::Kmsg(open) => Some(super::kmsg::write(&open, iov)),
         Kind::Cgroup(open) => Some(super::cgroup::write(&open, iov, None)),
         Kind::Dir(_) => Some(-(EBADF as i64)),
-        Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile | Kind::Binder(_) => {
+        Kind::Epoll(_) | Kind::Inotify(_) | Kind::PidFd(_) | Kind::SyncFile | Kind::Binder(_) => {
             Some(-(EINVAL as i64))
         }
         Kind::TracePipe(_) => Some(-(EBADF as i64)),

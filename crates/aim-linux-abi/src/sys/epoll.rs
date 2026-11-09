@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::fdtab::{self, Kind};
+use super::wait::ReapAlias;
 use crate::errno::{self, EBADF, EEXIST, EINVAL, ENOENT, EPERM};
 
 // Each receipt cohort is bounded independently, including busy level-triggered waits.
@@ -267,6 +268,8 @@ fn pty_ctl(
 pub struct Epoll {
     cloexec: bool,
     interest: Mutex<HashMap<i32, Interest>>,
+    /// The pidfd interests' own fds of their reap watches.
+    reaps: Mutex<HashMap<i32, ReapAlias>>,
     ptys: Mutex<Vec<PtyInterest>>,
 }
 struct PtyInterest {
@@ -285,7 +288,7 @@ fn pty_changes(
 ) -> Vec<libc::kevent> {
     use std::os::fd::AsRawFd;
     let data = watch.observation.data().as_raw_fd();
-    let mut changes = changes(data, old, new);
+    let mut changes = changes(data, None, old, new);
     if let Some(notification) = watch.observation.notification() {
         let fd = notification.as_raw_fd();
         if old.is_some() {
@@ -364,10 +367,16 @@ fn apply(kq: i32, changes: &[libc::kevent]) -> i64 {
     0
 }
 
-/// The knote changes that make `kq` match `new` for `fd` (from `old`).
+/// The knote changes that make `kq` match `new` for `fd` (from `old`),
+/// and for a pidfd's on `reap`, its interest's alias of the reap watch.
 /// Darwin keeps a knote's EV_CLEAR/EV_DISPATCH from its creation, so a
 /// modified interest replaces its knotes.
-fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc::kevent> {
+fn changes(
+    fd: i32,
+    reap: Option<i32>,
+    old: Option<&Interest>,
+    new: Option<&Interest>,
+) -> Vec<libc::kevent> {
     let mut v = Vec::new();
     for (filter, want) in [
         (
@@ -403,7 +412,7 @@ fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc:
     }
     // A pidfd's reap is its reap watch's, as the pidfd itself polls
     // readable from the exit on.
-    if let Some(reap) = super::wait::reap_watch_fd(fd) {
+    if let Some(reap) = reap {
         if old.is_some() {
             v.push(kev(reap, libc::EVFILT_READ, libc::EV_DELETE));
         }
@@ -466,6 +475,7 @@ pub fn epoll_create1(a: [u64; 6]) -> i64 {
         Kind::Epoll(Arc::new(Epoll {
             cloexec,
             interest: Mutex::new(HashMap::new()),
+            reaps: Mutex::new(HashMap::new()),
             ptys: Mutex::new(Vec::new()),
         })),
     );
@@ -527,7 +537,7 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     // watched for EPOLLERR and EPOLLHUP, as `ep_insert` and `ep_modify`
     // add them.
     let new = new.map(|mut n| {
-        match super::poll::reportable(fd, kind.as_ref()) {
+        match super::poll::reportable(kind.as_ref()) {
             Some(events) => {
                 n.events &= events as u32 | EPOLLEXCLUSIVE | EPOLLWAKEUP | EPOLLONESHOT | EPOLLET
             }
@@ -553,15 +563,41 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
         // Linux calls binder_poll from here: the thread becomes a poller.
         super::binder::poll(fd);
     }
-    let r = apply(epfd, &changes(fd, old.as_ref(), new.as_ref()));
+    // A pidfd's reap knote is on the interest's own alias of its reap
+    // watch; one left by a file closed since is closed, with its knote.
+    let mut reaps = ep.reaps.lock().unwrap();
+    let (mut alias, stale): (Option<ReapAlias>, _) = match reaps.remove(&fd) {
+        Some(alias) if alias.current(fd) => (Some(alias), None),
+        stale => (None, stale),
+    };
+    if new.is_some() && alias.is_none() {
+        alias = match ReapAlias::new(fd).transpose() {
+            Ok(alias) => alias,
+            Err(error) => return -(error as i64),
+        };
+    }
+    let reap = alias.as_ref().map(ReapAlias::fd);
+    let r = apply(epfd, &changes(fd, reap, old.as_ref(), new.as_ref()));
     if r < 0 {
+        if let Some(alias) = alias.filter(|_| old.is_some()) {
+            reaps.insert(fd, alias);
+        }
         return r;
     }
     match new {
-        Some(n) => interest.insert(fd, n),
-        None => interest.remove(&fd),
-    };
+        Some(n) => {
+            interest.insert(fd, n);
+            if let Some(alias) = alias.take() {
+                reaps.insert(fd, alias);
+            }
+        }
+        None => {
+            interest.remove(&fd);
+        }
+    }
+    drop(reaps);
     drop(interest);
+    drop((alias, stale));
     trace_ctl(epfd, op, fd, new.or(old));
     0
 }
@@ -586,7 +622,7 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
     let pipe = eof
         .then(|| {
             let fd = k.ident as i32;
-            super::poll::pipe(fd, fd, fdtab::get(fd).as_ref())
+            super::poll::pipe(fd, fdtab::get(fd).as_ref())
         })
         .flatten();
     match pipe {
@@ -844,18 +880,32 @@ fn ready(
     let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len().min(limit));
     let mut rearm = Vec::new();
     let mut rearmed = Vec::new();
+    // Closed after the locks.
+    let mut retired = Vec::new();
     let mut interest = ep.interest.lock().unwrap();
+    let mut reaps = ep.reaps.lock().unwrap();
     for k in kevs {
         if !k.udata.is_null() {
             continue;
         }
         let ident = k.ident as i32;
-        // A pidfd's knote, or its reap watch's.
+        // A pidfd's knote, or its interest's alias of its reap watch.
         let (fd, reap) = if interest.contains_key(&ident) {
             (ident, false)
         } else {
-            match super::wait::reap_watch_owner(ident) {
-                Some(fd) => (fd, true),
+            let owner = reaps
+                .iter()
+                .find(|(_, alias)| alias.fd() == ident)
+                .map(|(&fd, alias)| (fd, alias.current(fd)));
+            match owner {
+                Some((fd, true)) => (fd, true),
+                // The pidfd's fd was closed, dropping its own knote, while
+                // a dup keeps the watch open: closing the alias drops this
+                // one.
+                Some((fd, false)) => {
+                    retired.extend(reaps.remove(&fd));
+                    continue;
+                }
                 None => continue,
             }
         };
@@ -894,7 +944,12 @@ fn ready(
         if out.len() == limit {
             if !rearmed.contains(&fd) {
                 rearmed.push(fd);
-                rearm.extend(changes(fd, None, Some(i)));
+                rearm.extend(changes(
+                    fd,
+                    reaps.get(&fd).map(ReapAlias::fd),
+                    None,
+                    Some(i),
+                ));
             }
             continue;
         }
@@ -914,11 +969,16 @@ fn ready(
                 if i.wants_read() {
                     rearm.push(kev(fd, libc::EVFILT_READ, libc::EV_DISABLE));
                 }
-            } else if let Some(reap) = super::wait::reap_watch_fd(fd) {
-                rearm.push(kev(reap, libc::EVFILT_READ, libc::EV_DISABLE));
+            } else if let Some(reap) = reaps.get(&fd) {
+                rearm.push(kev(reap.fd(), libc::EVFILT_READ, libc::EV_DISABLE));
             }
         } else if i.hangup_only() && i.events & EPOLLET == 0 {
-            rearm.extend(changes(fd, None, Some(i)));
+            rearm.extend(changes(
+                fd,
+                reaps.get(&fd).map(ReapAlias::fd),
+                None,
+                Some(i),
+            ));
         }
         out.push((fd, b, i.data));
     }
@@ -1114,6 +1174,7 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
     Arc::new(Epoll {
         cloexec,
         interest: Mutex::new(interest.into_iter().collect()),
+        reaps: Mutex::new(HashMap::new()),
         ptys: Mutex::new(ptys.into_iter().flatten().collect()),
     })
 }
@@ -1160,7 +1221,18 @@ fn rebuild(epolls: Vec<(i32, Arc<Epoll>)>) -> Result<(), errno::Errno> {
     }
     for (fd, ep) in made {
         let mut interest = ep.interest.lock().unwrap_or_else(|e| e.into_inner());
-        interest.retain(|&t, i| apply(fd, &changes(t, None, Some(i))) == 0);
+        let mut reaps = ep.reaps.lock().unwrap_or_else(|e| e.into_inner());
+        for &t in interest.keys() {
+            if let Some(alias) = ReapAlias::new(t).transpose()? {
+                reaps.insert(t, alias);
+            }
+        }
+        interest.retain(|&t, i| {
+            let reap = reaps.get(&t).map(ReapAlias::fd);
+            apply(fd, &changes(t, reap, None, Some(i))) == 0
+        });
+        reaps.retain(|t, _| interest.contains_key(t));
+        drop(reaps);
         drop(interest);
         for pty in ep.ptys.lock().unwrap().iter() {
             let result = apply(
