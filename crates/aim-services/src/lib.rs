@@ -405,16 +405,17 @@ impl NativeServices {
         Ok(endpoints)
     }
 
-    /// Flush before service stop; retain failures for reporting after final persistence.
+    /// `ShutdownThread.run`'s broadcast and activity manager shutdown before
+    /// service stop; retain failures for reporting after final persistence.
     pub fn prepare_shutdown(&self) {
-        // Android 16 r1 ShutdownThread.MAX_BROADCAST_TIME bounds ACTION_SHUTDOWN,
-        // whose SyncManager receiver calls writeAllState: use that same 10 seconds.
-        self.prepare_shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        self.prepare_shutdown_until(
+            std::time::Instant::now() + app_host::shutdown::MAX_BROADCAST_TIME,
+        );
     }
 
     fn prepare_shutdown_until(&self, deadline: std::time::Instant) {
         if let Some(host) = &self.app_host
-            && let Err(error) = host.flush_sync_before_stop(deadline)
+            && let Err(error) = host.shutdown_thread(deadline)
         {
             eprintln!("{error}");
             self.shutdown.lock().unwrap().errors.push(error);

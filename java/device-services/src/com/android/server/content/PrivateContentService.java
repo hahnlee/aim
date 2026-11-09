@@ -17,7 +17,6 @@ public final class PrivateContentService extends Binder {
         // Force the original lazy manager after all local owners, without phase/unlock admission.
         content.getSyncAdapterTypesAsUser(0);
     }
-    public void flush() { SyncStorageEngine.getSingleton().writeAllState(); }
     public void onBootPhase(int phase) { content.onBootPhase(phase); }
     public void onStartUser(int user) { content.onStartUser(user); }
     public void onUnlockUser(int user) { content.onUnlockUser(user); }

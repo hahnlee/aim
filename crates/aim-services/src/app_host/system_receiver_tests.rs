@@ -174,6 +174,7 @@ fn system_deliveries(ordered: bool) {
                     Chain {
                         record: record.clone(),
                         targets: targets.iter().cloned().map(Target::Manifest).collect(),
+                        outstanding: 0,
                         result_code: 0,
                         result_data: None,
                         result_extras: None,

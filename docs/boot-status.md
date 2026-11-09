@@ -37,6 +37,19 @@ used to outlive init's SIGTERM until SIGKILL 3 s later; three disposable
 app-host boots now stop in 1.17-1.20 s from `aimctl stop` (3.5 s before), with
 no process left (2026-11-10).
 
+A guest stop runs the app host's part of `ShutdownThread` before services stop
+(#2694): ACTION_SHUTDOWN (foreground, registered receivers only, every user)
+with a result, waited for up to `MAX_BROADCAST_TIME` (10 s), then
+`ActivityManagerService.shutdown`'s usage stats shutdown (DEVICE_SHUTDOWN,
+stats and app standby flushed). The original receivers in aim-system run
+(SyncManager writes its state, 50-180 ms after `aimctl stop`), replacing the
+private sync flush that stood in for its receiver; five of six disposable boots
+stopped in 0.89-1.15 s, one in 7.0 s after the broadcast had finished, as in
+#2657 (2026-11-10). ACTION_SHUTDOWN, not
+ordered, goes to every process at once, so one receiver that does not finish
+holds back none of the others. Activities are not put to sleep first, and app ops, battery stats
+and process stats write nothing at shutdown (#1872).
+
 `signalfd4` (#2648) creates and updates signal descriptors whose reads take the
 reader's pending signals as `signalfd_siginfo` records, returning the records
 copied before a fault. Poll, select and epoll report POLLIN alone, for a masked
@@ -1080,11 +1093,9 @@ admission, including restored or rescheduled jobs, waits for it. Broadcast-queue
 idle is not a readiness signal. Public sync forwarding remains inactive.
 The original storage/cache cohort now takes a process-lifetime writer lease and
 requires an account snapshot before opening stores (#1460 slice 6d). Shutdown
-flushes native jobs before the retained original state, while aim-system is still
-alive, with the original shutdown broadcast's 10-second deadline, then commits
-native jobs again after guest exit. Timeout or a dead/detached owner is logged
-without failing shutdown; live-owner errors are reported after final persistence.
-Host regressions cover hung/dead/error owners and normal ordering. Pinned-source JVM recovery
+commits native jobs, then the original SyncManager writes its state from its own
+ACTION_SHUTDOWN receiver while aim-system is still alive, and native jobs are
+committed again after guest exit. Pinned-source JVM recovery
 and ownership fixtures and native persistence tests cover host behavior only.
 The stopped disposable ASIF snapshot/restore tool retains the whole data cohort
 and checks its digest and supplied matched-runtime identity. Actual store recovery,
@@ -1565,8 +1576,7 @@ removeAllowlistedRestrictedPermission kills aim-system 3–4 s after it
 starts in both. On main its main thread was still stalled behind a broadcast
 start that waited for readiness, so readiness finished first; with starts held
 it reaches RoleController sooner, and readiness (stage 4 onward) waits for
-the restarted process. ACTION_SHUTDOWN is not
-broadcast at guest stop, so the original shutdown save does not run (2026-11-04).
+the restarted process.
 Installs are not dexopted: without ART Service (#2063) the
 completion reports the missing owner as the original's `observeException`
 does. Without `access.abx`, the permission manager migrates legacy definitions

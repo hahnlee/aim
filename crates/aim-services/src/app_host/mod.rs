@@ -196,6 +196,7 @@ pub mod settings_provider;
 pub mod settings_service;
 pub mod settings_validators;
 pub mod shortcut_service;
+pub mod shutdown;
 pub mod slice;
 pub mod stats_manager;
 pub mod status_bar;

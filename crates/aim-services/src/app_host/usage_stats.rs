@@ -306,6 +306,16 @@ impl AppHost {
         }
     }
 
+    /// `UsageStatsManagerInternal.prepareShutdown`: DEVICE_SHUTDOWN to the
+    /// user whose stats are loaded and its stats persisted, then app
+    /// standby's flushed.
+    pub(super) fn prepare_usage_shutdown(&self) -> Result<(), Exception> {
+        if let Some(user) = self.usage.lock().unwrap().as_mut() {
+            user.shutdown(clocks());
+        }
+        self.flush_standby()
+    }
+
     /// The service's listener of the user's stats: a flush to disk after
     /// `FLUSH_INTERVAL` when they first change (`onStatsUpdated`), the
     /// apps' standby buckets checked when they reload (`onStatsReloaded`),

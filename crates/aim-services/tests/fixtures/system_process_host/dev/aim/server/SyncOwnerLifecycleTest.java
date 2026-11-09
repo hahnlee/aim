@@ -54,13 +54,6 @@ public final class SyncOwnerLifecycleTest {
             original.broadcast(context, 0); // First possible main-looper receiver execution.
             drain();
             require(ready && acknowledgements == 1);
-            int writes = com.android.server.content.SyncStorageEngine.writes;
-            Bridge.system = false;
-            try { lifecycle.onShutdown(); throw new AssertionError(); }
-            catch (SecurityException expected) {} finally { Bridge.system = true; }
-            require(com.android.server.content.SyncStorageEngine.writes == writes);
-            lifecycle.onShutdown();
-            require(com.android.server.content.SyncStorageEngine.writes == writes + 1);
             lifecycle.onUserUnlocking(0);
             drain();
             require(replays == 1 && acknowledgements == 1);
