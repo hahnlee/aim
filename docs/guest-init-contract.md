@@ -346,9 +346,11 @@ attribute `dev.aim.fscrypt-context`. The layer sets it on
 symlink a guest creates in a directory that has one. guest-init prepares
 the filesystem's fscrypt owner with the data directory
 (`aim_storage::fscrypt`): `<runtime>/fscrypt-root` locates the persistent
-`<data>/fscrypt`, whose `roots` lists the guest paths given a policy (while
-it is empty no attribute is read), and `<runtime>/fscrypt-keyring`, empty
-at each boot, holds the added keys' specifiers and users, never a key.
+`<data>/fscrypt`, where the marker `policies` exists once any directory
+has been given a policy (until then no attribute is read, and after, only
+on the data filesystem's device), and `<runtime>/fscrypt-keyring` (mode
+0600, replaced by a rename under `fscrypt-keyring.lock`), empty at each
+boot, holds the added keys' specifiers and users, never a key.
 
 ## 7. `/proc` and `/sys` values: `<runtime>/kernfs`
 

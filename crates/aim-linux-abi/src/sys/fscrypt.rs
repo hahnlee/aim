@@ -15,7 +15,7 @@
 //! link or rename across policies (#2845), locked directories (ENOKEY,
 //! no-key names, #2846).
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::fd::AsRawFd;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,7 +64,7 @@ fn owner() -> Result<Option<&'static Owner>, Errno> {
         .map_err(|error| *error)
 }
 
-/// Whether any directory has a policy. Roots are never forgotten, so a
+/// Whether any directory has a policy. Policies are never removed, so a
 /// process asks the owner only until one exists.
 fn active() -> Result<bool, Errno> {
     static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -74,7 +74,7 @@ fn active() -> Result<bool, Errno> {
     let Some(owner) = owner()? else {
         return Ok(false);
     };
-    let active = owner.has_roots().map_err(io)?;
+    let active = owner.has_policies().map_err(io)?;
     ACTIVE.store(active, Ordering::Relaxed);
     Ok(active)
 }
@@ -129,10 +129,11 @@ fn renewed(context: &[u8]) -> Vec<u8> {
     context
 }
 
-/// `fscrypt_prepare_new_inode`: `child`, just created in `parent`, takes
-/// the parent's policy with a nonce of its own.
-pub(super) fn inherit(parent: Host, child: Host) -> Result<(), Errno> {
-    if !active()? {
+/// `fscrypt_prepare_new_inode`: `child`, just created in `parent` (on
+/// host device `device`), takes the parent's policy with a nonce of its
+/// own.
+pub(super) fn inherit(parent: Host, device: i32, child: Host) -> Result<(), Errno> {
+    if !active()? || owner()?.is_none_or(|owner| owner.device() != device as u64) {
         return Ok(());
     }
     let Some(context) = context(parent) else {
@@ -144,8 +145,10 @@ pub(super) fn inherit(parent: Host, child: Host) -> Result<(), Errno> {
     store(child, &renewed(&context))
 }
 
-/// `fscrypt_supported_policy` for ext4 with 4096-byte blocks and 32-bit
-/// inode numbers.
+/// `fscrypt_supported_policy` for ext4 with 4096-byte blocks: ext4 has
+/// stable inode numbers of 32 bits, which the IV_INO_LBLK flags need. The
+/// host's inode numbers are stable, and no IV is derived from them, since
+/// the bytes stay plaintext.
 fn supported(policy: &[u8]) -> bool {
     let (contents, filenames, flags) = (policy[1], policy[2], policy[3]);
     let v1_modes = matches!((contents, filenames), (1, 4) | (5, 6) | (9, 9));
@@ -170,7 +173,8 @@ fn supported(policy: &[u8]) -> bool {
         && policy[5..8] == [0; 3]
 }
 
-fn empty_directory(fd: i32) -> Result<bool, Errno> {
+/// The names in a directory, all or the first.
+fn entries(fd: i32, all: bool) -> Result<Vec<CString>, Errno> {
     let _own = super::fork::spawn::own_fds();
     let copy = unsafe {
         libc::openat(
@@ -188,20 +192,38 @@ fn empty_directory(fd: i32) -> Result<bool, Errno> {
         unsafe { libc::close(copy) };
         return Err(error);
     }
-    let mut empty = true;
-    loop {
+    let mut names = Vec::new();
+    while all || names.is_empty() {
         let entry = unsafe { libc::readdir(dir) };
         if entry.is_null() {
             break;
         }
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
-        if name != b"." && name != b".." {
-            empty = false;
-            break;
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
         }
     }
     unsafe { libc::closedir(dir) };
-    Ok(empty)
+    Ok(names)
+}
+
+/// A create that raced the emptiness check of a policy being set: as on
+/// Linux the directory was not empty, so it and what inherited its policy
+/// meanwhile lose it again. (A create whose inheritance read the policy
+/// before this and stores it after keeps it.)
+fn withdraw(fd: i32, names: &[CString]) -> Result<(), Errno> {
+    attrs::remove(Host::Fd(fd), CONTEXT)?;
+    let mut path = [0u8; libc::PATH_MAX as usize];
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } < 0 {
+        return Err(errno::last());
+    }
+    let dir = CStr::from_bytes_until_nul(&path).map_err(|_| errno::EINVAL)?;
+    for name in names {
+        let child = [dir.to_bytes(), b"/", name.to_bytes()].concat();
+        let child = CString::new(child).map_err(|_| errno::EINVAL)?;
+        attrs::remove(Host::Path(&child), CONTEXT)?;
+    }
+    Ok(())
 }
 
 fn capable(id: &Identity, cap: u32) -> bool {
@@ -237,7 +259,7 @@ fn set_policy(owner: &Owner, fd: i32, arg: u64, id: &Identity) -> Result<i64, Er
             if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
                 return Err(errno::ENOTDIR);
             }
-            if !empty_directory(fd)? {
+            if !entries(fd, false)?.is_empty() {
                 return Err(ENOTEMPTY);
             }
             if !supported(&wanted) {
@@ -256,8 +278,15 @@ fn set_policy(owner: &Owner, fd: i32, arg: u64, id: &Identity) -> Result<i64, Er
                 0 => [&[1], &wanted[1..], &[0; NONCE][..]].concat(),
                 _ => [&wanted[..], &[0; NONCE][..]].concat(),
             };
-            owner.add_root(&guest).map_err(io)?;
+            owner.policy_set().map_err(io)?;
             store(Host::Fd(fd), &renewed(&context))?;
+            // Creates do not take the inode lock; one may have come between
+            // the check and the store.
+            let names = entries(fd, true)?;
+            if !names.is_empty() {
+                withdraw(fd, &names)?;
+                return Err(ENOTEMPTY);
+            }
             Ok(0)
         };
         change().unwrap_or_else(|error: Errno| -(error as i64))
@@ -396,8 +425,9 @@ fn ioctl_as(fd: i32, request: u64, arg: u64, id: &Identity) -> Option<i64> {
         SET_POLICY => set_policy(owner, fd, arg, id),
         GET_POLICY => existing(fd).and_then(|context| {
             let policy = policy(&context).ok_or(errno::EINVAL)?;
+            // `fscrypt_ioctl_get_policy`: only v1 fits.
             if policy[0] != 0 {
-                return Err(EOVERFLOW);
+                return Err(errno::EINVAL);
             }
             super::user_memory::write_exact(arg, &policy).map(|_| 0)
         }),
@@ -427,7 +457,6 @@ fn ioctl_as(fd: i32, request: u64, arg: u64, id: &Identity) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
     use std::path::Path;
 
     const AT: u64 = crate::vfs::LINUX_AT_FDCWD as u64;
@@ -688,7 +717,7 @@ mod tests {
         assert_eq!(get_ex(&v2_dir, 24), Ok(policy2.clone()));
         assert_eq!(
             call(&v2_dir, GET_POLICY, &mut legacy, &root()),
-            errno(EOVERFLOW)
+            errno(errno::EINVAL)
         );
         assert_eq!(
             set(&open(view, "other"), &v2(1, 10, 0, identifier), &root()),
@@ -732,6 +761,31 @@ mod tests {
         nonces.dedup();
         assert_eq!(nonces.len(), 4);
 
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    #[test]
+    fn a_create_racing_the_policy_withdraws_it() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        mkdir("raced");
+        let dir = open(view, "raced");
+        let policy = v1(1, 4, 0, 3);
+        assert_eq!(call(&dir, SET_POLICY, &mut policy.clone(), &root()), 0);
+        // What the race leaves before the re-check: the directory's policy
+        // and a child that inherited it.
+        create("raced/late");
+        assert!(context(Host::Fd(open(view, "raced/late").as_raw_fd())).is_some());
+        let names = entries(dir.as_raw_fd(), true).unwrap();
+        assert_eq!(names, [c"late".to_owned()]);
+        withdraw(dir.as_raw_fd(), &names).unwrap();
+        assert_eq!(get_ex(&dir, 24), Err(errno(errno::ENODATA)));
+        assert_eq!(
+            get_ex(&open(view, "raced/late"), 24),
+            Err(errno(errno::ENODATA))
+        );
         std::fs::remove_dir_all(&host).unwrap();
     }
 }

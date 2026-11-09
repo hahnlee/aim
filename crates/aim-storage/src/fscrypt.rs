@@ -1,14 +1,16 @@
 //! The fscrypt state of the data filesystem (ADR 0016): its keyring and
-//! the table of policy roots, shared by every guest process as the kernel
-//! keeps them per superblock.
+//! whether any inode has a policy, shared by every guest process as the
+//! kernel keeps them per superblock.
 //!
 //! guest-init prepares both when it mounts the data directory
 //! ([`Owner::prepare`]): the keyring is empty at every boot, as a mounted
-//! filesystem's is, and lives in the runtime directory; the roots table,
-//! the guest paths of directories given a policy, persists with the data.
-//! The locator `<runtime>/fscrypt-root` names the persistent directory, as
-//! `fs-verity-root` names the verity store. Changes are serialized by
-//! `flock` on the file they change.
+//! filesystem's is, and lives in the runtime directory; the marker
+//! `policies`, created when a directory is first given a policy, persists
+//! with the data. The locator `<runtime>/fscrypt-root` names the
+//! persistent directory, as `fs-verity-root` names the verity store.
+//! A change of the keyring is serialized by `flock` on its lock file and
+//! replaces the keyring by a rename, so a writer killed mid-way leaves the
+//! previous keyring whole.
 //!
 //! The keyring keeps key specifiers and, for v2 keys, the users who added
 //! them; never a raw key. The data stays plaintext on the host (ADR 0016,
@@ -19,7 +21,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha512};
@@ -28,6 +30,8 @@ use crate::private_fd::PrivateFile;
 
 const LOCATOR: &str = "fscrypt-root";
 const KEYRING: &str = "fscrypt-keyring";
+const KEYRING_LOCK: &str = "fscrypt-keyring.lock";
+const KEYRING_NEXT: &str = "fscrypt-keyring.next";
 const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
 
 /// `struct fscrypt_key_specifier`: a v1 key by its descriptor, a v2 key by
@@ -76,8 +80,10 @@ struct Entry {
 }
 
 pub struct Owner {
-    roots: PathBuf,
+    marker: PathBuf,
     keyring: PathBuf,
+    runtime: PathBuf,
+    device: u64,
 }
 
 impl Owner {
@@ -91,8 +97,16 @@ impl Owner {
         }
         let mut locator = MAGIC.to_vec();
         locator.extend_from_slice(fs::canonicalize(dir)?.as_os_str().as_bytes());
-        fs::write(runtime.join(KEYRING), b"")?;
-        fs::write(runtime.join(LOCATOR), locator)
+        for (name, bytes) in [
+            (KEYRING, &b""[..]),
+            (KEYRING_LOCK, b""),
+            (LOCATOR, &locator),
+        ] {
+            let path = runtime.join(name);
+            fs::write(&path, bytes)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
     }
 
     /// The owner guest-init prepared under `runtime`, if any.
@@ -107,28 +121,34 @@ impl Owner {
             .strip_prefix(MAGIC)
             .filter(|dir| !dir.is_empty() && !dir.contains(&0))
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let dir = Path::new(OsStr::from_bytes(dir));
         Ok(Some(Self {
-            roots: Path::new(OsStr::from_bytes(dir)).join("roots"),
+            marker: dir.join("policies"),
             keyring: runtime.join(KEYRING),
+            runtime: runtime.to_path_buf(),
+            device: fs::symlink_metadata(dir)?.dev(),
         }))
+    }
+
+    /// The host device of the data filesystem: no inode elsewhere has a
+    /// policy.
+    pub fn device(&self) -> u64 {
+        self.device
     }
 
     /// Whether any directory of the filesystem was given a policy: until
     /// one is, no inode has one to read or inherit.
-    pub fn has_roots(&self) -> io::Result<bool> {
-        match fs::symlink_metadata(&self.roots) {
-            Ok(metadata) => Ok(metadata.len() > 0),
+    pub fn has_policies(&self) -> io::Result<bool> {
+        match fs::symlink_metadata(&self.marker) {
+            Ok(_) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }
     }
 
-    /// Records the guest path of a directory given a policy.
-    pub fn add_root(&self, guest: &str) -> io::Result<()> {
-        let mut file = open(&self.roots, true)?;
-        let _lock = Lock::exclusive(&file)?;
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(format!("{guest}\n").as_bytes())
+    /// Records that a directory is being given a policy.
+    pub fn policy_set(&self) -> io::Result<()> {
+        open(&self.marker, true).map(drop)
     }
 
     /// Adds `user`'s claim to a key (v2), or the key (v1, `user` None).
@@ -183,7 +203,6 @@ impl Owner {
     /// The key's state for `user`; None when it is not in the keyring.
     pub fn key_status(&self, spec: Spec, user: u32) -> io::Result<Option<Status>> {
         let mut file = open(&self.keyring, false)?;
-        let _lock = Lock::shared(&file)?;
         let spec = spec.encode();
         Ok(read(&mut file)?
             .into_iter()
@@ -198,9 +217,8 @@ impl Owner {
     }
 
     fn change<T>(&self, apply: impl FnOnce(&mut Vec<Entry>) -> io::Result<T>) -> io::Result<T> {
-        let mut file = open(&self.keyring, false)?;
-        let _lock = Lock::exclusive(&file)?;
-        let mut entries = read(&mut file)?;
+        let _lock = Lock::exclusive(&open(&self.runtime.join(KEYRING_LOCK), false)?)?;
+        let mut entries = read(&mut open(&self.keyring, false)?)?;
         let result = apply(&mut entries)?;
         let text: String = entries
             .iter()
@@ -212,11 +230,13 @@ impl Owner {
                 line + "\n"
             })
             .collect();
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(text.as_bytes())?;
-        if unsafe { libc::ftruncate(file.as_raw_fd(), text.len() as libc::off_t) } < 0 {
+        let next = self.runtime.join(KEYRING_NEXT);
+        let mut file = open(&next, true)?;
+        if unsafe { libc::ftruncate(file.as_raw_fd(), 0) } < 0 {
             return Err(io::Error::last_os_error());
         }
+        file.write_all(text.as_bytes())?;
+        fs::rename(next, &self.keyring)?;
         Ok(result)
     }
 }
@@ -261,9 +281,6 @@ struct Lock(i32);
 impl Lock {
     fn exclusive(file: &PrivateFile) -> io::Result<Self> {
         Self::take(file, libc::LOCK_EX)
-    }
-    fn shared(file: &PrivateFile) -> io::Result<Self> {
-        Self::take(file, libc::LOCK_SH)
     }
     fn take(file: &PrivateFile, kind: i32) -> io::Result<Self> {
         loop {
@@ -329,21 +346,50 @@ mod tests {
 
     /// The users of keys are the syscall layer's tests (`sys/fscrypt.rs`).
     #[test]
-    fn a_boot_empties_the_keyring_and_keeps_the_roots() {
+    fn a_boot_empties_the_keyring_and_keeps_the_marker() {
         let dir = crate::scratch_dir("fscrypt-owner");
         let (runtime, data) = (dir.join("run"), dir.join("data"));
         fs::create_dir_all(&runtime).unwrap();
         fs::create_dir_all(&data).unwrap();
         Owner::prepare(&runtime, &data).unwrap();
+        for name in [KEYRING, KEYRING_LOCK, LOCATOR] {
+            let mode = fs::metadata(runtime.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
         let owner = Owner::locate(&runtime).unwrap().unwrap();
-        assert!(!owner.has_roots().unwrap());
-        owner.add_root("/data/a").unwrap();
+        assert_eq!(owner.device(), fs::metadata(&data).unwrap().dev());
+        assert!(!owner.has_policies().unwrap());
+        owner.policy_set().unwrap();
         let v1 = Spec::Descriptor([1; 8]);
         owner.add_key(v1, None).unwrap();
         assert!(owner.key_status(v1, 0).unwrap().is_some());
         Owner::prepare(&runtime, &data).unwrap();
         assert_eq!(owner.key_status(v1, 0).unwrap(), None);
-        assert!(owner.has_roots().unwrap());
+        assert!(owner.has_policies().unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_writer_killed_mid_change_leaves_the_keyring_whole() {
+        let dir = crate::scratch_dir("fscrypt-crash");
+        Owner::prepare(&dir, &dir).unwrap();
+        let owner = Owner::locate(&dir).unwrap().unwrap();
+        let v2 = Spec::Identifier([7; 16]);
+        owner.add_key(v2, Some(1000)).unwrap();
+        // What a writer killed before its rename leaves: a partial next
+        // keyring, which readers never see and the next change replaces.
+        fs::write(dir.join(KEYRING_NEXT), b"i07070707 10").unwrap();
+        let status = owner.key_status(v2, 1000).unwrap().unwrap();
+        assert_eq!((status.users, status.added_by_self), (1, true));
+        owner.add_key(v2, Some(1001)).unwrap();
+        assert_eq!(owner.key_status(v2, 1001).unwrap().unwrap().users, 2);
+        assert_eq!(
+            owner.remove_key(v2, 1000, false).unwrap(),
+            Removal::OtherUsers
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }
