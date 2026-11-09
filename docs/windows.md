@@ -135,20 +135,29 @@ which provisions the device and finishes, then the image's
 task: the home is resumed until an app covers it. A home record is
 unresizeable unless its activity asked to be resizeable
 (`setActivityType`). In window mode the Mac desktop is the home: the root home task
-stays behind it at the bottom of the tasks, invisible, never focused or
-brought to the front, its activity launched straight to stopped
-(`LaunchActivityItem` with `StopActivityItem`), and it is never reported
-to the display server, so it has no Mac window. `getTasks`, the task
-organizer, the window dump and the root-task queries list it. Moving the
-root home task to the front (`TaskDisplayArea.moveHomeRootTaskToFront`,
-which the pinned `IActivityTaskManager` does not expose; a HOME start
-reaches it) brings the desktop to the front instead, as **Home** below
-describes: the apps hide, and the root home task keeps its place at the
-bottom of the root tasks, invisible, unfocused and without a Mac window.
+stays behind it at the bottom of the tasks, invisible and never focused,
+its activity launched straight to stopped (`LaunchActivityItem` with
+`StopActivityItem`), and it is never reported to the display server, so it
+has no Mac window. A start that brings it to the front (a HOME intent,
+`moveTaskToFront`) brings the desktop there: the tasks of the focused
+task's app go behind the desktop, invisible, and pause and stop; the
+server hides that app (`HIDE`); the home becomes the focused task and its
+activity the top resumed one; other apps' tasks stay visible and resumed,
+as their windows stay. A task of the hidden app coming to the front (its
+window back from the Dock) brings all of the app's tasks back, as
+unhiding shows all its windows; any other task coming to the front puts
+the home behind the desktop again, paused and stopped. When the home's
+process dies, a home that saved its instance state at its stop stays in
+the task (`handleAppDied`); behind the desktop it should not be visible, so
+it is not restarted (`attachApplication` starts only activities that
+should be), and stays unlaunched until a start brings the task to the
+front, which relaunches it from that state. `getTasks`, the task
+organizer, the window dump and the root-task queries list it.
 `getAllRootTaskInfos` and `getAllRootTaskInfosOnDisplay` list the root
 tasks top to bottom (the app tasks, the organizer root tasks with their
 tasks as leaves, the root home task at position 0 unless an organizer
-root task was made under it), and `getRootTaskInfo` and
+root task was made under it or a HOME start brought it to the front), and
+`getRootTaskInfo` and
 `getRootTaskInfoOnDisplay` find the root home task for
 `ACTIVITY_TYPE_HOME`, no pinned one, else the topmost compatible one
 (`TaskDisplayArea.getRootTask`), and `getFocusedRootTaskInfo` the focused
@@ -315,7 +324,8 @@ and letterboxing, are tracked in #2050.
   brings the desktop (the home task) to the front: its app hides, as Cmd+H
   hides a Mac app, and its tasks stay; the Dock icon brings it back
   (m1-shell.md, D6). The server, which shows several apps, minimizes that
-  app's windows instead. A task Android moves to the back (Back on its
+  app's windows instead, and one of them back from the Dock brings back
+  the others it minimized, as the guest brings back the app's tasks. A task Android moves to the back (Back on its
   root activity) is not a HOME intent and hides nothing.
 
 ## Back

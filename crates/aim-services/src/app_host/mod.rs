@@ -3480,26 +3480,16 @@ impl AppHost {
         if let Some(token) = request.restart {
             let mut stack = self.activities.stack.lock().unwrap();
             let mut records = self.activities.records.lock().unwrap();
-            let Some(a) = stack
-                .get_mut(token)
-                .filter(|a| a.start_seq == 0 || a.pending)
-            else {
+            let Some(a) = stack.get_mut(token).filter(|a| a.pending) else {
                 return Ok(());
             };
             let Some(r) = records.get_mut(&token) else {
                 return Ok(());
             };
-            let pending = std::mem::replace(&mut a.pending, false);
             a.start_seq = start_seq;
             r.start_seq = start_seq;
             r.started = Instant::now();
-            let mut commands = Vec::new();
-            if pending {
-                stack.resume_focused(false, &mut commands);
-            } else {
-                commands.push(activity_stack::Command::Launch(token));
-                stack.report_top_resumed(&mut commands);
-            }
+            let commands = stack.attached(token);
             drop(records);
             drop(stack);
             if let Some(me) = self.me.upgrade() {

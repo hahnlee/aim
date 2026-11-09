@@ -88,8 +88,12 @@ pub struct Activity {
     pub launch_mode: i32,
     pub user: u32,
     pub state: State,
-    /// `ActivityRecord.mHaveState` starts true, until the first client resume.
-    pub never_resumed: bool,
+    /// `ActivityRecord.mHaveState`: true until its first client resume,
+    /// then again once a stop saved its instance state.
+    pub have_state: bool,
+    /// `ActivityInfo.FLAG_STATE_NOT_NEEDED`: it may be restarted without
+    /// saved state.
+    pub state_not_needed: bool,
     pub finishing: bool,
     /// The activity its result goes to (`resultTo`), and its result:
     /// `RESULT_CANCELED` unless it set one.
@@ -126,7 +130,8 @@ impl Activity {
             launch_mode,
             user,
             state: State::Initializing,
-            never_resumed: true,
+            have_state: true,
+            state_not_needed: false,
             finishing: false,
             result_to,
             result: None,
@@ -147,6 +152,8 @@ pub struct Task {
     pub affinity: Option<String>,
     /// `realActivity`: the component of its intent.
     pub real_activity: String,
+    /// The package it was made for, its window's app (`PACKAGE`).
+    pub package: String,
     /// `intent`, its base intent, and the intent as the app host writes
     /// it back.
     pub intent: Intent,
@@ -183,6 +190,9 @@ pub enum Visibility {
 pub enum Command {
     /// `LaunchActivityItem` and `ResumeActivityItem`.
     Launch(u64),
+    /// `LaunchActivityItem` and `PauseActivityItem`: `realStartActivityLocked`
+    /// of a visible activity not to be resumed.
+    LaunchPaused(u64),
     /// `LaunchActivityItem` and `StopActivityItem`: `realStartActivityLocked`
     /// of an activity neither resumed nor visible.
     LaunchStopped(u64),
@@ -230,6 +240,8 @@ pub enum Command {
     Front(i32),
     /// The task returned to the desktop, retaining its activities.
     Back(i32),
+    /// The desktop came to the front over the task: its app hides.
+    Hide(i32),
     /// A task without activities, gone.
     TaskEmpty(i32),
 }
@@ -309,10 +321,17 @@ pub struct Stack {
     fullscreen: BTreeSet<i32>,
     /// Tasks behind the desktop, also hidden on a freeform display.
     background: BTreeSet<i32>,
+    /// Tasks behind the desktop as their app hid (`HIDE`): they come back
+    /// together, as the app's windows do.
+    hidden: BTreeSet<i32>,
     /// The root home task (`TaskDisplayArea.mRootHomeTask`). In window mode
     /// it stays behind the Mac desktop, which is the user's home: never
-    /// visible, focused or brought to the front.
+    /// visible or focused until a start brings it to the front: the desktop
+    /// is then in front, and the home resumed.
     pub(super) home: Option<i32>,
+    /// Whether the root home task was brought to the front in window mode,
+    /// and no other task since.
+    home_front: bool,
     /// `RecentTasks.remove`: finishing tasks can remain attached until destroyed.
     removed_from_recents: BTreeSet<i32>,
     /// The task last reported focused.
@@ -388,9 +407,16 @@ impl Stack {
     }
 
     /// Whether `task` is behind the desktop: moved there, or the root home
-    /// task in window mode.
+    /// task in window mode unless it was brought to the front.
     fn behind_desktop(&self, task: i32) -> bool {
-        self.background.contains(&task) || (self.freeform && self.home == Some(task))
+        self.background.contains(&task)
+            || self.hidden.contains(&task)
+            || (self.freeform && self.home == Some(task) && !self.home_front)
+    }
+
+    /// Whether `task`'s app hid as the desktop came to the front over it.
+    pub(super) fn app_hidden(&self, task: i32) -> bool {
+        self.hidden.contains(&task)
     }
 
     /// The activity type of `task`: the root home task's is home.
@@ -813,9 +839,12 @@ impl Stack {
                     if self.behind_desktop(task.id) {
                         self.tasks.insert(0, *task);
                     } else {
+                        self.home_front = false;
                         self.tasks.push(*task);
                     }
-                } else {
+                } else if !(self.freeform && self.home == Some(activity.task)) {
+                    // The root home task comes to the front by the start's
+                    // decision (`d.front`) only.
                     self.move_to_front(activity.task);
                 }
                 if d.set_intent
@@ -842,6 +871,20 @@ impl Stack {
         if let Some(token) = added {
             self.launch_behind_desktop(token, &mut out);
         }
+        out
+    }
+
+    /// `attachApplication` of the process that `token` waited for
+    /// (`mStartingProcessActivities`): it is launched only if it should be
+    /// visible (`shouldBeVisible`), resumed as the top of a visible task,
+    /// and otherwise waits, unlaunched, until it is shown.
+    pub(super) fn attached(&mut self, token: u64) -> Vec<Command> {
+        let mut out = Vec::new();
+        if let Some(a) = self.get_mut(token) {
+            a.pending = false;
+        }
+        self.resume_focused(false, &mut out);
+        self.settle(&mut out);
         out
     }
 
@@ -882,16 +925,43 @@ impl Stack {
         }
     }
 
+    /// `task` comes to the front. In window mode the root home task coming
+    /// to the front is the desktop's: the tasks of the focused task's app
+    /// go behind it (`HIDE` hides that app's windows), and those of other
+    /// apps stay visible, as their windows do. A task of a hidden app
+    /// brings all of the app's back, as unhiding the app shows its windows.
     fn move_to_front(&mut self, task: i32) {
         self.background.remove(&task);
-        // The desktop, not the root home task, comes to the front.
-        if self.behind_desktop(task) {
+        let Some(at) = self.tasks.iter().position(|t| t.id == task) else {
             return;
+        };
+        let package = self.tasks[at].package.clone();
+        if self.freeform && self.home == Some(task) {
+            if let Some(package) = self
+                .focused()
+                .filter(|&f| f != task)
+                .and_then(|f| self.task(f))
+                .map(|f| f.package.clone())
+            {
+                let hidden: Vec<i32> = self
+                    .tasks
+                    .iter()
+                    .filter(|t| t.id != task && t.package == package)
+                    .map(|t| t.id)
+                    .collect();
+                self.hidden.extend(hidden);
+            }
+            self.home_front = true;
+        } else {
+            if self.hidden.contains(&task) {
+                let tasks = &self.tasks;
+                self.hidden
+                    .retain(|&t| tasks.iter().all(|o| o.id != t || o.package != package));
+            }
+            self.home_front = false;
         }
-        if let Some(at) = self.tasks.iter().position(|t| t.id == task) {
-            let t = self.tasks.remove(at);
-            self.tasks.push(t);
-        }
+        let t = self.tasks.remove(at);
+        self.tasks.push(t);
     }
 
     /// The task is brought to the front (`moveTaskToFront`).
@@ -1012,6 +1082,13 @@ impl Stack {
         }
         let a = self.get_mut(top).unwrap();
         match a.state {
+            // `startSpecificActivity` of an activity whose process died:
+            // the process is started, and the activity waits for it
+            // (`mStartingProcessActivities`), neither resumed nor pausing.
+            State::Initializing if a.start_seq == 0 => {
+                a.pending = true;
+                out.push(Command::Launch(top));
+            }
             State::Initializing => {
                 a.state = State::Resumed;
                 out.push(Command::Launch(top));
@@ -1041,11 +1118,22 @@ impl Stack {
     /// the stopped activities now visible that are not to be resumed are
     /// started (`makeVisibleIfNeeded`, `shouldStartActivity`).
     fn settle(&mut self, out: &mut Vec<Command>) {
+        // A home that finished is restarted behind the desktop.
+        if self.home.is_none_or(|h| self.top(h).is_none()) {
+            self.home_front = false;
+        }
         let focused = self.focused();
         if focused != self.front {
-            self.front = focused;
+            let last = std::mem::replace(&mut self.front, focused);
             if let Some(task) = focused {
                 out.push(Command::Front(task));
+            }
+            if let Some(last) = last
+                && self.freeform
+                && focused.is_some()
+                && focused == self.home
+            {
+                out.push(Command::Hide(last));
             }
         }
         self.update_top_resumed(out);
@@ -1059,6 +1147,28 @@ impl Stack {
             })
             .map(|a| a.token)
             .collect();
+        // `makeVisibleAndRestartIfNeeded`: an unlaunched activity now
+        // visible, not to be resumed, is launched paused
+        // (`realStartActivityLocked` without `andResume`), once its process
+        // started if it died.
+        let unlaunched: Vec<u64> = self
+            .activities
+            .iter()
+            .filter(|a| {
+                a.state == State::Initializing && !a.pending && self.shown(a) && !self.resumable(a)
+            })
+            .map(|a| a.token)
+            .collect();
+        for token in unlaunched {
+            let a = self.get_mut(token).unwrap();
+            if a.start_seq == 0 {
+                a.pending = true;
+                out.push(Command::Launch(token));
+            } else {
+                a.state = State::Paused;
+                out.push(Command::LaunchPaused(token));
+            }
+        }
         for token in shown {
             self.get_mut(token).unwrap().state = State::Started;
             out.push(Command::Visible {
@@ -1244,13 +1354,15 @@ impl Stack {
         out
     }
 
-    /// `activityStopped`.
-    pub fn stopped(&mut self, token: u64) {
-        if let Some(a) = self.get_mut(token)
-            && a.state == State::Stopping
-        {
-            a.state = State::Stopped;
-        }
+    /// `activityStopped` of a stop that saved instance state, or did not:
+    /// whether it was stopping, so takes that state (`setSavedState`).
+    pub fn stopped(&mut self, token: u64, saved_state: bool) -> bool {
+        let Some(a) = self.get_mut(token).filter(|a| a.state == State::Stopping) else {
+            return false;
+        };
+        a.state = State::Stopped;
+        a.have_state |= saved_state;
+        true
     }
 
     /// `activityDestroyed`: it goes; a task left without activities goes
@@ -1270,10 +1382,12 @@ impl Stack {
         if !self.activities.iter().any(|a| a.task == task) && self.task(task).is_some() {
             self.tasks.retain(|t| t.id != task);
             self.background.remove(&task);
+            self.hidden.remove(&task);
             self.removed_from_recents.remove(&task);
             self.fullscreen.remove(&task);
             if self.home == Some(task) {
                 self.home = None;
+                self.home_front = false;
             }
             out.push(Command::TaskEmpty(task));
         }
@@ -1409,9 +1523,12 @@ impl Stack {
         }
     }
 
-    /// `ActivityRecord.handleAppDied`: an activity not yet resumed has its
-    /// initial state and survives unless finishing or force-stopped. Visible
-    /// survivors are launched again (`ensureVisibilityOnVisibleActivityDiedOrCrashed`).
+    /// `ActivityRecord.handleAppDied`: an activity with state to restart
+    /// from (`mHaveState`: not yet resumed, or stopped after saving its
+    /// instance state), or that needs none, survives unless finishing or
+    /// force-stopped, to be launched again when next resumed; the rest are
+    /// removed. Visible survivors are launched again
+    /// (`ensureVisibilityOnVisibleActivityDiedOrCrashed`).
     pub fn process_died(&mut self, start_seq: i64, removed: bool) -> Vec<Command> {
         let mut out = Vec::new();
         let gone: Vec<(u64, i32)> = self
@@ -1424,7 +1541,7 @@ impl Stack {
             if a.start_seq != start_seq {
                 return true;
             }
-            if !removed && !a.finishing && a.never_resumed {
+            if !removed && !a.finishing && (a.have_state || a.state_not_needed) {
                 a.start_seq = 0;
                 a.pending = false;
                 a.state = State::Initializing;
@@ -1491,6 +1608,7 @@ mod tests {
             id,
             affinity: affinity.map(str::to_string),
             real_activity: format!("{APP}/{class}"),
+            package: APP.into(),
             intent: Intent::default(),
             base: LaunchIntent::Component,
             uid: 10_100,
@@ -1616,7 +1734,7 @@ mod tests {
             let mut commands = s.paused(2);
             commands.extend(s.idle(1));
             assert!(commands.contains(&Stop(2)));
-            s.stopped(2);
+            s.stopped(2, false);
             assert_eq!(s.get(2).unwrap().state, State::Stopped);
             assert!(!s.get(2).unwrap().finishing);
 
@@ -1810,7 +1928,7 @@ mod tests {
                 Stop(1)
             ]
         );
-        s.stopped(1);
+        s.stopped(1, false);
         assert_eq!(s.get(1).unwrap().state, State::Stopped);
     }
 
@@ -1828,7 +1946,7 @@ mod tests {
         s.paused(1);
         s.top_resumed_released(None);
         s.idle(2);
-        s.stopped(1);
+        s.stopped(1, false);
         let (finished, out) = s.finish(2);
         assert!(finished);
         assert_eq!(
@@ -2245,7 +2363,7 @@ mod tests {
                 Stop(1)
             ]
         );
-        s.stopped(1);
+        s.stopped(1, false);
         // B finishes: A's task is focused, and A comes back once B paused;
         // B is destroyed once A is idle.
         assert_eq!(s.finish(2).1.last(), Some(&Front(7)));
@@ -2278,7 +2396,7 @@ mod tests {
         b.start_seq = 2;
         let d = Decision::default();
         s.apply(&d, Then::Add(b, Some(task(8, "B", None))), None, true);
-        s.get_mut(2).unwrap().never_resumed = false;
+        s.get_mut(2).unwrap().have_state = false;
         assert_eq!(s.process_died(2, false), [TaskEmpty(8), Front(7)]);
         assert!(s.get(2).is_none() && s.get(1).is_some());
     }
@@ -2314,7 +2432,7 @@ mod tests {
                 ..Default::default()
             };
             launch_new(&mut s, 1, 7, "Launcher", 0);
-            s.get_mut(1).unwrap().never_resumed = false;
+            s.get_mut(1).unwrap().have_state = false;
             let d = Decision {
                 outcome: Outcome::New(Some(7)),
                 ..Default::default()
@@ -2340,14 +2458,15 @@ mod tests {
                 on_top: true
             }));
             s.get_mut(2).unwrap().start_seq = 3;
-            let mut attached = Vec::new();
-            s.report_top_resumed(&mut attached);
             assert_eq!(
-                attached,
-                [TopResumed {
-                    token: 2,
-                    on_top: true
-                }]
+                s.attached(2),
+                [
+                    Launch(2),
+                    TopResumed {
+                        token: 2,
+                        on_top: true
+                    }
+                ]
             );
         }
     }
@@ -2380,8 +2499,113 @@ mod tests {
         s.paused(1);
         assert!(!s.process_died(1, false).contains(&Launch(1)));
         assert_eq!(s.get(1).unwrap().start_seq, 0);
-        s.get_mut(2).unwrap().never_resumed = false;
+        s.get_mut(2).unwrap().have_state = false;
         assert!(s.process_died(2, false).contains(&Launch(1)));
+    }
+
+    /// Task 7 of process 1: `A` (token 1), resumed once, then stopped
+    /// under `B` (token 2), resumed, the stop saving instance state or not.
+    fn stopped_under_resumed(saved_state: bool) -> Stack {
+        let mut s = Stack::default();
+        launch_new(&mut s, 1, 7, "A", 0);
+        s.get_mut(1).unwrap().have_state = false;
+        let d = Decision {
+            outcome: Outcome::New(Some(7)),
+            ..Default::default()
+        };
+        s.apply(&d, Then::Add(activity(2, 7, "B", 0), None), None, true);
+        s.top_resumed_released(None);
+        assert!(s.paused(1).contains(&Launch(2)));
+        s.get_mut(2).unwrap().have_state = false;
+        assert!(s.idle(2).contains(&Stop(1)));
+        assert!(s.stopped(1, saved_state));
+        s
+    }
+
+    // android-16.0.0_r1 ActivityRecord.activityStopped/handleAppDied: a
+    // stop that saved instance state sets mHaveState again, and an
+    // activity with it, or with FLAG_STATE_NOT_NEEDED, survives its
+    // process's death to be relaunched; one without (the resumed `B`) is
+    // removed.
+    #[test]
+    fn a_dead_process_keeps_stopped_activities_that_saved_state() {
+        for (saved_state, state_not_needed) in [(true, false), (false, true), (false, false)] {
+            let mut s = stopped_under_resumed(saved_state);
+            s.get_mut(1).unwrap().state_not_needed = state_not_needed;
+            let commands = s.process_died(1, false);
+            assert!(s.get(2).is_none());
+            if saved_state || state_not_needed {
+                assert_eq!(s.get(1).unwrap().start_seq, 0);
+                assert_eq!(s.top(7).unwrap().token, 1);
+                assert!(commands.contains(&Launch(1)), "{commands:?}");
+                assert!(!commands.contains(&TaskEmpty(7)));
+            } else {
+                assert!(s.get(1).is_none());
+                assert!(s.task(7).is_none());
+                assert!(commands.contains(&TaskEmpty(7)));
+            }
+        }
+    }
+
+    // android-16.0.0_r1 startSpecificActivity/attachApplication: the
+    // restarted activity waits for its process (`mStartingProcessActivities`)
+    // neither resumed nor pausing, so a task brought in front meanwhile is
+    // not held; once attached it is launched only if it should be visible
+    // (`shouldBeVisible`): resumed as a visible top, else when shown.
+    #[test]
+    fn a_restarting_activity_waits_for_its_process_unlaunched_unless_visible() {
+        let mut s = stopped_under_resumed(true);
+        assert!(s.process_died(1, false).contains(&Launch(1)));
+        assert_eq!(s.get(1).unwrap().state, State::Initializing);
+        s.get_mut(1).unwrap().start_seq = 3;
+        assert_eq!(
+            s.attached(1),
+            [
+                Launch(1),
+                TopResumed {
+                    token: 1,
+                    on_top: true
+                }
+            ]
+        );
+
+        let mut s = stopped_under_resumed(true);
+        s.process_died(1, false);
+        // Another task comes in front before the process attaches.
+        let mut c = activity(3, 8, "C", 0);
+        c.start_seq = 2;
+        let commands = s.apply(
+            &Decision::default(),
+            Then::Add(c, Some(task(8, "C", None))),
+            None,
+            true,
+        );
+        assert!(commands.contains(&Launch(3)), "{commands:?}");
+        assert!(!commands.iter().any(|c| matches!(c, Pause { token: 1, .. })));
+        s.get_mut(1).unwrap().start_seq = 3;
+        let commands = s.attached(1);
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, Launch(1) | LaunchPaused(1) | LaunchStopped(1))),
+            "{commands:?}"
+        );
+        assert_eq!(s.get(1).unwrap().state, State::Initializing);
+        // Shown behind a translucent task, it is launched paused.
+        s.get_mut(3).unwrap().occludes_parent = false;
+        assert!(s.ensure_visible().contains(&LaunchPaused(1)));
+        assert_eq!(s.get(1).unwrap().state, State::Paused);
+        // Brought back in front, it is resumed once `C` paused.
+        assert!(s.bring_to_front(7).contains(&Pause {
+            token: 3,
+            finishing: false,
+            user_leaving: true
+        }));
+        assert!(s.paused(3).contains(&Resume {
+            token: 1,
+            results: vec![],
+            new_intents: vec![]
+        }));
     }
 
     #[test]
@@ -2464,7 +2688,7 @@ mod tests {
                 ]
             )
         );
-        s.stopped(1);
+        s.stopped(1, false);
         assert_eq!(s.set_occludes_parent(2, true), (false, vec![]));
         // Translucent again: A shows, started but not resumed.
         assert_eq!(
@@ -2507,7 +2731,7 @@ mod tests {
                 Stop(1)
             ]
         );
-        s.stopped(1);
+        s.stopped(1, false);
         s.apply(&d, Then::Add(activity(3, 7, "Next", 0), None), None, true);
         assert_eq!(s.paused(2), [Launch(3)]);
         s.top_resumed_released(None);

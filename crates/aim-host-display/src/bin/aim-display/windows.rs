@@ -120,6 +120,10 @@ struct TaskWindow {
     /// turned for an orientation an activity asked for.
     user: Option<CGSize>,
     full_screen: FullScreen,
+    /// Minimized as its app went home (`HIDE`, in the server): back from
+    /// the Dock, it brings the app's other such windows back, as the guest
+    /// brings back all of the app's tasks.
+    app_hidden: bool,
 }
 
 /// Touches held for a task to come to the front.
@@ -354,6 +358,11 @@ fn on_bridge_record(r: &Record) {
         note(s, r);
         if r.op == window::FRONT {
             s.front = Some(r.task);
+        }
+        // The desktop came to the front: no task is, and the app's window
+        // back from the Dock asks for the front again.
+        if r.op == window::HIDE && s.front == Some(r.task) {
+            s.front = None;
         }
         if r.op == window::REORDER_TO_BACK
             && let Some(at) = s.order.iter().position(|&(task, _)| task == r.task)
@@ -757,6 +766,7 @@ fn create(task: i32, b: [i32; 4]) {
         moved: None,
         user: None,
         full_screen: FullScreen::default(),
+        app_hidden: false,
     };
     send!(w, c"setTitle:" => (), Id = nsstring(&info.title()));
     crate::titlebar::set(w, info.primary_color, info.background_color);
@@ -1207,7 +1217,18 @@ fn hide(task: i32) {
         send!(app, c"hide:" => (), Id = std::ptr::null_mut());
         return;
     }
-    for w in with(|s| app_windows(s, task)).unwrap_or_default() {
+    let windows = with(|s| {
+        // The user's minimized windows stay so.
+        let windows: Vec<Id> = app_windows(s, task)
+            .into_iter()
+            .filter(|&w| !send!(w, c"isMiniaturized" => bool))
+            .collect();
+        for t in s.tasks.values_mut().filter(|t| windows.contains(&t.window)) {
+            t.app_hidden = true;
+        }
+        windows
+    });
+    for w in windows.unwrap_or_default() {
         minimize(w);
     }
 }
@@ -1419,12 +1440,35 @@ pub extern "C" fn did_hide(_: Id, _: Sel, _: Id) {
 }
 
 /// A window back from the Dock is in the full screen again for a
-/// fullscreen task.
+/// fullscreen task; one its app's going home minimized brings back the
+/// app's others.
 extern "C" fn did_deminiaturize(_: Id, _: Sel, note: Id) {
     if let Some((task, w)) = task_of(note) {
         window_order(task, send!(w, c"windowNumber" => isize));
-        with(|s| s.tasks.get_mut(&task).map(|t| t.full_screen.back()));
+        let others = with(|s| {
+            let t = s.tasks.get_mut(&task)?;
+            t.full_screen.back();
+            if !std::mem::take(&mut t.app_hidden) {
+                return None;
+            }
+            let windows = app_windows(s, task);
+            Some(
+                s.tasks
+                    .values_mut()
+                    .filter(|t| t.app_hidden && windows.contains(&t.window))
+                    .map(|t| {
+                        t.app_hidden = false;
+                        t.window
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .unwrap_or_default();
         full_screen(task);
+        for w in others {
+            send!(w, c"deminiaturize:" => (), Id = std::ptr::null_mut());
+        }
     }
 }
 
@@ -1758,6 +1802,7 @@ mod tests {
                 moved: None,
                 user: None,
                 full_screen: FullScreen::default(),
+                app_hidden: false,
             },
         );
         note(

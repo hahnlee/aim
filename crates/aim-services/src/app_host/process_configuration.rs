@@ -271,7 +271,7 @@ pub(super) mod tests {
                         Launch {
                             global: &global,
                             task: bounds,
-                            resume: true,
+                            to: super::super::activity::LaunchTo::Resumed,
                         },
                     )
                     .unwrap();

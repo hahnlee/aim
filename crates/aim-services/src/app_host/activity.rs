@@ -20,7 +20,7 @@ use aim_service_aidl::android_app_iactivitytaskmanager as atm;
 use super::activity_stack::{FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS, FLAG_ACTIVITY_NEW_TASK};
 use super::activity_start::{Component, FLAG_EXCLUDE_FROM_RECENTS, Report};
 use super::config::{self, Configuration, SizeBuckets};
-use super::kept::{RawBundle, RawIntent};
+use super::kept::{KeptBundle, RawBundle, RawIntent};
 use super::resources::WindowStyle;
 use super::{AppHost, reply};
 use crate::package::info::ActivityInfo;
@@ -153,6 +153,10 @@ pub struct ActivityRecord {
     pub result_who: Option<String>,
     pub request_code: i32,
     pub(super) transition_overrides: [Option<(String, i32, i32)>; 2],
+    /// `mIcicle` and `mPersistentState`: what it saved at its last stop,
+    /// which its launch after its process died restores.
+    pub(super) saved_state: Option<KeptBundle>,
+    pub(super) persistent_state: Option<RawBundle>,
 }
 
 /// `Build.VERSION_CODES.HONEYCOMB_MR2`.
@@ -242,7 +246,8 @@ impl Activities {
             .any(|r| r.start_seq == start_seq)
     }
 
-    /// Detach the dead process, retaining activities with their initial state.
+    /// Detach the dead process, retaining the activities with state to
+    /// restart from.
     pub fn remove_start(
         &self,
         start_seq: i64,
@@ -378,13 +383,21 @@ pub struct Launch<'a> {
     pub global: &'a Configuration,
     /// The bounds of its task in window mode, else the display's.
     pub task: Option<(i32, super::config::Rect)>,
-    /// Whether it is resumed, else stopped.
-    pub resume: bool,
+    pub to: LaunchTo,
+}
+
+/// What `realStartActivityLocked` leaves a launched activity: resumed,
+/// paused while visible, or stopped.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LaunchTo {
+    Resumed,
+    Paused,
+    Stopped,
 }
 
 impl AppHost {
     /// `realStartActivityLocked`: the items that launch the activity of
-    /// `token`, then resume or stop it.
+    /// `token`, then resume, pause or stop it.
     pub(super) fn launch_items(
         &self,
         token: Binder,
@@ -431,16 +444,18 @@ impl AppHost {
             record.referrer.clone(),
             record.info.clone(),
         );
+        let state = record.saved_state.as_ref().map(|k| k.bundle.clone());
+        let persistent_state = record.persistent_state.clone();
         drop(records);
         let current = self.launching_process_configuration(start_seq, launch.global);
-        let lifecycle: Box<dyn Item> = if launch.resume {
-            Box::new(ResumeActivityItem {
+        let lifecycle: Box<dyn Item> = match launch.to {
+            LaunchTo::Resumed => Box::new(ResumeActivityItem {
                 token,
                 proc_state: PROCESS_STATE_UNKNOWN,
                 forward: true,
-            })
-        } else {
-            Box::new(super::activity_start::StopActivityItem(token))
+            }),
+            LaunchTo::Paused => Box::new(Lifecycle::Pause(token)),
+            LaunchTo::Stopped => Box::new(super::activity_start::StopActivityItem(token)),
         };
         let items: Vec<Box<dyn Item>> = vec![
             Box::new(LaunchActivityItem {
@@ -459,6 +474,8 @@ impl AppHost {
                 },
                 intent,
                 info,
+                state,
+                persistent_state,
             }),
             lifecycle,
         ];
@@ -652,6 +669,8 @@ struct LaunchActivityItem {
     window: ActivityWindowInfo,
     intent: Box<dyn WriteParcelable>,
     info: ActivityInfo,
+    state: Option<RawBundle>,
+    persistent_state: Option<RawBundle>,
 }
 
 impl Item for LaunchActivityItem {
@@ -670,8 +689,13 @@ impl Item for LaunchActivityItem {
         p.write_string16(Some(&self.referrer));
         p.write_binder(None); // no voice interactor
         p.write_i32(PROCESS_STATE_CACHED_EMPTY);
-        p.write_i32(-1); // no saved state (`writeBundle`)
-        p.write_i32(-1); // no persistent state (`writePersistableBundle`)
+        // `writeBundle`, `writePersistableBundle`: -1 for none.
+        for bundle in [&self.state, &self.persistent_state] {
+            match bundle {
+                Some(b) => b.write_to(p),
+                None => p.write_i32(-1),
+            }
+        }
         p.write_i32(-1); // no pending results
         p.write_i32(-1); // no pending new intents
         p.write_i32(0); // no scene transition
@@ -1438,7 +1462,9 @@ impl Service for ActivityClientController {
                 if let Some(Binder::Local(t)) = token
                     && let Some(a) = self.0.activities.stack.lock().unwrap().get_mut(t)
                 {
-                    a.never_resumed = false;
+                    // `setSavedState(null)`.
+                    a.have_state = false;
+                    self.0.activities.with(token, |r| r.saved_state = None);
                 }
                 self.0.update_window_focus();
                 if let Some(start_seq) = self.0.activities.with(token, |r| r.start_seq) {
@@ -1589,6 +1615,24 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_STOPPED | acc::ACTIVITY_DESTROYED => {
                 let token = Self::token(call)?;
                 let stopped = call.code == acc::ACTIVITY_STOPPED;
+                let report = if stopped {
+                    let state = aim_service_aidl::read_typed::<RawBundle>(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    if state.as_ref().is_some_and(RawBundle::has_fds) {
+                        return reply(Err(Exception::illegal_argument(
+                            "File descriptors passed in Bundle",
+                        )));
+                    }
+                    let state = state
+                        .map(|b| KeptBundle::new(b, &self.0.process))
+                        .transpose()
+                        .map_err(|_| BAD_VALUE)?;
+                    let persistent = aim_service_aidl::read_typed::<RawBundle>(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    Report::Stopped { state, persistent }
+                } else {
+                    Report::Destroyed
+                };
                 self.report(token, if stopped { "stopped" } else { "destroyed" }, |_| {});
                 if let Some(Binder::Local(t)) = token {
                     self.0.activity_usage_stats(
@@ -1600,14 +1644,7 @@ impl Service for ActivityClientController {
                         },
                     );
                 }
-                self.0.activity_reported(
-                    token,
-                    if stopped {
-                        Report::Stopped
-                    } else {
-                        Report::Destroyed
-                    },
-                );
+                self.0.activity_reported(token, report);
                 empty()
             }
             acc::FINISH_ACTIVITY_AFFINITY => {
@@ -1964,6 +2001,150 @@ mod launched_from_tests {
             );
             for token in [None, Some(Binder::Local(u64::MAX))] {
                 assert_eq!(read(host, token, 1000), (-1, None));
+            }
+        });
+    }
+}
+
+// android-16.0.0_r1 ActivityRecord.activityStopped keeps the instance
+// and persistent state a stop saved (`setSavedState`), and
+// realStartActivityLocked passes them in the next LaunchActivityItem.
+#[cfg(test)]
+mod saved_state_tests {
+    use super::super::activity_stack::{Activity, State};
+    use super::super::activity_start::StartRequest;
+    use super::*;
+    use aim_service_aidl::ReadParcelable;
+
+    /// An activity of `p.Main` in task 7, in `state`.
+    fn activity(host: &Arc<AppHost>, state: State) -> u64 {
+        let token = host.new_activity(
+            1,
+            10100,
+            "p",
+            host.activity_info_of("p", "p.Main").unwrap(),
+            Default::default(),
+            7,
+            StartRequest::launcher("p.Main"),
+        );
+        let mut a = Activity::new(token, 7, 1, "p/p.Main", 0, 0, None);
+        (a.state, a.have_state) = (state, false);
+        host.activities.stack.lock().unwrap().activities.push(a);
+        token
+    }
+
+    /// `activityStopped` of `token` with `state` and `persistent`: its reply.
+    fn stop(host: &Arc<AppHost>, token: u64, state: &RawBundle, persistent: &RawBundle) -> Parcel {
+        let mut data = Parcel::new();
+        acc::ActivityStopped::<RawBundle, RawBundle, RawBundle> {
+            token: Some(Binder::Local(token)),
+            state: Some(state.clone()),
+            persistent_state: Some(persistent.clone()),
+            description: None,
+        }
+        .write(&mut data);
+        ActivityClientController(host.clone())
+            .transact(&mut Call {
+                code: acc::ACTIVITY_STOPPED,
+                flags: 0,
+                sender_pid: 71,
+                sender_euid: 10100,
+                data: data.reader(),
+            })
+            .unwrap()
+    }
+
+    fn saved(host: &Arc<AppHost>, token: u64) -> (bool, bool) {
+        host.activities
+            .with(Some(Binder::Local(token)), |r| {
+                (r.saved_state.is_some(), r.persistent_state.is_some())
+            })
+            .unwrap()
+    }
+
+    // ActivityClientController.activityStopped refuses an icicle with file
+    // descriptors, and ActivityRecord.activityStopped ignores the stop of
+    // an activity no longer stopping.
+    #[test]
+    fn a_stop_with_file_descriptors_or_not_stopping_saves_nothing() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let empty = RawBundle::empty();
+            let mut p = Parcel::new();
+            p.write_i32(0);
+            p.write_i32(crate::bundle::MAGIC);
+            p.write_i32(1);
+            p.write_string16(Some("fd"));
+            p.write_i32(4);
+            let at = p.data().len();
+            p.write_i32(0);
+            p.write_string16(Some("android.os.ParcelFileDescriptor"));
+            p.write_file(Arc::new(std::fs::File::open("/dev/null").unwrap()));
+            p.set_i32_at(at, (p.data().len() - at - 4) as i32);
+            p.set_i32_at(0, (p.data().len() - 8) as i32);
+            p.write_bool(false);
+            let fd = RawBundle::read_from(&mut p.reader()).unwrap();
+            let token = activity(host, State::Stopping);
+            let reply = stop(host, token, &fd, &empty);
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+            );
+            assert_eq!(saved(host, token), (false, false));
+            let a = host.activities.stack.lock().unwrap().get(token).cloned();
+            assert!(a.is_some_and(|a| a.state == State::Stopping && !a.have_state));
+
+            let token = activity(host, State::Resumed);
+            stop(host, token, &empty, &empty);
+            assert_eq!(saved(host, token), (false, false));
+            let a = host.activities.stack.lock().unwrap().get(token).cloned();
+            assert!(a.is_some_and(|a| a.state == State::Resumed && !a.have_state));
+        });
+    }
+
+    #[test]
+    fn a_stop_saves_the_state_the_next_launch_restores() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let token = activity(host, State::Stopping);
+            let state = RawBundle::empty().with_ints(&[("scroll", 42)]).unwrap();
+            let persistent = RawBundle::empty().with_ints(&[("kept", 7)]).unwrap();
+            stop(host, token, &state, &persistent);
+            assert_eq!(saved(host, token), (true, true));
+            let a = host.activities.stack.lock().unwrap().get(token).cloned();
+            assert!(a.is_some_and(|a| a.state == State::Stopped && a.have_state));
+            let global = Configuration::from_proto(&[]).unwrap();
+            let items = host
+                .launch_items(
+                    Binder::Local(token),
+                    Launch {
+                        global: &global,
+                        task: None,
+                        to: LaunchTo::Resumed,
+                    },
+                )
+                .unwrap();
+            let mut p = Parcel::new();
+            items[0].write_fields(&mut p);
+            let mut r = p.reader();
+            r.read_binder().unwrap();
+            r.read_i32().unwrap();
+            for _ in 0..2 {
+                assert_eq!(r.read_i32().unwrap(), 1);
+                Configuration::read_from(&mut r).unwrap();
+            }
+            r.read_i32().unwrap();
+            r.read_string16().unwrap();
+            r.read_binder().unwrap();
+            r.read_i32().unwrap();
+            let bytes = |b: &RawBundle| {
+                let mut p = Parcel::new();
+                b.write_to(&mut p);
+                p.data().to_vec()
+            };
+            for expected in [&state, &persistent] {
+                assert_eq!(
+                    bytes(&RawBundle::read_from(&mut r).unwrap()),
+                    bytes(expected)
+                );
             }
         });
     }
