@@ -361,7 +361,7 @@ mod tests {
             &[writer.as_raw_fd(), file.as_raw_fd()],
         )
         .unwrap();
-        drop(writer);
+        writer.sent();
 
         let mut got = Request::default();
         let mut fds = Vec::new();

@@ -301,15 +301,17 @@ fn present(p: &mut Present) -> i64 {
         },
         &fds,
     );
-    // The server has its own copy of the writer now.
-    drop(writer);
-    if r == 0 {
-        p.present = match aim_sync_file::give_to_guest(fence) {
-            Ok(fd) => fd,
-            Err(error) => return neg(error),
-        };
+    if r != 0 {
+        // Unsent: dropping the writer fails the fence.
+        return r;
     }
-    r
+    // The server has its own copy of the writer now.
+    writer.sent();
+    p.present = match aim_sync_file::give_to_guest(fence) {
+        Ok(fd) => fd,
+        Err(error) => return neg(error),
+    };
+    0
 }
 
 /// Keep an acquire fence sent to the server open until the frame's present
@@ -395,11 +397,12 @@ fn layers(f: &mut Layers) -> i64 {
     let ok = wire::send_fds(conn.as_fd(), wire::bytes(&r), &fds)
         .and_then(|()| wire::send(conn.as_fd(), &layers::encode(&sent, rects), None));
     drop(guard);
-    // The server has its own copies of the fences now.
-    drop(writer);
     if ok.is_err() {
+        // Dropping the writer fails the fence.
         return neg(errno::ENOTCONN);
     }
+    // The server has its own copies of the fences now.
+    writer.sent();
     f.present = match aim_sync_file::give_to_guest(fence) {
         Ok(fd) => fd,
         Err(error) => return neg(error),
