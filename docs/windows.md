@@ -141,11 +141,11 @@ its activity launched straight to stopped (`LaunchActivityItem` with
 has no Mac window. A start that brings it to the front (a HOME intent,
 `moveTaskToFront`; an app's HOME intent also brings a root home task it
 makes or finds empty, where `startHomeOnAllDisplays` and
-`resumeHomeActivity` leave it behind) brings the desktop there: the tasks of the focused
-task's app go behind the desktop, invisible, and pause and stop; the
-server hides that app (`HIDE`); the home becomes the focused task and its
-activity the top resumed one; other apps' tasks stay visible and resumed,
-as their windows stay. A task of the hidden app coming to the front (its
+`resumeHomeActivity` leave it behind) brings the desktop there: the tasks
+of the focused task's app go behind the desktop, invisible, and pause and
+stop; the server hides that app (`HIDE`); the home becomes the focused task
+and its activity the top resumed one; other apps' tasks stay visible and
+resumed, as their windows stay. A task of the hidden app coming to the front (its
 window back from the Dock) brings all of the app's tasks back, as
 unhiding shows all its windows; any other task coming to the front puts
 the home behind the desktop again, paused and stopped. When the home's

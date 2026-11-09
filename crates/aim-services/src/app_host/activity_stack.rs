@@ -258,10 +258,11 @@ pub struct Decision {
     /// The task brought to the front (`setTargetRootTaskIfNeeded`).
     pub front: Option<i32>,
     /// The root home task the start goes to comes to the front though no
-    /// activity runs there: made by `getOrCreateRootTask`, or emptied,
-    /// `startActivityInner` moves it there (`moveToFront`) all the same.
-    /// `startHomeActivity`'s start, of no such decision, leaves it behind
-    /// the desktop in window mode.
+    /// activity runs there (made by `getOrCreateRootTask`, or emptied), as
+    /// `startActivityInner` moves it there (`moveToFront`). The original
+    /// brings it to the front at `startHomeActivity` too (`ON_TOP`); in
+    /// window mode that start, of no such decision, leaves it behind the
+    /// desktop by this owner's policy (docs/windows.md).
     pub home_front: bool,
     /// The activities finished first, top first (`performClearTop`,
     /// `performClearTaskForReuse`).
