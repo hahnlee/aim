@@ -285,8 +285,11 @@ their keys include the lockfile, with no locally installed JDK probe.
   only the members used. The stubs are dexed and checked against the
   image's jars on the boot and system server class paths
   (`aim_android_image::linkage`): every class, superclass, member and
-  constant a stub declares must be the image's. Java emits a constructor for
-  every class; a private compile-only constructor is ignored only when the
+  constant a stub declares must be the image's, and a member no wider and
+  no more or less static than the image's: a public compile-only declaration
+  of a package-private member compiles but fails ART's access check (#1035),
+  so a stub declares the image's constructor when Java's default one would
+  be wider. Java emits a constructor for every class; a private compile-only constructor is ignored only when the
   image class has no constructors (#900). Every constructor referenced by
   executable code must still exist on its declaring class: constructors
   are never inherited. Every other class, field and method the dexed code

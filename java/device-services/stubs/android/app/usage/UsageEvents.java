@@ -1,3 +1,3 @@
 // Compile-only image type.
 package android.app.usage;
-public final class UsageEvents { public static class Event {} }
+public final class UsageEvents { UsageEvents() {} public static class Event {} }

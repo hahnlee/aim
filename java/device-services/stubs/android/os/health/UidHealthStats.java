@@ -1,2 +1,2 @@
 package android.os.health;
-public class UidHealthStats { public static final HealthKeys.Constants CONSTANTS = null; }
+public class UidHealthStats { private UidHealthStats() {} public static final HealthKeys.Constants CONSTANTS = null; }
