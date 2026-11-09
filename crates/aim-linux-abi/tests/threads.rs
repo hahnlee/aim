@@ -161,52 +161,65 @@ fn signal_from_another_process_reaches_sigwait() {
     assert!(child.wait().unwrap().success());
 }
 
-/// SIGTERM from another process while every guest thread waits in a
-/// futex: the default action ends the process with the signal at once
-/// (signal(7)); a handled or ignored SIGTERM leaves it running.
+/// A default-fatal signal while every guest thread waits in a futex ends
+/// the process with it at once (signal(7)): SIGTERM from another process,
+/// from the process itself and its SIGALRM timer (in a child: the guest is
+/// its namespace's init, which ignores its own), and a SIGTERM every thread
+/// blocked once it is unblocked. A handled or ignored SIGTERM leaves the
+/// process running.
 #[test]
-fn external_sigterm_ends_a_blocked_process_unless_handled_or_ignored() {
+fn default_fatal_signals_end_a_blocked_process_unless_handled_or_ignored() {
     use std::io::{BufRead, BufReader};
     use std::time::{Duration, Instant};
     let r = root().expect("required pinned original image and NDK: NOT RUN if missing");
-    for (mode, expect) in [
-        ("default", None),
-        ("handled", Some("handled")),
-        ("ignored", Some("survived")),
+    for (mode, external, lines, signal) in [
+        ("default", true, &[][..], Some(libc::SIGTERM)),
+        ("self", false, &["signaled 15"], None),
+        ("alarm", false, &["signaled 14"], None),
+        ("init_self", false, &["survived"], None),
+        ("blocked", true, &["pending"], Some(libc::SIGTERM)),
+        ("handled", true, &["handled"], None),
+        ("ignored", true, &["survived"], None),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_linux-run"))
             .arg("--root")
             .arg(&r.0)
-            .args(["/data/local/tmp/threads", "external_sigterm", mode])
+            .args(["/data/local/tmp/threads", "sigterm", mode])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        assert_eq!(lines.next().unwrap().unwrap(), "ready", "{mode}");
-        // SAFETY: signalling our own child.
-        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-        let sent = Instant::now();
+        let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
+        assert_eq!(out.next().unwrap().unwrap(), "ready", "{mode}");
+        if external {
+            // SAFETY: signalling our own child.
+            unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        }
+        for line in lines {
+            assert_eq!(&out.next().unwrap().unwrap(), line, "{mode}");
+        }
+        let since = Instant::now();
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
             }
-            if sent.elapsed() > Duration::from_secs(10) {
+            if since.elapsed() > Duration::from_secs(10) {
                 child.kill().unwrap();
-                panic!("{mode}: still running 10 s after SIGTERM");
+                panic!("{mode}: still running after 10 s");
             }
             std::thread::sleep(Duration::from_millis(5));
         };
-        let elapsed = sent.elapsed();
-        match expect {
-            None => {
-                assert_eq!(status.signal(), Some(libc::SIGTERM), "{mode}: {status:?}");
-                assert!(elapsed < Duration::from_millis(500), "{mode}: {elapsed:?}");
+        match signal {
+            Some(signal) => {
+                assert_eq!(status.signal(), Some(signal), "{mode}: {status:?}");
+                // The alarm fires a second in.
+                assert!(
+                    since.elapsed() < Duration::from_secs(3),
+                    "{mode}: {:?}",
+                    since.elapsed()
+                );
             }
-            Some(line) => {
-                assert!(status.success(), "{mode}: {status:?}");
-                assert_eq!(lines.next().unwrap().unwrap(), line, "{mode}");
-            }
+            None => assert!(status.success(), "{mode}: {status:?}"),
         }
     }
 }

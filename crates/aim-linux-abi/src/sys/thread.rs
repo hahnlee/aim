@@ -166,10 +166,11 @@ pub fn group_exiting() -> bool {
     GROUP_EXIT.load(SeqCst)
 }
 
-pub fn begin_group_exit() {
+/// Whether this call began the group exit (`SIGNAL_GROUP_EXIT`).
+pub fn begin_group_exit() -> bool {
     // exit_group(2) ends the whole group; signal(7) handlers must not enter
     // guest state while process teardown is in progress.
-    GROUP_EXIT.store(true, SeqCst);
+    !GROUP_EXIT.swap(true, SeqCst)
 }
 
 pub fn with_table<R>(f: impl FnOnce(&HashMap<i32, Arc<Thread>>) -> R) -> R {

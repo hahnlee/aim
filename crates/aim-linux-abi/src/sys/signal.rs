@@ -25,7 +25,9 @@
 //!   no other exact way back to an arbitrary pc (ADR 0012, "Platform probes").
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering::Relaxed, Ordering::SeqCst,
+};
 
 use super::sigframe::{
     self, AltStack, Cpu, DarwinMcontext, Entry, KSigaction, MINSIGSTKSZ, SIG_DFL, SIG_IGN,
@@ -95,14 +97,24 @@ fn default_action(sig: i32) -> Default {
 /// Linux's `complete_signal`: a signal whose default action kills, sent to
 /// a thread that does not block it (`real_blocked`; one waiting for it in
 /// sigtimedwait does), ends the whole group at once, whatever its threads
-/// are blocked in. A core-dumping signal and one to a traced process are
-/// left to the thread that takes it.
-fn kills_group(th: &Thread, sig: i32) -> bool {
+/// are blocked in. A core-dumping signal and one to a traced task
+/// (`addressed`: the thread, or the leader for the process) are left to the
+/// thread that takes it.
+fn kills_group(th: &Thread, sig: i32, addressed: i32) -> bool {
     COREDUMP & bit(sig) == 0
         && th.sig.mask() & bit(sig) == 0
         && action(sig).handler == SIG_DFL
         && matches!(default_action(sig), Default::Die)
-        && super::ptrace::tracer_of(th.tid) == 0
+        && super::ptrace::tracer_of(addressed) == 0
+}
+
+/// The fatal signal a sender decided the group dies of; the router dies of
+/// it, so the sender (a peer's agent, a timer holding its lock) returns.
+static GROUP_FATAL: AtomicI32 = AtomicI32::new(0);
+
+fn kill_group(sig: i32) {
+    let _ = GROUP_FATAL.compare_exchange(0, sig, SeqCst, SeqCst);
+    EXTERNAL_ROUTER.unpark();
 }
 
 fn ignored(sig: i32, act: &KSigaction) -> bool {
@@ -113,7 +125,13 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 /// The guest's default action for a fatal signal: the process dies of the
 /// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
 pub fn die(sig: i32) -> ! {
-    thread::begin_group_exit();
+    // Another thread is ending the group (Linux checks SIGNAL_GROUP_EXIT).
+    if !thread::begin_group_exit() {
+        loop {
+            // SAFETY: waiting for the process to end.
+            unsafe { libc::pause() };
+        }
+    }
     crate::diag::report_death(sig);
     super::ptrace::process_ending(sig);
     super::fork::spawn::wait_handovers();
@@ -347,15 +365,16 @@ fn send_thread(th: &Thread, info: Siginfo) -> i64 {
         return e;
     }
     wake_readers();
-    if th.sig.eligible(sig) {
-        thread::with_table(|t| {
-            if t.contains_key(&th.tid) {
-                poke_signal_locked(th, sig)
-            }
-        });
-    }
-    if kills_group(th, sig) {
-        die(sig);
+    // A thread that already left the table takes nothing.
+    let present = thread::with_table(|t| {
+        let present = t.contains_key(&th.tid);
+        if present && th.sig.eligible(sig) {
+            poke_signal_locked(th, sig)
+        }
+        present
+    });
+    if present && kills_group(th, sig, th.tid) {
+        kill_group(sig);
     }
     0
 }
@@ -408,15 +427,15 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
         return false;
     }
     wake_readers();
-    if th.sig.eligible(sig) {
-        thread::with_table(|t| {
-            if t.contains_key(&th.tid) {
-                poke_signal_locked(&th, sig)
-            }
-        });
-    }
-    if kills_group(&th, sig) {
-        die(sig);
+    let present = thread::with_table(|t| {
+        let present = t.contains_key(&th.tid);
+        if present && th.sig.eligible(sig) {
+            poke_signal_locked(&th, sig)
+        }
+        present
+    });
+    if present && kills_group(&th, sig, th.tid) {
+        kill_group(sig);
     }
     true
 }
@@ -438,8 +457,8 @@ fn route(sig: i32) {
         }
         target.cloned()
     });
-    if target.is_some_and(|th| kills_group(&th, sig)) {
-        die(sig);
+    if target.is_some_and(|th| kills_group(&th, sig, thread::main_tid())) {
+        kill_group(sig);
     }
 }
 
@@ -522,11 +541,16 @@ fn unkillable_drops(pid: i32, sig: i32) -> bool {
 
 /// The host thread that routes external signals, as a sender in the
 /// process would: [`route`] reaches a thread blocked where only its waker
-/// interrupts it (a binder read), and a fatal signal ends the process.
+/// interrupts it (a binder read). It also ends the process of a fatal
+/// signal ([`kill_group`]).
 fn route_external() {
     loop {
         EXTERNAL_ROUTER.park(0, None);
         drain_external();
+        let fatal = GROUP_FATAL.load(SeqCst);
+        if fatal != 0 {
+            die(fatal);
+        }
     }
 }
 
@@ -1535,11 +1559,7 @@ fn my_pid() -> i64 {
 /// which queues them as Linux does; the rest go through Darwin.
 pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
     if p == libc_getpid() {
-        return if sig == 0 {
-            0
-        } else {
-            send_process(sender(sig, sigframe::SI_USER))
-        };
+        return send_self(sig);
     }
     // SAFETY: trivial.
     let same_session = || unsafe { libc::getsid(p) == libc::getsid(0) };
@@ -1564,6 +1584,15 @@ pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
     }
     // SAFETY: plain kill of a process of the namespace.
     crate::errno::check(unsafe { libc::kill(p, h) } as i64)
+}
+
+/// kill of this process: a private namespace's init ignores what it has
+/// no handler for, from itself too (`sig_task_ignored`).
+fn send_self(sig: i32) -> i64 {
+    if sig == 0 || unkillable_ignores(thread::main_tid(), sig) {
+        return 0;
+    }
+    send_process(sender(sig, sigframe::SI_USER))
 }
 
 fn libc_getpid() -> i32 {
@@ -1607,11 +1636,7 @@ pub fn kill(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     if pid == my_pid() {
-        return if sig == 0 {
-            0
-        } else {
-            send_process(sender(sig, sigframe::SI_USER))
-        };
+        return send_self(sig);
     }
     let h = to_host(sig);
     let targets = match pid {
@@ -1717,6 +1742,7 @@ pub fn tgkill(nr: u64, a: [u64; 6]) -> i64 {
     match target(tgid, tid, sig) {
         Err(e) => e,
         Ok(_) if sig == 0 => 0,
+        Ok(th) if unkillable_ignores(th.tid, sig) => 0,
         Ok(th) => send_thread(&th, sender(sig, sigframe::SI_TKILL)),
     }
 }
