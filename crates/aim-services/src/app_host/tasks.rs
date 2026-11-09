@@ -521,7 +521,9 @@ impl AppHost {
             organized: false,
             root: None,
         });
-        // The root home task goes behind the desktop, under the others.
+        // A task goes on top, the root home task too
+        // (`getOrCreateRootHomeTask(ON_TOP)`), but in window mode that goes
+        // behind the desktop, under the others.
         if home && windows {
             tasks.rotate_right(1);
         }
@@ -782,7 +784,10 @@ impl AppHost {
     /// `TaskOrganizerController.createRootTask` on the display: a root
     /// task in windowing `mode` at the display's bounds, at the bottom
     /// (`Task.Builder`'s default position), its layer a container of the
-    /// display's. It has no Mac window: each app task keeps its own.
+    /// display's. It has no Mac window: each app task keeps its own. The
+    /// root tasks here are of equal priority (none pinned, always on top or
+    /// a dream), so `findPositionForRootTask` puts it under the root home
+    /// task too.
     pub(super) fn create_root_task(
         &self,
         mode: i32,
@@ -2270,11 +2275,27 @@ pub(super) mod tests {
     /// the test phone display in window mode, task 7 at least 900x1100 and
     /// followed by its process: the process's thread, the activities and the
     /// server's end of the task bridge, and the composer's layers, of
-    /// four surface handles.
+    /// six surface handles.
     pub(in crate::app_host) fn wct_tasks(
         host: &Arc<AppHost>,
         export: &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
         old: Rect,
+    ) -> (
+        Arc<super::super::process_configuration::tests::Recorder>,
+        Vec<u64>,
+        UnixStream,
+        Arc<Mutex<SurfaceTree>>,
+    ) {
+        tasks_in_mode(host, export, old, true)
+    }
+
+    /// `wct_tasks`, in window mode if `windows`, else fullscreen tasks on
+    /// a display of no Mac windows.
+    fn tasks_in_mode(
+        host: &Arc<AppHost>,
+        export: &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+        old: Rect,
+        windows: bool,
     ) -> (
         Arc<super::super::process_configuration::tests::Recorder>,
         Vec<u64>,
@@ -2288,7 +2309,7 @@ pub(super) mod tests {
             Default::default(),
         );
         assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
-        host.tasks.windows.set(true).unwrap();
+        host.tasks.windows.set(windows).unwrap();
         host.display_metrics
             .set(Ok(super::super::display::Metrics::of(
                 &super::super::display::Display::phone_for_test(),
@@ -2320,7 +2341,7 @@ pub(super) mod tests {
         let tree = Arc::new(Mutex::new(SurfaceTree::default()));
         let endpoint = export(Arc::new(Surfaces(tree.clone())));
         let mut handles = Parcel::new();
-        for _ in 0..4 {
+        for _ in 0..6 {
             let held = export(Arc::new(super::super::activity::Token));
             handles.write_binder(Some(held.binder()));
             tree.lock().unwrap().held.push(held);
@@ -2370,7 +2391,7 @@ pub(super) mod tests {
             host.activities.stack.lock().unwrap().activities.push(a);
             activity_tokens.push(token);
         }
-        host.activities.stack.lock().unwrap().freeform = true;
+        host.activities.stack.lock().unwrap().freeform = windows;
         host.tasks.tasks.lock().unwrap()[0].min_size = (900, 1100);
         let (bridge, receive) = UnixStream::pair().unwrap();
         receive.set_nonblocking(true).unwrap();
@@ -2512,6 +2533,50 @@ pub(super) mod tests {
             host.activities.stack.lock().unwrap().activities.clear();
             assert!(host.home_to_restart());
         });
+    }
+
+    /// `TaskDisplayArea.findPositionForRootTask` of root tasks of equal
+    /// priority: an organizer root task goes to the bottom
+    /// (`createRootTask`'s `Task.Builder`, not on top), whether made before
+    /// or after the root home task, and the root home task, started and
+    /// restarted, on top (`getOrCreateRootHomeTask(ON_TOP)`), except that
+    /// in window mode it goes behind the desktop, at the bottom.
+    #[test]
+    fn organizer_root_tasks_go_to_the_bottom_and_the_root_home_task_on_top() {
+        for windows in [false, true] {
+            crate::system::with_discovery_binders(|host, _, _, export| {
+                let old = Rect {
+                    left: 100,
+                    top: 100,
+                    right: 900,
+                    bottom: 1500,
+                };
+                let _fixture = tasks_in_mode(host, export, old, windows);
+                let ids = || host.tasks.root_task_ids();
+                let before = host.create_root_task(6, None).unwrap();
+                assert_eq!(ids(), [8, 7, before]);
+                let (home, _) = home_task(host);
+                let after_home = host.create_root_task(6, None).unwrap();
+                if windows {
+                    assert_eq!(ids(), [8, 7, before, home, after_home]);
+                } else {
+                    assert_eq!(ids(), [home, 8, 7, before, after_home]);
+                }
+                {
+                    let mut stack = host.activities.stack.lock().unwrap();
+                    stack.activities.retain(|a| a.task != home);
+                    stack.tasks.retain(|t| t.id != home);
+                    stack.home = None;
+                }
+                host.remove_task(home);
+                let (restarted, _) = home_task(host);
+                if windows {
+                    assert_eq!(ids(), [8, 7, before, after_home, restarted]);
+                } else {
+                    assert_eq!(ids(), [restarted, 8, 7, before, after_home]);
+                }
+            });
+        }
     }
 
     #[test]

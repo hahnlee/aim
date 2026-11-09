@@ -131,8 +131,9 @@ home task, with the HOME activity type (`startHomeOnAllDisplays`,
 `app_host/home.rs`), and again once that task has gone and no task is
 left to focus (`resumeHomeActivity`): on fresh data the setup wizard,
 which provisions the device and finishes, then the image's
-`dev.aim.home/.Home`. Without window mode that task is an ordinary bottom
-task: the home is resumed until an app covers it. A home record is
+`dev.aim.home/.Home`. Without window mode that task is an ordinary task,
+made on top (`getOrCreateRootHomeTask(ON_TOP)`): the home is resumed until
+an app covers it. A home record is
 unresizeable unless its activity asked to be resizeable
 (`setActivityType`). In window mode the Mac desktop is the home: the root home task
 stays behind it at the bottom of the tasks, invisible and never focused,
@@ -155,8 +156,10 @@ front, which relaunches it from that state. `getTasks`, the task
 organizer, the window dump and the root-task queries list it.
 `getAllRootTaskInfos` and `getAllRootTaskInfosOnDisplay` list the root
 tasks top to bottom (the app tasks, the organizer root tasks with their
-tasks as leaves, the root home task at position 0 unless an organizer
-root task was made under it or a HOME start brought it to the front), and
+tasks as leaves, and the root home task: tasks and the root home task are
+made on top, organizer root tasks at the bottom, under the root home task
+too; in window mode the root home task is made at the bottom instead,
+behind the desktop, until a HOME start brings it to the front), and
 `getRootTaskInfo` and
 `getRootTaskInfoOnDisplay` find the root home task for
 `ACTIVITY_TYPE_HOME`, no pinned one, else the topmost compatible one
