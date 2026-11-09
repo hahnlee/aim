@@ -482,7 +482,6 @@ impl AppHost {
                     };
                     return self
                         .start_process_for(&package, &process, Some(request), false)
-                        .map(|_| ())
                         .map_err(|e| e.message);
                 }
                 if resume {
@@ -794,9 +793,7 @@ impl AppHost {
                     None,
                 )
                 .map(|_| ()),
-            None => self
-                .start_process_for(package, &process, Some(request), false)
-                .map(|_| ()),
+            None => self.start_process_for(package, &process, Some(request), false),
         }
     }
 
@@ -1055,16 +1052,21 @@ impl AppHost {
         if let Some((package, process, request)) = pending {
             let token = result.1.unwrap();
             if let Err(e) = self.start_process_for(&package, &process, Some(request), false) {
-                let (_, commands) = self.activities.stack.lock().unwrap().finish(token);
-                self.activities.records.lock().unwrap().remove(&token);
-                self.activities.finish_launch(token, Some((false, -1, 0)));
-                self.cancel_activity_transition(token);
-                self.release_uri_grants(Owner::Activity(token));
-                self.run(commands);
+                self.abandon_activity_start(token);
                 return Err(e);
             }
         }
         Ok(result)
+    }
+
+    /// An activity whose process could not start goes.
+    pub(super) fn abandon_activity_start(self: &Arc<Self>, token: u64) {
+        let (_, commands) = self.activities.stack.lock().unwrap().finish(token);
+        self.activities.records.lock().unwrap().remove(&token);
+        self.activities.finish_launch(token, Some((false, -1, 0)));
+        self.cancel_activity_transition(token);
+        self.release_uri_grants(Owner::Activity(token));
+        self.run(commands);
     }
 
     fn admit_activity_start(

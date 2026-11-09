@@ -175,6 +175,7 @@ pub mod playback;
 pub mod power_service;
 mod preferred_records;
 mod process_configuration;
+mod process_hold;
 mod process_start;
 mod provider_queries;
 pub mod providers;
@@ -650,6 +651,8 @@ pub struct AppHost {
     package_boot: package_boot::Readiness,
     /// AMS.mProcessesReady: package settings and default grants before app forks.
     processes_ready: OnceLock<Result<(), Exception>>,
+    /// AMS.mProcessesOnHold: starts asked for before `processes_ready`.
+    processes_on_hold: Mutex<Vec<process_hold::HeldStart>>,
     pub(crate) accessibility_ready: boot_ready::AccessibilityReady,
     /// Retained verifier API in the current system process; replaced on attach.
     domain_frontend: Mutex<Option<Arc<crate::system::ServiceOwner>>>,
@@ -808,6 +811,7 @@ impl AppHost {
             package_parser_cache: OnceLock::new(),
             package_boot: Default::default(),
             processes_ready: OnceLock::new(),
+            processes_on_hold: Mutex::new(Vec::new()),
             accessibility_ready: Default::default(),
             domain_frontend: Mutex::new(None),
             system_route_queries: Mutex::new(None),
@@ -1514,23 +1518,6 @@ impl AppHost {
             .map(|(seq, a)| (*seq, a.thread.is_some()))
     }
 
-    /// Starts the process of package `name` for `request`, or for a
-    /// service, a provider or a broadcast (no activity). As
-    /// `ProcessList.startProcessLocked` decides by `FLAG_FROM_BACKGROUND`,
-    /// a start `from_background` (a broadcast's) fails for a bad process,
-    /// and any other start makes the process good again and resets its
-    /// crash counts.
-    fn start_process_for(
-        &self,
-        name: &str,
-        process: &str,
-        request: Option<activity_start::StartRequest>,
-        from_background: bool,
-    ) -> Result<i32, Exception> {
-        self.start_app_process(name, process, request, from_background, false)
-            .map(|(_, pid)| pid)
-    }
-
     /// A new isolated process `process` of package `name`, for a service
     /// (`startProcessLocked` with `isolated`): its start and pid. Its uid
     /// is a new isolated uid, which the package manager knows to be the
@@ -1825,6 +1812,8 @@ impl AppHost {
         from_background: bool,
         isolated: bool,
     ) -> Result<(i64, i32), Exception> {
+        // `start_process_for` holds its early starts; `addAppLocked`'s
+        // (instrumentation's) wait for the package readiness forks follow.
         self.processes_ready.wait().clone()?;
         let launch = self.launch_inputs(name)?;
         let owner = launch.application.uid as u32;
