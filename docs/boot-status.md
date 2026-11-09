@@ -147,7 +147,9 @@ launch roots, empty transactions and sync remain explicit failures. No guest boo
 
 TOC `createRootTask`, `deleteRootTask`, `getRootTasks` and `getChildTasks`
 serve organizer root tasks (#2616): a multi-window root on the default display
-is made at the bottom with a real container layer under the display's and no
+is made at the bottom (under the root home task too, which is made on top
+except in window mode, as `findPositionForRootTask` places root tasks of
+equal priority; #2735) with a real container layer under the display's and no
 Mac window of its own, appears to the organizer by callback (not in a
 registration's list) with its launch cookie, and goes with its organizer
 (`TaskOrganizerState.dispose`), its tasks' activities finishing. WCT `reparent`
