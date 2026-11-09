@@ -26,6 +26,8 @@ pub mod inode_lease;
 
 pub mod fsverity;
 
+pub mod fscrypt;
+
 pub mod private_fd;
 
 pub mod verity_control;

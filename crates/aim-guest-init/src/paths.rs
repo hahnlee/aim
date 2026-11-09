@@ -643,6 +643,8 @@ impl Layout {
         let mut locator = b"AIMVRTROOT01\0".to_vec();
         locator.extend_from_slice(verity.as_os_str().as_bytes());
         fs::write(self.runtime.join("fs-verity-root"), locator)?;
+        // The data filesystem's fscrypt keyring and policy roots (ADR 0016).
+        aim_storage::fscrypt::Owner::prepare(&self.runtime, &self.data)?;
         // The mount point of /data/user/0, a symlink to /data/data in
         // earlier layouts (#221).
         let user0 = self.data.join("data/user/0");

@@ -55,6 +55,7 @@ pub(crate) mod fdtab;
 mod fileattr;
 mod fork;
 mod fs;
+mod fscrypt;
 mod fsops;
 mod fsverity_ioctl;
 mod futex;

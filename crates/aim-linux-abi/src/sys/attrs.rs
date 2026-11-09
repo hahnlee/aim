@@ -100,7 +100,7 @@ fn decode(b: &[u8]) -> Option<Attr> {
 }
 
 /// Reads attribute `name` of `host` into `b`: the length read, if any.
-fn get(host: Host, name: &CStr, b: &mut [u8]) -> Option<usize> {
+pub(super) fn get(host: Host, name: &CStr, b: &mut [u8]) -> Option<usize> {
     // SAFETY: host path or fd, local buffer.
     let n = unsafe {
         match host {
@@ -152,23 +152,30 @@ fn decode_original(b: &[u8]) -> Option<Attr> {
 
 /// Stores `a`'s recorded fields over the guest attribute of `host`.
 fn set_guest(host: Host, a: Attr) -> Result<bool, crate::errno::Errno> {
+    let b = encode(a.over(guest_attr(host).unwrap_or_default()));
+    set(host, GUEST, &b)
+}
+
+/// Stores the private attribute `name` of `host`, a writable host inode,
+/// adding owner write for the change where the host mode lacks it: false
+/// where the inode cannot carry it.
+pub(super) fn set(host: Host, name: &CStr, b: &[u8]) -> Result<bool, crate::errno::Errno> {
     if matches!(host, Host::Image(_)) {
         return Ok(false);
     }
-    let b = encode(a.over(guest_attr(host).unwrap_or_default()));
     let set = || {
         let result = unsafe {
             match host {
                 Host::Path(p) => libc::setxattr(
                     p.as_ptr(),
-                    GUEST.as_ptr(),
+                    name.as_ptr(),
                     b.as_ptr().cast(),
                     b.len(),
                     0,
                     libc::XATTR_NOFOLLOW,
                 ),
                 Host::Fd(fd) => {
-                    libc::fsetxattr(fd, GUEST.as_ptr(), b.as_ptr().cast(), b.len(), 0, 0)
+                    libc::fsetxattr(fd, name.as_ptr(), b.as_ptr().cast(), b.len(), 0, 0)
                 }
                 Host::Image(_) => unreachable!(),
             }
@@ -759,6 +766,7 @@ pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::
         || parent.guest.clone(),
         &mut parent_stat,
     );
+    super::fscrypt::inherit(Host::Path(&parent.host), host)?;
     let mut mode = None;
     if parent_stat.st_mode & libc::S_ISGID != 0 {
         gid = parent_stat.st_gid;

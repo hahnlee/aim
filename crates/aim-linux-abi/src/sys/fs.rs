@@ -2756,6 +2756,9 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
             .map(|result| result as i64)
             .unwrap_or_else(|error| -(error as i64));
     }
+    if let Some(r) = super::fscrypt::ioctl(fd, req, arg) {
+        return r;
+    }
     if let Some(r) = super::fileattr::ioctl(fd, req, arg) {
         return r;
     }

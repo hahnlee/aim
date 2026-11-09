@@ -44,14 +44,14 @@ struct Rules {
     immutable_check: bool,
 }
 /// `EXT4_FL_USER_VISIBLE`, `EXT4_FL_USER_MODIFIABLE`.
-const EXT4: Rules = Rules {
+static EXT4: Rules = Rules {
     accepted: 0x725b_dbff,
     modifiable: 0x604b_c0ff,
     honoured: IMMUTABLE,
     immutable_check: true,
 };
 /// `SHMEM_FL_USER_MODIFIABLE`: immutable, append-only, nodump, noatime.
-const SHMEM: Rules = Rules {
+static SHMEM: Rules = Rules {
     accepted: 0xf0,
     modifiable: 0xf0,
     honoured: 0,
@@ -108,6 +108,13 @@ fn rules(fd: i32) -> Option<&'static Rules> {
         Some(kind) if super::fs::kernel_fs_magic(kind).is_some() => None,
         _ => Some(&EXT4),
     }
+}
+
+/// Whether `fd` is a file of a writable ext4, which has fscrypt.
+pub(super) fn ext4(fd: i32) -> bool {
+    rules(fd).is_some_and(|rules| std::ptr::eq(rules, &EXT4))
+        && super::fs::stat_fd_kernel(fd)
+            .is_ok_and(|stat| !crate::vfs::on_read_only_root(stat.st_dev))
 }
 
 fn flags(stat: &libc::stat) -> Result<u32, Errno> {
