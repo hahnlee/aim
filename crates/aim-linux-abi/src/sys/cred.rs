@@ -738,6 +738,14 @@ pub fn may_signal(pid: i32) -> bool {
     })
 }
 
+/// `sigio_perm` (fs/fcntl.c): an O_ASYNC owner set by a caller with real
+/// and effective uids `uid` and `euid` may be signalled in process `pid`
+/// when that euid is root or either uid is the target's real or saved uid.
+pub fn may_signal_io(pid: i32, uid: u32, euid: u32) -> bool {
+    let t = target(pid);
+    euid == 0 || [uid, euid].iter().any(|u| *u == t.uid[0] || *u == t.uid[2])
+}
+
 /// `__ptrace_may_access` (kernel/ptrace.c) but for the dumpable rule: the
 /// caller's real ids (with `fs`, its filesystem ids) are each of the
 /// target's real, effective and saved ids, or it has CAP_SYS_PTRACE.

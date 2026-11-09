@@ -107,7 +107,11 @@ dup keeps the pidfd open, unlike Linux's epitem, which lasts until the file's
 last close; AIM's other fd kinds behave the same. A pidfd's O_NONBLOCK is its
 kqueue's status flag: F_SETFL and FIONBIO set it on a pidfd, epoll or inotify
 (Darwin's ENOTTY from a kqueue's missing FIONBIO is not the guest's), F_GETFL
-reports it, and waitid(P_PIDFD) reads it when it runs (#2841). A fork child
+reports it, and waitid(P_PIDFD) reads it when it runs (#2841). O_ASYNC on an
+inotify signals its F_SETOWN/F_SETOWN_EX owner for each queued event, SIGIO or
+F_SETSIG's signal with POLL_IN, its band and si_fd: a watcher thread waits on a
+second knote on each watched vnode and decodes events as they arrive (#2850);
+for other kinds F_SETFL still drops O_ASYNC and F_SETSIG is EINVAL. A fork child
 gives each rebuilt pidfd, epoll and inotify fd its own close-on-exec flag
 (#2840) and its open file's O_NONBLOCK, and a pidfd (a kqueue) cannot
 be sent over SCM_RIGHTS (#2838). Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited

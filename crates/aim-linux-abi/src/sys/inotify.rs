@@ -16,12 +16,19 @@
 //! is not empty, a user event keeps the kqueue readable. A vnode note may
 //! decode to nothing, so a readable kqueue is only a candidate: poll,
 //! select and epoll ask [`readable`], as Linux asks inotify_poll.
+//!
+//! With O_ASYNC, each queued event signals the F_SETOWN owner. Events are
+//! then decoded as they arrive: a private kqueue holds a second knote on
+//! each watched vnode, and the O_ASYNC watcher thread waits on all of
+//! them (the inotify's own kqueue cannot be waited on for that: a
+//! nested kqueue that is already readable does not report another note).
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use super::fdtab::{self, Kind};
+use super::fown::Fown;
 use crate::errno::{self, EAGAIN, EBADF, EINVAL};
 use crate::sys::guest_cstr;
 use crate::vfs;
@@ -83,6 +90,23 @@ impl Drop for Watch {
     }
 }
 
+/// O_ASYNC, set through guest fd `fd` (the signals' `si_fd`).
+struct Fasync {
+    fd: i32,
+    /// None in a fork child until [`after_fork_child`].
+    armed: Option<Armed>,
+}
+
+/// An O_ASYNC inotify's registration with the watcher thread.
+struct Armed {
+    /// A private reference to the inotify's kqueue.
+    kq: i32,
+    /// The private kqueue holding a second knote on each watched vnode.
+    mirror: i32,
+    /// The inotify's key in [`Watcher::inotifies`].
+    id: u64,
+}
+
 #[derive(Default)]
 struct State {
     watches: HashMap<i32, Watch>,
@@ -90,6 +114,10 @@ struct State {
     queue: VecDeque<Vec<u8>>,
     /// Whether an IN_Q_OVERFLOW waits in the queue.
     overflowed: bool,
+    owner: Fown,
+    fasync: Option<Fasync>,
+    /// Events queued under O_ASYNC whose signal [`Inotify::unlock`] sends.
+    raised: u32,
 }
 
 fn mask_of(e: &[u8]) -> u32 {
@@ -100,12 +128,14 @@ impl State {
     /// fsnotify_add_event: past max_queued_events an event is dropped and
     /// one IN_Q_OVERFLOW (wd -1) is queued unless one already waits; an
     /// event equal to the last queued one (inotify_merge: wd, mask, cookie
-    /// and name), unless that is an IN_IGNORED, is folded into it.
+    /// and name), unless that is an IN_IGNORED, is folded into it. Each
+    /// event queued signals the owner under O_ASYNC (`kill_fasync`).
     fn push(&mut self, e: Vec<u8>) {
         if self.queue.len() >= MAX_QUEUED_EVENTS {
             if !self.overflowed {
                 self.overflowed = true;
                 self.queue.push_back(event(-1, IN_Q_OVERFLOW, b""));
+                self.raise();
             }
             return;
         }
@@ -117,6 +147,13 @@ impl State {
             return;
         }
         self.queue.push_back(e);
+        self.raise();
+    }
+
+    fn raise(&mut self) {
+        if self.fasync.is_some() {
+            self.raised += 1;
+        }
     }
 
     /// Take the oldest event.
@@ -128,6 +165,11 @@ impl State {
         {
             self.overflowed = false;
         }
+    }
+
+    /// The private kqueue of the watched vnodes' second knotes.
+    fn mirror(&self) -> Option<i32> {
+        Some(self.fasync.as_ref()?.armed.as_ref()?.mirror)
     }
 }
 
@@ -174,11 +216,16 @@ fn event(wd: i32, mask: u32, name: &[u8]) -> Vec<u8> {
     e
 }
 
-fn register(kq: i32, wd: i32, fd: i32) -> bool {
-    register_note(kq, fd, wd as usize)
+fn register(kq: i32, wd: i32, fd: i32, mirror: Option<i32>) -> bool {
+    register_note(kq, fd, wd as usize, mirror)
 }
 
-fn register_note(kq: i32, fd: i32, udata: usize) -> bool {
+/// A knote on vnode `fd`, and its second one on `mirror` under O_ASYNC.
+fn register_note(kq: i32, fd: i32, udata: usize, mirror: Option<i32>) -> bool {
+    vnode_note(kq, fd, udata) && mirror.is_none_or(|mirror| vnode_note(mirror, fd, 0))
+}
+
+fn vnode_note(kq: i32, fd: i32, udata: usize) -> bool {
     let k = libc::kevent {
         ident: fd as usize,
         filter: libc::EVFILT_VNODE,
@@ -198,7 +245,7 @@ fn entry_udata(wd: i32, fd: i32) -> usize {
 /// Make watch `wd`'s entry knotes match its snapshot and mask: one on each
 /// regular file while the mask asks for IN_MODIFY or IN_CLOSE_WRITE, none
 /// otherwise. A replaced file (another inode) gets a new one.
-fn sync_entries(kq: i32, wd: i32, w: &mut Watch) {
+fn sync_entries(kq: i32, wd: i32, w: &mut Watch, mirror: Option<i32>) {
     let wanted = w.mask & (IN_MODIFY | IN_CLOSE_WRITE) != 0;
     let files: HashMap<&Vec<u8>, u64> = match &w.dir {
         Some(d) if wanted => d
@@ -240,7 +287,7 @@ fn sync_entries(kq: i32, wd: i32, w: &mut Watch) {
         if efd < 0 {
             continue;
         }
-        if register_note(kq, efd, entry_udata(wd, efd)) {
+        if register_note(kq, efd, entry_udata(wd, efd), mirror) {
             w.entries.insert((*name).clone(), efd);
         } else {
             // SAFETY: our entry fd.
@@ -336,13 +383,14 @@ pub fn inotify_add_watch(a: [u64; 6]) -> i64 {
     }
     let dev_ino = (st.st_dev as u32 as u64, st.st_ino);
     let mut s = ino.state.lock().unwrap();
+    let mirror = s.mirror();
     if let Some((wd, w)) = s.watches.iter_mut().find(|(_, w)| w.dev_ino == dev_ino) {
         w.mask = if mask & IN_MASK_ADD != 0 {
             w.mask | mask
         } else {
             mask
         };
-        sync_entries(fd, *wd, w);
+        sync_entries(fd, *wd, w, mirror);
         return *wd as i64;
     }
     // SAFETY: an event-only open of the watched path.
@@ -351,7 +399,7 @@ pub fn inotify_add_watch(a: [u64; 6]) -> i64 {
         return -(errno::last() as i64);
     }
     let wd = s.next_wd;
-    if !register(fd, wd, wfd) {
+    if !register(fd, wd, wfd, mirror) {
         // SAFETY: our watch fd.
         unsafe { libc::close(wfd) };
         return -(errno::last() as i64);
@@ -366,7 +414,7 @@ pub fn inotify_add_watch(a: [u64; 6]) -> i64 {
         dir,
         entries: HashMap::new(),
     };
-    sync_entries(fd, wd, &mut w);
+    sync_entries(fd, wd, &mut w, mirror);
     s.watches.insert(wd, w);
     wd as i64
 }
@@ -387,15 +435,15 @@ pub fn inotify_rm_watch(a: [u64; 6]) -> i64 {
         Ok(i) => i,
         Err(e) => return e,
     };
-    if remove(fd, &mut ino.state.lock().unwrap(), wd) {
-        0
-    } else {
-        -(EINVAL as i64)
-    }
+    let mut s = ino.state.lock().unwrap();
+    let removed = remove(fd, &mut s, wd);
+    ino.unlock(s);
+    if removed { 0 } else { -(EINVAL as i64) }
 }
 
 /// Decode what the knote of watch `wd` reported.
 fn decode(fd: i32, s: &mut State, wd: i32, notes: u32) {
+    let mirror = s.mirror();
     let Some(w) = s.watches.get_mut(&wd) else {
         return;
     };
@@ -438,7 +486,7 @@ fn decode(fd: i32, s: &mut State, wd: i32, notes: u32) {
         out.push((IN_CLOSE_WRITE, Vec::new()));
     }
     if w.dir.is_some() {
-        sync_entries(fd, wd, w);
+        sync_entries(fd, wd, w, mirror);
     }
     if notes & libc::NOTE_ATTRIB != 0 {
         out.push((IN_ATTRIB | dir_flag, Vec::new()));
@@ -503,8 +551,20 @@ fn decode_entry(fd: i32, s: &mut State, wd: i32, efd: i32, notes: u32) {
     }
 }
 
-/// Move pending knote events into the queue; wait for one when `block`.
-fn collect(fd: i32, s: &mut State, block: bool) -> i64 {
+/// Move all pending knote events into the queue; wait for one when
+/// `block`.
+fn collect(fd: i32, s: &mut State, mut block: bool) -> i64 {
+    loop {
+        let n = collect_some(fd, s, block);
+        if n < 32 {
+            return n.min(0);
+        }
+        block = false;
+    }
+}
+
+/// Up to 32 knote events into the queue: their count, or a negative errno.
+fn collect_some(fd: i32, s: &mut State, block: bool) -> i64 {
     let mut evs = [libc::kevent {
         ident: 0,
         filter: 0,
@@ -545,7 +605,7 @@ fn collect(fd: i32, s: &mut State, block: bool) -> i64 {
             decode(fd, s, udata as i32, e.fflags);
         }
     }
-    0
+    n as i64
 }
 
 /// read(2) on an inotify fd; None when `fd` is not one.
@@ -557,6 +617,7 @@ pub fn read(fd: i32, buf: u64, len: usize) -> Option<i64> {
     loop {
         let r = collect(fd, &mut s, false);
         if r < 0 {
+            ino.unlock(s);
             return Some(r);
         }
         if !s.queue.is_empty() {
@@ -564,32 +625,42 @@ pub fn read(fd: i32, buf: u64, len: usize) -> Option<i64> {
         }
         if fdtab::nonblocking(fd) {
             signal_pending(fd, false);
+            ino.unlock(s);
             return Some(-(EAGAIN as i64));
         }
-        drop(s);
+        ino.unlock(s);
         let r = fdtab::wait_for(fd, libc::POLLIN);
         s = ino.state.lock().unwrap();
         if r < 0 {
+            ino.unlock(s);
             return Some(r);
         }
     }
     let mut off = 0usize;
+    let mut fault = None;
     while let Some(e) = s.queue.front() {
         if off + e.len() > len {
             break;
         }
         // SAFETY: guest buffer of `len` bytes.
-        user_try!(unsafe {
+        if let Err(error) = unsafe {
             crate::sys::user_memory::copy_bytes(
                 e.as_ptr() as *const u8,
                 buf.wrapping_add(off as u64) as *mut u8,
                 e.len(),
             )
-        });
+        } {
+            fault = Some(error);
+            break;
+        }
         off += e.len();
         s.pop();
     }
     signal_pending(fd, !s.queue.is_empty());
+    ino.unlock(s);
+    if let Some(error) = fault {
+        return crate::sys::user_memory::CopyError::copy_error(error);
+    }
     Some(if off == 0 {
         -(EINVAL as i64)
     } else {
@@ -605,7 +676,9 @@ pub fn pending_bytes(fd: i32) -> Option<i64> {
     let mut s = ino.state.lock().unwrap();
     collect(fd, &mut s, false);
     signal_pending(fd, !s.queue.is_empty());
-    Some(s.queue.iter().map(|e| e.len() as i64).sum())
+    let bytes = s.queue.iter().map(|e| e.len() as i64).sum();
+    ino.unlock(s);
+    Some(bytes)
 }
 
 /// inotify_poll: whether inotify fd `fd` has an event to read, None when
@@ -619,8 +692,253 @@ pub fn readable(fd: i32) -> Option<bool> {
     pending_bytes(fd).map(|bytes| bytes > 0)
 }
 
-/// Fork: an inotify is its watches (each on an inherited vnode fd) and its
-/// queued events.
+impl Inotify {
+    /// Release the state, then signal the owner for each event queued
+    /// under O_ASYNC: sending can reach another process's agent, which the
+    /// inotify must not wait on locked.
+    fn unlock(&self, mut s: std::sync::MutexGuard<'_, State>) {
+        let raised = std::mem::take(&mut s.raised);
+        let fd = s.fasync.as_ref().map(|f| f.fd);
+        let owner = s.owner.owner();
+        drop(s);
+        if let Some(fd) = fd {
+            for _ in 0..raised {
+                owner.readable(fd);
+            }
+        }
+    }
+
+    /// fcntl's owner commands (F_SETOWN, F_SETSIG, ...); None for others.
+    pub fn owner_fcntl(&self, cmd: u64, arg: u64) -> Option<i64> {
+        self.state.lock().unwrap().owner.fcntl(cmd, arg)
+    }
+
+    /// Whether O_ASYNC is set.
+    pub fn is_async(&self) -> bool {
+        self.state.lock().unwrap().fasync.is_some()
+    }
+
+    /// The watcher thread saw a watched vnode change: decode what the
+    /// inotify's kqueue holds, which queues (and signals) its events.
+    fn arrived(&self) {
+        let mut s = self.state.lock().unwrap();
+        let Some((kq, mirror)) = s
+            .fasync
+            .as_ref()
+            .and_then(|f| f.armed.as_ref())
+            .map(|a| (a.kq, a.mirror))
+        else {
+            return;
+        };
+        // Drained first: a note after this is in both kqueues.
+        drain(mirror);
+        let r = collect(kq, &mut s, false);
+        if r < 0 {
+            crate::diag!("inotify O_ASYNC collect: errno {}", -r);
+        }
+        signal_pending(kq, !s.queue.is_empty());
+        self.unlock(s);
+    }
+}
+
+impl Drop for Inotify {
+    fn drop(&mut self) {
+        let s = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(armed) = s.fasync.take().and_then(|f| f.armed) {
+            disarm(armed);
+        }
+    }
+}
+
+/// The O_ASYNC watcher thread's kqueue (a knote on each armed inotify's
+/// mirror kqueue, with its id), and the inotifies by id.
+struct Watcher {
+    kq: i32,
+    inotifies: HashMap<u64, Weak<Inotify>>,
+    next: u64,
+}
+
+static WATCHER: Mutex<Option<Watcher>> = Mutex::new(None);
+
+fn watch(kq: i32) {
+    // SAFETY: this host thread takes no signals, so the kernel never picks
+    // it for a process-directed one.
+    unsafe {
+        let mut all: libc::sigset_t = 0;
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+    }
+    // SAFETY: an all-zero kevent is valid.
+    let mut evs: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+    loop {
+        // SAFETY: waiting for events into a local buffer.
+        let n = unsafe {
+            libc::kevent(
+                kq,
+                std::ptr::null(),
+                0,
+                evs.as_mut_ptr(),
+                evs.len() as i32,
+                std::ptr::null(),
+            )
+        };
+        if n < 0 && errno::last() == errno::EINTR {
+            continue;
+        }
+        if n < 0 {
+            crate::diag!("inotify O_ASYNC watcher: errno {}", errno::last());
+            return;
+        }
+        for e in &evs[..n as usize] {
+            let ino = WATCHER
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|w| w.inotifies.get(&(e.udata as u64)))
+                .and_then(Weak::upgrade);
+            if let Some(ino) = ino {
+                ino.arrived();
+            }
+        }
+    }
+}
+
+/// Discard what kqueue `kq` reports.
+fn drain(kq: i32) {
+    // SAFETY: an all-zero kevent is valid.
+    let mut evs: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+    let zero = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: output array we own, no wait.
+    while unsafe {
+        libc::kevent(
+            kq,
+            std::ptr::null(),
+            0,
+            evs.as_mut_ptr(),
+            evs.len() as i32,
+            &zero,
+        )
+    } == evs.len() as i32
+    {}
+}
+
+/// A private kqueue, out of the guest's way.
+fn private_kqueue(source: Option<i32>) -> Result<i32, errno::Errno> {
+    // SAFETY: a new kqueue, or our own reference to inotify kqueue `source`.
+    let kq = unsafe {
+        match source {
+            Some(fd) => libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, fdtab::hidden_base()),
+            None => libc::kqueue(),
+        }
+    };
+    if kq < 0 {
+        return Err(errno::last());
+    }
+    Ok(fdtab::hide(kq))
+}
+
+fn close_private(fd: i32) {
+    fdtab::unhide(fd);
+    // SAFETY: our private kqueue.
+    unsafe { libc::close(fd) };
+}
+
+/// Register inotify `ino` (kqueue `fd`, state `s`) with the watcher
+/// thread, started on first use.
+fn arm(ino: &Arc<Inotify>, fd: i32, s: &State) -> Result<Armed, errno::Errno> {
+    let kq = private_kqueue(Some(fd))?;
+    let mirror = match private_kqueue(None) {
+        Ok(mirror) => mirror,
+        Err(error) => {
+            close_private(kq);
+            return Err(error);
+        }
+    };
+    let mut watcher = WATCHER.lock().unwrap();
+    let registered = (|| {
+        for w in s.watches.values() {
+            for fd in std::iter::once(w.fd).chain(w.entries.values().copied()) {
+                if !vnode_note(mirror, fd, 0) {
+                    return Err(errno::last());
+                }
+            }
+        }
+        if watcher.is_none() {
+            let wkq = private_kqueue(None)?;
+            std::thread::Builder::new()
+                .name("linux-abi-inotify-async".into())
+                .spawn(move || watch(wkq))
+                .map_err(|_| errno::ENOMEM)?;
+            *watcher = Some(Watcher {
+                kq: wkq,
+                inotifies: HashMap::new(),
+                next: 0,
+            });
+        }
+        let w = watcher.as_mut().unwrap();
+        w.next += 1;
+        let k = libc::kevent {
+            ident: mirror as usize,
+            filter: libc::EVFILT_READ,
+            flags: libc::EV_ADD | libc::EV_CLEAR,
+            fflags: 0,
+            data: 0,
+            udata: w.next as usize as *mut _,
+        };
+        // SAFETY: one change, no events.
+        if unsafe { libc::kevent(w.kq, &k, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
+            return Err(errno::last());
+        }
+        w.inotifies.insert(w.next, Arc::downgrade(ino));
+        Ok(w.next)
+    })();
+    match registered {
+        Ok(id) => Ok(Armed { kq, mirror, id }),
+        Err(error) => {
+            close_private(mirror);
+            close_private(kq);
+            Err(error)
+        }
+    }
+}
+
+/// Leave the watcher thread; closing the mirror drops its knotes.
+fn disarm(armed: Armed) {
+    if let Some(w) = WATCHER.lock().unwrap().as_mut() {
+        w.inotifies.remove(&armed.id);
+    }
+    close_private(armed.mirror);
+    close_private(armed.kq);
+}
+
+/// F_SETFL's O_ASYNC change (Linux `inotify_fasync`) on inotify `ino`
+/// through guest fd `guest`, whose kqueue is `fd`.
+pub fn set_async(ino: &Arc<Inotify>, fd: i32, guest: i32, on: bool) -> Result<(), errno::Errno> {
+    let mut s = ino.state.lock().unwrap();
+    match (on, s.fasync.is_some()) {
+        (true, false) => {
+            let armed = arm(ino, fd, &s)?;
+            s.fasync = Some(Fasync {
+                fd: guest,
+                armed: Some(armed),
+            });
+        }
+        (false, true) => {
+            if let Some(armed) = s.fasync.take().and_then(|f| f.armed) {
+                disarm(armed);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Fork: an inotify is its watches (each on an inherited vnode fd), its
+/// queued events and its O_ASYNC state (Linux children share the file;
+/// here each process has a copy, which signals the owner too).
 pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
     use std::os::unix::ffi::OsStrExt;
     let s = ino.state.lock().unwrap();
@@ -649,6 +967,8 @@ pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
     });
     w.i32(s.next_wd);
     w.seq(s.queue.iter(), |w, e| w.bytes(e));
+    s.owner.save(w);
+    w.opt(s.fasync.as_ref(), |w, f| w.i32(f.fd));
 }
 
 pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
@@ -676,6 +996,12 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
         next_wd,
         overflowed: queue.iter().any(|e| mask_of(e) == IN_Q_OVERFLOW),
         queue,
+        owner: Fown::load(r),
+        fasync: r.opt(|r| Fasync {
+            fd: r.i32(),
+            armed: None,
+        }),
+        raised: 0,
     };
     Arc::new(Inotify {
         state: Mutex::new(state),
@@ -703,19 +1029,25 @@ pub fn after_fork_child() -> Result<(), errno::Errno> {
             }
             result?;
         }
-        let s = ino.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = ino.state.lock().unwrap_or_else(|e| e.into_inner());
         for (wd, w) in &s.watches {
-            if !register(fd, *wd, w.fd) {
+            if !register(fd, *wd, w.fd, None) {
                 return Err(errno::last());
             }
             for efd in w.entries.values() {
-                if !register_note(fd, *efd, entry_udata(*wd, *efd)) {
+                if !register_note(fd, *efd, entry_udata(*wd, *efd), None) {
                     return Err(errno::last());
                 }
             }
         }
         if !s.queue.is_empty() && !signal_pending(fd, true) {
             return Err(errno::last());
+        }
+        if s.fasync.as_ref().is_some_and(|f| f.armed.is_none()) {
+            let armed = arm(&ino, fd, &s)?;
+            if let Some(f) = s.fasync.as_mut() {
+                f.armed = Some(armed);
+            }
         }
         drop(s);
         made.push((fd, ino));
@@ -725,6 +1057,7 @@ pub fn after_fork_child() -> Result<(), errno::Errno> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::fown;
     use super::*;
     use std::os::fd::AsRawFd;
 
@@ -810,5 +1143,129 @@ mod tests {
             s.push(event(1, IN_IGNORED, b""));
         }
         assert_eq!(s.queue.len(), 5);
+    }
+
+    #[test]
+    fn o_async_signals_the_owner_of_each_event() {
+        if fdtab::isolated_kernel_test(
+            "sys::inotify::tests::o_async_signals_the_owner_of_each_event",
+        ) {
+            return;
+        }
+        use super::super::signal::take_process;
+        const F_GETFL: u64 = 3;
+        const F_SETFL: u64 = 4;
+        const O_ASYNC: u64 = 0o20000;
+        const SIGIO: i32 = 29;
+        const SIGRT: i32 = 35;
+        fdtab::init();
+        let (_vfs, view) = crate::vfs::test_view();
+        std::fs::create_dir_all(view.join("data/async")).unwrap();
+        let fcntl = |fd: i32, cmd, arg| super::super::fs::fcntl([fd as u64, cmd, arg, 0, 0, 0]);
+        let take = |sig| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(info) = take_process(sig) {
+                    return Some(info);
+                }
+                if std::time::Instant::now() > deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let fd = inotify_init1([O_NONBLOCK, 0, 0, 0, 0, 0]) as i32;
+        assert!(fd >= 0);
+        let dir = CString::new("/data/async").unwrap();
+        assert!(inotify_add_watch([fd as u64, dir.as_ptr() as u64, IN_CREATE as u64, 0, 0, 0]) > 0);
+        let pid = unsafe { libc::getpid() } as u64;
+        assert_eq!(fcntl(fd, fown::F_SETOWN, pid), 0);
+        assert_eq!(fcntl(fd, fown::F_GETOWN, 0), pid as i64);
+
+        // Without O_ASYNC, events queue silently.
+        std::fs::write(view.join("data/async/quiet"), b"").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(pending_bytes(fd), Some(32));
+        assert!(take_process(SIGIO).is_none());
+        let mut bytes = [0u8; 64];
+        assert_eq!(read(fd, bytes.as_mut_ptr() as u64, bytes.len()), Some(32));
+
+        // O_ASYNC: an event signals the owner with no read or poll.
+        assert_eq!(fcntl(fd, F_SETFL, O_NONBLOCK | O_ASYNC), 0);
+        assert_ne!(fcntl(fd, F_GETFL, 0) as u64 & O_ASYNC, 0);
+        std::fs::write(view.join("data/async/loud"), b"").unwrap();
+        let info = take(SIGIO).expect("SIGIO");
+        assert_eq!(info.code, 0x80);
+
+        // F_SETSIG: the signal carries POLL_IN, the band and the fd.
+        assert_eq!(fcntl(fd, fown::F_SETSIG, SIGRT as u64), 0);
+        assert_eq!(fcntl(fd, fown::F_GETSIG, 0), SIGRT as i64);
+        std::fs::write(view.join("data/async/rt"), b"").unwrap();
+        let info = take(SIGRT).expect("F_SETSIG signal");
+        assert_eq!((info.code, info.fields[0]), (1, 0x41));
+        assert_eq!(info.fields[1] as i32, fd);
+        assert_eq!(read(fd, bytes.as_mut_ptr() as u64, bytes.len()), Some(64));
+
+        // Clearing O_ASYNC stops the signals.
+        assert_eq!(fcntl(fd, F_SETFL, O_NONBLOCK), 0);
+        assert_eq!(fcntl(fd, F_GETFL, 0) as u64 & O_ASYNC, 0);
+        std::fs::write(view.join("data/async/after"), b"").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(pending_bytes(fd), Some(32));
+        assert!(take_process(SIGRT).is_none() && take_process(SIGIO).is_none());
+        fdtab::close_owned_guest(fd, false).unwrap();
+    }
+
+    /// More notes than one kevent call returns, all fired before the
+    /// watcher thread decodes: each still queues its event and signal.
+    #[test]
+    fn o_async_decodes_a_burst_beyond_one_kevent_batch() {
+        if fdtab::isolated_kernel_test(
+            "sys::inotify::tests::o_async_decodes_a_burst_beyond_one_kevent_batch",
+        ) {
+            return;
+        }
+        const F_SETFL: u64 = 4;
+        const O_ASYNC: u64 = 0o20000;
+        const SIGRT: i32 = 36;
+        const FILES: usize = 40;
+        fdtab::init();
+        let (_vfs, view) = crate::vfs::test_view();
+        std::fs::create_dir_all(view.join("data/burst")).unwrap();
+        let fcntl = |fd: i32, cmd, arg| super::super::fs::fcntl([fd as u64, cmd, arg, 0, 0, 0]);
+        let fd = inotify_init1([O_NONBLOCK, 0, 0, 0, 0, 0]) as i32;
+        assert!(fd >= 0);
+        for i in 0..FILES {
+            std::fs::write(view.join(format!("data/burst/{i}")), b"").unwrap();
+            let path = CString::new(format!("/data/burst/{i}")).unwrap();
+            let watch = [fd as u64, path.as_ptr() as u64, IN_MODIFY as u64, 0, 0, 0];
+            assert!(inotify_add_watch(watch) > 0);
+        }
+        let pid = unsafe { libc::getpid() } as u64;
+        assert_eq!(fcntl(fd, fown::F_SETOWN, pid), 0);
+        assert_eq!(fcntl(fd, fown::F_SETSIG, SIGRT as u64), 0);
+        assert_eq!(fcntl(fd, F_SETFL, O_NONBLOCK | O_ASYNC), 0);
+        let Some(Kind::Inotify(ino)) = fdtab::get(fd) else {
+            panic!("inotify")
+        };
+        // The watcher waits for the lock while every file is written.
+        let held = ino.state.lock().unwrap();
+        for i in 0..FILES {
+            std::fs::write(view.join(format!("data/burst/{i}")), b"x").unwrap();
+        }
+        drop(held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut signals = 0;
+        while signals < FILES && std::time::Instant::now() < deadline {
+            if super::super::signal::take_process(SIGRT).is_some() {
+                signals += 1;
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        assert_eq!(signals, FILES);
+        assert_eq!(ino.state.lock().unwrap().queue.len(), FILES);
+        drop(ino);
+        fdtab::close_owned_guest(fd, false).unwrap();
     }
 }
