@@ -190,6 +190,7 @@ impl Fixture {
                 uid: 10100 + task as u32,
                 user: 0,
                 last_active: 0,
+                root_was_reset: false,
             });
         }
         let mut a = Activity::new(token, task, 1, "p/A", 0, 0, None);

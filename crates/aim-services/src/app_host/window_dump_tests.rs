@@ -41,6 +41,7 @@ fn multi_task_window_dump_decodes_with_pinned_schema() {
             uid: 10050,
             user: 0,
             last_active: 1,
+            root_was_reset: false,
         });
         let mut home = Activity::new(1, 1, 1, "h/h.Home", 2, 0, None);
         home.state = State::Stopped;
@@ -64,6 +65,7 @@ fn multi_task_window_dump_decodes_with_pinned_schema() {
             base: super::super::super::activity_start::LaunchIntent::Component,
             uid: 10100,
             user: 0,
+            root_was_reset: false,
             last_active: 1,
         });
         let mut activity = Activity::new(id as u64, id, 1, &format!("p/p.A{id}"), 0, 0, None);

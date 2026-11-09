@@ -53,6 +53,7 @@ fn source(host: &Arc<AppHost>) -> u64 {
         uid: 10100,
         user: 0,
         last_active: 0,
+        root_was_reset: false,
     });
     stack.activities.push(activity_stack::Activity::new(
         token, 7, 1, "p/p.Main", 0, 0, None,
