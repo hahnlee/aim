@@ -18,6 +18,9 @@ use super::AppHost;
 const DESCRIPTOR: &str = "com.android.media.permission.INativePermissionController";
 const POPULATE_PACKAGES_FOR_UIDS: u32 = 1;
 const POPULATE_PERMISSION_STATE: u32 = 3;
+/// How often AudioService looks again for a restarting audioserver
+/// (`onAudioServerDied`'s `MSG_AUDIO_SERVER_DIED` delay).
+const AUDIO_SERVER_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// `MONITORED_PERMS`, by `PermissionEnum`.
 pub(super) const MONITORED_PERMS: [&str; 16] = [
@@ -123,17 +126,22 @@ impl AppHost {
         self.populate_audio_permissions(&controller)
     }
 
+    /// audioserver's permission state given anew once its policy service
+    /// is back (`ServiceHolder`'s start tasks).
     fn reconnect_audio_permissions(&self) -> Result<(), String> {
-        let deadline = std::time::Instant::now() + super::audio_policy::PATIENCE;
         loop {
             // ServiceManager may still return the retired policy's Binder while
-            // processing its death; wait for a live controller, not just a name.
+            // processing its death; wait for a live controller, not just a name,
+            // looking again as AudioService does while audioserver restarts
+            // (`onAudioServerDied`).
             match super::audio_policy::AudioPolicy::connect(&self.process)
                 .and_then(|policy| policy.permission_controller(&self.process))
             {
                 Ok(controller) => return self.audio_permission_service_started(controller),
-                Err(error) if std::time::Instant::now() >= deadline => return Err(error),
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(error) => {
+                    eprintln!("app host: audioserver permissions: {error}; trying again");
+                    std::thread::sleep(AUDIO_SERVER_RETRY);
+                }
             }
         }
     }
