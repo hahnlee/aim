@@ -1549,16 +1549,6 @@ impl Broadcasts {
         self.send_as_system(host, intent, user, allow_list, required_permissions);
     }
 
-    /// A synchronous package leaf propagates admission failures to its caller.
-    pub(super) fn try_send_from_package_manager(
-        &self,
-        host: &AppHost,
-        intent: RawIntent,
-        user: i32,
-    ) -> Result<(), Exception> {
-        self.send_with(host, intent, user, None, Sender::system(&[]), None, None)
-    }
-
     /// Package effects retain AppsFilter restrictions and BroadcastOptions.
     pub(super) fn try_send_package_effect(
         &self,

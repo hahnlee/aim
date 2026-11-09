@@ -33,6 +33,7 @@ pub struct Inputs {
     pub user_policy: super::super::native::PolicySource,
     pub gate: Arc<Mutex<()>>,
     pub preferred_removal: super::PreferredRemoval,
+    pub package_removed: super::PackageRemoved,
     pub factory: Arc<Factory>,
     pub keystore: Arc<crate::package::owner::keystore::KeystoreCleanup>,
 }
@@ -139,6 +140,7 @@ pub fn build(inputs: Inputs) -> Result<Arc<Controller>, Exception> {
         publisher: Arc::new(move |service| Ok(process.add_service(service))),
         factory_restore: restore,
         preferred_removal: inputs.preferred_removal,
+        package_removed: inputs.package_removed,
         gate: inputs.gate,
         keystore: inputs.keystore,
     }))

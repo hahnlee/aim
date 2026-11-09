@@ -3353,6 +3353,7 @@ mod tests {
             publisher: owner.publisher.clone(),
             factory_restore: Arc::new(|_| Err(illegal("fixture has no factory"))),
             preferred_removal: Arc::new(|_, _, _| Err(illegal("fixture has no preferred owner"))),
+            package_removed: Arc::new(|_, _| Err(illegal("fixture has no package observers"))),
             gate: Arc::new(Mutex::new(())),
             keystore: Arc::new(crate::package::owner::keystore::KeystoreCleanup::new(
                 process.clone(),

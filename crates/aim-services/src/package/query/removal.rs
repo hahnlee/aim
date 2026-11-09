@@ -280,6 +280,7 @@ impl Owner {
             users,
             blocked_users: blocked,
             keep_uninstalled: admission.keep_uninstalled,
+            removed_by_system: false,
         }))
     }
     fn invoke(

@@ -138,16 +138,9 @@ impl AppHibernation {
         }
     }
 
-    /// The receiver's `PACKAGE_REMOVED` without `EXTRA_REPLACING`; no
-    /// user keeping the package's code is `EXTRA_REMOVED_FOR_ALL_USERS`.
-    pub(super) fn package_removed(&self, name: &str, user: i32) -> Result<(), Exception> {
-        let all_users = self
-            .0
-            .package_capture()?
-            .state()
-            .packages
-            .get(name)
-            .is_none_or(|ps| ps.pkg.is_none());
+    /// The receiver's `PACKAGE_REMOVED` without `EXTRA_REPLACING`, with
+    /// its `EXTRA_REMOVED_FOR_ALL_USERS`.
+    pub(super) fn package_removed(&self, name: &str, user: i32, all_users: bool) {
         let mut loaded = self.0.hibernation.0.lock().unwrap();
         if let (0, Some(states)) = (user, loaded.user.as_mut()) {
             states.remove(name);
@@ -156,7 +149,6 @@ impl AppHibernation {
         if all_users && let Some(global) = loaded.global.as_mut() {
             global.remove(name);
         }
-        Ok(())
     }
 
     fn enabled(&self) -> Result<bool, Exception> {
