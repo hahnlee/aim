@@ -11,8 +11,14 @@ const UNLOCK_CE_STORAGE: u32 = 46;
 struct Memory(Arc<Mutex<HashMap<String, Vec<u8>>>>);
 
 impl CeSecrets for Memory {
-    fn read(&self, account: &str) -> Result<Option<Vec<u8>>, String> {
-        Ok(self.0.lock().unwrap().get(account).cloned())
+    fn read(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .get(account)
+            .cloned()
+            .map(Zeroizing::new))
     }
 
     fn create(&self, account: &str, secret: &[u8]) -> Result<(), String> {

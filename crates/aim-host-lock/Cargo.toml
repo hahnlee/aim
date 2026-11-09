@@ -8,3 +8,4 @@ description = "The Mac's lock as Android's trust service sees it: whether the Ma
 
 [dependencies]
 aim-hostcall.workspace = true
+zeroize = "1.9"

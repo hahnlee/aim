@@ -43,6 +43,7 @@ rsa = { version = "0.9", default-features = false, features = ["std"] }
 sha1 = { version = "0.10", features = ["oid"] }
 # sha2 0.10 gates its ARM64 hardware backend behind asm.
 sha2 = { workspace = true, features = ["oid", "asm"] }
+zeroize = "1.9"
 
 [dev-dependencies]
 log.workspace = true

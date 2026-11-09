@@ -410,15 +410,23 @@ impl AppHost {
 
     /// `finishUserUnlocking` of user 0: UserManagerService's
     /// `onBeforeUnlockUser`, its CE storage and apps' data, then the user
-    /// unlocking, then StorageManagerService's `onUserUnlocking`.
-    pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<(), String> {
+    /// unlocking, then StorageManagerService's `onUserUnlocking`. False
+    /// when its CE storage stays locked, where `finishUserUnlocking`
+    /// returns and the user stays locked (Direct Boot).
+    pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<bool, String> {
         // `unlockUserCleared`: CE storage vold has not unlocked is unlocked
-        // first, through LockSettingsService.
-        if self.file_encrypted() && !user.ce_unlocked {
-            self.unlock_user_key_if_unsecured(&user.vold, USER)?;
+        // first, through LockSettingsService, which logs a failure
+        // (`Slogf.wtf`) and leaves it locked.
+        if self.file_encrypted()
+            && !user.ce_unlocked
+            && let Err(e) = self.unlock_user_key_if_unsecured(&user.vold, USER)
+        {
+            eprintln!("app host: Failed to unlock CE storage for unsecured user {USER}: {e}");
+            return Ok(false);
         }
         self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE)?;
-        self.finish_storage_unlock(&user.vold, &user.installd)
+        self.finish_storage_unlock(&user.vold, &user.installd)?;
+        Ok(true)
     }
 
     fn finish_storage_unlock(&self, vold: &Strong, installd: &Strong) -> Result<(), String> {

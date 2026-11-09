@@ -34,6 +34,7 @@ use aim_service_aidl::{
 };
 use rusqlite::types::FromSql;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql, params};
+use zeroize::Zeroizing;
 
 use super::recovery_certificates::{
     self as certificates, CertError, CertXml, GOOGLE_CLOUD_KEY_VAULT_SERVICE_V1_ALIAS, SigXml,
@@ -116,7 +117,7 @@ const CE_SECRET_LEN: usize = 32;
 /// Where users' CE secrets are kept, by account.
 pub(super) trait CeSecrets: Send + Sync {
     /// The secret of `account`, none if there is none.
-    fn read(&self, account: &str) -> Result<Option<Vec<u8>>, String>;
+    fn read(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
     /// Keeps `secret` as `account`'s, which has none.
     fn create(&self, account: &str, secret: &[u8]) -> Result<(), String>;
 }
@@ -125,7 +126,7 @@ pub(super) trait CeSecrets: Send + Sync {
 struct MacKeychain;
 
 impl CeSecrets for MacKeychain {
-    fn read(&self, account: &str) -> Result<Option<Vec<u8>>, String> {
+    fn read(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         aim_host_lock::keychain::Keychain::user()
             .read(CE_SECRET_SERVICE, account)
             .map_err(|status| format!("keychain: {CE_SECRET_SERVICE} {account}: OSStatus {status}"))
@@ -682,8 +683,8 @@ impl AppHost {
 
     /// `unlockUserKeyIfUnsecured` of a user whose CE storage vold has
     /// not unlocked: its secret from the keychain to `unlockCeStorage`.
-    /// The keychain being locked or the secret missing is an error here
-    /// where the original logs it and leaves the user locked.
+    /// A failure (the keychain locked, the secret missing) is the
+    /// caller's to log, the user staying locked.
     pub(super) fn unlock_user_key_if_unsecured(
         &self,
         vold: &Strong,
@@ -701,7 +702,7 @@ impl AppHost {
     }
 
     /// `unlockLskfBasedProtector` of no credential: `user`'s CE secret.
-    fn ce_secret(&self, user: i32, protector: i64) -> Result<Vec<u8>, String> {
+    fn ce_secret(&self, user: i32, protector: i64) -> Result<Zeroizing<Vec<u8>>, String> {
         let account = ce_secret_account(user, protector);
         self.ce_secrets()
             .read(&account)?
@@ -792,7 +793,7 @@ impl LockSettings {
     /// kept in the keychain under a new protector (`newSyntheticPassword`,
     /// `createLskfBasedProtector`), the protector made the user's
     /// (`setCurrentLskfBasedProtectorId`).
-    fn initialize_ce_secret(&self, user: i32) -> Result<Vec<u8>, String> {
+    fn initialize_ce_secret(&self, user: i32) -> Result<Zeroizing<Vec<u8>>, String> {
         let failed = |e: Exception| format!("lock_settings: {}", e.message);
         // `generateProtectorId`.
         let protector = loop {
@@ -803,7 +804,7 @@ impl LockSettings {
                 break id;
             }
         };
-        let mut secret = vec![0; CE_SECRET_LEN];
+        let mut secret = Zeroizing::new(vec![0; CE_SECRET_LEN]);
         // SAFETY: arc4random_buf fills the vector's bytes.
         unsafe { libc::arc4random_buf(secret.as_mut_ptr().cast(), secret.len()) };
         self.host

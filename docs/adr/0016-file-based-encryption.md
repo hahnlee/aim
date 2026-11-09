@@ -175,12 +175,21 @@ turns FBE on and depends on slice 4's CE protection: it lands after it.
    data-protection keychain, which an ad-hoc signed process cannot use;
    its equivalent is the file-based login keychain, unlocked by the Mac
    user's login and locked at logout, never synchronized, read without UI
-   so a locked keychain fails the unlock instead of prompting. The item's
-   access lets any of the user's applications decrypt it, so a rebuilt app
-   host (a new ad-hoc designated requirement) is not prompted; it loses
+   so a locked keychain fails the read (`errAuthorizationInternal`, tested
+   on a throwaway keychain) instead of prompting. The item's access lets
+   any of the user's applications decrypt it and carries no partition
+   list: an item made with the default access is bound to its maker's
+   ad-hoc cdhash, and a second, separately built ad-hoc binary reading it
+   blocked on a prompt, where with this access it read the item without
+   one (checked with two throwaway binaries and a throwaway keychain). A
+   rebuilt app host is therefore never prompted, and setting a partition
+   list, which needs the keychain's password, is not needed. It loses
    nothing, as every process of the user can read the plaintext data
-   image. Every user is unsecured to LockSettings here: the Mac's session
-   is the credential. With slice 3 the FBE branches of the ported
+   image. As in the original, a failed unlock (the keychain locked, the
+   item missing) is logged and the user stays locked (Direct Boot): the
+   app host's boot stops after `LOCKED_BOOT_COMPLETED` instead of failing.
+   Every user is unsecured to LockSettings here: the Mac's session is the
+   credential. With slice 3 the FBE branches of the ported
    `fixAppsDataOnBoot` and `UserDataPreparer` then run as on a device;
    remaining: measure 3 fresh and 3 warm
    boots against main (boot-measurement discipline) and run CTS

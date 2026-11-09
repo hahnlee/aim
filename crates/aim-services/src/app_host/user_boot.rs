@@ -183,8 +183,12 @@ impl AppHost {
         );
         self.restriction_locked_boot_completed();
         // `maybeUnlockUser` → `finishUserUnlocking`: the CE storage, the
-        // user unlocking.
-        self.unlock_user_storage(&user)?;
+        // user unlocking; a user whose CE storage stays locked stays
+        // RUNNING_LOCKED.
+        if !self.unlock_user_storage(&user)? {
+            eprintln!("app host: user {USER}: CE storage locked, leaving the user locked");
+            return Ok(());
+        }
         unlocking();
         // `finishUserUnlocked`: STATE_RUNNING_UNLOCKED (the app host runs
         // no persistent apps or encryption unaware providers to start), to
