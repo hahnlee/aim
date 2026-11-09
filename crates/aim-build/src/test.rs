@@ -153,6 +153,8 @@ pub fn run(
         graph::build(graph, &["aidl-gen".to_string()], ctx, options)?;
     }
     let binaries = compile(ctx)?;
+    // The integration tests boot guests.
+    let _guest = integration.then(crate::guest_lock).transpose()?;
     let skips = aim_paths::test_skips();
     let _ = fs::remove_dir_all(&skips);
     let started = Instant::now();

@@ -90,6 +90,7 @@ name = "aim-build"
 version = "0.1.0"
 dependencies = [
  "aim-android-image",
+ "aim-android-init",
  "aim-android-xml",
  "aim-apps",
  "aim-binder-host",

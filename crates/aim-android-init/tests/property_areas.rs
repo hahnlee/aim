@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use aim_android_init::props::area::{LONG_FLAG, LONG_LEGACY_ERROR, PROP_AREA_HEADER_SIZE};
+use aim_android_init::props::areas::read_from_dir;
 use aim_android_init::props::{
     FutexWaker, PropAreaReader, PropertyAreas, PropertyInfoEntry, WakeTarget, build_trie,
 };
@@ -170,4 +171,39 @@ fn files_are_written_read_only() {
             .permissions()
             .readonly()
     );
+}
+
+#[test]
+fn another_process_reads_a_property_from_the_area_files() {
+    let areas = PropertyAreas::new(small_info()).unwrap();
+    let wake = aim_android_init::props::NoWake;
+    areas.add("sys.boot_completed", b"1", &wake).unwrap();
+    areas
+        .add("ro.boot.product.vendor.sku", b"sku", &wake)
+        .unwrap();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("read__properties__");
+    let _ = std::fs::remove_dir_all(&dir);
+    areas.write_to_dir(&dir).unwrap();
+    assert_eq!(
+        read_from_dir(&dir, "sys.boot_completed")
+            .unwrap()
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        read_from_dir(&dir, "ro.boot.product.vendor.sku")
+            .unwrap()
+            .as_deref(),
+        Some("sku")
+    );
+    assert_eq!(read_from_dir(&dir, "sys.unset").unwrap(), None);
+    // An unreadable or invalid area is an error, not an unset property.
+    assert!(read_from_dir(&dir.join("missing"), "sys.boot_completed").is_err());
+    let context = "u:object_r:system_prop:s0";
+    let mut permissions = std::fs::metadata(dir.join(context)).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(dir.join(context), permissions).unwrap();
+    std::fs::write(dir.join(context), b"short").unwrap();
+    assert!(read_from_dir(&dir, "sys.boot_completed").is_err());
 }

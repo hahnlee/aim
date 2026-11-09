@@ -46,6 +46,7 @@ use crate::boot;
 use crate::graph::{Action, Ctx, Dep, Node};
 use crate::log::Log;
 use aim_android_image::assemble::force_remove;
+use aim_android_init::props::areas::{PROP_DIRNAME, read_from_dir};
 use aim_storage::copy;
 use aim_storage::data::{self, DataImage, EMPTY_TEMPLATE};
 use std::fmt::Write as _;
@@ -533,6 +534,8 @@ fn first_boot(
     log: &mut Log,
     isolated: Option<&IsolatedTemplate>,
 ) -> Result<(Option<String>, stubs::Admission), String> {
+    // Held until the boot's DATA is detached.
+    let _guest = crate::guest_lock()?;
     TemplateBoot::run(dir, |owner| {
         first_boot_owned(ctx, work, dir, settings, permissions, log, isolated, owner)
     })
@@ -637,10 +640,12 @@ fn first_boot_owned(
         binder: format!("dev.aim.guest-init.{}.binder", session.init.id()),
         data: dir.join("data"),
     };
+    // Read as the guest's own readers do, from the areas init writes: no
+    // guest process whose start a loaded Mac delays past any fixed bound
+    // (#2665). The boot's patience is the only bound.
+    let properties = data::runtime_of(dir).join(PROP_DIRNAME.trim_start_matches('/'));
     let getprop = |name: &str| {
-        guest
-            .run(&["/system/bin/getprop", name], Duration::from_secs(10))
-            .map(|v| v.trim().to_string())
+        read_from_dir(&properties, name).map_err(|e| format!("{}: {e}", properties.display()))
     };
     if isolated.is_some() {
         log.line(&format!(
@@ -706,7 +711,7 @@ fn first_boot_owned(
                         .as_millis()
                         .min(20) as u32,
                 )?
-                && getprop("sys.boot_completed")? == "1"
+                && getprop("sys.boot_completed")?.as_deref() == Some("1")
             {
                 completed = Some(start.elapsed());
             }
@@ -719,7 +724,7 @@ fn first_boot_owned(
         completed.unwrap_or_default().as_secs_f64(),
         granted.unwrap_or_default().as_secs_f64(),
     ));
-    let sku = Some(getprop("ro.boot.product.vendor.sku")?).filter(|s| !s.is_empty());
+    let sku = getprop("ro.boot.product.vendor.sku")?.filter(|s| !s.is_empty());
     if isolated.is_some() {
         let events = guest.run(
             &[

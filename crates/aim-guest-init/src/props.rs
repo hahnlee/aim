@@ -14,10 +14,9 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use aim_android_init::props::area::{AreaMemory, HeapMemory};
-use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO};
+use aim_android_init::props::areas::{PROPERTIES_SERIAL, PROPERTY_INFO, read_from_dir};
 use aim_android_init::props::{
-    FutexWaker, PA_SIZE, PropAreaReader, PropertyAreas, PropertyInfoArea, PropertyService,
-    WakeTarget,
+    FutexWaker, PA_SIZE, PropertyAreas, PropertyInfoArea, PropertyService, WakeTarget,
 };
 use aim_binder_host::mach;
 use aim_binder_host::server::Server;
@@ -194,18 +193,6 @@ pub fn mapped_properties(dir: &Path, property_info: Vec<u8>) -> Result<Propertie
     Ok(service)
 }
 
-/// The value of the property `name` in the area files of `dir`, as a
-/// reader in another process sees it (`__system_property_get`): the
-/// area of its context by `property_info`, then the area's trie.
-pub fn read_property(dir: &Path, name: &str) -> Option<String> {
-    let info = fs::read(dir.join(PROPERTY_INFO)).ok()?;
-    let info = PropertyInfoArea::new(&info).ok()?;
-    let (index, _) = info.property_info_indexes(name);
-    let context = *info.contexts().get(index as usize)?;
-    let area = fs::read(dir.join(context)).ok()?;
-    PropAreaReader::new(&area).ok()?.get(name).map(|p| p.value)
-}
-
 /// Waits for a property's value through bionic's global area serial
 /// (`SystemProperties::WaitAny`), including properties not yet added.
 pub fn wait_property(dir: &Path, name: &str, value: &str, deadline: Instant) -> io::Result<bool> {
@@ -244,7 +231,7 @@ pub fn wait_property(dir: &Path, name: &str, value: &str, deadline: Instant) -> 
         // Snapshot before reading the condition so a concurrent write cannot
         // be lost between the read and the shared wait's compare.
         let expected = serial.load(Ordering::Acquire);
-        if read_property(dir, name).as_deref() == Some(value) {
+        if read_from_dir(dir, name)?.as_deref() == Some(value) {
             return Ok(true);
         }
         let Some(remaining) = deadline
