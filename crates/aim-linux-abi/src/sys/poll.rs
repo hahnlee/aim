@@ -3,7 +3,9 @@
 //! meaning for the events its Linux `_poll` can report ([`reportable`]),
 //! so only those are asked and the event bits and timeouts translated; a
 //! signalfd is also readable for the polling thread's own signals, which
-//! its wake token reports.
+//! its wake token reports. A socket or pipe polled for no event, which
+//! Darwin's poll watches for nothing, is watched for the hangup and error
+//! Linux poll always reports: a socket by [`Hangups`], a pipe by POLLHUP.
 
 use crate::errno::{self, EBADF, EINVAL};
 use std::os::fd::AsRawFd;
@@ -124,6 +126,119 @@ fn signal_revents(pin: Option<&super::fdtab::Pinned>, host: &mut libc::pollfd) {
     }
 }
 
+/// Whether a guest's poll `events` ask Darwin's poll to watch nothing:
+/// Linux poll reports POLLERR and POLLHUP whatever was asked, but Darwin's
+/// registers a knote only for a read or write event, or POLLHUP.
+fn eventless(events: i16) -> bool {
+    to_host(events) & !(POLLERR | POLLHUP | POLLNVAL) == 0
+}
+
+fn is_fifo(fd: i32) -> bool {
+    // SAFETY: fstat into a local struct.
+    unsafe {
+        let mut status: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut status) == 0 && status.st_mode & libc::S_IFMT == libc::S_IFIFO
+    }
+}
+
+/// Whether `fd` is a pipe's write end, which Darwin reports HUP for once
+/// the readers are gone and `pipe_poll` POLLERR.
+fn pipe_writer(fd: i32) -> bool {
+    // SAFETY: F_GETFL on a host descriptor.
+    is_fifo(fd) && unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE == libc::O_WRONLY
+}
+
+/// The sockets polled for no event, as EVFILT_READ knotes of a kqueue of
+/// the call, polled with the others: their low-water mark out of reach,
+/// they fire for the EOF and the pending error that `sock_poll` reports
+/// whatever was asked (filt_soread), and for a full buffer, which Darwin
+/// caps the mark at. They are edge-triggered, so that a firing that
+/// reports nothing (a full buffer, a TCP half-close) is waited past, not
+/// spun on, while a later one (the reset that follows) still wakes.
+struct Hangups(std::os::fd::OwnedFd);
+
+impl Hangups {
+    /// Watch host socket `fd`, the poll set's `index`th entry.
+    fn watch(hangups: &mut Option<Self>, fd: i32, index: usize) -> Result<(), crate::errno::Errno> {
+        let kq = match hangups {
+            Some(hangups) => hangups.0.as_raw_fd(),
+            None => {
+                // SAFETY: a new kqueue, owned from here.
+                let kq = unsafe { libc::kqueue() };
+                if kq < 0 {
+                    return Err(errno::last());
+                }
+                use std::os::fd::FromRawFd;
+                // SAFETY: the kqueue just created.
+                hangups
+                    .insert(Self(unsafe { std::os::fd::OwnedFd::from_raw_fd(kq) }))
+                    .0
+                    .as_raw_fd()
+            }
+        };
+        let change = libc::kevent {
+            ident: fd as usize,
+            filter: libc::EVFILT_READ,
+            flags: libc::EV_ADD | libc::EV_CLEAR | libc::EV_RECEIPT,
+            fflags: libc::NOTE_LOWAT,
+            data: isize::MAX,
+            udata: index as *mut libc::c_void,
+        };
+        // SAFETY: one change, its receipt into a local event.
+        let mut receipt: libc::kevent = unsafe { std::mem::zeroed() };
+        let n = unsafe { libc::kevent(kq, &change, 1, &mut receipt, 1, std::ptr::null()) };
+        if n < 0 {
+            return Err(errno::last());
+        }
+        match receipt.data {
+            0 => Ok(()),
+            error => Err(errno::from_darwin(error as i32)),
+        }
+    }
+
+    /// Take the knotes fired since the last pass, adding HUP to the host
+    /// revents of each at EOF: what Darwin's poll reports for it.
+    fn fired(&self, host: &mut [libc::pollfd]) -> Result<(), crate::errno::Errno> {
+        let zero = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        loop {
+            // SAFETY: an event array we own.
+            let mut events: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+            let n = unsafe {
+                libc::kevent(
+                    self.0.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    events.as_mut_ptr(),
+                    events.len() as i32,
+                    &zero,
+                )
+            };
+            if n < 0 {
+                return Err(errno::last());
+            }
+            for event in &events[..n as usize] {
+                if event.flags & libc::EV_EOF != 0 {
+                    host[event.udata as usize].revents |= POLLHUP;
+                }
+            }
+            if (n as usize) < events.len() {
+                return Ok(());
+            }
+        }
+    }
+
+    fn pollfd(&self) -> libc::pollfd {
+        libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }
+    }
+}
+
 /// Install `mask` (a guest sigset pointer, 0 for none) for the duration of a
 /// wait; returns the mask to restore.
 pub fn swap_sigmask(mask: u64) -> Result<Option<u64>, i32> {
@@ -218,6 +333,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
     let mut pins = Vec::with_capacity(guest.len());
     let mut ptys = Vec::with_capacity(guest.len());
     let mut reaps = Vec::with_capacity(guest.len());
+    let mut hangups = None;
     let mut invalid = false;
     let mut host = Vec::with_capacity(guest.len());
     for entry in guest.iter_mut() {
@@ -253,6 +369,10 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             pin.as_ref().and_then(|pin| pin.kind()),
             entry.events,
         );
+        let socket = matches!(
+            pin.as_ref().and_then(|pin| pin.kind()),
+            Some(super::fdtab::Kind::Sock(_))
+        );
         if pty.is_some() {
             pin = None;
         }
@@ -270,6 +390,30 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 events: libc::POLLIN,
                 revents: 0,
             },
+            // A pipe polled for no event: Darwin's POLLHUP watches its
+            // hangup alone, which `pipe_poll` reports as POLLHUP or
+            // POLLERR whatever was asked.
+            None if eventless(entry.events)
+                && pin.as_ref().is_some_and(|pin| pin.kind().is_none())
+                && is_fifo(fd) =>
+            {
+                libc::pollfd {
+                    fd,
+                    events: POLLHUP,
+                    revents: 0,
+                }
+            }
+            // A socket's, its knote in `hangups` instead.
+            None if socket && eventless(entry.events) => {
+                if let Err(error) = Hangups::watch(&mut hangups, fd, host.len()) {
+                    return -(error as i64);
+                }
+                libc::pollfd {
+                    fd,
+                    events: 0,
+                    revents: 0,
+                }
+            }
             None => libc::pollfd {
                 fd,
                 events: to_host(entry.events),
@@ -290,6 +434,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             revents: 0,
         });
     }
+    host.extend(hangups.as_ref().map(Hangups::pollfd));
     let polling = match watch_signals(&pins, &mut host) {
         Ok(polling) => polling,
         Err(error) => return -(error as i64),
@@ -329,6 +474,11 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         if n < 0 {
             return n;
         }
+        if let Some(hangups) = &hangups {
+            if let Err(error) = hangups.fired(&mut host) {
+                return -(error as i64);
+            }
+        }
         let mut ready = 0;
         for (((g, h), pin), pty) in guest.iter_mut().zip(&mut host).zip(&pins).zip(&ptys) {
             if g.fd >= 0 && pin.is_none() && pty.is_none() {
@@ -348,6 +498,12 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                     Ok(events) => events,
                     Err(_) => POLLERR,
                 };
+            }
+            if h.revents & POLLHUP != 0
+                && pin.as_ref().is_some_and(|pin| pin.kind().is_none())
+                && pipe_writer(h.fd)
+            {
+                h.revents = h.revents & !POLLHUP | POLLERR;
             }
             g.revents = match (h.revents & POLLHUP != 0)
                 .then(|| super::tcp_shutdown::polled_hangup(h.fd))
@@ -1464,5 +1620,155 @@ mod reportable_tests {
         assert_eq!(selected(ready), (1, true, false));
         assert_eq!(waited(outer, 0).0, 0);
         close(&[inner, notify, pidfd, counter, ready, outer]);
+    }
+
+    /// Run `action` on another thread after `ms`, as a wait is under way.
+    fn after(ms: u64, action: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            action();
+        })
+    }
+
+    /// ppoll on `fd` for no event while `action` runs after 100 ms:
+    /// (count, revents, milliseconds waited).
+    fn woken(fd: i64, action: impl FnOnce() + Send + 'static) -> (i64, i16, u128) {
+        let start = std::time::Instant::now();
+        let thread = after(100, action);
+        let (n, revents) = polled_for(fd, 0, 5_000);
+        thread.join().unwrap();
+        (n, revents, start.elapsed().as_millis())
+    }
+
+    /// ppoll on `fd` for no event sleeps out its 200 ms timeout, not
+    /// spinning.
+    fn sleeps(fd: i64) {
+        let (start, cpu) = (std::time::Instant::now(), thread_cpu());
+        assert_eq!(polled_for(fd, 0, 200), (0, 0), "fd {fd}");
+        assert!(start.elapsed().as_millis() >= 200);
+        assert!(thread_cpu() - cpu < 25_000_000, "fd {fd}");
+    }
+
+    /// SO_LINGER of 0 on `socket`, so that closing it resets.
+    fn abortive(socket: &std::net::TcpStream) {
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: setting SO_LINGER on our own socket.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&linger as *const libc::linger).cast(),
+                    std::mem::size_of::<libc::linger>() as u32,
+                )
+            },
+            0
+        );
+    }
+
+    /// Linux poll reports POLLERR and POLLHUP whatever was asked
+    /// (`sock_poll`, `tcp_poll`): a TCP socket polled for no event sleeps
+    /// while established, with data queued, and after the peer's FIN,
+    /// which `tcp_poll` reports as POLLIN|POLLRDHUP alone; the reset that
+    /// follows wakes the wait with POLLERR|POLLHUP (LTP poll01 style).
+    #[test]
+    fn an_eventless_tcp_poll_wakes_for_a_reset() {
+        let _view = crate::vfs::test_view();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (fd, connected) = connected_to(1, listener.local_addr().unwrap().port());
+        assert_eq!(connected, -115);
+        let (peer, _) = listener.accept().unwrap();
+        assert_eq!(polled_for(fd, POLLOUT, 2_000), (1, POLLOUT));
+        sleeps(fd);
+        use std::io::Write;
+        (&peer).write_all(b"x").unwrap();
+        assert_eq!(polled_for(fd, POLLIN, 2_000), (1, POLLIN));
+        sleeps(fd);
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(
+            polled_for(fd, POLLRDHUP, 2_000),
+            (1, POLLRDHUP),
+            "the FIN arrived"
+        );
+        sleeps(fd);
+        abortive(&peer);
+        let (n, revents, ms) = woken(fd, move || drop(peer));
+        assert_eq!((n, revents), (1, POLLERR | POLLHUP));
+        assert!(ms < 2_000, "{ms} ms");
+        close(&[fd]);
+    }
+
+    /// A connected UDP socket polled for no event wakes for the ICMP port
+    /// unreachable that a send during the wait draws (`sk_error_report`),
+    /// with POLLERR alone (`datagram_poll`).
+    #[test]
+    fn an_eventless_udp_poll_wakes_for_an_error() {
+        let _view = crate::vfs::test_view();
+        let (fd, connected) = refused(2);
+        assert_eq!(connected, 0);
+        sleeps(fd);
+        let (n, revents, ms) = woken(fd, move || {
+            let byte = 0u8;
+            assert_eq!(
+                crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
+                1
+            );
+        });
+        assert_eq!((n, revents), (1, POLLERR));
+        assert!(ms < 2_000, "{ms} ms");
+        close(&[fd]);
+    }
+
+    /// An AF_UNIX stream socket polled for no event sleeps with data
+    /// queued and with its buffer full, and wakes with POLLHUP when the
+    /// peer closes (`unix_release_sock` shuts it both ways, `unix_poll`).
+    #[test]
+    fn an_eventless_unix_poll_wakes_for_the_peer_close() {
+        let _view = crate::vfs::test_view();
+        let mut pair = [0i32; 2];
+        assert_eq!(
+            crate::sys::net::socketpair([1, 1 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        let (fd, other) = (pair[0] as i64, pair[1] as i64);
+        sleeps(fd);
+        let chunk = [0u8; 512];
+        while crate::sys::net::sendto([other as u64, chunk.as_ptr() as u64, 512, 0, 0, 0]) > 0 {}
+        sleeps(fd);
+        sleeps(other);
+        let (n, revents, ms) = woken(fd, move || close(&[other]));
+        assert_eq!((n, revents), (1, POLLHUP));
+        assert!(ms < 2_000, "{ms} ms");
+        close(&[fd]);
+    }
+
+    /// `pipe_poll`: a pipe end polled for no event sleeps while the other
+    /// is open; the read end wakes with POLLHUP when the last writer
+    /// closes, and the write end with POLLERR, never POLLHUP, when the
+    /// last reader does.
+    #[test]
+    fn an_eventless_pipe_poll_wakes_for_the_other_end_close() {
+        let _view = crate::vfs::test_view();
+        for (end, revents) in [(0, POLLHUP), (1, POLLERR)] {
+            let mut pipe = [0i32; 2];
+            assert_eq!(
+                fs::pipe2([pipe.as_mut_ptr() as u64, O_NONBLOCK, 0, 0, 0, 0]),
+                0
+            );
+            let (fd, other) = (pipe[end] as i64, pipe[1 - end] as i64);
+            sleeps(fd);
+            let (n, polled_revents, ms) = woken(fd, move || close(&[other]));
+            assert_eq!((n, polled_revents), (1, revents), "end {end}");
+            assert!(ms < 2_000, "{ms} ms");
+            assert_eq!(polled(fd, 0), (1, revents));
+            if end == 1 {
+                assert_eq!(polled(fd, POLLOUT).1 & (POLLERR | POLLHUP), POLLERR);
+            }
+            close(&[fd]);
+        }
     }
 }
