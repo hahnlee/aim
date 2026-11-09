@@ -60,7 +60,7 @@ pub(super) fn process(
 }
 
 /// A second receiver of the `at`th registered's process, at `priority`.
-fn second_receiver(
+pub(super) fn second_receiver(
     host: &AppHost,
     export: &dyn Fn(Arc<dyn Service>) -> Strong,
     at: usize,
@@ -306,7 +306,7 @@ fn a_dead_higher_process_unblocks_the_lower_tranche() {
     });
 }
 
-fn unordered(host: &AppHost) -> Arc<Record> {
+pub(super) fn unordered(host: &AppHost) -> Arc<Record> {
     Arc::new(Record {
         enqueue_id: host.broadcasts.state.lock().unwrap().enqueue_id(),
         intent: RawIntent::new(ACTION, FLAG_RECEIVER_INCLUDE_BACKGROUND, &[]),
@@ -326,7 +326,7 @@ fn unordered(host: &AppHost) -> Arc<Record> {
 }
 
 /// A manifest receiver at `priority` of the process `system` of `uid`.
-fn manifest(class: &str, uid: u32, priority: i32) -> Arc<Manifest> {
+pub(super) fn manifest(class: &str, uid: u32, priority: i32) -> Arc<Manifest> {
     let mut m = super::system_receiver_tests::receiver("android", class, uid);
     Arc::get_mut(&mut m).unwrap().priority = priority;
     m
@@ -413,7 +413,7 @@ fn a_plain_broadcast_waits_for_its_higher_manifest_receiver() {
 }
 
 /// A thread that takes a manifest receiver's `scheduleReceiver`.
-struct ManifestThread(mpsc::Sender<()>);
+pub(super) struct ManifestThread(pub(super) mpsc::Sender<()>);
 impl Service for ManifestThread {
     fn descriptor(&self) -> &str {
         thread::DESCRIPTOR

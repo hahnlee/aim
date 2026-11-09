@@ -2815,28 +2815,48 @@ impl AppHost {
         Ok(())
     }
 
-    /// `appNotResponding` of the process of `seq`, for a foreground service
-    /// or a broadcast receiver that did not answer in time.
-    pub(super) fn app_not_responding(&self, seq: i64, reason: &str) {
-        // The native owner has no SystemUI ANR dialog. Record the ANR and
-        // terminate that process, through the same owner as other app kills.
-        if self
-            .apps
-            .lock()
-            .unwrap()
-            .get(&seq)
-            .is_none_or(|app| app.thread.is_none())
-        {
-            return;
+    /// `ProcessErrorStateRecord.appNotResponding` of the process of `seq`,
+    /// for a foreground service or a broadcast receiver that did not answer
+    /// in time: whether it was killed. A silent ANR kills its process; one
+    /// that is not would show the ANR dialog, which the native owner has
+    /// not (#2843), so its process is kept.
+    pub(super) fn app_not_responding(&self, seq: i64, reason: &str) -> bool {
+        let interesting = match self.apps.lock().unwrap().get(&seq) {
+            Some(app) if app.thread.is_some() => interesting_for_background_traces(app),
+            _ => return false,
+        };
+        if interesting || self.show_background_anrs() {
+            eprintln!("app host: ANR in start {seq}, kept: {reason}");
+            return false;
         }
         eprintln!("app host: ANR in start {seq}: {reason}");
-        if let Err(error) = self.kill_process(
+        match self.kill_process(
             seq,
             super::exit_info::REASON_ANR,
             super::exit_info::SUBREASON_UNKNOWN,
             reason,
         ) {
-            eprintln!("app host: ANR process kill: {error}");
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("app host: ANR process kill: {error}");
+                false
+            }
+        }
+    }
+
+    /// `ProcessErrorStateRecord.getShowBackground`: the secure setting
+    /// `anr_show_background`; unread, an ANR is shown rather than silent.
+    fn show_background_anrs(&self) -> bool {
+        match self.platform() {
+            Ok(platform) => platform
+                .settings
+                .get(super::settings::Table::Secure, "anr_show_background")
+                .and_then(|v| v.parse::<i32>().ok())
+                .is_some_and(|v| v != 0),
+            Err(e) => {
+                eprintln!("app host: anr_show_background: {}", e.message);
+                true
+            }
         }
     }
 
@@ -3993,6 +4013,18 @@ impl AppHost {
             r.fg.pending = false;
         }
     }
+}
+
+/// `ProcessErrorStateRecord.isInterestingForBackgroundTraces` of `app` as
+/// far as the app host tells, its ANR then not silent: the system process,
+/// SystemUI, or one perceptible (its process state standing for the visible
+/// activities and top or overlay UI the app host does not track apart), and
+/// further a persistent one, which the app host keeps rather than kill.
+pub(super) fn interesting_for_background_traces(app: &super::App) -> bool {
+    app.process == super::SYSTEM_PROCESS && app.uid == super::SYSTEM_UID
+        || app.package == "com.android.systemui"
+        || app.persistent
+        || app.proc_state <= super::PROCESS_STATE_IMPORTANT_FOREGROUND
 }
 
 /// The start id after `last`: from 1, wrapping past `i32::MAX` to 1.

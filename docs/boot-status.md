@@ -55,9 +55,13 @@ LIMIT_PRIORITY_SCOPE disabled, so across processes by default nothing waits
 broadcast ordered or with a result) ends after `BROADCAST_FG_TIMEOUT` (10 s)
 or `BROADCAST_BG_TIMEOUT` (60 s), or the `bcast_fg_constants` /
 `bcast_bg_constants` setting's `timeout`, PRE_BOOT_COMPLETED exempt: its
-broadcast moves on and its process is killed as an ANR, as a foreground
-service's is (#2831); the soft timeout's extension by the process's CPU delay
-is not measured. Activities are not put to sleep first, and app ops, battery stats
+broadcast moves on, and its process is not responding (#2831); the soft
+timeout's extension by the process's CPU delay is not measured (#2842). An
+ANR, a broadcast's or a foreground service's, kills its process only when it
+is silent (`isSilentAnr`: not the system process, SystemUI, persistent or
+perceptible, without `anr_show_background`); otherwise it is logged and the
+process kept, as no ANR dialog, traces or dropbox entry exist (#2843). As the
+app host reports every attached process TOP, no ANR kills yet. Activities are not put to sleep first, and app ops, battery stats
 and process stats write nothing at shutdown (#1872).
 
 `signalfd4` (#2648) creates and updates signal descriptors whose reads take the

@@ -115,6 +115,16 @@ const FIRST_APPLICATION_UID: i32 = 10_000;
 const PROTECTION_MASK_BASE: i32 = 0xf;
 const ACTION_PRE_BOOT_COMPLETED: &str = "android.intent.action.PRE_BOOT_COMPLETED";
 
+/// A delivery timeout started: when, for the process of which start and
+/// with which generation, and whether of a foreground broadcast.
+#[derive(Debug, PartialEq)]
+struct Started {
+    at: Instant,
+    seq: i64,
+    generation: u64,
+    foreground: bool,
+}
+
 /// `ActivityManagerService.BROADCAST_FG_TIMEOUT` and `BROADCAST_BG_TIMEOUT`,
 /// before `ro.hw_timeout_multiplier`.
 const BROADCAST_FG_TIMEOUT: Duration = Duration::from_secs(10);
@@ -510,9 +520,8 @@ pub struct Broadcasts {
     state: Mutex<State>,
     limits: std::sync::OnceLock<Limits>,
     changed: Condvar,
-    /// The worker that fires the delivery timeouts, by process and
-    /// generation, once due.
-    timer: Mutex<Option<mpsc::Sender<(Instant, i64, u64)>>>,
+    /// The worker that fires the delivery timeouts once due.
+    timer: Mutex<Option<mpsc::Sender<Started>>>,
 }
 
 impl State {
@@ -2858,18 +2867,21 @@ impl Broadcasts {
         if host.processes_ready.get().is_none() || record.timeout_exempt() {
             return;
         }
-        let after = Self::timeout(
-            host,
-            record.intent.intent.flags & FLAG_RECEIVER_FOREGROUND != 0,
-        );
         st.next_timeout += 1;
         let generation = st.next_timeout;
         st.timeouts.insert(seq, generation);
+        // The worker reads how long, off the queue's lock.
+        let started = Started {
+            at: Instant::now(),
+            seq,
+            generation,
+            foreground: record.intent.intent.flags & FLAG_RECEIVER_FOREGROUND != 0,
+        };
         self.timer
             .lock()
             .unwrap()
             .get_or_insert_with(|| Self::timer(host.me.clone()))
-            .send((Instant::now() + after, seq, generation))
+            .send(started)
             .expect("broadcast timer worker");
     }
 
@@ -2909,26 +2921,29 @@ impl Broadcasts {
         )
     }
 
-    /// A worker that fires each delivery timeout sent to it once it is due,
+    /// A worker that fires each delivery timeout started once it is due,
     /// until the queue goes.
-    fn timer(host: Weak<AppHost>) -> mpsc::Sender<(Instant, i64, u64)> {
-        let (sender, timeouts) = mpsc::channel::<(Instant, i64, u64)>();
+    fn timer(host: Weak<AppHost>) -> mpsc::Sender<Started> {
+        let (sender, started) = mpsc::channel::<Started>();
         std::thread::spawn(move || {
             let mut pending: Vec<(Instant, i64, u64)> = Vec::new();
             loop {
                 let received = match pending.iter().map(|(at, ..)| *at).min() {
-                    Some(at) => timeouts.recv_timeout(at.saturating_duration_since(Instant::now())),
-                    None => timeouts
+                    Some(at) => started.recv_timeout(at.saturating_duration_since(Instant::now())),
+                    None => started
                         .recv()
                         .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
                 };
+                let Some(host) = host.upgrade() else { return };
                 match received {
-                    Ok(timeout) => pending.push(timeout),
+                    Ok(s) => {
+                        let due = s.at + Self::timeout(&host, s.foreground);
+                        pending.push((due, s.seq, s.generation));
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let now = Instant::now();
                         let due: Vec<_>;
                         (due, pending) = pending.into_iter().partition(|(at, ..)| *at <= now);
-                        let Some(host) = host.upgrade() else { return };
                         for (_, seq, generation) in due {
                             host.broadcasts.timed_out(&host, seq, generation);
                         }
@@ -2941,23 +2956,33 @@ impl Broadcasts {
     }
 
     /// `deliveryTimeoutLocked`: the delivery the process of `seq` did not
-    /// finish in time ends (`DELIVERY_TIMEOUT`), its chain or tranche moves
-    /// on, and its queue waits its turn again (`demoteFromRunningLocked`);
-    /// then its process is not responding (`appNotResponding`). A timeout
-    /// gone stale, its delivery finished, does nothing.
+    /// finish in time ends (`DELIVERY_TIMEOUT`) and its chain or tranche
+    /// moves on; its process is not responding (`appNotResponding`), killed
+    /// first if its ANR is silent, else its queue waits its turn again
+    /// (`demoteFromRunningLocked`). A timeout gone stale, its delivery
+    /// finished, does nothing.
     pub(super) fn timed_out(&self, host: &AppHost, seq: i64, generation: u64) {
+        let reason = {
+            let st = self.state.lock().unwrap();
+            if st.timeouts.get(&seq) != Some(&generation) {
+                return;
+            }
+            Self::timeout_reason(&st, st.queues[&seq].front().unwrap())
+        };
+        // Off the queue's lock: a death finishes what its process had.
+        let killed = host.app_not_responding(seq, &reason);
         let mut st = self.state.lock().unwrap();
         if st.timeouts.get(&seq) != Some(&generation) {
             return;
         }
-        let reason = Self::timeout_reason(&st, st.queues[&seq].front().unwrap());
         self.finish_active(host, &mut st, seq);
-        if st.queues.get(&seq).is_some_and(|q| !q.is_empty()) {
+        // A killed process is sent nothing more; its death retires its queue.
+        if killed {
+            st.runnable.retain(|q| *q != QueueId::Warm(seq));
+        } else if st.queues.get(&seq).is_some_and(|q| !q.is_empty()) {
             Self::make_runnable(&mut st, QueueId::Warm(seq));
         }
         self.update_running(host, &mut st);
-        drop(st);
-        host.app_not_responding(seq, &reason);
     }
 
     /// `TimeoutRecord.forBroadcastReceiver`'s reason for the delivery `d`,
