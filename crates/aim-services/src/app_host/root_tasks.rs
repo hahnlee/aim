@@ -1,7 +1,7 @@
 //! `IActivityTaskManager`'s root-task queries as ActivityTaskManager answers
 //! them at `android-16.0.0_r1`: `getAllRootTaskInfos`,
-//! `getAllRootTaskInfosOnDisplay`, `getRootTaskInfo` and
-//! `getRootTaskInfoOnDisplay` (`ActivityTaskManagerService`, behind
+//! `getAllRootTaskInfosOnDisplay`, `getRootTaskInfo`,
+//! `getRootTaskInfoOnDisplay` and `getFocusedRootTaskInfo` (`ActivityTaskManagerService`, behind
 //! `enforceTaskPermission`; `RootWindowContainer.getRootTaskInfo` and
 //! `TaskDisplayArea.getRootTask`) over the app host's root tasks: the root
 //! home task, the organizer root tasks with their tasks and the other app
@@ -17,6 +17,7 @@ use aim_service_aidl::android_app_iactivitytaskmanager as atm;
 use super::activity::{
     ACTIVITY_TYPE_HOME, ACTIVITY_TYPE_STANDARD, DEFAULT_DISPLAY, INVALID_DISPLAY,
 };
+use super::activity_stack::Visibility;
 use super::config::Rect;
 use super::task_info::{RunningTaskInfo, write_rect};
 use super::{AppHost, reply};
@@ -33,7 +34,7 @@ pub struct RootTaskInfo {
     /// Its leaf tasks bottom to top (`forAllLeafTasks`): itself if it
     /// holds no task.
     pub leaves: Vec<LeafTask>,
-    /// `shouldBeVisible`.
+    /// `shouldBeVisible`: by the stack's visibility policy.
     pub visible: bool,
     /// Its index among the display's root tasks, bottom to top.
     pub position: i32,
@@ -89,21 +90,10 @@ impl WriteParcelable for RootTaskInfo {
     }
 }
 
-/// The component of the intent of `info`'s top activity
-/// (`topRunningActivity().intent.getComponent()`).
-fn top_intent_component(info: &RunningTaskInfo) -> Option<(String, String)> {
-    let top = &info.top_activity_info.as_ref()?.info.item;
-    Some((
-        top.package_name.clone().unwrap_or_default(),
-        top.name.clone().unwrap_or_default(),
-    ))
-}
-
-/// `TaskDisplayArea.getRootTask`'s match of a root task in `info`'s
-/// windowing mode and activity type for `mode` and `kind`
+/// `TaskDisplayArea.getRootTask`'s match of a root task in windowing mode
+/// `this_mode` of activity type `this_kind` for `mode` and `kind`
 /// (`Task.isCompatible`, `ConfigurationContainer.isCompatible`).
-fn compatible(info: &RunningTaskInfo, mode: i32, kind: i32) -> bool {
-    let (this_mode, this_kind) = (info.configuration.window.windowing_mode, info.activity_type);
+fn compatible((this_mode, this_kind): (i32, i32), mode: i32, kind: i32) -> bool {
     // An undefined type asks for the topmost root task of the mode.
     if kind == ACTIVITY_TYPE_UNDEFINED && mode == this_mode {
         return true;
@@ -143,19 +133,32 @@ impl AppHost {
         )))
     }
 
+    /// The root tasks top to bottom, those being removed left out: the
+    /// snapshot a query's positions follow.
+    fn live_root_tasks(&self) -> Vec<i32> {
+        self.tasks
+            .root_task_ids()
+            .into_iter()
+            .filter(|&id| !self.task_gone(id))
+            .collect()
+    }
+
     /// `RootWindowContainer.getAllRootTaskInfos(display)`: the root tasks
     /// top to bottom, of every display for `INVALID_DISPLAY`, none of an
-    /// unknown display.
+    /// unknown display. One that goes meanwhile is left out.
     pub(super) fn all_root_task_infos(&self, display: i32) -> Result<Vec<RootTaskInfo>, Exception> {
         if display != INVALID_DISPLAY && display != DEFAULT_DISPLAY {
             return Ok(Vec::new());
         }
-        let ids = self.tasks.root_task_ids();
-        let bottom = ids.len() as i32 - 1;
-        ids.into_iter()
-            .enumerate()
-            .map(|(i, id)| self.root_task_info_at(id, bottom - i as i32))
-            .collect()
+        let mut infos = Vec::new();
+        for id in self.live_root_tasks() {
+            infos.extend(self.root_task_info_at(id)?);
+        }
+        let bottom = infos.len() as i32 - 1;
+        for (i, info) in infos.iter_mut().enumerate() {
+            info.position = bottom - i as i32;
+        }
+        Ok(infos)
     }
 
     /// `RootWindowContainer.getRootTaskInfo(windowingMode, activityType,
@@ -173,43 +176,100 @@ impl AppHost {
         {
             return Ok(None);
         }
-        Ok(self.all_root_task_infos(display)?.into_iter().find(|r| {
-            if kind == ACTIVITY_TYPE_HOME {
-                r.task.activity_type == ACTIVITY_TYPE_HOME
+        let global = self.global_configuration()?.window.windowing_mode;
+        let ids = self.live_root_tasks();
+        for at in 0..ids.len() {
+            let this = self.root_task_kind(ids[at], global);
+            let found = if kind == ACTIVITY_TYPE_HOME {
+                this.1 == ACTIVITY_TYPE_HOME
             } else {
-                compatible(&r.task, mode, kind)
+                compatible(this, mode, kind)
+            };
+            if found && let Some(info) = self.root_task_info_in(&ids, at)? {
+                return Ok(Some(info));
             }
+        }
+        Ok(None)
+    }
+
+    /// `getFocusedRootTaskInfo`: the root task of the focused task
+    /// (`getTopDisplayFocusedRootTask`), if any.
+    pub(super) fn focused_root_task_info(&self) -> Result<Option<RootTaskInfo>, Exception> {
+        let Some(task) = self.activities.stack.lock().unwrap().focused() else {
+            return Ok(None);
+        };
+        let root = self.tasks.parent(task).unwrap_or(task);
+        let ids = self.live_root_tasks();
+        match ids.iter().position(|&id| id == root) {
+            Some(at) => self.root_task_info_in(&ids, at),
+            None => Ok(None),
+        }
+    }
+
+    /// The info of root task `ids[at]` at its position among `ids`.
+    fn root_task_info_in(&self, ids: &[i32], at: usize) -> Result<Option<RootTaskInfo>, Exception> {
+        Ok(self.root_task_info_at(ids[at])?.map(|mut info| {
+            info.position = (ids.len() - 1 - at) as i32;
+            info
         }))
     }
 
-    /// `RootWindowContainer.getRootTaskInfo(Task)` of root task `id` at
-    /// `position`: an organizer root task is visible if a task of it is,
-    /// and its top activity is its top task's.
-    fn root_task_info_at(&self, id: i32, position: i32) -> Result<RootTaskInfo, Exception> {
-        let mut task = self.organizer_task_info(id)?;
-        let children = self.tasks.children(Some(id));
-        let (leaves, visible, top) = if children.is_empty() {
-            let top = top_intent_component(&task);
-            (vec![LeafTask::of(&task)], task.is_visible, top)
-        } else {
-            let infos = children
+    /// The windowing mode and activity type of root task `id`
+    /// (`getWindowingMode`, `getActivityType`), `global` the display's
+    /// mode: an organizer root task's type is undefined.
+    fn root_task_kind(&self, id: i32, global: i32) -> (i32, i32) {
+        match self.tasks.root(id) {
+            Some(root) => (root.windowing_mode, ACTIVITY_TYPE_UNDEFINED),
+            None => (
+                self.tasks.own_bounds(id).map_or(global, |(mode, _)| mode),
+                self.activities.stack.lock().unwrap().activity_type(id),
+            ),
+        }
+    }
+
+    /// `RootWindowContainer.getRootTaskInfo(Task)` of root task `id`, its
+    /// position unset, none if it went meanwhile. Its leaves are its tasks,
+    /// else itself; it should be visible as the stack's visibility policy
+    /// has its leaves (`shouldBeVisible`); its top activity is named as the
+    /// intent of the top one (`topRunningActivity().intent.getComponent()`).
+    fn root_task_info_at(&self, id: i32) -> Result<Option<RootTaskInfo>, Exception> {
+        let mut task = match self.organizer_task_info(id) {
+            Ok(task) => task,
+            Err(_) if self.task_gone(id) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let mut ids = self.tasks.children(Some(id));
+        if ids.is_empty() {
+            ids.push(id);
+        }
+        let mut leaves = Vec::new();
+        for &leaf in ids.iter().rev() {
+            match self.organizer_task_info(leaf) {
+                Ok(info) => leaves.push(LeafTask::of(&info)),
+                Err(_) if self.task_gone(leaf) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let (visible, top) = {
+            let stack = self.activities.stack.lock().unwrap();
+            let records = self.activities.records.lock().unwrap();
+            let visible = ids
                 .iter()
-                .rev()
-                .map(|&child| self.organizer_task_info(child))
-                .collect::<Result<Vec<_>, _>>()?;
-            (
-                infos.iter().map(LeafTask::of).collect(),
-                infos.iter().any(|i| i.is_visible),
-                infos.iter().rev().find_map(top_intent_component),
-            )
+                .any(|&leaf| stack.visibility(leaf) != Visibility::Invisible);
+            let top = ids.iter().find_map(|&leaf| {
+                let r = records.get(&stack.top(leaf)?.token)?;
+                let c = r.intent.intent(&r.package, &r.class).component?;
+                Some((c.package, c.class))
+            });
+            (visible, top)
         };
         task.top_activity = top;
-        Ok(RootTaskInfo {
+        Ok(Some(RootTaskInfo {
             task,
             leaves,
             visible,
-            position,
-        })
+            position: 0,
+        }))
     }
 }
 
@@ -255,6 +315,12 @@ pub(super) fn transact(host: &AppHost, call: &mut Call<'_>) -> Reply {
                         host.root_task_info_of(a.windowing_mode, a.activity_type, a.display_id)
                     })
                     .map(|info| one(&mut p, info))
+            }
+            atm::GET_FOCUSED_ROOT_TASK_INFO => {
+                atm::GetFocusedRootTaskInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                host.enforce_task_permission(uid, pid, "getFocusedRootTaskInfo()")
+                    .and_then(|()| host.focused_root_task_info())
+                    .map(|info| atm::write_get_focused_root_task_info_reply(&mut p, info.as_ref()))
             }
             _ => return Err(BAD_VALUE),
         }
@@ -394,10 +460,25 @@ mod tests {
             };
             assert_eq!(leaves(&all[0]), [(7, "p/p.Main".to_string(), 0)]);
             assert_eq!(leaves(&all[2]), [(8, "p/p.Main".to_string(), 0)]);
-            // The organizer root task's top activity is its task's.
+            // The organizer root task's activities are its task's (#2748),
+            // the top one named by its intent's component (`A`), not by
+            // its ActivityInfo (`p.Main`).
+            let t = &all[2].task;
+            assert_eq!(t.top_activity, Some(("p".into(), "A".into())));
+            assert_eq!(t.base_activity, Some(("p".into(), "p.Main".into())));
             assert_eq!(
-                all[2].task.top_activity,
-                Some(("p".into(), "p.Main".into()))
+                (
+                    t.is_running,
+                    t.num_activities,
+                    t.activity_type,
+                    t.is_visible
+                ),
+                (true, 1, ACTIVITY_TYPE_STANDARD, true)
+            );
+            assert!(t.top_activity_info.is_some());
+            assert_eq!(
+                t.configuration.window.activity_type,
+                ACTIVITY_TYPE_UNDEFINED
             );
             assert_eq!(all[2].leaves[0].bounds, host.tasks.bounds(8).unwrap());
             assert_eq!(all[1].task.activity_type, ACTIVITY_TYPE_HOME);
@@ -426,6 +507,7 @@ mod tests {
                     atm::GET_ROOT_TASK_INFO_ON_DISPLAY,
                     &[0, ACTIVITY_TYPE_HOME, 0],
                 ),
+                (atm::GET_FOCUSED_ROOT_TASK_INFO, &[]),
             ] {
                 let denied = ask(host, code, args, 10100)
                     .reader()
@@ -474,6 +556,32 @@ mod tests {
             let mut r = reply.reader();
             r.read_exception().unwrap().unwrap();
             assert_eq!(r.read_i32().unwrap(), 0);
+
+            // getFocusedRootTaskInfo: the focused task's root task.
+            let focused = host.activities.stack.lock().unwrap().focused().unwrap();
+            let expected = host.tasks.parent(focused).unwrap_or(focused);
+            let info = host.focused_root_task_info().unwrap().unwrap();
+            assert_eq!(info.task.task_id, expected);
+            let reply = ask(host, atm::GET_FOCUSED_ROOT_TASK_INFO, &[], 1000);
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            assert_eq!(r.read_i32().unwrap(), 1);
+            let mut written = Parcel::new();
+            info.write_to(&mut written);
+            assert_eq!(&reply.data()[r.position()..], written.data());
+
+            // Task 7 being removed (out of the stack, still in the task
+            // owner) is left out, and the positions follow.
+            {
+                let mut stack = host.activities.stack.lock().unwrap();
+                stack.tasks.retain(|t| t.id != 7);
+                stack.activities.retain(|a| a.task != 7);
+            }
+            let all = host.all_root_task_infos(INVALID_DISPLAY).unwrap();
+            let ids: Vec<_> = all.iter().map(|r| (r.task.task_id, r.position)).collect();
+            assert_eq!(ids, [(home, 1), (root, 0)]);
+            assert_eq!(find(freeform, ACTIVITY_TYPE_STANDARD, 0), None);
+            assert_eq!(find(0, ACTIVITY_TYPE_HOME, 0), Some(home));
         });
     }
 }

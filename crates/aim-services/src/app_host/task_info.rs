@@ -712,7 +712,10 @@ impl AppHost {
 
     /// `Task.fillTaskInfo` of the organizer root task `root`
     /// (`TaskOrganizerController.createRootTask`): a resizeable task of no
-    /// activity, user or uid, in its windowing mode at its bounds.
+    /// user or uid, in its windowing mode at its bounds, whose activities
+    /// are its tasks' (`TaskInfoHelper.fillAndReturnTop`): the top one of
+    /// its top task, its base one of its bottom task, all of them counted,
+    /// visible if one is (`hasVisibleChildren`).
     pub(super) fn root_task_info(&self, root: i32) -> Result<RunningTaskInfo, Exception> {
         let r = self
             .tasks
@@ -721,10 +724,18 @@ impl AppHost {
         let mut configuration = self.global_configuration()?;
         configuration.window.windowing_mode = r.windowing_mode;
         configuration.window.bounds = r.bounds;
-        let supports_multi_window =
-            self.multi_window()?
-                .supports(true, (-1, -1), false, &configuration);
-        Ok(RunningTaskInfo {
+        let multi_window = self.multi_window()?;
+        let supports_multi_window = multi_window.supports(true, (-1, -1), false, &configuration);
+        // Its tasks top to bottom; one that went meanwhile is not counted.
+        let mut tasks = Vec::new();
+        for id in self.tasks.children(Some(root)) {
+            match self.organizer_task_info(id) {
+                Ok(info) => tasks.push(info),
+                Err(_) if self.task_gone(id) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let mut info = RunningTaskInfo {
             user_id: 0,
             task_id: root,
             effective_uid: 0,
@@ -757,7 +768,29 @@ impl AppHost {
             is_activity_stack_transparent: true,
             last_non_fullscreen_bounds: None,
             top_activity_app_bounds: Rect::default(),
-        })
+        };
+        if let (Some(top), Some(bottom)) = (tasks.first(), tasks.last()) {
+            info.base_activity = bottom.base_activity.clone();
+            info.top_activity = top.top_activity.clone();
+            info.num_activities = tasks.iter().map(|t| t.num_activities).sum();
+            info.is_running = true;
+            info.resize_mode = top.resize_mode;
+            info.activity_type = top.activity_type;
+            info.top_activity_info = top.top_activity_info.clone();
+            info.is_visible = tasks.iter().any(|t| t.is_visible);
+            info.is_top_activity_no_display = top.is_top_activity_no_display;
+            info.is_top_activity_transparent = top.is_top_activity_transparent;
+            info.is_activity_stack_transparent = top.is_activity_stack_transparent;
+            info.last_non_fullscreen_bounds = top.last_non_fullscreen_bounds;
+            info.top_activity_app_bounds = top.top_activity_app_bounds;
+        }
+        Ok(info)
+    }
+
+    /// Whether task `id` went: no organizer root task and no task with a
+    /// running activity, as a task being removed is in the stack.
+    pub(super) fn task_gone(&self, id: i32) -> bool {
+        self.tasks.root(id).is_none() && self.activities.stack.lock().unwrap().top(id).is_none()
     }
 
     pub(super) fn organizer_task_info(&self, task: i32) -> Result<RunningTaskInfo, Exception> {

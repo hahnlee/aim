@@ -1089,7 +1089,8 @@ impl Service for ActivityTaskManager {
             atm::GET_ALL_ROOT_TASK_INFOS
             | atm::GET_ALL_ROOT_TASK_INFOS_ON_DISPLAY
             | atm::GET_ROOT_TASK_INFO
-            | atm::GET_ROOT_TASK_INFO_ON_DISPLAY => super::root_tasks::transact(&self.0, call),
+            | atm::GET_ROOT_TASK_INFO_ON_DISPLAY
+            | atm::GET_FOCUSED_ROOT_TASK_INFO => super::root_tasks::transact(&self.0, call),
             // `List<IBinder> getAppTasks(String callingPackage)`, read and
             // written by hand (`writeBinderList`).
             atm::GET_APP_TASKS => {

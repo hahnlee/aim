@@ -84,7 +84,7 @@ pub enum LaunchIntent {
 
 impl LaunchIntent {
     /// The intent as a task keeps it, of `package`'s `class`.
-    fn intent(&self, package: &str, class: &str) -> Intent {
+    pub(super) fn intent(&self, package: &str, class: &str) -> Intent {
         match self {
             LaunchIntent::Component => Intent {
                 flags: stack::FLAG_ACTIVITY_NEW_TASK,

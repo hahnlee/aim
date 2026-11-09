@@ -151,7 +151,8 @@ tasks as leaves, the root home task at position 0 unless an organizer
 root task was made under it), and `getRootTaskInfo` and
 `getRootTaskInfoOnDisplay` find the root home task for
 `ACTIVITY_TYPE_HOME`, no pinned one, else the topmost compatible one
-(`TaskDisplayArea.getRootTask`), all behind `MANAGE_ACTIVITY_TASKS`
+(`TaskDisplayArea.getRootTask`), and `getFocusedRootTaskInfo` the focused
+task's root task, all behind `MANAGE_ACTIVITY_TASKS`
 (`app_host/root_tasks.rs`). A start whose record is a home
 activity (`ActivityRecord.setActivityType`) goes to that task, and no
 other start is put there (`FindTaskResult` compares activity types). It connects to the display server
