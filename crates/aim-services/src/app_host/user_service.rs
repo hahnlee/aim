@@ -1840,7 +1840,6 @@ impl Service for UserManager {
                     Err(e) => return reply(Err(e)),
                 }
             }
-            // `readApplicationRestrictionsLAr`: none without the file.
             um::GET_APPLICATION_RESTRICTIONS_FOR_USER => {
                 let args = um::GetApplicationRestrictionsForUser::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -1869,8 +1868,7 @@ impl Service for UserManager {
 }
 
 /// `UserManagerService.getApplicationRestrictionsForUser`: the caller's
-/// own, or any for the system; those persisted (`res_<package>.xml`):
-/// #1519.
+/// own, or any for the system, as persisted (`res_<package>.xml`).
 pub(super) fn application_restrictions(
     host: &AppHost,
     uid: i32,
@@ -1883,14 +1881,10 @@ pub(super) fn application_restrictions(
             "get application restrictions for other user/app {package} is only allowed for the system"
         )));
     }
-    if host
+    let file = host
         .data()?
-        .join(format!("system/users/{user}/res_{package}.xml"))
-        .exists()
-    {
-        return Err(host.unimplemented_named("user", "an app's persisted restrictions (#1519)"));
-    }
-    Ok(super::bind::Bundle(Vec::new()))
+        .join(format!("system/users/{user}/res_{package}.xml"));
+    super::application_restrictions::read(&file).map(super::bind::Bundle)
 }
 
 fn switcher_error(status: i32) -> Exception {
