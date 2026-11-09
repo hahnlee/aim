@@ -1143,6 +1143,7 @@ pub fn get(fd: i32) -> Option<Kind> {
 pub fn on_close(fd: i32) {
     clear_regular_access(fd);
     super::fuse_client::close(fd);
+    super::wait::closed(fd);
     if super::fuse_device::is_device(fd) {
         set_slow(fd, false);
     }

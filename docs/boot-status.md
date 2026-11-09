@@ -58,7 +58,13 @@ read without touching POLLOUT (#2712), one lock across the processes a fork
 shares it with; an epoll, inotify or pidfd (each a
 kqueue) is POLLIN|POLLRDNORM, so a write event asked of one is not ready instead
 of POLLNVAL/EBADF, and epoll_ctl accepts EPOLLOUT on it; a pidfd adds POLLHUP
-once its process is reaped (#2699). Every other epoll interest also reports
+once its process is reaped (#2699), which a hidden reap-watch kqueue
+(`NOTE_REAP`, or this process's own reap of a zombie) reports to an interest or
+poll with no events and as a second edge to an edge-triggered one (#2711).
+Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited
+across fork) while its process is already a zombie gets that reap notice only
+when this same process reaps it; one held by any other process then reports
+POLLHUP only to a poll for POLLIN. Every other epoll interest also reports
 EPOLLERR|EPOLLHUP, events=0 included (#2701), though only at EOF, not on a
 full buffer; one left with no event keeps a
 knote, so closing its fd still removes it (#2700). A socket's pending error

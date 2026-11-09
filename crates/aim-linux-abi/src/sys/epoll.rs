@@ -401,6 +401,28 @@ fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc:
             v.push(k);
         }
     }
+    // A pidfd's reap is its reap watch's, as the pidfd itself polls
+    // readable from the exit on.
+    if let Some(reap) = super::wait::reap_watch_fd(fd) {
+        if old.is_some() {
+            v.push(kev(reap, libc::EVFILT_READ, libc::EV_DELETE));
+        }
+        if let Some(n) = new {
+            let mut f = libc::EV_ADD;
+            f |= if n.disabled {
+                libc::EV_DISABLE
+            } else {
+                libc::EV_ENABLE
+            };
+            if n.events & EPOLLET != 0 {
+                f |= libc::EV_CLEAR;
+            }
+            if n.events & EPOLLONESHOT != 0 {
+                f |= libc::EV_DISPATCH;
+            }
+            v.push(kev(reap, libc::EVFILT_READ, f));
+        }
+    }
     v
 }
 
@@ -802,11 +824,29 @@ fn ready(
         if !k.udata.is_null() {
             continue;
         }
-        let fd = k.ident as i32;
+        let ident = k.ident as i32;
+        // A pidfd's knote, or its reap watch's.
+        let (fd, reap) = if interest.contains_key(&ident) {
+            (ident, false)
+        } else {
+            match super::wait::reap_watch_owner(ident) {
+                Some(fd) => (fd, true),
+                None => continue,
+            }
+        };
         let Some(i) = interest.get_mut(&fd) else {
             continue;
         };
-        let fired = bits(k, i);
+        let fired = if !reap {
+            bits(k, i)
+        } else if super::wait::pidfd_reaped(fd) {
+            // pidfd_poll: a reaped process's pidfd is readable and hung up.
+            EPOLLHUP | i.events & (EPOLLIN | EPOLLRDNORM)
+        } else {
+            // The pidfd was closed, which dropped its own knote.
+            rearm.push(kev(ident, k.filter, libc::EV_DELETE));
+            continue;
+        };
         let mut b = fired;
         if b & EPOLLIN != 0 && super::inotify::spuriously_ready(fd) {
             b &= !(EPOLLIN | EPOLLRDNORM);
@@ -818,7 +858,7 @@ fn ready(
             // A dispatched knote that fired for nothing (a hangup-only one
             // on a full buffer) waits on.
             if (fired != 0 || i.hangup_only()) && i.events & EPOLLONESHOT != 0 && !i.disabled {
-                rearm.push(kev(fd, k.filter, libc::EV_ENABLE));
+                rearm.push(kev(ident, k.filter, libc::EV_ENABLE));
             }
             continue;
         }
@@ -844,6 +884,13 @@ fn ready(
                 || (other == libc::EVFILT_WRITE && i.wants_write())
             {
                 rearm.push(kev(fd, other, libc::EV_DISABLE));
+            }
+            if reap {
+                if i.wants_read() {
+                    rearm.push(kev(fd, libc::EVFILT_READ, libc::EV_DISABLE));
+                }
+            } else if let Some(reap) = super::wait::reap_watch_fd(fd) {
+                rearm.push(kev(reap, libc::EVFILT_READ, libc::EV_DISABLE));
             }
         } else if i.hangup_only() && i.events & EPOLLET == 0 {
             rearm.extend(changes(fd, None, Some(i)));
