@@ -59,7 +59,8 @@ fn from_host(h: i16, asked: i16) -> i16 {
 /// POLLWRNORM (`eventfd_poll`); an epoll, inotify or pidfd is a kqueue,
 /// which Darwin poll reports POLLNVAL for when asked a write event, and
 /// Linux reports only readable (`ep_eventpoll_poll`, `inotify_poll`,
-/// `pidfd_poll`, which adds POLLHUP once the process is reaped).
+/// `pidfd_poll`, which adds POLLHUP once the process is reaped: the
+/// pidfd's reap watch, [`super::wait::ReapWatch`]).
 pub(super) fn reportable(fd: i32, kind: Option<&super::fdtab::Kind>) -> Option<i16> {
     use super::fdtab::Kind;
     match kind {
@@ -216,6 +217,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
     }
     let mut pins = Vec::with_capacity(guest.len());
     let mut ptys = Vec::with_capacity(guest.len());
+    let mut reaps = Vec::with_capacity(guest.len());
     let mut invalid = false;
     let mut host = Vec::with_capacity(guest.len());
     for entry in guest.iter_mut() {
@@ -257,11 +259,24 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         if entry.events & POLLIN != 0 && fd >= 0 {
             super::binder::poll(fd);
         }
-        host.push(libc::pollfd {
-            fd,
-            events: to_host(entry.events),
-            revents: 0,
+        // A pidfd polled for no event reports only its reap, which its
+        // reap watch polls readable for: the pidfd is from the exit on.
+        let reap = (entry.events & (POLLIN | POLLRDNORM) == 0)
+            .then(|| super::wait::reap_watch(entry.fd))
+            .flatten();
+        host.push(match &reap {
+            Some(watch) => libc::pollfd {
+                fd: watch.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            None => libc::pollfd {
+                fd,
+                events: to_host(entry.events),
+                revents: 0,
+            },
         });
+        reaps.push(reap);
         pins.push(pin);
         ptys.push(pty);
     }
@@ -849,6 +864,185 @@ mod reportable_tests {
         assert_eq!(waited(ep, 0), (1, 0x1 | 0x10));
         assert_eq!(selected(pidfd), (1, true, false));
         close(&[pidfd, ep]);
+    }
+
+    /// ppoll on one fd for `events`, waiting up to `ms`: (count, revents).
+    fn polled_for(fd: i64, events: i16, ms: i64) -> (i64, i16) {
+        let mut entry = libc::pollfd {
+            fd: fd as i32,
+            events,
+            revents: 0,
+        };
+        let timeout = [ms / 1000, ms % 1000 * 1_000_000];
+        let n = ppoll([
+            &mut entry as *mut _ as u64,
+            1,
+            timeout.as_ptr() as u64,
+            0,
+            0,
+            0,
+        ]);
+        (n, entry.revents)
+    }
+
+    /// pidfd_poll reports EPOLLHUP once the process is reaped, which
+    /// ep_item_poll and poll report whatever was asked: an interest in no
+    /// events sleeps while the process runs and while it is a zombie, and
+    /// wakes for the reap; an edge-triggered one gets an edge at the exit
+    /// and another at the reap.
+    #[test]
+    fn an_eventless_pidfd_interest_wakes_for_the_reap() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::an_eventless_pidfd_interest_wakes_for_the_reap",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let pidfd = wait::open_pidfd(pid, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let level = watching(pidfd, 0);
+        let edge = watching(pidfd, 0x1 | 1 << 31);
+        let once = watching(pidfd, 1 << 30);
+        let asleep = || {
+            let cpu = thread_cpu();
+            assert_eq!(polled_for(pidfd, 0, 50), (0, 0));
+            assert_eq!(waited(level, 50).0, 0);
+            assert!(thread_cpu() - cpu < 25_000_000);
+        };
+        asleep();
+        assert_eq!(waited(edge, 0).0, 0);
+        child.kill().unwrap();
+        let mut entry = libc::pollfd {
+            fd: pidfd as i32,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd on the stack.
+        assert_eq!(unsafe { libc::poll(&mut entry, 1, 5_000) }, 1);
+        asleep();
+        assert_eq!(waited(edge, 0), (1, 0x1));
+        assert_eq!(waited(edge, 0).0, 0);
+        let sleepers = [
+            std::thread::spawn(move || waited(level, 5_000)),
+            std::thread::spawn(move || {
+                let (n, revents) = polled_for(pidfd, 0, 5_000);
+                (n, revents as u64)
+            }),
+        ];
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // SAFETY: reaping the child spawned above.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
+        for (sleeper, hangup) in sleepers.into_iter().zip([0x10, POLLHUP as u64]) {
+            assert_eq!(sleeper.join().unwrap(), (1, hangup));
+        }
+        assert_eq!(polled(pidfd, 0), (1, POLLHUP));
+        assert_eq!(waited(level, 0), (1, 0x10));
+        assert_eq!(waited(edge, 0), (1, 0x1 | 0x10));
+        assert_eq!(waited(edge, 0).0, 0);
+        assert_eq!(waited(once, 0), (1, 0x10));
+        assert_eq!(waited(once, 0).0, 0);
+        // Closing the pidfd ends the interest, reap included.
+        close(&[pidfd]);
+        let cpu = thread_cpu();
+        assert_eq!(waited(level, 50).0, 0);
+        assert!(thread_cpu() - cpu < 25_000_000);
+        close(&[level, edge, once]);
+    }
+
+    /// A pidfd opened on a zombie (to which Darwin attaches no process
+    /// filter) still wakes for the reap when this process reaps it.
+    #[test]
+    fn a_zombie_pidfd_wakes_for_its_reap_here() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_zombie_pidfd_wakes_for_its_reap_here",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waiting for the zombie without reaping it.
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as u32,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            },
+            0
+        );
+        let pidfd = wait::open_pidfd(pid, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let level = watching(pidfd, 0);
+        assert_eq!(polled(pidfd, 0), (0, 0));
+        assert_eq!(waited(level, 0).0, 0);
+        assert_eq!(wait::wait4([pid as u64, 0, 0, 0, 0, 0]), pid as i64);
+        assert_eq!(polled(pidfd, 0), (1, POLLHUP));
+        assert_eq!(waited(level, 0), (1, 0x10));
+        close(&[pidfd, level]);
+    }
+
+    /// epoll_ctl `op` of `fd` in `ep` for `events`.
+    fn ctl(ep: i64, op: u64, fd: i64, events: u32) -> i64 {
+        let interest = [events as u64, fd as u64];
+        epoll::epoll_ctl([ep as u64, op, fd as u64, interest.as_ptr() as u64, 0, 0])
+    }
+
+    /// A pidfd held by a process other than the parent wakes for the reap
+    /// the parent does (NOTE_REAP); EPOLLONESHOT is re-armed by
+    /// EPOLL_CTL_MOD and EPOLL_CTL_DEL drops the reap knote; closing the
+    /// pidfd closes its reap watch.
+    #[test]
+    fn a_pidfd_wakes_for_another_parents_reap() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_pidfd_wakes_for_another_parents_reap",
+        ) {
+            return;
+        }
+        use std::io::BufRead;
+        let _view = crate::vfs::test_view();
+        // The shell is the parent: it reaps the sleep when it ends.
+        let mut shell = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 0.3 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(shell.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid: i32 = line.trim().parse().unwrap();
+        let pidfd = wait::open_pidfd(pid, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let level = watching(pidfd, 0);
+        let once = watching(pidfd, 1 << 30);
+        let removed = watching(pidfd, 0);
+        assert_eq!(ctl(removed, 2, pidfd, 0), 0);
+        assert_eq!(polled_for(pidfd, 0, 0), (0, 0));
+        assert_eq!(waited(level, 5_000), (1, 0x10));
+        assert_eq!(polled(pidfd, 0), (1, POLLHUP));
+        assert_eq!(waited(once, 0), (1, 0x10));
+        assert_eq!(waited(once, 0).0, 0);
+        assert_eq!(ctl(once, 3, pidfd, 1 << 30), 0);
+        assert_eq!(waited(once, 0), (1, 0x10));
+        assert_eq!(waited(once, 0).0, 0);
+        let cpu = thread_cpu();
+        assert_eq!(waited(removed, 50).0, 0);
+        assert!(thread_cpu() - cpu < 25_000_000);
+        let watch = wait::reap_watch_fd(pidfd as i32).unwrap();
+        close(&[pidfd]);
+        // SAFETY: probing a descriptor number.
+        assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } < 0);
+        assert!(shell.wait().unwrap().success());
+        close(&[level, once, removed]);
     }
 
     /// This thread's CPU time in nanoseconds.
