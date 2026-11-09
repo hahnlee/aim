@@ -277,6 +277,12 @@ impl Tasks {
         adjacent.then_some(root)
     }
 
+    /// The bounds of the organizer root task task `id` is in.
+    pub(super) fn parent_bounds(&self, id: i32) -> Option<Rect> {
+        let tasks = self.tasks.lock().unwrap();
+        parent_of(&tasks, tasks.iter().find(|t| t.id == id)?).map(|p| p.1)
+    }
+
     /// The organizer root task task `id` is in.
     pub(super) fn parent(&self, id: i32) -> Option<i32> {
         self.tasks
@@ -3552,6 +3558,36 @@ pub(super) mod tests {
                 (host.tasks.bounds(7), host.tasks.bounds(8)),
                 (Some(r(0, 0, 900, 1920)), Some(right))
             );
+            // Its activity's window takes touches only within its root task,
+            // so a touch at x 600 reaches task 8's even under task 7's.
+            let input = |task| {
+                let bounds = host.tasks.bounds(task).unwrap();
+                let crop = host.tasks.parent_bounds(task);
+                let i = super::super::window_manager::Input::of(
+                    &Default::default(),
+                    bounds,
+                    bounds,
+                    crop,
+                    (10100, 42),
+                );
+                let [l, t, r, b] = [
+                    i.touchable.left,
+                    i.touchable.top,
+                    i.touchable.right,
+                    i.touchable.bottom,
+                ];
+                aim_input_transport::Region {
+                    frame: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+                    touchable: [l, t, r, b],
+                    watch_outside: i.watch_outside,
+                    owner: 10100,
+                    owner_pid: 42,
+                }
+            };
+            assert_eq!(
+                aim_input_transport::touched(&[input(8), input(7)], (600., 100.)).0,
+                Some(0)
+            );
             // The last TASK record of each task: its window's place.
             let mut records = HashMap::new();
             let mut last = |receive: &mut UnixStream| {
@@ -3783,9 +3819,11 @@ pub(super) mod tests {
             into(7, primary);
             let mut bytes = Vec::new();
             let _ = receive.read_to_end(&mut bytes);
+            // Task 7's bounds grow to its minimal size (900x1100) to the
+            // right and bottom (`adjustForMinimalTaskDimensions`).
             assert_eq!(
                 apply(7, 0, Some(launch)),
-                (6, launch, Some(launch), Some(old))
+                (6, r(200, 300, 1100, 1400), Some(launch), Some(old))
             );
             assert_eq!(host.tasks.tile_root(7), Some(primary));
             let mut bytes = Vec::new();
