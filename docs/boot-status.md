@@ -67,8 +67,10 @@ when this same process reaps it; one held by any other process then reports
 POLLHUP only to a poll for POLLIN. An inotify is readable only while events
 are queued, as inotify_poll reports: poll, select and epoll collect its kqueue's
 vnode notes when it fires and drop POLLIN|POLLRDNORM for notes that decode to
-nothing, so a level-triggered wait on it sleeps; past 16384 queued events one
-IN_Q_OVERFLOW (wd -1) is queued (#2670). Every other epoll interest also reports
+nothing, so a level-triggered wait on it sleeps; an event equal to the last
+queued one is merged into it, and past 16384 queued events
+(/proc/sys/fs/inotify/max_queued_events) one IN_Q_OVERFLOW (wd -1) is queued
+(#2670). Every other epoll interest also reports
 EPOLLERR|EPOLLHUP, events=0 included (#2701), though only at EOF, not on a
 full buffer; one left with no event keeps a
 knote, so closing its fd still removes it (#2700). A socket's pending error
