@@ -794,7 +794,7 @@ fn ready(
         };
         let fired = bits(k, i);
         let mut b = fired;
-        if b & EPOLLIN != 0 && super::inotify::spuriously_ready(fd) {
+        if b & EPOLLIN != 0 && super::inotify::readable(fd) == Some(false) {
             b &= !(EPOLLIN | EPOLLRDNORM);
         }
         if signals.iter().any(|signal| signal.0 == fd) {
