@@ -188,6 +188,7 @@ mod root_tasks;
 mod safe_labels;
 pub mod sensor_privacy;
 pub mod sensor_service;
+mod service_manager;
 pub mod services;
 pub mod settings;
 pub mod settings_provider;

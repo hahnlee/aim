@@ -634,7 +634,7 @@ fn real_app_caller_and_returned_session_survive_the_java_round_trip() {
     publish(&java, "aim.netstats", java.add_service(java_owner.clone()));
     let service = Arc::new(NetworkStats::new(AppHost::new(native.clone())));
     publish(&native, "netstats", native.add_service(service.clone()));
-    let remote = super::super::display::check_service(&app, "netstats").unwrap();
+    let remote = super::super::service_manager::check_service(&app, "netstats").unwrap();
     let mut p = Parcel::new();
     ns::OpenSessionForUsageStats {
         flags: 5,

@@ -183,7 +183,7 @@ impl AudioPolicy {
     pub fn connect(process: &LocalProcess) -> Result<AudioPolicy, String> {
         let deadline = Instant::now() + PATIENCE;
         let service = |name: &str| loop {
-            if let Ok(s) = super::display::check_service(process, name) {
+            if let Ok(s) = super::service_manager::check_service(process, name) {
                 return Ok(s);
             }
             if Instant::now() > deadline {

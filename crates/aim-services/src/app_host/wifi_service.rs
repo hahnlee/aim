@@ -1122,7 +1122,7 @@ pub(super) fn location_mode_enabled(host: &AppHost) -> Result<bool, Exception> {
     .write(&mut data);
     let asked = {
         let _system = aim_binder_host::local::clear_calling_identity();
-        super::display::transact_service(
+        super::service_manager::transact_service(
             &host.process,
             "location",
             lm::IS_LOCATION_ENABLED_FOR_USER,

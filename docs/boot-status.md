@@ -888,7 +888,13 @@ without a bound. init starts aim-system (class main) independently of
 SurfaceFlinger, as the original's zygote-start precedes `class_start core`, so
 aim-system's first `getOverlaySupport` no longer fails with "no
 SurfaceFlingerAIDL" under load (#2750; host regression, no guest boot,
-2026-11-09). Host lib suites (2,105 services and 45 display checks), 15 host
+2026-11-09). The app host's other owners look services up as their originals
+do (#2755): the suspend blockers' `system_suspend`, the Power HAL of
+HintManager and the health HAL with `waitForDeclaredService` (none if the
+VINTF manifests do not declare it), apexd's `apexservice` with
+`waitForService`, whose `getService2` has init start the lazy apexd;
+`getService` and `checkService` lookups (dumpstate, statsd, keystore2)
+stay single. Host lib suites (2,105 services and 45 display checks), 15 host
 integration checks and the matched boots pass; three M4 checks remain not run
 because their cohort input is absent (2026-10-30). The media services (mediaserver, mediaextractor,
 mediametrics, media.swcodec) start too: Codec2's software decoders take

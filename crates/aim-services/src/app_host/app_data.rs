@@ -177,7 +177,7 @@ impl AppHost {
     pub(super) fn installd(&self) -> Result<Strong, String> {
         let deadline = Instant::now() + INSTALLD_PATIENCE;
         loop {
-            if let Ok(installd) = super::display::check_service(&self.process, INSTALLD) {
+            if let Ok(installd) = super::service_manager::check_service(&self.process, INSTALLD) {
                 return Ok(installd);
             }
             if Instant::now() > deadline {

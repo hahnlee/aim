@@ -510,9 +510,13 @@ impl PowerManager {
         )))
     }
 
-    /// A suspend blocker of `name`, from `system_suspend`.
+    /// A suspend blocker of `name`, from `system_suspend`
+    /// (libhardware_legacy's `acquire_wake_lock`: the declared service,
+    /// waited for).
     fn blocker(&self, name: &str) -> Result<Blocker, String> {
-        let suspend = super::display::check_service(&self.host.process, SYSTEM_SUSPEND)?;
+        let suspend =
+            super::service_manager::wait_for_declared_service(&self.host.process, SYSTEM_SUSPEND)?
+                .ok_or("Failed to get SystemSuspend service")?;
         let mut data = Parcel::new();
         data.write_interface_token(SYSTEM_SUSPEND_DESCRIPTOR);
         data.write_i32(WAKE_LOCK_PARTIAL);

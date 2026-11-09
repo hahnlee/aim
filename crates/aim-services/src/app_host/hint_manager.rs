@@ -641,8 +641,11 @@ impl HintManager {
         Ok(self.client_data()?.power_hal_version >= 5 && self.flag(ADPF_USE_FMQ_CHANNEL)?)
     }
 
+    /// The Power HAL as `Injector.createIPower` finds it: the declared
+    /// service, waited for.
     fn hal(&self) -> Result<Strong, Exception> {
-        super::display::check_service(&self.host.process, POWER)
+        super::service_manager::wait_for_declared_service(&self.host.process, POWER)
+            .and_then(|hal| hal.ok_or_else(|| format!("no {POWER}")))
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 

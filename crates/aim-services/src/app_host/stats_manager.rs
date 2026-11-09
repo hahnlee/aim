@@ -514,7 +514,8 @@ impl Stats {
                 eprintln!("app host: statscompanion: statsd has already been fetched before");
                 return Ok(());
             }
-            let Ok(statsd) = super::display::check_service(&self.host.process, STATSD_SERVICE)
+            let Ok(statsd) =
+                super::service_manager::check_service(&self.host.process, STATSD_SERVICE)
             else {
                 if let Some(old) = companion.statsd.take() {
                     self.host.process.clear_death(&old.statsd, old.death);

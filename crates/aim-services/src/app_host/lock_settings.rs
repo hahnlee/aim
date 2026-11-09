@@ -747,7 +747,8 @@ impl LockSettings {
         };
         let mut data = Parcel::new();
         write(key, &mut data);
-        let reply = super::display::transact_service(&self.host.process, KEYSTORE, code, &data)?;
+        let reply =
+            super::service_manager::transact_service(&self.host.process, KEYSTORE, code, &data)?;
         reply
             .reader()
             .read_exception()
@@ -1013,9 +1014,13 @@ impl LockSettings {
         // `KeyStore2.grant`: a failure is a `KeyStoreException` of
         // keystore2's response code, a transport failure a system error.
         let internal = |m: String| service_specific(ERROR_SERVICE_INTERNAL_ERROR, &m);
-        let reply =
-            super::display::transact_service(&self.host.process, KEYSTORE, ks::GRANT, &data)
-                .map_err(internal)?;
+        let reply = super::service_manager::transact_service(
+            &self.host.process,
+            KEYSTORE,
+            ks::GRANT,
+            &data,
+        )
+        .map_err(internal)?;
         match ks::read_grant_reply::<KeyDescriptor>(&mut reply.reader())
             .map_err(|s| internal(format!("{KEYSTORE}: {s}")))?
         {
