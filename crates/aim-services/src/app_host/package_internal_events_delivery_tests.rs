@@ -521,3 +521,61 @@ fn interactive_requests_follow_the_power_owner() {
         );
     });
 }
+
+/// KeyguardViewMediator's USER_PRESENT follows the Mac's screen lock: once
+/// for a start unlocked, after the boot; again on each unlock, not on a
+/// lock or a repeated unlocked state.
+#[test]
+fn user_present_follows_the_mac_screen_unlock() {
+    const PRESENT: &str = "android.intent.action.USER_PRESENT";
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let received = register_filter(host, export, "p", 10100, false);
+        let mut filter = IntentFilter::default();
+        filter.add_action(PRESENT);
+        host.broadcasts.state.lock().unwrap().receivers[0].filters[0].filter = filter;
+        let present = |received: &mpsc::Receiver<(RawIntent, i32)>| {
+            let (intent, user) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(intent.intent.action.as_deref(), Some(PRESENT));
+            // REPLACE_PENDING | REGISTERED_ONLY_BEFORE_BOOT |
+            // VISIBLE_TO_INSTANT_APPS, and AM's EXCLUDE_STOPPED_PACKAGES.
+            assert_eq!(intent.intent.flags, 0x2420_0010);
+            assert_eq!(user, 0);
+        };
+        let none = |received: &mpsc::Receiver<(RawIntent, i32)>| {
+            assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+        };
+        // Unlocked at start: sent once the boot has completed.
+        host.mac_screen_locked(false);
+        none(&received);
+        host.keyguard_boot_completed();
+        present(&received);
+        host.mac_screen_locked(false);
+        none(&received);
+        // Locked, the screen shows no unlock: nothing until it is unlocked.
+        host.mac_screen_locked(true);
+        host.mac_screen_locked(true);
+        none(&received);
+        host.mac_screen_locked(false);
+        present(&received);
+        none(&received);
+    });
+}
+
+/// Locked at start, the boot completes with nobody present.
+#[test]
+fn user_present_waits_for_an_unlock_after_a_locked_start() {
+    const PRESENT: &str = "android.intent.action.USER_PRESENT";
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let received = register_filter(host, export, "p", 10100, false);
+        let mut filter = IntentFilter::default();
+        filter.add_action(PRESENT);
+        host.broadcasts.state.lock().unwrap().receivers[0].filters[0].filter = filter;
+        host.mac_screen_locked(true);
+        host.keyguard_boot_completed();
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+        host.mac_screen_locked(false);
+        let (intent, _) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(intent.intent.action.as_deref(), Some(PRESENT));
+        assert!(received.try_recv().is_err());
+    });
+}
