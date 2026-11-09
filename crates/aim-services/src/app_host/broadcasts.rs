@@ -1567,6 +1567,7 @@ impl Broadcasts {
             Sender::system(permissions),
             temp_allowlist,
             None,
+            false,
         )
     }
 
@@ -1603,6 +1604,7 @@ impl Broadcasts {
         temp_allowlist: Option<TempAllowlist>,
         done: Option<Done>,
     ) {
+        let serialized = done.is_some();
         if let Err(e) = self.send_with(
             host,
             intent,
@@ -1611,6 +1613,32 @@ impl Broadcasts {
             Sender::system(required_permissions),
             temp_allowlist,
             done,
+            serialized,
+        ) {
+            eprintln!("app host: a system broadcast: {e:?}");
+        }
+    }
+
+    /// `ActivityManagerInternal.broadcastIntentWithCallback` of a system
+    /// service of the app host, to `user`'s registered receivers when the
+    /// intent says so: not serialized, its receivers cannot abort it, and
+    /// `done` runs once it has gone through them.
+    pub fn send_from_system_with_callback(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        done: Done,
+    ) {
+        if let Err(e) = self.send_with(
+            host,
+            intent,
+            user,
+            None,
+            Sender::system(&[]),
+            None,
+            Some(done),
+            false,
         ) {
             eprintln!("app host: a system broadcast: {e:?}");
         }
@@ -1624,12 +1652,13 @@ impl Broadcasts {
         allow_list: Option<&[i32]>,
         sender: Sender,
     ) {
-        if let Err(e) = self.send_with(host, intent, user, allow_list, sender, None, None) {
+        if let Err(e) = self.send_with(host, intent, user, allow_list, sender, None, None, false) {
             eprintln!("app host: a system broadcast: {e:?}");
         }
     }
 
-    /// A system service's broadcast: ordered when it has a `done`.
+    /// A system service's broadcast, `serialized` or not: one receiver at
+    /// a time when it has a `done`.
     #[allow(clippy::too_many_arguments)]
     fn send_with(
         &self,
@@ -1640,6 +1669,7 @@ impl Broadcasts {
         sender: Sender,
         temp_allowlist: Option<TempAllowlist>,
         done: Option<Done>,
+        serialized: bool,
     ) -> Result<(), Exception> {
         let mut flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let allowed_implicit = host.packages().map(|(model, _)| {
@@ -1684,7 +1714,7 @@ impl Broadcasts {
             intent,
             binders: Arc::new(binders),
             sender,
-            ordered: done.is_some(),
+            ordered: serialized,
             initial_sticky: false,
             user,
             share_identity: false,
@@ -3006,6 +3036,10 @@ pub(super) mod internal_package_tests;
 #[cfg(test)]
 #[path = "system_receiver_tests.rs"]
 mod system_receiver_tests;
+
+#[cfg(test)]
+#[path = "shutdown_broadcast_tests.rs"]
+mod shutdown_broadcast_tests;
 
 #[cfg(test)]
 mod tests {

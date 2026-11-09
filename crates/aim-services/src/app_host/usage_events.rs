@@ -670,6 +670,13 @@ impl UserStats {
         notified
     }
 
+    /// `UsageStatsService.shutdown` of the user: at an orderly shutdown
+    /// the last event is DEVICE_SHUTDOWN, then the stats are persisted.
+    pub fn shutdown(&mut self, clocks: Clocks) {
+        self.report(Event::device(DEVICE_SHUTDOWN, clocks.1), clocks);
+        self.persist();
+    }
+
     /// `notifyStatsChanged`: whether it is the first change since the
     /// stats were persisted.
     fn notify_stats_changed(&mut self) -> bool {
@@ -1215,6 +1222,23 @@ mod tests {
                 ("p".into(), ACTIVITY_RESUMED),
                 ("q".into(), ACTIVITY_RESUMED)
             ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An orderly shutdown ends the open activity's time at its time and
+    /// persists the stats, no flush having come before it.
+    #[test]
+    fn an_orderly_shutdown_ends_open_activities_and_persists() {
+        let dir = temp("shutdown");
+        let mut first = user(&dir, 0);
+        first.report(event("p", ACTIVITY_RESUMED, 100, 1), (100, 100));
+        first.shutdown((400, 400));
+        let second = user(&dir, 500);
+        let s = &second.current[INTERVAL_DAILY].package_stats["p"];
+        assert_eq!(
+            (s.total_time_in_foreground, s.total_time_visible),
+            (300, 300)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
