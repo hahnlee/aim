@@ -113,6 +113,7 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod kept;
+mod keyguard;
 pub(crate) mod launch_inputs;
 mod launch_params;
 pub mod legacy_permission;
@@ -729,6 +730,7 @@ pub struct AppHost {
     services: services::Services,
     pending_intents: pending_intents::PendingIntents,
     broadcasts: broadcasts::Broadcasts,
+    keyguard: keyguard::Keyguard,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
     /// Whether the system user's first boot records were made
@@ -878,6 +880,7 @@ impl AppHost {
             services: Default::default(),
             pending_intents: Default::default(),
             broadcasts: Default::default(),
+            keyguard: Default::default(),
             user_restrictions: OnceLock::new(),
             system_user: OnceLock::new(),
             sensor_privacy: OnceLock::new(),
@@ -6080,6 +6083,14 @@ impl Service for Control {
                         eprintln!("app host: the global configuration: {e:?}");
                     }
                 }));
+                // The Mac's screen lock is the keyguard.
+                let weak = Arc::downgrade(&host);
+                aim_host_lock::watch_screen(Box::new(move |locked| {
+                    if let Some(host) = weak.upgrade() {
+                        host.mac_screen_locked(locked);
+                    }
+                }));
+                host.mac_screen_at_start(aim_host_lock::screen_locked());
                 // audioserver starts with its HAL, which asks the Mac for
                 // its devices: apart from the storage's start.
                 let audio = host.clone();

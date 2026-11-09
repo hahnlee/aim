@@ -1696,6 +1696,22 @@ impl Broadcasts {
         self.send_as_system(host, intent, user, None, &[]);
     }
 
+    /// `Context.sendBroadcastAsUser(intent, user, null, options)` of a
+    /// system service of the app host whose options' delivery group policy
+    /// is MOST_RECENT, matching by `key`: a receiver's pending delivery of
+    /// the group is replaced by this one.
+    pub(super) fn send_from_system_as_user_most_recent(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        key: &str,
+    ) {
+        let mut sender = Sender::system(&[]);
+        sender.delivery_group = Some(key.into());
+        self.send_as(host, intent, user, None, sender);
+    }
+
     /// `Context.sendBroadcastAsUser(intent, user, receiverPermission)` of a
     /// system service of the app host: to receivers holding `permission`.
     pub fn send_from_system_with_permission(

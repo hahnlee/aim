@@ -212,7 +212,7 @@ impl AppHost {
     /// `finishUserUnlockedCompleted`: the user logged in, then
     /// BOOT_COMPLETED to receivers holding RECEIVE_BOOT_COMPLETED (no
     /// widgets to start first: `startUserWidgets` updates bound widgets
-    /// only, and none is bound, #1789).
+    /// only, and none is bound, #1789), which SystemUI's keyguard hears.
     fn finish_user_unlocked_completed(self: &Arc<Self>, user: StartedUser) {
         if let Err(e) = self.user_logged_in(&user) {
             eprintln!("app host: user: logged in: {e}");
@@ -231,6 +231,7 @@ impl AppHost {
             Some(self.boot_time_temp_allowlist(REASON_BOOT_COMPLETED)),
             None,
         );
+        self.keyguard_boot_completed();
     }
 
     /// `PreBootBroadcaster`: PRE_BOOT_COMPLETED to each system app's
