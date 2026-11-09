@@ -284,6 +284,14 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             return -(error as i64);
         }
     }
+    // Darwin poll waits for a socket's pending error only through a read
+    // or write event (filt_soread, filt_sowrite), which `sock_poll`
+    // reports whatever was asked.
+    let errored = host.iter().zip(&pins).any(|(h, pin)| {
+        pin.is_some()
+            && h.events & (POLLIN | libc::POLLOUT) == 0
+            && super::net::pending_error(h.fd).is_some()
+    });
     let t0 = now_ns();
     #[cfg(test)]
     BEFORE_WAIT.with(|hook| {
@@ -301,7 +309,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         if let Some(polling) = &polling {
             polling.sync();
         }
-        let n = host_poll(&mut host, if invalid { 0 } else { left }, mask);
+        let n = host_poll(&mut host, if invalid || errored { 0 } else { left }, mask);
         if n < 0 {
             return n;
         }
@@ -349,6 +357,17 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             };
             if h.revents & libc::POLLIN != 0 && super::wait::pidfd_reaped(g.fd) {
                 g.revents |= POLLHUP;
+            }
+            // POLLERR for a pending socket error, which Darwin reports as
+            // readable, writable or not at all; readable only with data
+            // queued or at EOF.
+            if pin.is_some() && (h.revents != 0 || h.events & (POLLIN | libc::POLLOUT) == 0) {
+                if let Some(queued) = super::net::pending_error(h.fd) {
+                    g.revents |= POLLERR;
+                    if queued == 0 && h.revents & POLLHUP == 0 {
+                        g.revents &= !(POLLIN | POLLRDNORM);
+                    }
+                }
             }
             if g.revents != 0 {
                 ready += 1;
@@ -906,6 +925,124 @@ mod reportable_tests {
             unsafe { libc::close(local) };
             close(&[level, oneshot]);
         }
+    }
+
+    /// A guest IPv4 socket of `kind`, non-blocking, connected to a closed
+    /// loopback port: (fd, connect's result).
+    fn refused(kind: u64) -> (i64, i64) {
+        let port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let fd = crate::sys::net::socket([2, kind | O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(fd >= 0, "socket {fd}");
+        let mut address = [0u8; 16];
+        address[..2].copy_from_slice(&2u16.to_le_bytes());
+        address[2..4].copy_from_slice(&port.to_be_bytes());
+        address[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        let connected = crate::sys::net::connect([fd as u64, address.as_ptr() as u64, 16, 0, 0, 0]);
+        (fd, connected)
+    }
+
+    /// `sock_poll` reports EPOLLERR while `sk_err` is set, here by the
+    /// ICMP port unreachable a connected UDP socket's send draws, whatever
+    /// was asked and without EPOLLIN for an empty queue (`datagram_poll`);
+    /// the next receive returns ECONNREFUSED once and clears it, and
+    /// SO_ERROR reads and clears it the same way (LTP-style).
+    #[test]
+    fn a_pending_datagram_error_is_pollerr_until_returned() {
+        let _view = crate::vfs::test_view();
+        for consume in ["recv", "SO_ERROR"] {
+            let (fd, connected) = refused(2);
+            assert_eq!(connected, 0);
+            let readable = watching(fd, 0x1);
+            let eventless = watching(fd, 0);
+            let writable = watching(fd, 0x4);
+            let byte = 0u8;
+            assert_eq!(
+                crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
+                1
+            );
+            assert_eq!(waited(readable, 2_000), (1, 0x8), "{consume}");
+            assert_eq!(waited(readable, 0), (1, 0x8));
+            assert_eq!(waited(eventless, 0), (1, 0x8));
+            assert_eq!(waited(writable, 0), (1, 0x4 | 0x8));
+            assert_eq!(polled(fd, 0), (1, POLLERR));
+            assert_eq!(polled(fd, POLLIN | POLLRDNORM), (1, POLLERR));
+            assert_eq!(polled(fd, POLLOUT), (1, POLLOUT | POLLERR));
+            if consume == "recv" {
+                let mut buffer = [0u8; 4];
+                let mut received = || {
+                    crate::sys::net::recvfrom([fd as u64, buffer.as_mut_ptr() as u64, 4, 0, 0, 0])
+                };
+                assert_eq!(received(), -111);
+                assert_eq!(received(), -(crate::errno::EAGAIN as i64));
+            } else {
+                let mut error = [0i32; 2];
+                let mut len = 4u32;
+                let get = |error: &mut [i32; 2], len: &mut u32| {
+                    crate::sys::net::getsockopt([
+                        fd as u64,
+                        1,
+                        4,
+                        error.as_mut_ptr() as u64,
+                        len as *mut u32 as u64,
+                        0,
+                    ])
+                };
+                assert_eq!(get(&mut error, &mut len), 0);
+                assert_eq!(error[0], 111);
+                assert_eq!(get(&mut error, &mut len), 0);
+                assert_eq!(error[0], 0);
+            }
+            assert_eq!(waited(readable, 0).0, 0);
+            assert_eq!(waited(eventless, 0).0, 0);
+            assert_eq!(waited(writable, 0), (1, 0x4));
+            assert_eq!(polled(fd, 0), (0, 0));
+            assert_eq!(polled(fd, POLLIN), (0, 0));
+            assert_eq!(polled(fd, POLLOUT), (1, POLLOUT));
+            close(&[fd, readable, eventless, writable]);
+        }
+    }
+
+    /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
+    /// so `tcp_poll` reports HUP, IN and OUT, and ERR until SO_ERROR
+    /// returns ECONNREFUSED once.
+    #[test]
+    fn a_refused_connect_is_pollerr_until_so_error() {
+        let _view = crate::vfs::test_view();
+        let (fd, connected) = refused(1);
+        assert_eq!(connected, -115);
+        let eventless = watching(fd, 0);
+        let both = watching(fd, 0x1 | 0x4);
+        assert_eq!(waited(eventless, 2_000), (1, 0x8 | 0x10));
+        assert_eq!(waited(both, 0), (1, 0x1 | 0x4 | 0x8 | 0x10));
+        assert_eq!(
+            polled(fd, POLLIN | POLLOUT),
+            (1, POLLIN | POLLOUT | POLLERR | POLLHUP)
+        );
+        let mut error = [0i32; 2];
+        let mut len = 4u32;
+        let mut get = || {
+            crate::sys::net::getsockopt([
+                fd as u64,
+                1,
+                4,
+                error.as_mut_ptr() as u64,
+                &mut len as *mut u32 as u64,
+                0,
+            ]);
+            error[0]
+        };
+        assert_eq!(get(), 111);
+        assert_eq!(get(), 0);
+        assert_eq!(waited(eventless, 0), (1, 0x10));
+        assert_eq!(
+            polled(fd, POLLIN | POLLOUT),
+            (1, POLLIN | POLLOUT | POLLHUP)
+        );
+        close(&[fd, eventless, both]);
     }
 
     /// Closing the last reference to a file drops its eventless interest

@@ -51,8 +51,12 @@ of POLLNVAL/EBADF, and epoll_ctl accepts EPOLLOUT on it; a pidfd adds POLLHUP
 once its process is reaped (#2699). Every other epoll interest also reports
 EPOLLERR|EPOLLHUP, events=0 included (#2701), though only at EOF, not on a
 full buffer; one left with no event keeps a
-knote, so closing its fd still removes it (#2700). Host checks only; no guest
-boot (2026-11-04).
+knote, so closing its fd still removes it (#2700). A socket's pending error
+(an ICMP-refused UDP send, a refused connect) is EPOLLERR/POLLERR, without
+EPOLLIN for an empty queue, until a receive, send or SO_ERROR returns it once,
+read from the socket's `soi_error` without clearing it; a closed TCP connection
+polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713). Host checks only; no
+guest boot (2026-11-10).
 
 The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep requests,
 with timestamp ordering, shared interactive/display queries, display-state callbacks

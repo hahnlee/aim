@@ -585,6 +585,15 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
             if k.fflags != 0 {
                 b |= EPOLLERR;
             }
+        } else if k.data == 0 || !i.wants_read() {
+            // Darwin's filt_soread fires for a pending socket error, a
+            // datagram's without EOF, as for readable data: a firing with
+            // nothing to read, or a hangup-only knote's, may be the
+            // error's, which `sock_poll` reports as EPOLLERR, with EPOLLIN
+            // only for queued data.
+            if let Some(queued) = super::net::pending_error(k.ident as i32) {
+                b = EPOLLERR | if queued == 0 { 0 } else { b };
+            }
         }
         if b & EPOLLIN != 0 && super::wait::pidfd_reaped(k.ident as i32) {
             b |= EPOLLHUP;
@@ -593,6 +602,8 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
         b |= i.events & (EPOLLOUT | EPOLLWRNORM);
         if eof {
             b |= if k.fflags != 0 { EPOLLERR } else { EPOLLHUP };
+        } else if super::net::pending_error(k.ident as i32).is_some() {
+            b |= EPOLLERR;
         }
     }
     b
