@@ -3840,22 +3840,20 @@ fn host_protocol(fd: i32) -> i32 {
     i32::from_ne_bytes(info[PROTOCOL..PROTOCOL + 4].try_into().unwrap())
 }
 
-/// The bytes queued to receive on host socket `fd` when it has a pending
-/// error (`soi_error` and `soi_rcv.sbi_cc` of its PROC_PIDFDSOCKETINFO),
-/// read without clearing it as SO_ERROR does: Linux `sock_poll` reports
-/// EPOLLERR while `sk_err` is set, which the next receive, send or
-/// SO_ERROR returns once. None without one, or for any other fd.
-pub(super) fn pending_error(fd: i32) -> Option<u32> {
+/// sizeof(struct socket_fdinfo), and offsetof its `.psi.soi_state`,
+/// `.psi.soi_error` and `.psi.soi_rcv.sbi_cc`.
+const SOCKET_FDINFO: usize = 792;
+const SOI_STATE: usize = 192;
+const SOI_ERROR: usize = 202;
+const SBI_CC: usize = 208;
+
+/// Guest socket `fd`'s PROC_PIDFDSOCKETINFO; None for any other fd.
+fn socket_info(fd: i32) -> Option<[u8; SOCKET_FDINFO]> {
     if !matches!(fdtab::get(fd), Some(Kind::Sock(_))) {
         return None;
     }
     const PROC_PIDFDSOCKETINFO: i32 = 3;
-    /// sizeof(struct socket_fdinfo), offsetof(.psi.soi_error) and
-    /// offsetof(.psi.soi_rcv.sbi_cc).
-    const SIZE: usize = 792;
-    const ERROR: usize = 202;
-    const QUEUED: usize = 208;
-    let mut info = [0u8; SIZE];
+    let mut info = [0u8; SOCKET_FDINFO];
     // SAFETY: proc_pidfdinfo into a buffer of the struct's size.
     let n = unsafe {
         libc::proc_pidfdinfo(
@@ -3863,11 +3861,36 @@ pub(super) fn pending_error(fd: i32) -> Option<u32> {
             fd,
             PROC_PIDFDSOCKETINFO,
             info.as_mut_ptr().cast(),
-            SIZE as i32,
+            SOCKET_FDINFO as i32,
         )
     };
-    (n as usize == SIZE && u16::from_ne_bytes(info[ERROR..ERROR + 2].try_into().unwrap()) != 0)
-        .then(|| u32::from_ne_bytes(info[QUEUED..QUEUED + 4].try_into().unwrap()))
+    (n as usize == SOCKET_FDINFO).then_some(info)
+}
+
+/// The bytes queued to receive on host socket `fd` when it has a pending
+/// error (`soi_error` and `soi_rcv.sbi_cc` of its PROC_PIDFDSOCKETINFO),
+/// read without clearing it as SO_ERROR does: Linux `sock_poll` reports
+/// EPOLLERR while `sk_err` is set, which the next receive, send or
+/// SO_ERROR returns once. None without one, or for any other fd.
+pub(super) fn pending_error(fd: i32) -> Option<u32> {
+    let info = socket_info(fd)?;
+    (u16::from_ne_bytes(info[SOI_ERROR..SOI_ERROR + 2].try_into().unwrap()) != 0)
+        .then(|| u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap()))
+}
+
+/// The directions shut on guest socket `fd` (its `soi_state`'s
+/// SS_CANTRCVMORE and SS_CANTSENDMORE), as Linux's `sk_shutdown`, which
+/// `unix_poll` and `datagram_poll` report as a hangup only once both are
+/// shut. Darwin marks either with EOF and HUP alike. None for any other fd.
+pub(super) fn shut_directions(fd: i32) -> Option<super::tcp_shutdown::Shutdown> {
+    const SS_CANTSENDMORE: i16 = 0x10;
+    const SS_CANTRCVMORE: i16 = 0x20;
+    let info = socket_info(fd)?;
+    let state = i16::from_ne_bytes(info[SOI_STATE..SOI_STATE + 2].try_into().unwrap());
+    Some(super::tcp_shutdown::Shutdown {
+        receive: state & SS_CANTRCVMORE != 0,
+        send: state & SS_CANTSENDMORE != 0,
+    })
 }
 
 pub fn getsockopt(a: [u64; 6]) -> i64 {
