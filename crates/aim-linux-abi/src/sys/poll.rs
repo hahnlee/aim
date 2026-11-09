@@ -1051,11 +1051,11 @@ mod reportable_tests {
             events,
             revents: 0,
         };
-        let timeout = [ms / 1000, ms % 1000 * 1_000_000];
+        let mut timeout = [ms / 1000, ms % 1000 * 1_000_000];
         let n = ppoll([
             &mut entry as *mut _ as u64,
             1,
-            timeout.as_ptr() as u64,
+            timeout.as_mut_ptr() as u64,
             0,
             0,
             0,
@@ -1797,11 +1797,11 @@ mod reportable_tests {
 
     /// ppoll on `entries` for up to `ms`: the count.
     fn polled_all(entries: &mut [libc::pollfd], ms: i64) -> i64 {
-        let timeout = [ms / 1000, ms % 1000 * 1_000_000];
+        let mut timeout = [ms / 1000, ms % 1000 * 1_000_000];
         ppoll([
             entries.as_mut_ptr() as u64,
             entries.len() as u64,
-            timeout.as_ptr() as u64,
+            timeout.as_mut_ptr() as u64,
             0,
             0,
             0,
