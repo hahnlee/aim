@@ -1447,6 +1447,23 @@ fn host_user_unlocking_publishes_and_survives_enabled_and_permission_updates() {
     drop(workers);
 }
 
+/// The image's declarations of the per-app overrides of window management
+/// (`ActivityInfo.FORCE_RESIZE_APP`, `FORCE_NON_RESIZE_APP`,
+/// `OVERRIDE_ANY_ORIENTATION_TO_USER`): disabled, as an undeclared change
+/// is enabled.
+fn declare_app_compat_overrides(image: &std::path::Path) {
+    let dir = image.join("system/etc/compatconfig");
+    std::fs::create_dir_all(&dir).unwrap();
+    let changes: String = [174042936, 181136395, 310816437]
+        .map(|id| format!(r#"<compat-change id="{id}" disabled="true" overridable="true"/>"#))
+        .concat();
+    std::fs::write(
+        dir.join("services-platform-compat-config.xml"),
+        format!("<config>{changes}</config>"),
+    )
+    .unwrap();
+}
+
 /// A native query publication withheld until the startup regression releases it.
 pub(crate) fn with_late_package_boot(test: impl FnOnce(&Arc<AppHost>, &mut dyn FnMut())) {
     with_late_package_construction(|host, construct| {
@@ -1465,6 +1482,7 @@ pub(crate) fn with_late_package_construction(test: impl FnOnce(&Arc<AppHost>, &m
     let image = fixture.root.join("image");
     std::fs::create_dir_all(image.join("system/framework")).unwrap();
     std::fs::write(image.join("system/build.prop"), "ro.build.version.sdk=36\n").unwrap();
+    declare_app_compat_overrides(&image);
     std::fs::write(
         image.join("system/framework/framework-res.apk"),
         include_bytes!("../tests/fixtures/discovery/framework.apk"),
@@ -1595,6 +1613,7 @@ pub(crate) fn with_discovery_context(
     let image = fixture.root.join("image");
     std::fs::create_dir_all(image.join("system/framework")).unwrap();
     std::fs::write(image.join("system/build.prop"), "ro.build.version.sdk=36\n").unwrap();
+    declare_app_compat_overrides(&image);
     std::fs::write(
         image.join("system/framework/framework-res.apk"),
         include_bytes!("../tests/fixtures/discovery/framework.apk"),
