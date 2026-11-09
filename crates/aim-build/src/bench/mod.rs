@@ -175,7 +175,7 @@ pub(crate) struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        stop::forget();
+        let _stopping = stop::stopping();
         // guest-init stops its services on SIGTERM.
         if matches!(self.init.try_wait(), Ok(None)) {
             // SAFETY: signals a child we started, not yet reaped.
@@ -620,6 +620,7 @@ fn one_run(
     let display = boot::start_display(ctx, dir, false)?;
     stop::running(stop::Running {
         display: Some(display.id()),
+        data: Some(data.clone()),
         ..Default::default()
     });
     let epoch0 = SystemTime::now()
@@ -638,7 +639,7 @@ fn one_run(
         Ok(init) => init,
         Err(e) => {
             let mut display = display;
-            stop::forget();
+            let _stopping = stop::stopping();
             let _ = display.kill();
             let _ = display.wait();
             return Err(e);
@@ -647,6 +648,7 @@ fn one_run(
     stop::running(stop::Running {
         display: Some(display.id()),
         init: Some(init.id()),
+        data: Some(data.clone()),
         ..Default::default()
     });
     let mut session = Session { display, init };
@@ -659,10 +661,18 @@ fn one_run(
     let capture = dir.join("capture.bmp");
     let result = measure(&guest, &mut session, &capture, fixtures, epoch0, t0, run);
     drop(session);
+    // guest-init hands its data image to its parent to detach.
+    let detached = stop::stop(stop::Running {
+        data: Some(data.clone()),
+        ..Default::default()
+    });
     if !keep {
         let _ = aim_storage::data::remove(&data);
     }
-    result
+    match (result, detached) {
+        (Err(error), Err(detach)) => Err(format!("{error}; {detach}")),
+        (result, detached) => result.and(detached),
+    }
 }
 
 fn measure(
@@ -908,8 +918,9 @@ mod guest_command_tests {
         stop::stop(stop::Running {
             display: Some(display.id()),
             init: Some(init.id()),
-            apps: None,
-        });
+            ..Default::default()
+        })
+        .unwrap();
         assert!(marker.exists(), "guest-init got no SIGTERM");
         for pid in [init.id(), display.id()] {
             // SAFETY: probing a pid this test started and stop reaped.

@@ -1,38 +1,53 @@
 //! The guest a command runs, stopped when the command is: SIGINT, SIGTERM
 //! and SIGHUP wake a thread of their own, which stops what is running as
 //! the command's own cleanup would and exits as the signal would have.
+//! One stop runs at a time, so a signal during the command's own cleanup
+//! waits for it rather than ending the process in its middle.
 
 use std::io::Read;
 use std::os::fd::IntoRawFd;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// The children running: aim-display's and guest-init's pids, and
-/// aim-apps's with its binary and the shims' directory it cleans.
+/// aim-apps's with its binary and the shims' directory it cleans; and the
+/// data directory whose image guest-init hands to its parent to detach.
 #[derive(Clone, Default)]
 pub(crate) struct Running {
     pub(crate) display: Option<u32>,
     pub(crate) init: Option<u32>,
     pub(crate) apps: Option<(u32, PathBuf, PathBuf)>,
+    pub(crate) data: Option<PathBuf>,
 }
 
 static RUNNING: Mutex<Running> = Mutex::new(Running {
     display: None,
     init: None,
     apps: None,
+    data: None,
 });
+
+/// Held by the stop under way.
+static STOPPING: Mutex<()> = Mutex::new(());
 
 /// Records what a signal stops.
 pub(crate) fn running(now: Running) {
     *RUNNING.lock().unwrap() = now;
 }
 
-/// Nothing is running any more: the command has stopped it itself.
-pub(crate) fn forget() {
-    running(Running::default());
+/// The command stops its children itself while the guard lives; a signal
+/// meanwhile waits for it, then finds only the data image to detach.
+pub(crate) fn stopping() -> MutexGuard<'static, ()> {
+    let guard = STOPPING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut now = RUNNING.lock().unwrap();
+    *now = Running {
+        data: now.data.take(),
+        ..Default::default()
+    };
+    guard
 }
 
 /// The write end of the pipe the signal handler wakes the stop thread by.
@@ -77,17 +92,30 @@ pub(crate) fn on_signals(command: &'static str) {
             return;
         }
         let signal = i32::from(byte[0]);
-        let now = RUNNING.lock().unwrap().clone();
         eprintln!("{command}: signal {signal}: stopping the guest");
-        stop(now);
+        let _stopping = STOPPING.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::mem::take(&mut *RUNNING.lock().unwrap());
+        if let Err(error) = stop_now(now) {
+            eprintln!("{command}: {error}");
+        }
         std::process::exit(128 + signal);
     });
 }
 
+/// Stops what is running, as [`stop_now`], once no other stop is under
+/// way; a signal from then on finds nothing left to stop.
+pub(crate) fn stop(now: Running) -> Result<(), String> {
+    let _stopping = STOPPING.lock().unwrap_or_else(|e| e.into_inner());
+    *RUNNING.lock().unwrap() = Running::default();
+    stop_now(now)
+}
+
 /// Stops guest-init (which stops its services on SIGTERM), killing it
 /// after a minute, then aim-display, then aim-apps, whose shims go out of
-/// Launch Services.
-pub(crate) fn stop(now: Running) {
+/// Launch Services. Then, with none of them left to hold it, detaches the
+/// data image guest-init handed off, as aimctl does after guest-init
+/// exits.
+fn stop_now(now: Running) -> Result<(), String> {
     let reaped = |pid: u32| {
         let mut status = 0;
         // SAFETY: polling a child we started.
@@ -120,6 +148,11 @@ pub(crate) fn stop(now: Running) {
         }
         clean_shims(&binary, &into);
     }
+    match now.data {
+        Some(data) => aim_storage::data::detach_existing(&data)
+            .map_err(|e| format!("detaching {}: {e}", data.display())),
+        None => Ok(()),
+    }
 }
 
 /// `aim-apps clean --into DIR`: the shims go with the guest, and out of
@@ -137,6 +170,7 @@ pub(crate) fn clean_shims(binary: &std::path::Path, into: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
 
     /// A child started once the signals are handled can still be stopped
@@ -179,6 +213,68 @@ mod tests {
         assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGTERM));
     }
 
+    /// The stop detaches the data image guest-init handed off, and says
+    /// when it cannot: here a live owner still holds the image (#2766).
+    #[test]
+    fn stopping_detaches_the_data_image_or_says_why_not() {
+        let dir = std::env::temp_dir().join(format!("stop-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let data = dir.join("data");
+        std::fs::write(aim_storage::data::image_of(&data), b"not attached").unwrap();
+        let owner = std::fs::File::create(dir.join("data.lock")).unwrap();
+        // SAFETY: flock on an open descriptor.
+        assert_eq!(
+            unsafe { libc::flock(owner.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let stopped = stop(Running {
+            data: Some(data.clone()),
+            ..Default::default()
+        });
+        assert!(stopped.unwrap_err().contains("in use"));
+        drop(owner);
+        stop(Running {
+            data: Some(data),
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// guest-init's exit leaves its data image attached for its parent;
+    /// the stop detaches it (#2766).
+    #[test]
+    #[ignore = "creates and attaches one owned disposable APFS data image"]
+    fn stopping_detaches_an_image_guest_init_handed_off() {
+        let dir = std::env::temp_dir().join(format!("stop-handoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let data = dir.join("data");
+        let mut image = aim_storage::data::DataImage::attach(&data, None).unwrap();
+        let backing = image.image().to_path_buf();
+        image.handoff_detach().unwrap();
+        drop(image);
+        assert!(
+            !aim_storage::disk::attachments_of(&backing)
+                .unwrap()
+                .is_empty()
+        );
+        stop(Running {
+            data: Some(data.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            aim_storage::disk::attachments_of(&backing)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!aim_storage::disk::is_mount_point(&data));
+        aim_storage::data::remove(&data).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A stopped boot stops aim-apps too and cleans its shims (#796).
     #[test]
     fn stopping_stops_the_shims_and_cleans_them() {
@@ -195,10 +291,10 @@ mod tests {
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         let apps = Command::new("/bin/sleep").arg("60").spawn().unwrap();
         stop(Running {
-            display: None,
-            init: None,
             apps: Some((apps.id(), binary, dir.clone())),
-        });
+            ..Default::default()
+        })
+        .unwrap();
         assert!(dir.join("cleaned").exists(), "the shims were not cleaned");
         // SAFETY: probing a pid this test started and stop reaped.
         assert_eq!(unsafe { libc::kill(apps.id() as i32, 0) }, -1);

@@ -349,8 +349,11 @@ guest-init --image <derived> --data <data> --run \
   `cargo aim boot`, which stops the guest before the display. Three
   disposable boots stopped in 3.5 s each (2026-11-10). About 25 native
   services, mostly binder HALs, still outlast SIGTERM's 3 s and end at
-  SIGKILL (#2765), and `cargo aim boot` leaves the DATA image that
-  guest-init hands off attached after it exits (#2766).
+  SIGKILL (#2765). guest-init hands its DATA image to its parent to
+  detach; `cargo aim boot` and `cargo aim bench` detach it, as aimctl
+  does, once guest-init has exited and the display and shims are gone, on
+  every exit (its own stop or crash, a signal, the kill after a minute),
+  and fail when it will not detach (#2766).
 - `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
   attaches at `<data>` for the boot and detaches when it stops
   (docs/storage.md); `cargo aim storage` shows what it occupies.

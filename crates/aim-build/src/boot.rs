@@ -31,6 +31,7 @@ pub fn run(
     let display = start_display(ctx, &dir, windows)?;
     let mut now = stop::Running {
         display: Some(display.id()),
+        data: Some(data.clone()),
         ..Default::default()
     };
     stop::running(now.clone());
@@ -51,11 +52,13 @@ pub fn run(
         .map_err(|e| format!("guest-init: {e}"))?;
     now.init = Some(init.id());
     stop::running(now.clone());
-    let status = init.wait().map_err(|e| format!("guest-init: {e}"))?;
-    // A signal from here on finds nothing to stop; guest-init is reaped.
-    stop::forget();
+    let status = init.wait();
+    // guest-init is reaped; the rest stops, and its data image detaches,
+    // whatever its status.
     now.init = None;
-    stop::stop(now);
+    let stopped = stop::stop(now);
+    let status = status.map_err(|e| format!("guest-init: {e}"))?;
+    stopped?;
     Ok(if status.success() {
         ExitCode::SUCCESS
     } else {
