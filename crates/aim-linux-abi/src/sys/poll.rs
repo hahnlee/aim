@@ -76,10 +76,25 @@ pub(super) fn reportable(fd: i32, kind: Option<&super::fdtab::Kind>) -> Option<i
 
 /// The events of `asked` that guest fd `fd` can report, a signalfd's as
 /// of a mask read now: those polled for, and the only ones its host
-/// readiness is translated back to.
-fn asked_events(fd: i32, kind: Option<&super::fdtab::Kind>, asked: i16) -> i16 {
+/// readiness is translated back to. A pipe or FIFO, `pipe`, is never
+/// POLLPRI, POLLRDBAND or POLLWRBAND, which Darwin's is whenever readable
+/// or writable, nor POLLRDHUP, and its read end never writable, which a
+/// named FIFO's is on Darwin (`pipe_poll`).
+fn asked_events(
+    fd: i32,
+    kind: Option<&super::fdtab::Kind>,
+    pipe: Option<PipeEnd>,
+    asked: i16,
+) -> i16 {
     if let Some(super::fdtab::Kind::Signal(description)) = kind {
         super::signalfd::ready(description);
+    }
+    match pipe {
+        Some(PipeEnd::Read) => {
+            return asked & !(POLLPRI | POLLRDBAND | POLLWRBAND | POLLRDHUP | POLLOUT | POLLWRNORM);
+        }
+        Some(_) => return asked & !(POLLPRI | POLLRDBAND | POLLWRBAND | POLLRDHUP),
+        None => {}
     }
     reportable(fd, kind).map_or(asked, |events| asked & events)
 }
@@ -141,11 +156,58 @@ fn is_fifo(fd: i32) -> bool {
     }
 }
 
-/// Whether `fd` is a pipe's write end, which Darwin reports HUP for once
-/// the readers are gone and `pipe_poll` POLLERR.
-fn pipe_writer(fd: i32) -> bool {
+/// The ends of a pipe or FIFO a descriptor holds, whose Darwin readiness
+/// differs from `pipe_poll`'s.
+#[derive(Clone, Copy)]
+pub(super) enum PipeEnd {
+    Read,
+    Write,
+    /// A FIFO open for both.
+    Both,
+}
+
+/// Which ends of a pipe or FIFO host `fd` holds, by its access mode.
+fn pipe_end(fd: i32) -> Option<PipeEnd> {
+    if !is_fifo(fd) {
+        return None;
+    }
     // SAFETY: F_GETFL on a host descriptor.
-    is_fifo(fd) && unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE == libc::O_WRONLY
+    match unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE {
+        libc::O_RDONLY => Some(PipeEnd::Read),
+        libc::O_WRONLY => Some(PipeEnd::Write),
+        _ => Some(PipeEnd::Both),
+    }
+}
+
+/// The pipe ends of guest fd `fd`, an untyped one, on its host descriptor
+/// `host`: a typed one's host socket or kqueue is never a FIFO, nor is a
+/// pidfd, a kqueue that Darwin stats as one.
+pub(super) fn pipe(fd: i32, host: i32, kind: Option<&super::fdtab::Kind>) -> Option<PipeEnd> {
+    (kind.is_none() && !super::wait::is_pidfd(fd))
+        .then(|| pipe_end(host))
+        .flatten()
+}
+
+/// The bytes queued in pipe read end `fd`.
+fn pipe_queued(fd: i32) -> i32 {
+    let mut queued = 0;
+    // SAFETY: FIONREAD into a local int.
+    unsafe { libc::ioctl(fd, libc::FIONREAD, &mut queued) };
+    queued
+}
+
+/// A hung-up pipe end's Darwin poll `revents` as `pipe_poll` reports
+/// them. A read end is readable only with data queued, where Darwin's is
+/// also once its writers are gone. A write end whose readers are gone,
+/// which Darwin reports as hung up and, when asked, readable, is POLLERR
+/// and writable alone: Darwin frees the pipe's buffer with its last reader
+/// (Linux keeps it, so a full one is not writable).
+fn pipe_revents(end: PipeEnd, fd: i32, revents: i16) -> i16 {
+    match end {
+        PipeEnd::Read if pipe_queued(fd) == 0 => revents & !(POLLIN | POLLRDNORM),
+        PipeEnd::Write => POLLERR | libc::POLLOUT,
+        PipeEnd::Read | PipeEnd::Both => revents,
+    }
 }
 
 /// The sockets and pipes polled for no event, as EVFILT_READ knotes of a
@@ -354,6 +416,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
     let mut pins = Vec::with_capacity(guest.len());
     let mut ptys = Vec::with_capacity(guest.len());
     let mut reaps = Vec::with_capacity(guest.len());
+    let mut pipes = Vec::with_capacity(guest.len());
     let mut hangups = None;
     let mut invalid = false;
     let mut host = Vec::with_capacity(guest.len());
@@ -385,11 +448,9 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             || pin.as_ref().map_or(-1, |pin| pin.descriptor().as_raw_fd()),
             |watch| watch.observation.data().as_raw_fd(),
         );
-        entry.events = asked_events(
-            entry.fd,
-            pin.as_ref().and_then(|pin| pin.kind()),
-            entry.events,
-        );
+        let kind = pin.as_ref().and_then(|pin| pin.kind());
+        let pipe = pin.as_ref().and_then(|_| self::pipe(entry.fd, fd, kind));
+        entry.events = asked_events(entry.fd, kind, pipe, entry.events);
         let socket = matches!(
             pin.as_ref().and_then(|pin| pin.kind()),
             Some(super::fdtab::Kind::Sock(_))
@@ -412,10 +473,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 revents: 0,
             },
             // A socket's or pipe's, its knote in `hangups` instead.
-            None if eventless(entry.events)
-                && (socket
-                    || pin.as_ref().is_some_and(|pin| pin.kind().is_none()) && is_fifo(fd)) =>
-            {
+            None if eventless(entry.events) && (socket || pipe.is_some()) => {
                 if let Err(error) = Hangups::watch(&mut hangups, fd, host.len()) {
                     return -(error as i64);
                 }
@@ -432,6 +490,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             },
         });
         reaps.push(reap);
+        pipes.push(pipe);
         pins.push(pin);
         ptys.push(pty);
     }
@@ -491,7 +550,13 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             }
         }
         let mut ready = 0;
-        for (((g, h), pin), pty) in guest.iter_mut().zip(&mut host).zip(&pins).zip(&ptys) {
+        for ((((g, h), pin), pty), pipe) in guest
+            .iter_mut()
+            .zip(&mut host)
+            .zip(&pins)
+            .zip(&ptys)
+            .zip(&pipes)
+        {
             if g.fd >= 0 && pin.is_none() && pty.is_none() {
                 g.revents = POLLNVAL;
                 ready += 1;
@@ -510,11 +575,8 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                     Err(_) => POLLERR,
                 };
             }
-            if h.revents & POLLHUP != 0
-                && pin.as_ref().is_some_and(|pin| pin.kind().is_none())
-                && pipe_writer(h.fd)
-            {
-                h.revents = h.revents & !POLLHUP | POLLERR;
+            if let Some(end) = pipe.filter(|_| h.revents & POLLHUP != 0) {
+                h.revents = pipe_revents(end, h.fd, h.revents);
             }
             g.revents = match (h.revents & POLLHUP != 0)
                 .then(|| {
@@ -596,6 +658,7 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
     let mut pins = Vec::new();
     let mut ptys = Vec::new();
     let mut guest_fds = Vec::new();
+    let mut pipes = Vec::new();
     for fd in 0..nfds {
         let mut ev = 0;
         for (s, w) in input_sets.iter().zip(wanted) {
@@ -625,13 +688,15 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
             if ev & POLLIN != 0 {
                 super::binder::poll(host_fd);
             }
-            ev = to_host(asked_events(fd as i32, pin.kind(), ev));
+            let pipe = pipe(fd as i32, host_fd, pin.kind());
+            ev = to_host(asked_events(fd as i32, pin.kind(), pipe, ev));
             host.push(libc::pollfd {
                 fd: host_fd,
                 events: ev,
                 revents: 0,
             });
             guest_fds.push(fd);
+            pipes.push(pipe);
             pins.push(if pty.is_none() { Some(pin) } else { None });
             ptys.push(pty);
         }
@@ -684,11 +749,15 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
                 };
             }
         }
-        for ((descriptor, watch), pin) in host.iter_mut().zip(&ptys).zip(&pins) {
+        for (((descriptor, watch), pin), pipe) in host.iter_mut().zip(&ptys).zip(&pins).zip(&pipes)
+        {
             if let Some(watch) = watch {
                 descriptor.revents = watch.events(descriptor.revents);
             }
             signal_revents(pin.as_ref(), descriptor);
+            if let Some(end) = pipe.filter(|_| descriptor.revents & POLLHUP != 0) {
+                descriptor.revents = pipe_revents(end, descriptor.fd, descriptor.revents);
+            }
         }
         if host.iter().any(|p| p.revents & POLLNVAL != 0) {
             return -(EBADF as i64);
@@ -1932,5 +2001,195 @@ mod reportable_tests {
         assert_eq!(poller.join().unwrap(), (-(crate::errno::EINTR as i64), 0));
         assert_eq!(lowest_free(), free);
         close(&[fd, other]);
+    }
+
+    /// A pipe end of `pipe2` whose other end is closed after `fill`ing the
+    /// pipe from its write end: 1 byte, or until full.
+    fn widowed_end(end: usize, full: bool) -> i64 {
+        let mut pipe = [0i32; 2];
+        assert_eq!(
+            fs::pipe2([pipe.as_mut_ptr() as u64, O_NONBLOCK, 0, 0, 0, 0]),
+            0
+        );
+        // SAFETY: writing to our own non-blocking pipe.
+        while unsafe { libc::write(pipe[1], [0u8; 512].as_ptr().cast(), 1 + 511 * full as usize) }
+            > 0
+            && full
+        {}
+        close(&[pipe[1 - end] as i64]);
+        pipe[end] as i64
+    }
+
+    /// `pipe_poll` never reports POLLPRI, POLLRDBAND or POLLWRBAND, which
+    /// Darwin's poll reports for a readable or writable pipe end.
+    #[test]
+    fn a_pipe_is_never_priority_or_band() {
+        let _view = crate::vfs::test_view();
+        let mut pipe = [0i32; 2];
+        assert_eq!(fs::pipe2([pipe.as_mut_ptr() as u64, 0, 0, 0, 0, 0]), 0);
+        let (read, write) = (pipe[0] as i64, pipe[1] as i64);
+        assert_eq!(polled(write, ALL), (1, POLLOUT | POLLWRNORM));
+        assert_eq!(
+            fs::write([write as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]),
+            1
+        );
+        assert_eq!(polled(read, ALL), (1, POLLIN | POLLRDNORM));
+        assert_eq!(polled(read, POLLPRI | POLLRDBAND), (0, 0));
+        let mut except = [0u64; 16];
+        except[read as usize / 64] = 1 << (read % 64);
+        let timeout = [0i64; 2];
+        assert_eq!(
+            pselect6([
+                read as u64 + 1,
+                0,
+                0,
+                except.as_mut_ptr() as u64,
+                timeout.as_ptr() as u64,
+                0,
+            ]),
+            0
+        );
+        close(&[read, write]);
+    }
+
+    /// `pipe_poll` reports a named FIFO's ends, one open for both included,
+    /// as a pipe's: never POLLPRI, POLLRDBAND, POLLWRBAND or POLLRDHUP.
+    #[test]
+    fn a_fifo_is_never_priority_band_or_rdhup() {
+        let (_view, dir) = crate::vfs::test_view();
+        let name = format!("poll-fifo-{}", std::process::id());
+        let host = std::ffi::CString::new(dir.join("data").join(&name).to_str().unwrap()).unwrap();
+        // SAFETY: a new FIFO in the test view's data.
+        assert_eq!(unsafe { libc::mkfifo(host.as_ptr(), 0o600) }, 0);
+        let guest = std::ffi::CString::new(format!("/data/{name}")).unwrap();
+        let open = |mode: u64| {
+            let fd = fs::openat([
+                -100i64 as u64,
+                guest.as_ptr() as u64,
+                mode | O_NONBLOCK,
+                0,
+                0,
+                0,
+            ]);
+            assert!(fd >= 0, "mode {mode}: {fd}");
+            fd
+        };
+        let (read, write, both) = (open(0), open(1), open(2));
+        assert_eq!(polled(write, ALL), (1, POLLOUT | POLLWRNORM));
+        assert_eq!(
+            fs::write([write as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]),
+            1
+        );
+        assert_eq!(polled(read, ALL), (1, POLLIN | POLLRDNORM));
+        assert_eq!(
+            polled(both, ALL | POLLRDHUP),
+            (1, POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM)
+        );
+        assert_eq!(polled(both, POLLPRI | POLLRDHUP), (0, 0));
+        let mut except = [0u64; 16];
+        except[both as usize / 64] = 1 << (both % 64);
+        let timeout = [0i64; 2];
+        assert_eq!(
+            pselect6([
+                both as u64 + 1,
+                0,
+                0,
+                except.as_mut_ptr() as u64,
+                timeout.as_ptr() as u64,
+                0,
+            ]),
+            0
+        );
+        close(&[read, write, both]);
+        // SAFETY: the FIFO made above.
+        assert_eq!(unsafe { libc::unlink(host.as_ptr()) }, 0);
+    }
+
+    /// `pipe_poll`: a write end without readers is POLLERR, never POLLHUP,
+    /// with POLLOUT|POLLWRNORM when the pipe isn't full, and readable and
+    /// writable to select, which counts POLLERR in both sets (LTP poll01,
+    /// epoll_wait02, select01 style).
+    #[test]
+    fn a_pipe_writer_without_readers_is_pollerr() {
+        let _view = crate::vfs::test_view();
+        const EPOLLOUT: u64 = 0x4;
+        const EPOLLERR: u64 = 0x8;
+        const EPOLLWRNORM: u64 = 0x100;
+        const EPOLLET: u32 = 1 << 31;
+        let fd = widowed_end(1, false);
+        assert_eq!(
+            polled(fd, POLLOUT | POLLWRNORM),
+            (1, POLLOUT | POLLWRNORM | POLLERR)
+        );
+        assert_eq!(polled(fd, ALL), (1, POLLOUT | POLLWRNORM | POLLERR));
+        assert_eq!(polled(fd, POLLIN), (1, POLLERR));
+        assert_eq!(polled(fd, 0), (1, POLLERR));
+        assert_eq!(selected(fd), (2, true, true));
+        for (events, fired) in [
+            (0x4 | 0x100, EPOLLOUT | EPOLLWRNORM | EPOLLERR),
+            (0x1 | 0x4, EPOLLOUT | EPOLLERR),
+            (0x1, EPOLLERR),
+            (0, EPOLLERR),
+        ] {
+            let level = watching(fd, events);
+            assert_eq!(waited(level, 0), (1, fired), "events {events:#x}");
+            assert_eq!(waited(level, 0), (1, fired), "events {events:#x}");
+            let edge = watching(fd, events | EPOLLET);
+            assert_eq!(waited(edge, 0), (1, fired), "events {events:#x}");
+            assert_eq!(waited(edge, 0).0, 0, "events {events:#x}");
+            close(&[level, edge]);
+        }
+        close(&[fd]);
+        // Darwin frees the pipe's buffer with its last reader, so a full
+        // pipe's writer reports room too, where Linux keeps the data.
+        let fd = widowed_end(1, true);
+        assert_eq!(polled(fd, POLLOUT).1 & (POLLERR | POLLHUP), POLLERR);
+        let level = watching(fd, 0x4);
+        assert_eq!(waited(level, 0).1 & (EPOLLERR | 0x10), EPOLLERR);
+        close(&[level, fd]);
+    }
+
+    /// `pipe_poll`: a read end without writers is POLLHUP, with
+    /// POLLIN|POLLRDNORM while data is queued, and only readable to select.
+    #[test]
+    fn a_pipe_reader_without_writers_hangs_up() {
+        let _view = crate::vfs::test_view();
+        const EPOLLIN: u64 = 0x1;
+        const EPOLLHUP: u64 = 0x10;
+        const EPOLLRDNORM: u64 = 0x40;
+        const EPOLLET: u32 = 1 << 31;
+        let fd = widowed_end(0, false);
+        assert_eq!(
+            polled(fd, POLLIN | POLLRDNORM),
+            (1, POLLIN | POLLRDNORM | POLLHUP)
+        );
+        assert_eq!(polled(fd, ALL), (1, POLLIN | POLLRDNORM | POLLHUP));
+        assert_eq!(polled(fd, POLLIN | POLLRDHUP), (1, POLLIN | POLLHUP));
+        assert_eq!(selected(fd), (1, true, false));
+        for (events, fired) in [
+            (0x1 | 0x40, EPOLLIN | EPOLLRDNORM | EPOLLHUP),
+            (0x4, EPOLLHUP),
+            (0, EPOLLHUP),
+        ] {
+            let level = watching(fd, events);
+            assert_eq!(waited(level, 0), (1, fired), "events {events:#x}");
+            assert_eq!(waited(level, 0), (1, fired), "events {events:#x}");
+            let edge = watching(fd, events | EPOLLET);
+            assert_eq!(waited(edge, 0), (1, fired), "events {events:#x}");
+            assert_eq!(waited(edge, 0).0, 0, "events {events:#x}");
+            close(&[level, edge]);
+        }
+        let mut byte = 0u8;
+        assert_eq!(
+            fs::read([fd as u64, &mut byte as *mut u8 as u64, 1, 0, 0, 0]),
+            1
+        );
+        assert_eq!(polled(fd, POLLIN | POLLRDNORM), (1, POLLHUP));
+        assert_eq!(polled(fd, 0), (1, POLLHUP));
+        assert_eq!(polled(fd, POLLRDHUP), (1, POLLHUP));
+        assert_eq!(selected(fd), (1, true, false));
+        let level = watching(fd, 0x1 | 0x2000);
+        assert_eq!(waited(level, 0), (1, EPOLLHUP));
+        close(&[level, fd]);
     }
 }
