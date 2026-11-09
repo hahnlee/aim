@@ -4078,7 +4078,8 @@ regression pass; five actual writer/enable/alias/fork/crash/SCM lease checks pas
 FS_IOC_GETFLAGS and FS_IOC_SETFLAGS answer regular files and directories with
 ext4's rules where statfs reports ext4 and shmem's on tmpfs and memfd; device nodes
 (ashmem, dma-buf), procfs, sysfs, selinuxfs, cgroup and bpf answer ENOTTY as on Linux.
-Flags are the host's immutable and append-only flags and fs-verity; only immutable is
+Flags are the host's immutable and append-only flags, fs-verity and fscrypt's
+`FS_ENCRYPT_FL` (also `STATX_ATTR_ENCRYPTED`); only immutable is
 settable (on ext4, with CAP_LINUX_IMMUTABLE), since Darwin's append-only refuses a
 touch Linux allows, and changing any other flag, casefold among them, is EOPNOTSUPP.
 An immutable or append-only inode refuses chmod, chown and xattr writes with EPERM. Shared private

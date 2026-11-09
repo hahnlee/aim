@@ -1,8 +1,9 @@
 //! fscrypt on the data filesystem (Linux v6.12 `fs/crypto/`,
 //! `Documentation/filesystems/fscrypt.rst`; ADR 0016, option B): the
 //! keyring ioctls, encryption policies set on empty directories and
-//! inherited by what is created below them, and their queries. The bytes
-//! stay plaintext on the host; confidentiality at rest is the Mac's.
+//! inherited by what is created below them, their queries, and EXDEV for a
+//! link or rename across policies. The bytes stay plaintext on the host;
+//! confidentiality at rest is the Mac's.
 //!
 //! An inode's `struct fscrypt_context` (its policy and its own nonce) is
 //! the host attribute `dev.aim.fscrypt-context`, as ext4 keeps it in an
@@ -11,9 +12,7 @@
 //! Until a directory of the filesystem has a policy, nothing here reads an
 //! attribute.
 //!
-//! Not served yet: `FS_ENCRYPT_FL`, `STATX_ATTR_ENCRYPTED` and EXDEV for a
-//! link or rename across policies (#2845), locked directories (ENOKEY,
-//! no-key names, #2846).
+//! Locked directories (ENOKEY, no-key names) are not served yet (#2846).
 
 use std::ffi::{CStr, CString};
 use std::os::fd::AsRawFd;
@@ -35,6 +34,8 @@ const REMOVE_KEY: u64 = 0xc0406618;
 const REMOVE_KEY_ALL_USERS: u64 = 0xc0406619;
 const GET_KEY_STATUS: u64 = 0xc080661a;
 const GET_NONCE: u64 = 0x8010661b;
+/// `FS_ENCRYPT_FL` and `STATX_ATTR_ENCRYPTED`.
+pub(super) const ENCRYPTED: u32 = 0x800;
 
 const CONTEXT: &CStr = c"dev.aim.fscrypt-context";
 const NONCE: usize = 16;
@@ -66,7 +67,7 @@ fn owner() -> Result<Option<&'static Owner>, Errno> {
 
 /// Whether any directory has a policy. Policies are never removed, so a
 /// process asks the owner only until one exists.
-fn active() -> Result<bool, Errno> {
+pub(super) fn active() -> Result<bool, Errno> {
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     if ACTIVE.load(Ordering::Relaxed) {
         return Ok(true);
@@ -129,6 +130,11 @@ fn renewed(context: &[u8]) -> Vec<u8> {
     context
 }
 
+/// Whether `host` has a policy (`IS_ENCRYPTED`).
+pub(super) fn encrypted(host: Host) -> Result<bool, Errno> {
+    Ok(active()? && context(host).is_some())
+}
+
 /// `fscrypt_prepare_new_inode`: `child`, just created in `parent` (on
 /// host device `device`), takes the parent's policy with a nonce of its
 /// own.
@@ -143,6 +149,59 @@ pub(super) fn inherit(parent: Host, device: i32, child: Host) -> Result<(), Errn
         return Ok(());
     }
     store(child, &renewed(&context))
+}
+
+/// `fscrypt_has_permitted_context`: whether `child` may be linked or
+/// renamed into `parent`. A child that is gone is the operation's to
+/// report.
+fn permitted(parent: Host, child: Host) -> Result<bool, Errno> {
+    let Some(parent) = context(parent) else {
+        return Ok(true);
+    };
+    match host_type(child) {
+        Ok(kind) if encryptable(kind) => {}
+        _ => return Ok(true),
+    }
+    Ok(context(child)
+        .is_some_and(|child| policy(&child).is_some_and(|c| policy(&parent) == Some(c))))
+}
+
+/// The directory a host path is in.
+fn parent_of(host: &CStr) -> CString {
+    let bytes = host.to_bytes();
+    let end = bytes.iter().rposition(|byte| *byte == b'/').unwrap_or(0);
+    CString::new(if end == 0 { &b"/"[..] } else { &bytes[..end] }).unwrap()
+}
+
+/// `fscrypt_prepare_link`: `child` (a path or an open file) linked as
+/// `new`.
+pub(super) fn link(child: Host, new: &CStr) -> Result<(), Errno> {
+    if active()? && !permitted(Host::Path(&parent_of(new)), child)? {
+        return Err(errno::EXDEV);
+    }
+    Ok(())
+}
+
+/// `fscrypt_prepare_rename`: between different directories, what moves
+/// into an encrypted one must have its policy.
+pub(super) fn rename(old: &CStr, new: &CStr, exchange: bool) -> Result<(), Errno> {
+    if !active()? {
+        return Ok(());
+    }
+    let (old_dir, new_dir) = (parent_of(old), parent_of(new));
+    let identity = |path: &CStr| {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        (unsafe { libc::stat(path.as_ptr(), &mut st) } == 0).then_some((st.st_dev, st.st_ino))
+    };
+    if identity(&old_dir) == identity(&new_dir) {
+        return Ok(());
+    }
+    if !permitted(Host::Path(&new_dir), Host::Path(old))?
+        || exchange && !permitted(Host::Path(&old_dir), Host::Path(new))?
+    {
+        return Err(errno::EXDEV);
+    }
+    Ok(())
 }
 
 /// `fscrypt_supported_policy` for ext4 with 4096-byte blocks: ext4 has
@@ -452,8 +511,9 @@ fn ioctl_as(fd: i32, request: u64, arg: u64, id: &Identity) -> Option<i64> {
     Some(result.unwrap_or_else(|error| -(error as i64)))
 }
 
-/// Ported from xfstests' encryption group (generic/395, 396 and 399) and
-/// `fscrypt.rst`'s error table.
+/// Ported from xfstests' encryption group (generic/395, 396, 399 and the
+/// parts of 398 that need no locked directory) and `fscrypt.rst`'s error
+/// table.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,6 +820,72 @@ mod tests {
         nonces.sort();
         nonces.dedup();
         assert_eq!(nonces.len(), 4);
+
+        // FS_ENCRYPT_FL and STATX_ATTR_ENCRYPTED.
+        let mut flags = 0u32;
+        let flags_arg = (&mut flags as *mut u32) as u64;
+        let b = open(view, "v1/b");
+        assert_eq!(
+            super::super::fileattr::ioctl(
+                b.as_raw_fd(),
+                super::super::fileattr::GETFLAGS,
+                flags_arg
+            ),
+            Some(0)
+        );
+        assert_eq!(flags & ENCRYPTED, ENCRYPTED);
+        let mut statx = [0u8; 256];
+        let b_path = guest("v1/b");
+        let statx_args = |path: &CString, out: &mut [u8; 256]| {
+            [
+                AT,
+                path.as_ptr() as u64,
+                0,
+                0xfff,
+                out.as_mut_ptr() as u64,
+                0,
+            ]
+        };
+        assert_eq!(super::super::fs::statx(statx_args(&b_path, &mut statx)), 0);
+        assert_eq!(statx[9] & 0x08, 0x08);
+        let plain_path = guest("plain/file");
+        assert_eq!(
+            super::super::fs::statx(statx_args(&plain_path, &mut statx)),
+            0
+        );
+        assert_eq!(statx[9] & 0x08, 0);
+
+        // generic/398-like moves: EXDEV into a directory of another policy,
+        // or of an unencrypted file into an encrypted one; out of one is
+        // allowed, as are special files.
+        let path = |name: &str| guest(name);
+        let rename = |from: &str, to: &str, flags: u64| {
+            let (from, to) = (path(from), path(to));
+            super::super::fsops::renameat2([
+                AT,
+                from.as_ptr() as u64,
+                AT,
+                to.as_ptr() as u64,
+                flags,
+                0,
+            ])
+        };
+        let link = |from: &str, to: &str| {
+            let (from, to) = (path(from), path(to));
+            super::super::fsops::linkat([AT, from.as_ptr() as u64, AT, to.as_ptr() as u64, 0, 0])
+        };
+        let exdev = errno(errno::EXDEV);
+        assert_eq!(rename("v1/b", "v2/b", 0), exdev);
+        assert_eq!(rename("plain/file", "v1/file", 0), exdev);
+        assert_eq!(link("plain/file", "v1/file"), exdev);
+        assert_eq!(link("v1/b", "v2/b"), exdev);
+        assert_eq!(rename("v1/fifo", "v2/fifo", 0), 0);
+        create("v2/c");
+        // RENAME_EXCHANGE checks both directions.
+        assert_eq!(rename("plain/file", "v2/c", 2), exdev);
+        assert_eq!(link("v1/b", "v1/sub/b"), 0);
+        assert_eq!(rename("v1/sub/a", "plain/a", 0), 0);
+        assert_eq!(get_ex(&open(view, "plain/a"), 24), Ok(policy));
 
         std::fs::remove_dir_all(&host).unwrap();
     }

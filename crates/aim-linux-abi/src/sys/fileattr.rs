@@ -117,8 +117,11 @@ pub(super) fn ext4(fd: i32) -> bool {
             .is_ok_and(|stat| !crate::vfs::on_read_only_root(stat.st_dev))
 }
 
-fn flags(stat: &libc::stat) -> Result<u32, Errno> {
+fn flags(fd: i32, stat: &libc::stat) -> Result<u32, Errno> {
     let mut flags = 0;
+    if super::fscrypt::encrypted(Host::Fd(fd))? {
+        flags |= super::fscrypt::ENCRYPTED;
+    }
     if stat.st_flags & HOST_IMMUTABLE != 0 {
         flags |= IMMUTABLE;
     }
@@ -136,7 +139,7 @@ fn get(fd: i32, arg: u64) -> i64 {
         Ok(stat) => stat,
         Err(error) => return error,
     };
-    flags(&stat)
+    flags(fd, &stat)
         .and_then(|flags| super::user_memory::write_exact(arg, &flags.to_le_bytes()))
         .map(|_| 0)
         .unwrap_or_else(|error| -(error as i64))
@@ -163,7 +166,7 @@ fn set(fd: i32, arg: u64, id: &Identity, rules: &Rules) -> i64 {
         if stat.st_uid != id.uid[attrs::FS] && id.cap_eff & CAP_FOWNER == 0 {
             return -(errno::EPERM as i64);
         }
-        let old = match flags(stat) {
+        let old = match flags(fd, stat) {
             Ok(flags) => flags,
             Err(error) => return -(error as i64),
         };

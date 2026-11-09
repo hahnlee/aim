@@ -515,11 +515,19 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         Some(_) => None,
     };
     match (fd, old) {
-        (Some(fd), _) => tmpfile::link_fd(fd, &new),
+        (Some(fd), _) => {
+            if let Err(error) = super::fscrypt::link(Host::Fd(fd), &new.host) {
+                return -(error as i64);
+            }
+            tmpfile::link_fd(fd, &new)
+        }
         // SAFETY: host paths.
         (None, Some(old)) => {
             if let Err(error) = may_linkat(&old, &super::cred::current()) {
                 return error;
+            }
+            if let Err(error) = super::fscrypt::link(Host::Path(&old.host), &new.host) {
+                return -(error as i64);
             }
             errno::check(unsafe { libc::link(old.host.as_ptr(), new.host.as_ptr()) } as i64)
         }
@@ -576,6 +584,9 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
         {
             return result;
         }
+    }
+    if let Err(error) = super::fscrypt::rename(&old.host, &new.host, flags & RENAME_EXCHANGE != 0) {
+        return -(error as i64);
     }
     let hflags = if flags & RENAME_NOREPLACE != 0 {
         libc::RENAME_EXCL

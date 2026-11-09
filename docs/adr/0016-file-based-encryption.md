@@ -3,7 +3,7 @@
 Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
 option B, CE protected by a Mac Keychain item, FileVault for confidentiality
 at rest (D not now), and existing data directories recreated by a breaking
-migration on a branch. Slice 1a is partly implemented (#2845); the guest is a
+migration on a branch. Slice 1a is implemented (#2845); the guest is a
 device without file-based encryption (FBE) until slices 1b-3 land.
 
 ## Context

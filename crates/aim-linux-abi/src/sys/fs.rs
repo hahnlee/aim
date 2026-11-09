@@ -1859,6 +1859,10 @@ pub fn statx(a: [u64; 6]) -> i64 {
         Ok(verity) => verity,
         Err(error) => return -(error as i64),
     };
+    let encrypted = match statx_encrypted(dirfd, path, flags) {
+        Ok(encrypted) => encrypted,
+        Err(error) => return -(error as i64),
+    };
     // Timestamps are { i64 sec; u32 nsec; i32 pad }.
     let ts = |s: i64, ns: i64| [s, ns & 0xffff_ffff];
     let x = Statx {
@@ -1875,12 +1879,12 @@ pub fn statx(a: [u64; 6]) -> i64 {
             super::fsverity_ioctl::VERITY_ATTRIBUTE
         } else {
             0
-        },
+        } | encrypted.map_or(0, |on| on as u64 * super::fscrypt::ENCRYPTED as u64),
         attributes_mask: if verity.is_some() {
             super::fsverity_ioctl::VERITY_ATTRIBUTE
         } else {
             0
-        },
+        } | encrypted.map_or(0, |_| super::fscrypt::ENCRYPTED as u64),
         atime: ts(st.st_atime, st.st_atime_nsec),
         btime: ts(st.st_birthtime, st.st_birthtime_nsec),
         ctime: ts(st.st_ctime, st.st_ctime_nsec),
@@ -1900,6 +1904,25 @@ pub fn statx(a: [u64; 6]) -> i64 {
     super::fsverity_ioctl::write(out, bytes)
         .map(|_| 0)
         .unwrap_or_else(|error| -(error as i64))
+}
+
+/// `STATX_ATTR_ENCRYPTED` of what statx stats, None where no inode can
+/// have a policy (`fscrypt`).
+fn statx_encrypted(
+    dirfd: i32,
+    path: &[u8],
+    flags: u64,
+) -> Result<Option<bool>, crate::errno::Errno> {
+    if !super::fscrypt::active()? {
+        return Ok(None);
+    }
+    use std::os::fd::AsRawFd;
+    if path.is_empty() {
+        let pin = fdtab::pin_guest(dirfd)?;
+        return super::fscrypt::encrypted(attrs::Host::Fd(pin.descriptor().as_raw_fd())).map(Some);
+    }
+    let r = vfs::resolve(dirfd, path, flags & AT_SYMLINK_NOFOLLOW == 0)?;
+    super::fscrypt::encrypted(attrs::Host::Path(&r.host)).map(Some)
 }
 
 /// Linux arm64 `struct statfs` (asm-generic, 64-bit fields), 120 bytes.
