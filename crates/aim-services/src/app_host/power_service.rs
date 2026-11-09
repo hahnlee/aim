@@ -460,6 +460,11 @@ impl PowerManager {
         if let Some(display) = self.host.display_manager.get() {
             display.power_changed();
         }
+        // Notifier's early interactive change: the policy's
+        // `startedWakingUp`, which the keyguard hears.
+        if awake {
+            self.host.keyguard_woke();
+        }
         // Notifier's interactive broadcast: nonsticky, registered receivers,
         // foreground and visible to instant apps, for every user.
         let action = if awake {

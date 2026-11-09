@@ -1,9 +1,9 @@
 //! The keyguard's `ACTION_USER_PRESENT` (`KeyguardViewMediator
 //! .sendUserPresentBroadcast` at `android-16.0.0_r1`). The Mac's screen
 //! lock is the device's keyguard (#1887): the user is present when it is
-//! dismissed, the Mac's screen unlocked, and at start when it is not
-//! locked, as the original sends it on waking with no lock screen to
-//! show. Sent before the boot has completed, it waits for SystemUI's
+//! dismissed, the Mac's screen unlocked, and at start or on waking while
+//! it is not locked, as the original sends it on waking with no lock
+//! screen to show. Sent before the boot has completed, it waits for SystemUI's
 //! `onBootCompleted` (`mBootSendUserPresent`). `LockPatternUtils
 //! .userPresent`, which reports the unlock to strong auth, is #1888.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -44,14 +44,34 @@ impl State {
 }
 
 impl AppHost {
-    /// The Mac's screen as it is at start, then each time it locks or
-    /// unlocks: its keyguard dismissed when it is unlocked.
+    /// The Mac's screen as read at start, after its changes are watched:
+    /// a change heard meanwhile is newer, and the read is dropped.
+    pub(super) fn mac_screen_at_start(&self, locked: bool) {
+        if self.keyguard.0.lock().unwrap().locked.is_none() {
+            self.mac_screen_locked(locked);
+        }
+    }
+
+    /// The Mac's screen locked or unlocked: its keyguard dismissed when it
+    /// is unlocked.
     pub(super) fn mac_screen_locked(&self, locked: bool) {
         let send = {
             let mut state = self.keyguard.0.lock().unwrap();
             let dismissed = !locked && state.locked != Some(false);
             state.locked = Some(locked);
             dismissed && state.user_present()
+        };
+        if send {
+            self.send_user_present();
+        }
+    }
+
+    /// `maybeSendUserPresentBroadcast` on waking: with no lock screen to
+    /// show, the Mac's screen unlocked, the user is present.
+    pub(super) fn keyguard_woke(&self) {
+        let send = {
+            let mut state = self.keyguard.0.lock().unwrap();
+            state.locked == Some(false) && state.user_present()
         };
         if send {
             self.send_user_present();
