@@ -393,11 +393,13 @@ impl Runtime {
                 installer()?.free_stage_dirs(None)?;
             }
             4 => self.call(leaf::DEX_OPTIMIZER_READY, |_| {})?,
+            // `PackageManagerService.systemReady`: `reconcileApps` of
+            // internal storage; app data is reconciled at boot and as users
+            // start and unlock.
             5 => {
-                self.queue
-                    .send(Job::Prepare)
-                    .map_err(|_| fail("App-data queue stopped"))?;
-                self.wait()?;
+                let capture = system.capture_package_queries_for(&self.bridge)?;
+                let state = capture.state();
+                installer()?.reconcile_apps(state.packages.values().map(|s| s.path.as_str()))?;
             }
             6 => {
                 let events = *self.events.lock().unwrap();

@@ -748,6 +748,25 @@ impl Store {
         }
         Ok(stages)
     }
+    /// `FileUtils.listFilesOrEmpty(Environment.getDataAppDirectory(null))`:
+    /// each entry's name and whether it is a directory (`File.isDirectory`);
+    /// an unlistable directory is empty and an unreadable entry is skipped.
+    pub fn app_entries(&self) -> Vec<(String, bool)> {
+        let Ok(entries) = fs::read_dir(self.data.join("app")) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let directory = fs::metadata(entry.path()).is_ok_and(|m| m.is_dir());
+                Some((entry.file_name().into_string().ok()?, directory))
+            })
+            .collect()
+    }
+    /// `File.delete` of a top-level `/data/app` file: whether it was deleted.
+    pub fn remove_app_file(&self, name: &str) -> bool {
+        valid_filename(name) && fs::remove_file(self.data.join("app").join(name)).is_ok()
+    }
     pub fn remove_staging_directory(&self, guest: &str) -> Result<(), Error> {
         let valid = guest.strip_prefix("/data/app/").is_some_and(|name| {
             name.starts_with("vmdl") && name.ends_with(".tmp") && valid_filename(name)
@@ -1228,6 +1247,24 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+    #[test]
+    fn app_entries_list_data_app_and_remove_only_its_files() {
+        let data = Data::new();
+        let store = data.open(Arc::new(|_: &std::path::Path, _: &str| Ok(())));
+        assert!(store.app_entries().is_empty());
+        fs::create_dir_all(data.0.join("app/~~a==")).unwrap();
+        fs::write(data.0.join("app/orphan.apk"), b"").unwrap();
+        let mut entries = store.app_entries();
+        entries.sort();
+        assert_eq!(
+            entries,
+            [("orphan.apk".to_owned(), false), ("~~a==".to_owned(), true)]
+        );
+        assert!(store.remove_app_file("orphan.apk"));
+        assert!(!store.remove_app_file("orphan.apk"));
+        assert!(!store.remove_app_file("../system"));
+        assert_eq!(store.app_entries(), [("~~a==".to_owned(), true)]);
     }
     fn label(path: &std::path::Path, _: &str) -> Result<(), Error> {
         use std::os::unix::ffi::OsStrExt;
