@@ -2637,7 +2637,7 @@ impl AppHost {
             return Ok(());
         }
         if let Event::StartAnr { seq, reason } = event {
-            self.foreground_service_anr(seq, &reason);
+            self.app_not_responding(seq, &reason);
             return Ok(());
         }
         let mut state = self.services.state.lock().unwrap();
@@ -2711,7 +2711,7 @@ impl AppHost {
                             "A foreground service of FOREGROUND_SERVICE_TYPE_SHORT_SERVICE did not stop within a timeout: {component}"
                         );
                         drop(state);
-                        self.foreground_service_anr(seq, &reason);
+                        self.app_not_responding(seq, &reason);
                     }
                     _ => unreachable!(),
                 }
@@ -2815,7 +2815,9 @@ impl AppHost {
         Ok(())
     }
 
-    fn foreground_service_anr(&self, seq: i64, reason: &str) {
+    /// `appNotResponding` of the process of `seq`, for a foreground service
+    /// or a broadcast receiver that did not answer in time.
+    pub(super) fn app_not_responding(&self, seq: i64, reason: &str) {
         // The native owner has no SystemUI ANR dialog. Record the ANR and
         // terminate that process, through the same owner as other app kills.
         if self
@@ -2834,7 +2836,7 @@ impl AppHost {
             super::exit_info::SUBREASON_UNKNOWN,
             reason,
         ) {
-            eprintln!("app host: FGS ANR process kill: {error}");
+            eprintln!("app host: ANR process kill: {error}");
         }
     }
 

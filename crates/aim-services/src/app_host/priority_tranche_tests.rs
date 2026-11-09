@@ -8,9 +8,9 @@ use aim_binder_host::local::{Reply, Service};
 use std::sync::mpsc;
 use std::time::Duration;
 
-const ACTION: &str = "fixture.PRIORITIZED";
+pub(super) const ACTION: &str = "fixture.PRIORITIZED";
 
-type Scheduled = thread::ScheduleRegisteredReceiver<RawIntent, RawBundle>;
+pub(super) type Scheduled = thread::ScheduleRegisteredReceiver<RawIntent, RawBundle>;
 
 struct AppThread(mpsc::Sender<Scheduled>);
 impl Service for AppThread {
@@ -24,14 +24,14 @@ impl Service for AppThread {
     }
 }
 
-struct Process {
-    scheduled: mpsc::Receiver<Scheduled>,
-    thread: Binder,
+pub(super) struct Process {
+    pub(super) scheduled: mpsc::Receiver<Scheduled>,
+    pub(super) thread: Binder,
 }
 
 /// A process of `uid` with a receiver of ACTION at `priority`, the `at`th
 /// registered.
-fn process(
+pub(super) fn process(
     host: &Arc<AppHost>,
     export: &dyn Fn(Arc<dyn Service>) -> Strong,
     package: &str,
@@ -107,17 +107,17 @@ fn send(host: &AppHost) -> mpsc::Receiver<()> {
 }
 
 /// The receiver of the next delivery.
-fn delivered(scheduled: &mpsc::Receiver<Scheduled>) -> Option<Binder> {
+pub(super) fn delivered(scheduled: &mpsc::Receiver<Scheduled>) -> Option<Binder> {
     let a = scheduled.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(a.intent.unwrap().intent.action.as_deref(), Some(ACTION));
     a.receiver
 }
 
-fn nothing<T>(r: &mpsc::Receiver<T>) {
+pub(super) fn nothing<T>(r: &mpsc::Receiver<T>) {
     assert!(r.recv_timeout(Duration::from_millis(150)).is_err());
 }
 
-fn finish(host: &AppHost, who: Binder) {
+pub(super) fn finish(host: &AppHost, who: Binder) {
     host.broadcasts
         .finish(
             host,

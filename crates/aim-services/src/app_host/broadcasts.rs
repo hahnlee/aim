@@ -22,12 +22,15 @@
 //! at most `MAX_RUNNING_PROCESS_QUEUES` run at once, and one more for an
 //! urgent broadcast, and of the processes not running only one is started
 //! at a time (`mRunningColdStart`), its receivers' deliveries held until
-//! its turn.
+//! its turn. A delivery waited for has a timeout, the foreground or the
+//! background one (`dispatchReceivers`): past it, the delivery ends and its
+//! process is not responding.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::slice;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, Strong};
 use aim_binder_host::parcel::{
@@ -110,6 +113,12 @@ const SHELL_UID: i32 = 2000;
 const FIRST_APPLICATION_UID: i32 = 10_000;
 /// `PermissionInfo.PROTECTION_MASK_BASE`.
 const PROTECTION_MASK_BASE: i32 = 0xf;
+const ACTION_PRE_BOOT_COMPLETED: &str = "android.intent.action.PRE_BOOT_COMPLETED";
+
+/// `ActivityManagerService.BROADCAST_FG_TIMEOUT` and `BROADCAST_BG_TIMEOUT`,
+/// before `ro.hw_timeout_multiplier`.
+const BROADCAST_FG_TIMEOUT: Duration = Duration::from_secs(10);
+const BROADCAST_BG_TIMEOUT: Duration = Duration::from_secs(60);
 const BROADCAST_STICKY: &str = "android.permission.BROADCAST_STICKY";
 
 /// A parcelled `IntentFilter`.
@@ -181,6 +190,14 @@ struct Record {
     temp_allowlist: Option<TempAllowlist>,
     /// `BroadcastRecord.isUrgent`.
     urgent: bool,
+}
+
+impl Record {
+    /// `BroadcastRecord.timeoutExempt`: PRE_BOOT_COMPLETED's receivers
+    /// take as long as they need (`BroadcastController.broadcastIntentLocked`).
+    fn timeout_exempt(&self) -> bool {
+        self.intent.intent.action.as_deref() == Some(ACTION_PRE_BOOT_COMPLETED)
+    }
 }
 
 /// `BroadcastRecord.calculateUrgent`: a foreground broadcast, an
@@ -333,6 +350,11 @@ struct State {
     cold_start: Option<i64>,
     /// The prioritized broadcasts delivering, by enqueue id.
     tranches: HashMap<u64, Tranches>,
+    /// Of the `busy` processes, those whose delivery has a timeout
+    /// (`timeoutScheduled`), and its generation, which tells a timer gone
+    /// stale.
+    timeouts: HashMap<i64, u64>,
+    next_timeout: u64,
 }
 
 /// Of a prioritized broadcast (`BroadcastRecord.prioritized`), each
@@ -488,6 +510,9 @@ pub struct Broadcasts {
     state: Mutex<State>,
     limits: std::sync::OnceLock<Limits>,
     changed: Condvar,
+    /// The worker that fires the delivery timeouts, by process and
+    /// generation, once due.
+    timer: Mutex<Option<mpsc::Sender<(Instant, i64, u64)>>>,
 }
 
 impl State {
@@ -2797,25 +2822,171 @@ impl Broadcasts {
             Some(Delivery::Manifest(_, _, id, _)) => *id,
             _ => return Ok(()),
         };
-        st.busy.remove(&seq);
-        let finished = st.queues.get_mut(&seq).unwrap().pop_front().unwrap();
-        Self::delivered(&mut st, &finished);
-        if let Some(id) = id {
-            if let Some(chain) = st.chains.get_mut(&id)
-                && chain.record.ordered
-            {
-                chain.result_code = args.result_code;
-                chain.result_data = args.result_data;
-                chain.result_extras = extras;
-                if chain.record.intent.intent.flags & FLAG_RECEIVER_NO_ABORT == 0 {
-                    chain.aborted = args.abort_broadcast;
-                }
+        if let Some(chain) = id.and_then(|id| st.chains.get_mut(&id))
+            && chain.record.ordered
+        {
+            chain.result_code = args.result_code;
+            chain.result_data = args.result_data;
+            chain.result_extras = extras;
+            if chain.record.intent.intent.flags & FLAG_RECEIVER_NO_ABORT == 0 {
+                chain.aborted = args.abort_broadcast;
             }
-            self.advance(host, &mut st, id);
         }
+        self.finish_active(host, &mut st, seq);
         self.send_next(host, &mut st, seq);
         self.update_running(host, &mut st);
         Ok(())
+    }
+
+    /// `finishReceiverActiveLocked`: the delivery the process of `seq` was
+    /// sent and waits for ends, its timeout cancelled, and its chain moves
+    /// on.
+    fn finish_active(&self, host: &AppHost, st: &mut State, seq: i64) {
+        st.busy.remove(&seq);
+        st.timeouts.remove(&seq);
+        let finished = st.queues.get_mut(&seq).unwrap().pop_front().unwrap();
+        Self::delivered(st, &finished);
+        if let Delivery::Chained(id, ..) | Delivery::Manifest(_, _, Some(id), _) = finished {
+            self.advance(host, st, id);
+        }
+    }
+
+    /// `dispatchReceivers`' timeout of the delivery of `record` the process
+    /// of `seq` was sent and waits for: once processes are ready, unless the
+    /// broadcast is exempt, the foreground or the background one.
+    fn start_timeout(&self, host: &AppHost, st: &mut State, seq: i64, record: &Record) {
+        if host.processes_ready.get().is_none() || record.timeout_exempt() {
+            return;
+        }
+        let after = Self::timeout(
+            host,
+            record.intent.intent.flags & FLAG_RECEIVER_FOREGROUND != 0,
+        );
+        st.next_timeout += 1;
+        let generation = st.next_timeout;
+        st.timeouts.insert(seq, generation);
+        self.timer
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| Self::timer(host.me.clone()))
+            .send((Instant::now() + after, seq, generation))
+            .expect("broadcast timer worker");
+    }
+
+    /// `BroadcastConstants.TIMEOUT` of the foreground or the background
+    /// constants: the `timeout` of the `bcast_fg_constants` or
+    /// `bcast_bg_constants` setting (a `KeyValueListParser` list, in
+    /// milliseconds), else `BROADCAST_FG_TIMEOUT` or `BROADCAST_BG_TIMEOUT`
+    /// times `ro.hw_timeout_multiplier`.
+    fn timeout(host: &AppHost, foreground: bool) -> Duration {
+        let (name, default) = if foreground {
+            ("bcast_fg_constants", BROADCAST_FG_TIMEOUT)
+        } else {
+            ("bcast_bg_constants", BROADCAST_BG_TIMEOUT)
+        };
+        let setting = match host.platform() {
+            Ok(platform) => platform.settings.get(super::settings::Table::Global, name),
+            Err(e) => {
+                eprintln!("app host: broadcast timeout: {}", e.message);
+                None
+            }
+        };
+        let set = setting.as_deref().and_then(|list| {
+            list.split(',')
+                .filter_map(|kv| kv.split_once('='))
+                .find(|(k, _)| k.trim() == "timeout")
+                .and_then(|(_, v)| v.trim().parse().ok())
+        });
+        set.map_or_else(
+            || {
+                let multiplier = host
+                    .property("ro.hw_timeout_multiplier")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+                default * multiplier
+            },
+            Duration::from_millis,
+        )
+    }
+
+    /// A worker that fires each delivery timeout sent to it once it is due,
+    /// until the queue goes.
+    fn timer(host: Weak<AppHost>) -> mpsc::Sender<(Instant, i64, u64)> {
+        let (sender, timeouts) = mpsc::channel::<(Instant, i64, u64)>();
+        std::thread::spawn(move || {
+            let mut pending: Vec<(Instant, i64, u64)> = Vec::new();
+            loop {
+                let received = match pending.iter().map(|(at, ..)| *at).min() {
+                    Some(at) => timeouts.recv_timeout(at.saturating_duration_since(Instant::now())),
+                    None => timeouts
+                        .recv()
+                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                };
+                match received {
+                    Ok(timeout) => pending.push(timeout),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let now = Instant::now();
+                        let due: Vec<_>;
+                        (due, pending) = pending.into_iter().partition(|(at, ..)| *at <= now);
+                        let Some(host) = host.upgrade() else { return };
+                        for (_, seq, generation) in due {
+                            host.broadcasts.timed_out(&host, seq, generation);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        });
+        sender
+    }
+
+    /// `deliveryTimeoutLocked`: the delivery the process of `seq` did not
+    /// finish in time ends (`DELIVERY_TIMEOUT`), its chain or tranche moves
+    /// on, and its queue waits its turn again (`demoteFromRunningLocked`);
+    /// then its process is not responding (`appNotResponding`). A timeout
+    /// gone stale, its delivery finished, does nothing.
+    pub(super) fn timed_out(&self, host: &AppHost, seq: i64, generation: u64) {
+        let mut st = self.state.lock().unwrap();
+        if st.timeouts.get(&seq) != Some(&generation) {
+            return;
+        }
+        let reason = Self::timeout_reason(&st, st.queues[&seq].front().unwrap());
+        self.finish_active(host, &mut st, seq);
+        if st.queues.get(&seq).is_some_and(|q| !q.is_empty()) {
+            Self::make_runnable(&mut st, QueueId::Warm(seq));
+        }
+        self.update_running(host, &mut st);
+        drop(st);
+        host.app_not_responding(seq, &reason);
+    }
+
+    /// `TimeoutRecord.forBroadcastReceiver`'s reason for the delivery `d`,
+    /// the intent naming its receiver's component or package.
+    fn timeout_reason(st: &State, d: &Delivery) -> String {
+        let (record, receiver) = match d {
+            Delivery::Manifest(record, m, ..) => (
+                Some(record),
+                format!(
+                    "cmp={}/{}",
+                    manifest_package(m),
+                    m.info.info.item.name.as_deref().unwrap_or_default()
+                ),
+            ),
+            Delivery::Chained(id, to, _) => (
+                st.chains.get(id).map(|c| &c.record),
+                st.receivers
+                    .iter()
+                    .find(|r| r.receiver.handle == to.handle)
+                    .map(|r| format!("pkg={}", r.filters[to.filter].package))
+                    .unwrap_or_default(),
+            ),
+            Delivery::Once(record, ..) => (Some(record), String::new()),
+        };
+        let action = record
+            .and_then(|r| r.intent.intent.action.as_deref())
+            .map(|a| format!("act={a} "))
+            .unwrap_or_default();
+        format!("Broadcast of Intent {{ {action}{receiver} }}")
     }
 
     /// A process died: its receivers go, and what it was to finish is
@@ -2824,6 +2995,7 @@ impl Broadcasts {
         let mut st = self.state.lock().unwrap();
         st.receivers.retain(|r| r.start_seq != start_seq);
         st.busy.remove(&start_seq);
+        st.timeouts.remove(&start_seq);
         if st.cold_start == Some(start_seq) {
             st.cold_start = None;
         }
@@ -2959,6 +3131,7 @@ impl Broadcasts {
                     None => return,
                     Some(true) => {
                         st.busy.insert(start_seq);
+                        self.start_timeout(host, st, start_seq, &record);
                         return;
                     }
                     Some(false) => {
@@ -3007,6 +3180,7 @@ impl Broadcasts {
                 };
             if let (Some(_), true) = (chain, sent) {
                 st.busy.insert(start_seq);
+                self.start_timeout(host, st, start_seq, &record);
                 return;
             }
             let done = st.queues.get_mut(&start_seq).unwrap().pop_front().unwrap();
@@ -3404,6 +3578,10 @@ mod shutdown_broadcast_tests;
 #[cfg(test)]
 #[path = "priority_tranche_tests.rs"]
 mod priority_tranche_tests;
+
+#[cfg(test)]
+#[path = "broadcast_timeout_tests.rs"]
+mod broadcast_timeout_tests;
 
 #[cfg(test)]
 mod tests {
