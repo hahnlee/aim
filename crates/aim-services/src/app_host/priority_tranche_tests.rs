@@ -288,3 +288,139 @@ fn limited_scope_blocks_only_around_receivers_with_the_change_disabled() {
         [0, 0, 1, 1]
     );
 }
+
+/// A process dying with the higher tranche's delivery finishes it: the
+/// lower tranche goes on.
+#[test]
+fn a_dead_higher_process_unblocks_the_lower_tranche() {
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let p = process(host, export, "p", 1000, 0, 10);
+        let q = process(host, export, "q", 1001, 1, 0);
+        let result = send(host);
+        delivered(&p.scheduled);
+        nothing(&q.scheduled);
+        host.broadcasts.process_died(host, 1000);
+        delivered(&q.scheduled);
+        finish(host, q.thread);
+        result.recv_timeout(Duration::from_secs(2)).unwrap();
+    });
+}
+
+fn unordered(host: &AppHost) -> Arc<Record> {
+    Arc::new(Record {
+        enqueue_id: host.broadcasts.state.lock().unwrap().enqueue_id(),
+        intent: RawIntent::new(ACTION, FLAG_RECEIVER_INCLUDE_BACKGROUND, &[]),
+        binders: Arc::new(vec![]),
+        sender: Sender::system(&[]),
+        ordered: false,
+        initial_sticky: false,
+        user: 0,
+        share_identity: false,
+        result_code: 0,
+        result_data: None,
+        result_extras: None,
+        id_for_response_event: 0,
+        temp_allowlist: None,
+        urgent: false,
+    })
+}
+
+/// A manifest receiver at `priority` of the process `system` of `uid`.
+fn manifest(class: &str, uid: u32, priority: i32) -> Arc<Manifest> {
+    let mut m = super::system_receiver_tests::receiver("android", class, uid);
+    Arc::get_mut(&mut m).unwrap().priority = priority;
+    m
+}
+
+/// A process not running is not started for a blocked receiver: its
+/// queue waits until the tranche before it is terminal.
+#[test]
+fn a_cold_start_waits_while_its_receiver_is_blocked() {
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let q = process(host, export, "q", 1001, 0, 10);
+        let record = unordered(host);
+        let mut st = host.broadcasts.state.lock().unwrap();
+        let first = Registered {
+            handle: st.receivers[0].receiver.handle,
+            filter: 0,
+            priority: 10,
+            start_seq: 1001,
+        };
+        // Nothing runs as `system` of this uid.
+        let cold = manifest("android.Cold", 10123, 0);
+        let targets = vec![Target::Registered(first), Target::Manifest(cold.clone())];
+        // The registered receiver is assumed delivered once sent: hold its
+        // process busy so that it is not yet.
+        st.busy.insert(1001);
+        host.broadcasts
+            .prioritize(host, &mut st, &record, &targets)
+            .unwrap();
+        host.broadcasts.enqueue(host, &mut st, &record, targets);
+        let queue = QueueId::Cold("system".into(), 10123);
+        assert!(!st.runnable.contains(&queue));
+        host.broadcasts.start_cold(host, &mut st, "system", 10123);
+        assert_eq!(st.cold.len(), 1);
+        assert!(st.cold_start.is_none());
+        st.busy.remove(&1001);
+        host.broadcasts.send_next(host, &mut st, 1001);
+        assert!(st.runnable.contains(&queue));
+        drop(st);
+        delivered(&q.scheduled);
+    });
+}
+
+/// A plain broadcast: its registered receiver of the lower tranche is sent
+/// it once the manifest receiver of the higher one, in another process,
+/// finished.
+#[test]
+fn a_plain_broadcast_waits_for_its_higher_manifest_receiver() {
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        process(host, export, "android", 1000, 0, 0);
+        let (send, scheduled) = mpsc::channel();
+        let thread = export(Arc::new(ManifestThread(send)));
+        let who = thread.binder();
+        {
+            let mut apps = host.apps.lock().unwrap();
+            let app = apps.get_mut(&1000).unwrap();
+            app.process = "system".into();
+            app.config = Some(Default::default());
+            app.thread = Some(thread);
+        }
+        let q = process(host, export, "q", 1001, 1, 0);
+        let record = unordered(host);
+        let mut st = host.broadcasts.state.lock().unwrap();
+        let lower = Registered {
+            handle: st.receivers[1].receiver.handle,
+            filter: 0,
+            priority: 0,
+            start_seq: 1001,
+        };
+        let targets = vec![
+            Target::Manifest(manifest("android.Higher", 1000, 10)),
+            Target::Registered(lower),
+        ];
+        host.broadcasts
+            .prioritize(host, &mut st, &record, &targets)
+            .unwrap();
+        host.broadcasts.enqueue(host, &mut st, &record, targets);
+        drop(st);
+        scheduled.recv_timeout(Duration::from_secs(2)).unwrap();
+        nothing(&q.scheduled);
+        finish(host, who);
+        delivered(&q.scheduled);
+        assert!(host.broadcasts.state.lock().unwrap().tranches.is_empty());
+    });
+}
+
+/// A thread that takes a manifest receiver's `scheduleReceiver`.
+struct ManifestThread(mpsc::Sender<()>);
+impl Service for ManifestThread {
+    fn descriptor(&self) -> &str {
+        thread::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        assert_eq!(call.code, thread::SCHEDULE_RECEIVER);
+        self.0.send(()).unwrap();
+        Ok(Parcel::new())
+    }
+}

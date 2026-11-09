@@ -2347,6 +2347,10 @@ impl Broadcasts {
                 return;
             };
             match st.runnable.remove(at).unwrap() {
+                // Its front became blocked (a newer delivery of its group
+                // replaced the one before): it runs again once unblocked.
+                QueueId::Warm(seq)
+                    if st.front(&QueueId::Warm(seq)).is_some_and(|d| st.blocked(d)) => {}
                 QueueId::Warm(seq) if candidates[at].cold => st.cold_start = Some(seq),
                 QueueId::Warm(seq) => self.send_next(host, st, seq),
                 QueueId::Cold(process, uid) => self.start_cold(host, st, &process, uid),
@@ -2388,7 +2392,7 @@ impl Broadcasts {
         let mut cold = st.cold.remove(at);
         // It may have started meanwhile.
         if let Some((seq, _)) = host.running_process(process, uid) {
-            st.queues.entry(seq).or_default().extend(cold.deliveries);
+            Self::merge_cold(st, seq, cold.deliveries);
             Self::make_runnable(st, QueueId::Warm(seq));
             return;
         }
@@ -2421,7 +2425,7 @@ impl Broadcasts {
             });
         match started {
             Ok(seq) => {
-                st.queues.entry(seq).or_default().extend(cold.deliveries);
+                Self::merge_cold(st, seq, cold.deliveries);
                 st.cold_start = Some(seq);
                 self.send_next(host, st, seq);
             }
@@ -2438,6 +2442,30 @@ impl Broadcasts {
                 }
             }
         }
+    }
+
+    /// The deliveries held for a process that now runs as `seq` join its
+    /// queue in the order their broadcasts were enqueued, each side's own
+    /// order kept: an older broadcast is not left behind a newer one.
+    fn merge_cold(st: &mut State, seq: i64, cold: VecDeque<Delivery>) {
+        let enqueued = |st: &State, d: &Delivery| st.receiver(d).map_or(u64::MAX, |(id, _)| id);
+        let mut warm = st.queues.remove(&seq).unwrap_or_default();
+        let mut merged = VecDeque::with_capacity(warm.len() + cold.len());
+        // The delivery it was sent and has not finished stays its first.
+        if st.busy.contains(&seq) {
+            merged.extend(warm.pop_front());
+        }
+        for d in cold {
+            let id = enqueued(st, &d);
+            while let Some(w) = warm.front()
+                && enqueued(st, w) <= id
+            {
+                merged.push_back(warm.pop_front().unwrap());
+            }
+            merged.push_back(d);
+        }
+        merged.extend(warm);
+        st.queues.insert(seq, merged);
     }
 
     /// `shouldSkipReceiver`'s `shouldSkipMessage` of a manifest receiver
