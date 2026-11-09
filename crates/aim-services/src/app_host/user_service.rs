@@ -1874,17 +1874,27 @@ pub(super) fn application_restrictions(
     uid: i32,
     package: &str,
     user: i32,
-) -> Result<super::bind::Bundle, Exception> {
+) -> Result<super::application_restrictions::Restrictions, Exception> {
     let same_app = host.owns_package(uid, package).unwrap_or(false);
-    if (uid / 100_000 != user || !same_app) && !matches!(uid % 100_000, 0 | 1000) {
-        return Err(Exception::security(format!(
-            "get application restrictions for other user/app {package} is only allowed for the system"
-        )));
+    if uid / PER_USER_RANGE as i32 != user || !same_app {
+        check_system_or_root(
+            uid,
+            &format!("get application restrictions for other user/app {package}"),
+        )?;
     }
     let file = host
         .data()?
         .join(format!("system/users/{user}/res_{package}.xml"));
-    super::application_restrictions::read(&file).map(super::bind::Bundle)
+    super::application_restrictions::read(&file)
+}
+
+/// `UserManagerService.checkSystemOrRoot`: the system's app id in any
+/// user, or root.
+fn check_system_or_root(uid: i32, message: &str) -> Result<(), Exception> {
+    if uid % PER_USER_RANGE as i32 == 1000 || uid == 0 {
+        return Ok(());
+    }
+    Err(Exception::security(format!("Only system may: {message}")))
 }
 
 fn switcher_error(status: i32) -> Exception {
@@ -1923,6 +1933,38 @@ impl AppHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn other_apps_restrictions_are_for_the_system_app_id_or_root_alone() {
+        let data = crate::app_host::test_temp_dir("application-restrictions");
+        let users = data.join("system/users/0");
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(
+            users.join("res_com.example.xml"),
+            "<restrictions><entry key=\"k\" type=\"s\">v</entry></restrictions>",
+        )
+        .unwrap();
+        let host = AppHost::new(crate::test_process(1000));
+        crate::app_host::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        for uid in [0, 1000, 101_000] {
+            let restrictions = application_restrictions(&host, uid, "com.example", 0).unwrap();
+            assert_eq!(
+                restrictions.0,
+                [(Some("k".into()), Value::String(Some("v".into())))]
+            );
+        }
+        // Root's app id in another user is not root.
+        for uid in [100_000, 10_100, 2000] {
+            let error = application_restrictions(&host, uid, "com.example", 0)
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.message,
+                "Only system may: get application restrictions for other user/app com.example"
+            );
+        }
+        std::fs::remove_dir_all(&data).unwrap();
+    }
 
     #[test]
     fn cross_profile_access_properties_preserve_values_and_system_visibility() {
