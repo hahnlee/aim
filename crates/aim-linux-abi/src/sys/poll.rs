@@ -885,6 +885,10 @@ mod reportable_tests {
     use crate::sys::{epoll, event, fs, inotify, wait};
 
     const O_NONBLOCK: u64 = 0o4000;
+    /// For a pipe whose ends' close a test awaits: a process spawned
+    /// meanwhile by a test running in parallel (an isolated kernel test's,
+    /// a sleep) would otherwise inherit and hold them open for its life.
+    const O_CLOEXEC: u64 = 0o2000000;
     /// Every event bit a guest may ask poll for.
     const ALL: i16 = POLLIN | POLLPRI | POLLOUT | POLLRDNORM | POLLRDBAND | POLLWRNORM | POLLWRBAND;
 
@@ -1835,7 +1839,7 @@ mod reportable_tests {
         for (end, revents) in [(0, POLLHUP), (1, POLLERR)] {
             let mut pipe = [0i32; 2];
             assert_eq!(
-                fs::pipe2([pipe.as_mut_ptr() as u64, O_NONBLOCK, 0, 0, 0, 0]),
+                fs::pipe2([pipe.as_mut_ptr() as u64, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]),
                 0
             );
             let (fd, other) = (pipe[end] as i64, pipe[1 - end] as i64);
@@ -2008,7 +2012,7 @@ mod reportable_tests {
     fn widowed_end(end: usize, full: bool) -> i64 {
         let mut pipe = [0i32; 2];
         assert_eq!(
-            fs::pipe2([pipe.as_mut_ptr() as u64, O_NONBLOCK, 0, 0, 0, 0]),
+            fs::pipe2([pipe.as_mut_ptr() as u64, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]),
             0
         );
         // SAFETY: writing to our own non-blocking pipe.
@@ -2017,6 +2021,23 @@ mod reportable_tests {
             && full
         {}
         close(&[pipe[1 - end] as i64]);
+        // A host process a test running in parallel is spawning holds a
+        // copy of every descriptor until its exec drops the close-on-exec
+        // ones: the other end is gone once Darwin reports the hang-up.
+        let mut host = libc::pollfd {
+            fd: pipe[end],
+            events: POLLHUP,
+            revents: 0,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // SAFETY: one pollfd on our stack.
+        while unsafe { libc::poll(&mut host, 1, 0) } >= 0
+            && host.revents & POLLHUP == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_ne!(host.revents & POLLHUP, 0, "the other end stayed open");
         pipe[end] as i64
     }
 
