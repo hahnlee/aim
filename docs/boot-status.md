@@ -71,8 +71,13 @@ knote, so closing its fd still removes it (#2700). A socket's pending error
 (an ICMP-refused UDP send, a refused connect) is EPOLLERR/POLLERR, without
 EPOLLIN for an empty queue, until a receive, send or SO_ERROR returns it once,
 read from the socket's `soi_error` without clearing it; a closed TCP connection
-polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713). Host checks only; no
-guest boot (2026-11-10).
+polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713). A poll with no event
+on a socket or pipe reports its hangup and error too, waking for one that
+arrives during the wait without spinning on a full buffer or a TCP half-close,
+and a pipe's write end without readers polls POLLERR, not Darwin's POLLHUP
+(#2779). A non-TCP socket's half-close (the peer's SHUT_WR, its own SHUT_RD)
+is POLLIN|POLLRDHUP, with POLLHUP only once both directions are shut, as
+`unix_poll` and `datagram_poll` report it, in poll and epoll (#2802). Host checks only; no guest boot (2026-11-10).
 
 The app host's power owner serves DEVICE_POWER-guarded Binder wake/sleep requests,
 with timestamp ordering, shared interactive/display queries, display-state callbacks
