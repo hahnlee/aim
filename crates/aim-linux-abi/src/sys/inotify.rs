@@ -132,7 +132,6 @@ impl State {
 }
 
 pub struct Inotify {
-    cloexec: bool,
     state: Mutex<State>,
 }
 
@@ -278,12 +277,10 @@ pub fn inotify_init1(a: [u64; 6]) -> i64 {
     if kq < 0 {
         return -(errno::last() as i64);
     }
-    let cloexec = flags & O_CLOEXEC != 0;
-    fdtab::set_flags(kq, flags & O_NONBLOCK != 0, cloexec);
+    fdtab::set_flags(kq, flags & O_NONBLOCK != 0, flags & O_CLOEXEC != 0);
     fdtab::insert(
         kq,
         Kind::Inotify(Arc::new(Inotify {
-            cloexec,
             state: Mutex::new(State {
                 next_wd: 1,
                 ..Default::default()
@@ -626,7 +623,6 @@ pub fn readable(fd: i32) -> Option<bool> {
 /// queued events.
 pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
     use std::os::unix::ffi::OsStrExt;
-    w.bool(ino.cloexec);
     let s = ino.state.lock().unwrap();
     w.seq(s.watches.iter(), |w, (wd, x)| {
         w.i32(*wd);
@@ -656,7 +652,6 @@ pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
 }
 
 pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
-    let cloexec = r.bool();
     let watches = r.seq(|r| {
         let wd = r.i32();
         let fd = r.i32();
@@ -683,7 +678,6 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
         queue,
     };
     Arc::new(Inotify {
-        cloexec,
         state: Mutex::new(state),
     })
 }
@@ -694,7 +688,7 @@ pub fn after_fork_child() -> Result<(), errno::Errno> {
     for (fd, k) in fdtab::fds_where(|k| matches!(k, Kind::Inotify(_))) {
         let Kind::Inotify(ino) = k else { continue };
         if let Some((source, _)) = made.iter().find(|(_, other)| Arc::ptr_eq(other, &ino)) {
-            fdtab::restore_kqueue(fd, *source, ino.cloexec)?;
+            fdtab::restore_kqueue(fd, *source)?;
             continue;
         }
         // SAFETY: the parent's fd number, freed by Darwin in the child.
@@ -703,7 +697,7 @@ pub fn after_fork_child() -> Result<(), errno::Errno> {
             if kq < 0 {
                 return Err(errno::last());
             }
-            let result = fdtab::restore_kqueue(fd, kq, ino.cloexec);
+            let result = fdtab::restore_kqueue(fd, kq);
             if kq != fd {
                 libc::close(kq);
             }

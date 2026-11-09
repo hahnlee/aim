@@ -565,8 +565,11 @@ fn hold_fork_private_locked(
         target,
     })
 }
+/// Each guest fd with its close-on-exec flag and, for a kqueue (which the
+/// child makes again, so it inherits no status flags), its O_NONBLOCK;
+/// and the receipts of the inherited fds' owners.
 pub(crate) fn fork_guest_snapshot()
--> Result<(Vec<(i32, bool)>, Vec<ForkPrivateFd>), crate::errno::Errno> {
+-> Result<(Vec<(i32, bool, bool)>, Vec<ForkPrivateFd>), crate::errno::Errno> {
     let mut flags = Vec::new();
     let mut owners = Vec::new();
     let kqueues = kqueue_fds();
@@ -575,8 +578,9 @@ pub(crate) fn fork_guest_snapshot()
         if value < 0 {
             return Err(crate::errno::last());
         }
-        flags.push((fd, value & libc::FD_CLOEXEC != 0));
-        if !kqueues.contains(&fd) {
+        let kqueue = kqueues.contains(&fd);
+        flags.push((fd, value & libc::FD_CLOEXEC != 0, kqueue && nonblocking(fd)));
+        if !kqueue {
             owners.push(hold_fork_private(unsafe {
                 std::os::fd::BorrowedFd::borrow_raw(fd)
             })?);
@@ -1417,23 +1421,17 @@ pub fn after_fork_child() -> Result<(), crate::errno::Errno> {
 }
 
 /// Install a borrowed kqueue on its reserved child slot, preserving errors
-/// before the caller releases a temporary source descriptor.
-pub(super) fn restore_kqueue(
-    fd: i32,
-    source: i32,
-    cloexec: bool,
-) -> Result<(), crate::errno::Errno> {
+/// before the caller releases a temporary source descriptor. It is
+/// close-on-exec until the fork child gives each fd number its own
+/// descriptor and status flags, which the parent recorded per fd
+/// ([`fork_guest_snapshot`]).
+pub(super) fn restore_kqueue(fd: i32, source: i32) -> Result<(), crate::errno::Errno> {
     // SAFETY: descriptor operations do not dereference guest memory.
     unsafe {
         if source != fd && libc::dup2(source, fd) < 0 {
             return Err(crate::errno::last());
         }
-        if libc::fcntl(
-            fd,
-            libc::F_SETFD,
-            if cloexec { libc::FD_CLOEXEC } else { 0 },
-        ) < 0
-        {
+        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
             return Err(crate::errno::last());
         }
     }
@@ -1789,6 +1787,27 @@ pub fn fds_where(f: impl Fn(&Kind) -> bool) -> Vec<(i32, Kind)> {
 pub fn nonblocking(fd: i32) -> bool {
     // SAFETY: plain fcntl.
     unsafe { libc::fcntl(fd, libc::F_GETFL) & libc::O_NONBLOCK != 0 }
+}
+
+/// F_SETFL `flags` (host bits) on `fd`. Darwin stores them and then
+/// passes O_NONBLOCK to the file's FIONBIO, which a kqueue (an epoll,
+/// inotify or pidfd) does not have; Linux sets these files' flags with
+/// no such ioctl, so its ENOTTY is not the guest's.
+pub fn set_status_flags(fd: i32, flags: i32) -> Result<(), crate::errno::Errno> {
+    // SAFETY: plain fcntl.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } == 0 {
+        return Ok(());
+    }
+    let error = crate::errno::last();
+    let kqueue = matches!(
+        get(fd),
+        Some(Kind::Epoll(_) | Kind::Inotify(_) | Kind::PidFd(_))
+    );
+    if error == crate::errno::ENOTTY && kqueue {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 /// Initialize guest flags, including clearing a backing kqueue's defaults.

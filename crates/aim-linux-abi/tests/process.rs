@@ -342,6 +342,16 @@ fn a_dup_of_a_pidfd_is_the_same_pidfd() {
 }
 
 #[test]
+fn pidfd_nonblock_is_a_status_flag() {
+    check("pidfd_setfl");
+}
+
+#[test]
+fn kqueue_fds_keep_their_own_cloexec_across_fork() {
+    check("kqueue_fd_cloexec_fork");
+}
+
+#[test]
 fn epoll_fds_survive_fork() {
     check("epoll_fork");
 }
