@@ -1148,6 +1148,7 @@ pub fn get(fd: i32) -> Option<Kind> {
 pub fn on_close(fd: i32) {
     clear_regular_access(fd);
     super::fuse_client::close(fd);
+    super::fasync::on_close(fd);
     if super::fuse_device::is_device(fd) {
         set_slow(fd, false);
     }
@@ -1165,6 +1166,7 @@ pub fn on_close(fd: i32) {
 pub fn on_dup(old: i32, new: i32) {
     on_close(new);
     super::fuse_client::dup(old, new);
+    super::fasync::on_dup(old, new);
     if super::fuse_device::is_device(old) {
         super::fuse_device::adopt(new);
     }

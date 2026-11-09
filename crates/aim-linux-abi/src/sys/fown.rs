@@ -1,6 +1,6 @@
 //! The owner an O_ASYNC descriptor signals (Linux `struct fown_struct`),
-//! for descriptors whose readiness this layer implements; Darwin keeps it
-//! for host ones.
+//! for descriptors whose readiness this layer implements, and for host
+//! ones with what Darwin cannot hold (`fasync`).
 
 use std::sync::Mutex;
 
@@ -52,6 +52,18 @@ impl Owner {
         };
         super::signal::send_io(owner, self.signum, fd, (self.uid, self.euid));
     }
+
+    /// The owner as Darwin's F_SETOWN takes it (a pid, a negated group, or
+    /// 0 for none) when Darwin can signal it: SIGIO to a process or group.
+    pub fn host(&self) -> Option<i32> {
+        match self.kind {
+            _ if self.signum != 0 => None,
+            _ if self.pid == 0 => Some(0),
+            F_OWNER_TID => None,
+            F_OWNER_PID => Some(self.pid),
+            _ => Some(-self.pid),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -60,6 +72,21 @@ pub struct Fown {
 }
 
 impl Fown {
+    /// Darwin's owner `owner` of a host file (a pid, or a negated group),
+    /// set by the caller as far as `sigio_perm` is concerned.
+    pub fn from_host(owner: i32) -> Fown {
+        let id = super::cred::current();
+        Fown {
+            state: Mutex::new(Owner {
+                kind: if owner < 0 { F_OWNER_PGRP } else { F_OWNER_PID },
+                pid: owner.abs(),
+                signum: 0,
+                uid: id.uid[0],
+                euid: id.uid[1],
+            }),
+        }
+    }
+
     /// The owner now, to signal once the file's lock is released.
     pub fn owner(&self) -> Owner {
         *self.state.lock().unwrap_or_else(|e| e.into_inner())

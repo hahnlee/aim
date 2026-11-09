@@ -8,7 +8,6 @@ use std::ffi::CString;
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 
 use super::fdtab::{self, Kind};
-use super::fown::{F_GETOWN, F_SETOWN};
 use super::{attrs, dir, event, inotify, memfd, net, space};
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENOENT, ENOTTY, ERANGE};
 use crate::sys::{guest_cstr, procfs};
@@ -73,6 +72,7 @@ fn open_flags_to_host(f: u64) -> i32 {
         (O_TRUNC, libc::O_TRUNC),
         (O_APPEND, libc::O_APPEND),
         (O_NONBLOCK, libc::O_NONBLOCK),
+        (O_ASYNC, libc::O_ASYNC),
         (O_DIRECTORY, libc::O_DIRECTORY),
         (O_NOFOLLOW, libc::O_NOFOLLOW),
         (O_CLOEXEC, libc::O_CLOEXEC),
@@ -94,7 +94,11 @@ fn open_flags_from_host(h: i32) -> u64 {
         return O_PATH;
     }
     let mut f = (h & libc::O_ACCMODE) as u64 | O_LARGEFILE;
-    for (l, d) in [(O_APPEND, libc::O_APPEND), (O_NONBLOCK, libc::O_NONBLOCK)] {
+    for (l, d) in [
+        (O_APPEND, libc::O_APPEND),
+        (O_NONBLOCK, libc::O_NONBLOCK),
+        (O_ASYNC, libc::O_ASYNC),
+    ] {
         if h & d != 0 {
             f |= l;
         }
@@ -2599,6 +2603,16 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
         {
             return -(error as i64);
         }
+    } else {
+        // The host file is the Linux one, whose fown Darwin holds as far
+        // as it can; the layer's other descriptors have no fasync.
+        let host = matches!(
+            pin.kind(),
+            None | Some(Kind::Sock(_) | Kind::Pty(_) | Kind::Regular(_) | Kind::Memfd(_))
+        ) && super::fuse_client::get(fd).is_none();
+        if let Some(result) = super::fasync::fcntl(fd, original, host, cmd, arg) {
+            return result;
+        }
     }
     // SAFETY: fcntl with integer arguments.
     unsafe {
@@ -2627,48 +2641,10 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                 }
             }
             F_SETFL => fdtab::set_status_flags(fd, open_flags_to_host(arg) & !libc::O_ACCMODE)
+                .and_then(|()| super::fasync::status_changed(fd, original))
                 .map_or_else(|error| -(error as i64), |()| 0),
             F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
                 lock(fd, cmd, arg)
-            }
-            F_GETOWN => {
-                *libc::__error() = 0;
-                let value = libc::fcntl(fd, libc::F_GETOWN);
-                if value == -1 && *libc::__error() != 0 {
-                    return errno::check(-1);
-                }
-                if value == 0 {
-                    0
-                } else {
-                    let group = value < 0;
-                    let host = if group { -value } else { value };
-                    match super::pidns::guest_pid(host) {
-                        Ok(pid) => {
-                            if group {
-                                -(pid as i64)
-                            } else {
-                                pid as i64
-                            }
-                        }
-                        Err(error) => error,
-                    }
-                }
-            }
-            F_SETOWN => {
-                let target = if arg as i32 > 0 {
-                    match super::pidns::syscall_pid(arg as i32) {
-                        Ok(pid) => pid,
-                        Err(error) => return error,
-                    }
-                } else if (arg as i32) < 0 {
-                    match super::pidns::syscall_pid(-(arg as i32)) {
-                        Ok(group) => -group,
-                        Err(error) => return error,
-                    }
-                } else {
-                    0
-                };
-                errno::check(libc::fcntl(fd, libc::F_SETOWN, target) as i64)
             }
             // Pipe capacity is fixed on Darwin; report the request as met.
             F_SETPIPE_SZ | F_GETPIPE_SZ => {
@@ -2697,6 +2673,7 @@ const FIONREAD: u64 = 0x541b;
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
 const FIOCLEX: u64 = 0x5451;
+const FIOASYNC: u64 = 0x5452;
 
 pub fn ioctl(a: [u64; 6]) -> i64 {
     if matches!(a[1], FIOCLEX | FIONCLEX) {
@@ -2726,6 +2703,18 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
         return -(EBADF as i64);
     }
     let (req, arg) = (a[1], a[2]);
+    if req == FIOASYNC {
+        // Sockets, pipes, ttys and inotify have fasync.
+        let fasync = match pin.kind() {
+            Some(Kind::Sock(_) | Kind::Pty(_) | Kind::Inotify(_)) => true,
+            None if super::fuse_client::get(fd).is_none() => match stat_fd_kernel(fd) {
+                Ok(st) => matches!(st.st_mode & libc::S_IFMT, libc::S_IFSOCK | libc::S_IFIFO),
+                Err(error) => return error,
+            },
+            _ => false,
+        };
+        return fioasync(a[0] as i32, arg, fasync);
+    }
     if req == FIONBIO {
         if let Some(Kind::Pty(description)) = pin.kind() {
             let on = match super::user_memory::read_exact(arg, 4) {
@@ -2838,6 +2827,28 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
             _ => -(ENOTTY as i64),
         }
     }
+}
+
+/// `ioctl_fioasync`: set O_ASYNC as `*arg` says, as F_SETFL would; a
+/// change is ENOTTY on a file without fasync.
+fn fioasync(fd: i32, arg: u64, fasync: bool) -> i64 {
+    let on = match super::fsverity_ioctl::read::<4>(arg) {
+        Ok(bytes) => i32::from_le_bytes(bytes) != 0,
+        Err(error) => return -(error as i64),
+    };
+    let flags = fcntl([fd as u64, F_GETFL, 0, 0, 0, 0]);
+    if flags < 0 || (flags as u64 & O_ASYNC != 0) == on {
+        return flags.min(0);
+    }
+    if !fasync {
+        return -(ENOTTY as i64);
+    }
+    let flags = if on {
+        flags as u64 | O_ASYNC
+    } else {
+        flags as u64 & !O_ASYNC
+    };
+    fcntl([fd as u64, F_SETFL, flags, 0, 0, 0])
 }
 
 /// execve in place: prepare every close-on-exec owner release before any
