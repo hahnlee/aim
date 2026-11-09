@@ -189,9 +189,15 @@ itself (`OP_WINDOWS`, from guest-init) and, in window mode:
   affinity) to the front, or starts the activity in a new task and answers
   `DRAWN` when it is idle; `FOCUS` brings the task to the front, its
   windows in front of the others and its latest one with the input focus;
-  `SET_BOUNDS` (`resizeTask`) gives the task the bounds, at least its
-  minimal size (`Task.adjustForMinimalTaskDimensions`: 220 dp, or its
-  activity's window layout's), and tells its activity as
+  `SET_BOUNDS` (`resizeTask`) gives the task the bounds as its windowing
+  mode resolves them (`Task.resolveLeafTaskOnlyOverrideConfigs`, undefined
+  inheriting its parent's): fullscreen fills its parent, pinned keeps
+  them, the others take them at least its minimal size
+  (`adjustForMinimalTaskDimensions`: 220 dp, or its activity's window
+  layout's), and freeform keeps 48x32 dp of them and their top on its
+  parent's part of the display (`computeFreeformBounds`; no bars, so the
+  stable area is the display); the Mac window follows the bounds the task
+  got. It tells its activity as
   `ActivityRecord.updateReportedConfigurationAndSend` does: a change the
   activity does not handle (`configChanges`), past its size buckets
   (`SizeConfigurationBuckets.filterDiff`), relaunches it, keeping its

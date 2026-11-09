@@ -26,6 +26,8 @@ const DISPLAY_EDGE_OFFSET_DP: i32 = 27;
 const BOUNDS_CONFLICT_THRESHOLD: i32 = 4;
 const STEP_DENOMINATOR: i32 = 16;
 const MINIMAL_STEP: i32 = 1;
+/// `WindowState.MINIMUM_VISIBLE_WIDTH_IN_DP`, `MINIMUM_VISIBLE_HEIGHT_IN_DP`.
+const MINIMUM_VISIBLE_DP: (i32, i32) = (48, 32);
 
 impl Rect {
     pub fn width(&self) -> i32 {
@@ -136,6 +138,59 @@ pub fn default_bounds(
 pub fn restored_bounds(display: Rect, others: &[Rect], mut bounds: Rect) -> Rect {
     avoid_conflict(display, others, &mut bounds);
     bounds
+}
+
+/// `Task.computeFreeformBounds`: a freeform task's `bounds` moved to keep
+/// a strip of them in its `parent`'s part of the stable area (`display`,
+/// as it has no bars) (`fitWithinBounds`), their top inside it. `None` if
+/// the moved bounds overflow.
+pub fn within_parent(bounds: Rect, parent: Rect, display: Rect, density_dpi: i32) -> Option<Rect> {
+    let density = density_dpi as f32 / 160.0;
+    // `Rect.intersect`: unchanged if they do not intersect.
+    let parent = if parent.left < display.right
+        && display.left < parent.right
+        && parent.top < display.bottom
+        && display.top < parent.bottom
+    {
+        Rect {
+            left: parent.left.max(display.left),
+            top: parent.top.max(display.top),
+            right: parent.right.min(display.right),
+            bottom: parent.bottom.min(display.bottom),
+        }
+    } else {
+        parent
+    };
+    let [left, top, right, bottom] =
+        [bounds.left, bounds.top, bounds.right, bounds.bottom].map(i64::from);
+    let [p_left, p_top, p_right, p_bottom] =
+        [parent.left, parent.top, parent.right, parent.bottom].map(i64::from);
+    let (mut dx, mut dy) = (0, 0);
+    if parent.width() > 0 && parent.height() > 0 && !parent.contains(&bounds) {
+        // Both at most the width of the bounds, as the original has it.
+        let width = right - left;
+        let x = ((density * MINIMUM_VISIBLE_DP.0 as f32) as i64).min(width);
+        let y = ((density * MINIMUM_VISIBLE_DP.1 as f32) as i64).min(width);
+        if right < p_left + x {
+            dx = x - (right - p_left);
+        } else if left > p_right - x {
+            dx = -(x - (p_right - left));
+        }
+        if bottom < p_top + y {
+            dy = y - (bottom - p_top);
+        } else if top > p_bottom - y {
+            dy = -(y - (p_bottom - top));
+        }
+    }
+    // Its caption stays clear of the stable insets.
+    dy += (p_top - (top + dy)).max(0);
+    let moved = |v: i64, d: i64| i32::try_from(v + d).ok();
+    Some(Rect {
+        left: moved(left, dx)?,
+        top: moved(top, dy)?,
+        right: moved(right, dx)?,
+        bottom: moved(bottom, dy)?,
+    })
 }
 
 /// `LaunchParamsUtil.getDefaultFreeformSize`.
@@ -320,6 +375,40 @@ mod tests {
             min_aspect_ratio: 0.0,
             max_aspect_ratio: 0.0,
         }
+    }
+
+    /// `computeFreeformBounds` in an organizer root task: its part of the
+    /// display bounds the bounds; a strip narrower than the bounds' width
+    /// is that width, in both directions as the original has it.
+    #[test]
+    fn freeform_bounds_fit_their_parent_on_the_display() {
+        let r = |left, top, right, bottom| Rect {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let parent = r(1000, 200, 4000, 2000);
+        assert_eq!(
+            within_parent(r(3900, 100, 3940, 1000), parent, DISPLAY, 320),
+            Some(r(3416, 200, 3456, 1100))
+        );
+        assert_eq!(
+            within_parent(r(0, 2400, 40, 3000), parent, DISPLAY, 320),
+            Some(r(1000, 1960, 1040, 2560))
+        );
+        assert_eq!(
+            within_parent(r(1200, 300, 1300, 400), parent, DISPLAY, 320),
+            Some(r(1200, 300, 1300, 400))
+        );
+        assert_eq!(
+            within_parent(r(0, 0, 100, 100), r(0, 0, 100, 100), DISPLAY, 320),
+            Some(r(0, 0, 100, 100))
+        );
+        assert_eq!(
+            within_parent(r(0, -(1 << 30), 10, i32::MAX - 10), DISPLAY, DISPLAY, 320),
+            None
+        );
     }
 
     #[test]
