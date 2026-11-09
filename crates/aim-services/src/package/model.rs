@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::intent_filter::UriRelativeFilterGroup;
-use super::pkg::AndroidPackage;
+use super::pkg::{AndroidPackage, Property};
 use super::restrictions::ArchiveState;
 use super::settings::{Signatures, UsesSdkLibrary};
 
@@ -49,6 +49,69 @@ pub struct State {
     pub users: BTreeMap<i32, User>,
     pub system: System,
     pub platform: Platform,
+}
+
+impl State {
+    /// `PackageManagerService.getPropertyAsUser`'s property `name` of
+    /// `package`, its application's, or its component `class`'s, of the
+    /// registry or else the parsed package.
+    pub(crate) fn property(
+        &self,
+        name: &str,
+        package: &str,
+        class: Option<&str>,
+    ) -> Option<Property> {
+        if let Some(registry) = &self.package_registry {
+            return registry.property(name, package, class).cloned();
+        }
+        let pkg = self.packages.get(package)?.pkg.as_deref()?;
+        if class.is_none() {
+            return pkg
+                .properties
+                .iter()
+                .flatten()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, property)| property.clone());
+        }
+        [1, 4, 2, 3].into_iter().find_map(|kind| {
+            properties(pkg, kind)
+                .into_iter()
+                .rev()
+                .flat_map(|p| p.iter().rev())
+                .find(|(key, p)| key == name && p.class_name.as_deref() == class)
+                .map(|(_, p)| p.clone())
+        })
+    }
+}
+
+/// The properties of `pkg`'s components of `PackageManager.Property`'s
+/// `kind` (its application's for 5).
+pub(super) fn properties(pkg: &AndroidPackage, kind: i32) -> Vec<&[(String, Property)]> {
+    match kind {
+        1 => pkg
+            .activities
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        2 => pkg
+            .receivers
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        3 => pkg
+            .services
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        4 => pkg
+            .providers
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        5 => pkg.properties.as_deref().into_iter().collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// What resolution reads beside the packages: what PackageManager chose

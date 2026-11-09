@@ -28,7 +28,7 @@ use super::activity_stack::{Stack, Visibility};
 use super::activity_start::{Component, LaunchIntent};
 use super::config::{Configuration, Rect};
 use super::settings::Table;
-use super::{AppHost, PER_USER_RANGE};
+use super::{AppHost, PER_USER_RANGE, SYSTEM_UID};
 use crate::package::info::{ActivityInfo, ApplicationInfo};
 
 /// `ActivityTaskManager.INVALID_TASK_ID`.
@@ -49,6 +49,18 @@ const LARGE_SCREEN_SMALLEST_SCREEN_WIDTH_DP: i32 = 600;
 const ORIENTATION_LANDSCAPE: i32 = 2;
 /// `ActivityInfo.CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW`.
 const CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW: i64 = 197654537;
+/// `ActivityInfo.UNIVERSAL_RESIZABLE_BY_DEFAULT` and the aconfig flag of
+/// its name.
+const UNIVERSAL_RESIZABLE_BY_DEFAULT: i64 = 357141415;
+const UNIVERSAL_RESIZABLE_FLAG: &str = "com.android.window.flags.universal_resizable_by_default";
+/// `WindowManager.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY`.
+const ALLOW_RESTRICTED_RESIZABILITY: &str =
+    "android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY";
+/// `ApplicationInfo.CATEGORY_GAME`.
+const CATEGORY_GAME: i32 = 0;
+/// `PackageManager.USER_MIN_ASPECT_RATIO_UNSET`, `_FULLSCREEN`.
+const USER_MIN_ASPECT_RATIO_UNSET: i32 = 0;
+const USER_MIN_ASPECT_RATIO_FULLSCREEN: i32 = 6;
 
 /// `RunningTasks.getTasks` over `stack` for `caller` (`allowed`: by
 /// `isGetTasksAllowed`, `cross_user`: with `INTERACT_ACROSS_USERS`): the
@@ -362,6 +374,95 @@ struct MultiWindow {
     non_resizable: i32,
     respects_min_size: i32,
     min_percentage: (f32, f32),
+    universal: Universal,
+}
+
+/// What `ActivityRecord.canBeUniversalResizeable` reads of the device.
+#[derive(Default)]
+struct Universal {
+    /// `DisplayContent.isLargeScreen() && getIgnoreOrientationRequest()`,
+    /// read only if `flag` or `ignore_large` make it count.
+    large_screen: bool,
+    /// `Flags.universalResizableByDefault`.
+    flag: bool,
+    /// `WindowManagerConstants`' `mIgnoreActivityOrientationRequest
+    /// LargeScreen` and `SmallScreen`, and its opt-out packages.
+    ignore_large: bool,
+    ignore_small: bool,
+    opt_out: Vec<String>,
+}
+
+impl Universal {
+    /// `WindowManagerConstants.updateIgnoreActivityOrientationRequest` and
+    /// `updateOptOutIgnoreActivityOrientationRequestList` of the
+    /// `window_manager` device config `config`.
+    fn of_device_config(config: impl Fn(&str) -> Option<String>) -> Self {
+        let is = |v: Option<String>, s: &str| v.is_some_and(|v| v.eq_ignore_ascii_case(s));
+        let screens = || config("ignore_activity_orientation_request_screens");
+        let ignore_small =
+            is(config("ignore_activity_orientation_request"), "true") || is(screens(), "all");
+        Universal {
+            ignore_large: ignore_small || is(screens(), "large"),
+            ignore_small,
+            opt_out: config("opt_out_ignore_activity_orientation_request_list")
+                .map(|l| l.split(',').map(str::to_owned).collect())
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    /// `canBeUniversalResizeable(forActivity true)` of an app of `category`
+    /// and `package`, `UNIVERSAL_RESIZABLE_BY_DEFAULT` enabled for it if
+    /// `compat`.
+    fn can_be(
+        &self,
+        category: i32,
+        package: &str,
+        compat: impl FnOnce() -> Result<bool, Exception>,
+    ) -> Result<bool, Exception> {
+        if category == CATEGORY_GAME {
+            return Ok(false);
+        }
+        let compat_enabled = self.large_screen && self.flag && compat()?;
+        let config_enabled = if self.large_screen {
+            self.ignore_large
+        } else {
+            self.ignore_small
+        } && !self.opt_out.iter().any(|p| p == package);
+        Ok(compat_enabled || config_enabled)
+    }
+}
+
+/// The rest of `ActivityRecord.isUniversalResizeable` of an activity
+/// `class` of `package` for `user`, once its app can be: not if the app or
+/// the activity allow restricted resizability (`AppCompatResizeOverrides
+/// .allowRestrictedResizability`), nor if the user's min aspect ratio is
+/// one a non-resizeable app respects (`AppCompatAspectRatioOverrides
+/// .userPreferenceCompatibleWithNonResizability`).
+fn universal_for_user(
+    state: &crate::package::model::State,
+    package: &str,
+    class: Option<&str>,
+    user: i32,
+) -> bool {
+    let allows = |class| {
+        state
+            .property(ALLOW_RESTRICTED_RESIZABILITY, package, class)
+            .is_some_and(|p| p.value == crate::package::pkg::PropertyValue::Bool(true))
+    };
+    if allows(None) || class.is_some_and(|c| allows(Some(c))) {
+        return false;
+    }
+    // `IPackageManager.getUserMinAspectRatio`.
+    let ratio = state
+        .packages
+        .get(package)
+        .and_then(|ps| ps.users.get(&user))
+        .map_or(USER_MIN_ASPECT_RATIO_UNSET, |u| u.min_aspect_ratio);
+    matches!(
+        ratio,
+        USER_MIN_ASPECT_RATIO_UNSET | USER_MIN_ASPECT_RATIO_FULLSCREEN
+    )
 }
 
 impl MultiWindow {
@@ -550,6 +651,16 @@ impl AppHost {
         let pip = supports && feature("android.software.picture_in_picture");
         let multi_display = feature("android.software.activities_on_secondary_displays");
         let force_resizable = global("force_resizable_activities");
+        let mut universal = Universal::of_device_config(|name| {
+            inputs
+                .settings
+                .get(Table::Config, &format!("window_manager/{name}"))
+        });
+        universal.flag = self.flag(UNIVERSAL_RESIZABLE_FLAG)?;
+        universal.large_screen = (universal.flag || universal.ignore_large)
+            && self.global_configuration()?.smallest_screen_width_dp
+                >= LARGE_SCREEN_SMALLEST_SCREEN_WIDTH_DP
+            && self.rotation_policy(SYSTEM_UID as i32, None)?.ignore;
         let supported =
             (supports || force_resizable) && (freeform || split_screen || pip || multi_display);
         Ok(MultiWindow {
@@ -564,6 +675,7 @@ impl AppHost {
                 float("config_minPercentageMultiWindowSupportHeight")?,
                 float("config_minPercentageMultiWindowSupportWidth")?,
             ),
+            universal,
         })
     }
 
@@ -581,9 +693,12 @@ impl AppHost {
         // Forced resizeability is a standard task's (`Task.isResizeable`).
         let force_resizable =
             multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD;
+        // `mForceResizeOverride` holds the root activity's universal
+        // resizeability (`updateForceResizeOverrides`).
         let is_resizeable = force_resizable
             || RESIZEABLE_MODES.contains(&root.resize_mode)
-            || root.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
+            || root.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0
+            || self.universal_resizeable(&multi_window.universal, root)?;
         let checks_min_size = self.platform()?.compat.is_enabled(
             CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
             root.info.application_info.item.package_name.as_deref(),
@@ -591,6 +706,37 @@ impl AppHost {
         );
         let supports = multi_window.supports(is_resizeable, min_size, checks_min_size, global);
         Ok((is_resizeable, supports))
+    }
+
+    /// `ActivityRecord.isUniversalResizeable` of the activity `info`.
+    fn universal_resizeable(
+        &self,
+        universal: &Universal,
+        info: &ActivityInfo,
+    ) -> Result<bool, Exception> {
+        let app = &info.info.application_info;
+        let package = app
+            .item
+            .package_name
+            .as_deref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "an activity of no package"))?;
+        let compat = || {
+            Ok(self.platform()?.compat.is_enabled(
+                UNIVERSAL_RESIZABLE_BY_DEFAULT,
+                Some(package),
+                app.target_sdk_version,
+            ))
+        };
+        if !universal.can_be(app.category, package, compat)? {
+            return Ok(false);
+        }
+        let (state, _) = self.packages()?;
+        Ok(universal_for_user(
+            &state,
+            package,
+            info.info.item.name.as_deref(),
+            app.uid / PER_USER_RANGE as i32,
+        ))
     }
 
     /// The global configuration of a task whose top activity's uid is
@@ -856,8 +1002,10 @@ impl AppHost {
         let multi_window = self.multi_window()?;
         let pip = info.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
         // `ActivityRecord.isResizeable` of an activity not embedded.
-        let resizeable =
-            multi_window.force_resizable || RESIZEABLE_MODES.contains(&info.resize_mode) || pip;
+        let resizeable = multi_window.force_resizable
+            || RESIZEABLE_MODES.contains(&info.resize_mode)
+            || pip
+            || self.universal_resizeable(&multi_window.universal, info)?;
         let checks_min_size = self.platform()?.compat.is_enabled(
             CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
             info.info.application_info.item.package_name.as_deref(),
@@ -1079,6 +1227,7 @@ pub(super) mod tests {
             non_resizable: 0,
             respects_min_size: 0,
             min_percentage: (0.0, 0.0),
+            universal: Universal::default(),
         };
         let all = device(true, true, true);
         // Undefined is never valid; fullscreen always is.
@@ -1097,6 +1246,156 @@ pub(super) mod tests {
         }
         assert_eq!(all.validate(2, true, false), 0);
         assert_eq!(device(true, false, true).validate(5, true, true), 0);
+    }
+
+    #[test]
+    fn universal_resizeability_reads_the_window_manager_device_config() {
+        let of = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let u = Universal::of_device_config(|name| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.clone())
+            });
+            (u.ignore_small, u.ignore_large, u.opt_out)
+        };
+        assert_eq!(of(&[]), (false, false, vec![]));
+        let ignore = "ignore_activity_orientation_request";
+        let screens = "ignore_activity_orientation_request_screens";
+        assert_eq!(of(&[(ignore, "TRUE")]), (true, true, vec![]));
+        assert_eq!(of(&[(ignore, "1")]), (false, false, vec![]));
+        assert_eq!(of(&[(screens, "All")]), (true, true, vec![]));
+        assert_eq!(of(&[(screens, "large")]), (false, true, vec![]));
+        assert_eq!(of(&[(screens, "none")]), (false, false, vec![]));
+        let list = of(&[("opt_out_ignore_activity_orientation_request_list", "a,b")]);
+        assert_eq!(list.2, ["a", "b"]);
+    }
+
+    #[test]
+    fn universal_resizeability_needs_the_flag_and_compat_change_or_the_config() {
+        let can_be = |u: &Universal, category: i32, compat: bool| {
+            u.can_be(category, "p", || Ok(compat)).unwrap()
+        };
+        let compat = Universal {
+            large_screen: true,
+            flag: true,
+            ..Default::default()
+        };
+        assert!(can_be(&compat, -1, true));
+        // A game never is.
+        assert!(!can_be(&compat, CATEGORY_GAME, true));
+        // The compat change needs a large screen ignoring orientation
+        // requests, the flag, and the change enabled for the app.
+        assert!(!can_be(&compat, -1, false));
+        for u in [
+            Universal {
+                flag: false,
+                ..compat
+            },
+            Universal {
+                large_screen: false,
+                flag: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(!can_be(&u, -1, true));
+        }
+        // The device config: its large-screen value on a large screen,
+        // its small-screen one otherwise, unless the package opts out.
+        let config = |large_screen, ignore_large, ignore_small| Universal {
+            large_screen,
+            ignore_large,
+            ignore_small,
+            opt_out: vec!["q".into()],
+            ..Default::default()
+        };
+        assert!(can_be(&config(true, true, false), -1, false));
+        assert!(!can_be(&config(true, false, true), -1, false));
+        assert!(can_be(&config(false, true, true), -1, false));
+        assert!(!can_be(&config(false, true, false), -1, false));
+        let opted_out = Universal {
+            opt_out: vec!["p".into()],
+            ..config(true, true, true)
+        };
+        assert!(!can_be(&opted_out, -1, false));
+        assert!(!can_be(&config(true, true, false), CATEGORY_GAME, false));
+        // The compat change is not asked when it cannot count.
+        let unasked = config(false, false, false).can_be(-1, "p", || panic!());
+        assert!(!unasked.unwrap());
+    }
+
+    #[test]
+    fn universal_resizeability_yields_to_restricted_resizability_and_the_users_ratio() {
+        use crate::package::model::{PackageState, PackageUserState, State};
+        use crate::package::pkg::{
+            Activity, AndroidPackage, Component, MainComponent, Property, PropertyValue,
+        };
+        let property = |class: Option<&str>, value: bool| {
+            Some(vec![(
+                ALLOW_RESTRICTED_RESIZABILITY.to_string(),
+                Property {
+                    name: Some(ALLOW_RESTRICTED_RESIZABILITY.into()),
+                    package_name: Some("p".into()),
+                    class_name: class.map(str::to_owned),
+                    value: PropertyValue::Bool(value),
+                },
+            )])
+        };
+        let state = |app: Option<bool>, activity: Option<bool>, ratio: Option<i32>| {
+            let pkg = AndroidPackage {
+                package_name: "p".into(),
+                properties: app.and_then(|v| property(None, v)),
+                activities: vec![Activity {
+                    main: MainComponent {
+                        component: Component {
+                            name: "p.A".into(),
+                            package_name: "p".into(),
+                            properties: activity.and_then(|v| property(Some("p.A"), v)),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let users = ratio.map(|min_aspect_ratio| {
+                (
+                    0,
+                    PackageUserState {
+                        min_aspect_ratio,
+                        ..Default::default()
+                    },
+                )
+            });
+            let ps = PackageState {
+                name: "p".into(),
+                pkg: Some(Arc::new(pkg)),
+                users: users.into_iter().collect(),
+                ..Default::default()
+            };
+            State {
+                packages: [("p".to_string(), ps)].into(),
+                ..Default::default()
+            }
+        };
+        let universal = |app, activity, ratio| {
+            universal_for_user(&state(app, activity, ratio), "p", Some("p.A"), 0)
+        };
+        assert!(universal(None, None, None));
+        // PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY of the app or the
+        // activity, when true.
+        assert!(!universal(Some(true), None, None));
+        assert!(!universal(None, Some(true), None));
+        assert!(universal(Some(false), Some(false), None));
+        // The user's min aspect ratio: unset or fullscreen only.
+        for (ratio, expected) in [(0, true), (6, true), (1, false), (3, false), (7, false)] {
+            assert_eq!(universal(None, None, Some(ratio)), expected, "{ratio}");
+        }
     }
 
     #[test]
