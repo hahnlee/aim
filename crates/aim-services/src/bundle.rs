@@ -78,8 +78,9 @@ pub enum Value {
     },
     /// A `PersistableBundle` (`writePersistableBundle`) of entries.
     PersistableBundle(Vec<(String, Value)>),
-    /// A `Bundle` (`putBundle`, `writeBundle`) of entries.
-    Bundle(Vec<(String, Value)>),
+    /// A `Bundle` (`putBundle`, `writeBundle`) of entries; its `ArrayMap`
+    /// takes a null key.
+    Bundle(Vec<(Option<String>, Value)>),
     /// A `MemoryIntArray` (`writeParcelable`): its shared memory, as the
     /// `ParcelFileDescriptor` its `writeToParcel` writes.
     MemoryIntArray(SharedFile),
@@ -198,17 +199,21 @@ impl Value {
                 p.write_string16(Some(class));
                 aim_service_aidl::write_byte_array(p, Some(data));
             }),
-            Value::PersistableBundle(entries) | Value::Bundle(entries) => {
-                p.write_i32(if matches!(self, Value::Bundle(_)) {
-                    VAL_BUNDLE
-                } else {
-                    VAL_PERSISTABLEBUNDLE
-                });
+            Value::PersistableBundle(entries) => {
+                p.write_i32(VAL_PERSISTABLEBUNDLE);
                 let entries: Vec<(&str, Value)> = entries
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.clone()))
                     .collect();
                 write(p, &entries);
+            }
+            Value::Bundle(entries) => {
+                p.write_i32(VAL_BUNDLE);
+                let entries: Vec<(Option<&str>, Value)> = entries
+                    .iter()
+                    .map(|(k, v)| (k.as_deref(), v.clone()))
+                    .collect();
+                write_nullable(p, &entries);
             }
             Value::Lazy { .. } => unreachable!("lazy values are only read"),
         }
@@ -243,6 +248,14 @@ impl std::fmt::Debug for SharedFile {
 /// `writeBundle` of a bundle with `entries`, in the order its `ArrayMap`
 /// keeps them: by key hash, then as put.
 pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
+    let entries: Vec<(Option<&str>, Value)> =
+        entries.iter().map(|(k, v)| (Some(*k), v.clone())).collect();
+    write_nullable(p, &entries);
+}
+
+/// [`write`] of a bundle whose keys may be null (`ArrayMap` hashes null as
+/// 0; `writeString` writes it as null).
+pub fn write_nullable(p: &mut Parcel, entries: &[(Option<&str>, Value)]) {
     if entries.is_empty() {
         return p.write_i32(0);
     }
@@ -251,8 +264,10 @@ pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
     p.write_i32(MAGIC);
     let start = p.position();
     p.write_i32(entries.len() as i32);
-    for (key, value) in crate::package::info::array_order(entries.iter().collect(), |(k, _)| k) {
-        p.write_string16(Some(key));
+    let mut ordered: Vec<_> = entries.iter().collect();
+    ordered.sort_by_key(|(k, _)| k.map_or(0, crate::package::info::java_hash));
+    for (key, value) in ordered {
+        p.write_string16(*key);
         value.write(p);
     }
     let length = (p.position() - start) as i32;

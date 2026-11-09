@@ -36,6 +36,7 @@ mod app_standby;
 mod app_switches;
 pub mod app_widget;
 mod application_data;
+mod application_restrictions;
 pub mod appops_history;
 pub mod appops_restrictions;
 pub mod appops_sampling;

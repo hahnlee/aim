@@ -299,7 +299,7 @@ impl WriteParcelable for UsageStats {
             .map(|(action, categories)| {
                 let entries = categories
                     .iter()
-                    .map(|(c, &n)| (c.clone(), Value::Int(n)))
+                    .map(|(c, &n)| (Some(c.clone()), Value::Int(n)))
                     .collect();
                 (action.as_str(), Value::Bundle(entries))
             })
