@@ -1242,8 +1242,21 @@ static void test_tgkill_blocked(void) {
 
 // abort() dies of SIGABRT; run as its own process by the harness. The
 // debuggerd handler the linker installs is reset first: it needs
-// crash_dump, which this root does not have.
-static void test_abort(void) {
+// crash_dump, which this root does not have. The standalone guest is its
+// namespace's init, which ignores the SIGABRT it raises itself, so abort()
+// falls back to _exit(127) there ("init_abort"); "abort" aborts in a child
+// and reports how it ended.
+static void test_abort(const char *mode) {
+  if (strcmp(mode, "abort") == 0) {
+    pid_t child = fork();
+    if (child > 0) {
+      int status = 0;
+      waitpid(child, &status, 0);
+      if (WIFSIGNALED(status)) printf("signaled %d\n", WTERMSIG(status));
+      else printf("exited %d\n", WEXITSTATUS(status));
+      exit(0);
+    }
+  }
   signal(SIGABRT, SIG_DFL);
   abort();
 }
@@ -1289,7 +1302,8 @@ static const struct test tests[] = {
 
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
-  if (argc == 2 && strcmp(argv[1], "abort") == 0) test_abort();
+  if (argc == 2 && (strcmp(argv[1], "abort") == 0 || strcmp(argv[1], "init_abort") == 0))
+    test_abort(argv[1]);
   if (argc == 2 && strcmp(argv[1], "main_exit") == 0) main_exit();
   if (argc == 2 && strcmp(argv[1], "segv_default") == 0) segv_default();
   if (argc == 2 && strcmp(argv[1], "external_sigquit") == 0) wait_external_sigquit();

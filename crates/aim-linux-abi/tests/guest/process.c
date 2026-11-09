@@ -974,7 +974,8 @@ static void on_init_usr1(int sig) { (void)sig; init_usr1 = 1; }
 
 // The init of a private namespace gets from inside it only the signals it
 // handles (SIGNAL_UNKILLABLE): the others, SIGKILL and SIGSTOP among them,
-// are dropped and kill() succeeds. So are its own timers' signals.
+// are dropped and kill() succeeds. So are its own timers' signals and those
+// it queues itself.
 static void ns_init_unkillable(void) {
   CHECK(signal(SIGUSR1, on_init_usr1) != SIG_ERR, "handler");
   pid_t init = getpid();
@@ -1001,6 +1002,20 @@ static void ns_init_unkillable(void) {
   CHECK(timer_settime(timer, 0, &ts, NULL) == 0, "timer_settime");
   usleep(200000);
   CHECK(timer_delete(timer) == 0, "timer_delete");
+
+  union sigval value = {0};
+  CHECK(sigqueue(init, SIGUSR2, value) == 0, "rt_sigqueueinfo of an unhandled signal");
+  CHECK(pthread_sigqueue(pthread_self(), SIGUSR2, value) == 0,
+        "rt_tgsigqueueinfo of an unhandled signal");
+  init_usr1 = 0;
+  CHECK(sigqueue(init, SIGUSR1, value) == 0, "rt_sigqueueinfo of a handled signal");
+  for (int i = 0; i < 100 && !init_usr1; i++) usleep(10000);
+  CHECK(init_usr1, "init's queued handled signal delivered");
+  init_usr1 = 0;
+  CHECK(pthread_sigqueue(pthread_self(), SIGUSR1, value) == 0,
+        "rt_tgsigqueueinfo of a handled signal");
+  for (int i = 0; i < 100 && !init_usr1; i++) usleep(10000);
+  CHECK(init_usr1, "init's thread-queued handled signal delivered");
   printf("ok ns_init_unkillable\n");
 }
 
