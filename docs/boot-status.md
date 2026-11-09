@@ -80,8 +80,8 @@ the next root home task. `getTasks`, organizer registration and the window dump
 include the task at the bottom, also after its process died. A start of a home
 intent the caller may make home goes to the root home task; `FindTaskResult` never
 puts another start there. The ActivityTaskManager root-task queries
-(`getAllRootTaskInfos`, `getRootTaskInfo`, `moveHomeRootTaskToFront`) are not
-served yet (#2705). On a window-mode boot with fresh data,
+(`getAllRootTaskInfos`, `getRootTaskInfo` and their `OnDisplay` forms) report
+it with the app tasks and organizer root tasks (#2714). On a window-mode boot with fresh data,
 MultiWindowTests#testNonResizeableActivity gets past `getHomeTask()` to
 createRootTask (#2616), and testMinimumDeviceSize passes with no "Empty task"
 post-assertion. No Mac window opened for either home task. Cold boot to

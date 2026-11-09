@@ -227,7 +227,7 @@ fn write_component(p: &mut Parcel, c: &Option<(String, String)>) {
 }
 
 /// `writeTypedObject` of a `Rect`.
-fn write_rect(p: &mut Parcel, r: Option<&Rect>) {
+pub(super) fn write_rect(p: &mut Parcel, r: Option<&Rect>) {
     match r {
         Some(r) => {
             p.write_i32(1);
@@ -260,7 +260,7 @@ impl WriteParcelable for RecentTaskInfo {
 
 impl RunningTaskInfo {
     /// `TaskInfo.writeTaskToParcel`.
-    fn write_task(&self, p: &mut Parcel) {
+    pub(super) fn write_task(&self, p: &mut Parcel) {
         p.write_i32(self.user_id);
         p.write_i32(self.task_id);
         p.write_i32(self.effective_uid);
