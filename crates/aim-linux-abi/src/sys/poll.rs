@@ -628,11 +628,11 @@ mod reportable_tests {
             events,
             revents: 0,
         };
-        let timeout = [0i64; 2];
+        let mut timeout = [0i64; 2];
         let n = ppoll([
             &mut entry as *mut _ as u64,
             1,
-            timeout.as_ptr() as u64,
+            timeout.as_mut_ptr() as u64,
             0,
             0,
             0,
@@ -647,13 +647,13 @@ mod reportable_tests {
         let (mut read, mut write) = ([0u64; 16], [0u64; 16]);
         read[word] = bit;
         write[word] = bit;
-        let timeout = [0i64; 2];
+        let mut timeout = [0i64; 2];
         let n = pselect6([
             fd as u64 + 1,
             read.as_mut_ptr() as u64,
             write.as_mut_ptr() as u64,
             0,
-            timeout.as_ptr() as u64,
+            timeout.as_mut_ptr() as u64,
             0,
         ]);
         (n, read[word] == bit, write[word] == bit)
@@ -999,7 +999,8 @@ mod reportable_tests {
         assert!(wd > 0, "{wd}");
         let ep = watching(notify, 0x1);
         let mut buf = [0u64; 32];
-        let read = || inotify::read(notify as i32, buf.as_ptr() as u64, 256);
+        let buf = buf.as_mut_ptr();
+        let read = || inotify::read(notify as i32, buf as u64, 256);
         let quiet = |what: &str| {
             assert_eq!(polled(notify, ALL), (0, 0), "{what}");
             assert_eq!(selected(notify), (0, false, false), "{what}");
@@ -1050,13 +1051,13 @@ mod reportable_tests {
             events: POLLIN,
             revents: 0,
         };
-        let timeout = [0i64, 200_000_000];
+        let mut timeout = [0i64, 200_000_000];
         let started = std::time::Instant::now();
         assert_eq!(
             ppoll([
                 &mut entry as *mut _ as u64,
                 1,
-                timeout.as_ptr() as u64,
+                timeout.as_mut_ptr() as u64,
                 0,
                 0,
                 0
@@ -1089,7 +1090,7 @@ mod reportable_tests {
         );
         queued("watch removed");
         assert_eq!(read(), Some(16));
-        assert_eq!(buf[0] >> 32, 0x8000, "IN_IGNORED");
+        assert_eq!(unsafe { buf.read() } >> 32, 0x8000, "IN_IGNORED");
         quiet("IN_IGNORED read");
         std::fs::remove_dir_all(&dir).unwrap();
         close(&[ep, notify]);
