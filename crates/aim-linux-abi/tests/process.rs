@@ -407,6 +407,13 @@ fn wait_reports_the_signal_a_child_died_of() {
     check("wait_signal_status");
 }
 
+/// SIGCHLD carries the child's pid, uid and fatal signal when the parent
+/// reaps it before the signal is routed (#2804).
+#[test]
+fn sigchld_reports_a_child_reaped_before_it() {
+    check("sigchld_after_reap");
+}
+
 #[test]
 fn other_processes_ids_in_proc_and_siginfo() {
     check("peer_ids");

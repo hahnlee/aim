@@ -39,7 +39,8 @@ no process left (2026-11-10). A process killed by a signal Darwin cannot carry
 (real-time, SIGSTKFLT, SIGPWR) exits 128 + the signal with the signal in its
 process record, and its parent's wait4, waitid and SIGCHLD report it killed by
 that signal, as init's service exit logs read it; a real exit of 128 + a signal
-stays an exit (#2773). A private namespace's init drops its own timers'
+stays an exit (#2773). SIGCHLD keeps the child's pid, uid and fatal signal when
+the parent reaps it before the signal is routed (#2804). A private namespace's init drops its own timers'
 signals (setitimer, POSIX timers) that it has no handler for, as it drops
 `kill`s of itself (#2774).
 
