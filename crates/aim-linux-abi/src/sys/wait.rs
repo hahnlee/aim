@@ -377,11 +377,13 @@ impl ReapWatch {
                 kev(pid as usize, libc::EVFILT_PROC, libc::EV_ADD, NOTE_REAP),
             ],
         );
+        // A process filter fails for a zombie or a process gone (ESRCH),
+        // or one this process may not watch: as for the pidfd's own
+        // (`new_pidfd_kqueue`), the pidfd stays, with only the "reaped
+        // here" filter.
         match r[..] {
-            [0, 0] => Ok(watch),
-            // The process is a zombie or gone.
-            [0, e] if e == libc::ESRCH as i64 => Ok(watch),
-            [0, e] | [e, _] => Err(-(errno::from_darwin(e as i32) as i64)),
+            [0, _] => Ok(watch),
+            [e, _] => Err(-(errno::from_darwin(e as i32) as i64)),
             _ => Err(-(EINVAL as i64)),
         }
     }
@@ -573,6 +575,23 @@ pub(super) fn reap_watch(fd: i32) -> Option<Arc<ReapWatch>> {
     let t = PIDFDS.lock().unwrap();
     let p = t.iter().find(|p| p.fd == fd)?;
     has_tag(fd, p.pid).then(|| p.reap.clone()).flatten()
+}
+
+/// The fd of pidfd `fd`'s reap watch, for a knote on it: the watch lives
+/// as long as the pidfd, which the guest closes, not the caller.
+pub(super) fn reap_watch_fd(fd: i32) -> Option<i32> {
+    let t = PIDFDS.lock().unwrap();
+    let p = t.iter().find(|p| p.fd == fd)?;
+    has_tag(fd, p.pid)
+        .then(|| p.reap.as_ref().map(|r| r.0))
+        .flatten()
+}
+
+/// The guest closes `fd`: forget it if it is a pidfd, closing its reap
+/// watch.
+pub(super) fn closed(fd: i32) {
+    let closed = take_where(&mut PIDFDS.lock().unwrap(), |p| p.fd == fd);
+    drop(closed);
 }
 
 /// The pidfd whose reap watch is `watch`.

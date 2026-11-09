@@ -261,7 +261,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         }
         // A pidfd polled for no event reports only its reap, which its
         // reap watch polls readable for: the pidfd is from the exit on.
-        let reap = (entry.events & POLLIN == 0)
+        let reap = (entry.events & (POLLIN | POLLRDNORM) == 0)
             .then(|| super::wait::reap_watch(entry.fd))
             .flatten();
         host.push(match &reap {
@@ -988,6 +988,61 @@ mod reportable_tests {
         assert_eq!(polled(pidfd, 0), (1, POLLHUP));
         assert_eq!(waited(level, 0), (1, 0x10));
         close(&[pidfd, level]);
+    }
+
+    /// epoll_ctl `op` of `fd` in `ep` for `events`.
+    fn ctl(ep: i64, op: u64, fd: i64, events: u32) -> i64 {
+        let interest = [events as u64, fd as u64];
+        epoll::epoll_ctl([ep as u64, op, fd as u64, interest.as_ptr() as u64, 0, 0])
+    }
+
+    /// A pidfd held by a process other than the parent wakes for the reap
+    /// the parent does (NOTE_REAP); EPOLLONESHOT is re-armed by
+    /// EPOLL_CTL_MOD and EPOLL_CTL_DEL drops the reap knote; closing the
+    /// pidfd closes its reap watch.
+    #[test]
+    fn a_pidfd_wakes_for_another_parents_reap() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_pidfd_wakes_for_another_parents_reap",
+        ) {
+            return;
+        }
+        use std::io::BufRead;
+        let _view = crate::vfs::test_view();
+        // The shell is the parent: it reaps the sleep when it ends.
+        let mut shell = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 0.3 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(shell.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid: i32 = line.trim().parse().unwrap();
+        let pidfd = wait::open_pidfd(pid, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let level = watching(pidfd, 0);
+        let once = watching(pidfd, 1 << 30);
+        let removed = watching(pidfd, 0);
+        assert_eq!(ctl(removed, 2, pidfd, 0), 0);
+        assert_eq!(polled_for(pidfd, 0, 0), (0, 0));
+        assert_eq!(waited(level, 5_000), (1, 0x10));
+        assert_eq!(polled(pidfd, 0), (1, POLLHUP));
+        assert_eq!(waited(once, 0), (1, 0x10));
+        assert_eq!(waited(once, 0).0, 0);
+        assert_eq!(ctl(once, 3, pidfd, 1 << 30), 0);
+        assert_eq!(waited(once, 0), (1, 0x10));
+        assert_eq!(waited(once, 0).0, 0);
+        let cpu = thread_cpu();
+        assert_eq!(waited(removed, 50).0, 0);
+        assert!(thread_cpu() - cpu < 25_000_000);
+        let watch = wait::reap_watch_fd(pidfd as i32).unwrap();
+        close(&[pidfd]);
+        // SAFETY: probing a descriptor number.
+        assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } < 0);
+        assert!(shell.wait().unwrap().success());
+        close(&[level, once, removed]);
     }
 
     /// This thread's CPU time in nanoseconds.
