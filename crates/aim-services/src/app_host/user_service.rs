@@ -6,23 +6,32 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeSet;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use aim_android_xml::{Element, Node, TEXT, Value as XmlValue};
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
+};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_iusermanager as um;
 use aim_service_aidl::dev_aim_server_iuserswitcherpolicy as switcher;
 
+use super::application_restrictions::Incoming;
+use super::kept::RawIntent;
 use super::user_types::{self, UserType};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::bundle::Value;
 
 /// The only user.
 pub(super) const SYSTEM_USER: i32 = 0;
+/// `Intent.ACTION_APPLICATION_RESTRICTIONS_CHANGED`,
+/// `Intent.FLAG_RECEIVER_REGISTERED_ONLY`.
+const ACTION_APPLICATION_RESTRICTIONS_CHANGED: &str =
+    "android.intent.action.APPLICATION_RESTRICTIONS_CHANGED";
+const FLAG_RECEIVER_REGISTERED_ONLY: i32 = 0x4000_0000;
 /// `UserManager.DISALLOW_DEBUGGING_FEATURES`.
 const DISALLOW_DEBUGGING_FEATURES: &str = "no_debugging_features";
 /// `UserHandle.USER_NULL`, also `UserInfo.NO_PROFILE_GROUP_ID`.
@@ -799,6 +808,8 @@ pub struct UserManager {
     host: Arc<AppHost>,
     /// `mUserTypes`, made once as the constructor makes them.
     types: std::sync::OnceLock<Vec<UserType>>,
+    /// `mAppRestrictionsLock`, held over a write of an app's restrictions.
+    app_restrictions: Mutex<()>,
 }
 
 impl UserManager {
@@ -806,7 +817,45 @@ impl UserManager {
         UserManager {
             host,
             types: std::sync::OnceLock::new(),
+            app_restrictions: Mutex::new(()),
         }
+    }
+
+    /// `setApplicationRestrictions`: the system's or root's, for a valid
+    /// package name; the package's registered receivers told of a change
+    /// in its user.
+    fn set_application_restrictions(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        restrictions: Option<&Incoming>,
+        user: i32,
+    ) -> Result<(), Exception> {
+        check_system_or_root(uid, "set application restrictions")?;
+        let package = package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+        if let Some(e) = crate::package::parse::validate_name(package, false) {
+            return Err(Exception::illegal_argument(format!(
+                "Invalid package name: {e}"
+            )));
+        }
+        let file = restrictions_file(&self.host, package, user)?;
+        let changed = {
+            let _lock = self.app_restrictions.lock().unwrap();
+            super::application_restrictions::store(&file, restrictions)
+        };
+        if changed {
+            let intent = RawIntent::new(
+                ACTION_APPLICATION_RESTRICTIONS_CHANGED,
+                FLAG_RECEIVER_REGISTERED_ONLY,
+                &[],
+            )
+            .with_package(package)
+            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "an intent of a package"))?;
+            self.host
+                .broadcasts
+                .send_from_system_as_user(&self.host, intent, user);
+        }
+        Ok(())
     }
 
     fn flag(&self, name: &str) -> Result<bool, Exception> {
@@ -1840,6 +1889,36 @@ impl Service for UserManager {
                     Err(e) => return reply(Err(e)),
                 }
             }
+            um::SET_APPLICATION_RESTRICTIONS => {
+                let a = um::SetApplicationRestrictions::<Incoming>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.set_application_restrictions(
+                    call.sender_euid as i32,
+                    a.package_name.as_deref(),
+                    a.restrictions.as_ref(),
+                    a.user_id,
+                ) {
+                    return reply(Err(e));
+                }
+                um::write_set_application_restrictions_reply(&mut p);
+            }
+            um::GET_APPLICATION_RESTRICTIONS => {
+                let a =
+                    um::GetApplicationRestrictions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                let package = a.package_name.unwrap_or_default();
+                match application_restrictions(
+                    &self.host,
+                    uid,
+                    &package,
+                    uid / PER_USER_RANGE as i32,
+                ) {
+                    Ok(restrictions) => {
+                        um::write_get_application_restrictions_reply(&mut p, Some(&restrictions))
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
+            }
             um::GET_APPLICATION_RESTRICTIONS_FOR_USER => {
                 let args = um::GetApplicationRestrictionsForUser::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -1882,10 +1961,14 @@ pub(super) fn application_restrictions(
             &format!("get application restrictions for other user/app {package}"),
         )?;
     }
-    let file = host
+    super::application_restrictions::read(&restrictions_file(host, package, user)?)
+}
+
+/// `packageToRestrictionsFileName` in the user's system directory.
+fn restrictions_file(host: &AppHost, package: &str, user: i32) -> Result<PathBuf, Exception> {
+    Ok(host
         .data()?
-        .join(format!("system/users/{user}/res_{package}.xml"));
-    super::application_restrictions::read(&file)
+        .join(format!("system/users/{user}/res_{package}.xml")))
 }
 
 /// `UserManagerService.checkSystemOrRoot`: the system's app id in any
@@ -1933,6 +2016,35 @@ impl AppHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restrictions_are_set_by_the_system_or_root_for_a_valid_package_name() {
+        let data = crate::app_host::test_temp_dir("set-application-restrictions");
+        std::fs::create_dir_all(data.join("system/users/0")).unwrap();
+        let host = AppHost::new(crate::test_process(1000));
+        crate::app_host::configure_test_host(&host, &data, &data, &data, Box::new(|_| None));
+        let users = UserManager::new(host);
+        let error = users
+            .set_application_restrictions(10_100, Some("com.example"), None, 0)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.message,
+            "Only system may: set application restrictions"
+        );
+        let error = users
+            .set_application_restrictions(1000, Some("com.example/"), None, 0)
+            .err()
+            .unwrap();
+        assert_eq!(error.message, "Invalid package name: bad character '/'");
+        let file = data.join("system/users/0/res_com.example.xml");
+        std::fs::write(&file, "<restrictions />").unwrap();
+        users
+            .set_application_restrictions(0, Some("com.example"), None, 0)
+            .unwrap();
+        assert!(!file.exists());
+        std::fs::remove_dir_all(&data).unwrap();
+    }
 
     #[test]
     fn other_apps_restrictions_are_for_the_system_app_id_or_root_alone() {

@@ -20,15 +20,15 @@ pub(crate) const VAL_NULL: i32 = -1;
 pub(crate) const VAL_STRING: i32 = 0;
 pub(crate) const VAL_INTEGER: i32 = 1;
 const VAL_MAP: i32 = 2;
-const VAL_BUNDLE: i32 = 3;
+pub(crate) const VAL_BUNDLE: i32 = 3;
 pub(crate) const VAL_PARCELABLE: i32 = 4;
 const VAL_LONG: i32 = 6;
 const VAL_FLOAT: i32 = 7;
-const VAL_BOOLEAN: i32 = 9;
+pub(crate) const VAL_BOOLEAN: i32 = 9;
 pub(crate) const VAL_LIST: i32 = 11;
 const VAL_SPARSEARRAY: i32 = 12;
-const VAL_STRINGARRAY: i32 = 14;
-const VAL_PARCELABLEARRAY: i32 = 16;
+pub(crate) const VAL_STRINGARRAY: i32 = 14;
+pub(crate) const VAL_PARCELABLEARRAY: i32 = 16;
 const VAL_OBJECTARRAY: i32 = 17;
 const VAL_INTARRAY: i32 = 18;
 const VAL_LONGARRAY: i32 = 19;
@@ -220,6 +220,20 @@ impl Value {
     }
 }
 
+/// `Parcel.isLengthPrefixed`: a value of `kind` follows its length.
+pub(crate) fn is_length_prefixed(kind: i32) -> bool {
+    matches!(
+        kind,
+        VAL_MAP
+            | VAL_PARCELABLE
+            | VAL_LIST
+            | VAL_SPARSEARRAY
+            | VAL_PARCELABLEARRAY
+            | VAL_OBJECTARRAY
+            | VAL_SERIALIZABLE
+    )
+}
+
 /// `writeValue` of a length-prefixed value of `kind`.
 pub(crate) fn length_prefixed(p: &mut Parcel, kind: i32, value: impl FnOnce(&mut Parcel)) {
     p.write_i32(kind);
@@ -353,8 +367,7 @@ pub fn read(r: &mut Reader<'_>) -> Result<Option<HashMap<String, Value>>> {
                 let n = r.read_i32()?;
                 Value::LongArray((0..n.max(0)).map(|_| r.read_i64()).collect::<Result<_>>()?)
             }
-            kind @ (VAL_MAP | VAL_PARCELABLE | VAL_LIST | VAL_SPARSEARRAY | VAL_PARCELABLEARRAY
-            | VAL_OBJECTARRAY | VAL_SERIALIZABLE) => {
+            kind if is_length_prefixed(kind) => {
                 let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
                 let start = r.position();
                 r.skip(len)?;
