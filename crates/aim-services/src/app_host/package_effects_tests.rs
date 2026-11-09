@@ -801,6 +801,7 @@ fn removal(installer: Option<&str>) -> removal::SendRemovedBroadcast {
         app_id: 10100,
         users: Some(vec![0]),
         instant_users: Some(Vec::new()),
+        visibility: None,
         data_removed: true,
         removed_for_all_users: true,
         app_id_removed: true,
@@ -826,7 +827,7 @@ fn summary(events: &[Event]) -> Vec<(&str, Option<&str>, i32)> {
 #[test]
 fn removal_broadcasts_follow_send_package_removed_broadcasts() {
     let a = removal(Some("store"));
-    let events = removed_events(&a, "p", &[0], &[]);
+    let events = removed_events(&a, "p", &[0], &[], None);
     assert_eq!(
         summary(&events),
         [
@@ -888,7 +889,7 @@ fn removal_broadcasts_follow_send_package_removed_broadcasts() {
     a.removed_by_system = true;
     a.archived = true;
     a.removed_for_all_users = false;
-    let events = removed_events(&a, "p", &[0], &[]);
+    let events = removed_events(&a, "p", &[0], &[], None);
     assert_eq!(
         summary(&events)
             .into_iter()
@@ -925,10 +926,10 @@ fn removal_broadcasts_follow_send_package_removed_broadcasts() {
     let mut a = removal(Some("store"));
     a.static_shared_lib = true;
     assert_eq!(
-        summary(&removed_events(&a, "p", &[0], &[])),
+        summary(&removed_events(&a, "p", &[0], &[], None)),
         [(REMOVED, Some("store"), 0x04000000)]
     );
-    let events = removed_events(&removal(None), "p", &[0], &[10]);
+    let events = removed_events(&removal(None), "p", &[0], &[10], None);
     assert!(events.iter().all(|event| event.user == 10
         && event.instant
         && event.permissions == ["android.permission.ACCESS_INSTANT_APPS"]));
@@ -981,5 +982,61 @@ fn removal_notifies_native_and_callback_monitors_once() {
             extras["android.intent.extra.SYSTEM_UPDATE_UNINSTALL"],
             Value::Bool(false)
         );
+    });
+}
+
+#[test]
+fn removal_visibility_filters_all_but_the_installers_copy() {
+    let lists: AllowLists = [(0, Some(vec![10200])), (10, None)].into();
+    let events = removed_events(&removal(Some("store")), "p", &[0], &[], Some(&lists));
+    assert_eq!(events[0].intent.intent.package.as_deref(), Some("store"));
+    assert!(events[0].allow.is_none());
+    assert!(
+        events[1..]
+            .iter()
+            .all(|event| event.allow.as_deref() == Some(&[10200][..]))
+    );
+    assert_eq!(
+        events[2].intent.test_extras()["android.intent.extra.VISIBILITY_ALLOW_LIST"],
+        Value::IntArray(vec![10200])
+    );
+    assert!(
+        !events[1]
+            .intent
+            .test_extras()
+            .contains_key("android.intent.extra.VISIBILITY_ALLOW_LIST")
+    );
+    // A user without a list is not filtered.
+    let events = removed_events(&removal(None), "p", &[10], &[], Some(&lists));
+    assert!(events.iter().all(|event| event.allow.is_none()));
+    assert_eq!(
+        events[1].intent.test_extras()["android.intent.extra.VISIBILITY_ALLOW_LIST"],
+        Value::Null
+    );
+}
+
+#[test]
+fn archived_removal_skips_discovery_and_instant_users_take_the_cohort() {
+    crate::system::with_discovery_session(|host, _, _| {
+        let native = Arc::new(RemovalSeen(Mutex::default()));
+        for user in [0, 10] {
+            host.package_monitors.register(
+                user,
+                Arc::downgrade(&(native.clone() as Arc<dyn PackageMonitor>)),
+            );
+        }
+        let events = host.package_system().unwrap().package_events().unwrap();
+        let effects = PackageEffects::new(host.clone());
+        let mut archived = removal(None);
+        archived.instant_users = Some(vec![10]);
+        archived.archived = true;
+        effects.package_removed(archived).unwrap();
+        assert!(events.wait(2000, false).unwrap());
+        assert!(native.0.lock().unwrap().is_empty());
+        let mut instant = removal(None);
+        instant.instant_users = Some(vec![10]);
+        effects.package_removed(instant).unwrap();
+        assert!(events.wait(2000, false).unwrap());
+        assert_eq!(*native.0.lock().unwrap(), [("p".into(), 10, true)]);
     });
 }

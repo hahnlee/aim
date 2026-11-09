@@ -538,3 +538,44 @@ fn global_hibernation_without_oat_deletion_keeps_dexopt_and_artifacts() {
         );
     });
 }
+
+#[test]
+fn archived_package_removal_keeps_the_hibernation_states() {
+    crate::system::with_discovery_session(|host, _, _| {
+        grant(host);
+        let s = AppHibernation(host.clone());
+        s.boot_completed().unwrap();
+        let hibernated = State {
+            hibernated: true,
+            saved: 0,
+        };
+        (host.hibernation.0.lock().unwrap().global.as_mut())
+            .unwrap()
+            .insert("gone".into(), hibernated);
+        let removed = |archived: bool| {
+            super::super::package_effects::PackageEffects::new(host.clone())
+                .package_removed(
+                    aim_service_aidl::dev_aim_server_iinstallerremovalbridge::SendRemovedBroadcast {
+                        package_name: Some("gone".into()),
+                        installer: None,
+                        app_id: 10100,
+                        users: Some(vec![0]),
+                        instant_users: Some(Vec::new()),
+                        visibility: None,
+                        data_removed: !archived,
+                        removed_for_all_users: true,
+                        app_id_removed: false,
+                        static_shared_lib: false,
+                        kill_app: true,
+                        removed_by_system: false,
+                        archived,
+                    },
+                )
+                .unwrap();
+            let loaded = host.hibernation.0.lock().unwrap();
+            loaded.global.as_ref().unwrap().contains_key("gone")
+        };
+        assert!(removed(true));
+        assert!(!removed(false));
+    });
+}

@@ -371,6 +371,186 @@ mod tests {
         });
     }
 
+    /// The original owners' leaves of a removal that succeeds; records the
+    /// removal broadcasts.
+    struct RemovalLeaves(
+        Mutex<Vec<String>>,
+        Arc<aim_binder_host::local::LocalProcess>,
+    );
+    struct Scope;
+    impl aim_binder_host::local::Service for Scope {
+        fn descriptor(&self) -> &str {
+            aim_service_aidl::dev_aim_server_iinstallerpermissionremoval::DESCRIPTOR
+        }
+        fn transact(
+            &self,
+            call: &mut aim_binder_host::local::Call<'_>,
+        ) -> aim_binder_host::local::Reply {
+            use aim_service_aidl::dev_aim_server_iinstallerpermissionremoval as api;
+            assert_eq!(call.code, api::APPLY);
+            api::Apply::read(&mut call.data)?;
+            let mut p = Parcel::new();
+            api::write_apply_reply(&mut p);
+            Ok(p)
+        }
+    }
+    impl aim_binder_host::local::Service for RemovalLeaves {
+        fn descriptor(&self) -> &str {
+            external_api::DESCRIPTOR
+        }
+        fn transact(
+            &self,
+            call: &mut aim_binder_host::local::Call<'_>,
+        ) -> aim_binder_host::local::Reply {
+            let mut p = Parcel::new();
+            match call.code {
+                external_api::PREPARE_PERMISSIONS => {
+                    external_api::PreparePermissions::read(&mut call.data)?;
+                    let scope = self.1.add_service(Arc::new(Scope));
+                    external_api::write_prepare_permissions_reply(&mut p, Some(scope));
+                }
+                external_api::DESTROY_PROFILES => {
+                    external_api::DestroyProfiles::read(&mut call.data)?;
+                    external_api::write_destroy_profiles_reply(&mut p);
+                }
+                external_api::DESTROY_APP_DATA => {
+                    external_api::DestroyAppData::read(&mut call.data)?;
+                    external_api::write_destroy_app_data_reply(&mut p);
+                }
+                external_api::REMOVE_CODE => {
+                    external_api::RemoveCode::read(&mut call.data)?;
+                    external_api::write_remove_code_reply(&mut p);
+                }
+                external_api::SEND_REMOVED_BROADCAST => {
+                    let a = external_api::SendRemovedBroadcast::read(&mut call.data)?;
+                    self.0.lock().unwrap().push(format!(
+                        "{:?} {} {:?} {:?} {} {} {}",
+                        a.package_name,
+                        a.app_id,
+                        a.users,
+                        a.visibility.map(|v| v[0]),
+                        a.data_removed,
+                        a.removed_for_all_users,
+                        a.app_id_removed
+                    ));
+                    external_api::write_send_removed_broadcast_reply(&mut p);
+                }
+                code => panic!("unexpected removal leaf {code}"),
+            }
+            Ok(p)
+        }
+    }
+
+    /// One uninstall through `Controller::execute`: its removal broadcasts
+    /// and package observer calls.
+    fn executed(flags: i32) -> (Vec<String>, Vec<(String, i32)>) {
+        let mut result = Default::default();
+        crate::system::with_discovery_session(|host, _, _| {
+            let system = host.package_system().unwrap();
+            let capture = system.capture_package_queries().unwrap();
+            let (bridge, disk) = system.package_persistence_owner(&capture).unwrap();
+            let store = system.native_removal_store(&bridge, disk).unwrap();
+            // The fixture has no original domain lifecycle to reconcile.
+            let store = Arc::new(crate::package::installer::removal::NativeStore {
+                snapshots: store.snapshots.clone(),
+                disk: store.disk.clone(),
+                publish: store.publish.clone(),
+                invalidate: Arc::new(|| Ok(())),
+            });
+            let effects = system.package_effects_owner(&bridge).unwrap();
+            let leaves = Arc::new(RemovalLeaves(Mutex::default(), host.process.clone()));
+            let Binder::Local(ptr) = host.process.add_service(leaves.clone()) else {
+                unreachable!()
+            };
+            let external = External::new(
+                crate::system::ServiceOwner::Local(host.process.local_service(ptr).unwrap()),
+                host.process.clone(),
+            );
+            let state = capture.state().clone();
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let notified = observed.clone();
+            let controller = Controller {
+                store,
+                source: Arc::new(move || Ok(state.clone())),
+                resolver: Default::default(),
+                effects,
+                external,
+                policy: PolicySource {
+                    admission: Arc::new(|_, _| panic!("already admitted")),
+                    removal: Arc::new(|_, _| {
+                        Ok(RemovalPolicy {
+                            admins: Default::default(),
+                            protected: Default::default(),
+                            uninstall_restricted: Default::default(),
+                            users: vec![0],
+                            child_users: Default::default(),
+                            sdk_library_independence: false,
+                        })
+                    }),
+                },
+                publisher: Arc::new(|_| panic!("no observer")),
+                factory_restore: Arc::new(|_| panic!("ordinary removal")),
+                preferred_removal: Arc::new(|_, _, _| {
+                    Ok(
+                        crate::package::installer::removal::PostCommitEffect::Deferred(Arc::new(
+                            || Ok(()),
+                        )),
+                    )
+                }),
+                package_removed: Arc::new(move |name, uid| {
+                    notified.lock().unwrap().push((name.to_owned(), uid));
+                    Ok(())
+                }),
+                gate: Arc::new(Mutex::new(())),
+                keystore: Arc::new(owner::keystore::KeystoreCleanup::new(host.process.clone())),
+            };
+            let status = controller
+                .execute(&Plan {
+                    request: Request {
+                        package: "p".into(),
+                        version: -1,
+                        caller_package: None,
+                        uid: 0,
+                        pid: 7,
+                        user: 0,
+                        flags,
+                        existing_only: false,
+                    },
+                    internal_package: "p".into(),
+                    users: vec![0],
+                    blocked_users: vec![],
+                    keep_uninstalled: false,
+                    removed_by_system: false,
+                })
+                .unwrap();
+            assert_eq!(status, crate::package::installer::removal::SUCCEEDED);
+            result = (
+                std::mem::take(&mut *leaves.0.lock().unwrap()),
+                std::mem::take(&mut *observed.lock().unwrap()),
+            );
+        });
+        result
+    }
+
+    #[test]
+    fn uninstall_sends_one_removal_and_frees_the_app_id_only_with_its_setting() {
+        assert_eq!(
+            executed(0),
+            (
+                vec![r#"Some("p") 10100 Some([0]) Some(0) true true true"#.to_owned()],
+                vec![("p".to_owned(), 10100)]
+            )
+        );
+        // DELETE_KEEP_DATA retires the code but keeps the setting and app id.
+        assert_eq!(
+            executed(crate::package::installer::removal::KEEP_DATA),
+            (
+                vec![r#"Some("p") 10100 Some([0]) Some(0) false true false"#.to_owned()],
+                Vec::new()
+            )
+        );
+    }
+
     fn apply(
         owner: &PermissionManager,
         scope: Binder,

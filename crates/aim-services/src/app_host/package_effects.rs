@@ -215,9 +215,16 @@ impl PackageEffects {
             (false, true) => &users,
             (false, false) => &instant,
         };
+        let visibility = a
+            .visibility
+            .take()
+            .map(|v| decode_visibility(&v))
+            .transpose()?;
         let hibernation = super::app_hibernation::AppHibernation(self.host.clone());
         let mut failure = None;
-        for &user in told {
+        // Receivers take an archive's `EXTRA_REPLACING` removal as the
+        // start of an update, not as the package's removal.
+        for &user in told.iter().filter(|_| !a.archived) {
             if let Err(e) =
                 self.host
                     .notify_package_discoveries(&super::package_writes::PackageChanged {
@@ -229,15 +236,20 @@ impl PackageEffects {
             {
                 failure.get_or_insert(e);
             }
-            if !a.archived {
-                hibernation.package_removed(name, user, a.removed_for_all_users);
-            }
+            hibernation.package_removed(name, user, a.removed_for_all_users);
         }
-        self.post(removed_events(&a, name, &users, &instant), Vec::new())?;
+        let events = removed_events(&a, name, &users, &instant, visibility.as_ref());
+        if let Err(e) = self.post(events, Vec::new()) {
+            failure.get_or_insert(e);
+        }
         if a.app_id_removed {
             for &user in told {
-                self.host
-                    .foreground_service_uid_removed(uid(user, a.app_id))?;
+                if let Err(e) = self
+                    .host
+                    .foreground_service_uid_removed(uid(user, a.app_id))
+                {
+                    failure.get_or_insert(e);
+                }
             }
         }
         failure.map_or(Ok(()), Err)
@@ -1271,13 +1283,14 @@ fn decode_visibility(encoded: &[i32]) -> Result<AllowLists, Exception> {
 }
 
 /// `BroadcastHelper.sendPackageRemovedBroadcasts` of an uninstall, which is
-/// neither an update nor a system update's removal. Its prior visibility is
-/// not captured, so no allow list filters the receivers.
+/// neither an update nor a system update's removal: a full deletion's prior
+/// visibility filters all but the installer's copy.
 fn removed_events(
     a: &removal::SendRemovedBroadcast,
     name: &str,
     users: &[i32],
     instant: &[i32],
+    visibility: Option<&AllowLists>,
 ) -> Vec<Event> {
     let mut extras = vec![
         (UID, Value::Int(a.app_id)),
@@ -1307,6 +1320,20 @@ fn removed_events(
         Value::Bool(a.removed_for_all_users),
     ));
     let mut events = Vec::new();
+    if let Some(installer) = a.installer.as_deref() {
+        cohorts(
+            &mut events,
+            REMOVED,
+            Some(name),
+            &extras,
+            0,
+            Some(installer),
+            users,
+            instant,
+            None,
+            None,
+        );
+    }
     let mut send = |action: &str, name: Option<&str>, extras: &[_], flags, target| {
         cohorts(
             &mut events,
@@ -1317,13 +1344,10 @@ fn removed_events(
             target,
             users,
             instant,
-            None,
+            visibility,
             None,
         );
     };
-    if let Some(installer) = a.installer.as_deref() {
-        send(REMOVED, Some(name), &extras, 0, Some(installer));
-    }
     // Only the installer of a static shared library is told.
     if a.static_shared_lib {
         return events;
