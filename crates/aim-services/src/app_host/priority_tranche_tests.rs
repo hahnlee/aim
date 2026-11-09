@@ -8,9 +8,9 @@ use aim_binder_host::local::{Reply, Service};
 use std::sync::mpsc;
 use std::time::Duration;
 
-const ACTION: &str = "fixture.PRIORITIZED";
+pub(super) const ACTION: &str = "fixture.PRIORITIZED";
 
-type Scheduled = thread::ScheduleRegisteredReceiver<RawIntent, RawBundle>;
+pub(super) type Scheduled = thread::ScheduleRegisteredReceiver<RawIntent, RawBundle>;
 
 struct AppThread(mpsc::Sender<Scheduled>);
 impl Service for AppThread {
@@ -24,14 +24,14 @@ impl Service for AppThread {
     }
 }
 
-struct Process {
-    scheduled: mpsc::Receiver<Scheduled>,
-    thread: Binder,
+pub(super) struct Process {
+    pub(super) scheduled: mpsc::Receiver<Scheduled>,
+    pub(super) thread: Binder,
 }
 
 /// A process of `uid` with a receiver of ACTION at `priority`, the `at`th
 /// registered.
-fn process(
+pub(super) fn process(
     host: &Arc<AppHost>,
     export: &dyn Fn(Arc<dyn Service>) -> Strong,
     package: &str,
@@ -60,7 +60,7 @@ fn process(
 }
 
 /// A second receiver of the `at`th registered's process, at `priority`.
-fn second_receiver(
+pub(super) fn second_receiver(
     host: &AppHost,
     export: &dyn Fn(Arc<dyn Service>) -> Strong,
     at: usize,
@@ -107,17 +107,17 @@ fn send(host: &AppHost) -> mpsc::Receiver<()> {
 }
 
 /// The receiver of the next delivery.
-fn delivered(scheduled: &mpsc::Receiver<Scheduled>) -> Option<Binder> {
+pub(super) fn delivered(scheduled: &mpsc::Receiver<Scheduled>) -> Option<Binder> {
     let a = scheduled.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(a.intent.unwrap().intent.action.as_deref(), Some(ACTION));
     a.receiver
 }
 
-fn nothing<T>(r: &mpsc::Receiver<T>) {
+pub(super) fn nothing<T>(r: &mpsc::Receiver<T>) {
     assert!(r.recv_timeout(Duration::from_millis(150)).is_err());
 }
 
-fn finish(host: &AppHost, who: Binder) {
+pub(super) fn finish(host: &AppHost, who: Binder) {
     host.broadcasts
         .finish(
             host,
@@ -306,7 +306,7 @@ fn a_dead_higher_process_unblocks_the_lower_tranche() {
     });
 }
 
-fn unordered(host: &AppHost) -> Arc<Record> {
+pub(super) fn unordered(host: &AppHost) -> Arc<Record> {
     Arc::new(Record {
         enqueue_id: host.broadcasts.state.lock().unwrap().enqueue_id(),
         intent: RawIntent::new(ACTION, FLAG_RECEIVER_INCLUDE_BACKGROUND, &[]),
@@ -326,7 +326,7 @@ fn unordered(host: &AppHost) -> Arc<Record> {
 }
 
 /// A manifest receiver at `priority` of the process `system` of `uid`.
-fn manifest(class: &str, uid: u32, priority: i32) -> Arc<Manifest> {
+pub(super) fn manifest(class: &str, uid: u32, priority: i32) -> Arc<Manifest> {
     let mut m = super::system_receiver_tests::receiver("android", class, uid);
     Arc::get_mut(&mut m).unwrap().priority = priority;
     m
@@ -413,7 +413,7 @@ fn a_plain_broadcast_waits_for_its_higher_manifest_receiver() {
 }
 
 /// A thread that takes a manifest receiver's `scheduleReceiver`.
-struct ManifestThread(mpsc::Sender<()>);
+pub(super) struct ManifestThread(pub(super) mpsc::Sender<()>);
 impl Service for ManifestThread {
     fn descriptor(&self) -> &str {
         thread::DESCRIPTOR
