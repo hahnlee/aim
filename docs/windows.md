@@ -135,10 +135,16 @@ which provisions the device and finishes, then the image's
 task: the home is resumed until an app covers it. A home record is
 unresizeable unless its activity asked to be resizeable
 (`setActivityType`). In window mode the Mac desktop is the home: the root home task
-stays behind it at the bottom of the tasks, invisible, never focused or
-brought to the front, its activity launched straight to stopped
-(`LaunchActivityItem` with `StopActivityItem`), and it is never reported
-to the display server, so it has no Mac window. `getTasks`, the task
+stays behind it at the bottom of the tasks, invisible and never focused,
+its activity launched straight to stopped (`LaunchActivityItem` with
+`StopActivityItem`), and it is never reported to the display server, so it
+has no Mac window. A start that brings it to the front (a HOME intent,
+`moveTaskToFront`) brings the desktop there: the tasks of the focused
+task's app go behind the desktop, invisible, and pause and stop; the
+server hides that app (`HIDE`); the home becomes the focused task and its
+activity the top resumed one; other apps' tasks stay visible and resumed,
+as their windows stay. Any other task coming to the front puts it behind
+the desktop again, paused and stopped. `getTasks`, the task
 organizer and the window dump list it. A start whose record is a home
 activity (`ActivityRecord.setActivityType`) goes to that task, and no
 other start is put there (`FindTaskResult` compares activity types). It connects to the display server

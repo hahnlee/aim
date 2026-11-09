@@ -643,6 +643,16 @@ impl AppHost {
         Ok(())
     }
 
+    /// The desktop came to the front over task `id`, the focused one: the
+    /// server hides its app (`HIDE`), as Cmd+H does.
+    pub(super) fn task_hidden(&self, id: i32) {
+        self.tasks.send(&Record {
+            op: window::HIDE,
+            task: id,
+            ..Default::default()
+        });
+    }
+
     /// The layer of task `id`, the parent of its windows: made at its
     /// bounds, in front.
     pub(super) fn task_layer<T>(
@@ -2440,6 +2450,24 @@ pub(super) mod tests {
                     info.supports_multi_window,
                 ),
                 (2, 2, 0, false, false)
+            );
+            // Brought to the front, the desktop's coming there is not
+            // reported; the server hides the app of the task it came over.
+            host.task_to_front(home).unwrap();
+            assert_eq!(host.tasks.root_task_ids(), [home, 8, 7]);
+            host.task_hidden(8);
+            let mut record = [0; size_of::<Record>()];
+            receive.read_exact(&mut record).unwrap();
+            assert_eq!(
+                (
+                    u32::from_ne_bytes(record[..4].try_into().unwrap()),
+                    i32::from_ne_bytes(record[4..8].try_into().unwrap()),
+                ),
+                (window::HIDE, 8)
+            );
+            assert_eq!(
+                receive.read(&mut [0]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
             );
             // Its process dies behind the focused apps: it goes unreported
             // and stays gone while an app is left to focus.

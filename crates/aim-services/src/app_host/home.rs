@@ -5,7 +5,8 @@
 //! and `ActivityStartController.startHomeActivity` starts it in the root
 //! home task (`Stack::home`). In window mode that task stays behind the Mac
 //! desktop, so its activity is launched to stopped and never gets a Mac
-//! window (docs/windows.md).
+//! window; a HOME intent brings the desktop and the home to the front
+//! (docs/windows.md).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
