@@ -89,6 +89,16 @@ impl Task {
     }
 }
 
+/// Who moves a task. Android (launch bounds, a WCT's `setBounds`, an app's
+/// request) has its bounds fitted as the original fits them; the user
+/// moving its Mac window (`SET_BOUNDS`) puts it where the window is, partly
+/// off the display or on another monitor, and the task follows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Mover {
+    Android,
+    Mac,
+}
+
 /// `Tasks::home` once the root home task has gone (`INVALID_TASK_ID`).
 const HOME_GONE: i32 = -1;
 
@@ -649,7 +659,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .set_task_windowing_mode(id, mode);
-        self.move_task(id, bounds)
+        self.move_task(id, bounds, Mover::Android)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 
@@ -705,7 +715,7 @@ impl AppHost {
         // `inMultiWindowMode`: pinned, freeform or multi-window.
         if matches!(root_mode, 2 | 5 | 6) {
             return self
-                .move_task_requesting(id, bounds, Some(Some(bounds)))
+                .move_task_requesting(id, bounds, Some(Some(bounds)), Mover::Android)
                 .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e));
         }
         let mut tasks = self.tasks.tasks.lock().unwrap();
@@ -1167,7 +1177,7 @@ impl AppHost {
                 };
                 match self.tasks.tile_root(r.task) {
                     Some(root) => self.resize_tile(r.task, root, bounds),
-                    None => self.move_task(r.task, bounds),
+                    None => self.move_task(r.task, bounds, Mover::Mac),
                 }
             }
             op => Err(format!("unknown request {op}")),
@@ -1373,16 +1383,20 @@ impl AppHost {
         Ok(())
     }
 
-    /// `SET_BOUNDS` (`resizeTask`): the task takes `bounds`, at least its
-    /// minimal size; its activities and windows are told, as
-    /// `ActivityRecord.updateReportedConfigurationAndSend` and
+    /// `SET_BOUNDS` (`resizeTask`): the task takes `requested` bounds, as
+    /// its windowing mode resolves them; its activities and windows are
+    /// told, as `ActivityRecord.updateReportedConfigurationAndSend` and
     /// `WindowState.reportResized` tell them. The server takes the bounds
-    /// the task got. In windowing `mode` if given, else in its own.
+    /// the task got. In windowing `mode` if given, else in its own;
+    /// `requested` `None` inherits its parent's. A freeform task the Mac
+    /// moved keeps its place (`Mover`). Bounds whose resolution overflows
+    /// are an error, where the original's int arithmetic wraps silently.
     pub(super) fn task_move_bounds(
         &self,
         id: i32,
         mode: Option<i32>,
-        bounds: Rect,
+        requested: Option<Rect>,
+        mover: Mover,
     ) -> Result<Rect, String> {
         let min_dp = self
             .framework()
@@ -1391,64 +1405,87 @@ impl AppHost {
             .ok_or("no default_minimal_size_resizable_task")? as i32;
         let display = self.display().map_err(|e| format!("{e:?}"))?;
         let density = display.0.density_dpi() as f32 / 160.0;
-        let bounds = {
-            let tasks = self.tasks.tasks.lock().unwrap();
-            let task = tasks
-                .iter()
-                .find(|t| t.id == id)
-                .ok_or_else(|| format!("no task {id}"))?;
-            // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its
-            // parent; freeform and multi-window take their requested bounds
-            // at least their minimal size.
-            if !matches!(mode.unwrap_or(task.windowing_mode), 5 | 6) {
-                return Ok(parent_of(&tasks, task).map_or(
-                    Rect {
-                        left: 0,
-                        top: 0,
-                        right: display.0.width,
-                        bottom: display.0.height,
-                    },
-                    |p| p.1,
-                ));
-            }
-            let previous = task.resolved_bounds;
-            let default_min = (min_dp as f32 * density) as i32;
-            let min = (
-                if task.min_size.0 < 0 {
-                    default_min
-                } else {
-                    task.min_size.0
-                },
-                if task.min_size.1 < 0 {
-                    default_min
-                } else {
-                    task.min_size.1
-                },
-            );
-            for (start, end, old_end, minimum) in [
-                (bounds.left, bounds.right, previous.map(|p| p.right), min.0),
-                (bounds.top, bounds.bottom, previous.map(|p| p.bottom), min.1),
-            ] {
-                let size = end.checked_sub(start).ok_or("task bounds overflow")?;
-                if size <= 0 {
-                    return Err("empty task bounds".into());
-                }
-                if size < minimum {
-                    if Some(end) == old_end {
-                        end.checked_sub(minimum)
-                    } else {
-                        start.checked_add(minimum)
-                    }
-                    .ok_or("minimum task bounds overflow")?;
-                }
-            }
-            minimal_dimensions(bounds, previous, min)
+        let area = Rect {
+            left: 0,
+            top: 0,
+            right: display.0.width,
+            bottom: display.0.height,
         };
-        Ok(bounds)
+        let tasks = self.tasks.tasks.lock().unwrap();
+        let task = tasks
+            .iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| format!("no task {id}"))?;
+        let parent = parent_of(&tasks, task).map_or(area, |p| p.1);
+        // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its
+        // parent; pinned keeps its requested bounds; the other modes take
+        // them at least their minimal size (adjustForMinimalTaskDimensions),
+        // freeform then within its parent (computeFreeformBounds).
+        let mode = self.resolved_mode(&tasks, task, mode.unwrap_or(task.windowing_mode));
+        match mode {
+            1 => return Ok(parent),
+            2 => return Ok(requested.unwrap_or(parent)),
+            _ => {}
+        }
+        let previous = task.resolved_bounds;
+        let default_min = (min_dp as f32 * density) as i32;
+        let min = (
+            if task.min_size.0 < 0 {
+                default_min
+            } else {
+                task.min_size.0
+            },
+            if task.min_size.1 < 0 {
+                default_min
+            } else {
+                task.min_size.1
+            },
+        );
+        let bounds = match requested {
+            Some(b) => b,
+            // Inheriting bounds of its minimal size.
+            None if parent.width() >= min.0 && parent.height() >= min.1 => return Ok(parent),
+            None => parent,
+        };
+        for (start, end, old_end, minimum) in [
+            (bounds.left, bounds.right, previous.map(|p| p.right), min.0),
+            (bounds.top, bounds.bottom, previous.map(|p| p.bottom), min.1),
+        ] {
+            let size = end.checked_sub(start).ok_or("task bounds overflow")?;
+            if size <= 0 {
+                return Err("empty task bounds".into());
+            }
+            if size < minimum {
+                if Some(end) == old_end {
+                    end.checked_sub(minimum)
+                } else {
+                    start.checked_add(minimum)
+                }
+                .ok_or("minimum task bounds overflow")?;
+            }
+        }
+        let bounds = minimal_dimensions(bounds, previous, min);
+        if mode != 5 || mover == Mover::Mac {
+            return Ok(bounds);
+        }
+        super::freeform::within_parent(bounds, parent, area, display.0.density_dpi())
+            .ok_or_else(|| "task bounds overflow".into())
     }
 
-    pub(super) fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
-        self.move_task_requesting(id, bounds, None)
+    /// Task `task`'s windowing `mode` resolved (`getWindowingMode`):
+    /// undefined inherits its parent's, its organizer root task's, else
+    /// the display area's.
+    fn resolved_mode(&self, tasks: &[Task], task: &Task, mode: i32) -> i32 {
+        match (mode, parent_of(tasks, task)) {
+            (0, Some((parent, _))) if parent != 0 => parent,
+            (0, _) if self.tasks.window_mode() => 5,
+            (0, _) => 1,
+            (mode, _) => mode,
+        }
+    }
+
+    pub(super) fn move_task(&self, id: i32, bounds: Rect, mover: Mover) -> Result<(), String> {
+        self.move_task_requesting(id, bounds, None, mover)
     }
 
     /// `move_task`, with the task's requested override bounds `requested` if
@@ -1460,8 +1497,9 @@ impl AppHost {
         id: i32,
         bounds: Rect,
         requested: Option<Option<Rect>>,
+        mover: Mover,
     ) -> Result<(), String> {
-        let bounds = self.task_move_bounds(id, None, bounds)?;
+        let bounds = self.task_move_bounds(id, None, Some(bounds), mover)?;
         {
             let mut tasks = self.tasks.tasks.lock().unwrap();
             let parent = tasks
@@ -1534,22 +1572,15 @@ impl AppHost {
     /// `WindowOrganizerController.applyChanges` would apply it: its requested
     /// windowing mode (`mode`), then its requested bounds (`bounds`,
     /// `Some(None)` to inherit its parent's), which it keeps in any mode and
-    /// which resolve in freeform and multi-window only. Both resolve in its
-    /// parent: its organizer root task, else the display area.
+    /// which resolve as the mode resolves them (`task_move_bounds`). Both
+    /// resolve in its parent: its organizer root task, else the display area.
     pub(super) fn task_change(
         &self,
         id: i32,
         mode: Option<i32>,
         bounds: Option<Option<Rect>>,
     ) -> Result<TaskChange, String> {
-        let display = self.display().map_err(|e| e.message)?;
-        let area = Rect {
-            left: 0,
-            top: 0,
-            right: display.0.width,
-            bottom: display.0.height,
-        };
-        let (current, requested_mode, requested, restore, parent) = {
+        let (current, requested_mode, requested, restore, in_root) = {
             let tasks = self.tasks.tasks.lock().unwrap();
             let t = tasks
                 .iter()
@@ -1560,27 +1591,27 @@ impl AppHost {
                 t.requested_mode,
                 t.requested_bounds,
                 t.restore_bounds,
-                parent_of(&tasks, t),
+                parent_of(&tasks, t).is_some(),
             )
         };
         let requested_mode = mode.unwrap_or(requested_mode);
         // Task.setWindowingMode: a leaf task in an organizer root task takes
-        // its mode, undefined inheriting the root task's; a root task's
-        // (setWindowingModeInner) is undefined if it cannot take it
-        // (isValidWindowingMode), inheriting the display area's.
-        let mode = match parent {
-            Some((parent, _)) if requested_mode == 0 => parent,
-            Some(_) => requested_mode,
-            None => match self
-                .valid_task_mode(requested_mode, id)
+        // its mode; a root task's (setWindowingModeInner) is undefined if it
+        // cannot take it (isValidWindowingMode). Undefined inherits.
+        let mode = if in_root {
+            requested_mode
+        } else {
+            self.valid_task_mode(requested_mode, id)
                 .map_err(|e| e.message)?
-            {
-                0 if self.tasks.window_mode() => 5,
-                0 => 1,
-                mode => mode,
-            },
         };
-        let area = parent.map_or(area, |p| p.1);
+        let mode = {
+            let tasks = self.tasks.tasks.lock().unwrap();
+            let t = tasks
+                .iter()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
+            self.resolved_mode(&tasks, t, mode)
+        };
         let mut requested = bounds.unwrap_or(requested);
         // Task.onConfigurationChangedInner: a task entering freeform without
         // requested bounds takes its last non-fullscreen bounds; with neither,
@@ -1588,11 +1619,7 @@ impl AppHost {
         if mode == 5 && current != 5 && requested.is_none() {
             requested = restore;
         }
-        let bounds = match requested {
-            Some(b) if matches!(mode, 5 | 6) => self.task_move_bounds(id, Some(mode), b)?,
-            None if mode == 6 => self.task_move_bounds(id, Some(mode), area)?,
-            _ => area,
-        };
+        let bounds = self.task_move_bounds(id, Some(mode), requested, Mover::Android)?;
         Ok(TaskChange {
             mode,
             requested_mode,
@@ -1625,7 +1652,7 @@ impl AppHost {
                 .unwrap()
                 .set_task_windowing_mode(id, c.mode);
         }
-        self.move_task_requesting(id, c.bounds, Some(c.requested))?;
+        self.move_task_requesting(id, c.bounds, Some(c.requested), Mover::Android)?;
         if changed {
             let commands = self.activities.stack.lock().unwrap().ensure_visible();
             self.run(commands);
@@ -3460,6 +3487,146 @@ pub(super) mod tests {
             // Shrunk from the left, the left edge goes back.
             apply(&[(t7, &bounds(r(800, 100, 1000, 1200)))], &[]);
             assert_eq!(host.tasks.bounds(7), Some(r(100, 100, 1000, 1200)));
+        });
+    }
+
+    /// The `TASK` records of task 7 the server sent since the last call.
+    fn task_7_records(receive: &mut UnixStream) -> Vec<([i32; 4], i32)> {
+        let mut bytes = Vec::new();
+        let _ = receive.read_to_end(&mut bytes);
+        bytes
+            .chunks_exact(size_of::<Record>())
+            // SAFETY: `Record` is plain old data, `c` one's bytes.
+            .map(|c| unsafe { std::ptr::read_unaligned(c.as_ptr().cast::<Record>()) })
+            .filter(|r| r.op == window::TASK && r.task == 7)
+            .map(|r| (r.bounds, r.windowing_mode))
+            .collect()
+    }
+
+    /// `Task.computeFreeformBounds`: a freeform task a WCT moves past the
+    /// edges of the display keeps a strip of 48x32 dp on it, its top on it;
+    /// its Mac window follows the bounds it got.
+    #[test]
+    fn freeform_task_bounds_stay_within_the_display() {
+        use super::super::task_organizer::tests::apply_wct;
+        use super::super::window_container_transaction::tests::transaction;
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let r = |left, top, right, bottom| Rect {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            let (_thread, _, mut receive, _) = wct_tasks(host, export, r(100, 100, 1000, 1200));
+            let t7 = host.task_token(7);
+            let mut sent = |[left, top, right, bottom]: [i32; 4]| {
+                let bounds = [(244, left), (248, top), (252, right), (256, bottom)];
+                let reply = apply_wct(host, &transaction(&[(t7, &bounds)], &[]), 1000);
+                reply.reader().read_exception().unwrap().unwrap();
+                task_7_records(&mut receive).pop()
+            };
+            // The 1080x1920 display at 2x: 96 px stay on it to the right.
+            assert_eq!(
+                sent([1050, 100, 1950, 1200]),
+                Some(([984, 100, 1884, 1200], 5))
+            );
+            assert_eq!(host.tasks.bounds(7), Some(r(984, 100, 1884, 1200)));
+            // To the left; 64 px at the bottom.
+            assert_eq!(
+                sent([-1000, 1900, -10, 3000]),
+                Some(([-894, 1856, 96, 2956], 5))
+            );
+            // Above the top, the top goes back on the display.
+            assert_eq!(
+                sent([100, -300, 1000, 800]),
+                Some(([100, 0, 1000, 1100], 5))
+            );
+            // Bounds on the display stay.
+            assert_eq!(
+                sent([100, 100, 1000, 1200]),
+                Some(([100, 100, 1000, 1200], 5))
+            );
+        });
+    }
+
+    /// The user moving a freeform task's Mac window mostly off the display,
+    /// or onto another monitor, leaves it there: the task takes the
+    /// window's bounds and no `TASK` record moves the window back.
+    #[test]
+    fn a_mac_window_moved_off_the_display_stays() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let (_thread, _, mut receive, _) = wct_tasks(
+                host,
+                export,
+                Rect {
+                    left: 100,
+                    top: 100,
+                    right: 1000,
+                    bottom: 1200,
+                },
+            );
+            for bounds in [[1050, 100, 1950, 1200], [-890, -1000, 10, 100]] {
+                host.request(&Record {
+                    op: window::SET_BOUNDS,
+                    task: 7,
+                    bounds,
+                    ..Default::default()
+                })
+                .unwrap();
+                let [left, top, right, bottom] = bounds;
+                assert_eq!(
+                    host.tasks.bounds(7),
+                    Some(Rect {
+                        left,
+                        top,
+                        right,
+                        bottom
+                    })
+                );
+                let records = task_7_records(&mut receive);
+                assert!(!records.is_empty());
+                assert!(records.iter().all(|&r| r == (bounds, 5)), "{records:?}");
+            }
+        });
+    }
+
+    /// `Task.resolveLeafTaskOnlyOverrideConfigs`: an undefined mode
+    /// resolves as its parent's, here the display area's freeform; a
+    /// pinned task keeps its requested bounds, of any size; a fullscreen
+    /// one fills its parent.
+    #[test]
+    fn task_bounds_resolve_in_the_resolved_windowing_mode() {
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let r = |left, top, right, bottom| Rect {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            let (_thread, _, _receive, _) = wct_tasks(host, export, r(100, 100, 1000, 1200));
+            let set_mode = |mode| {
+                let mut tasks = host.tasks.tasks.lock().unwrap();
+                tasks.iter_mut().find(|t| t.id == 7).unwrap().windowing_mode = mode;
+            };
+            let off = r(1050, 100, 1100, 150);
+            set_mode(0);
+            assert_eq!(
+                host.task_move_bounds(7, None, Some(off), Mover::Android),
+                Ok(r(984, 100, 1884, 1200))
+            );
+            set_mode(2);
+            assert_eq!(
+                host.task_move_bounds(7, None, Some(off), Mover::Android),
+                Ok(off)
+            );
+            assert_eq!(
+                host.task_move_bounds(7, None, None, Mover::Android),
+                Ok(r(0, 0, 1080, 1920))
+            );
+            assert_eq!(
+                host.task_move_bounds(7, Some(1), Some(off), Mover::Android),
+                Ok(r(0, 0, 1080, 1920))
+            );
         });
     }
 

@@ -189,9 +189,17 @@ itself (`OP_WINDOWS`, from guest-init) and, in window mode:
   affinity) to the front, or starts the activity in a new task and answers
   `DRAWN` when it is idle; `FOCUS` brings the task to the front, its
   windows in front of the others and its latest one with the input focus;
-  `SET_BOUNDS` (`resizeTask`) gives the task the bounds, at least its
-  minimal size (`Task.adjustForMinimalTaskDimensions`: 220 dp, or its
-  activity's window layout's), and tells its activity as
+  `SET_BOUNDS` (`resizeTask`) gives the task the bounds as its windowing
+  mode resolves them (`Task.resolveLeafTaskOnlyOverrideConfigs`, undefined
+  inheriting its parent's): fullscreen fills its parent, pinned keeps
+  them, the others take them at least its minimal size
+  (`adjustForMinimalTaskDimensions`: 220 dp, or its activity's window
+  layout's). Bounds Android gives a freeform task (launch bounds, a WCT's
+  `setBounds`) then keep 48x32 dp of them and their top on its parent's
+  part of the display (`computeFreeformBounds`; no bars, so the stable
+  area is the display), but a `SET_BOUNDS` is the Mac window's own frame
+  and keeps its place (see Move and resize); the Mac window follows the
+  bounds the task got. It tells its activity as
   `ActivityRecord.updateReportedConfigurationAndSend` does: a change the
   activity does not handle (`configChanges`), past its size buckets
   (`SizeConfigurationBuckets.filterDiff`), relaunches it, keeping its
@@ -256,6 +264,10 @@ and letterboxing, are tracked in #2050.
   minimum size), once the user has not moved it for half a second; bounds
   Android gives the task itself it takes at once. While they differ, the
   layer shows the task one pixel per pixel from the top left, unstretched.
+  A window the user drags partly off the screen or onto another monitor
+  stays where the user put it, as a Mac window does: the task takes the
+  window's bounds unfitted, so its configuration matches the window, and
+  the part of it outside the display is simply not visible to Android.
 - **Focus and stacking.** The key window's task is the focused one
   (`FOCUS`), and a task Android brings to the front makes its window key
   while the app is active; while inactive it orders the window directly
