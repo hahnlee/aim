@@ -88,8 +88,12 @@ pub struct Activity {
     pub launch_mode: i32,
     pub user: u32,
     pub state: State,
-    /// `ActivityRecord.mHaveState` starts true, until the first client resume.
-    pub never_resumed: bool,
+    /// `ActivityRecord.mHaveState`: true until its first client resume,
+    /// then again once a stop saved its instance state.
+    pub have_state: bool,
+    /// `ActivityInfo.FLAG_STATE_NOT_NEEDED`: it may be restarted without
+    /// saved state.
+    pub state_not_needed: bool,
     pub finishing: bool,
     /// The activity its result goes to (`resultTo`), and its result:
     /// `RESULT_CANCELED` unless it set one.
@@ -126,7 +130,8 @@ impl Activity {
             launch_mode,
             user,
             state: State::Initializing,
-            never_resumed: true,
+            have_state: true,
+            state_not_needed: false,
             finishing: false,
             result_to,
             result: None,
@@ -866,6 +871,29 @@ impl Stack {
         out
     }
 
+    /// `realStartActivityLocked` of `token`, restarted once its process
+    /// attached: resumed if it is the top of a visible task
+    /// (`andResume`), else launched to stopped, and what that leaves to
+    /// resume or show follows.
+    pub(super) fn relaunch(&mut self, token: u64) -> Vec<Command> {
+        let mut out = Vec::new();
+        let Some(resume) = self.get(token).map(|a| self.resumable(a)) else {
+            return out;
+        };
+        let a = self.get_mut(token).unwrap();
+        if resume {
+            a.state = State::Resumed;
+            out.push(Command::Launch(token));
+            self.report_top_resumed(&mut out);
+        } else {
+            a.state = State::Stopping;
+            out.push(Command::LaunchStopped(token));
+            self.resume_focused(false, &mut out);
+            self.settle(&mut out);
+        }
+        out
+    }
+
     /// `realStartActivityLocked` of `token`, in an attached process, when
     /// its task is behind the desktop: not to be resumed nor visible, it is
     /// launched to stopped.
@@ -1303,13 +1331,15 @@ impl Stack {
         out
     }
 
-    /// `activityStopped`.
-    pub fn stopped(&mut self, token: u64) {
-        if let Some(a) = self.get_mut(token)
-            && a.state == State::Stopping
-        {
-            a.state = State::Stopped;
-        }
+    /// `activityStopped` of a stop that saved instance state, or did not:
+    /// whether it was stopping, so takes that state (`setSavedState`).
+    pub fn stopped(&mut self, token: u64, saved_state: bool) -> bool {
+        let Some(a) = self.get_mut(token).filter(|a| a.state == State::Stopping) else {
+            return false;
+        };
+        a.state = State::Stopped;
+        a.have_state |= saved_state;
+        true
     }
 
     /// `activityDestroyed`: it goes; a task left without activities goes
@@ -1470,9 +1500,12 @@ impl Stack {
         }
     }
 
-    /// `ActivityRecord.handleAppDied`: an activity not yet resumed has its
-    /// initial state and survives unless finishing or force-stopped. Visible
-    /// survivors are launched again (`ensureVisibilityOnVisibleActivityDiedOrCrashed`).
+    /// `ActivityRecord.handleAppDied`: an activity with state to restart
+    /// from (`mHaveState`: not yet resumed, or stopped after saving its
+    /// instance state), or that needs none, survives unless finishing or
+    /// force-stopped, to be launched again when next resumed; the rest are
+    /// removed. Visible survivors are launched again
+    /// (`ensureVisibilityOnVisibleActivityDiedOrCrashed`).
     pub fn process_died(&mut self, start_seq: i64, removed: bool) -> Vec<Command> {
         let mut out = Vec::new();
         let gone: Vec<(u64, i32)> = self
@@ -1485,7 +1518,7 @@ impl Stack {
             if a.start_seq != start_seq {
                 return true;
             }
-            if !removed && !a.finishing && a.never_resumed {
+            if !removed && !a.finishing && (a.have_state || a.state_not_needed) {
                 a.start_seq = 0;
                 a.pending = false;
                 a.state = State::Initializing;
@@ -1678,7 +1711,7 @@ mod tests {
             let mut commands = s.paused(2);
             commands.extend(s.idle(1));
             assert!(commands.contains(&Stop(2)));
-            s.stopped(2);
+            s.stopped(2, false);
             assert_eq!(s.get(2).unwrap().state, State::Stopped);
             assert!(!s.get(2).unwrap().finishing);
 
@@ -1872,7 +1905,7 @@ mod tests {
                 Stop(1)
             ]
         );
-        s.stopped(1);
+        s.stopped(1, false);
         assert_eq!(s.get(1).unwrap().state, State::Stopped);
     }
 
@@ -1890,7 +1923,7 @@ mod tests {
         s.paused(1);
         s.top_resumed_released(None);
         s.idle(2);
-        s.stopped(1);
+        s.stopped(1, false);
         let (finished, out) = s.finish(2);
         assert!(finished);
         assert_eq!(
@@ -2307,7 +2340,7 @@ mod tests {
                 Stop(1)
             ]
         );
-        s.stopped(1);
+        s.stopped(1, false);
         // B finishes: A's task is focused, and A comes back once B paused;
         // B is destroyed once A is idle.
         assert_eq!(s.finish(2).1.last(), Some(&Front(7)));
@@ -2340,7 +2373,7 @@ mod tests {
         b.start_seq = 2;
         let d = Decision::default();
         s.apply(&d, Then::Add(b, Some(task(8, "B", None))), None, true);
-        s.get_mut(2).unwrap().never_resumed = false;
+        s.get_mut(2).unwrap().have_state = false;
         assert_eq!(s.process_died(2, false), [TaskEmpty(8), Front(7)]);
         assert!(s.get(2).is_none() && s.get(1).is_some());
     }
@@ -2376,7 +2409,7 @@ mod tests {
                 ..Default::default()
             };
             launch_new(&mut s, 1, 7, "Launcher", 0);
-            s.get_mut(1).unwrap().never_resumed = false;
+            s.get_mut(1).unwrap().have_state = false;
             let d = Decision {
                 outcome: Outcome::New(Some(7)),
                 ..Default::default()
@@ -2442,8 +2475,90 @@ mod tests {
         s.paused(1);
         assert!(!s.process_died(1, false).contains(&Launch(1)));
         assert_eq!(s.get(1).unwrap().start_seq, 0);
-        s.get_mut(2).unwrap().never_resumed = false;
+        s.get_mut(2).unwrap().have_state = false;
         assert!(s.process_died(2, false).contains(&Launch(1)));
+    }
+
+    /// Task 7 of process 1: `A` (token 1), resumed once, then stopped
+    /// under `B` (token 2), resumed, the stop saving instance state or not.
+    fn stopped_under_resumed(saved_state: bool) -> Stack {
+        let mut s = Stack::default();
+        launch_new(&mut s, 1, 7, "A", 0);
+        s.get_mut(1).unwrap().have_state = false;
+        let d = Decision {
+            outcome: Outcome::New(Some(7)),
+            ..Default::default()
+        };
+        s.apply(&d, Then::Add(activity(2, 7, "B", 0), None), None, true);
+        s.top_resumed_released(None);
+        assert!(s.paused(1).contains(&Launch(2)));
+        s.get_mut(2).unwrap().have_state = false;
+        assert!(s.idle(2).contains(&Stop(1)));
+        assert!(s.stopped(1, saved_state));
+        s
+    }
+
+    // android-16.0.0_r1 ActivityRecord.activityStopped/handleAppDied: a
+    // stop that saved instance state sets mHaveState again, and an
+    // activity with it, or with FLAG_STATE_NOT_NEEDED, survives its
+    // process's death to be relaunched; one without (the resumed `B`) is
+    // removed.
+    #[test]
+    fn a_dead_process_keeps_stopped_activities_that_saved_state() {
+        for (saved_state, state_not_needed) in [(true, false), (false, true), (false, false)] {
+            let mut s = stopped_under_resumed(saved_state);
+            s.get_mut(1).unwrap().state_not_needed = state_not_needed;
+            let commands = s.process_died(1, false);
+            assert!(s.get(2).is_none());
+            if saved_state || state_not_needed {
+                assert_eq!(s.get(1).unwrap().start_seq, 0);
+                assert_eq!(s.top(7).unwrap().token, 1);
+                assert!(commands.contains(&Launch(1)), "{commands:?}");
+                assert!(!commands.contains(&TaskEmpty(7)));
+            } else {
+                assert!(s.get(1).is_none());
+                assert!(s.task(7).is_none());
+                assert!(commands.contains(&TaskEmpty(7)));
+            }
+        }
+    }
+
+    // ActivityTaskSupervisor.realStartActivityLocked: the restarted
+    // activity is resumed only as the top of a visible task (`andResume`),
+    // else launched to stopped.
+    #[test]
+    fn a_restarted_activity_resumes_only_if_still_the_visible_top() {
+        let mut s = stopped_under_resumed(true);
+        s.process_died(1, false);
+        s.get_mut(1).unwrap().start_seq = 3;
+        assert_eq!(
+            s.relaunch(1),
+            [
+                Launch(1),
+                TopResumed {
+                    token: 1,
+                    on_top: true
+                }
+            ]
+        );
+
+        let mut s = stopped_under_resumed(true);
+        s.process_died(1, false);
+        // Another task comes in front before the process attaches.
+        let mut c = activity(3, 8, "C", 0);
+        c.start_seq = 2;
+        s.apply(
+            &Decision::default(),
+            Then::Add(c, Some(task(8, "C", None))),
+            None,
+            true,
+        );
+        s.get_mut(1).unwrap().start_seq = 3;
+        let commands = s.relaunch(1);
+        assert_eq!(commands[0], LaunchStopped(1), "{commands:?}");
+        assert!(!commands.contains(&Launch(1)));
+        assert_eq!(s.get(1).unwrap().state, State::Stopping);
+        assert!(commands.contains(&Launch(3)), "{commands:?}");
     }
 
     #[test]
@@ -2526,7 +2641,7 @@ mod tests {
                 ]
             )
         );
-        s.stopped(1);
+        s.stopped(1, false);
         assert_eq!(s.set_occludes_parent(2, true), (false, vec![]));
         // Translucent again: A shows, started but not resumed.
         assert_eq!(
@@ -2569,7 +2684,7 @@ mod tests {
                 Stop(1)
             ]
         );
-        s.stopped(1);
+        s.stopped(1, false);
         s.apply(&d, Then::Add(activity(3, 7, "Next", 0), None), None, true);
         assert_eq!(s.paused(2), [Launch(3)]);
         s.top_resumed_released(None);

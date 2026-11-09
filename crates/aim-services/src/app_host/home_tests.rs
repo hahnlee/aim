@@ -49,7 +49,7 @@ fn home_is_launched_stopped_behind_the_desktop_in_window_mode() {
     // `realStartActivityLocked` neither resumes nor shows it.
     assert_eq!(home, [Command::LaunchStopped(1)]);
     assert_eq!(s.get(1).unwrap().state, State::Stopping);
-    s.stopped(1);
+    s.stopped(1, false);
     assert_eq!(s.get(1).unwrap().state, State::Stopped);
     // The app's task opens over it; it is never paused, resumed or focused.
     assert!(app.starts_with(&[Command::Launch(2), Command::Front(7)]));
@@ -104,7 +104,7 @@ fn start_home_intent(s: &mut Stack) -> Vec<Command> {
 #[test]
 fn a_home_intent_in_window_mode_hides_the_front_app_and_resumes_the_home() {
     let (mut s, _, _) = start_home_then_app(true);
-    s.stopped(1);
+    s.stopped(1, false);
     // Another task of the app, and one of another app, which it is in front of.
     let new = Decision::default();
     let other = Activity::new(3, 9, 3, "q/q.Main", 0, 0, None);
@@ -328,4 +328,29 @@ fn a_home_intent_starts_a_home_activity_unless_a_component_is_named_by_an_app() 
     let mut data = home.intent.clone();
     data.data = Some(crate::package::uri::Uri::parse("content://h"));
     assert!(!is_home_intent(&data));
+}
+
+// android-16.0.0_r1 ActivityRecord.handleAppDied keeps the stopped home
+// that saved its state in the root home task; restarted behind the desktop
+// in window mode, it is launched to stopped (realStartActivityLocked).
+#[test]
+fn a_dead_home_with_saved_state_is_kept_and_restarted_stopped_behind_the_desktop() {
+    for saved_state in [true, false] {
+        let (mut s, _, _) = start_home_then_app(true);
+        // It was resumed once, as when brought to the front before.
+        s.get_mut(1).unwrap().have_state = false;
+        assert!(s.stopped(1, saved_state));
+        let commands = s.process_died(1, false);
+        if !saved_state {
+            assert!(s.get(1).is_none());
+            assert!(commands.contains(&Command::TaskEmpty(HOME_ROOT_TASK)));
+            continue;
+        }
+        assert!(!commands.contains(&Command::TaskEmpty(HOME_ROOT_TASK)));
+        assert!(!commands.contains(&Command::Launch(1)), "{commands:?}");
+        assert_eq!(s.top(HOME_ROOT_TASK).unwrap().token, 1);
+        s.get_mut(1).unwrap().start_seq = 3;
+        assert_eq!(s.relaunch(1), [Command::LaunchStopped(1)]);
+        assert_eq!(s.get(1).unwrap().state, State::Stopping);
+    }
 }

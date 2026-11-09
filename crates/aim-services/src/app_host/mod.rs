@@ -3493,13 +3493,13 @@ impl AppHost {
             a.start_seq = start_seq;
             r.start_seq = start_seq;
             r.started = Instant::now();
-            let mut commands = Vec::new();
-            if pending {
+            let commands = if pending {
+                let mut commands = Vec::new();
                 stack.resume_focused(false, &mut commands);
+                commands
             } else {
-                commands.push(activity_stack::Command::Launch(token));
-                stack.report_top_resumed(&mut commands);
-            }
+                stack.relaunch(token)
+            };
             drop(records);
             drop(stack);
             if let Some(me) = self.me.upgrade() {
