@@ -134,7 +134,7 @@ impl AppHost {
     }
 
     /// `finishBooting` after the services' `PHASE_BOOT_COMPLETED`: the
-    /// boot's properties, then `onBootComplete`'s `finishUserBoot` of the
+    /// processes on hold started, the boot's properties, then `onBootComplete`'s `finishUserBoot` of the
     /// system user, `LOCKED_BOOT_COMPLETED` while it is locked, its unlock,
     /// and the rest of its boot as `UserController` goes through it.
     /// `unlocking` runs the services' `onUserUnlocking`
@@ -164,6 +164,7 @@ impl AppHost {
                 );
                 Ok(())
             })?;
+        self.start_processes_on_hold();
         // "Tell anyone interested that we are done booting!"
         self.set_property("sys.boot_completed", "1");
         self.set_property("dev.bootcomplete", "1");
