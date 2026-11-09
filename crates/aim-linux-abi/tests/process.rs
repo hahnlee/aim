@@ -337,6 +337,11 @@ fn pidfds_poll_readable_when_the_process_exits() {
 }
 
 #[test]
+fn a_dup_of_a_pidfd_is_the_same_pidfd() {
+    check("pidfd_dup");
+}
+
+#[test]
 fn epoll_fds_survive_fork() {
     check("epoll_fork");
 }

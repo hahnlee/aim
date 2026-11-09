@@ -67,6 +67,8 @@ pub enum Kind {
     Kmsg(Arc<super::kmsg::Open>),
     /// A control file of a cgroup filesystem (`cgroup`).
     Cgroup(Arc<super::cgroup::Open>),
+    /// A pidfd (`wait`): a kqueue.
+    PidFd(Arc<super::wait::PidFd>),
 }
 
 pub(super) struct PathProof(std::os::fd::OwnedFd);
@@ -567,8 +569,7 @@ pub(crate) fn fork_guest_snapshot()
 -> Result<(Vec<(i32, bool)>, Vec<ForkPrivateFd>), crate::errno::Errno> {
     let mut flags = Vec::new();
     let mut owners = Vec::new();
-    let mut kqueues = kqueue_fds();
-    kqueues.extend(super::wait::pidfd_fds());
+    let kqueues = kqueue_fds();
     for fd in super::fd_visibility::visible() {
         let value = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         if value < 0 {
@@ -1143,7 +1144,6 @@ pub fn get(fd: i32) -> Option<Kind> {
 pub fn on_close(fd: i32) {
     clear_regular_access(fd);
     super::fuse_client::close(fd);
-    super::wait::closed(fd);
     if super::fuse_device::is_device(fd) {
         set_slow(fd, false);
     }
@@ -1369,6 +1369,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             Kind::Signal(_) => "anon_inode:[signalfd]",
             Kind::Epoll(_) => "anon_inode:[eventpoll]",
             Kind::Inotify(_) => "anon_inode:inotify",
+            Kind::PidFd(_) => "anon_inode:[pidfd]",
             Kind::SyncFile => "anon_inode:sync_file",
             Kind::Evdev(e) => return Some(e.path()),
             Kind::Sock(_)
@@ -1392,10 +1393,10 @@ pub fn anon_name(fd: i32) -> Option<String> {
     )
 }
 
-/// The fds of epolls and inotifies: kqueues, which a fork child makes
-/// again on the same numbers.
+/// The fds of epolls, inotifies and pidfds: kqueues, which a fork child
+/// makes again on the same numbers.
 pub fn kqueue_fds() -> Vec<i32> {
-    fds_where(|k| matches!(k, Kind::Epoll(_) | Kind::Inotify(_)))
+    fds_where(|k| matches!(k, Kind::Epoll(_) | Kind::Inotify(_) | Kind::PidFd(_)))
         .into_iter()
         .filter(|(fd, _)| visible(*fd))
         .map(|(fd, _)| fd)
@@ -1900,6 +1901,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
             Kind::Kmsg(a) => Arc::as_ptr(a) as *const (),
             Kind::Cgroup(a) => Arc::as_ptr(a) as *const (),
+            Kind::PidFd(a) => Arc::as_ptr(a) as *const (),
             Kind::Knob(a) => Arc::as_ptr(a) as *const (),
             Kind::TracePipe(a) => Arc::as_ptr(a) as *const (),
             Kind::Memfd(_)
@@ -2017,6 +2019,10 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                 w.u32(15);
                 super::cgroup::save_open(w, open);
             }
+            Kind::PidFd(pidfd) => {
+                w.u32(21);
+                pidfd.save(w);
+            }
             Kind::Content | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
@@ -2076,6 +2082,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
                     return (fd, None);
                 }
             },
+            21 => Kind::PidFd(super::wait::PidFd::load(r)),
             14 => Kind::Kmsg(Arc::new(super::kmsg::Open::restore(r.bool()))),
             // A group removed since keeps its open files as plain ones.
             15 => match super::cgroup::restore_open(r) {

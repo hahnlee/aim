@@ -63,13 +63,12 @@ fn from_host(h: i16, asked: i16) -> i16 {
 /// Linux reports only readable (`ep_eventpoll_poll`, `inotify_poll`,
 /// `pidfd_poll`, which adds POLLHUP once the process is reaped: the
 /// pidfd's reap watch, [`super::wait::ReapWatch`]).
-pub(super) fn reportable(fd: i32, kind: Option<&super::fdtab::Kind>) -> Option<i16> {
+pub(super) fn reportable(kind: Option<&super::fdtab::Kind>) -> Option<i16> {
     use super::fdtab::Kind;
     match kind {
         Some(Kind::Signal(_) | Kind::Timer(_)) => Some(POLLIN),
         Some(Kind::Event(_)) => Some(POLLIN | POLLOUT),
-        Some(Kind::Epoll(_) | Kind::Inotify(_)) => Some(POLLIN | POLLRDNORM),
-        None if super::wait::is_pidfd(fd) => Some(POLLIN | POLLRDNORM),
+        Some(Kind::Epoll(_) | Kind::Inotify(_) | Kind::PidFd(_)) => Some(POLLIN | POLLRDNORM),
         _ => None,
     }
 }
@@ -80,12 +79,7 @@ pub(super) fn reportable(fd: i32, kind: Option<&super::fdtab::Kind>) -> Option<i
 /// POLLPRI, POLLRDBAND or POLLWRBAND, which Darwin's is whenever readable
 /// or writable, nor POLLRDHUP, and its read end never writable, which a
 /// named FIFO's is on Darwin (`pipe_poll`).
-fn asked_events(
-    fd: i32,
-    kind: Option<&super::fdtab::Kind>,
-    pipe: Option<PipeEnd>,
-    asked: i16,
-) -> i16 {
+fn asked_events(kind: Option<&super::fdtab::Kind>, pipe: Option<PipeEnd>, asked: i16) -> i16 {
     if let Some(super::fdtab::Kind::Signal(description)) = kind {
         super::signalfd::ready(description);
     }
@@ -96,7 +90,7 @@ fn asked_events(
         Some(_) => return asked & !(POLLPRI | POLLRDBAND | POLLWRBAND | POLLRDHUP),
         None => {}
     }
-    reportable(fd, kind).map_or(asked, |events| asked & events)
+    reportable(kind).map_or(asked, |events| asked & events)
 }
 
 /// Register the calling thread as a poller of the signalfds among `pins`
@@ -179,13 +173,11 @@ fn pipe_end(fd: i32) -> Option<PipeEnd> {
     }
 }
 
-/// The pipe ends of guest fd `fd`, an untyped one, on its host descriptor
-/// `host`: a typed one's host socket or kqueue is never a FIFO, nor is a
-/// pidfd, a kqueue that Darwin stats as one.
-pub(super) fn pipe(fd: i32, host: i32, kind: Option<&super::fdtab::Kind>) -> Option<PipeEnd> {
-    (kind.is_none() && !super::wait::is_pidfd(fd))
-        .then(|| pipe_end(host))
-        .flatten()
+/// The pipe ends of an untyped guest fd on its host descriptor `host`: a
+/// typed one's host socket or kqueue (a pidfd's, which Darwin stats as a
+/// FIFO, included) is never a FIFO.
+pub(super) fn pipe(host: i32, kind: Option<&super::fdtab::Kind>) -> Option<PipeEnd> {
+    kind.is_none().then(|| pipe_end(host)).flatten()
 }
 
 /// The bytes queued in pipe read end `fd`.
@@ -457,8 +449,8 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             |watch| watch.observation.data().as_raw_fd(),
         );
         let kind = pin.as_ref().and_then(|pin| pin.kind());
-        let pipe = pin.as_ref().and_then(|_| self::pipe(entry.fd, fd, kind));
-        entry.events = asked_events(entry.fd, kind, pipe, entry.events);
+        let pipe = pin.as_ref().and_then(|_| self::pipe(fd, kind));
+        entry.events = asked_events(kind, pipe, entry.events);
         let socket = matches!(
             pin.as_ref().and_then(|pin| pin.kind()),
             Some(super::fdtab::Kind::Sock(_))
@@ -475,8 +467,8 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             .then(|| super::wait::reap_watch(entry.fd))
             .flatten();
         host.push(match &reap {
-            Some(watch) => libc::pollfd {
-                fd: watch.fd(),
+            Some((_, watch)) => libc::pollfd {
+                fd: *watch,
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -694,8 +686,8 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
             if ev & POLLIN != 0 {
                 super::binder::poll(host_fd);
             }
-            let pipe = pipe(fd as i32, host_fd, pin.kind());
-            ev = to_host(asked_events(fd as i32, pin.kind(), pipe, ev));
+            let pipe = pipe(host_fd, pin.kind());
+            ev = to_host(asked_events(pin.kind(), pipe, ev));
             host.push(libc::pollfd {
                 fd: host_fd,
                 events: ev,
@@ -1294,6 +1286,72 @@ mod reportable_tests {
         assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } < 0);
         assert!(shell.wait().unwrap().success());
         close(&[level, once, removed]);
+    }
+
+    /// A dup of a pidfd (dup, fcntl F_DUPFD_CLOEXEC, dup3 over another
+    /// file) is the same open file, so the same pidfd: it signals, waits
+    /// and polls readable at the exit and hung up at the reap through the
+    /// one reap watch, which closing the original leaves to the dups until
+    /// the last of them closes.
+    #[test]
+    fn a_dup_of_a_pidfd_is_the_same_pidfd() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_dup_of_a_pidfd_is_the_same_pidfd",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let pidfd = wait::open_pidfd(pid, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let duped = fs::dup([pidfd as u64, 0, 0, 0, 0, 0]);
+        // F_DUPFD_CLOEXEC.
+        let cloexec = fs::fcntl([pidfd as u64, 1030, 0, 0, 0, 0]);
+        let replaced = event::eventfd2([0, O_NONBLOCK, 0, 0, 0, 0]);
+        assert!(duped >= 0 && cloexec >= 0 && replaced >= 0);
+        assert_eq!(
+            fs::dup3([pidfd as u64, replaced as u64, 0, 0, 0, 0]),
+            replaced
+        );
+        let watch = wait::reap_watch_fd(pidfd as i32).unwrap();
+        close(&[pidfd]);
+        for fd in [duped, cloexec, replaced] {
+            assert_eq!(wait::reap_watch_fd(fd as i32), Some(watch));
+            assert_eq!(wait::pidfd_send_signal([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+        let level = watching(duped, 0);
+        let readable = watching(cloexec, 0x1);
+        assert_eq!(polled(replaced, POLLIN), (0, 0));
+        child.kill().unwrap();
+        assert_eq!(waited(readable, 5_000), (1, 0x1));
+        assert_eq!(polled(replaced, POLLIN), (1, POLLIN));
+        // waitid(P_PIDFD, WEXITED | WNOWAIT) on a dup.
+        let mut info = [0i32; 32];
+        assert_eq!(
+            wait::waitid([
+                3,
+                replaced as u64,
+                info.as_mut_ptr() as u64,
+                0x4 | 0x0100_0000,
+                0,
+                0
+            ]),
+            0
+        );
+        assert_eq!(info[4], pid);
+        assert_eq!(waited(level, 0).0, 0);
+        child.wait().unwrap();
+        assert_eq!(waited(level, 5_000), (1, 0x10));
+        assert_eq!(polled(replaced, 0), (1, POLLHUP));
+        close(&[duped, cloexec, level, readable]);
+        // SAFETY: probing descriptor numbers.
+        assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } >= 0);
+        close(&[replaced]);
+        assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } < 0);
     }
 
     /// This thread's CPU time in nanoseconds.

@@ -7,9 +7,8 @@
 //!
 //! A pidfd is a kqueue with an `EVFILT_PROC`/`NOTE_EXIT` filter on the
 //! process: it polls readable once the process exits, as a Linux pidfd
-//! does. A disabled `EVFILT_USER` filter whose ident encodes the pid tags
-//! it, so a table entry is only trusted while the fd still is that kqueue.
-//! The process's start time, recorded at open, tells it apart from a later
+//! does. Its state is the open file's ([`PidFd`], in [`fdtab`]), so a dup
+//! of it is the same pidfd, as on Linux. The process's start time, recorded at open, tells it apart from a later
 //! one with its pid: once no process has both, it was reaped, and the pidfd
 //! also reports POLLHUP (`pidfd_poll`). The pidfd stays readable from the
 //! exit on, so a wait for the reap alone (an interest in no events, or the
@@ -17,10 +16,10 @@
 //! Darwin does not pass kqueues to a forked child; [`after_fork_child`]
 //! recreates the pidfds there.
 
-use super::fdtab;
+use super::fdtab::{self, Kind};
 use aim_storage::process_namespace::ProcessIdentity;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, ESRCH};
 
@@ -328,9 +327,9 @@ pub fn waitid(a: [u64; 6]) -> i64 {
                 }
             },
         ),
-        P_PIDFD => match pidfd_lookup(id as i32) {
-            Some((pid, nonblock)) => {
-                nohang |= nonblock;
+        P_PIDFD => match pidfd_of(id as i32) {
+            Some(pidfd) => {
+                nohang |= pidfd.nonblock;
                 // A readable pidfd's process has exited, and Linux has made
                 // it a zombie by then. Darwin posts NOTE_EXIT a moment
                 // before the zombie can be waited for: wait that moment
@@ -338,7 +337,7 @@ pub fn waitid(a: [u64; 6]) -> i64 {
                 if nohang && options & WEXITED != 0 && pidfd_readable(id as i32) {
                     nohang = false;
                 }
-                (libc::P_PID, pid as u32)
+                (libc::P_PID, pidfd.pid as u32)
             }
             None => return -(EBADF as i64),
         },
@@ -409,8 +408,6 @@ pub fn waitid(a: [u64; 6]) -> i64 {
 // ---- pidfd -----------------------------------------------------------------
 
 const PIDFD_NONBLOCK: u64 = 0o4000;
-/// `EVFILT_USER` ident of the tag filter: this prefix | pid.
-const PIDFD_TAG: usize = 0x7069_6466_0000_0000;
 /// `EVFILT_USER` ident of the "already exited" filter.
 const PIDFD_EXITED: usize = 0x7069_6466_ffff_ffff;
 /// `EVFILT_USER` ident of a reap watch's "reaped here" filter.
@@ -419,13 +416,14 @@ const REAPED: usize = 0;
 /// the process's knotes when its parent reaps it.
 const NOTE_REAP: u32 = 0x1000_0000;
 
-struct PidFd {
-    fd: i32,
+/// A pidfd's open file, which every fd referring to it shares (dups, and
+/// a fork child's copies), as [`fdtab`] keeps an open file's state.
+pub struct PidFd {
     pid: i32,
     nonblock: bool,
     process: ProcessIdentity,
-    /// None only in a fork child until [`after_fork_child`] rebuilds it.
-    reap: Option<Arc<ReapWatch>>,
+    /// Unset only in a fork child until [`after_fork_child`] makes it again.
+    reap: OnceLock<ReapWatch>,
 }
 
 impl PidFd {
@@ -436,12 +434,34 @@ impl PidFd {
 
     /// Make the reap watch readable if the process was reaped.
     fn notice_reap(&self) {
-        if let Some(reap) = self.reap.as_ref().filter(|_| self.reaped()) {
+        if let Some(reap) = self.reap.get().filter(|_| self.reaped()) {
             apply(
                 reap.0,
                 &[kev(REAPED, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER)],
             );
         }
+    }
+
+    /// Fork: the open file (its kqueues are made again in the child).
+    pub(super) fn save(&self, w: &mut super::fork_state::Writer) {
+        w.i32(self.pid);
+        w.bool(self.nonblock);
+        w.u64(self.process.start_seconds);
+        w.u64(self.process.start_microseconds);
+    }
+
+    pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Self> {
+        let (pid, nonblock) = (r.i32(), r.bool());
+        Arc::new(Self {
+            pid,
+            nonblock,
+            process: ProcessIdentity {
+                host_pid: pid,
+                start_seconds: r.u64(),
+                start_microseconds: r.u64(),
+            },
+            reap: OnceLock::new(),
+        })
     }
 }
 
@@ -451,7 +471,7 @@ impl PidFd {
 /// Darwin attaches none to a zombie: a "reaped here" user filter, which
 /// this process triggers as it reaps the pid or finds it reaped, covers a
 /// process that was a zombie when watched.
-pub(super) struct ReapWatch(i32);
+struct ReapWatch(i32);
 
 impl ReapWatch {
     fn new(pid: i32) -> Result<Self, i64> {
@@ -479,10 +499,6 @@ impl ReapWatch {
             _ => Err(-(EINVAL as i64)),
         }
     }
-
-    pub(super) fn fd(&self) -> i32 {
-        self.0
-    }
 }
 
 impl Drop for ReapWatch {
@@ -492,8 +508,6 @@ impl Drop for ReapWatch {
         }
     }
 }
-
-static PIDFDS: Mutex<Vec<PidFd>> = Mutex::new(Vec::new());
 
 fn kev(ident: usize, filter: i16, flags: u16, fflags: u32) -> libc::kevent {
     libc::kevent {
@@ -530,8 +544,8 @@ fn apply(kq: i32, changes: &[libc::kevent]) -> Vec<i64> {
     out[..n as usize].iter().map(|e| e.data as i64).collect()
 }
 
-/// A kqueue that polls readable once `pid` exits, tagged with the pid;
-/// readable from the start unless `watch`.
+/// A kqueue that polls readable once `pid` exits; readable from the start
+/// unless `watch`.
 fn new_pidfd_kqueue(pid: i32, watch: bool) -> Result<i32, i64> {
     // SAFETY: plain kqueue creation.
     let kq = unsafe { libc::kqueue() };
@@ -540,26 +554,13 @@ fn new_pidfd_kqueue(pid: i32, watch: bool) -> Result<i32, i64> {
     }
     // SAFETY: our new fd.
     unsafe { libc::fcntl(kq, libc::F_SETFD, libc::FD_CLOEXEC) };
-    let tag = kev(
-        PIDFD_TAG | pid as u32 as usize,
-        libc::EVFILT_USER,
-        libc::EV_ADD | libc::EV_DISABLE,
-        0,
-    );
     let proc = kev(
         pid as usize,
         libc::EVFILT_PROC,
         libc::EV_ADD,
         libc::NOTE_EXIT,
     );
-    let changes = [tag, proc];
-    let r = apply(kq, &changes[..if watch { 2 } else { 1 }]);
-    if r.first() != Some(&0) {
-        // SAFETY: closing our fd.
-        unsafe { libc::close(kq) };
-        return Err(-(EINVAL as i64));
-    }
-    if r.get(1) != Some(&0) {
+    if !watch || apply(kq, &[proc]) != [0] {
         // The process is gone or a zombie: it still exists for its parent
         // until reaped, and its pidfd is readable from the start.
         // SAFETY: probing a pid.
@@ -567,26 +568,19 @@ fn new_pidfd_kqueue(pid: i32, watch: bool) -> Result<i32, i64> {
             unsafe { libc::close(kq) };
             return Err(-(ESRCH as i64));
         }
-        apply(
+        let exited = apply(
             kq,
             &[
                 kev(PIDFD_EXITED, libc::EVFILT_USER, libc::EV_ADD, 0),
                 kev(PIDFD_EXITED, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER),
             ],
         );
+        if let Some(&e) = exited.iter().find(|&&e| e != 0) {
+            unsafe { libc::close(kq) };
+            return Err(-(errno::from_darwin(e as i32) as i64));
+        }
     }
     Ok(kq)
-}
-
-/// Whether `fd` is still the pidfd kqueue of `pid`.
-fn has_tag(fd: i32, pid: i32) -> bool {
-    let probe = kev(
-        PIDFD_TAG | pid as u32 as usize,
-        libc::EVFILT_USER,
-        libc::EV_DISABLE,
-        0,
-    );
-    apply(fd, &[probe]) == [0]
 }
 
 pub(super) fn open_pidfd(pid: i32, nonblock: bool) -> i64 {
@@ -595,32 +589,24 @@ pub(super) fn open_pidfd(pid: i32, nonblock: bool) -> i64 {
         Err(e) => return -(errno::from_darwin(e.raw_os_error().unwrap_or(libc::EIO)) as i64),
     };
     let reap = match ReapWatch::new(pid) {
-        Ok(reap) => Arc::new(reap),
+        Ok(reap) => reap,
         Err(e) => return e,
     };
     let kq = match new_pidfd_kqueue(pid, true) {
         Ok(kq) => kq,
         Err(e) => return e,
     };
-    let entry = PidFd {
-        fd: kq,
+    let pidfd = Arc::new(PidFd {
         pid,
         nonblock,
         process,
-        reap: Some(reap),
-    };
-    let stale = {
-        let mut t = PIDFDS.lock().unwrap();
-        let stale = take_where(&mut t, |p| p.fd == kq);
-        t.push(entry);
-        // A reap since the watch was made, by this process or another.
-        t.last().unwrap().notice_reap();
-        stale
-    };
-    drop(stale);
+        reap: OnceLock::from(reap),
+    });
+    // A reap since the watch was made, by this process or another.
+    pidfd.notice_reap();
+    fdtab::insert(kq, Kind::PidFd(pidfd));
     if let Err(error) = fdtab::publish_typed_guest(kq) {
-        let stale = take_where(&mut PIDFDS.lock().unwrap(), |entry| entry.fd == kq);
-        drop(stale);
+        fdtab::on_close(kq);
         unsafe {
             libc::close(kq);
         }
@@ -641,74 +627,59 @@ fn pidfd_readable(fd: i32) -> bool {
     unsafe { libc::poll(&mut p, 1, 0) == 1 && p.revents & libc::POLLIN != 0 }
 }
 
-/// The pid and O_NONBLOCK flag behind a pidfd.
-fn pidfd_lookup(fd: i32) -> Option<(i32, bool)> {
-    let t = PIDFDS.lock().unwrap();
-    let p = t.iter().find(|p| p.fd == fd)?;
-    has_tag(fd, p.pid).then_some((p.pid, p.nonblock))
+/// The open pidfd file behind `fd`, whichever fd referring to it this is.
+fn pidfd_of(fd: i32) -> Option<Arc<PidFd>> {
+    match fdtab::get(fd)? {
+        Kind::PidFd(pidfd) => Some(pidfd),
+        _ => None,
+    }
 }
 
 /// Whether `fd` is a pidfd whose process was reaped, which `pidfd_poll`
 /// reports as EPOLLHUP.
 pub(super) fn pidfd_reaped(fd: i32) -> bool {
-    let t = PIDFDS.lock().unwrap();
-    t.iter()
-        .find(|p| p.fd == fd)
-        .is_some_and(|p| has_tag(fd, p.pid) && p.reaped())
+    pidfd_of(fd).is_some_and(|p| p.reaped())
 }
 
-/// Whether `fd` is a pidfd.
-pub(super) fn is_pidfd(fd: i32) -> bool {
-    pidfd_lookup(fd).is_some()
-}
-
-/// The reap watch of pidfd `fd`.
-pub(super) fn reap_watch(fd: i32) -> Option<Arc<ReapWatch>> {
-    let t = PIDFDS.lock().unwrap();
-    let p = t.iter().find(|p| p.fd == fd)?;
-    has_tag(fd, p.pid).then(|| p.reap.clone()).flatten()
+/// Pidfd `fd`'s open file, which keeps its reap watch, and the watch's fd.
+pub(super) fn reap_watch(fd: i32) -> Option<(Arc<PidFd>, i32)> {
+    let pidfd = pidfd_of(fd)?;
+    let watch = pidfd.reap.get()?.0;
+    Some((pidfd, watch))
 }
 
 /// The fd of pidfd `fd`'s reap watch, for a knote on it: the watch lives
-/// as long as the pidfd, which the guest closes, not the caller.
+/// as long as the pidfd's open file, which the guest closes, not the
+/// caller.
 pub(super) fn reap_watch_fd(fd: i32) -> Option<i32> {
-    let t = PIDFDS.lock().unwrap();
-    let p = t.iter().find(|p| p.fd == fd)?;
-    has_tag(fd, p.pid)
-        .then(|| p.reap.as_ref().map(|r| r.0))
-        .flatten()
+    reap_watch(fd).map(|(_, watch)| watch)
 }
 
-/// The guest closes `fd`: forget it if it is a pidfd, closing its reap
-/// watch.
-pub(super) fn closed(fd: i32) {
-    let closed = take_where(&mut PIDFDS.lock().unwrap(), |p| p.fd == fd);
-    drop(closed);
+/// Whether `watch` is the reap watch of a pidfd open in this process.
+pub(super) fn is_reap_watch(watch: i32) -> bool {
+    pidfds()
+        .iter()
+        .any(|(_, p)| p.reap.get().is_some_and(|r| r.0 == watch))
 }
 
-/// The pidfd whose reap watch is `watch`.
-pub(super) fn reap_watch_owner(watch: i32) -> Option<i32> {
-    let t = PIDFDS.lock().unwrap();
-    t.iter()
-        .find(|p| p.reap.as_ref().is_some_and(|r| r.0 == watch))
-        .map(|p| p.fd)
+/// The fds referring to pidfds, with their open files.
+fn pidfds() -> Vec<(i32, Arc<PidFd>)> {
+    fdtab::fds_where(|k| matches!(k, Kind::PidFd(_)))
+        .into_iter()
+        .filter_map(|(fd, k)| match k {
+            Kind::PidFd(p) => Some((fd, p)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// This process reaped `pid`: make its pidfds' reap watches readable,
 /// which `NOTE_REAP` does not for a process that was a zombie when
 /// watched.
 fn notice_reaped(pid: i32) {
-    for p in PIDFDS.lock().unwrap().iter().filter(|p| p.pid == pid) {
+    for (_, p) in pidfds().iter().filter(|(_, p)| p.pid == pid) {
         p.notice_reap();
     }
-}
-
-/// Remove the entries `f` selects, to be dropped (closing their reap
-/// watches) after the table's lock.
-fn take_where(t: &mut Vec<PidFd>, f: impl Fn(&PidFd) -> bool) -> Vec<PidFd> {
-    let (taken, kept) = std::mem::take(t).into_iter().partition(f);
-    *t = kept;
-    taken
 }
 
 pub fn pidfd_open(a: [u64; 6]) -> i64 {
@@ -759,78 +730,40 @@ pub fn pidfd_send_signal(a: [u64; 6]) -> i64 {
             return -(EINVAL as i64);
         }
     }
-    let Some((pid, _)) = pidfd_lookup(fd) else {
+    let Some(pidfd) = pidfd_of(fd) else {
         return -(EBADF as i64);
     };
-    send_signal(pid, sig)
+    send_signal(pidfd.pid, sig)
 }
 
-/// Before fork: forget pidfds the guest closed or replaced.
-pub(super) fn prune_pidfds() {
-    // Bound first: the guard goes at the end of the statement.
-    let closed = take_where(&mut PIDFDS.lock().unwrap(), |p| !has_tag(p.fd, p.pid));
-    drop(closed);
-}
-
-/// Fork: the pidfds (their kqueues are made again in the child).
-pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
-    prune_pidfds();
-    let t = PIDFDS.lock().unwrap();
-    w.seq(t.iter(), |w, p| {
-        w.i32(p.fd);
-        w.i32(p.pid);
-        w.bool(p.nonblock);
-        w.u64(p.process.start_seconds);
-        w.u64(p.process.start_microseconds);
-    });
-}
-
-pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
-    let v = r.seq(|r| {
-        let (fd, pid, nonblock) = (r.i32(), r.i32(), r.bool());
-        PidFd {
-            fd,
-            pid,
-            nonblock,
-            process: ProcessIdentity {
-                host_pid: pid,
-                start_seconds: r.u64(),
-                start_microseconds: r.u64(),
-            },
-            reap: None,
-        }
-    });
-    *PIDFDS.lock().unwrap() = v;
-}
-
-/// The fds of this process's pidfds.
-pub(super) fn pidfd_fds() -> Vec<i32> {
-    prune_pidfds();
-    PIDFDS.lock().unwrap().iter().map(|p| p.fd).collect()
-}
-
-/// In a forked child: kqueues are not inherited, so each pidfd is
-/// recreated at its number (held by a placeholder until now), as Linux
-/// children inherit their parent's pidfds; one whose process was reaped
-/// watches no process that took its pid since. The reap watches are made
-/// again too; one whose process is a zombie now, not this process's to
-/// reap, gets no notice of the reap.
+/// In a forked child: kqueues are not inherited, so each pidfd is made
+/// again, once per open file and duplicated onto every fd number that
+/// referred to it (held by placeholders until now), as Linux children
+/// inherit their parent's pidfds; one whose process was reaped watches no
+/// process that took its pid since. The reap watches are made again too;
+/// one whose process is a zombie now, not this process's to reap, gets no
+/// notice of the reap.
 pub(super) fn after_fork_child() -> Result<(), errno::Errno> {
-    let mut t = PIDFDS.lock().unwrap();
-    for p in t.iter_mut() {
-        p.reap = Some(Arc::new(
-            ReapWatch::new(p.pid).map_err(|error| -error as errno::Errno)?,
-        ));
-        p.notice_reap();
-        // SAFETY: filling the fd number the kqueue had.
-        unsafe {
-            let kq =
-                new_pidfd_kqueue(p.pid, !p.reaped()).map_err(|error| -error as errno::Errno)?;
-            let result = super::fdtab::restore_kqueue(p.fd, kq, true);
-            if kq != p.fd {
-                libc::close(kq);
+    let mut made: Vec<(i32, Arc<PidFd>)> = Vec::new();
+    for (fd, p) in pidfds() {
+        let source = made.iter().find(|(_, m)| Arc::ptr_eq(m, &p)).map(|m| m.0);
+        let kq = match source {
+            Some(source) => source,
+            None => {
+                let watch = ReapWatch::new(p.pid).map_err(|error| -error as errno::Errno)?;
+                p.reap.get_or_init(|| watch);
+                p.notice_reap();
+                new_pidfd_kqueue(p.pid, !p.reaped()).map_err(|error| -error as errno::Errno)?
             }
-            result?;
+        };
+        let result = fdtab::restore_kqueue(fd, kq, true);
+        if kq != fd && source.is_none() {
+            // SAFETY: our temporary kqueue, now on `fd`.
+            unsafe { libc::close(kq) };
+        }
+        result?;
+        if source.is_none() {
+            made.push((fd, p));
         }
     }
     Ok(())

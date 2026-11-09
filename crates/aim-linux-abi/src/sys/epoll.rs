@@ -527,7 +527,7 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
     // watched for EPOLLERR and EPOLLHUP, as `ep_insert` and `ep_modify`
     // add them.
     let new = new.map(|mut n| {
-        match super::poll::reportable(fd, kind.as_ref()) {
+        match super::poll::reportable(kind.as_ref()) {
             Some(events) => {
                 n.events &= events as u32 | EPOLLEXCLUSIVE | EPOLLWAKEUP | EPOLLONESHOT | EPOLLET
             }
@@ -586,7 +586,7 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
     let pipe = eof
         .then(|| {
             let fd = k.ident as i32;
-            super::poll::pipe(fd, fd, fdtab::get(fd).as_ref())
+            super::poll::pipe(fd, fdtab::get(fd).as_ref())
         })
         .flatten();
     match pipe {
@@ -850,12 +850,22 @@ fn ready(
             continue;
         }
         let ident = k.ident as i32;
-        // A pidfd's knote, or its reap watch's.
+        // A pidfd's knote, or its reap watch's: the watch of the pidfd's
+        // open file, which its dups share.
         let (fd, reap) = if interest.contains_key(&ident) {
             (ident, false)
         } else {
-            match super::wait::reap_watch_owner(ident) {
+            let owner = interest
+                .keys()
+                .copied()
+                .find(|&fd| super::wait::reap_watch_fd(fd) == Some(ident));
+            match owner {
                 Some(fd) => (fd, true),
+                // The pidfd was closed while a dup keeps its watch open.
+                None if super::wait::is_reap_watch(ident) => {
+                    rearm.push(kev(ident, k.filter, libc::EV_DELETE));
+                    continue;
+                }
                 None => continue,
             }
         };

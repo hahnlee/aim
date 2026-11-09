@@ -637,6 +637,61 @@ static void pidfd_poll(void) {
   printf("ok pidfd_poll\n");
 }
 
+// A dup of a pidfd (dup, dup3, F_DUPFD, F_DUPFD_CLOEXEC) is the same open
+// file, so the same pidfd: it signals, waits and polls, and outlives the
+// original's close; a forked child's copies of the dups are pidfds too.
+static void pidfd_dup(void) {
+  int go[2];
+  CHECK(pipe(go) == 0, "pipe");
+  pid_t pid = fork();
+  if (pid == 0) {
+    char c;
+    close(go[1]);
+    read(go[0], &c, 1);
+    _exit(7);
+  }
+  close(go[0]);
+  int fd = pidfd_open(pid, 0);
+  CHECK(fd >= 0, "pidfd_open");
+  int d[4] = {dup(fd), fcntl(fd, F_DUPFD, 100), fcntl(fd, F_DUPFD_CLOEXEC, 0), 200};
+  CHECK(dup3(fd, d[3], O_CLOEXEC) == d[3], "dup3");
+  for (int i = 0; i < 4; i++) CHECK(d[i] >= 0 && pidfd_send_signal(d[i], 0) == 0, "dup %d", i);
+  close(fd);
+  pid_t other = fork();
+  if (other == 0) {
+    int again = dup(d[1]);
+    _exit(pidfd_send_signal(d[0], 0) == 0 && pidfd_send_signal(again, 0) == 0 ? 0 : 1);
+  }
+  int st;
+  CHECK(waitpid(other, &st, 0) == other && WIFEXITED(st) && WEXITSTATUS(st) == 0, "inherited");
+  int readable = epoll_create1(0), reaped = epoll_create1(0);
+  struct epoll_event in = {.events = EPOLLIN, .data.fd = d[1]};
+  struct epoll_event none = {.events = 0, .data.fd = d[0]};
+  CHECK(epoll_ctl(readable, EPOLL_CTL_ADD, d[1], &in) == 0, "epoll IN");
+  CHECK(epoll_ctl(reaped, EPOLL_CTL_ADD, d[0], &none) == 0, "epoll none");
+  struct pollfd pfd = {d[2], POLLIN, 0};
+  CHECK(poll(&pfd, 1, 0) == 0, "readable before exit");
+  write(go[1], "x", 1);
+  CHECK(poll(&pfd, 1, 5000) == 1 && pfd.revents == POLLIN, "exit: %#x", pfd.revents);
+  struct epoll_event got;
+  CHECK(epoll_wait(readable, &got, 1, 5000) == 1 && got.data.fd == d[1] && got.events == EPOLLIN,
+        "epoll exit: %#x", got.events);
+  CHECK(epoll_wait(reaped, &got, 1, 0) == 0, "hung up before reap");
+  siginfo_t si;
+  CHECK(waitid(P_PIDFD, d[3], &si, WEXITED) == 0 && si.si_pid == pid && si.si_status == 7,
+        "waitid: pid %d status %d", si.si_pid, si.si_status);
+  CHECK(epoll_wait(reaped, &got, 1, 5000) == 1 && got.data.fd == d[0] && got.events == EPOLLHUP,
+        "epoll reap: %#x", got.events);
+  pfd.events = 0;
+  CHECK(poll(&pfd, 1, 0) == 1 && pfd.revents == POLLHUP, "reap: %#x", pfd.revents);
+  CHECK(pidfd_send_signal(d[1], 0) == -1 && errno == ESRCH, "reaped");
+  for (int i = 0; i < 4; i++) close(d[i]);
+  close(readable);
+  close(reaped);
+  close(go[1]);
+  printf("ok pidfd_dup\n");
+}
+
 // A forked child inherits an epoll fd with its registrations.
 static void epoll_fork(void) {
   int p[2];
@@ -1958,6 +2013,7 @@ int main(int argc, char** argv) {
       {"exec_script", exec_script}, {"exec_state", exec_state},
       {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
+      {"pidfd_dup", pidfd_dup},
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
       {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},
