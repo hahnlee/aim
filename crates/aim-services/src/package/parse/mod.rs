@@ -371,7 +371,7 @@ fn descend(host: &Path, path: &str) -> Result<(std::path::PathBuf, String)> {
 }
 
 /// `FrameworkParsingPackageUtils.validateName`.
-fn validate_name(name: &str, require_separator: bool) -> Option<String> {
+pub(crate) fn validate_name(name: &str, require_separator: bool) -> Option<String> {
     let mut has_sep = false;
     let mut front = true;
     for c in name.chars() {

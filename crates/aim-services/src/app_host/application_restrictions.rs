@@ -2,13 +2,16 @@
 //! read as `UserManagerService.readApplicationRestrictionsLAr`,
 //! `readEntry` and `readBundleEntry` do at android-16.0.0_r1: an `entry`
 //! per key, typed by its `type` attribute, a string array when it has an
-//! `m` count of `value` elements.
+//! `m` count of `value` elements; written as
+//! `writeApplicationRestrictionsLAr` and `writeBundle` write them, and
+//! removed as `cleanAppRestrictionsForPackageLAr` removes them.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::path::Path;
 
 use aim_android_xml::pull::{Event, Reader};
-use aim_binder_host::parcel::{Exception, Parcel};
+use aim_android_xml::{Element, Node, TEXT, Value as XmlValue};
+use aim_binder_host::parcel::{self, BAD_VALUE, Exception, Parcel};
 
 use crate::bundle::{self, Value};
 
@@ -43,6 +46,189 @@ pub(super) fn read(file: &Path) -> Result<Restrictions, Exception> {
         eprintln!("UserManagerService: Error parsing {}: {e}", file.display());
     }
     Ok(Restrictions(restrictions))
+}
+
+/// Restrictions as `setApplicationRestrictions` takes them: whether the
+/// `Bundle` is empty, and the document `writeBundle` makes of its entries
+/// (in its `ArrayMap`'s order, the parcel's), or the exception it throws
+/// on one: a null key, a value of another type than the ones it writes
+/// (its `String[]` cast), or a `Parcelable[]` item that is not a `Bundle`.
+pub(super) struct Incoming {
+    empty: bool,
+    document: Result<Element, String>,
+}
+
+impl aim_service_aidl::ReadParcelable for Incoming {
+    fn read_from(r: &mut parcel::Reader<'_>) -> parcel::Result<Self> {
+        let (count, entries) = read_bundle(r)?;
+        Ok(Incoming {
+            empty: count == 0,
+            document: entries.map(|content| Element {
+                name: "restrictions".into(),
+                attrs: Vec::new(),
+                content,
+            }),
+        })
+    }
+}
+
+/// A `Bundle` (`readFromParcelInner`): its entry count, and its entries
+/// as `writeBundle` writes them.
+fn read_bundle(r: &mut parcel::Reader<'_>) -> parcel::Result<(i32, Result<Vec<Node>, String>)> {
+    let length = r.read_i32()?;
+    if length == 0 {
+        return Ok((0, Ok(Vec::new())));
+    }
+    if length < 0 || length % 4 != 0 {
+        return Err(BAD_VALUE);
+    }
+    if !matches!(r.read_i32()?, bundle::MAGIC | bundle::MAGIC_NATIVE) {
+        return Err(BAD_VALUE);
+    }
+    let end = r.position() + length as usize;
+    let count = r.read_i32()?;
+    let mut entries = Vec::new();
+    for _ in 0..count.max(0) {
+        let key = r.read_string16()?;
+        match read_entry_value(r, key)? {
+            Some(Ok(entry)) => entries.push(entry),
+            Some(Err(e)) => return skip_to(r, end).map(|()| (count, Err(e))),
+            // A type this reader cannot step over: none `writeBundle` writes.
+            None => {
+                return skip_to(r, end)
+                    .map(|()| (count, Err("ClassCastException: not a String[]".into())));
+            }
+        }
+    }
+    if r.position() != end {
+        return Err(BAD_VALUE);
+    }
+    r.read_bool()?; // has an intent
+    Ok((count, Ok(entries)))
+}
+
+/// The end of a bundle, after the entries left unread.
+fn skip_to(r: &mut parcel::Reader<'_>, end: usize) -> parcel::Result<()> {
+    r.skip(end.checked_sub(r.position()).ok_or(BAD_VALUE)?)?;
+    r.read_bool()?;
+    Ok(())
+}
+
+/// An `entry` element of `kind`, as `writeBundle` writes it: a string
+/// array with its count `m`.
+fn entry(key: Option<String>, kind: &str, m: Option<i32>, content: Vec<Node>) -> Node {
+    let mut attrs = Vec::new();
+    if let Some(key) = key {
+        attrs.push(("key".to_owned(), XmlValue::String(key)));
+    }
+    attrs.push(("type".to_owned(), XmlValue::String(kind.into())));
+    if let Some(m) = m {
+        attrs.push(("m".to_owned(), XmlValue::Int(m)));
+    }
+    Node::Element(Element {
+        name: "entry".into(),
+        attrs,
+        content,
+    })
+}
+
+fn text(s: impl Into<String>) -> Vec<Node> {
+    vec![Node::Token(TEXT, Some(s.into()))]
+}
+
+/// One entry's value (`Parcel.readValue`) as `writeBundle` writes it; none
+/// for a type whose length is not known.
+fn read_entry_value(
+    r: &mut parcel::Reader<'_>,
+    key: Option<String>,
+) -> parcel::Result<Option<Result<Node, String>>> {
+    let kind = r.read_i32()?;
+    let value = match kind {
+        bundle::VAL_NULL => Ok(("s", None, text(""))),
+        bundle::VAL_STRING => Ok(("s", None, text(r.read_string16()?.unwrap_or_default()))),
+        bundle::VAL_INTEGER => Ok(("i", None, text(r.read_i32()?.to_string()))),
+        bundle::VAL_BOOLEAN => Ok(("b", None, text(r.read_bool()?.to_string()))),
+        bundle::VAL_BUNDLE => read_bundle(r)?.1.map(|content| ("B", None, content)),
+        bundle::VAL_STRINGARRAY => match r.read_i32()? {
+            n if n < 0 => Ok(("s", None, text(""))),
+            n => {
+                let mut values = Vec::new();
+                for _ in 0..n {
+                    values.push(Node::Element(Element {
+                        name: "value".into(),
+                        attrs: Vec::new(),
+                        content: text(r.read_string16()?.unwrap_or_default()),
+                    }));
+                }
+                Ok(("sa", Some(n), values))
+            }
+        },
+        bundle::VAL_PARCELABLEARRAY => {
+            let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
+            let end = r.position() + len;
+            let n = r.read_i32()?;
+            let mut bundles = Ok(Vec::new());
+            for _ in 0..n.max(0) {
+                if r.read_string16()?.as_deref() != Some("android.os.Bundle") {
+                    bundles = Err(
+                        "IllegalArgumentException: bundle-array can only hold Bundles".to_owned(),
+                    );
+                    break;
+                }
+                let content = read_bundle(r)?.1;
+                if let Ok(items) = &mut bundles {
+                    match content {
+                        Ok(content) => items.push(entry(None, "B", None, content)),
+                        Err(e) => bundles = Err(e),
+                    }
+                }
+            }
+            r.skip(end.checked_sub(r.position()).ok_or(BAD_VALUE)?)?;
+            if n < 0 {
+                Ok(("s", None, text("")))
+            } else {
+                bundles.map(|items| ("BA", None, items))
+            }
+        }
+        kind if bundle::is_length_prefixed(kind) => {
+            let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
+            r.skip(len)?;
+            Err("ClassCastException: not a String[]".to_owned())
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(value.and_then(|(kind, m, content)| {
+        let key = key.ok_or("NullPointerException: a null key")?;
+        Ok(entry(Some(key), kind, m, content))
+    })))
+}
+
+/// `setApplicationRestrictions`' store: `restrictions` written to `file`
+/// as `writeApplicationRestrictionsLAr` writes them (an exception logged,
+/// the file left as it was), or the file removed for none
+/// (`cleanAppRestrictionsForPackageLAr`). Whether the app is to be told:
+/// always after a write, after a removal only of an existing file.
+pub(super) fn store(file: &Path, restrictions: Option<&Incoming>) -> bool {
+    let Some(restrictions) = restrictions.filter(|r| !r.empty) else {
+        if !file.exists() {
+            return false;
+        }
+        if let Err(e) = std::fs::remove_file(file) {
+            eprintln!("UserManagerService: {} not deleted: {e}", file.display());
+        }
+        return true;
+    };
+    let written = restrictions
+        .document
+        .clone()
+        .and_then(|root| aim_android_xml::abx::write(&root))
+        .and_then(|bytes| {
+            super::usage_database::atomic_write(file, &bytes).map_err(|e| e.to_string())
+        });
+    if let Err(e) = written {
+        eprintln!("UserManagerService: Error writing application restrictions list: {e}");
+    }
+    true
 }
 
 /// An `IOException` or `XmlPullParserException`, which the original catches.
@@ -399,6 +585,127 @@ mod tests {
             read(&base).unwrap().0,
             [(key("k"), Value::String(Some("base".into())))]
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `restrictions` as an app's `Bundle` in a call's data
+    /// (`writeTypedObject`).
+    fn incoming(restrictions: &[(Option<&str>, Value)]) -> Incoming {
+        let mut p = Parcel::new();
+        p.write_i32(1);
+        bundle::write_nullable(&mut p, restrictions);
+        let mut r = parcel::Reader::new(p.data(), &[]);
+        let incoming = aim_service_aidl::read_typed::<Incoming>(&mut r)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.remaining(), 0);
+        incoming
+    }
+
+    #[test]
+    fn written_restrictions_read_back_as_they_were_set() {
+        let dir = crate::app_host::test_temp_dir("application-restrictions-write");
+        let file = dir.join("res_com.example.xml");
+        let set = [
+            (Some("on"), Value::Bool(true)),
+            (Some("off"), Value::Bool(false)),
+            (Some("count"), Value::Int(-7)),
+            (Some("name"), Value::String(Some("value".into()))),
+            (Some("empty"), Value::String(Some(String::new()))),
+            (
+                Some("list"),
+                Value::StringArray(vec![Some("a".into()), Some(" b ".into())]),
+            ),
+            (
+                Some("inner"),
+                Value::Bundle(vec![(Some("x".into()), Value::Int(1))]),
+            ),
+            (
+                Some("many"),
+                Value::ParcelableArray(vec![
+                    (
+                        "android.os.Bundle".into(),
+                        parcel(&[(key("x"), Value::Int(1))]),
+                    ),
+                    ("android.os.Bundle".into(), parcel(&[])),
+                ]),
+            ),
+        ];
+        assert!(store(&file, Some(&incoming(&set))));
+        let bytes = std::fs::read(&file).unwrap();
+        assert!(bytes.starts_with(b"ABX"));
+        // The original trims what it reads back.
+        let mut expected = set.to_vec();
+        expected[5].1 = Value::StringArray(vec![Some("a".into()), Some("b".into())]);
+        let mut p = Parcel::new();
+        bundle::write_nullable(&mut p, &expected);
+        let mut q = Parcel::new();
+        write(&mut q, &read(&file).unwrap().0);
+        assert_eq!(p.data(), q.data());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn null_values_are_written_as_empty_strings() {
+        let dir = crate::app_host::test_temp_dir("application-restrictions-null");
+        let file = dir.join("res_com.example.xml");
+        let set = [
+            (Some("n"), Value::Null),
+            (Some("s"), Value::String(None)),
+            (Some("a"), Value::StringArray(vec![None])),
+        ];
+        assert!(store(&file, Some(&incoming(&set))));
+        let empty = || Value::String(Some(String::new()));
+        let mut read = read(&file).unwrap().0;
+        read.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            read,
+            [
+                (key("a"), Value::StringArray(vec![Some(String::new())])),
+                (key("n"), empty()),
+                (key("s"), empty()),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unwritable_value_leaves_the_file_and_still_tells_the_app() {
+        let dir = crate::app_host::test_temp_dir("application-restrictions-unwritable");
+        let file = dir.join("res_com.example.xml");
+        let before = [(Some("k"), Value::String(Some("v".into())))];
+        assert!(store(&file, Some(&incoming(&before))));
+        let kept = std::fs::read(&file).unwrap();
+        let not_a_bundle =
+            Value::ParcelableArray(vec![("android.graphics.Rect".into(), vec![0; 16])]);
+        for unwritable in [
+            vec![(Some("k"), Value::Long(1))],
+            vec![(Some("k"), Value::IntArray(vec![1]))],
+            vec![(Some("k"), not_a_bundle)],
+            vec![(None, Value::Int(1))],
+            vec![
+                (Some("a"), Value::Int(1)),
+                (Some("b"), Value::Bundle(vec![(key("l"), Value::Long(1))])),
+            ],
+        ] {
+            assert!(store(&file, Some(&incoming(&unwritable))));
+            assert_eq!(std::fs::read(&file).unwrap(), kept);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn no_restrictions_remove_the_file_and_tell_only_if_there_was_one() {
+        let dir = crate::app_host::test_temp_dir("application-restrictions-clean");
+        let file = dir.join("res_com.example.xml");
+        assert!(!store(&file, None));
+        assert!(!store(&file, Some(&incoming(&[]))));
+        assert!(store(&file, Some(&incoming(&[(Some("k"), Value::Int(1))]))));
+        assert!(store(&file, Some(&incoming(&[]))));
+        assert!(!file.exists());
+        assert!(store(&file, Some(&incoming(&[(Some("k"), Value::Int(1))]))));
+        assert!(store(&file, None));
+        assert!(!file.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
