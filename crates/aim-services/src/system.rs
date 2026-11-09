@@ -7899,7 +7899,7 @@ impl System {
         let image = self.native_package_image()?;
         let image_inputs =
             image_inputs.unwrap_or_else(|| crate::package::boot_image::Inputs::new(&image.image));
-        if image_inputs.image != image.image {
+        if !image_inputs.reads(&image.image) {
             return Err(Exception::illegal_argument(
                 "package boot inputs use another image",
             ));

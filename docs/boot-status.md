@@ -351,6 +351,13 @@ guest-init --image <derived> --data <data> --run \
   services, mostly binder HALs, still outlast SIGTERM's 3 s and end at
   SIGKILL (#2765), and `cargo aim boot` leaves the DATA image that
   guest-init hands off attached after it exits (#2766).
+- guest-init's guest processes die with it, even when it is SIGKILLed, as
+  the processes of a Linux pid namespace whose init exits: a linux-run
+  watcher outside the guest (`--pidns-watch ... TABLE`) SIGKILLs the
+  members of its `by-pid` table when guest-init exits (#2763).
+- An `--image` reached through a symbolic link (`/tmp` on macOS) boots:
+  package boot compares the app host's image inputs with the native
+  package image by directory identity, not by path spelling (#2763).
 - `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
   attaches at `<data>` for the boot and detaches when it stops
   (docs/storage.md); `cargo aim storage` shows what it occupies.

@@ -25,7 +25,7 @@
 
 use std::ffi::{CStr, CString, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aim_linux_abi::sys::{ExecState, cred::Identity};
 
@@ -71,8 +71,9 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
 
   linux-run --fuse-broker PATH (internal) the FUSE kernel connection owner
 
-  linux-run --pidns-watch PID SECONDS MICROSECONDS
-                         (internal) watch a private pid namespace's init
+  linux-run --pidns-watch PID SECONDS MICROSECONDS [TABLE]
+                         (internal) watch a private pid namespace's init,
+                         or the init of the existing namespace of TABLE
 
   linux-run --audio-io   (internal) the audio host module's CoreAudio
                          process, started by the module itself
@@ -132,7 +133,7 @@ fn main() {
         .first()
         .is_some_and(|arg| arg == "--pidns-watch")
     {
-        if internal_args.len() != 4 {
+        if !(4..=5).contains(&internal_args.len()) {
             usage();
         }
         let init = aim_storage::process_namespace::ProcessIdentity {
@@ -150,7 +151,11 @@ fn main() {
                 .unwrap_or_else(|| usage()),
         };
         aim_storage::inherited::close_above_stdio();
-        if let Err(error) = aim_linux_abi::sys::watch_pid_namespace(init) {
+        let watched = match internal_args.get(4) {
+            Some(table) => aim_linux_abi::sys::watch_pid_namespace_init(Path::new(table), init),
+            None => aim_linux_abi::sys::watch_pid_namespace(init),
+        };
+        if let Err(error) = watched {
             eprintln!("linux-run: pid namespace watcher: {error}");
             std::process::exit(1);
         }

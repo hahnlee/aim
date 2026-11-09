@@ -589,6 +589,37 @@ pub fn cgroup2_hierarchy(image: &ImageRoot) -> Option<(String, u32, String, Stri
     ))
 }
 
+/// Start linux-run's watcher of this init's pid namespace `table`: the
+/// kernel kills every process of a namespace whose init exits
+/// (pid_namespaces(7)), and a watcher outside the guest does so here even
+/// when this process is SIGKILLed.
+fn watch_namespace(
+    linux_run: &std::path::Path,
+    table: &std::path::Path,
+    init: aim_storage::process_namespace::ProcessIdentity,
+) -> std::io::Result<()> {
+    use std::io::Read;
+    let mut command = std::process::Command::new(linux_run);
+    command
+        .arg("--pidns-watch")
+        .arg(init.host_pid.to_string())
+        .arg(init.start_seconds.to_string())
+        .arg(init.start_microseconds.to_string())
+        .arg(table)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped());
+    let mut child = aim_storage::inherited::stdio_only(&mut command).spawn()?;
+    // Reap the intermediate helper before any service starts; the watcher
+    // itself belongs to launchd.
+    let status = child.wait()?;
+    let mut ready = [0];
+    child.stdout.take().unwrap().read_exact(&mut ready)?;
+    if !status.success() || ready != [1] {
+        return Err(std::io::Error::other("did not start"));
+    }
+    Ok(())
+}
+
 fn default_linux_run() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -737,6 +768,12 @@ impl Boot {
             registration
                 .activate_pid_mapping(&layout.identity_dir().join("by-pid"))
                 .map_err(|error| error.to_string())?;
+            watch_namespace(
+                &linux_run_binary,
+                &layout.identity_dir().join("by-pid"),
+                process,
+            )
+            .map_err(|error| format!("pid namespace watcher: {error}"))?;
             aim_storage::boot_id::BootId::generate(process)
                 .and_then(|boot_id| boot_id.publish(&layout.runtime))
                 .map_err(|error| format!("boot generation identity: {error}"))?;
