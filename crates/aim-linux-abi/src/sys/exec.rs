@@ -471,7 +471,7 @@ fn to_cstring(b: &[u8]) -> CString {
 }
 
 /// Resolve the program `execveat` names.
-fn resolve(dirfd: i32, path: &[u8], flags: u64) -> Result<vfs::Resolved, i64> {
+pub(super) fn resolve(dirfd: i32, path: &[u8], flags: u64) -> Result<vfs::Resolved, i64> {
     if path.is_empty() {
         // The fd itself; a translated file stands for its original.
         let guest = super::procfs::fd_guest_path(dirfd).map_err(|e| -(e as i64))?;
@@ -488,6 +488,8 @@ fn resolve(dirfd: i32, path: &[u8], flags: u64) -> Result<vfs::Resolved, i64> {
             return Err(-(ELOOP as i64));
         }
     }
+    // `do_open_execat` opens the file: a locked one is ENOKEY.
+    super::fscrypt::open(&r.host).map_err(|error| -(error as i64))?;
     Ok(r)
 }
 

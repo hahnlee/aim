@@ -2973,7 +2973,8 @@ fn resolve_inner(
             continue;
         }
         fuse_walk = None;
-        let (host, area) = lookup(&done.host_path());
+        let named = done.host.as_ref().map(|names| join_guest(names));
+        let (host, area) = lookup(named.as_deref().unwrap_or(&current));
         let link = locking.then(|| host_cstring(host.clone())).transpose()?;
         let Some(mut target) = link_target(host, area) else {
             continue;
@@ -2999,7 +3000,8 @@ fn resolve_inner(
         }
     }
     let guest = join_guest(&done.guest);
-    let (host, area) = lookup(&done.host_path());
+    let named = done.host.as_ref().map(|names| join_guest(names));
+    let (host, area) = lookup(named.as_deref().unwrap_or(&guest));
     Ok(Resolved {
         host: CString::new(host.as_os_str().as_bytes()).map_err(|_| errno::EINVAL)?,
         guest,

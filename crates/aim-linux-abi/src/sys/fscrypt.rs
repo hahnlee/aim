@@ -390,8 +390,6 @@ fn set_policy(owner: &Owner, fd: i32, arg: u64, id: &Identity) -> Result<i64, Er
                 0 => [&[1], &wanted[1..], &[0; NONCE][..]].concat(),
                 _ => [&wanted[..], &[0; NONCE][..]].concat(),
             };
-            let spec = Spec::of_context(&context).ok_or(errno::EINVAL)?;
-            owner.policy_root(spec, stat.st_ino).map_err(io)?;
             store(Host::Fd(fd), &renewed(&context))?;
             // Creates do not take the inode lock; one may have come between
             // the check and the store.
@@ -399,6 +397,13 @@ fn set_policy(owner: &Owner, fd: i32, arg: u64, id: &Identity) -> Result<i64, Er
             if !names.is_empty() {
                 withdraw(fd, &names)?;
                 return Err(ENOTEMPTY);
+            }
+            // Recorded once the policy is there: the owner drops roots that
+            // have none.
+            let spec = Spec::of_context(&context).ok_or(errno::EINVAL)?;
+            if let Err(error) = owner.policy_root(spec, stat.st_ino) {
+                withdraw(fd, &[])?;
+                return Err(io(error));
             }
             Ok(0)
         };
@@ -445,6 +450,11 @@ fn ciphertext(owner: &Owner, context: &[u8], plain: &[u8], max: usize) -> Vec<u8
 /// `fscrypt_fname_disk_to_usr` without the key: the no-key name of
 /// `plain`, base64url-encoded `struct fscrypt_nokey_name`.
 fn nokey(owner: &Owner, context: &[u8], plain: &[u8], max: usize) -> Vec<u8> {
+    base64url(&nokey_struct(owner, context, plain, max))
+}
+
+/// The `struct fscrypt_nokey_name` of `plain`.
+fn nokey_struct(owner: &Owner, context: &[u8], plain: &[u8], max: usize) -> Vec<u8> {
     let ciphertext = ciphertext(owner, context, plain, max);
     let mut name = vec![0u8; NOKEY_HASH];
     if ciphertext.len() <= NOKEY_BYTES {
@@ -453,7 +463,7 @@ fn nokey(owner: &Owner, context: &[u8], plain: &[u8], max: usize) -> Vec<u8> {
         name.extend_from_slice(&ciphertext[..NOKEY_BYTES]);
         name.extend_from_slice(&Sha256::digest(&ciphertext[NOKEY_BYTES..]));
     }
-    base64url(&name)
+    name
 }
 
 const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -513,7 +523,7 @@ fn plaintext(
             .into_iter()
             .map(CString::into_bytes)
             .find(|entry| {
-                nokey(owner, context, entry, NAME_MAX)[NOKEY_HASH..] == name[NOKEY_HASH..]
+                nokey_struct(owner, context, entry, NAME_MAX)[NOKEY_HASH..] == decoded[NOKEY_HASH..]
             }));
     }
     let mut plain = decoded[NOKEY_HASH..].to_vec();
@@ -591,7 +601,26 @@ pub(crate) fn link_target(link: &CStr, target: Vec<u8>) -> Result<Vec<u8>, Errno
     })
 }
 
-/// `fscrypt_file_open`: a locked regular file cannot be opened.
+/// Before the entry `host` is unlinked or removed: the inode of a policy
+/// root it may be, to report to [`removed`] once it is gone.
+pub(super) fn removing(host: &CStr) -> Result<Option<u64>, Errno> {
+    if !locking()? || context(Host::Path(host)).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(host_stat(Host::Path(host))?.st_ino))
+}
+
+/// After [`removing`]'s entry is gone: while a key is absent, a root that
+/// went with it no longer keeps lookups asking.
+pub(super) fn removed(inode: Option<u64>) -> Result<(), Errno> {
+    match (inode, owner()?) {
+        (Some(inode), Some(owner)) => owner.removed(inode).map_err(io),
+        _ => Ok(()),
+    }
+}
+
+/// `fscrypt_file_open` (also for execve) and `fscrypt_prepare_setattr` of a
+/// size: a locked regular file can neither be opened nor truncated.
 pub(super) fn open(host: &CStr) -> Result<(), Errno> {
     if locking()?
         && host_type(Host::Path(host)).is_ok_and(|kind| kind == libc::S_IFREG)
@@ -1320,6 +1349,16 @@ mod tests {
         let enokey = errno(ENOKEY);
         assert_eq!(open_at(&path(&files[0]), 0), enokey);
         assert_eq!(open_at(&path(&files[0]), 0o1101), enokey);
+        // execve opens the file; truncate changes its size.
+        let file = guest(&path(&files[0]));
+        assert_eq!(
+            super::super::exec::resolve(AT as i32, file.as_bytes(), 0).err(),
+            Some(enokey)
+        );
+        assert_eq!(
+            super::super::fsops::truncate([file.as_ptr() as u64, 0, 0, 0, 0, 0]),
+            enokey
+        );
         assert_eq!(open_at(&path(&dirs[0]), 0o40000), 0);
         assert_eq!(open_at("locked/new", 0o101), enokey);
         assert_eq!(open_at("locked/new", 0o301), enokey);
@@ -1385,6 +1424,25 @@ mod tests {
             assert_eq!(unlink(AT, &guest(&path(name)), flags), 0, "{name}");
         }
         assert!(list("locked").is_empty());
+        // The root goes, and with it the absent key: lookups stop asking.
+        let roots = |identifier: [u8; 16]| {
+            let table = std::fs::read_to_string(view.join("fscrypt/policies")).unwrap();
+            let spec: String = identifier
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            table.contains(&format!("i{spec} "))
+        };
+        assert!(roots(identifier));
+        assert_eq!(
+            at("locked", |p| super::super::fsops::unlinkat([
+                AT, p, 0x200, 0, 0, 0
+            ])),
+            0
+        );
+        assert!(!roots(identifier));
+        // Other tests' roots are gone with their directories.
+        assert!(!locking().unwrap());
         std::fs::remove_dir_all(&host).unwrap();
     }
 

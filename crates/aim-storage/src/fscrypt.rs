@@ -46,6 +46,7 @@ const STATE: &str = "fscrypt-state";
 const TABLE: &str = "policies";
 const TABLE_NEXT: &str = "policies.next";
 const SECRET: &str = "secret";
+const SECRET_NEXT: &str = "secret.next";
 const MAGIC: &[u8] = b"AIMFSCRYPT01\0";
 const PAGE: usize = 4096;
 /// The host attribute holding an inode's `struct fscrypt_context`.
@@ -105,6 +106,7 @@ pub enum Removal {
     Removed,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct Entry {
     spec: String,
     /// None for a v1 key, which has no users.
@@ -124,6 +126,7 @@ pub struct Owner {
     runtime: PathBuf,
     device: u64,
     secret: [u8; 32],
+    fsid: libc::fsid_t,
     /// The shared page: the generation, then the number of absent keys.
     state: *const [AtomicU64; 2],
     /// The keyring's specifiers as this process last read them, with the
@@ -152,21 +155,25 @@ impl Owner {
             return Err(io::Error::from_raw_os_error(libc::ELOOP));
         }
         let dir = fs::canonicalize(dir)?;
-        match File::options()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(dir.join(SECRET))
-        {
-            Ok(mut file) => {
-                let mut secret = [0u8; 32];
-                unsafe { libc::arc4random_buf(secret.as_mut_ptr().cast(), secret.len()) };
-                file.write_all(&secret)?;
+        let secret = dir.join(SECRET);
+        if !secret.exists() {
+            // Written whole, then linked: a boot killed mid-way leaves
+            // either no secret or all of it.
+            let next = dir.join(SECRET_NEXT);
+            let mut bytes = [0u8; 32];
+            unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
+            let mut file = open(&next, true)?;
+            if unsafe { libc::ftruncate(file.as_raw_fd(), 0) } < 0 {
+                return Err(io::Error::last_os_error());
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            match fs::hard_link(&next, &secret) {
+                Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+                _ => fs::remove_file(next)?,
+            }
         }
+        read_secret(&secret)?;
         let mut locator = MAGIC.to_vec();
         locator.extend_from_slice(dir.as_os_str().as_bytes());
         for (name, bytes) in [
@@ -181,21 +188,7 @@ impl Owner {
         }
         let owner =
             Self::locate(runtime)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        let mut fsid: libc::statfs = unsafe { std::mem::zeroed() };
-        let path = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
-        if unsafe { libc::statfs(path.as_ptr(), &mut fsid) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        owner.change(|_, roots| {
-            let mut kept = Vec::new();
-            for root in roots.drain(..) {
-                if live(&root, fsid.f_fsid)? {
-                    kept.push(root);
-                }
-            }
-            *roots = kept;
-            Ok(())
-        })
+        owner.change(|_, _| Ok(()))
     }
 
     /// The owner guest-init prepared under `runtime`, if any.
@@ -211,11 +204,12 @@ impl Owner {
             .filter(|dir| !dir.is_empty() && !dir.contains(&0))
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
         let dir = Path::new(OsStr::from_bytes(dir));
-        let mut secret = Vec::new();
-        open(&dir.join(SECRET), false)?.read_to_end(&mut secret)?;
-        let secret = secret
-            .try_into()
-            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let secret = read_secret(&dir.join(SECRET))?;
+        let mut fsid: libc::statfs = unsafe { std::mem::zeroed() };
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
+        if unsafe { libc::statfs(path.as_ptr(), &mut fsid) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
         let page = open(&runtime.join(STATE), false)?;
         let state = unsafe {
             libc::mmap(
@@ -236,6 +230,7 @@ impl Owner {
             runtime: runtime.to_path_buf(),
             device: fs::symlink_metadata(dir)?.dev(),
             secret,
+            fsid: fsid.f_fsid,
             state: state.cast(),
             added: Mutex::new((0, Vec::new())),
         }))
@@ -373,34 +368,48 @@ impl Owner {
             }))
     }
 
-    /// Applies a change to the keyring and the roots, then publishes the
-    /// generation and the number of absent keys.
+    /// Applies a change to the keyring and the roots, after dropping the
+    /// roots that are gone, then publishes the generation and the number of
+    /// absent keys if anything changed (or nothing was published since the
+    /// boot, generation 0).
     fn change<T>(
         &self,
         apply: impl FnOnce(&mut Vec<Entry>, &mut Vec<Root>) -> io::Result<T>,
     ) -> io::Result<T> {
         let _lock = Lock::exclusive(&open(&self.runtime.join(KEYRING_LOCK), false)?)?;
         let mut entries = read(&mut open(&self.keyring, false)?)?;
-        let mut roots = self.roots()?;
-        let before = roots.clone();
+        let keys = entries.clone();
+        let before = self.roots()?;
+        let mut roots = Vec::new();
+        for root in &before {
+            if live(root, self.fsid)? {
+                roots.push(root.clone());
+            }
+        }
         let result = apply(&mut entries, &mut roots)?;
-        let text: String = entries
-            .iter()
-            .map(|entry| {
-                let mut line = entry.spec.clone();
-                for user in entry.users.iter().flatten() {
-                    line.push_str(&format!(" {user}"));
-                }
-                line + "\n"
-            })
-            .collect();
-        replace(&self.runtime.join(KEYRING_NEXT), &self.keyring, &text)?;
+        if entries != keys {
+            let text: String = entries
+                .iter()
+                .map(|entry| {
+                    let mut line = entry.spec.clone();
+                    for user in entry.users.iter().flatten() {
+                        line.push_str(&format!(" {user}"));
+                    }
+                    line + "\n"
+                })
+                .collect();
+            replace(&self.runtime.join(KEYRING_NEXT), &self.keyring, &text)?;
+        }
         if roots != before {
             let text: String = roots
                 .iter()
                 .map(|root| format!("{} {}\n", root.spec, root.inode))
                 .collect();
             replace(&self.table.with_file_name(TABLE_NEXT), &self.table, &text)?;
+        }
+        let state = unsafe { &*self.state };
+        if entries == keys && roots == before && state[0].load(Ordering::Acquire) != 0 {
+            return Ok(result);
         }
         let mut absent: Vec<&String> = roots
             .iter()
@@ -409,11 +418,18 @@ impl Owner {
             .collect();
         absent.sort();
         absent.dedup();
-        unsafe {
-            (*self.state)[1].store(absent.len() as u64, Ordering::Release);
-            (*self.state)[0].fetch_add(1, Ordering::AcqRel);
-        }
+        state[1].store(absent.len() as u64, Ordering::Release);
+        state[0].fetch_add(1, Ordering::AcqRel);
         Ok(result)
+    }
+
+    /// Drops the root `inode` if it is one and is gone (its last link was
+    /// just removed).
+    pub fn removed(&self, inode: u64) -> io::Result<()> {
+        if self.roots()?.iter().any(|root| root.inode == inode) {
+            self.change(|_, _| Ok(()))?;
+        }
+        Ok(())
     }
 
     /// The table of policy roots: one line each, its key's encoded
@@ -440,6 +456,18 @@ impl Owner {
             })
             .collect()
     }
+}
+
+/// The volume's secret; one that is not 32 bytes is corrupt.
+fn read_secret(path: &Path) -> io::Result<[u8; 32]> {
+    let mut secret = Vec::new();
+    open(path, false)?.read_to_end(&mut secret)?;
+    secret.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the fscrypt secret {} is not 32 bytes", path.display()),
+        )
+    })
 }
 
 /// Writes `text` to `next` and renames it over `path`.
@@ -635,10 +663,19 @@ mod tests {
         assert_eq!(owner.key_status(v1, 0).unwrap(), None);
         assert!(!owner.has_key(v1).unwrap());
         assert!(owner.locking());
-        // A root that is gone is dropped, and with it the absent key.
+        // A root removed during the boot (as init removes the previous
+        // boot's /data/per_boot) is dropped, and with it the absent key.
+        let generation = unsafe { (*owner.state)[0].load(Ordering::Acquire) };
+        owner.removed(inode + 1).unwrap();
+        assert_eq!(
+            unsafe { (*owner.state)[0].load(Ordering::Acquire) },
+            generation
+        );
         fs::remove_dir(&root).unwrap();
-        Owner::prepare(&runtime, &data).unwrap();
+        owner.removed(inode).unwrap();
         assert!(owner.has_policies().unwrap());
+        assert!(!owner.locking());
+        Owner::prepare(&runtime, &data).unwrap();
         assert!(!owner.locking());
         // The secret persists, so names stay stable across boots.
         let mut name = *b"name";
@@ -646,6 +683,24 @@ mod tests {
         let again = Owner::locate(&runtime).unwrap().unwrap();
         again.cipher(&[0; 16], &mut name);
         assert_eq!(&name, b"name");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_secret_is_whole_or_absent_and_a_corrupt_one_fails_the_boot() {
+        let dir = crate::scratch_dir("fscrypt-secret");
+        // A boot killed before linking the secret left only the next one.
+        fs::create_dir_all(dir.join("fscrypt")).unwrap();
+        fs::write(dir.join("fscrypt").join(SECRET_NEXT), b"short").unwrap();
+        Owner::prepare(&dir, &dir).unwrap();
+        assert_eq!(
+            fs::read(dir.join("fscrypt").join(SECRET)).unwrap().len(),
+            32
+        );
+        assert!(!dir.join("fscrypt").join(SECRET_NEXT).exists());
+        fs::write(dir.join("fscrypt").join(SECRET), b"short").unwrap();
+        let error = Owner::prepare(&dir, &dir).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         fs::remove_dir_all(dir).unwrap();
     }
 

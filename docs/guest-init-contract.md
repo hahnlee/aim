@@ -351,7 +351,10 @@ locked directories and the table `policies` of policy roots (each an
 inode with a policy whose parent has none: the key's specifier and the
 inode number), which exists once any directory has been given a policy
 (until then no attribute is read, and after, only on the data
-filesystem's device). Each boot drops the roots whose inode is gone.
+filesystem's device). Every change of the keyring or the table drops
+the roots whose inode is gone, as does removing a root while a key is
+absent. The secret is written to `secret.next` and linked into place, so
+it is whole or absent; a secret of another size fails guest-init.
 `<runtime>/fscrypt-keyring` (mode 0600, replaced by a rename under
 `fscrypt-keyring.lock`, as the table is), empty at each boot, holds the
 added keys' specifiers and users, never a key; the page

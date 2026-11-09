@@ -378,6 +378,10 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             if let Some(result) = super::tracefs::remove(&r.guest, host, directory) {
                 return result;
             }
+            let root = match super::fscrypt::removing(&r.host) {
+                Ok(root) => root,
+                Err(error) => return -(error as i64),
+            };
             // SAFETY: resolved host path.
             let result = unsafe {
                 if a[2] & AT_REMOVEDIR != 0 {
@@ -387,7 +391,9 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
                 }
             };
             if result == 0 {
-                return 0;
+                return super::fscrypt::removed(root)
+                    .map(|_| 0)
+                    .unwrap_or_else(|error| -(error as i64));
             }
             let error = errno::last() as i64;
             if a[2] == 0 && error == EPERM {
@@ -1395,6 +1401,9 @@ fn truncate_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         }
         if !attrs::permits(&stat, 2, id, attrs::FS) {
             return -(crate::errno::EACCES as i64);
+        }
+        if let Err(error) = super::fscrypt::open(&resolved.host) {
+            return -(error as i64);
         }
         let result =
             errno::check(unsafe { libc::ftruncate(anchor.as_raw_fd(), a[1] as i64) } as i64);
