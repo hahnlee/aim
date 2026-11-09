@@ -12,8 +12,10 @@
 //! knote. Rename pairing (IN_MOVED_FROM/TO cookies) is not reported: a
 //! rename inside a watched directory shows as delete + create.
 //!
-//! Events are decoded into a queue when read; while the queue is not
-//! empty, a user event keeps the kqueue readable for poll and epoll.
+//! Events are decoded into a queue when read or polled; while the queue
+//! is not empty, a user event keeps the kqueue readable. A vnode note may
+//! decode to nothing, so a readable kqueue is only a candidate: poll,
+//! select and epoll ask [`readable`], as Linux asks inotify_poll.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
@@ -31,6 +33,7 @@ const IN_CREATE: u32 = 0x100;
 const IN_DELETE: u32 = 0x200;
 const IN_DELETE_SELF: u32 = 0x400;
 const IN_MOVE_SELF: u32 = 0x800;
+const IN_Q_OVERFLOW: u32 = 0x4000;
 const IN_IGNORED: u32 = 0x8000;
 const IN_ISDIR: u32 = 0x4000_0000;
 const IN_ONESHOT: u32 = 0x8000_0000;
@@ -41,6 +44,9 @@ const IN_ALL_EVENTS: u32 = 0xfff;
 /// A knote's udata bit for a directory entry's knote: the watch's wd in
 /// bits 32-61, the entry's fd below.
 const ENTRY: usize = 1 << 62;
+
+/// /proc/sys/fs/inotify/max_queued_events at Linux's default.
+pub(super) const MAX_QUEUED_EVENTS: usize = 16384;
 
 const O_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u64 = 0o2000000;
@@ -82,6 +88,47 @@ struct State {
     watches: HashMap<i32, Watch>,
     next_wd: i32,
     queue: VecDeque<Vec<u8>>,
+    /// Whether an IN_Q_OVERFLOW waits in the queue.
+    overflowed: bool,
+}
+
+fn mask_of(e: &[u8]) -> u32 {
+    u32::from_le_bytes([e[4], e[5], e[6], e[7]])
+}
+
+impl State {
+    /// fsnotify_add_event: past max_queued_events an event is dropped and
+    /// one IN_Q_OVERFLOW (wd -1) is queued unless one already waits; an
+    /// event equal to the last queued one (inotify_merge: wd, mask, cookie
+    /// and name), unless that is an IN_IGNORED, is folded into it.
+    fn push(&mut self, e: Vec<u8>) {
+        if self.queue.len() >= MAX_QUEUED_EVENTS {
+            if !self.overflowed {
+                self.overflowed = true;
+                self.queue.push_back(event(-1, IN_Q_OVERFLOW, b""));
+            }
+            return;
+        }
+        if self
+            .queue
+            .back()
+            .is_some_and(|last| *last == e && mask_of(last) & IN_IGNORED == 0)
+        {
+            return;
+        }
+        self.queue.push_back(e);
+    }
+
+    /// Take the oldest event.
+    fn pop(&mut self) {
+        if self
+            .queue
+            .pop_front()
+            .is_some_and(|e| mask_of(&e) == IN_Q_OVERFLOW)
+        {
+            self.overflowed = false;
+        }
+    }
 }
 
 pub struct Inotify {
@@ -332,7 +379,7 @@ fn remove(fd: i32, s: &mut State, wd: i32) -> bool {
         return false;
     };
     drop(w);
-    s.queue.push_back(event(wd, IN_IGNORED, b""));
+    s.push(event(wd, IN_IGNORED, b""));
     signal_pending(fd, true);
     true
 }
@@ -410,7 +457,7 @@ fn decode(fd: i32, s: &mut State, wd: i32, notes: u32) {
     let mut fired = false;
     for (m, name) in out {
         if m & mask & IN_ALL_EVENTS != 0 {
-            s.queue.push_back(event(wd, m, &name));
+            s.push(event(wd, m, &name));
             fired = true;
         }
     }
@@ -450,7 +497,7 @@ fn decode_entry(fd: i32, s: &mut State, wd: i32, efd: i32, notes: u32) {
     let mut fired = false;
     for m in [IN_MODIFY, IN_CLOSE_WRITE] {
         if m & mask != 0 {
-            s.queue.push_back(event(wd, m, &name));
+            s.push(event(wd, m, &name));
             fired = true;
         }
     }
@@ -543,7 +590,7 @@ pub fn read(fd: i32, buf: u64, len: usize) -> Option<i64> {
             )
         });
         off += e.len();
-        s.queue.pop_front();
+        s.pop();
     }
     signal_pending(fd, !s.queue.is_empty());
     Some(if off == 0 {
@@ -564,13 +611,15 @@ pub fn pending_bytes(fd: i32) -> Option<i64> {
     Some(s.queue.iter().map(|e| e.len() as i64).sum())
 }
 
-/// Whether `fd`, reported readable by the host, is an inotify fd with no
-/// event to read. Its kqueue is readable on any vnode note, and a note may
-/// decode to nothing (a rescan that finds what an earlier one reported);
-/// Linux is readable only while events are queued, and a blocking read
-/// after such a wakeup would never return.
-pub fn spuriously_ready(fd: i32) -> bool {
-    pending_bytes(fd) == Some(0)
+/// inotify_poll: whether inotify fd `fd` has an event to read, None when
+/// `fd` is not one. Its kqueue is readable on any vnode note, and a note
+/// may decode to nothing (a rescan that finds what an earlier one
+/// reported, an event outside the mask); Linux is readable only while
+/// events are queued. Collecting clears those notes, so the kqueue stays
+/// readable only while the queue is not empty and a level-triggered wait
+/// on it sleeps.
+pub fn readable(fd: i32) -> Option<bool> {
+    pending_bytes(fd).map(|bytes| bytes > 0)
 }
 
 /// Fork: an inotify is its watches (each on an inherited vnode fd) and its
@@ -625,10 +674,13 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Inotify> {
         };
         (wd, watch)
     });
+    let next_wd = r.i32();
+    let queue: VecDeque<Vec<u8>> = r.seq(|r| r.bytes()).into();
     let state = State {
         watches: watches.into_iter().collect(),
-        next_wd: r.i32(),
-        queue: r.seq(|r| r.bytes()).into(),
+        next_wd,
+        overflowed: queue.iter().any(|e| mask_of(e) == IN_Q_OVERFLOW),
+        queue,
     };
     Arc::new(Inotify {
         cloexec,
@@ -725,5 +777,44 @@ mod tests {
         for target in [fd, alias] {
             fdtab::close_owned_guest(target, false).unwrap();
         }
+    }
+
+    /// fsnotify_add_event: the queue holds max_queued_events, then one
+    /// IN_Q_OVERFLOW with wd -1 for all that are dropped, and once reads
+    /// make room the next events queue behind it; inotify_merge folds an
+    /// event equal to the last one queued, but never into an IN_IGNORED.
+    #[test]
+    fn a_full_queue_ends_in_one_overflow_event() {
+        let mut s = State::default();
+        for wd in 0..MAX_QUEUED_EVENTS as i32 + 3 {
+            s.push(event(wd, IN_MODIFY, b""));
+        }
+        let overflow = event(-1, IN_Q_OVERFLOW, b"");
+        assert_eq!(s.queue.len(), MAX_QUEUED_EVENTS + 1);
+        assert_eq!(s.queue.back(), Some(&overflow));
+        // The overflow event counts toward the limit, as on Linux.
+        s.pop();
+        s.pop();
+        s.push(event(1, IN_ATTRIB, b""));
+        s.push(event(2, IN_ATTRIB, b""));
+        assert_eq!(s.queue.len(), MAX_QUEUED_EVENTS);
+        assert_eq!(s.queue[MAX_QUEUED_EVENTS - 2], overflow);
+        assert_eq!(s.queue.back(), Some(&event(1, IN_ATTRIB, b"")));
+        assert_eq!(s.queue.iter().filter(|e| **e == overflow).count(), 1);
+        while s.queue.len() > 1 {
+            s.pop();
+        }
+        assert!(!s.overflowed);
+
+        let mut s = State::default();
+        for _ in 0..3 {
+            s.push(event(1, IN_MODIFY, b"name"));
+        }
+        s.push(event(1, IN_MODIFY, b"other"));
+        s.push(event(1, IN_CLOSE_WRITE, b"other"));
+        for _ in 0..2 {
+            s.push(event(1, IN_IGNORED, b""));
+        }
+        assert_eq!(s.queue.len(), 5);
     }
 }
