@@ -579,22 +579,25 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
     if k.flags & libc::EV_ERROR != 0 {
         return EPOLLERR;
     }
-    let tcp = eof
+    // A socket's shutdown, which Darwin marks with EOF either way: Linux
+    // reports a hangup only once both directions are shut.
+    let shut = eof
         .then(|| {
             super::tcp_shutdown::shutdown(
                 k.ident as i32,
                 k.filter == libc::EVFILT_READ,
                 k.filter == libc::EVFILT_WRITE,
             )
+            .or_else(|| super::net::shut_directions(k.ident as i32))
         })
         .flatten();
-    if let Some(tcp) = tcp {
+    if let Some(shut) = shut {
         if k.filter == libc::EVFILT_READ {
             b |= i.events & (EPOLLIN | EPOLLRDNORM | EPOLLRDHUP);
         } else if k.filter == libc::EVFILT_WRITE {
             b |= i.events & (EPOLLOUT | EPOLLWRNORM);
         }
-        if tcp.hangup() {
+        if shut.hangup() {
             b |= EPOLLHUP;
         }
         if k.fflags != 0 {

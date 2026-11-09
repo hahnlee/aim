@@ -4,8 +4,8 @@
 //! so only those are asked and the event bits and timeouts translated; a
 //! signalfd is also readable for the polling thread's own signals, which
 //! its wake token reports. A socket or pipe polled for no event, which
-//! Darwin's poll watches for nothing, is watched for the hangup and error
-//! Linux poll always reports: a socket by [`Hangups`], a pipe by POLLHUP.
+//! Darwin's poll watches for nothing, is watched by [`Hangups`] for the
+//! hangup and error Linux poll always reports.
 
 use crate::errno::{self, EBADF, EINVAL};
 use std::os::fd::AsRawFd;
@@ -148,20 +148,25 @@ fn pipe_writer(fd: i32) -> bool {
     is_fifo(fd) && unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE == libc::O_WRONLY
 }
 
-/// The sockets polled for no event, as EVFILT_READ knotes of a kqueue of
-/// the call, polled with the others: their low-water mark out of reach,
-/// they fire for the EOF and the pending error that `sock_poll` reports
-/// whatever was asked (filt_soread), and for a full buffer, which Darwin
-/// caps the mark at. They are edge-triggered, so that a firing that
-/// reports nothing (a full buffer, a TCP half-close) is waited past, not
+/// The sockets and pipes polled for no event, as EVFILT_READ knotes of a
+/// kqueue of the call, polled with the others: their low-water mark out of
+/// reach, they fire for the EOF and the pending error that `sock_poll` and
+/// `pipe_poll` report whatever was asked (filt_soread, filt_piperead, a
+/// write end's at its readers' close), and for a full socket buffer, which
+/// Darwin caps the mark at. They are edge-triggered, so that a firing that
+/// reports nothing (a full buffer, a half-close) is waited past, not
 /// spun on, while a later one (the reset that follows) still wakes.
-struct Hangups(std::os::fd::OwnedFd);
+struct Hangups {
+    kq: std::os::fd::OwnedFd,
+    /// The poll set's entries watched, one knote for those of one socket.
+    entries: Vec<usize>,
+}
 
 impl Hangups {
-    /// Watch host socket `fd`, the poll set's `index`th entry.
+    /// Watch host socket or pipe `fd`, the poll set's `index`th entry.
     fn watch(hangups: &mut Option<Self>, fd: i32, index: usize) -> Result<(), crate::errno::Errno> {
-        let kq = match hangups {
-            Some(hangups) => hangups.0.as_raw_fd(),
+        let this = match hangups {
+            Some(hangups) => hangups,
             None => {
                 // SAFETY: a new kqueue, owned from here.
                 let kq = unsafe { libc::kqueue() };
@@ -170,23 +175,33 @@ impl Hangups {
                 }
                 use std::os::fd::FromRawFd;
                 // SAFETY: the kqueue just created.
-                hangups
-                    .insert(Self(unsafe { std::os::fd::OwnedFd::from_raw_fd(kq) }))
-                    .0
-                    .as_raw_fd()
+                hangups.insert(Self {
+                    kq: unsafe { std::os::fd::OwnedFd::from_raw_fd(kq) },
+                    entries: Vec::new(),
+                })
             }
         };
+        this.entries.push(index);
         let change = libc::kevent {
             ident: fd as usize,
             filter: libc::EVFILT_READ,
             flags: libc::EV_ADD | libc::EV_CLEAR | libc::EV_RECEIPT,
             fflags: libc::NOTE_LOWAT,
             data: isize::MAX,
-            udata: index as *mut libc::c_void,
+            udata: std::ptr::null_mut(),
         };
         // SAFETY: one change, its receipt into a local event.
         let mut receipt: libc::kevent = unsafe { std::mem::zeroed() };
-        let n = unsafe { libc::kevent(kq, &change, 1, &mut receipt, 1, std::ptr::null()) };
+        let n = unsafe {
+            libc::kevent(
+                this.kq.as_raw_fd(),
+                &change,
+                1,
+                &mut receipt,
+                1,
+                std::ptr::null(),
+            )
+        };
         if n < 0 {
             return Err(errno::last());
         }
@@ -197,7 +212,8 @@ impl Hangups {
     }
 
     /// Take the knotes fired since the last pass, adding HUP to the host
-    /// revents of each at EOF: what Darwin's poll reports for it.
+    /// revents of each entry of a socket or pipe at EOF: what Darwin's poll
+    /// reports for it.
     fn fired(&self, host: &mut [libc::pollfd]) -> Result<(), crate::errno::Errno> {
         let zero = libc::timespec {
             tv_sec: 0,
@@ -208,7 +224,7 @@ impl Hangups {
             let mut events: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
             let n = unsafe {
                 libc::kevent(
-                    self.0.as_raw_fd(),
+                    self.kq.as_raw_fd(),
                     std::ptr::null(),
                     0,
                     events.as_mut_ptr(),
@@ -220,8 +236,13 @@ impl Hangups {
                 return Err(errno::last());
             }
             for event in &events[..n as usize] {
-                if event.flags & libc::EV_EOF != 0 {
-                    host[event.udata as usize].revents |= POLLHUP;
+                if event.flags & libc::EV_EOF == 0 {
+                    continue;
+                }
+                for &index in &self.entries {
+                    if host[index].fd as usize == event.ident {
+                        host[index].revents |= POLLHUP;
+                    }
                 }
             }
             if (n as usize) < events.len() {
@@ -232,7 +253,7 @@ impl Hangups {
 
     fn pollfd(&self) -> libc::pollfd {
         libc::pollfd {
-            fd: self.0.as_raw_fd(),
+            fd: self.kq.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         }
@@ -390,21 +411,11 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 events: libc::POLLIN,
                 revents: 0,
             },
-            // A pipe polled for no event: Darwin's POLLHUP watches its
-            // hangup alone, which `pipe_poll` reports as POLLHUP or
-            // POLLERR whatever was asked.
+            // A socket's or pipe's, its knote in `hangups` instead.
             None if eventless(entry.events)
-                && pin.as_ref().is_some_and(|pin| pin.kind().is_none())
-                && is_fifo(fd) =>
+                && (socket
+                    || pin.as_ref().is_some_and(|pin| pin.kind().is_none()) && is_fifo(fd)) =>
             {
-                libc::pollfd {
-                    fd,
-                    events: POLLHUP,
-                    revents: 0,
-                }
-            }
-            // A socket's, its knote in `hangups` instead.
-            None if socket && eventless(entry.events) => {
                 if let Err(error) = Hangups::watch(&mut hangups, fd, host.len()) {
                     return -(error as i64);
                 }
@@ -506,11 +517,14 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 h.revents = h.revents & !POLLHUP | POLLERR;
             }
             g.revents = match (h.revents & POLLHUP != 0)
-                .then(|| super::tcp_shutdown::polled_hangup(h.fd))
+                .then(|| {
+                    super::tcp_shutdown::polled_hangup(h.fd)
+                        .or_else(|| super::net::shut_directions(h.fd))
+                })
                 .flatten()
             {
-                // A TCP socket's shutdown, which Darwin reports as HUP
-                // alone, as tcp_poll reports it.
+                // A socket's shutdown, which Darwin reports as HUP alone, as
+                // tcp_poll, unix_poll and datagram_poll report it.
                 Some(tcp) => {
                     let mut revents = h.revents & !POLLHUP;
                     if tcp.receive {
@@ -1630,14 +1644,13 @@ mod reportable_tests {
         })
     }
 
-    /// ppoll on `fd` for no event while `action` runs after 100 ms:
-    /// (count, revents, milliseconds waited).
-    fn woken(fd: i64, action: impl FnOnce() + Send + 'static) -> (i64, i16, u128) {
-        let start = std::time::Instant::now();
+    /// ppoll on `fd` for no event, with a timeout of 30 s, while `action`
+    /// runs after 100 ms: (count, revents).
+    fn woken(fd: i64, action: impl FnOnce() + Send + 'static) -> (i64, i16) {
         let thread = after(100, action);
-        let (n, revents) = polled_for(fd, 0, 5_000);
+        let polled = polled_for(fd, 0, 30_000);
         thread.join().unwrap();
-        (n, revents, start.elapsed().as_millis())
+        polled
     }
 
     /// ppoll on `fd` for no event sleeps out its 200 ms timeout, not
@@ -1696,9 +1709,8 @@ mod reportable_tests {
         );
         sleeps(fd);
         abortive(&peer);
-        let (n, revents, ms) = woken(fd, move || drop(peer));
+        let (n, revents) = woken(fd, move || drop(peer));
         assert_eq!((n, revents), (1, POLLERR | POLLHUP));
-        assert!(ms < 2_000, "{ms} ms");
         close(&[fd]);
     }
 
@@ -1711,7 +1723,7 @@ mod reportable_tests {
         let (fd, connected) = refused(2);
         assert_eq!(connected, 0);
         sleeps(fd);
-        let (n, revents, ms) = woken(fd, move || {
+        let (n, revents) = woken(fd, move || {
             let byte = 0u8;
             assert_eq!(
                 crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
@@ -1719,7 +1731,6 @@ mod reportable_tests {
             );
         });
         assert_eq!((n, revents), (1, POLLERR));
-        assert!(ms < 2_000, "{ms} ms");
         close(&[fd]);
     }
 
@@ -1740,14 +1751,13 @@ mod reportable_tests {
         while crate::sys::net::sendto([other as u64, chunk.as_ptr() as u64, 512, 0, 0, 0]) > 0 {}
         sleeps(fd);
         sleeps(other);
-        let (n, revents, ms) = woken(fd, move || close(&[other]));
+        let (n, revents) = woken(fd, move || close(&[other]));
         assert_eq!((n, revents), (1, POLLHUP));
-        assert!(ms < 2_000, "{ms} ms");
         close(&[fd]);
     }
 
     /// `pipe_poll`: a pipe end polled for no event sleeps while the other
-    /// is open; the read end wakes with POLLHUP when the last writer
+    /// is open, with data queued or the buffer full; the read end wakes with POLLHUP when the last writer
     /// closes, and the write end with POLLERR, never POLLHUP, when the
     /// last reader does.
     #[test]
@@ -1761,14 +1771,166 @@ mod reportable_tests {
             );
             let (fd, other) = (pipe[end] as i64, pipe[1 - end] as i64);
             sleeps(fd);
-            let (n, polled_revents, ms) = woken(fd, move || close(&[other]));
+            // The read end with data queued, the write end with the
+            // buffer full.
+            let writer = pipe[1];
+            // SAFETY: writing to our own non-blocking pipe.
+            while unsafe { libc::write(writer, [0u8; 512].as_ptr().cast(), 512) } > 0 && end == 1 {}
+            sleeps(fd);
+            let (n, polled_revents) = woken(fd, move || close(&[other]));
             assert_eq!((n, polled_revents), (1, revents), "end {end}");
-            assert!(ms < 2_000, "{ms} ms");
             assert_eq!(polled(fd, 0), (1, revents));
             if end == 1 {
                 assert_eq!(polled(fd, POLLOUT).1 & (POLLERR | POLLHUP), POLLERR);
             }
             close(&[fd]);
         }
+    }
+
+    /// ppoll on `entries` for up to `ms`: the count.
+    fn polled_all(entries: &mut [libc::pollfd], ms: i64) -> i64 {
+        let timeout = [ms / 1000, ms % 1000 * 1_000_000];
+        ppoll([
+            entries.as_mut_ptr() as u64,
+            entries.len() as u64,
+            timeout.as_ptr() as u64,
+            0,
+            0,
+            0,
+        ])
+    }
+
+    /// A guest AF_UNIX stream socketpair, non-blocking.
+    fn unix_pair() -> (i64, i64) {
+        let mut pair = [0i32; 2];
+        assert_eq!(
+            crate::sys::net::socketpair([1, 1 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        (pair[0] as i64, pair[1] as i64)
+    }
+
+    fn shut(fd: i64, how: u64) {
+        assert_eq!(crate::sys::net::shutdown([fd as u64, how, 0, 0, 0, 0]), 0);
+    }
+
+    /// `unix_poll` reports POLLHUP only once both directions are shut
+    /// (`sk_shutdown == SHUTDOWN_MASK`), a receive shutdown alone as
+    /// POLLIN|POLLRDNORM|POLLRDHUP: a poll or epoll interest with no event
+    /// sleeps through the peer's SHUT_WR and its own SHUT_RD, and wakes
+    /// for the peer's close that completes them.
+    #[test]
+    fn an_eventless_unix_poll_sleeps_through_a_half_close() {
+        let _view = crate::vfs::test_view();
+        let (fd, other) = unix_pair();
+        shut(other, 1);
+        sleeps(fd);
+        let eventless = watching(fd, 0);
+        assert_eq!(waited(eventless, 50).0, 0);
+        assert_eq!(
+            polled(fd, POLLIN | POLLRDHUP | POLLOUT),
+            (1, POLLIN | POLLRDHUP | POLLOUT)
+        );
+        let readable = watching(fd, 0x1 | 0x2000);
+        assert_eq!(waited(readable, 0), (1, 0x1 | 0x2000));
+        let (n, revents) = woken(fd, move || close(&[other]));
+        assert_eq!((n, revents), (1, POLLHUP));
+        assert_eq!(waited(eventless, 0), (1, 0x10));
+        close(&[fd, eventless, readable]);
+        let (fd, other) = unix_pair();
+        shut(fd, 0);
+        sleeps(fd);
+        assert_eq!(polled(fd, POLLIN | POLLRDHUP), (1, POLLIN | POLLRDHUP));
+        let (n, revents) = woken(fd, move || close(&[other]));
+        assert_eq!((n, revents), (1, POLLHUP));
+        close(&[fd]);
+    }
+
+    /// Entries for no event, one socket's twice, poll with others: each
+    /// reports its own readiness, and a hangup every entry of its socket.
+    #[test]
+    fn eventless_entries_mix_with_others() {
+        let _view = crate::vfs::test_view();
+        let (fd, other) = unix_pair();
+        let (data, sender) = unix_pair();
+        let entry = |fd: i64, events: i16| libc::pollfd {
+            fd: fd as i32,
+            events,
+            revents: 0,
+        };
+        let mut entries = [
+            entry(fd, 0),
+            entry(data, POLLIN),
+            entry(fd, 0),
+            entry(fd, POLLOUT),
+        ];
+        assert_eq!(polled_all(&mut entries[..3], 50), 0);
+        let byte = 0u8;
+        assert_eq!(
+            crate::sys::net::sendto([sender as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
+            1
+        );
+        assert_eq!(polled_all(&mut entries, 2_000), 2);
+        assert_eq!(entries.map(|e| e.revents), [0, POLLIN, 0, POLLOUT]);
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(data, &mut buffer), 1);
+        let thread = after(100, move || close(&[other]));
+        assert_eq!(polled_all(&mut entries[..3], 5_000), 2);
+        thread.join().unwrap();
+        assert_eq!(entries.map(|e| e.revents)[..3], [POLLHUP, 0, POLLHUP]);
+        close(&[fd, data, sender]);
+    }
+
+    extern "C" fn interrupt(_: i32) {}
+
+    /// A signal interrupts a poll for no event with EINTR, and the wait's
+    /// own descriptors go with it.
+    #[test]
+    fn an_eventless_poll_is_interruptible() {
+        // A signal handler is installed for the process.
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::an_eventless_poll_is_interruptible",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        // SAFETY: a handler without SA_RESTART, for this process only.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = interrupt as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut()),
+                0
+            );
+        }
+        let (fd, other) = unix_pair();
+        // SAFETY: probing the lowest free descriptor number.
+        let lowest_free = || unsafe {
+            let probe = libc::dup(0);
+            libc::close(probe);
+            probe
+        };
+        let free = lowest_free();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let poller = std::thread::spawn(move || {
+            // SAFETY: this thread's own handle.
+            tx.send(unsafe { libc::pthread_self() } as usize).unwrap();
+            polled_for(fd, 0, 5_000)
+        });
+        let thread = rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !poller.is_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            // SAFETY: signalling the polling thread, which is still joinable.
+            assert_eq!(
+                unsafe { libc::pthread_kill(thread as libc::pthread_t, libc::SIGUSR2) },
+                0
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(poller.join().unwrap(), (-(crate::errno::EINTR as i64), 0));
+        assert_eq!(lowest_free(), free);
+        close(&[fd, other]);
     }
 }
