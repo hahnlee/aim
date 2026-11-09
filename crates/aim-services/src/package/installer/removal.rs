@@ -514,35 +514,75 @@ impl External {
             |_| Ok(()),
         )
     }
-    pub fn removed(
-        &self,
-        name: &str,
-        app: i32,
-        user: i32,
-        data: bool,
-        full: bool,
-        uid: bool,
-        version: i64,
-    ) -> Result<(), Exception> {
+    pub fn removed(&self, info: &RemovedInfo) -> Result<(), Exception> {
         self.call(
             external_api::SEND_REMOVED_BROADCAST,
             |p| {
-                p.write_string16(Some(name));
-                p.write_i32(app);
-                p.write_i32(user);
-                p.write_bool(data);
-                p.write_bool(full);
-                p.write_bool(uid);
-                p.write_i64(version);
+                p.write_string16(Some(&info.package));
+                p.write_string16(info.installer.as_deref());
+                p.write_i32(info.app_id);
+                aim_service_aidl::write_int_array(p, Some(&info.users));
+                aim_service_aidl::write_int_array(p, Some(&info.instant_users));
+                aim_service_aidl::write_int_array(
+                    p,
+                    info.visibility
+                        .as_ref()
+                        .map(|lists| encode_visibility(lists))
+                        .as_deref(),
+                );
+                p.write_bool(info.data_removed);
+                p.write_bool(info.removed_for_all_users);
+                p.write_bool(info.app_id_removed);
+                p.write_bool(info.static_shared_lib);
+                p.write_bool(info.kill_app);
+                p.write_bool(info.removed_by_system);
+                p.write_bool(info.archived);
             },
             |_| Ok(()),
         )
     }
 }
 
+/// `encodeVisibility`: each user, then its list's length (-1 for none)
+/// and app ids, as the package effects bridge decodes it.
+fn encode_visibility(lists: &[(i32, Option<Vec<i32>>)]) -> Vec<i32> {
+    let mut encoded = Vec::new();
+    for (user, list) in lists {
+        encoded.extend([*user, list.as_ref().map_or(-1, |list| list.len() as i32)]);
+        encoded.extend(list.iter().flatten());
+    }
+    encoded
+}
+
+/// The `PackageRemovedInfo` of an uninstall (`DeletePackageHelper`,
+/// `android-16.0.0_r1`) and the arguments of its
+/// `sendPackageRemovedBroadcasts`. An uninstall is never an update or a
+/// system update's removal; factory restoration owns that one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemovedInfo {
+    pub package: String,
+    pub installer: Option<String>,
+    /// `mUid`: the app id, which the broadcasts make per-user.
+    pub app_id: i32,
+    /// `populateBroadcastUsers`: the removed users, in reverse.
+    pub users: Vec<i32>,
+    pub instant_users: Vec<i32>,
+    /// `mBroadcastAllowList`: each removed user's visibility allow list
+    /// before a full deletion; `None` when other users keep the code.
+    pub visibility: Option<Vec<(i32, Option<Vec<i32>>)>>,
+    pub data_removed: bool,
+    pub removed_for_all_users: bool,
+    pub app_id_removed: bool,
+    pub static_shared_lib: bool,
+    pub kill_app: bool,
+    pub removed_by_system: bool,
+    pub archived: bool,
+}
+
 pub const KEEP_DATA: i32 = 1;
 pub const ALL_USERS: i32 = 2;
 pub const SYSTEM_APP: i32 = 4;
+pub const DONT_KILL_APP: i32 = 8;
 pub const ARCHIVE: i32 = 16;
 pub const SUCCEEDED: i32 = 1;
 pub const INTERNAL_ERROR: i32 = -1;
@@ -592,6 +632,7 @@ pub struct Plan {
     pub users: Vec<i32>,
     pub blocked_users: Vec<i32>,
     pub keep_uninstalled: bool,
+    pub removed_by_system: bool,
 }
 pub enum Admission {
     UserAction,
@@ -751,6 +792,7 @@ pub fn admit(
         users,
         blocked_users: blocked,
         keep_uninstalled: admission.keep_uninstalled,
+        removed_by_system: false,
     }))
 }
 
@@ -806,6 +848,9 @@ pub struct PolicySource {
 }
 pub type PreferredRemoval =
     Arc<dyn Fn(&str, i32, bool) -> Result<PostCommitEffect, Exception> + Send + Sync>;
+/// `PackageSender.notifyPackageRemoved(packageName, uid)`: the
+/// PackageListObservers of the current package epoch.
+pub type PackageRemoved = Arc<dyn Fn(&str, i32) -> Result<(), Exception> + Send + Sync>;
 pub enum PostCommitEffect {
     Deferred(Arc<dyn Fn() -> Result<(), Exception> + Send + Sync>),
     Added {
@@ -815,13 +860,8 @@ pub enum PostCommitEffect {
     },
     Removed {
         owner: Arc<External>,
-        package: String,
-        app_id: i32,
-        user: i32,
-        data_removed: bool,
-        package_removed: bool,
-        uid_removed: bool,
-        version: i64,
+        observers: PackageRemoved,
+        info: RemovedInfo,
     },
 }
 impl PostCommitEffect {
@@ -833,24 +873,31 @@ impl PostCommitEffect {
                 package,
                 user,
             } => owner.package_added(&package, user, false, 0, None),
+            // `sendPackageRemovedBroadcasts` posts the broadcasts, then
+            // notifies the observers of a removal that removed data,
+            // unless only the installer of a static library is told. A
+            // posted broadcast cannot keep the observers from being told.
             Self::Removed {
                 owner,
-                package,
-                app_id,
-                user,
-                data_removed,
-                package_removed,
-                uid_removed,
-                version,
-            } => owner.removed(
-                &package,
-                app_id,
-                user,
-                data_removed,
-                package_removed,
-                uid_removed,
-                version,
-            ),
+                observers,
+                info,
+            } => {
+                let sent = owner.removed(&info);
+                let notified = if info.data_removed && !info.static_shared_lib {
+                    observers(&info.package, info.app_id)
+                } else {
+                    Ok(())
+                };
+                match (sent, notified) {
+                    (Err(mut error), Err(other)) => {
+                        error
+                            .message
+                            .push_str(&format!("; package observers: {}", other.message));
+                        Err(error)
+                    }
+                    (sent, notified) => sent.and(notified),
+                }
+            }
         }
     }
 }
@@ -868,6 +915,7 @@ pub struct Controller {
     pub publisher: super::native::Publisher,
     pub factory_restore: RestoreFactory,
     pub preferred_removal: PreferredRemoval,
+    pub package_removed: PackageRemoved,
     pub gate: Arc<Mutex<()>>,
     pub keystore: Arc<owner::keystore::KeystoreCleanup>,
 }
@@ -884,6 +932,53 @@ fn should_remove_setting(
             .users
             .iter()
             .any(|(user, state)| state.installed && !plan.users.contains(user))
+}
+
+/// `executeDeletePackageLIF`: a removal that keeps the code for other users
+/// (`clearPackageStateAndReturn`) reports the app id removed whenever data
+/// is; a full deletion only when deleting the setting freed the app id.
+fn removed_info(
+    package: &crate::package::model::PackageState,
+    plan: &Plan,
+    visibility: Option<Vec<(i32, Option<Vec<i32>>)>>,
+    app_id_freed: bool,
+) -> RemovedInfo {
+    let remove_code = visibility.is_some();
+    let data_removed = plan.request.flags & KEEP_DATA == 0;
+    let (mut users, mut instant_users) = (Vec::new(), Vec::new());
+    for &user in plan.users.iter().rev() {
+        if package
+            .users
+            .get(&user)
+            .is_some_and(|state| state.instant_app)
+        {
+            instant_users.push(user);
+        } else {
+            users.push(user);
+        }
+    }
+    RemovedInfo {
+        package: package.name.clone(),
+        installer: package.install_source.installer.clone(),
+        app_id: package.app_id,
+        users,
+        instant_users,
+        visibility,
+        data_removed,
+        removed_for_all_users: remove_code,
+        app_id_removed: if remove_code {
+            data_removed && app_id_freed
+        } else {
+            data_removed
+        },
+        static_shared_lib: package
+            .pkg
+            .as_ref()
+            .is_some_and(|code| code.static_shared_library_name.is_some()),
+        kill_app: plan.request.flags & DONT_KILL_APP == 0,
+        removed_by_system: plan.removed_by_system,
+        archived: plan.request.flags & ARCHIVE != 0,
+    }
 }
 
 fn should_restore_factory(package: &crate::package::model::PackageState, plan: &Plan) -> bool {
@@ -1077,8 +1172,8 @@ impl Controller {
             users,
             blocked_users: vec![],
             keep_uninstalled: admission.keep_uninstalled,
+            removed_by_system,
         };
-        let _ = removed_by_system;
         self.execute(&plan)
     }
     pub(crate) fn execute(&self, plan: &Plan) -> Result<i32, Exception> {
@@ -1168,6 +1263,29 @@ impl Controller {
         let data_removed = plan.request.flags & KEEP_DATA == 0;
         let remove_setting = should_remove_setting(&package, plan, data_removed);
         let remove_code = should_remove_setting(&package, plan, true);
+        // `deleteInstalledPackageLIF` captures the visibility of a full
+        // deletion before the setting goes.
+        let visibility = if remove_code {
+            let resolved = self
+                .resolver
+                .resolution(&current)
+                .map_err(|error| illegal(format!("Removal visibility resolution: {error:?}")))?;
+            Some(
+                plan.users
+                    .iter()
+                    .map(|&user| {
+                        (
+                            user,
+                            resolved
+                                .apps_filter
+                                .visibility_allow_list(&current, &package, user),
+                        )
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
         // Original full deletion calls onPackageUninstalled once, after
         // removing the setting. Prepare its captured identity (and all other
         // fallible permission inputs) before profiles or app data are lost.
@@ -1261,29 +1379,20 @@ impl Controller {
                 }
             }
         }
-        let uid_removed = remove_code
-            && data_removed
-            && self
-                .store
-                .snapshots
-                .capture()
-                .owner()
-                .identities
-                .ids
-                .get(package.app_id)
-                .is_none();
-        for &user in &plan.users {
-            effects.push(PostCommitEffect::Removed {
-                owner: self.external.clone(),
-                package: package.name.clone(),
-                app_id: package.app_id,
-                user,
-                data_removed,
-                package_removed: remove_code && data_removed,
-                uid_removed,
-                version: package.version_code,
-            });
-        }
+        let app_id_freed = self
+            .store
+            .snapshots
+            .capture()
+            .owner()
+            .identities
+            .ids
+            .get(package.app_id)
+            .is_none();
+        effects.push(PostCommitEffect::Removed {
+            owner: self.external.clone(),
+            observers: self.package_removed.clone(),
+            info: removed_info(&package, plan, visibility, app_id_freed),
+        });
         Ok(if plan.blocked_users.is_empty() {
             SUCCEEDED
         } else {
@@ -1935,6 +2044,7 @@ mod admission_policy_tests {
             users: vec![0],
             blocked_users: Vec::new(),
             keep_uninstalled: false,
+            removed_by_system: false,
         };
         assert!(!package.is.system);
         assert!(should_restore_factory(&package, &plan));
@@ -2212,4 +2322,192 @@ pub fn archive_installer(state: &State, name: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
         .or(source.installer.as_ref())
         .cloned()
+}
+
+#[cfg(test)]
+mod removed_tests {
+    use super::*;
+    use crate::package::model::{PackageState, PackageUserState};
+
+    type Log = Arc<Mutex<Vec<String>>>;
+    struct Bridge(Log, std::sync::atomic::AtomicBool);
+    impl aim_binder_host::local::Service for Bridge {
+        fn descriptor(&self) -> &str {
+            external_api::DESCRIPTOR
+        }
+        fn transact(
+            &self,
+            call: &mut aim_binder_host::local::Call<'_>,
+        ) -> aim_binder_host::local::Reply {
+            assert_eq!(call.code, external_api::SEND_REMOVED_BROADCAST);
+            let a = external_api::SendRemovedBroadcast::read(&mut call.data)?;
+            self.0.lock().unwrap().push(format!("{a:?}"));
+            let mut p = Parcel::new();
+            if self.1.load(std::sync::atomic::Ordering::Relaxed) {
+                p.write_exception(&illegal("broadcast refused"));
+            } else {
+                external_api::write_send_removed_broadcast_reply(&mut p);
+            }
+            Ok(p)
+        }
+    }
+
+    fn package(instant: &[i32]) -> PackageState {
+        let mut package = PackageState {
+            name: "p".into(),
+            app_id: 10100,
+            ..Default::default()
+        };
+        package.install_source.installer = Some("store".into());
+        for user in [0, 10, 11] {
+            let state = PackageUserState {
+                instant_app: instant.contains(&user),
+                ..Default::default()
+            };
+            package.users.insert(user, state);
+        }
+        package
+    }
+    fn plan(flags: i32, users: Vec<i32>) -> Plan {
+        Plan {
+            request: Request {
+                package: "p".into(),
+                version: -1,
+                caller_package: None,
+                uid: 0,
+                pid: 7,
+                user: 0,
+                flags,
+                existing_only: false,
+            },
+            internal_package: "p".into(),
+            users,
+            blocked_users: Vec::new(),
+            keep_uninstalled: false,
+            removed_by_system: true,
+        }
+    }
+
+    #[test]
+    fn removed_info_follows_execute_delete_package_lif() {
+        // A full deletion: the removed users in reverse, split by instant
+        // state; the app id is removed only once deleting its setting freed it.
+        let full = removed_info(
+            &package(&[10]),
+            &plan(0, vec![0, 10, 11]),
+            Some(vec![(0, Some(vec![10200])), (10, None), (11, Some(vec![]))]),
+            false,
+        );
+        assert_eq!(
+            full,
+            RemovedInfo {
+                package: "p".into(),
+                installer: Some("store".into()),
+                app_id: 10100,
+                users: vec![11, 0],
+                instant_users: vec![10],
+                visibility: Some(vec![(0, Some(vec![10200])), (10, None), (11, Some(vec![]))]),
+                data_removed: true,
+                removed_for_all_users: true,
+                app_id_removed: false,
+                static_shared_lib: false,
+                kill_app: true,
+                removed_by_system: true,
+                archived: false,
+            }
+        );
+        assert!(
+            removed_info(&package(&[]), &plan(0, vec![0]), Some(Vec::new()), true).app_id_removed
+        );
+        let kept = removed_info(
+            &package(&[]),
+            &plan(KEEP_DATA | DONT_KILL_APP | ARCHIVE, vec![0]),
+            Some(Vec::new()),
+            true,
+        );
+        assert!(!kept.data_removed && !kept.app_id_removed && !kept.kill_app && kept.archived);
+        // clearPackageStateAndReturn: other users keep the code.
+        let partial = removed_info(&package(&[]), &plan(0, vec![10]), None, false);
+        assert!(!partial.removed_for_all_users && partial.app_id_removed);
+        let partial = removed_info(&package(&[]), &plan(KEEP_DATA, vec![10]), None, true);
+        assert!(!partial.removed_for_all_users && !partial.app_id_removed);
+    }
+
+    #[test]
+    fn removal_notifies_observers_after_broadcasts_when_data_is_removed() {
+        let process = crate::test_process(1000);
+        let log = Log::default();
+        let bridge = Arc::new(Bridge(log.clone(), Default::default()));
+        let Binder::Local(ptr) = process.add_service(bridge.clone()) else {
+            unreachable!()
+        };
+        let external = External::new(
+            crate::system::ServiceOwner::Local(process.local_service(ptr).unwrap()),
+            process.clone(),
+        );
+        let observed = log.clone();
+        let observers: PackageRemoved = Arc::new(move |name, uid| {
+            observed
+                .lock()
+                .unwrap()
+                .push(format!("removed {name} {uid}"));
+            Ok(())
+        });
+        let info = removed_info(
+            &package(&[]),
+            &plan(0, vec![0]),
+            Some(vec![(0, Some(vec![10200])), (10, None)]),
+            true,
+        );
+        let finish = |info: &RemovedInfo| {
+            PostCommitEffect::Removed {
+                owner: external.clone(),
+                observers: observers.clone(),
+                info: info.clone(),
+            }
+            .finish()
+            .unwrap();
+            std::mem::take(&mut *log.lock().unwrap())
+        };
+        assert_eq!(
+            finish(&info),
+            [
+                "SendRemovedBroadcast { package_name: Some(\"p\"), installer: Some(\"store\"), \
+                 app_id: 10100, users: Some([0]), instant_users: Some([]), \
+                 visibility: Some([0, 1, 10200, 10, -1]), data_removed: true, \
+                 removed_for_all_users: true, app_id_removed: true, static_shared_lib: false, \
+                 kill_app: true, removed_by_system: true, archived: false }",
+                "removed p 10100",
+            ]
+        );
+        for info in [
+            RemovedInfo {
+                data_removed: false,
+                ..info.clone()
+            },
+            RemovedInfo {
+                static_shared_lib: true,
+                ..info.clone()
+            },
+        ] {
+            let log = finish(&info);
+            assert_eq!(log.len(), 1, "{log:?}");
+            assert!(log[0].starts_with("SendRemovedBroadcast"));
+        }
+        // A refused broadcast still tells the observers, then fails.
+        bridge.1.store(true, std::sync::atomic::Ordering::Relaxed);
+        let error = PostCommitEffect::Removed {
+            owner: external.clone(),
+            observers: observers.clone(),
+            info,
+        }
+        .finish()
+        .unwrap_err();
+        assert!(
+            error.message.contains("broadcast refused"),
+            "{}",
+            error.message
+        );
+        assert_eq!(log.lock().unwrap()[1], "removed p 10100");
+    }
 }

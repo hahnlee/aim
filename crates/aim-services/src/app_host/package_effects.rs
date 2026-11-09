@@ -1,6 +1,7 @@
 //! `IPackageMutationBridge` for the app host: the native package writer's
 //! effects, answered as system_server's `NativePackageEffectsBridge`
-//! answers them (`android-16.0.0_r1`), to the system uid only. The
+//! answers them (`android-16.0.0_r1`), to the system uid only, and the
+//! removal leaf's `sendPackageRemovedBroadcasts`. The
 //! protection and suspension policy use native package/device-policy owners.
 //! Install effects retain the session capture and use
 //! the activity, broadcast and package-monitor owners.
@@ -19,6 +20,7 @@ use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
+use aim_service_aidl::dev_aim_server_iinstallerremovalbridge as removal;
 use aim_service_aidl::dev_aim_server_ipackagemutationbridge as bridge;
 
 use super::{AppHost, reply};
@@ -195,6 +197,62 @@ impl PackageEffects {
                 }
             }
         })
+    }
+
+    /// `InstallerRemovalBridge.sendRemovedBroadcast`. Native discovery and
+    /// the hibernation owner's `PACKAGE_REMOVED` receiver observe each user
+    /// the untargeted broadcast tells; `UID_REMOVED` also retires the uid's
+    /// foreground services.
+    pub(super) fn package_removed(
+        &self,
+        mut a: removal::SendRemovedBroadcast,
+    ) -> Result<(), Exception> {
+        let name = required(a.package_name.as_deref(), "packageName")?;
+        let users = required_array(a.users.take(), "users")?;
+        let instant = required_array(a.instant_users.take(), "instantUsers")?;
+        let told: &[i32] = match (a.static_shared_lib, instant.is_empty()) {
+            (true, _) => &[],
+            (false, true) => &users,
+            (false, false) => &instant,
+        };
+        let visibility = a
+            .visibility
+            .take()
+            .map(|v| decode_visibility(&v))
+            .transpose()?;
+        let hibernation = super::app_hibernation::AppHibernation(self.host.clone());
+        let mut failure = None;
+        // Receivers take an archive's `EXTRA_REPLACING` removal as the
+        // start of an update, not as the package's removal.
+        for &user in told.iter().filter(|_| !a.archived) {
+            if let Err(e) =
+                self.host
+                    .notify_package_discoveries(&super::package_writes::PackageChanged {
+                        package: name,
+                        user,
+                        components: &[name.to_owned()],
+                        removed: true,
+                    })
+            {
+                failure.get_or_insert(e);
+            }
+            hibernation.package_removed(name, user, a.removed_for_all_users);
+        }
+        let events = removed_events(&a, name, &users, &instant, visibility.as_ref());
+        if let Err(e) = self.post(events, Vec::new()) {
+            failure.get_or_insert(e);
+        }
+        if a.app_id_removed {
+            for &user in told {
+                if let Err(e) = self
+                    .host
+                    .foreground_service_uid_removed(uid(user, a.app_id))
+                {
+                    failure.get_or_insert(e);
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     fn unstopped_events(&self, a: bridge::PackageUnstopped) -> Result<Vec<Event>, Exception> {
@@ -1170,6 +1228,8 @@ const DATA_LOADER: &str = "android.content.pm.extra.DATA_LOADER_TYPE";
 const ADDED: &str = "android.intent.action.PACKAGE_ADDED";
 const REMOVED: &str = "android.intent.action.PACKAGE_REMOVED";
 const REPLACED: &str = "android.intent.action.PACKAGE_REPLACED";
+/// `Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND`.
+const INCLUDE_BACKGROUND: i32 = 0x01000000;
 type AllowLists = BTreeMap<i32, Option<Vec<i32>>>;
 
 struct Event {
@@ -1220,6 +1280,111 @@ fn decode_visibility(encoded: &[i32]) -> Result<AllowLists, Exception> {
         lists.insert(user, values);
     }
     Ok(lists)
+}
+
+/// `BroadcastHelper.sendPackageRemovedBroadcasts` of an uninstall, which is
+/// neither an update nor a system update's removal: a full deletion's prior
+/// visibility filters all but the installer's copy.
+fn removed_events(
+    a: &removal::SendRemovedBroadcast,
+    name: &str,
+    users: &[i32],
+    instant: &[i32],
+    visibility: Option<&AllowLists>,
+) -> Vec<Event> {
+    let mut extras = vec![
+        (UID, Value::Int(a.app_id)),
+        (
+            "android.intent.extra.DATA_REMOVED",
+            Value::Bool(a.data_removed),
+        ),
+        (
+            "android.intent.extra.SYSTEM_UPDATE_UNINSTALL",
+            Value::Bool(false),
+        ),
+        (
+            "android.intent.extra.DONT_KILL_APP",
+            Value::Bool(!a.kill_app),
+        ),
+        (
+            "android.intent.extra.USER_INITIATED",
+            Value::Bool(!a.removed_by_system),
+        ),
+    ];
+    if a.archived {
+        extras.push((REPLACING, Value::Bool(true)));
+        extras.push(("android.intent.extra.ARCHIVAL", Value::Bool(true)));
+    }
+    extras.push((
+        "android.intent.extra.REMOVED_FOR_ALL_USERS",
+        Value::Bool(a.removed_for_all_users),
+    ));
+    let mut events = Vec::new();
+    if let Some(installer) = a.installer.as_deref() {
+        cohorts(
+            &mut events,
+            REMOVED,
+            Some(name),
+            &extras,
+            0,
+            Some(installer),
+            users,
+            instant,
+            None,
+            None,
+        );
+    }
+    let mut send = |action: &str, name: Option<&str>, extras: &[_], flags, target| {
+        cohorts(
+            &mut events,
+            action,
+            name,
+            extras,
+            flags,
+            target,
+            users,
+            instant,
+            visibility,
+            None,
+        );
+    };
+    // Only the installer of a static shared library is told.
+    if a.static_shared_lib {
+        return events;
+    }
+    send(REMOVED, Some(name), &extras, 0, None);
+    send(
+        "android.intent.action.PACKAGE_REMOVED_INTERNAL",
+        Some(name),
+        &extras,
+        0,
+        Some("android"),
+    );
+    if a.data_removed {
+        send(
+            "android.intent.action.PACKAGE_FULLY_REMOVED",
+            Some(name),
+            &extras,
+            INCLUDE_BACKGROUND,
+            None,
+        );
+    }
+    if a.app_id_removed {
+        if a.archived {
+            extras.push((
+                "android.intent.extra.PACKAGE_NAME",
+                Value::String(Some(name.into())),
+            ));
+        }
+        send(
+            "android.intent.action.UID_REMOVED",
+            None,
+            &extras,
+            INCLUDE_BACKGROUND,
+            None,
+        );
+    }
+    events
 }
 
 /// `deliver`: instant cohorts take precedence, as in BroadcastHelper.

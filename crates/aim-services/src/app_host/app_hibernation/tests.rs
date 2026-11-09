@@ -414,7 +414,7 @@ fn transitions_persist_and_leave_hibernation_on_use_unstop_and_package_events() 
         // A removal for the user drops its state; the remaining code keeps the
         // global state. A new addition starts awake.
         success(&set_global(&s, 1000, true));
-        s.package_removed("p", 0).unwrap();
+        s.package_removed("p", 0, false);
         success(&set_user(&s, 1000, 0, true));
         assert!(globally(&s));
         s.package_added("p", 0);
@@ -436,7 +436,7 @@ fn removal_for_all_users_drops_the_global_state_without_user_states() {
         (host.hibernation.0.lock().unwrap().global.as_mut())
             .unwrap()
             .insert("gone".into(), hibernated);
-        s.package_removed("gone", 0).unwrap();
+        s.package_removed("gone", 0, true);
         let loaded = host.hibernation.0.lock().unwrap();
         assert!(loaded.user.is_none());
         assert!(!loaded.global.as_ref().unwrap().contains_key("gone"));
@@ -536,5 +536,46 @@ fn global_hibernation_without_oat_deletion_keeps_dexopt_and_artifacts() {
             std::fs::read(&global).unwrap(),
             [0x0a, 5, 0x0a, 1, b'p', 0x10, 1, 0x0a, 3, 0x0a, 1, b'q']
         );
+    });
+}
+
+#[test]
+fn archived_package_removal_keeps_the_hibernation_states() {
+    crate::system::with_discovery_session(|host, _, _| {
+        grant(host);
+        let s = AppHibernation(host.clone());
+        s.boot_completed().unwrap();
+        let hibernated = State {
+            hibernated: true,
+            saved: 0,
+        };
+        (host.hibernation.0.lock().unwrap().global.as_mut())
+            .unwrap()
+            .insert("gone".into(), hibernated);
+        let removed = |archived: bool| {
+            super::super::package_effects::PackageEffects::new(host.clone())
+                .package_removed(
+                    aim_service_aidl::dev_aim_server_iinstallerremovalbridge::SendRemovedBroadcast {
+                        package_name: Some("gone".into()),
+                        installer: None,
+                        app_id: 10100,
+                        users: Some(vec![0]),
+                        instant_users: Some(Vec::new()),
+                        visibility: None,
+                        data_removed: !archived,
+                        removed_for_all_users: true,
+                        app_id_removed: false,
+                        static_shared_lib: false,
+                        kill_app: true,
+                        removed_by_system: false,
+                        archived,
+                    },
+                )
+                .unwrap();
+            let loaded = host.hibernation.0.lock().unwrap();
+            loaded.global.as_ref().unwrap().contains_key("gone")
+        };
+        assert!(removed(true));
+        assert!(!removed(false));
     });
 }
