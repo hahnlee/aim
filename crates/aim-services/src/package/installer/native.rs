@@ -110,6 +110,7 @@ pub struct NativeOwners {
     >,
     writes: Arc<super::file_bridge::Registry>,
 }
+
 /// `reconcileApps`' orphans among `/data/app`'s entries: APK files and
 /// directories, not install stages (`PackageInstallerService.isStageName`),
 /// that no code path starts with.
@@ -129,6 +130,27 @@ fn orphaned_app_paths<'a>(
             !code_paths.clone().any(|code| code.starts_with(&path))
         })
         .collect()
+}
+/// `RemovePackageHelper.removeCodePath` of each orphan: a directory through
+/// installd's `rmPackageDir`, its failure logged; a file deleted as
+/// `File.delete` deletes it, unreported.
+fn destroy_orphans(
+    orphans: Vec<(String, bool)>,
+    mut remove_code: impl FnMut(&str, &str) -> Result<(), Exception>,
+    mut remove_file: impl FnMut(&str) -> bool,
+) {
+    for (name, directory) in orphans {
+        let path = format!("/data/app/{name}");
+        eprintln!("native package: Destroying orphaned at {path}");
+        if !directory {
+            remove_file(&name);
+        } else if let Err(error) = remove_code(&name, &path) {
+            eprintln!(
+                "native package: Failed to remove code path: {}",
+                error.message
+            );
+        }
+    }
 }
 fn disk_error(error: storage::Error) -> Exception {
     Exception::new(
@@ -251,32 +273,13 @@ impl NativeOwners {
         &self,
         code_paths: impl Iterator<Item = &'a str> + Clone,
     ) -> Result<(), Exception> {
-        let entries = self
-            .disk
-            .lock()
-            .unwrap()
-            .app_entries()
-            .map_err(disk_error)?;
+        let entries = self.disk.lock().unwrap().app_entries();
         let removal = self.removal_owner()?;
-        for (name, directory) in orphaned_app_paths(entries, code_paths) {
-            let path = format!("/data/app/{name}");
-            eprintln!("native package: Destroying orphaned at {path}");
-            let removed = if directory {
-                removal.external.remove_code(&name, &path)
-            } else {
-                self.disk
-                    .lock()
-                    .unwrap()
-                    .remove_app_file(&name)
-                    .map_err(disk_error)
-            };
-            if let Err(error) = removed {
-                eprintln!(
-                    "native package: Failed to remove code path {path}: {}",
-                    error.message
-                );
-            }
-        }
+        destroy_orphans(
+            orphaned_app_paths(entries, code_paths),
+            |name, path| removal.external.remove_code(name, path),
+            |name| self.disk.lock().unwrap().remove_app_file(name),
+        );
         Ok(())
     }
     pub fn free_stage_dirs(&self, volume: Option<&str>) -> Result<(), Exception> {
@@ -2099,30 +2102,6 @@ impl Owners for NativeOwners {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn reconcile_apps_destroys_only_unowned_package_paths() {
-        let entries = [
-            ("~~a==", true),
-            ("~~b==", true),
-            ("orphan.apk", false),
-            ("notes.txt", false),
-            ("vmdl12.tmp", true),
-            ("smdl3.tmp", true),
-            ("smdl2tmp1", true),
-            ("lost.apk", false),
-        ]
-        .map(|(name, directory)| (name.to_owned(), directory))
-        .to_vec();
-        let code = [
-            "/data/app/~~a==/com.a-1==",
-            "/data/app/lost.apk",
-            "/system/app/X",
-        ];
-        assert_eq!(
-            orphaned_app_paths(entries, code.iter().copied()),
-            [("~~b==".to_owned(), true), ("orphan.apk".to_owned(), false)]
-        );
-    }
     use super::*;
     use crate::package::{
         installer::pipeline,
@@ -2134,6 +2113,69 @@ mod tests {
     };
     use aim_service_aidl::android_content_pm_ipackageinstaller as aidl;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn reconcile_apps_destroys_only_unowned_package_paths() {
+        let entries = [
+            ("~~a==", true),
+            ("~~b==", true),
+            ("orphan.apk", false),
+            ("upper.APK", false),
+            ("notes.txt", false),
+            ("vmdl12.tmp", true),
+            ("smdl3.tmp", true),
+            ("smdl2tmp1", true),
+            ("lost.apk", false),
+            ("pre", true),
+        ]
+        .map(|(name, directory)| (name.to_owned(), directory))
+        .to_vec();
+        // `startsWith` without a separator: "/data/app/prefix-1" keeps "pre".
+        let code = [
+            "/data/app/~~a==/com.a-1==",
+            "/data/app/lost.apk",
+            "/data/app/prefix-1",
+            "/system/app/X",
+        ];
+        assert_eq!(
+            orphaned_app_paths(entries, code.iter().copied()),
+            [("~~b==".to_owned(), true), ("orphan.apk".to_owned(), false)]
+        );
+    }
+
+    #[test]
+    fn orphans_are_routed_by_kind_and_a_failure_does_not_stop_the_rest() {
+        let (mut code, mut files) = (Vec::new(), Vec::new());
+        destroy_orphans(
+            vec![
+                ("~~a==".into(), true),
+                ("x.apk".into(), false),
+                ("~~b==".into(), true),
+                ("y.apk".into(), false),
+            ],
+            |name, path| {
+                code.push((name.to_owned(), path.to_owned()));
+                if name == "~~a==" {
+                    Err(Exception::new(EX_ILLEGAL_STATE, "rmPackageDir failed"))
+                } else {
+                    Ok(())
+                }
+            },
+            |name| {
+                files.push(name.to_owned());
+                false
+            },
+        );
+        assert_eq!(
+            code,
+            [
+                ("~~a==".to_owned(), "/data/app/~~a==".to_owned()),
+                ("~~b==".to_owned(), "/data/app/~~b==".to_owned())
+            ]
+        );
+        assert_eq!(files, ["x.apk", "y.apk"]);
+    }
+
     #[test]
     fn install_storage_failures_preserve_public_parse_and_missing_split_status() {
         for status in [-108, -28, -110] {
