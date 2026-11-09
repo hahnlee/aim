@@ -230,6 +230,8 @@ pub enum Command {
     Front(i32),
     /// The task returned to the desktop, retaining its activities.
     Back(i32),
+    /// The desktop came to the front over the task: its app hides.
+    Hide(i32),
     /// A task without activities, gone.
     TaskEmpty(i32),
 }
@@ -311,8 +313,12 @@ pub struct Stack {
     background: BTreeSet<i32>,
     /// The root home task (`TaskDisplayArea.mRootHomeTask`). In window mode
     /// it stays behind the Mac desktop, which is the user's home: never
-    /// visible, focused or brought to the front.
+    /// visible or focused until a start brings it to the front: the desktop
+    /// is then in front, and the home resumed.
     pub(super) home: Option<i32>,
+    /// Whether the root home task was brought to the front in window mode,
+    /// and no other task since.
+    home_front: bool,
     /// `RecentTasks.remove`: finishing tasks can remain attached until destroyed.
     removed_from_recents: BTreeSet<i32>,
     /// The task last reported focused.
@@ -388,9 +394,10 @@ impl Stack {
     }
 
     /// Whether `task` is behind the desktop: moved there, or the root home
-    /// task in window mode.
+    /// task in window mode unless it was brought to the front.
     fn behind_desktop(&self, task: i32) -> bool {
-        self.background.contains(&task) || (self.freeform && self.home == Some(task))
+        self.background.contains(&task)
+            || (self.freeform && self.home == Some(task) && !self.home_front)
     }
 
     /// The activity type of `task`: the root home task's is home.
@@ -813,6 +820,7 @@ impl Stack {
                     if self.behind_desktop(task.id) {
                         self.tasks.insert(0, *task);
                     } else {
+                        self.home_front = false;
                         self.tasks.push(*task);
                     }
                 } else {
@@ -882,16 +890,36 @@ impl Stack {
         }
     }
 
+    /// `task` comes to the front. In window mode the root home task coming
+    /// to the front is the desktop's: the tasks of the focused task's app
+    /// go behind it (`HIDE` hides that app's windows, the tasks of its
+    /// package), and those of other apps stay visible, as their windows do.
     fn move_to_front(&mut self, task: i32) {
         self.background.remove(&task);
-        // The desktop, not the root home task, comes to the front.
-        if self.behind_desktop(task) {
+        let Some(at) = self.tasks.iter().position(|t| t.id == task) else {
             return;
+        };
+        if self.freeform && self.home == Some(task) {
+            if let Some(package) = self
+                .focused()
+                .filter(|&f| f != task)
+                .and_then(|f| self.task(f))
+                .map(|f| package_of(&f.real_activity).to_string())
+            {
+                let hidden: Vec<i32> = self
+                    .tasks
+                    .iter()
+                    .filter(|t| t.id != task && package_of(&t.real_activity) == package)
+                    .map(|t| t.id)
+                    .collect();
+                self.background.extend(hidden);
+            }
+            self.home_front = true;
+        } else {
+            self.home_front = false;
         }
-        if let Some(at) = self.tasks.iter().position(|t| t.id == task) {
-            let t = self.tasks.remove(at);
-            self.tasks.push(t);
-        }
+        let t = self.tasks.remove(at);
+        self.tasks.push(t);
     }
 
     /// The task is brought to the front (`moveTaskToFront`).
@@ -1043,9 +1071,16 @@ impl Stack {
     fn settle(&mut self, out: &mut Vec<Command>) {
         let focused = self.focused();
         if focused != self.front {
-            self.front = focused;
+            let last = std::mem::replace(&mut self.front, focused);
             if let Some(task) = focused {
                 out.push(Command::Front(task));
+            }
+            if let Some(last) = last
+                && self.freeform
+                && focused.is_some()
+                && focused == self.home
+            {
+                out.push(Command::Hide(last));
             }
         }
         self.update_top_resumed(out);
@@ -1274,6 +1309,7 @@ impl Stack {
             self.fullscreen.remove(&task);
             if self.home == Some(task) {
                 self.home = None;
+                self.home_front = false;
             }
             out.push(Command::TaskEmpty(task));
         }
@@ -1443,6 +1479,13 @@ impl Stack {
         self.settle(&mut out);
         out
     }
+}
+
+/// The package of component `package/class`.
+fn package_of(component: &str) -> &str {
+    component
+        .split_once('/')
+        .map_or(component, |(package, _)| package)
 }
 
 /// `adjustLaunchFlagsToDocumentMode`.

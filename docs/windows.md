@@ -135,20 +135,22 @@ which provisions the device and finishes, then the image's
 task: the home is resumed until an app covers it. A home record is
 unresizeable unless its activity asked to be resizeable
 (`setActivityType`). In window mode the Mac desktop is the home: the root home task
-stays behind it at the bottom of the tasks, invisible, never focused or
-brought to the front, its activity launched straight to stopped
-(`LaunchActivityItem` with `StopActivityItem`), and it is never reported
-to the display server, so it has no Mac window. `getTasks`, the task
-organizer, the window dump and the root-task queries list it. Moving the
-root home task to the front (`TaskDisplayArea.moveHomeRootTaskToFront`,
-which the pinned `IActivityTaskManager` does not expose; a HOME start
-reaches it) brings the desktop to the front instead, as **Home** below
-describes: the apps hide, and the root home task keeps its place at the
-bottom of the root tasks, invisible, unfocused and without a Mac window.
+stays behind it at the bottom of the tasks, invisible and never focused,
+its activity launched straight to stopped (`LaunchActivityItem` with
+`StopActivityItem`), and it is never reported to the display server, so it
+has no Mac window. A start that brings it to the front (a HOME intent,
+`moveTaskToFront`) brings the desktop there: the tasks of the focused
+task's app go behind the desktop, invisible, and pause and stop; the
+server hides that app (`HIDE`); the home becomes the focused task and its
+activity the top resumed one; other apps' tasks stay visible and resumed,
+as their windows stay. Any other task coming to the front puts it behind
+the desktop again, paused and stopped. `getTasks`, the task organizer, the
+window dump and the root-task queries list it.
 `getAllRootTaskInfos` and `getAllRootTaskInfosOnDisplay` list the root
 tasks top to bottom (the app tasks, the organizer root tasks with their
 tasks as leaves, the root home task at position 0 unless an organizer
-root task was made under it), and `getRootTaskInfo` and
+root task was made under it or a HOME start brought it to the front), and
+`getRootTaskInfo` and
 `getRootTaskInfoOnDisplay` find the root home task for
 `ACTIVITY_TYPE_HOME`, no pinned one, else the topmost compatible one
 (`TaskDisplayArea.getRootTask`), and `getFocusedRootTaskInfo` the focused

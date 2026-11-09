@@ -635,6 +635,10 @@ impl AppHost {
             }
             Command::Front(task) => self.task_to_front(task),
             Command::Back(task) => self.task_to_back(task),
+            Command::Hide(task) => {
+                self.task_hidden(task);
+                Ok(())
+            }
             Command::TaskEmpty(task) => {
                 self.remove_task(task);
                 Ok(())

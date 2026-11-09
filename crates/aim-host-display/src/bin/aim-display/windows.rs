@@ -355,6 +355,11 @@ fn on_bridge_record(r: &Record) {
         if r.op == window::FRONT {
             s.front = Some(r.task);
         }
+        // The desktop came to the front: no task is, and the app's window
+        // back from the Dock asks for the front again.
+        if r.op == window::HIDE && s.front == Some(r.task) {
+            s.front = None;
+        }
         if r.op == window::REORDER_TO_BACK
             && let Some(at) = s.order.iter().position(|&(task, _)| task == r.task)
         {
