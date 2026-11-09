@@ -450,10 +450,29 @@ impl AppHost {
         } else {
             None
         };
-        let windowing_mode = match &saved {
-            _ if home => 0,
+        // TaskLaunchParamsModifier: a mode the options leave undefined is a
+        // fullscreen display area's source task's, if fullscreen or freeform.
+        let source_mode = source
+            .filter(|_| !windows && options.mode == 0)
+            .and_then(|s| self.tasks.windowing_mode(s))
+            .filter(|m| matches!(m, 1 | 5));
+        let launch_mode = match &saved {
             Some(p) if p.windowing_mode != 0 => p.windowing_mode,
-            _ => options.windowing_mode(windows),
+            _ => source_mode.unwrap_or(options.mode),
+        };
+        // The display area's mode is inherited, and so is a mode the activity
+        // cannot take (TaskDisplayArea.validateWindowingMode).
+        let area_mode = if windows { 5 } else { 1 };
+        let windowing_mode = if home {
+            0
+        } else if launch_mode == area_mode {
+            area_mode
+        } else {
+            match self.valid_launch_mode(launch_mode, info, options.activity_type)? {
+                0 => area_mode,
+                6 => return Err(self.display_area_multi_window()),
+                mode => mode,
+            }
         };
         let saved_bounds = saved
             .map(|p| p.bounds)
@@ -548,31 +567,47 @@ impl AppHost {
         Ok(id)
     }
 
+    /// A multi-window root task of the display area, which a launch can ask
+    /// for and this owner does not make (#2616).
+    fn display_area_multi_window(&self) -> Exception {
+        self.unimplemented_named(
+            "activity_task",
+            "multi-window root task of the display area (#2616)",
+        )
+    }
+
     pub(super) fn apply_task_launch_options(
         &self,
         id: i32,
         options: super::activity_options::LaunchOptions,
         info: &ActivityInfo,
-    ) -> Result<(), String> {
+    ) -> Result<(), Exception> {
         if options.mode == 0 && options.bounds.is_none() {
             return Ok(());
         }
-        let display = self.display().map_err(|e| e.message)?;
+        let display = self.display()?;
         let area = Rect {
             left: 0,
             top: 0,
             right: display.0.width,
             bottom: display.0.height,
         };
+        // TaskDisplayArea.getOrCreateRootTask: a mode the task can take is
+        // its root task's; one it cannot (validateWindowingMode) leaves it.
+        let valid = match self.valid_task_mode(options.mode, id)? {
+            _ if self.tasks.parent(id).is_some() => 0,
+            6 => return Err(self.display_area_multi_window()),
+            mode => mode,
+        };
         let (bounds, mode) = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
             let task = tasks
                 .iter_mut()
                 .find(|t| t.id == id)
-                .ok_or_else(|| format!("no task {id}"))?;
-            if options.mode != 0 {
-                task.windowing_mode = options.windowing_mode(self.tasks.window_mode());
-                task.requested_mode = task.windowing_mode;
+                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no task {id}")))?;
+            if valid != 0 {
+                task.windowing_mode = valid;
+                task.requested_mode = valid;
             }
             let bounds = if task.windowing_mode == 5 {
                 let bounds = options.bounds.or(task.restore_bounds).unwrap_or_else(|| {
@@ -599,6 +634,7 @@ impl AppHost {
             .unwrap()
             .set_task_windowing_mode(id, mode);
         self.move_task(id, bounds)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 
     /// Task `id` is in front and focused: its layer goes over the others,
@@ -1432,11 +1468,22 @@ impl AppHost {
             )
         };
         let requested_mode = mode.unwrap_or(requested_mode);
-        let mode = resolved_mode(
-            self.tasks.window_mode(),
-            requested_mode,
-            parent.map(|p| p.0),
-        );
+        // Task.setWindowingMode: a leaf task in an organizer root task takes
+        // its mode, undefined inheriting the root task's; a root task's
+        // (setWindowingModeInner) is undefined if it cannot take it
+        // (isValidWindowingMode), inheriting the display area's.
+        let mode = match parent {
+            Some((parent, _)) if requested_mode == 0 => parent,
+            Some(_) => requested_mode,
+            None => match self
+                .valid_task_mode(requested_mode, id)
+                .map_err(|e| e.message)?
+            {
+                0 if self.tasks.window_mode() => 5,
+                0 => 1,
+                mode => mode,
+            },
+        };
         let area = parent.map_or(area, |p| p.1);
         let mut requested = bounds.unwrap_or(requested);
         // Task.onConfigurationChangedInner: a task entering freeform without
@@ -1554,21 +1601,6 @@ fn parent_of(tasks: &[Task], task: &Task) -> Option<(i32, Rect)> {
     let parent = task.parent?;
     let p = tasks.iter().find(|t| t.id == parent)?;
     Some((p.windowing_mode, p.bounds))
-}
-
-/// `getWindowingMode` of a task requesting windowing mode `requested`, in
-/// an organizer root task of windowing mode `parent` if in one, where an
-/// undefined mode (or one this owner does not serve in a root task)
-/// inherits the root task's. On the display area, a mode
-/// `TaskDisplayArea.isValidWindowingMode` rejects is undefined and inherits
-/// the display area's: fullscreen, or freeform in window mode.
-fn resolved_mode(windows: bool, requested: i32, parent: Option<i32>) -> i32 {
-    match parent {
-        Some(_) if matches!(requested, 1 | 5 | 6) => requested,
-        Some(p) => p,
-        None if requested == 1 || !windows => 1,
-        None => 5,
-    }
 }
 
 /// `Task.adjustForMinimalTaskDimensions`: `bounds` at least `min` wide and
@@ -1929,6 +1961,15 @@ pub(super) mod tests {
             )))
             .ok()
             .unwrap();
+        // Multi-window support (`retrieveSettings`) reads the device's.
+        assert!(host.platform.set(ready.platform().unwrap().clone()).is_ok());
+        assert!(
+            host.system
+                .set(ready.package_system().unwrap().clone())
+                .is_ok()
+        );
+        // The shared system's scan is published.
+        assert!(host.package_boot.scan.set(Ok(())).is_ok());
         host.tasks.windows.set(windows).unwrap();
         host
     }
@@ -1984,7 +2025,9 @@ pub(super) mod tests {
             for n in [bounds.left, bounds.top, bounds.right, bounds.bottom] {
                 rect.write_i32(n);
             }
-            for (requested, mode) in [(5, 5), (1, 1), (2, 1), (6, 1)] {
+            // Without picture-in-picture, a pinned launch inherits the freeform
+            // display area.
+            for (requested, mode) in [(1, 1), (5, 5), (2, 5)] {
                 let bundle = RawBundle::empty()
                     .with_ints(&[
                         ("android.activity.windowingMode", requested),
@@ -2045,23 +2088,6 @@ pub(super) mod tests {
                     mode
                 );
             }
-            let id = host.new_task(10100, "p", "p.Main", &info, None).unwrap();
-            let before = host.tasks.bounds(id).unwrap();
-            for mode in [1, 5] {
-                host.apply_task_launch_options(
-                    id,
-                    super::super::activity_options::LaunchOptions {
-                        mode,
-                        ..Default::default()
-                    },
-                    &info,
-                )
-                .unwrap();
-                assert_eq!(
-                    host.tasks.own_bounds(id),
-                    (mode == 5).then_some((5, before))
-                );
-            }
             for display in [-2, 1, 123] {
                 let bundle = RawBundle::empty()
                     .with_ints(&[("android.activity.launchDisplayId", display)])
@@ -2075,6 +2101,141 @@ pub(super) mod tests {
                 );
             }
             assert!(host.activity_launch_options(None, 2000).is_ok());
+        });
+    }
+
+    #[test]
+    fn launch_windowing_modes_the_activity_cannot_take_inherit_the_display_area() {
+        use super::super::{activity_options::LaunchOptions, settings::Table};
+        use aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION;
+        crate::system::with_discovery_binders(|ready, _, _, export| {
+            // The fixture device has multi-window but no picture-in-picture, and
+            // freeform window management once its setting enables it.
+            let fixed = ready.activity_info_of("p", "p.Main").unwrap();
+            assert_eq!(fixed.resize_mode, 0); // RESIZE_MODE_UNRESIZEABLE
+            let mut resizeable = fixed.clone();
+            resizeable.resize_mode = 2; // RESIZE_MODE_RESIZEABLE
+            for (freeform, windows) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                if freeform && !windows {
+                    let change = super::super::settings::Change {
+                        value: Some("1"),
+                        tag: None,
+                        make_default: false,
+                        package: None,
+                        caller_system: true,
+                        overrideable_by_restore: false,
+                    };
+                    let settings = &ready.platform().unwrap().settings;
+                    settings
+                        .insert(Table::Global, "enable_freeform_support", &change, false)
+                        .unwrap();
+                }
+                let host = launch_host(ready, windows);
+                assert!(
+                    host.framework
+                        .set(
+                            super::super::resources::Framework::load(
+                                &aim_paths::original_image(),
+                                320,
+                                "en-US"
+                            )
+                            .expect("framework resources for launch windowing modes")
+                        )
+                        .is_ok()
+                );
+                let endpoint = export(Arc::new(Surfaces(Default::default())));
+                assert!(
+                    host.composer
+                        .set(surface::Composer::for_test(&host.process, endpoint.handle))
+                        .is_ok()
+                );
+                let start = |info: &ActivityInfo, mode: i32, source: Option<i32>| {
+                    let mut request =
+                        super::super::activity_start::StartRequest::launcher("p.Main");
+                    request.launch_options = LaunchOptions {
+                        mode,
+                        ..Default::default()
+                    };
+                    request.source_task = source;
+                    let token = host.start_in_process(
+                        0,
+                        10100,
+                        "p",
+                        info.clone(),
+                        request,
+                        &Default::default(),
+                        None,
+                    )?;
+                    let task = host
+                        .activities
+                        .stack
+                        .lock()
+                        .unwrap()
+                        .get(token)
+                        .unwrap()
+                        .task;
+                    Ok::<_, Exception>((task, host.tasks.windowing_mode(task).unwrap()))
+                };
+                let area = if windows { 5 } else { 1 };
+                // Fullscreen is taken; undefined and pinned inherit the display
+                // area, and so does freeform but for a resizeable activity (on a
+                // phone display) on a device with freeform.
+                for info in [&fixed, &resizeable] {
+                    let free = if freeform && info.resize_mode == 2 {
+                        5
+                    } else {
+                        area
+                    };
+                    for (requested, mode) in [(0, area), (1, 1), (2, area), (5, free)] {
+                        assert_eq!(start(info, requested, None).unwrap().1, mode);
+                    }
+                }
+                // Multi-window is the resizeable activity's only: the other
+                // inherits the display area, the resizeable one would make a
+                // multi-window root task of it, which this owner does not.
+                assert_eq!(start(&fixed, 6, None).unwrap().1, area);
+                assert_eq!(
+                    start(&resizeable, 6, None).unwrap_err().code,
+                    EX_UNSUPPORTED_OPERATION
+                );
+                // A fullscreen display area's launch takes its source task's
+                // fullscreen or freeform mode, if it can; a freeform one's
+                // launch does not.
+                let (source, _) = start(&resizeable, 1, None).unwrap();
+                assert_eq!(start(&resizeable, 0, Some(source)).unwrap().1, area);
+                if freeform {
+                    let (source, _) = start(&resizeable, 5, None).unwrap();
+                    assert_eq!(start(&resizeable, 0, Some(source)).unwrap().1, 5);
+                    assert_eq!(start(&fixed, 0, Some(source)).unwrap().1, area);
+                }
+                // A reused root task takes a mode it supports and keeps its own
+                // for one it does not.
+                let apply = |task: i32, info: &ActivityInfo, mode: i32| {
+                    host.apply_task_launch_options(
+                        task,
+                        LaunchOptions {
+                            mode,
+                            ..Default::default()
+                        },
+                        info,
+                    )
+                    .map(|()| host.tasks.windowing_mode(task).unwrap())
+                };
+                let (task, _) = start(&resizeable, 1, None).unwrap();
+                assert_eq!(apply(task, &resizeable, 2).unwrap(), 1);
+                let free = if freeform { 5 } else { 1 };
+                assert_eq!(apply(task, &resizeable, 5).unwrap(), free);
+                assert_eq!(apply(task, &resizeable, 1).unwrap(), 1);
+                assert_eq!(
+                    apply(task, &resizeable, 6).unwrap_err().code,
+                    EX_UNSUPPORTED_OPERATION
+                );
+                let (task, _) = start(&fixed, 1, None).unwrap();
+                for mode in [5, 6] {
+                    assert_eq!(apply(task, &fixed, mode).unwrap(), 1);
+                }
+            }
         });
     }
 

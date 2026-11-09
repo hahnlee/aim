@@ -4,30 +4,13 @@ use aim_binder_host::parcel::Exception;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct LaunchOptions {
+    /// The requested windowing mode (`getLaunchWindowingMode`), unvalidated.
     pub mode: i32,
     pub bounds: Option<Rect>,
     /// The activity type of the start's root task (`resolveActivityType`):
     /// home of a home activity's (`ActivityRecord.setActivityType`) or
     /// `startHomeActivity`'s, else unset (standard).
     pub activity_type: i32,
-}
-
-impl LaunchOptions {
-    pub(super) fn windowing_mode(self, windows: bool) -> i32 {
-        match self.mode {
-            0 => {
-                if windows {
-                    5
-                } else {
-                    1
-                }
-            }
-            5 if windows => 5,
-            // TaskDisplayArea.validateWindowingMode: an unsupported mode inherits
-            // the fullscreen display area. There is no native PiP/split root.
-            _ => 1,
-        }
-    }
 }
 
 impl AppHost {
