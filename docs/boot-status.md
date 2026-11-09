@@ -919,8 +919,12 @@ VINTF manifests do not declare it), apexd's `apexservice` with
 `getService` and `checkService` lookups (dumpstate, statsd, keystore2)
 stay single. vold and installd are looked up as `connectVold` and
 `Installer.connect` do: again each second, logged ("vold not found; trying
-again"), vold without a bound and an installd call for at most
-`CONNECT_WAIT_MS` (10 s); audioserver's `media.audio_policy` and
+again"), an installd call for at most `CONNECT_WAIT_MS` (10 s). The original
+retries vold without a bound on a background thread while the boot goes
+on; the app host's boot thread prepares the user's storage itself and holds
+the held app starts meanwhile, so it waits 30 s for vold, then fails the
+boot and the held starts (continuing on vold's connection, as
+`onDaemonConnected` does, would lift the bound). audioserver's `media.audio_policy` and
 `media.audio_flinger` with `waitForService`, as AudioService's start tasks
 and retries leave no bound (#2809, #2810). HintManager resolves its Power HAL once, beside its
 construction, and the suspend blockers `system_suspend` at the first take;

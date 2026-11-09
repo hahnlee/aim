@@ -41,23 +41,19 @@ const RECONNECT: Duration = Duration::from_secs(1);
 /// The daemon `name` as `StorageManagerService.connectVold` and
 /// `Installer.connect` reach it: `ServiceManager.getService`, which only
 /// checks (`checkService2`); while it is not registered, logged and
-/// looked up again each second, until `limit` passed, if one: then none.
-pub(super) fn connect(
-    process: &LocalProcess,
-    name: &str,
-    limit: Option<Duration>,
-) -> Option<Strong> {
+/// looked up again each second, until `limit` passed: then none.
+pub(super) fn connect(process: &LocalProcess, name: &str, limit: Duration) -> Option<Strong> {
     let start = Instant::now();
     loop {
         if let Ok(service) = check_service(process, name) {
             return Some(service);
         }
-        let left = limit.map(|limit| limit.saturating_sub(start.elapsed()));
-        if left == Some(Duration::ZERO) {
+        let left = limit.saturating_sub(start.elapsed());
+        if left.is_zero() {
             return None;
         }
         eprintln!("app host: {name} not found; trying again");
-        std::thread::sleep(left.map_or(RECONNECT, |left| left.min(RECONNECT)));
+        std::thread::sleep(left.min(RECONNECT));
     }
 }
 
@@ -664,14 +660,13 @@ pub(super) mod tests {
         registry.finish();
     }
 
-    /// A daemon not registered yet is looked up again a second later,
-    /// without a bound.
+    /// A daemon not registered yet is looked up again a second later.
     #[test]
     fn a_connection_looks_again_until_the_daemon_registers() {
         let registry = Registry::start(97331, true, &[], &[]);
         let host = registry.host.clone();
         let connecting = std::thread::spawn(move || {
-            let reply = connect(&host, NAME, None)
+            let reply = connect(&host, NAME, Duration::from_secs(10))
                 .unwrap()
                 .transact(1, &Parcel::new(), false);
             reply.unwrap().reader().read_i32().unwrap()
@@ -683,12 +678,12 @@ pub(super) mod tests {
         registry.finish();
     }
 
-    /// A bounded connection looks up until its limit, then is none.
+    /// A connection looks up until its limit, then is none.
     #[test]
-    fn a_bounded_connection_gives_up_at_its_limit() {
+    fn a_connection_gives_up_at_its_limit() {
         let registry = Registry::start(97341, true, &[], &[]);
         let start = Instant::now();
-        assert!(connect(&registry.host, NAME, Some(Duration::from_millis(1500))).is_none());
+        assert!(connect(&registry.host, NAME, Duration::from_millis(1500)).is_none());
         assert!(start.elapsed() >= Duration::from_millis(1500));
         assert_eq!(registry.asked(), Asked::Check(NAME.into()));
         assert_eq!(registry.asked(), Asked::Check(NAME.into()));

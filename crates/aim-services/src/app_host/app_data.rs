@@ -177,7 +177,7 @@ impl AppHost {
     /// installd for a call, as `Installer.checkBeforeRemote` waits for
     /// `connect`: at most `CONNECT_WAIT_MS` for it to register.
     pub(super) fn installd(&self) -> Result<Strong, String> {
-        super::service_manager::connect(&self.process, INSTALLD, Some(CONNECT_WAIT))
+        super::service_manager::connect(&self.process, INSTALLD, CONNECT_WAIT)
             .ok_or_else(|| "time out waiting for the installer to be ready".into())
     }
 
