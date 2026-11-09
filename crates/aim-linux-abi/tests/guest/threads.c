@@ -738,8 +738,11 @@ static void test_sigwait(void) {
 }
 
 // A consumed signal must not leave a host carrier racing the next guest
-// fault (ART's implicit null checks use this same sigreturn path).
-enum { WAIT_FAULT_ROUNDS = 4096 };
+// fault (ART's implicit null checks use this same sigreturn path). The
+// watchdog bounds each round, not the whole run: a lost signal or fault
+// stalls one round forever, while a loaded host only slows every round
+// (#2768: up to 25 s in all, at most 33 ms per round).
+enum { WAIT_FAULT_ROUNDS = 4096, WAIT_FAULT_ROUND_SECONDS = 5 };
 static _Atomic int wait_fault_ready, wait_fault_done, wait_fault_count;
 extern char wait_fault_pc[], wait_fault_resume[];
 
@@ -769,7 +772,7 @@ static void *wait_then_fault(void *arg) {
 
 static void test_sigwait_fault_race(void) {
   const char *t = "sigwait_fault_race";
-  alarm(15);
+  alarm(WAIT_FAULT_ROUND_SECONDS);
   struct sigaction sa = {.sa_sigaction = wait_fault_handler, .sa_flags = SA_SIGINFO}, old_action;
   CHECK(t, sigaction(SIGSEGV, &sa, &old_action) == 0, "sigaction");
   sigset_t set, old_mask;
@@ -782,6 +785,7 @@ static void test_sigwait_fault_race(void) {
   pthread_t th;
   CHECK(t, pthread_create(&th, NULL, wait_then_fault, NULL) == 0, "create");
   for (int i = 1; i <= WAIT_FAULT_ROUNDS; i++) {
+    alarm(WAIT_FAULT_ROUND_SECONDS);
     while (atomic_load(&wait_fault_ready) < i) sched_yield();
     usleep(10);
     CHECK(t, pthread_kill(th, SIGQUIT) == 0, "send");
