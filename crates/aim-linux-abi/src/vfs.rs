@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, OsStr};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2720,7 +2720,22 @@ fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     let host = Path::new(OsStr::from_bytes(&buf[..len]));
-    Ok(guest_path_of_host(host).unwrap_or_else(|| host.display().to_string()))
+    visible(guest_path_of_host(host).unwrap_or_else(|| host.display().to_string()))
+}
+
+/// `guest`, a path of host names, as the guest names it: an entry of a
+/// locked directory by its no-key name (fscrypt).
+pub(crate) fn visible(guest: String) -> Result<String, Errno> {
+    if !crate::sys::fscrypt::locking()? {
+        return Ok(guest);
+    }
+    let (mut host, mut shown) = (Vec::new(), Vec::new());
+    for name in guest.split('/').filter(|name| !name.is_empty()) {
+        let dir = host_cstring(lookup(&join_guest(&host)).0)?;
+        shown.push(crate::sys::fscrypt::guest_name(&dir, name.as_bytes())?);
+        host.push(name.as_bytes().to_vec());
+    }
+    Ok(join_guest(&shown))
 }
 
 fn join_guest(components: &[Vec<u8>]) -> String {
@@ -2780,29 +2795,96 @@ fn link_target(host: PathBuf, area: Area) -> Option<PathBuf> {
 
 /// Resolve a guest path relative to a Linux dirfd into a host path.
 pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, Errno> {
-    resolve_inner(dirfd, path, follow_last, false, |_| Ok(()))
+    resolve_inner(dirfd, path, follow_last, false, false, |_| Ok(()))
+}
+/// [`resolve`] of a path whose last component is to be created: in a
+/// locked directory (fscrypt) that is ENOKEY, unless it names an entry.
+pub fn resolve_new(dirfd: i32, path: &[u8]) -> Result<Resolved, Errno> {
+    resolve_inner(dirfd, path, false, false, true, |_| Ok(()))
 }
 /// Resolve from the actual cwd/dirfd and check each searched directory, including
 /// directories visited before a symlink or dot-dot changes the resolved path.
+/// `check` gets the directory's path by its host names, as [`lookup`] maps
+/// it ([`visible`] gives the guest's).
 pub fn resolve_checked(
     dirfd: i32,
     path: &[u8],
     follow_last: bool,
     check: impl FnMut(&str) -> Result<(), Errno>,
 ) -> Result<Resolved, Errno> {
-    resolve_inner(dirfd, path, follow_last, true, check)
+    resolve_inner(dirfd, path, follow_last, true, false, check)
 }
+/// [`resolve_checked`] of a path whose last component may be created, as
+/// [`resolve_new`].
+pub fn resolve_checked_new(
+    dirfd: i32,
+    path: &[u8],
+    follow_last: bool,
+    check: impl FnMut(&str) -> Result<(), Errno>,
+) -> Result<Resolved, Errno> {
+    resolve_inner(dirfd, path, follow_last, true, true, check)
+}
+
+/// The components a walk has passed: as the guest names them and, once a
+/// locked directory's no-key name stands for an entry (fscrypt), as the
+/// host does.
+struct Walk {
+    guest: Vec<Vec<u8>>,
+    host: Option<Vec<Vec<u8>>>,
+}
+
+impl Walk {
+    /// Adds `name`, looked up in the directory walked so far; `new` when
+    /// it is to be created.
+    fn push(&mut self, name: Vec<u8>, locking: bool, new: bool) -> Result<(), Errno> {
+        let host = if locking {
+            let dir = host_cstring(lookup(&self.host_path()).0)?;
+            crate::sys::fscrypt::host_name(&dir, &name, new)?
+        } else {
+            None
+        };
+        if host.is_some() && self.host.is_none() {
+            self.host = Some(self.guest.clone());
+        }
+        if let Some(names) = &mut self.host {
+            names.push(host.unwrap_or_else(|| name.clone()));
+        }
+        self.guest.push(name);
+        Ok(())
+    }
+    fn pop(&mut self) {
+        self.guest.pop();
+        if let Some(names) = &mut self.host {
+            names.pop();
+        }
+    }
+    fn clear(&mut self) {
+        self.guest.clear();
+        self.host = None;
+    }
+    /// The guest path that names the walk's host path.
+    fn host_path(&self) -> String {
+        join_guest(self.host.as_ref().unwrap_or(&self.guest))
+    }
+}
+
+fn host_cstring(path: PathBuf) -> Result<CString, Errno> {
+    CString::new(path.into_os_string().into_vec()).map_err(|_| errno::EINVAL)
+}
+
 fn resolve_inner(
     dirfd: i32,
     path: &[u8],
     follow_last: bool,
     relative_base: bool,
+    new: bool,
     mut check: impl FnMut(&str) -> Result<(), Errno>,
 ) -> Result<Resolved, Errno> {
     refresh_fuse_mounts()?;
     if path.is_empty() {
         return Err(errno::ENOENT);
     }
+    let locking = crate::sys::fscrypt::locking()?;
     let base = if path[0] == b'/' {
         String::from("/")
     } else if dirfd == LINUX_AT_FDCWD {
@@ -2819,13 +2901,14 @@ fn resolve_inner(
             pending.push(c.to_vec());
         }
     }
-    let mut done: Vec<Vec<u8>> = Vec::new();
+    let mut done = Walk {
+        guest: Vec::new(),
+        host: None,
+    };
     if relative_base && path[0] != b'/' {
-        done = base
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .map(|part| part.as_bytes().to_vec())
-            .collect();
+        for part in base.split('/').filter(|part| !part.is_empty()) {
+            done.push(part.as_bytes().to_vec(), locking, false)?;
+        }
         pending = path
             .split(|&byte| byte == b'/')
             .filter(|part| !part.is_empty())
@@ -2836,7 +2919,8 @@ fn resolve_inner(
     let mut links = 0;
     let mut fuse_walk = None;
     while let Some(c) = pending.pop() {
-        check(&join_guest(&done))?;
+        // The checks stat the directory by its host names.
+        check(&done.host_path())?;
         match c.as_slice() {
             b"." => continue,
             b".." => {
@@ -2846,15 +2930,15 @@ fn resolve_inner(
             }
             _ => {}
         }
-        done.push(c);
         let is_last = pending.is_empty();
+        done.push(c, locking, new && is_last)?;
         if is_last && !follow_last {
             break;
         }
-        if done[0] == b"proc" {
+        if done.guest[0] == b"proc" {
             continue;
         }
-        let current = join_guest(&done);
+        let current = join_guest(&done.guest);
         if let Some(route) = fuse_route(&current) {
             let next = match crate::sys::fuse_client::Walk::advance(&route, fuse_walk.as_ref()) {
                 Ok(next) => next,
@@ -2889,10 +2973,17 @@ fn resolve_inner(
             continue;
         }
         fuse_walk = None;
-        let (host, area) = lookup(&current);
-        let Some(target) = link_target(host, area) else {
+        let named = done.host.as_ref().map(|names| join_guest(names));
+        let (host, area) = lookup(named.as_deref().unwrap_or(&current));
+        let link = locking.then(|| host_cstring(host.clone())).transpose()?;
+        let Some(mut target) = link_target(host, area) else {
             continue;
         };
+        if let Some(link) = link {
+            let bytes =
+                crate::sys::fscrypt::link_target(&link, target.into_os_string().into_vec())?;
+            target = PathBuf::from(OsStr::from_bytes(&bytes));
+        }
         links += 1;
         if links > MAX_SYMLINKS {
             return Err(errno::ELOOP);
@@ -2908,8 +2999,9 @@ fn resolve_inner(
             }
         }
     }
-    let guest = join_guest(&done);
-    let (host, area) = lookup(&guest);
+    let guest = join_guest(&done.guest);
+    let named = done.host.as_ref().map(|names| join_guest(names));
+    let (host, area) = lookup(named.as_deref().unwrap_or(&guest));
     Ok(Resolved {
         host: CString::new(host.as_os_str().as_bytes()).map_err(|_| errno::EINVAL)?,
         guest,

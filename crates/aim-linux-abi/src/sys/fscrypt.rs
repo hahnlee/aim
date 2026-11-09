@@ -12,14 +12,24 @@
 //! Until a directory of the filesystem has a policy, nothing here reads an
 //! attribute.
 //!
-//! Locked directories (ENOKEY, no-key names) are not served yet (#2846).
+//! An inode whose key is absent is locked (`fs/crypto/hooks.c`,
+//! `fname.c`): a locked directory lists no-key names, finds entries only
+//! by them, and refuses new entries with ENOKEY; a locked regular file
+//! cannot be opened, and a locked symlink's target reads as its no-key
+//! form. The host keeps plaintext, so the owner's per-volume secret stands
+//! in for the ciphertext a no-key name encodes. Path walks ask only while
+//! the owner's shared page says a key some policy names is absent.
+//! Removing a key locks its inodes at once: files already open keep
+//! working, as Linux's busy files do, but the key is reported absent, not
+//! FILES_BUSY.
 
 use std::ffi::{CStr, CString};
 use std::os::fd::AsRawFd;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use aim_storage::fscrypt::{Owner, Removal, Spec};
+use aim_storage::fscrypt::{CONTEXT, Owner, Removal, Spec};
+use sha2::{Digest, Sha256};
 
 use super::attrs::{self, Host};
 use super::cred::Identity;
@@ -37,7 +47,6 @@ const GET_NONCE: u64 = 0x8010661b;
 /// `FS_ENCRYPT_FL` and `STATX_ATTR_ENCRYPTED`.
 pub(super) const ENCRYPTED: u32 = 0x800;
 
-const CONTEXT: &CStr = c"dev.aim.fscrypt-context";
 const NONCE: usize = 16;
 const PAD_MASK: u8 = 0x03;
 const DIRECT_KEY: u8 = 0x04;
@@ -48,6 +57,15 @@ const CAP_SYS_ADMIN: u32 = 21;
 const EOVERFLOW: Errno = 75;
 const ENOKEY: Errno = 126;
 const ENOTEMPTY: Errno = 39;
+const NAME_MAX: usize = 255;
+/// ext4's longest symlink target with 4096-byte blocks, less the length
+/// word of `struct fscrypt_symlink_data`.
+const SYMLINK_MAX: usize = 4094;
+/// `struct fscrypt_nokey_name`: the directory hash (two words, left zero),
+/// the ciphertext, or its first 149 bytes then the SHA-256 of the rest.
+const NOKEY_HASH: usize = 8;
+const NOKEY_BYTES: usize = 149;
+const NOKEY_MAX: usize = NOKEY_HASH + NOKEY_BYTES + 32;
 
 fn io(error: std::io::Error) -> Errno {
     errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))
@@ -96,6 +114,10 @@ fn context(host: Host) -> Option<Vec<u8>> {
 }
 
 fn host_type(host: Host) -> Result<u16, Errno> {
+    Ok(host_stat(host)?.st_mode & libc::S_IFMT)
+}
+
+fn host_stat(host: Host) -> Result<libc::stat, Errno> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let result = unsafe {
         match host {
@@ -106,7 +128,7 @@ fn host_type(host: Host) -> Result<u16, Errno> {
     if result < 0 {
         return Err(errno::last());
     }
-    Ok(st.st_mode & libc::S_IFMT)
+    Ok(st)
 }
 
 /// Only regular files, directories and symlinks are encrypted.
@@ -176,19 +198,46 @@ fn parent_of(host: &CStr) -> CString {
 /// `fscrypt_prepare_link`: `child` (a path or an open file) linked as
 /// `new`.
 pub(super) fn link(child: Host, new: &CStr) -> Result<(), Errno> {
-    if active()? && !permitted(Host::Path(&parent_of(new)), child)? {
+    if !active()? {
+        return Ok(());
+    }
+    let parent = parent_of(new);
+    if !permitted(Host::Path(&parent), child)? {
         return Err(errno::EXDEV);
     }
-    Ok(())
+    moved(Host::Path(&parent), child)
 }
 
-/// `fscrypt_prepare_rename`: between different directories, what moves
-/// into an encrypted one must have its policy.
+/// Records `child` as a policy root if it has a policy and `parent`, which
+/// it is being linked or moved into, has none.
+fn moved(parent: Host, child: Host) -> Result<(), Errno> {
+    if context(parent).is_some() {
+        return Ok(());
+    }
+    let (Some(owner), Some(spec)) = (
+        owner()?,
+        context(child).as_deref().and_then(Spec::of_context),
+    ) else {
+        return Ok(());
+    };
+    owner
+        .policy_root(spec, host_stat(child)?.st_ino)
+        .map_err(io)
+}
+
+/// `fscrypt_prepare_rename`: neither directory may be locked, and between
+/// different directories what moves into an encrypted one must have its
+/// policy.
 pub(super) fn rename(old: &CStr, new: &CStr, exchange: bool) -> Result<(), Errno> {
     if !active()? {
         return Ok(());
     }
     let (old_dir, new_dir) = (parent_of(old), parent_of(new));
+    if locking()?
+        && (locked(Host::Path(&old_dir))?.is_some() || locked(Host::Path(&new_dir))?.is_some())
+    {
+        return Err(ENOKEY);
+    }
     let identity = |path: &CStr| {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         (unsafe { libc::stat(path.as_ptr(), &mut st) } == 0).then_some((st.st_dev, st.st_ino))
@@ -200,6 +249,10 @@ pub(super) fn rename(old: &CStr, new: &CStr, exchange: bool) -> Result<(), Errno
         || exchange && !permitted(Host::Path(&old_dir), Host::Path(new))?
     {
         return Err(errno::EXDEV);
+    }
+    moved(Host::Path(&new_dir), Host::Path(old))?;
+    if exchange {
+        moved(Host::Path(&old_dir), Host::Path(new))?;
     }
     Ok(())
 }
@@ -232,13 +285,13 @@ fn supported(policy: &[u8]) -> bool {
         && policy[5..8] == [0; 3]
 }
 
-/// The names in a directory, all or the first.
-fn entries(fd: i32, all: bool) -> Result<Vec<CString>, Errno> {
+/// The names in the directory `path` at `fd`, all or the first.
+fn entries(fd: i32, path: &CStr, all: bool) -> Result<Vec<CString>, Errno> {
     let _own = super::fork::spawn::own_fds();
     let copy = unsafe {
         libc::openat(
             fd,
-            c".".as_ptr(),
+            path.as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )
     };
@@ -318,7 +371,7 @@ fn set_policy(owner: &Owner, fd: i32, arg: u64, id: &Identity) -> Result<i64, Er
             if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
                 return Err(errno::ENOTDIR);
             }
-            if !entries(fd, false)?.is_empty() {
+            if !entries(fd, c".", false)?.is_empty() {
                 return Err(ENOTEMPTY);
             }
             if !supported(&wanted) {
@@ -337,14 +390,20 @@ fn set_policy(owner: &Owner, fd: i32, arg: u64, id: &Identity) -> Result<i64, Er
                 0 => [&[1], &wanted[1..], &[0; NONCE][..]].concat(),
                 _ => [&wanted[..], &[0; NONCE][..]].concat(),
             };
-            owner.policy_set().map_err(io)?;
             store(Host::Fd(fd), &renewed(&context))?;
             // Creates do not take the inode lock; one may have come between
             // the check and the store.
-            let names = entries(fd, true)?;
+            let names = entries(fd, c".", true)?;
             if !names.is_empty() {
                 withdraw(fd, &names)?;
                 return Err(ENOTEMPTY);
+            }
+            // Recorded once the policy is there: the owner drops roots that
+            // have none.
+            let spec = Spec::of_context(&context).ok_or(errno::EINVAL)?;
+            if let Err(error) = owner.policy_root(spec, stat.st_ino) {
+                withdraw(fd, &[])?;
+                return Err(io(error));
             }
             Ok(0)
         };
@@ -355,6 +414,221 @@ fn set_policy(owner: &Owner, fd: i32, arg: u64, id: &Identity) -> Result<i64, Er
     } else {
         Ok(result)
     }
+}
+
+/// Whether an inode may be locked: a key some policy root names is
+/// absent. Until one is, nothing asks.
+pub(crate) fn locking() -> Result<bool, Errno> {
+    Ok(owner()?.is_some_and(Owner::locking))
+}
+
+/// The context of `host` if its key is absent.
+fn locked(host: Host) -> Result<Option<(&'static Owner, Vec<u8>)>, Errno> {
+    let Some(owner) = owner()? else {
+        return Ok(None);
+    };
+    let Some(context) = context(host) else {
+        return Ok(None);
+    };
+    let Some(spec) = Spec::of_context(&context) else {
+        return Ok(None);
+    };
+    Ok((!owner.has_key(spec).map_err(io)?).then_some((owner, context)))
+}
+
+/// `fscrypt_fname_encrypted_size`, padded with NULs, then enciphered: the
+/// stand-in for the ciphertext of `plain` in the inode of `context`.
+fn ciphertext(owner: &Owner, context: &[u8], plain: &[u8], max: usize) -> Vec<u8> {
+    let padding = 4usize << (context[3] & PAD_MASK);
+    let size = plain.len().max(16).next_multiple_of(padding).min(max);
+    let mut bytes = plain.to_vec();
+    bytes.resize(size.max(plain.len()), 0);
+    owner.cipher(&context[context.len() - NONCE..], &mut bytes);
+    bytes
+}
+
+/// `fscrypt_fname_disk_to_usr` without the key: the no-key name of
+/// `plain`, base64url-encoded `struct fscrypt_nokey_name`.
+fn nokey(owner: &Owner, context: &[u8], plain: &[u8], max: usize) -> Vec<u8> {
+    base64url(&nokey_struct(owner, context, plain, max))
+}
+
+/// The `struct fscrypt_nokey_name` of `plain`.
+fn nokey_struct(owner: &Owner, context: &[u8], plain: &[u8], max: usize) -> Vec<u8> {
+    let ciphertext = ciphertext(owner, context, plain, max);
+    let mut name = vec![0u8; NOKEY_HASH];
+    if ciphertext.len() <= NOKEY_BYTES {
+        name.extend_from_slice(&ciphertext);
+    } else {
+        name.extend_from_slice(&ciphertext[..NOKEY_BYTES]);
+        name.extend_from_slice(&Sha256::digest(&ciphertext[NOKEY_BYTES..]));
+    }
+    name
+}
+
+const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// `fscrypt_base64url_encode`: RFC 4648 base64url without padding.
+fn base64url(bytes: &[u8]) -> Vec<u8> {
+    let (mut out, mut bits, mut value) = (Vec::new(), 0, 0u32);
+    for byte in bytes {
+        value = value << 8 | *byte as u32;
+        bits += 8;
+        while bits >= 6 {
+            bits -= 6;
+            out.push(BASE64URL[(value >> bits) as usize & 0x3f]);
+        }
+    }
+    if bits > 0 {
+        out.push(BASE64URL[(value << (6 - bits)) as usize & 0x3f]);
+    }
+    out
+}
+
+/// `fscrypt_base64url_decode`: None for a character outside the alphabet
+/// or bits left over.
+fn base64url_decode(text: &[u8]) -> Option<Vec<u8>> {
+    let (mut out, mut bits, mut value) = (Vec::new(), 0, 0u32);
+    for c in text {
+        value = value << 6 | BASE64URL.iter().position(|a| a == c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((value >> bits) as u8);
+        }
+    }
+    (value & ((1 << bits) - 1) == 0).then_some(out)
+}
+
+/// `fscrypt_setup_filename` and `fscrypt_match_name` without the key: the
+/// entry of the locked directory `dir` the no-key name `name` designates,
+/// None where it can designate none.
+fn plaintext(
+    owner: &Owner,
+    context: &[u8],
+    dir: &CStr,
+    name: &[u8],
+) -> Result<Option<Vec<u8>>, Errno> {
+    let Some(decoded) = base64url_decode(name) else {
+        return Ok(None);
+    };
+    if decoded.len() <= NOKEY_HASH
+        || decoded.len() > NOKEY_HASH + NOKEY_BYTES && decoded.len() != NOKEY_MAX
+    {
+        return Ok(None);
+    }
+    if decoded.len() == NOKEY_MAX {
+        // Only a long name's: compare the entries' own.
+        return Ok(entries(libc::AT_FDCWD, dir, true)?
+            .into_iter()
+            .map(CString::into_bytes)
+            .find(|entry| {
+                nokey_struct(owner, context, entry, NAME_MAX)[NOKEY_HASH..] == decoded[NOKEY_HASH..]
+            }));
+    }
+    let mut plain = decoded[NOKEY_HASH..].to_vec();
+    owner.cipher(&context[context.len() - NONCE..], &mut plain);
+    plain.truncate(
+        plain
+            .iter()
+            .rposition(|byte| *byte != 0)
+            .map_or(0, |at| at + 1),
+    );
+    let valid = !plain.is_empty()
+        && !plain.contains(&0)
+        && !plain.contains(&b'/')
+        && plain != b"."
+        && plain != b".."
+        && ciphertext(owner, context, &plain, NAME_MAX) == decoded[NOKEY_HASH..];
+    Ok(valid.then_some(plain))
+}
+
+/// The host name of `name` looked up in the host directory `dir`; None
+/// where `dir` is not locked and the names are the host's. A locked
+/// directory finds entries only by no-key names: any other is ENOENT, and
+/// creating (`new`) any entry but an existing one is ENOKEY
+/// (`fscrypt_prepare_lookup`, `fscrypt_prepare_new_inode`).
+pub(crate) fn host_name(dir: &CStr, name: &[u8], new: bool) -> Result<Option<Vec<u8>>, Errno> {
+    let Some((owner, context)) = locked(Host::Path(dir))? else {
+        return Ok(None);
+    };
+    let plain = plaintext(owner, &context, dir, name)?;
+    if new {
+        let exists = plain.as_ref().is_some_and(|plain| {
+            let path = [dir.to_bytes(), b"/", plain].concat();
+            CString::new(path).is_ok_and(|path| host_type(Host::Path(&path)).is_ok())
+        });
+        if !exists {
+            return Err(ENOKEY);
+        }
+    }
+    plain.map(Some).ok_or(errno::ENOENT)
+}
+
+/// The name the guest sees for the entry `name` of the host directory
+/// `dir`: its no-key name if `dir` is locked.
+pub(crate) fn guest_name(dir: &CStr, name: &[u8]) -> Result<Vec<u8>, Errno> {
+    Ok(match locked(Host::Path(dir))? {
+        Some((owner, context)) => nokey(owner, &context, name, NAME_MAX),
+        None => name.to_vec(),
+    })
+}
+
+/// readdir of the directory `fd`: no-key names if it is locked.
+pub(super) fn list(fd: i32, entries: &mut [super::dir::Entry]) -> Result<(), Errno> {
+    if !locking()? {
+        return Ok(());
+    }
+    let Some((owner, context)) = locked(Host::Fd(fd))? else {
+        return Ok(());
+    };
+    for entry in entries {
+        if entry.name != b"." && entry.name != b".." {
+            entry.name = nokey(owner, &context, &entry.name, NAME_MAX);
+        }
+    }
+    Ok(())
+}
+
+/// `fscrypt_get_symlink`: a locked symlink's target is its no-key form.
+pub(crate) fn link_target(link: &CStr, target: Vec<u8>) -> Result<Vec<u8>, Errno> {
+    if !locking()? {
+        return Ok(target);
+    }
+    Ok(match locked(Host::Path(link))? {
+        Some((owner, context)) => nokey(owner, &context, &target, SYMLINK_MAX),
+        None => target,
+    })
+}
+
+/// Before the entry `host` is unlinked or removed: the inode of a policy
+/// root it may be, to report to [`removed`] once it is gone.
+pub(super) fn removing(host: &CStr) -> Result<Option<u64>, Errno> {
+    if !locking()? || context(Host::Path(host)).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(host_stat(Host::Path(host))?.st_ino))
+}
+
+/// After [`removing`]'s entry is gone: while a key is absent, a root that
+/// went with it no longer keeps lookups asking.
+pub(super) fn removed(inode: Option<u64>) -> Result<(), Errno> {
+    match (inode, owner()?) {
+        (Some(inode), Some(owner)) => owner.removed(inode).map_err(io),
+        _ => Ok(()),
+    }
+}
+
+/// `fscrypt_file_open` (also for execve) and `fscrypt_prepare_setattr` of a
+/// size: a locked regular file can neither be opened nor truncated.
+pub(super) fn open(host: &CStr) -> Result<(), Errno> {
+    if locking()?
+        && host_type(Host::Path(host)).is_ok_and(|kind| kind == libc::S_IFREG)
+        && locked(Host::Path(host))?.is_some()
+    {
+        return Err(ENOKEY);
+    }
+    Ok(())
 }
 
 fn existing(fd: i32) -> Result<Vec<u8>, Errno> {
@@ -511,9 +785,8 @@ fn ioctl_as(fd: i32, request: u64, arg: u64, id: &Identity) -> Option<i64> {
     Some(result.unwrap_or_else(|error| -(error as i64)))
 }
 
-/// Ported from xfstests' encryption group (generic/395, 396, 399 and the
-/// parts of 398 that need no locked directory) and `fscrypt.rst`'s error
-/// table.
+/// Ported from xfstests' encryption group (generic/395-399, 429 and the
+/// key removal of 580) and `fscrypt.rst`'s error table.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,6 +892,13 @@ mod tests {
             error => Err(error),
         }
     }
+    fn add_v1(file: &std::fs::File, descriptor: u8) {
+        let mut arg = vec![0u8; 80 + 32];
+        arg[0] = 1;
+        arg[8..16].copy_from_slice(&[descriptor; 8]);
+        arg[40] = 32;
+        assert_eq!(call(file, ADD_KEY, &mut arg, &root()), 0);
+    }
     fn errno(error: Errno) -> i64 {
         -(error as i64)
     }
@@ -711,6 +991,8 @@ mod tests {
         create("plain/file");
         let (v1_dir, v2_dir, plain) = (open(view, "v1"), open(view, "v2"), open(view, "plain"));
         let policy = v1(1, 4, 0x2, 1);
+        // Its key, without which nothing can be created below it.
+        add_v1(&v1_dir, 1);
 
         // generic/396 and fscrypt.rst's errors.
         let set = |file: &std::fs::File, policy: &[u8], id: &Identity| {
@@ -899,12 +1181,13 @@ mod tests {
         mkdir("raced");
         let dir = open(view, "raced");
         let policy = v1(1, 4, 0, 3);
+        add_v1(&dir, 3);
         assert_eq!(call(&dir, SET_POLICY, &mut policy.clone(), &root()), 0);
         // What the race leaves before the re-check: the directory's policy
         // and a child that inherited it.
         create("raced/late");
         assert!(context(Host::Fd(open(view, "raced/late").as_raw_fd())).is_some());
-        let names = entries(dir.as_raw_fd(), true).unwrap();
+        let names = entries(dir.as_raw_fd(), c".", true).unwrap();
         assert_eq!(names, [c"late".to_owned()]);
         withdraw(dir.as_raw_fd(), &names).unwrap();
         assert_eq!(get_ex(&dir, 24), Err(errno(errno::ENODATA)));
@@ -913,5 +1196,335 @@ mod tests {
             Err(errno(errno::ENODATA))
         );
         std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    /// Guest syscalls on a path under the test directory.
+    fn at(name: &str, mut call: impl FnMut(u64) -> i64) -> i64 {
+        let path = guest(name);
+        call(path.as_ptr() as u64)
+    }
+    fn open_at(name: &str, flags: u64) -> i64 {
+        let fd = at(name, |path| {
+            super::super::fs::openat([AT, path, flags, 0o644, 0, 0])
+        });
+        if fd >= 0 {
+            assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+            return 0;
+        }
+        fd
+    }
+    /// The names getdents lists in the directory, without `.` and `..`.
+    fn list(name: &str) -> Vec<String> {
+        let fd = at(name, |path| {
+            super::super::fs::openat([AT, path, 0o40000, 0, 0, 0])
+        });
+        assert!(fd >= 0, "{name}: {fd}");
+        let mut names = Vec::new();
+        let mut buffer = vec![0u8; 16 << 10];
+        loop {
+            let args = [
+                fd as u64,
+                buffer.as_mut_ptr() as u64,
+                buffer.len() as u64,
+                0,
+                0,
+                0,
+            ];
+            let n = super::super::dir::getdents64(args);
+            assert!(n >= 0, "{n}");
+            if n == 0 {
+                break;
+            }
+            let mut at = 0;
+            while at < n as usize {
+                let length = u16::from_le_bytes([buffer[at + 16], buffer[at + 17]]) as usize;
+                let name = CStr::from_bytes_until_nul(&buffer[at + 19..at + length]).unwrap();
+                let name = name.to_str().unwrap().to_string();
+                if name != "." && name != ".." {
+                    names.push(name);
+                }
+                at += length;
+            }
+        }
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        names.sort();
+        names
+    }
+    fn kind(name: &str) -> Result<u32, i64> {
+        super::super::fs::stat_at(AT as i32, guest(name).as_bytes(), 0x100)
+            .map(|stat| (stat.st_mode & libc::S_IFMT) as u32)
+    }
+    fn readlink(name: &str) -> Vec<u8> {
+        let mut target = [0u8; 512];
+        let n = at(name, |path| {
+            super::super::fs::readlinkat([AT, path, target.as_mut_ptr() as u64, 512, 0, 0])
+        });
+        assert!(n > 0, "{name}: {n}");
+        target[..n as usize].to_vec()
+    }
+    /// An encrypted directory `name` with a file, a subdirectory with a
+    /// file, a symlink and a file of a long name, under a v2 key the root
+    /// user added; returns the key's identifier.
+    fn populate(view: &Path, name: &str, raw: &[u8]) -> [u8; 16] {
+        mkdir(name);
+        let dir = open(view, name);
+        let identifier = add(&dir, raw, &root()).unwrap();
+        let policy = v2(1, 4, 0x2, identifier);
+        assert_eq!(call(&dir, SET_POLICY, &mut policy.clone(), &root()), 0);
+        create(&format!("{name}/file"));
+        std::fs::write(
+            view.join("data/fscrypt-tests").join(name).join("file"),
+            b"secret",
+        )
+        .unwrap();
+        mkdir(&format!("{name}/sub"));
+        create(&format!("{name}/sub/inner"));
+        create(&format!("{name}/{}", "l".repeat(200)));
+        let target = c"file";
+        assert_eq!(
+            at(&format!("{name}/link"), |path| {
+                super::super::fsops::symlinkat([target.as_ptr() as u64, AT, path, 0, 0, 0])
+            }),
+            0
+        );
+        identifier
+    }
+    const PLAIN: [&str; 3] = ["file", "link", "sub"];
+    fn plain_names() -> Vec<String> {
+        let mut names: Vec<String> = PLAIN.iter().map(|name| name.to_string()).collect();
+        names.push("l".repeat(200));
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_locked_directory_lists_no_key_names_that_unlink() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        mkdir("plain");
+        create("plain/file");
+        let identifier = populate(view, "locked", &[0x5a; 64]);
+        let dir = open(view, "locked");
+        assert_eq!(list("locked"), plain_names());
+        assert_eq!(remove(&dir, identifier, false, &root()), Ok(0));
+        assert!(locking().unwrap());
+
+        // generic/397: no-key names, stable, none the plaintext; the
+        // long name's is the hashed form, at most NAME_MAX.
+        let names = list("locked");
+        assert_eq!(names.len(), 4);
+        assert_eq!(list("locked"), names);
+        for name in &names {
+            assert!(!plain_names().contains(name), "{name}");
+            assert!(name.bytes().all(|byte| BASE64URL.contains(&byte)), "{name}");
+            assert!(name.len() <= NAME_MAX);
+        }
+        assert!(names.iter().any(|name| name.len() == NOKEY_MAX / 3 * 4));
+        let path = |name: &String| format!("locked/{name}");
+        let by_kind = |wanted: u32| {
+            names
+                .iter()
+                .filter(|name| kind(&path(name)) == Ok(wanted))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let (files, dirs, links) = (
+            by_kind(libc::S_IFREG as u32),
+            by_kind(libc::S_IFDIR as u32),
+            by_kind(libc::S_IFLNK as u32),
+        );
+        assert_eq!((files.len(), dirs.len(), links.len()), (2, 1, 1));
+        // Plaintext names and names that decode to no entry are not there.
+        assert_eq!(kind("locked/file"), Err(errno(errno::ENOENT)));
+        assert_eq!(
+            kind("locked/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Err(errno(errno::ENOENT))
+        );
+
+        // fscrypt.rst: without the key, open of a regular file, every
+        // create, link and rename are ENOKEY; readlink gives the no-key
+        // form; stat and opening a directory work.
+        let enokey = errno(ENOKEY);
+        assert_eq!(open_at(&path(&files[0]), 0), enokey);
+        assert_eq!(open_at(&path(&files[0]), 0o1101), enokey);
+        // execve opens the file; truncate changes its size.
+        let file = guest(&path(&files[0]));
+        assert_eq!(
+            super::super::exec::resolve(AT as i32, file.as_bytes(), 0).err(),
+            Some(enokey)
+        );
+        assert_eq!(
+            super::super::fsops::truncate([file.as_ptr() as u64, 0, 0, 0, 0, 0]),
+            enokey
+        );
+        assert_eq!(open_at(&path(&dirs[0]), 0o40000), 0);
+        assert_eq!(open_at("locked/new", 0o101), enokey);
+        assert_eq!(open_at("locked/new", 0o301), enokey);
+        assert_eq!(open_at(&path(&files[0]), 0o301), errno(errno::EEXIST));
+        assert_eq!(
+            at("locked/new", |p| super::super::fsops::mkdirat([
+                AT, p, 0o755, 0, 0, 0
+            ])),
+            enokey
+        );
+        assert_eq!(
+            at("locked/new", |p| super::super::fsops::mknodat([
+                AT, p, 0o10644, 0, 0, 0
+            ])),
+            enokey
+        );
+        let target = c"x";
+        assert_eq!(
+            at("locked/new", |p| super::super::fsops::symlinkat([
+                target.as_ptr() as u64,
+                AT,
+                p,
+                0,
+                0,
+                0
+            ])),
+            enokey
+        );
+        let (plain, new, file) = (
+            guest("plain/file"),
+            guest("locked/new"),
+            guest(&path(&files[0])),
+        );
+        let link = |from: &CString, to: &CString| {
+            super::super::fsops::linkat([AT, from.as_ptr() as u64, AT, to.as_ptr() as u64, 0, 0])
+        };
+        let rename = |from: &CString, to: &CString| {
+            let args = [AT, from.as_ptr() as u64, AT, to.as_ptr() as u64, 0, 0];
+            super::super::fsops::renameat2(args)
+        };
+        assert_eq!(link(&plain, &new), enokey);
+        assert_eq!(rename(&file, &new), enokey);
+        assert_eq!(rename(&file, &guest("plain/moved")), enokey);
+        let symlink = readlink(&path(&links[0]));
+        assert_ne!(symlink, b"file");
+        assert!(symlink.iter().all(|byte| BASE64URL.contains(byte)));
+        // A relative lookup from the locked directory, opened by no-key name.
+        let sub = guest(&path(&dirs[0]));
+        let fd = super::super::fs::openat([AT, sub.as_ptr() as u64, 0o40000, 0, 0, 0]);
+        assert!(fd >= 0);
+        let inner = list(&path(&dirs[0]));
+        assert_eq!(inner.len(), 1);
+        let inner_name = CString::new(inner[0].clone()).unwrap();
+        let unlink = |dirfd: u64, name: &CString, flags: u64| {
+            super::super::fsops::unlinkat([dirfd, name.as_ptr() as u64, flags, 0, 0, 0])
+        };
+        assert_eq!(unlink(fd as u64, &inner_name, 0), 0);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+
+        // Every entry goes by its no-key name, the long one too.
+        for name in &names {
+            let flags = if dirs.contains(name) { 0x200 } else { 0 };
+            assert_eq!(unlink(AT, &guest(&path(name)), flags), 0, "{name}");
+        }
+        assert!(list("locked").is_empty());
+        // The root goes, and with it the absent key: lookups stop asking.
+        let roots = |identifier: [u8; 16]| {
+            let table = std::fs::read_to_string(view.join("fscrypt/policies")).unwrap();
+            let spec: String = identifier
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            table.contains(&format!("i{spec} "))
+        };
+        assert!(roots(identifier));
+        assert_eq!(
+            at("locked", |p| super::super::fsops::unlinkat([
+                AT, p, 0x200, 0, 0, 0
+            ])),
+            0
+        );
+        assert!(!roots(identifier));
+        // Other tests' roots are gone with their directories.
+        assert!(!locking().unwrap());
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    #[test]
+    fn adding_the_key_again_unlocks_and_removing_it_locks() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("data/fscrypt-tests");
+        let _ = std::fs::remove_dir_all(&host);
+        std::fs::create_dir_all(&host).unwrap();
+        let raw = [0x3c; 32];
+        let identifier = populate(view, "edir", &raw);
+        let dir = open(view, "edir");
+        let (user, other) = (identity(1000, 0), identity(1001, 0));
+        add(&dir, &raw, &user).unwrap();
+        add(&dir, &raw, &other).unwrap();
+        // generic/580: the key stays while any user holds it.
+        assert_eq!(remove(&dir, identifier, false, &root()), Ok(0x2));
+        assert_eq!(remove(&dir, identifier, false, &user), Ok(0x2));
+        assert_eq!(list("edir"), plain_names());
+        assert_eq!(open_at("edir/file", 0), 0);
+        assert_eq!(remove(&dir, identifier, false, &other), Ok(0));
+
+        // generic/429: without the key, no-key names, and the plaintext
+        // names are gone.
+        let locked = list("edir");
+        assert_ne!(locked, plain_names());
+        for name in PLAIN {
+            assert_eq!(kind(&format!("edir/{name}")), Err(errno(errno::ENOENT)));
+        }
+        // With it again, the plaintext names and contents.
+        add(&dir, &raw, &user).unwrap();
+        assert_eq!(list("edir"), plain_names());
+        assert_eq!(std::fs::read(host.join("edir/file")).unwrap(), b"secret");
+        assert_eq!(open_at("edir/file", 0), 0);
+        assert_eq!(readlink("edir/link"), b"file");
+        assert_eq!(
+            kind(&format!("edir/{}", locked[0])),
+            Err(errno(errno::ENOENT))
+        );
+        // The same no-key names when locked again.
+        assert_eq!(remove(&dir, identifier, false, &user), Ok(0));
+        assert_eq!(list("edir"), locked);
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+
+    #[test]
+    fn no_key_names_decode_only_to_their_entry() {
+        let _guard = crate::vfs::test_view();
+        let owner = owner().unwrap().unwrap();
+        let context = [&[2u8, 1, 4, 0x2, 0, 0, 0, 0][..], &[1; 16], &[7; 16]].concat();
+        let dir = c"/nonexistent";
+        for plain in [&b"a"[..], b"name.with.dots", &[b'x'; 120], &[0xff; 3]] {
+            let name = nokey(owner, &context, plain, NAME_MAX);
+            assert_eq!(
+                plaintext(owner, &context, dir, &name).unwrap().as_deref(),
+                Some(plain)
+            );
+        }
+        // Padding to 16 bytes (flags 0x2): a 33-byte name takes 48.
+        assert_eq!(ciphertext(owner, &context, &[b'x'; 33], NAME_MAX).len(), 48);
+        assert_eq!(
+            ciphertext(owner, &context, &[b'x'; 250], NAME_MAX).len(),
+            255
+        );
+        let other = [&context[..24], &[8; 16]].concat();
+        assert_ne!(
+            nokey(owner, &context, b"a", NAME_MAX),
+            nokey(owner, &other, b"a", NAME_MAX)
+        );
+        // Not base64url, left-over bits, too short, a length between the
+        // two forms, or a ciphertext that is not a name's.
+        let short = base64url(&[0; NOKEY_HASH]);
+        let between = base64url(&[0; NOKEY_HASH + NOKEY_BYTES + 1]);
+        let mut slash = b"a/b".to_vec();
+        slash.resize(16, 0);
+        owner.cipher(&context[24..], &mut slash);
+        let slash = base64url(&[&[0; NOKEY_HASH][..], &slash].concat());
+        for name in [&b"a+b"[..], b"AB", &short, &between, &slash] {
+            assert_eq!(plaintext(owner, &context, dir, name).unwrap(), None);
+        }
+        assert_eq!(base64url(b"\xfb\xff"), b"-_8");
+        assert_eq!(base64url_decode(b"-_8").unwrap(), b"\xfb\xff");
+        assert_eq!(base64url_decode(b"-_9"), None);
     }
 }

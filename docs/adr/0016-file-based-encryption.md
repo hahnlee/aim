@@ -3,8 +3,8 @@
 Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
 option B, CE protected by a Mac Keychain item, FileVault for confidentiality
 at rest (D not now), and existing data directories recreated by a breaking
-migration on a branch. Slice 1a is implemented (#2845); the guest is a
-device without file-based encryption (FBE) until slices 1b-3 land.
+migration on a branch. Slice 1 is implemented (#2845, #2846); the guest is
+a device without file-based encryption (FBE) until slices 2-3 land.
 
 ## Context
 
@@ -152,6 +152,13 @@ under the ~900-line review budget except the first, split in two:
    `EncryptionTest` and `FileBasedEncryptionPolicyTest`.
 
 ## Risks
+
+- The layer keeps paths, not inodes. A working directory or an open
+  directory inside a locked directory is known by its no-key names; once
+  the key is added (or removed, for one opened with it) a lookup relative
+  to it fails with ENOENT, where Linux keeps the inode. Removing a key
+  locks its inodes at once: open files keep working, as busy files do on
+  Linux, but the key is reported absent rather than `FILES_BUSY`.
 
 - Host-side writers bypass the syscall layer: the app host and aim-system
   write `/data/system*` and prepare app data directly or through installd.
