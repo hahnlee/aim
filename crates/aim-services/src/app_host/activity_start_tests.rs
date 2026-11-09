@@ -433,3 +433,84 @@ fn configuration_changes_stay_explicit_outside_shared_path() {
         assert!(host.activities.records.lock().unwrap().is_empty());
     });
 }
+
+/// ProcessList.startProcessLocked's `mProcessesOnHold`: an activity started
+/// before system ready is admitted at once and waits for its held process;
+/// resumed again, it asks for that one start; the boot's stop finishes it.
+#[test]
+fn activity_start_before_system_ready_waits_for_its_held_process() {
+    crate::system::with_discovery_binders_flags(
+        &[("android.permission.flags.appop_mode_caching_enabled", true)],
+        false,
+        |host, _, _, _| {
+            permissions(host);
+            // A caller's activity in task 7, whose process is gone.
+            let info = host.activity_info_of("p", "p.Main").unwrap();
+            let request = activity_start::StartRequest::launcher("p.Main");
+            let source = host.new_activity(1, 10100, "p", info, Default::default(), 7, request);
+            {
+                let mut stack = host.activities.stack.lock().unwrap();
+                stack.tasks.push(activity_stack::Task {
+                    id: 7,
+                    affinity: None,
+                    real_activity: "p/p.Main".into(),
+                    package: "p".into(),
+                    intent: Default::default(),
+                    base: activity_start::LaunchIntent::Component,
+                    uid: 10100,
+                    user: 0,
+                    last_active: 0,
+                });
+                stack.activities.push(activity_stack::Activity::new(
+                    source, 7, 1, "p/p.Main", 0, 0, None,
+                ));
+            }
+            let (sent, received) = std::sync::mpsc::channel();
+            let caller = host.clone();
+            std::thread::spawn(move || {
+                let mut a = args(Some("android"), 0, Some(intent("p.Main")));
+                a.result_to = Some(Binder::Local(source));
+                let mut p = Parcel::new();
+                a.write(&mut p);
+                let reply =
+                    activity::ActivityTaskManager(caller, Binder::Local(0)).transact(&mut Call {
+                        code: atm::START_ACTIVITY_AND_WAIT,
+                        flags: 0,
+                        sender_pid: 71,
+                        sender_euid: 1000,
+                        data: p.reader(),
+                    });
+                sent.send(reply.unwrap().reader().read_exception().unwrap())
+                    .unwrap();
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let token = loop {
+                let held = host.processes_on_hold.lock().unwrap().len();
+                let records = host.activities.records.lock().unwrap();
+                if let Some(t) = records.keys().find(|t| **t != source)
+                    && held == 1
+                {
+                    break *t;
+                }
+                drop(records);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the start was not held: {:?}",
+                    received.try_recv()
+                );
+                std::thread::yield_now();
+            };
+            assert!(host.apps.lock().unwrap().is_empty());
+            // `startSpecificActivity` again: the same held start.
+            host.run_one(activity_stack::Command::Launch(token))
+                .unwrap();
+            assert_eq!(host.processes_on_hold.lock().unwrap().len(), 1);
+            assert!(received.try_recv().is_err());
+            drop(boot_ready::BootReady(host));
+            let waited = received.recv_timeout(Duration::from_secs(5));
+            assert!(waited.expect("the launch waiter was not finished").is_ok());
+            assert!(!host.activities.records.lock().unwrap().contains_key(&token));
+            assert!(host.processes_on_hold.lock().unwrap().is_empty());
+        },
+    );
+}

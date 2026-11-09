@@ -134,12 +134,13 @@ impl AppHost {
     }
 
     /// `finishBooting` after the services' `PHASE_BOOT_COMPLETED`: the
-    /// processes on hold started, the boot's properties, then `onBootComplete`'s `finishUserBoot` of the
-    /// system user, `LOCKED_BOOT_COMPLETED` while it is locked, its unlock,
-    /// and the rest of its boot as `UserController` goes through it.
-    /// `unlocking` runs the services' `onUserUnlocking`
-    /// (`USER_UNLOCK_MSG`); the activity-task owner's `onUserUnlocked`
-    /// follows in `finish_user_unlocked_completed` (`USER_UNLOCKED_MSG`).
+    /// processes on hold started, the boot's properties, then
+    /// `onBootComplete`'s `finishUserBoot` of the system user,
+    /// `LOCKED_BOOT_COMPLETED` while it is locked, its unlock, and the rest
+    /// of its boot as `UserController` goes through it. `unlocking` runs
+    /// the services' `onUserUnlocking` (`USER_UNLOCK_MSG`); the
+    /// activity-task owner's `onUserUnlocked` follows in
+    /// `finish_user_unlocked_completed` (`USER_UNLOCKED_MSG`).
     pub(super) fn finish_booting(
         self: &Arc<Self>,
         user: StartedUser,

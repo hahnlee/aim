@@ -8,11 +8,18 @@ use std::sync::{Arc, Mutex};
 pub(super) struct BootReady<'a>(pub &'a AppHost);
 impl Drop for BootReady<'_> {
     fn drop(&mut self) {
-        let stopped = Exception::new(EX_ILLEGAL_STATE, "boot stopped before system ready");
-        let _ = self.0.processes_ready.set(Err(stopped.clone()));
+        let _ = self.0.processes_ready.set(Err(Exception::new(
+            EX_ILLEGAL_STATE,
+            "boot stopped before system ready",
+        )));
         // The held broadcast starts then fail with that error; the
-        // processes still on hold, with the boot's stop.
+        // processes still on hold, with readiness's failure, or after
+        // readiness, with the boot's stop before finishBooting.
         self.0.broadcasts.processes_ready(self.0);
+        let stopped = match self.0.processes_ready.get() {
+            Some(Err(error)) => error.clone(),
+            _ => Exception::new(EX_ILLEGAL_STATE, "boot stopped before finishBooting"),
+        };
         self.0.fail_processes_on_hold(&stopped);
     }
 }

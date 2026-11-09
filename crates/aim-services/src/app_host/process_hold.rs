@@ -41,6 +41,20 @@ impl AppHost {
                 let mut held = self.processes_on_hold.lock().unwrap();
                 // Readiness is published before either drain takes the hold.
                 if self.processes_ready.get().is_none() {
+                    // A pending activity resumed again while its start is
+                    // held asks for it again: it is the same held process.
+                    let same = |h: &HeldStart| {
+                        h.name == name
+                            && h.process == process
+                            && match (&h.request, &request) {
+                                (None, None) => true,
+                                (Some(a), Some(b)) => a.restart.is_some() && a.restart == b.restart,
+                                _ => false,
+                            }
+                    };
+                    if held.iter().any(same) {
+                        return Ok(());
+                    }
                     held.push(HeldStart {
                         name: name.to_string(),
                         process: process.to_string(),
@@ -71,7 +85,9 @@ impl AppHost {
     }
 
     /// `finishBooting` after `PHASE_BOOT_COMPLETED`: the processes on hold
-    /// started in order (`HOSTING_TYPE_ON_HOLD`).
+    /// started in order (`HOSTING_TYPE_ON_HOLD`). One whose activity
+    /// finished meanwhile still starts, as the original's held
+    /// `ProcessRecord` does.
     pub(super) fn start_processes_on_hold(&self) {
         let held = std::mem::take(&mut *self.processes_on_hold.lock().unwrap());
         held.into_iter().for_each(|start| self.start_held(start));
