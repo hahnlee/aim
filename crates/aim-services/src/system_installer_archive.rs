@@ -207,6 +207,19 @@ impl System {
                     system.finish_removed_package_preferred(&retained, effects.clone())
                 })))
             });
+        let weak = Arc::downgrade(self);
+        let retained = bridge.clone();
+        let package_removed: removal::PackageRemoved = Arc::new(move |name, uid| {
+            weak.upgrade()
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "removed package observers stopped",
+                    )
+                })?
+                .package_observer_owner(&retained)?
+                .removed(name, uid)
+        });
         let removal = Arc::new(removal::Controller {
             store: native_store.clone(),
             source: source.clone(),
@@ -217,6 +230,7 @@ impl System {
             publisher: self.package_installer_publisher()?,
             factory_restore,
             preferred_removal,
+            package_removed,
             gate: self.package_install_lock.clone(),
             keystore: Arc::new(crate::package::owner::keystore::KeystoreCleanup::new(
                 self.process.clone(),

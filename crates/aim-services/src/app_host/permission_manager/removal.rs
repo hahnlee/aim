@@ -323,6 +323,7 @@ mod tests {
                 publisher: Arc::new(|_| panic!("no observer")),
                 factory_restore: Arc::new(|_| panic!("ordinary removal")),
                 preferred_removal: Arc::new(|_, _, _| panic!("preparation failed")),
+                package_removed: Arc::new(|_, _| panic!("preparation failed")),
                 gate: Arc::new(Mutex::new(())),
                 keystore: Arc::new(owner::keystore::KeystoreCleanup::new(host.process.clone())),
             };
@@ -350,6 +351,7 @@ mod tests {
                         users: vec![0],
                         blocked_users: vec![],
                         keep_uninstalled,
+                        removed_by_system: false,
                     })
                     .unwrap_err();
                 assert!(error.message.contains("invalid permission identity"));

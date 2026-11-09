@@ -33,6 +33,9 @@ interface IInstallerRemovalBridge {
     void sendUnarchiveStatus(in IntentSender receiver, String packageName, String installer, String installerTitle,
         int user, int status, long requiredBytes, in PendingIntent userAction);
     void broadcastUnarchive(String packageName, String installer, int user, int unarchiveId, boolean allUsers);
-    void sendRemovedBroadcast(String packageName, int appId, int user, boolean dataRemoved, boolean fullyRemoved, boolean uidRemoved, long version);
+    /** BroadcastHelper.sendPackageRemovedBroadcasts of an uninstall's PackageRemovedInfo. */
+    void sendRemovedBroadcast(String packageName, String installer, int appId, in int[] users, in int[] instantUsers,
+        boolean dataRemoved, boolean removedForAllUsers, boolean appIdRemoved, boolean staticSharedLib,
+        boolean killApp, boolean removedBySystem, boolean archived);
     boolean isSdkLibraryIndependenceEnabled();
 }

@@ -111,29 +111,14 @@ impl Service for InstallerRemoval {
             bridge::SEND_REMOVED_BROADCAST => {
                 let a =
                     bridge::SendRemovedBroadcast::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply((|| {
-                    let package = a
-                        .package_name
-                        .as_deref()
-                        .ok_or_else(|| Exception::illegal_argument("package name is null"))?;
-                    self.host
-                        .package_writes
-                        .get_or_init(|| super::package_writes::Writes::new(self.host.clone()))
-                        .removed(
-                            package,
-                            a.app_id,
-                            a.user,
-                            a.data_removed,
-                            a.fully_removed,
-                            a.uid_removed,
-                        )?;
-                    if a.uid_removed {
-                        self.host
-                            .foreground_service_uid_removed(a.user * 100_000 + a.app_id)?;
-                    }
-                    bridge::write_send_removed_broadcast_reply(&mut p);
-                    Ok(p)
-                })())
+                reply(
+                    super::package_effects::PackageEffects::new(self.host.clone())
+                        .package_removed(a)
+                        .map(|()| {
+                            bridge::write_send_removed_broadcast_reply(&mut p);
+                            p
+                        }),
+                )
             }
             bridge::PREPARE_PERMISSIONS => {
                 let a = bridge::PreparePermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;

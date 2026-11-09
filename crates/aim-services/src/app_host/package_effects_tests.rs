@@ -793,3 +793,193 @@ fn kill_package_scopes_app_id_and_user_and_preserves_the_exit_reason() {
         assert!(errors.crash_times.contains_key(&("p".into(), 10101)));
     });
 }
+
+fn removal(installer: Option<&str>) -> removal::SendRemovedBroadcast {
+    removal::SendRemovedBroadcast {
+        package_name: Some("p".into()),
+        installer: installer.map(Into::into),
+        app_id: 10100,
+        users: Some(vec![0]),
+        instant_users: Some(Vec::new()),
+        data_removed: true,
+        removed_for_all_users: true,
+        app_id_removed: true,
+        static_shared_lib: false,
+        kill_app: true,
+        removed_by_system: false,
+        archived: false,
+    }
+}
+fn summary(events: &[Event]) -> Vec<(&str, Option<&str>, i32)> {
+    events
+        .iter()
+        .map(|event| {
+            (
+                event.intent.intent.action.as_deref().unwrap(),
+                event.intent.intent.package.as_deref(),
+                event.intent.intent.flags,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn removal_broadcasts_follow_send_package_removed_broadcasts() {
+    let a = removal(Some("store"));
+    let events = removed_events(&a, "p", &[0], &[]);
+    assert_eq!(
+        summary(&events),
+        [
+            (REMOVED, Some("store"), 0x04000000),
+            (REMOVED, None, 0x04000000),
+            (
+                "android.intent.action.PACKAGE_REMOVED_INTERNAL",
+                Some("android"),
+                0x04000000
+            ),
+            (
+                "android.intent.action.PACKAGE_FULLY_REMOVED",
+                None,
+                0x05000000
+            ),
+            ("android.intent.action.UID_REMOVED", None, 0x05000000),
+        ]
+    );
+    assert_eq!(
+        events.iter().map(|event| event.notify).collect::<Vec<_>>(),
+        [false, true, false, true, true]
+    );
+    let extras = events[1].intent.test_extras();
+    assert_eq!(
+        extras,
+        [
+            (UID, Value::Int(10100)),
+            ("android.intent.extra.DATA_REMOVED", Value::Bool(true)),
+            (
+                "android.intent.extra.SYSTEM_UPDATE_UNINSTALL",
+                Value::Bool(false)
+            ),
+            ("android.intent.extra.DONT_KILL_APP", Value::Bool(false)),
+            ("android.intent.extra.USER_INITIATED", Value::Bool(true)),
+            (
+                "android.intent.extra.REMOVED_FOR_ALL_USERS",
+                Value::Bool(true)
+            ),
+            (USER, Value::Int(0)),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect::<std::collections::HashMap<_, _>>()
+    );
+    assert!(events.iter().all(|event| event.allow.is_none()));
+    assert!(events[4].intent.intent.data.is_none());
+    assert!(
+        !events[4]
+            .intent
+            .test_extras()
+            .contains_key("android.intent.extra.PACKAGE_NAME")
+    );
+
+    // Kept data, a system removal without killing, an archive: replacing,
+    // and the archived UID_REMOVED names its package.
+    let mut a = removal(None);
+    a.data_removed = false;
+    a.kill_app = false;
+    a.removed_by_system = true;
+    a.archived = true;
+    a.removed_for_all_users = false;
+    let events = removed_events(&a, "p", &[0], &[]);
+    assert_eq!(
+        summary(&events)
+            .into_iter()
+            .map(|event| event.0)
+            .collect::<Vec<_>>(),
+        [
+            REMOVED,
+            "android.intent.action.PACKAGE_REMOVED_INTERNAL",
+            "android.intent.action.UID_REMOVED"
+        ]
+    );
+    let extras = events[0].intent.test_extras();
+    assert_eq!(extras[REPLACING], Value::Bool(true));
+    assert_eq!(extras["android.intent.extra.ARCHIVAL"], Value::Bool(true));
+    assert_eq!(
+        extras["android.intent.extra.DONT_KILL_APP"],
+        Value::Bool(true)
+    );
+    assert_eq!(
+        extras["android.intent.extra.USER_INITIATED"],
+        Value::Bool(false)
+    );
+    assert_eq!(
+        extras["android.intent.extra.REMOVED_FOR_ALL_USERS"],
+        Value::Bool(false)
+    );
+    assert_eq!(
+        events[2].intent.test_extras()["android.intent.extra.PACKAGE_NAME"],
+        Value::String(Some("p".into()))
+    );
+
+    // Only a static library's installer is told; instant users take the
+    // cohort with the per-user uid and the permission gate.
+    let mut a = removal(Some("store"));
+    a.static_shared_lib = true;
+    assert_eq!(
+        summary(&removed_events(&a, "p", &[0], &[])),
+        [(REMOVED, Some("store"), 0x04000000)]
+    );
+    let events = removed_events(&removal(None), "p", &[0], &[10]);
+    assert!(events.iter().all(|event| event.user == 10
+        && event.instant
+        && event.permissions == ["android.permission.ACCESS_INSTANT_APPS"]));
+    assert_eq!(events[0].intent.test_extras()[UID], Value::Int(1010100));
+}
+
+struct RemovalSeen(Mutex<Vec<(String, i32, bool)>>);
+impl PackageMonitor for RemovalSeen {
+    fn package_changed(&self, change: &PackageChanged<'_>) -> Result<(), Exception> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((change.package.into(), change.user, change.removed));
+        Ok(())
+    }
+}
+
+#[test]
+fn removal_notifies_native_and_callback_monitors_once() {
+    crate::system::with_discovery_session(|host, _, _| {
+        let native = Arc::new(RemovalSeen(Mutex::default()));
+        host.package_monitors.register(
+            0,
+            Arc::downgrade(&(native.clone() as Arc<dyn PackageMonitor>)),
+        );
+        let (send, receive) = mpsc::channel();
+        let callback = host.process.add_service(Arc::new(Callback(send)));
+        let events = host.package_system().unwrap().package_events().unwrap();
+        events.register(Some(callback), 0, 1000).unwrap();
+        PackageEffects::new(host.clone())
+            .package_removed(removal(Some("store")))
+            .unwrap();
+        assert!(events.wait(2000, false).unwrap());
+        assert!(events.wait(2000, false).unwrap());
+        assert_eq!(*native.0.lock().unwrap(), [("p".into(), 0, true)]);
+        let intents: Vec<_> = receive.try_iter().collect();
+        assert_eq!(
+            intents
+                .iter()
+                .map(|i| i.intent.action.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [REMOVED, "android.intent.action.UID_REMOVED"]
+        );
+        let extras = intents[0].test_extras();
+        assert_eq!(
+            extras["android.intent.extra.REMOVED_FOR_ALL_USERS"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            extras["android.intent.extra.SYSTEM_UPDATE_UNINSTALL"],
+            Value::Bool(false)
+        );
+    });
+}

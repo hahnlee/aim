@@ -29,6 +29,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.InsetDrawable;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.Environment;
 import android.os.IInstalld;
 import android.os.IBinder;
@@ -289,18 +290,41 @@ public final class InstallerRemovalBridge extends IInstallerRemovalBridge.Stub {
         options.setTemporaryAppAllowlist(120000, PowerExemptionManager.TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED, PowerExemptionManager.REASON_PACKAGE_UNARCHIVE, "");
         context.sendOrderedBroadcastAsUser(intent, UserHandle.of(user), null, -1, options.toBundle(), null, null, 0, null, null);
     }
-    @Override public void sendRemovedBroadcast(String packageName, int appId, int user, boolean dataRemoved, boolean fullyRemoved, boolean uidRemoved, long version) {
-        enforce(); int uid = UserHandle.getUid(user, appId);
-        Intent removed = new Intent(Intent.ACTION_PACKAGE_REMOVED, Uri.fromParts("package", packageName, null));
-        removed.putExtra(Intent.EXTRA_UID, uid); removed.putExtra(Intent.EXTRA_DATA_REMOVED, dataRemoved);
-        removed.putExtra(Intent.EXTRA_DONT_KILL_APP, false); removed.putExtra(Intent.EXTRA_USER_INITIATED, true);
-        context.sendBroadcastAsUser(removed, UserHandle.of(user));
-        if (fullyRemoved && dataRemoved) {
-            Intent full = new Intent(Intent.ACTION_PACKAGE_FULLY_REMOVED, removed.getData());
-            full.putExtra(Intent.EXTRA_UID, uid); full.putExtra(Intent.EXTRA_DATA_REMOVED, true);
-            context.sendBroadcastAsUser(full, UserHandle.of(user));
+    /** BroadcastHelper.sendPackageBroadcast without a prior visibility allow list. */
+    private void sendPackageBroadcast(String action, String packageName, Bundle extras, int flags, String target,
+            int[] users, int[] instantUsers) {
+        boolean instant = instantUsers.length != 0;
+        for (int user : instant ? instantUsers : users) {
+            Intent intent = new Intent(action, packageName != null ? Uri.fromParts("package", packageName, null) : null);
+            intent.putExtras(extras);
+            if (target != null) intent.setPackage(target);
+            int uid = intent.getIntExtra(Intent.EXTRA_UID, -1);
+            if (uid >= 0 && UserHandle.getUserId(uid) != user) intent.putExtra(Intent.EXTRA_UID, UserHandle.getUid(user, UserHandle.getAppId(uid)));
+            intent.putExtra(Intent.EXTRA_USER_HANDLE, user);
+            intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT | flags);
+            context.sendBroadcastAsUser(intent, UserHandle.of(user), instant ? "android.permission.ACCESS_INSTANT_APPS" : null);
         }
-        if (uidRemoved) { Intent gone = new Intent(Intent.ACTION_UID_REMOVED); gone.putExtra(Intent.EXTRA_UID, uid); context.sendBroadcastAsUser(gone, UserHandle.of(user)); }
+    }
+    @Override public void sendRemovedBroadcast(String packageName, String installer, int appId, int[] users, int[] instantUsers,
+            boolean dataRemoved, boolean removedForAllUsers, boolean appIdRemoved, boolean staticSharedLib,
+            boolean killApp, boolean removedBySystem, boolean archived) {
+        enforce(); Objects.requireNonNull(packageName); Objects.requireNonNull(users); Objects.requireNonNull(instantUsers);
+        // BroadcastHelper.sendPackageRemovedBroadcasts of an uninstall: never an update or a system update's removal.
+        Bundle extras = new Bundle();
+        extras.putInt(Intent.EXTRA_UID, appId); extras.putBoolean(Intent.EXTRA_DATA_REMOVED, dataRemoved);
+        extras.putBoolean(Intent.EXTRA_SYSTEM_UPDATE_UNINSTALL, false); extras.putBoolean(Intent.EXTRA_DONT_KILL_APP, !killApp);
+        extras.putBoolean(Intent.EXTRA_USER_INITIATED, !removedBySystem);
+        if (archived) { extras.putBoolean(Intent.EXTRA_REPLACING, true); extras.putBoolean(Intent.EXTRA_ARCHIVAL, true); }
+        extras.putBoolean(Intent.EXTRA_REMOVED_FOR_ALL_USERS, removedForAllUsers);
+        if (installer != null) sendPackageBroadcast(Intent.ACTION_PACKAGE_REMOVED, packageName, extras, 0, installer, users, instantUsers);
+        if (staticSharedLib) return;
+        sendPackageBroadcast(Intent.ACTION_PACKAGE_REMOVED, packageName, extras, 0, null, users, instantUsers);
+        sendPackageBroadcast(Intent.ACTION_PACKAGE_REMOVED_INTERNAL, packageName, extras, 0, "android", users, instantUsers);
+        if (dataRemoved) sendPackageBroadcast(Intent.ACTION_PACKAGE_FULLY_REMOVED, packageName, extras, Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND, null, users, instantUsers);
+        if (appIdRemoved) {
+            if (archived) extras.putString(Intent.EXTRA_PACKAGE_NAME, packageName);
+            sendPackageBroadcast(Intent.ACTION_UID_REMOVED, null, extras, Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND, null, users, instantUsers);
+        }
     }
     private static void enforceNativeOwner() {
         if (android.os.Binder.getCallingUid() != android.os.Process.SYSTEM_UID)

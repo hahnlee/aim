@@ -414,7 +414,7 @@ fn transitions_persist_and_leave_hibernation_on_use_unstop_and_package_events() 
         // A removal for the user drops its state; the remaining code keeps the
         // global state. A new addition starts awake.
         success(&set_global(&s, 1000, true));
-        s.package_removed("p", 0).unwrap();
+        s.package_removed("p", 0, false);
         success(&set_user(&s, 1000, 0, true));
         assert!(globally(&s));
         s.package_added("p", 0);
@@ -436,7 +436,7 @@ fn removal_for_all_users_drops_the_global_state_without_user_states() {
         (host.hibernation.0.lock().unwrap().global.as_mut())
             .unwrap()
             .insert("gone".into(), hibernated);
-        s.package_removed("gone", 0).unwrap();
+        s.package_removed("gone", 0, true);
         let loaded = host.hibernation.0.lock().unwrap();
         assert!(loaded.user.is_none());
         assert!(!loaded.global.as_ref().unwrap().contains_key("gone"));
