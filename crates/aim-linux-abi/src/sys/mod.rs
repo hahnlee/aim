@@ -50,6 +50,7 @@ mod evdev;
 mod event;
 mod exec;
 mod exec_fd_receipt;
+mod fasync;
 mod fd_visibility;
 pub(crate) mod fdtab;
 mod fileattr;

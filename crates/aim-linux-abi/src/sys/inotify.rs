@@ -19,14 +19,15 @@
 //!
 //! With O_ASYNC, each queued event signals the F_SETOWN owner. Events are
 //! then decoded as they arrive: a private kqueue holds a second knote on
-//! each watched vnode, and the O_ASYNC watcher thread waits on all of
-//! them (the inotify's own kqueue cannot be waited on for that: a
+//! each watched vnode, and the O_ASYNC watcher thread (`fasync`) waits
+//! on all of them (the inotify's own kqueue cannot be waited on for that: a
 //! nested kqueue that is already readable does not report another note).
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::sync::{Arc, Mutex, Weak};
 
+use super::fasync::{self, Arrival, close_private, drain, private_kqueue};
 use super::fdtab::{self, Kind};
 use super::fown::Fown;
 use crate::errno::{self, EAGAIN, EBADF, EINVAL};
@@ -103,7 +104,7 @@ struct Armed {
     kq: i32,
     /// The private kqueue holding a second knote on each watched vnode.
     mirror: i32,
-    /// The inotify's key in [`Watcher::inotifies`].
+    /// The mirror's registration with the watcher thread (`fasync`).
     id: u64,
 }
 
@@ -717,7 +718,9 @@ impl Inotify {
     pub fn is_async(&self) -> bool {
         self.state.lock().unwrap().fasync.is_some()
     }
+}
 
+impl Arrival for Inotify {
     /// The watcher thread saw a watched vnode change: decode what the
     /// inotify's kqueue holds, which queues (and signals) its events.
     fn arrived(&self) {
@@ -750,102 +753,6 @@ impl Drop for Inotify {
     }
 }
 
-/// The O_ASYNC watcher thread's kqueue (a knote on each armed inotify's
-/// mirror kqueue, with its id), and the inotifies by id.
-struct Watcher {
-    kq: i32,
-    inotifies: HashMap<u64, Weak<Inotify>>,
-    next: u64,
-}
-
-static WATCHER: Mutex<Option<Watcher>> = Mutex::new(None);
-
-fn watch(kq: i32) {
-    // SAFETY: this host thread takes no signals, so the kernel never picks
-    // it for a process-directed one.
-    unsafe {
-        let mut all: libc::sigset_t = 0;
-        libc::sigfillset(&mut all);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
-    }
-    // SAFETY: an all-zero kevent is valid.
-    let mut evs: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
-    loop {
-        // SAFETY: waiting for events into a local buffer.
-        let n = unsafe {
-            libc::kevent(
-                kq,
-                std::ptr::null(),
-                0,
-                evs.as_mut_ptr(),
-                evs.len() as i32,
-                std::ptr::null(),
-            )
-        };
-        if n < 0 && errno::last() == errno::EINTR {
-            continue;
-        }
-        if n < 0 {
-            crate::diag!("inotify O_ASYNC watcher: errno {}", errno::last());
-            return;
-        }
-        for e in &evs[..n as usize] {
-            let ino = WATCHER
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|w| w.inotifies.get(&(e.udata as u64)))
-                .and_then(Weak::upgrade);
-            if let Some(ino) = ino {
-                ino.arrived();
-            }
-        }
-    }
-}
-
-/// Discard what kqueue `kq` reports.
-fn drain(kq: i32) {
-    // SAFETY: an all-zero kevent is valid.
-    let mut evs: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
-    let zero = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: output array we own, no wait.
-    while unsafe {
-        libc::kevent(
-            kq,
-            std::ptr::null(),
-            0,
-            evs.as_mut_ptr(),
-            evs.len() as i32,
-            &zero,
-        )
-    } == evs.len() as i32
-    {}
-}
-
-/// A private kqueue, out of the guest's way.
-fn private_kqueue(source: Option<i32>) -> Result<i32, errno::Errno> {
-    // SAFETY: a new kqueue, or our own reference to inotify kqueue `source`.
-    let kq = unsafe {
-        match source {
-            Some(fd) => libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, fdtab::hidden_base()),
-            None => libc::kqueue(),
-        }
-    };
-    if kq < 0 {
-        return Err(errno::last());
-    }
-    Ok(fdtab::hide(kq))
-}
-
-fn close_private(fd: i32) {
-    fdtab::unhide(fd);
-    // SAFETY: our private kqueue.
-    unsafe { libc::close(fd) };
-}
-
 /// Register inotify `ino` (kqueue `fd`, state `s`) with the watcher
 /// thread, started on first use.
 fn arm(ino: &Arc<Inotify>, fd: i32, s: &State) -> Result<Armed, errno::Errno> {
@@ -857,7 +764,6 @@ fn arm(ino: &Arc<Inotify>, fd: i32, s: &State) -> Result<Armed, errno::Errno> {
             return Err(error);
         }
     };
-    let mut watcher = WATCHER.lock().unwrap();
     let registered = (|| {
         for w in s.watches.values() {
             for fd in std::iter::once(w.fd).chain(w.entries.values().copied()) {
@@ -866,34 +772,8 @@ fn arm(ino: &Arc<Inotify>, fd: i32, s: &State) -> Result<Armed, errno::Errno> {
                 }
             }
         }
-        if watcher.is_none() {
-            let wkq = private_kqueue(None)?;
-            std::thread::Builder::new()
-                .name("linux-abi-inotify-async".into())
-                .spawn(move || watch(wkq))
-                .map_err(|_| errno::ENOMEM)?;
-            *watcher = Some(Watcher {
-                kq: wkq,
-                inotifies: HashMap::new(),
-                next: 0,
-            });
-        }
-        let w = watcher.as_mut().unwrap();
-        w.next += 1;
-        let k = libc::kevent {
-            ident: mirror as usize,
-            filter: libc::EVFILT_READ,
-            flags: libc::EV_ADD | libc::EV_CLEAR,
-            fflags: 0,
-            data: 0,
-            udata: w.next as usize as *mut _,
-        };
-        // SAFETY: one change, no events.
-        if unsafe { libc::kevent(w.kq, &k, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
-            return Err(errno::last());
-        }
-        w.inotifies.insert(w.next, Arc::downgrade(ino));
-        Ok(w.next)
+        let target: Weak<Inotify> = Arc::downgrade(ino);
+        fasync::register(mirror, target)
     })();
     match registered {
         Ok(id) => Ok(Armed { kq, mirror, id }),
@@ -907,9 +787,7 @@ fn arm(ino: &Arc<Inotify>, fd: i32, s: &State) -> Result<Armed, errno::Errno> {
 
 /// Leave the watcher thread; closing the mirror drops its knotes.
 fn disarm(armed: Armed) {
-    if let Some(w) = WATCHER.lock().unwrap().as_mut() {
-        w.inotifies.remove(&armed.id);
-    }
+    fasync::unregister(armed.id);
     close_private(armed.mirror);
     close_private(armed.kq);
 }
@@ -1206,8 +1084,10 @@ mod tests {
         assert_eq!(info.fields[1] as i32, fd);
         assert_eq!(read(fd, bytes.as_mut_ptr() as u64, bytes.len()), Some(64));
 
-        // Clearing O_ASYNC stops the signals.
-        assert_eq!(fcntl(fd, F_SETFL, O_NONBLOCK), 0);
+        // Clearing O_ASYNC (FIOASYNC, as F_SETFL) stops the signals.
+        let off = 0i32;
+        let fioasync = [fd as u64, 0x5452, &off as *const i32 as u64, 0, 0, 0];
+        assert_eq!(super::super::fs::ioctl(fioasync), 0);
         assert_eq!(fcntl(fd, F_GETFL, 0) as u64 & O_ASYNC, 0);
         std::fs::write(view.join("data/async/after"), b"").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));

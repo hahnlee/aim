@@ -1148,6 +1148,7 @@ pub fn get(fd: i32) -> Option<Kind> {
 pub fn on_close(fd: i32) {
     clear_regular_access(fd);
     super::fuse_client::close(fd);
+    super::fasync::on_close(fd);
     if super::fuse_device::is_device(fd) {
         set_slow(fd, false);
     }
@@ -1165,6 +1166,7 @@ pub fn on_close(fd: i32) {
 pub fn on_dup(old: i32, new: i32) {
     on_close(new);
     super::fuse_client::dup(old, new);
+    super::fasync::on_dup(old, new);
     if super::fuse_device::is_device(old) {
         super::fuse_device::adopt(new);
     }
@@ -1416,6 +1418,7 @@ pub fn after_fork_child() -> Result<(), crate::errno::Errno> {
     super::host_descriptors::init();
     epoll::after_fork_child()?;
     inotify::after_fork_child()?;
+    super::fasync::after_fork_child()?;
     event::after_fork_child();
     Ok(())
 }
@@ -2051,6 +2054,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     w.seq(super::fd_visibility::visible().into_iter(), |w, fd| {
         w.i32(fd)
     });
+    super::fasync::fork_save(w);
 }
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
@@ -2189,6 +2193,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             r.invalidate();
         }
     }
+    super::fasync::fork_restore(r);
     for fd in super::fd_visibility::visible() {
         if super::fuse_device::adopt(fd) {
             continue;
