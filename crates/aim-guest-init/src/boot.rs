@@ -589,14 +589,16 @@ pub fn cgroup2_hierarchy(image: &ImageRoot) -> Option<(String, u32, String, Stri
     ))
 }
 
-/// Start linux-run's watcher of this init's pid namespace `table`: the
+/// Start linux-run's watcher of the pid namespace `table` of `init`: the
 /// kernel kills every process of a namespace whose init exits
 /// (pid_namespaces(7)), and a watcher outside the guest does so here even
-/// when this process is SIGKILLed.
-fn watch_namespace(
+/// when init is SIGKILLed. Its messages go to `log`, so it holds no
+/// descriptor of whoever reads init's output.
+pub fn watch_namespace(
     linux_run: &std::path::Path,
     table: &std::path::Path,
     init: aim_storage::process_namespace::ProcessIdentity,
+    log: &std::path::Path,
 ) -> std::io::Result<()> {
     use std::io::Read;
     let mut command = std::process::Command::new(linux_run);
@@ -607,7 +609,13 @@ fn watch_namespace(
         .arg(init.start_microseconds.to_string())
         .arg(table)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::piped())
+        .stderr(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)?,
+        );
     let mut child = aim_storage::inherited::stdio_only(&mut command).spawn()?;
     // Reap the intermediate helper before any service starts; the watcher
     // itself belongs to launchd.
@@ -772,6 +780,7 @@ impl Boot {
                 &linux_run_binary,
                 &layout.identity_dir().join("by-pid"),
                 process,
+                &layout.logs_dir().join("pidns-watch.log"),
             )
             .map_err(|error| format!("pid namespace watcher: {error}"))?;
             aim_storage::boot_id::BootId::generate(process)
