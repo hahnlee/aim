@@ -53,9 +53,12 @@ pub fn run(
     now.init = Some(init.id());
     stop::running(now.clone());
     let status = init.wait();
-    // guest-init is reaped; the rest stops, and its data image detaches,
-    // whatever its status.
+    // guest-init is reaped: a signal must not find its pid, which the Mac
+    // may reuse. The rest stops, and its data image detaches, whatever its
+    // status.
     now.init = None;
+    stop::running(now.clone());
+    stop::end_group(init.id());
     let stopped = stop::stop(now);
     let status = status.map_err(|e| format!("guest-init: {e}"))?;
     stopped?;

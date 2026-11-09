@@ -353,7 +353,9 @@ guest-init --image <derived> --data <data> --run \
   detach; `cargo aim boot` and `cargo aim bench` detach it, as aimctl
   does, once guest-init has exited and the display and shims are gone, on
   every exit (its own stop or crash, a signal, the kill after a minute),
-  and fail when it will not detach (#2766).
+  and fail when it will not detach (#2766). A second signal ends the
+  command at once; the next attach of that data directory detaches the
+  image it leaves.
 - `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
   attaches at `<data>` for the boot and detaches when it stops
   (docs/storage.md); `cargo aim storage` shows what it occupies.

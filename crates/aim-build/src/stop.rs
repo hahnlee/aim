@@ -2,7 +2,9 @@
 //! and SIGHUP wake a thread of their own, which stops what is running as
 //! the command's own cleanup would and exits as the signal would have.
 //! One stop runs at a time, so a signal during the command's own cleanup
-//! waits for it rather than ending the process in its middle.
+//! waits for it rather than ending the process in its middle. A second
+//! signal ends the command at once; a data image it leaves attached is
+//! detached by the next attach of that data directory.
 
 use std::io::Read;
 use std::os::fd::IntoRawFd;
@@ -93,6 +95,12 @@ pub(crate) fn on_signals(command: &'static str) {
         }
         let signal = i32::from(byte[0]);
         eprintln!("{command}: signal {signal}: stopping the guest");
+        std::thread::spawn(move || {
+            if reader.read_exact(&mut byte).is_ok() {
+                eprintln!("{command}: signal {}: not waiting for the stop", byte[0]);
+                std::process::exit(128 + i32::from(byte[0]));
+            }
+        });
         let _stopping = STOPPING.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::mem::take(&mut *RUNNING.lock().unwrap());
         if let Err(error) = stop_now(now) {
@@ -132,6 +140,7 @@ fn stop_now(now: Running) -> Result<(), String> {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        end_group(init);
     }
     if let Some(display) = now.display {
         // SAFETY: as above.
@@ -153,6 +162,17 @@ fn stop_now(now: Running) -> Result<(), String> {
             .map_err(|e| format!("detaching {}: {e}", data.display())),
         None => Ok(()),
     }
+}
+
+/// Kills what is left of the process group of guest-init, reaped (it
+/// leads a group of its own), so that nothing of it keeps the data volume
+/// busy. Its services lead groups of their own, beyond this: one that
+/// outlives a killed guest-init keeps the volume busy, and the detach
+/// fails rather than forces it.
+pub(crate) fn end_group(init: u32) {
+    // SAFETY: the group stays allocated while any member lives; an empty
+    // one is ESRCH.
+    unsafe { libc::killpg(init as i32, libc::SIGKILL) };
 }
 
 /// `aim-apps clean --into DIR`: the shims go with the guest, and out of
@@ -251,6 +271,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).unwrap();
         let data = dir.join("data");
+        /// Detaches and removes the image however the test ends.
+        struct Removed(PathBuf);
+        impl Drop for Removed {
+            fn drop(&mut self) {
+                if let Err(error) = aim_storage::data::remove(&self.0.join("data")) {
+                    eprintln!("{error}");
+                }
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _removed = Removed(dir.clone());
         let mut image = aim_storage::data::DataImage::attach(&data, None).unwrap();
         let backing = image.image().to_path_buf();
         image.handoff_detach().unwrap();

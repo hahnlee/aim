@@ -190,6 +190,7 @@ impl Drop for Session {
             std::thread::sleep(Duration::from_millis(100));
         }
         let _ = self.init.wait();
+        stop::end_group(self.init.id());
         // SAFETY: as above.
         unsafe { libc::kill(self.display.id() as i32, libc::SIGTERM) };
         let _ = self.display.wait();
@@ -638,11 +639,16 @@ fn one_run(
     let init = match init {
         Ok(init) => init,
         Err(e) => {
-            let mut display = display;
-            let _stopping = stop::stopping();
-            let _ = display.kill();
-            let _ = display.wait();
-            return Err(e);
+            // No guest-init, no data image: only the display stops.
+            return Err(
+                match stop::stop(stop::Running {
+                    display: Some(display.id()),
+                    ..Default::default()
+                }) {
+                    Ok(()) => e,
+                    Err(stop) => format!("{e}; {stop}"),
+                },
+            );
         }
     };
     stop::running(stop::Running {
