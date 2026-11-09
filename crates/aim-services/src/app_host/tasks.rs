@@ -578,6 +578,12 @@ impl AppHost {
         )
     }
 
+    /// A reused task takes the launch's windowing mode and bounds
+    /// (`ActivityStarter.setTargetRootTaskIfNeeded`). As
+    /// `LaunchParamsController.layoutTask` lays it out, a task in an
+    /// organizer root task in a multi-window mode requests the launch bounds
+    /// (`Task.setBounds`), resolved in its own mode, and any other task in
+    /// one records them as its last non-fullscreen bounds and stays.
     pub(super) fn apply_task_launch_options(
         &self,
         id: i32,
@@ -601,41 +607,56 @@ impl AppHost {
             6 => return Err(self.display_area_multi_window()),
             mode => mode,
         };
-        let (bounds, mode) = {
+        let (bounds, mode, requested) = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
-            let task = tasks
-                .iter_mut()
-                .find(|t| t.id == id)
+            let at = tasks
+                .iter()
+                .position(|t| t.id == id)
                 .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no task {id}")))?;
+            let root_mode = parent_of(&tasks, &tasks[at]).map(|p| p.0);
+            let task = &mut tasks[at];
             if valid != 0 {
                 task.windowing_mode = valid;
                 task.requested_mode = valid;
             }
-            let bounds = if task.windowing_mode == 5 {
-                let bounds = options.bounds.or(task.restore_bounds).unwrap_or_else(|| {
-                    super::freeform::default_bounds(
-                        &super::freeform::Activity::from(info),
-                        area,
-                        display.0.density_dpi(),
-                        false,
-                        &[],
-                    )
-                });
-                super::freeform::restored_bounds(area, &[], bounds)
-            } else {
-                if options.bounds.is_some() {
-                    task.restore_bounds = options.bounds;
+            let (bounds, requested) = match (root_mode, options.bounds) {
+                // `inMultiWindowMode`: pinned, freeform or multi-window.
+                (Some(2 | 5 | 6), Some(bounds)) => (bounds, Some(Some(bounds))),
+                (Some(_), bounds) => {
+                    if bounds.is_some() {
+                        task.restore_bounds = bounds;
+                        self.save_task_launch_params(task)
+                            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                    }
+                    return Ok(());
                 }
-                area
+                (None, _) if task.windowing_mode == 5 => {
+                    let bounds = options.bounds.or(task.restore_bounds).unwrap_or_else(|| {
+                        super::freeform::default_bounds(
+                            &super::freeform::Activity::from(info),
+                            area,
+                            display.0.density_dpi(),
+                            false,
+                            &[],
+                        )
+                    });
+                    (super::freeform::restored_bounds(area, &[], bounds), None)
+                }
+                (None, bounds) => {
+                    if bounds.is_some() {
+                        task.restore_bounds = bounds;
+                    }
+                    (area, None)
+                }
             };
-            (bounds, task.windowing_mode)
+            (bounds, task.windowing_mode, requested)
         };
         self.activities
             .stack
             .lock()
             .unwrap()
             .set_task_windowing_mode(id, mode);
-        self.move_task(id, bounds)
+        self.move_task_requesting(id, bounds, requested)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
     }
 
@@ -3425,6 +3446,73 @@ pub(super) mod tests {
             .unwrap();
             assert_eq!(host.tasks.parent(7), None);
             assert_eq!(*host.tasks.adjacency.lock().unwrap(), Default::default());
+        });
+    }
+
+    #[test]
+    fn launch_bounds_of_a_reused_task_in_a_root_task_resolve_in_its_root_tasks_mode() {
+        use super::super::activity_options::LaunchOptions;
+        use super::super::task_organizer::tests::apply_wct;
+        use super::super::window_container_transaction::tests::{reparent, transaction};
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let r = |left, top, right, bottom| Rect {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            let old = r(100, 100, 900, 1500);
+            let (_thread, activities, _receive, _) = wct_tasks(host, export, old);
+            for a in &activities {
+                let mut records = host.activities.records.lock().unwrap();
+                records.get_mut(a).unwrap().info.resize_mode = 2;
+            }
+            for task in &mut host.activities.stack.lock().unwrap().tasks {
+                task.intent.component = Some(crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                });
+            }
+            let multi = host.create_root_task(6, None).unwrap();
+            let full = host.create_root_task(1, None).unwrap();
+            let inherit = [(244, 0), (248, 0), (252, 0), (256, 0), (352, 0)];
+            let (t7, t8) = (host.task_token(7), host.task_token(8));
+            let wct = transaction(
+                &[(t7, &inherit), (t8, &inherit)],
+                &[
+                    reparent(t7, Some(host.task_token(multi)), true),
+                    reparent(t8, Some(host.task_token(full)), true),
+                ],
+            );
+            apply_wct(host, &wct, 1000)
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap();
+            let fills = host.tasks.bounds(full).unwrap();
+            let launch = r(200, 300, 700, 1100);
+            let apply = |task| {
+                let info = host.activity_info_of("p", "p.Main").unwrap();
+                let options = LaunchOptions {
+                    bounds: Some(launch),
+                    ..Default::default()
+                };
+                host.apply_task_launch_options(task, options, &info)
+                    .unwrap();
+                let tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter().find(|t| t.id == task).unwrap();
+                (
+                    t.windowing_mode,
+                    t.bounds,
+                    t.requested_bounds,
+                    t.restore_bounds,
+                )
+            };
+            // A multi-window task requests the launch bounds and keeps them.
+            assert_eq!(apply(7), (6, launch, Some(launch), Some(old)));
+            // A fullscreen one keeps filling its root task and records them
+            // as its last non-fullscreen bounds.
+            assert_eq!(apply(8), (1, fills, None, Some(launch)));
         });
     }
 
