@@ -36,7 +36,7 @@ const INVALID_TASK_ID: i32 = -1;
 /// `ActivityInfo.RESIZE_MODE_*` `isResizeableMode` takes as resizeable;
 /// `FLAG_SUPPORTS_PICTURE_IN_PICTURE`.
 const RESIZEABLE_MODES: [i32; 6] = [1, 2, 4, 5, 6, 7];
-const FLAG_SUPPORTS_PICTURE_IN_PICTURE: i32 = 0x40_0000;
+pub(super) const FLAG_SUPPORTS_PICTURE_IN_PICTURE: i32 = 0x40_0000;
 /// `DisplayAreaOrganizer.FEATURE_DEFAULT_TASK_CONTAINER`.
 const FEATURE_DEFAULT_TASK_CONTAINER: i32 = 1;
 /// `WindowInsets.Type.defaultVisible()`: all but the IME.

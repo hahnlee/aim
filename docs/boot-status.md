@@ -213,7 +213,11 @@ freeform and picture-in-picture support (a leaf task in an organizer root
 takes its mode unvalidated): a mode it cannot take is undefined and inherits the parent's (the
 display area's freeform in window mode, else fullscreen; a reused task keeps
 its own), a fullscreen display area's launch takes its source task's mode, and
-a valid multi-window launch on the display area is an explicit failure. The task's
+a valid multi-window launch on the display area is an explicit failure. A pinned
+launch on a device with freeform or picture-in-picture takes its launch bounds,
+kept below the minimal size as a pinned task's are, and only a freeform or
+multi-window task's Mac window resizes it (`canResizeTask`; #2833, #2851; host
+tests only). The task's
 configuration, Mac window bounds, visibility and lifecycle follow: a fullscreen
 task (also a fullscreen launch) puts its Mac window into macOS native full
 screen through the bridge's `TASK` windowing mode, and the user's native full
