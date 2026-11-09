@@ -9,7 +9,9 @@
 //! A `linux-run` started without a table (a test, a shell) gets a private
 //! one ([`new_table`]): a new namespace of itself and its descendants, whose
 //! processes die with it as with the init of a Linux pid namespace
-//! ([`leave`]). A shell joins a boot's namespace with `--by-pid`.
+//! ([`leave`]). A boot's native init, guest-init, starts the same watcher
+//! for its table ([`watch_init`]). A shell joins a boot's namespace with
+//! `--by-pid`.
 //!
 //! An entry names a member only if its process started before the entry
 //! was written: a pid the Mac reused after a member died without removing
@@ -23,7 +25,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use aim_storage::process_namespace::ProcessIdentity;
+use aim_storage::process_namespace::{ProcessIdentity, WATCHER};
 
 use crate::errno::ESRCH;
 
@@ -91,7 +93,7 @@ fn sweep_tables(tmp: &Path) -> io::Result<()> {
             let _holder = match std::fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(e.path().join("watcher"))
+                .open(e.path().join(WATCHER))
             {
                 Ok(file) => {
                     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
@@ -148,17 +150,7 @@ fn start_watcher(init: ProcessIdentity) -> Result<(), String> {
 /// Internal linux-run helper. Fork only here, in the fresh, single-threaded
 /// helper, never in the guest's multithreaded runtime.
 pub fn watch(init: ProcessIdentity) -> io::Result<()> {
-    // SAFETY: no other threads or runtime owners have been initialized.
-    match unsafe { libc::fork() } {
-        -1 => return Err(io::Error::last_os_error()),
-        0 => {}
-        // SAFETY: the intermediate process owns no state to tear down.
-        _ => unsafe { libc::_exit(0) },
-    }
-    // SAFETY: detach from the guest's session and process group.
-    if unsafe { libc::setsid() } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    detach()?;
     let dir = std::env::temp_dir().join(format!("{PRIVATE}{}", init.host_pid));
     watch_table(&dir, init, || {
         let process = ProcessIdentity::running(me())?;
@@ -177,21 +169,47 @@ pub fn watch(init: ProcessIdentity) -> io::Result<()> {
         controller
             .owner_config()?
             .write(&dir.join("posix-control-owner"))?;
-        // Close the readiness pipe before waiting.
-        let mut ready = unsafe { std::fs::File::from_raw_fd(1) };
-        ready.write_all(&[1])?;
-        drop(ready);
+        report_ready()?;
         Ok(controller)
     })
 }
 
-fn watch_table<T>(
-    dir: &Path,
-    init: ProcessIdentity,
-    ready: impl FnOnce() -> io::Result<T>,
-) -> io::Result<()> {
-    // Register before creating the table: even death during startup leaves
-    // either no table or a watcher. NOTE_EXIT survives exec and PID reuse.
+/// Internal linux-run helper: watch the init of the existing namespace of
+/// table `dir`, which a native init (guest-init) registered, and take its
+/// members along when it dies, even by SIGKILL.
+pub fn watch_init(dir: &Path, init: ProcessIdentity) -> io::Result<()> {
+    detach()?;
+    watch_existing_table(dir, init, report_ready)
+}
+
+/// Leave the starting process: the watcher belongs to launchd, outside
+/// the guest's session and process group. Fork only in the fresh,
+/// single-threaded helper.
+fn detach() -> io::Result<()> {
+    // SAFETY: no other threads or runtime owners have been initialized.
+    match unsafe { libc::fork() } {
+        -1 => return Err(io::Error::last_os_error()),
+        0 => {}
+        // SAFETY: the intermediate process owns no state to tear down.
+        _ => unsafe { libc::_exit(0) },
+    }
+    // SAFETY: detach from the guest's session and process group.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Close the readiness pipe on stdout before waiting.
+fn report_ready() -> io::Result<()> {
+    // SAFETY: the helper's stdout, which nothing else owns.
+    let mut ready = unsafe { std::fs::File::from_raw_fd(1) };
+    ready.write_all(&[1])
+}
+
+/// A kqueue with `init`'s exit registered, once `init` is known to run.
+/// NOTE_EXIT survives exec and PID reuse.
+fn exit_queue(init: ProcessIdentity) -> io::Result<OwnedFd> {
     let kq = unsafe { libc::kqueue() };
     if kq < 0 {
         return Err(io::Error::last_os_error());
@@ -218,52 +236,105 @@ fn watch_table<T>(
     if !init.is_live() {
         return Err(io::Error::from_raw_os_error(libc::ESRCH));
     }
+    Ok(kq)
+}
+
+fn wait_exit(kq: &OwnedFd) -> io::Result<()> {
+    let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+    loop {
+        match unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &mut event,
+                1,
+                std::ptr::null(),
+            )
+        } {
+            1 => return Ok(()),
+            -1 if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) => {}
+            _ => return Err(io::Error::last_os_error()),
+        }
+    }
+}
+
+/// Remove the private table `dir` of the dead init if it is still the
+/// directory `original`: a reused PID may have made another one.
+fn remove_private(dir: &Path, original: &std::fs::Metadata) -> io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.dev() == original.dev() && m.ino() == original.ino() => {
+            match std::fs::remove_dir_all(dir) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            }
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Lock the table's watcher file until the watcher is done: a later boot
+/// sweeps the table's runtime only once it can take the lock
+/// ([`aim_storage::process_namespace::wait_for_watcher`]).
+fn hold_watcher_lock(holder: io::Result<std::fs::File>) -> io::Result<std::fs::File> {
+    let holder =
+        holder.map_err(|e| io::Error::from_raw_os_error(e.raw_os_error().unwrap_or(libc::EIO)))?;
+    if unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(holder)
+}
+
+fn watch_existing_table(
+    dir: &Path,
+    init: ProcessIdentity,
+    ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let kq = exit_queue(init)?;
+    // Retain the directory: teardown walks this one, wherever it is by then.
+    let directory = std::fs::File::open(dir)?;
+    let _holder = hold_watcher_lock(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(dir.join(WATCHER)),
+    )?;
+    ready()?;
+    let result = wait_exit(&kq);
+    kill_members(&directory, init.host_pid)?;
+    result
+}
+
+fn watch_table<T>(
+    dir: &Path,
+    init: ProcessIdentity,
+    ready: impl FnOnce() -> io::Result<T>,
+) -> io::Result<()> {
+    // Register before creating the table: even death during startup leaves
+    // either no table or a watcher.
+    let kq = exit_queue(init)?;
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new().mode(0o700).create(dir)?;
     // Retain the directory so its inode cannot be recycled under this watcher.
     let directory = std::fs::File::open(dir)?;
     let original = directory.metadata()?;
-    let holder = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(dir.join("watcher"));
-    let result = holder
-        .as_ref()
-        .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error().unwrap_or(libc::EIO)))
-        .and_then(|holder| {
-            if unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let _owner = ready()?;
-            loop {
-                match unsafe {
-                    libc::kevent(
-                        kq.as_raw_fd(),
-                        std::ptr::null(),
-                        0,
-                        &mut event,
-                        1,
-                        std::ptr::null(),
-                    )
-                } {
-                    1 => break Ok(()),
-                    -1 if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) => {
-                        continue;
-                    }
-                    _ => break Err(io::Error::last_os_error()),
-                }
-            }
-        });
-    // Normal exit may already have removed it; a reused PID may have made
-    // another table. Never remove that later namespace's directory.
-    match std::fs::symlink_metadata(dir) {
-        Ok(m) if m.dev() == original.dev() && m.ino() == original.ino() => {
-            leave_table(dir, init.host_pid)?;
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
+    let result = hold_watcher_lock(
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(dir.join(WATCHER)),
+    )
+    .and_then(|_holder| {
+        let _owner = ready()?;
+        wait_exit(&kq)
+    });
+    kill_members(&directory, init.host_pid)?;
+    // Normal exit may already have removed it.
+    remove_private(dir, &original)?;
     result
 }
 
@@ -307,15 +378,27 @@ pub fn leave() {
 }
 
 fn leave_table(dir: &Path, init: i32) -> io::Result<()> {
+    let directory = match std::fs::File::open(dir) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    kill_members(&directory, init)?;
+    match std::fs::remove_dir_all(dir) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// SIGKILL the live members of the table `directory` but its init. The
+/// watcher passes the table its init ran with even if it was renamed
+/// since: a later boot may have made a new table at its path, whose
+/// processes are not this init's.
+fn kill_members(directory: &std::fs::File, init: i32) -> io::Result<()> {
     // The table goes once no member can add to it: a member killed as it
     // starts may still be writing its files, and one may be forking.
     loop {
-        let entries = match table_members_info(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let alive: Vec<i32> = entries
+        let alive: Vec<i32> = table_members_info(directory)?
             .into_iter()
             .filter(|(p, info)| *p != init && info.pbi_status != libc::SZOMB)
             .map(|(p, _)| p)
@@ -336,10 +419,7 @@ fn leave_table(dir: &Path, init: i32) -> io::Result<()> {
             return Err(io::Error::from_raw_os_error(libc::ETIMEDOUT));
         }
     }
-    match std::fs::remove_dir_all(dir) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    }
+    Ok(())
 }
 
 /// Wait until the processes `pids` have exited; false if one has not
@@ -388,11 +468,13 @@ fn wait_exits(pids: &[i32]) -> bool {
 
 /// Whether the table's entry for `pid` names the running process `info`.
 fn entry_names(dir: &std::path::Path, pid: i32, info: &libc::proc_bsdinfo) -> bool {
-    let Ok(written) =
-        std::fs::symlink_metadata(dir.join(pid.to_string())).and_then(|m| m.modified())
-    else {
-        return false;
-    };
+    std::fs::symlink_metadata(dir.join(pid.to_string()))
+        .and_then(|m| m.modified())
+        .is_ok_and(|written| written_after_start(written, info))
+}
+
+/// Whether an entry `written` then names the running process `info`.
+fn written_after_start(written: SystemTime, info: &libc::proc_bsdinfo) -> bool {
     let started = SystemTime::UNIX_EPOCH
         + Duration::from_secs(info.pbi_start_tvsec)
         + Duration::from_micros(info.pbi_start_tvusec);
@@ -417,15 +499,81 @@ fn members_info() -> Option<Vec<(i32, libc::proc_bsdinfo)>> {
     Some(v)
 }
 
-fn table_members_info(dir: &Path) -> io::Result<Vec<(i32, libc::proc_bsdinfo)>> {
-    Ok(std::fs::read_dir(dir)?
-        .collect::<io::Result<Vec<_>>>()?
-        .into_iter()
-        .filter_map(|e| e.file_name().to_str()?.parse().ok())
-        .filter(|&p: &i32| p > 0)
-        .filter_map(|p| Some((p, bsd_info(p)?)))
-        .filter(|(p, info)| entry_names(dir, *p, info))
-        .collect())
+/// The live processes the entries of the table `directory` name, read
+/// through its descriptor rather than its path.
+fn table_members_info(directory: &std::fs::File) -> io::Result<Vec<(i32, libc::proc_bsdinfo)>> {
+    let mut members = Vec::new();
+    for name in directory_names(directory)? {
+        let Some(pid) = name.to_str().ok().and_then(|n| n.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pid <= 0 {
+            continue;
+        }
+        let Some(info) = bsd_info(pid) else {
+            continue;
+        };
+        // SAFETY: zeroed plain data, filled by fstatat.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: an entry of our open directory into a local buffer.
+        if unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            continue;
+        }
+        let written = SystemTime::UNIX_EPOCH
+            + Duration::from_secs(stat.st_mtime as u64)
+            + Duration::from_nanos(stat.st_mtime_nsec as u64);
+        if written_after_start(written, &info) {
+            members.push((pid, info));
+        }
+    }
+    Ok(members)
+}
+
+/// The entry names of the open directory `directory`.
+fn directory_names(directory: &std::fs::File) -> io::Result<Vec<std::ffi::CString>> {
+    // SAFETY: a duplicate that fdopendir owns and closedir closes.
+    let fd = unsafe { libc::dup(directory.as_raw_fd()) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: our duplicate descriptor of a directory.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so the duplicate is still ours.
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    // The duplicate shares the offset of an earlier pass.
+    // SAFETY: our stream, read until its end and closed below.
+    unsafe { libc::rewinddir(stream) };
+    let mut names = Vec::new();
+    let result = loop {
+        // SAFETY: as above; errno tells the end from an error.
+        unsafe { *libc::__error() = 0 };
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let errno = unsafe { *libc::__error() };
+            break if errno == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(errno))
+            };
+        }
+        // SAFETY: readdir's entry, valid until the next call.
+        names.push(unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_owned());
+    };
+    // SAFETY: our stream, closing the duplicate.
+    unsafe { libc::closedir(stream) };
+    result.map(|()| names)
 }
 
 static INIT_OWNER: std::sync::OnceLock<
@@ -754,6 +902,83 @@ mod registration_tests {
         assert_eq!(member.0.wait().unwrap().signal(), Some(libc::SIGKILL));
         assert!(outside.0.try_wait().unwrap().is_none());
     }
+    /// A native init's members die with it even when it is SIGKILLed, as
+    /// those of a Linux pid namespace whose init exits (#2763).
+    #[test]
+    fn init_watcher_kills_an_existing_namespace_after_sigkill() {
+        let mut init = sleeper();
+        let mut member = sleeper();
+        let mut outside = sleeper();
+        let identity = ProcessIdentity::running(init.0.id() as i32).unwrap();
+        let table = test_table(identity);
+        std::fs::create_dir(&table).unwrap();
+        for process in [&init, &member] {
+            std::fs::write(table.join(process.0.id().to_string()), "member").unwrap();
+        }
+        let watched = table.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = std::thread::spawn(move || {
+            watch_existing_table(&watched, identity, || {
+                tx.send(()).unwrap();
+                Ok(())
+            })
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(member.0.try_wait().unwrap().is_none());
+        let lock = std::fs::File::open(table.join(WATCHER)).unwrap();
+        assert_ne!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        init.0.kill().unwrap();
+        init.0.wait().unwrap();
+        aim_storage::process_namespace::wait_for_watcher(&table).unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            member.0.try_wait().unwrap().and_then(|s| s.signal()),
+            Some(libc::SIGKILL)
+        );
+        watcher.join().unwrap().unwrap();
+        assert!(outside.0.try_wait().unwrap().is_none());
+        std::fs::remove_dir_all(table).unwrap();
+    }
+    /// The watcher kills the members of the table its init ran with, even
+    /// once a later boot renamed it away and made a new table at its path,
+    /// and leaves the new table and its processes alone.
+    #[test]
+    fn init_watcher_kills_only_its_own_table_after_a_new_one_replaces_it() {
+        let mut init = sleeper();
+        let mut member = sleeper();
+        let mut newcomer = sleeper();
+        let identity = ProcessIdentity::running(init.0.id() as i32).unwrap();
+        let table = test_table(identity);
+        std::fs::create_dir(&table).unwrap();
+        for process in [&init, &member] {
+            std::fs::write(table.join(process.0.id().to_string()), "member").unwrap();
+        }
+        let watched = table.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = std::thread::spawn(move || {
+            watch_existing_table(&watched, identity, || {
+                tx.send(()).unwrap();
+                Ok(())
+            })
+        });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let swept = table.with_extension("swept");
+        std::fs::rename(&table, &swept).unwrap();
+        std::fs::create_dir(&table).unwrap();
+        std::fs::write(table.join(newcomer.0.id().to_string()), "member").unwrap();
+        init.0.kill().unwrap();
+        init.0.wait().unwrap();
+        watcher.join().unwrap().unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(member.0.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(newcomer.0.try_wait().unwrap().is_none());
+        assert!(table.join(newcomer.0.id().to_string()).exists());
+        std::fs::remove_dir_all(table).unwrap();
+        std::fs::remove_dir_all(swept).unwrap();
+    }
     #[test]
     fn watcher_rejects_a_reused_pid_before_creating_a_table() {
         let init = sleeper();
@@ -808,7 +1033,7 @@ mod registration_tests {
         let root = test_table(identity);
         let table = root.join(format!("{PRIVATE}{}", identity.host_pid));
         std::fs::create_dir_all(&table).unwrap();
-        let holder = std::fs::File::create(table.join("watcher")).unwrap();
+        let holder = std::fs::File::create(table.join(WATCHER)).unwrap();
         assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
         init.0.kill().unwrap();
         init.0.wait().unwrap();

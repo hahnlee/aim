@@ -433,6 +433,35 @@ pub fn init_caught_signals(table: &Path, process: ProcessIdentity) -> io::Result
     u64::from_str_radix(fields[4], 16).map_err(|_| io::Error::from_raw_os_error(libc::EPROTO))
 }
 
+/// The table's watcher lock file: the watcher of the namespace's init
+/// holds it locked from before the first member starts until it has
+/// killed the members of a dead init.
+pub const WATCHER: &str = "watcher";
+
+/// Wait until no watcher holds the lock of `table`, so that its dead
+/// init's members are gone; at once if it has none.
+pub fn wait_for_watcher(table: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(table.join(WATCHER))
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: our descriptor; the lock goes with it.
+    while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 /// Readers see the old record or the new one (the rename). The table lives
 /// in the boot's runtime directory, which no boot outlives, so nothing is
 /// flushed to the disk.

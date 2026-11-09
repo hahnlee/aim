@@ -152,6 +152,7 @@ pub use pidns::leave as leave_pid_namespace;
 pub use pidns::new_table as new_pid_namespace;
 pub(crate) use pidns::tids::initialize as initialize_task_ids;
 pub use pidns::watch as watch_pid_namespace;
+pub use pidns::watch_init as watch_pid_namespace_init;
 pub use process::set_exe;
 pub use procfs::{StackInfo, note_stack};
 pub use pstate::kernel_release;

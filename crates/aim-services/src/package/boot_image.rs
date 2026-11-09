@@ -28,6 +28,17 @@ impl Inputs {
             seinfo: OnceLock::new(),
         })
     }
+    /// Whether these inputs read the image directory `image`. The same
+    /// directory, not the same spelling: the app host's root may reach it
+    /// through a symbolic link (`/tmp` on macOS), while the package image
+    /// owner holds its canonical path.
+    pub fn reads(&self, image: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(&self.image), std::fs::metadata(image)) {
+            (Ok(ours), Ok(theirs)) => ours.dev() == theirs.dev() && ours.ino() == theirs.ino(),
+            _ => false,
+        }
+    }
     pub fn config(&self, properties: &dyn Fn(&str) -> Option<String>) -> SystemConfig {
         self.config
             .get_or_init(|| SystemConfig::read_image(&self.image, properties))
@@ -176,6 +187,25 @@ impl Owner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A root reached through a symbolic link (`/tmp` on macOS) reads the
+    /// image the package image configuration identifies (#2763).
+    #[test]
+    fn inputs_through_a_symbolic_link_read_the_configured_image() {
+        let dir = crate::app_host::test_temp_dir("boot-image-link");
+        let image = dir.join("image");
+        let other = dir.join("other");
+        std::fs::create_dir(&image).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&image, &link).unwrap();
+        let configured = Configuration::pending(&image, &dir, &[]).unwrap().image;
+        assert_ne!(link, configured);
+        assert!(Inputs::new(&link).reads(&configured));
+        assert!(Inputs::new(&image).reads(&configured));
+        assert!(!Inputs::new(&other).reads(&configured));
+        assert!(!Inputs::new(&dir.join("missing")).reads(&configured));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     #[test]
     fn boot_inputs_retain_policy_but_reapply_environment_and_retire_with_boot() {
         let root = crate::app_host::test_temp_dir("boot-image-inputs");

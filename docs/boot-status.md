@@ -358,9 +358,8 @@ guest-init --image <derived> --data <data> --run \
   satisfied after two seconds, as with `--only`.
 - SIGINT, SIGTERM or SIGHUP to `cargo aim boot` stops the guest and
   leaves no guest process. `cargo aim boot` catches those signals rather
-  than blocking them (a blocked mask survives exec, so guest-init never saw
-  its stop and was killed after a minute, orphaning logd, prng_seeder,
-  hwservicemanager and tombstoned), guest-init unblocks them itself, and
+  than blocking them (a blocked mask survives exec, so guest-init would
+  never see its stop), guest-init unblocks them itself, and
   services start with no signal blocked and SIGPIPE's default action, as
   init's children do (#2704). aim-display, aim-apps and guest-init run in
   process groups of their own, so a terminal's Ctrl-C reaches only
@@ -369,6 +368,15 @@ guest-init --image <derived> --data <data> --run \
   services, mostly binder HALs, still outlast SIGTERM's 3 s and end at
   SIGKILL (#2765), and `cargo aim boot` leaves the DATA image that
   guest-init hands off attached after it exits (#2766).
+- guest-init's guest processes die with it, even when it is SIGKILLed, as
+  the processes of a Linux pid namespace whose init exits: a linux-run
+  watcher outside the guest (`--pidns-watch ... TABLE`) SIGKILLs the
+  members of its `by-pid` table, through the directory it holds, when
+  guest-init exits. The next boot of the same data waits for the
+  watcher's lock in that table before it sweeps the runtime (#2763).
+- An `--image` reached through a symbolic link (`/tmp` on macOS) boots:
+  package boot compares the app host's image inputs with the native
+  package image by directory identity, not by path spelling (#2763).
 - `<data>` is a case-sensitive disk image, `<data>.asif`, that guest-init
   attaches at `<data>` for the boot and detaches when it stops
   (docs/storage.md); `cargo aim storage` shows what it occupies.
