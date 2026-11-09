@@ -57,6 +57,23 @@ pub(super) const UNIVERSAL_RESIZABLE_FLAG: &str =
 /// `WindowManager.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY`.
 const ALLOW_RESTRICTED_RESIZABILITY: &str =
     "android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY";
+/// `ActivityInfo.FORCE_RESIZE_APP`, `FORCE_NON_RESIZE_APP` and
+/// `OVERRIDE_ANY_ORIENTATION_TO_USER`.
+const FORCE_RESIZE_APP: i64 = 174042936;
+const FORCE_NON_RESIZE_APP: i64 = 181136395;
+const OVERRIDE_ANY_ORIENTATION_TO_USER: i64 = 310816437;
+/// `WindowManager.PROPERTY_COMPAT_ALLOW_RESIZEABLE_ACTIVITY_OVERRIDES`,
+/// `_ALLOW_USER_ASPECT_RATIO_OVERRIDE`,
+/// `_ALLOW_USER_ASPECT_RATIO_FULLSCREEN_OVERRIDE` and
+/// `_ALLOW_ORIENTATION_OVERRIDE`.
+const ALLOW_RESIZEABLE_ACTIVITY_OVERRIDES: &str =
+    "android.window.PROPERTY_COMPAT_ALLOW_RESIZEABLE_ACTIVITY_OVERRIDES";
+const ALLOW_USER_ASPECT_RATIO_OVERRIDE: &str =
+    "android.window.PROPERTY_COMPAT_ALLOW_USER_ASPECT_RATIO_OVERRIDE";
+const ALLOW_USER_ASPECT_RATIO_FULLSCREEN_OVERRIDE: &str =
+    "android.window.PROPERTY_COMPAT_ALLOW_USER_ASPECT_RATIO_FULLSCREEN_OVERRIDE";
+const ALLOW_ORIENTATION_OVERRIDE: &str =
+    "android.window.PROPERTY_COMPAT_ALLOW_ORIENTATION_OVERRIDE";
 /// `ApplicationInfo.CATEGORY_GAME`.
 const CATEGORY_GAME: i32 = 0;
 /// `PackageManager.USER_MIN_ASPECT_RATIO_UNSET`, `_FULLSCREEN`.
@@ -459,17 +476,72 @@ fn universal_for_user(
     if allows(None) || class.is_some_and(|c| allows(Some(c))) {
         return false;
     }
-    // `IPackageManager.getUserMinAspectRatio`.
+    matches!(
+        user_min_aspect_ratio(state, package, info),
+        USER_MIN_ASPECT_RATIO_UNSET | USER_MIN_ASPECT_RATIO_FULLSCREEN
+    )
+}
+
+/// `IPackageManager.getUserMinAspectRatio` of the user of the activity
+/// `info` of `package`.
+fn user_min_aspect_ratio(
+    state: &crate::package::model::State,
+    package: &str,
+    info: &ActivityInfo,
+) -> i32 {
     let user = info.info.application_info.uid / PER_USER_RANGE as i32;
-    let ratio = state
+    state
         .packages
         .get(package)
         .and_then(|ps| ps.users.get(&user))
-        .map_or(USER_MIN_ASPECT_RATIO_UNSET, |u| u.min_aspect_ratio);
-    matches!(
+        .map_or(USER_MIN_ASPECT_RATIO_UNSET, |u| u.min_aspect_ratio)
+}
+
+/// The app compat overrides `Task.updateForceResizeOverrides` reads of
+/// the activity `info` of `package`, whose compat changes are `enabled`,
+/// with the user's fullscreen aspect ratio option `user_fullscreen`
+/// (`AppCompatConfiguration.isUserAppAspectRatioFullscreenEnabled`), asked
+/// only if it counts: whether they force it resizeable
+/// (`AppCompatResizeOverrides.shouldOverrideForceResizeApp`,
+/// `AppCompatAspectRatioOverrides.hasFullscreenOverride`) and
+/// non-resizeable (`shouldOverrideForceNonResizeApp`). No display here
+/// ignores activity size restrictions: only a virtual device's can.
+fn app_compat_resize_overrides(
+    state: &crate::package::model::State,
+    package: &str,
+    info: &ActivityInfo,
+    enabled: impl Fn(i64) -> bool,
+    user_fullscreen: impl FnOnce() -> Result<bool, Exception>,
+) -> Result<(bool, bool), Exception> {
+    // An `OptProp` of the app is false unless absent (or of a type read as
+    // none) or true: `getBoolean` of a property of another type is false.
+    let allows = |name| {
+        use crate::package::pkg::PropertyValue;
+        state.property(name, package, None).is_none_or(|p| {
+            matches!(
+                p.value,
+                PropertyValue::Bool(true) | PropertyValue::Unknown(_)
+            )
+        })
+    };
+    let ratio = user_min_aspect_ratio(state, package, info);
+    // `shouldApplyUserFullscreenOverride`; the option implies the user's
+    // aspect ratio settings, which gate the first property.
+    let user = ratio == USER_MIN_ASPECT_RATIO_FULLSCREEN
+        && allows(ALLOW_USER_ASPECT_RATIO_OVERRIDE)
+        && allows(ALLOW_USER_ASPECT_RATIO_FULLSCREEN_OVERRIDE)
+        && user_fullscreen()?;
+    // `isSystemOverrideToFullscreenEnabled`.
+    let system = matches!(
         ratio,
         USER_MIN_ASPECT_RATIO_UNSET | USER_MIN_ASPECT_RATIO_FULLSCREEN
-    )
+    ) && allows(ALLOW_ORIENTATION_OVERRIDE)
+        && enabled(OVERRIDE_ANY_ORIENTATION_TO_USER);
+    let resize = allows(ALLOW_RESIZEABLE_ACTIVITY_OVERRIDES);
+    Ok((
+        (resize && enabled(FORCE_RESIZE_APP)) || user || system,
+        resize && enabled(FORCE_NON_RESIZE_APP),
+    ))
 }
 
 impl MultiWindow {
@@ -693,15 +765,21 @@ impl AppHost {
         min_size: (i32, i32),
         global: &Configuration,
     ) -> Result<(bool, bool), Exception> {
-        // Forced resizeability is a standard task's (`Task.isResizeable`).
-        let force_resizable =
-            multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD;
-        // `mForceResizeOverride` holds the root activity's universal
-        // resizeability (`updateForceResizeOverrides`).
-        let is_resizeable = force_resizable
-            || RESIZEABLE_MODES.contains(&root.resize_mode)
-            || root.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0
-            || self.universal_resizeable(&multi_window.universal, root, true)?;
+        // `Task.isResizeable`: forced resizeability is a standard task's,
+        // then the root activity's overrides (`mForceNonResizeOverride`,
+        // `mForceResizeOverride`) and its universal resizeability
+        // (`updateForceResizeOverrides`) count.
+        let is_resizeable =
+            if multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD {
+                true
+            } else {
+                let (force_resize, force_non_resize) = self.force_resize_overrides(root)?;
+                !force_non_resize
+                    && (force_resize
+                        || RESIZEABLE_MODES.contains(&root.resize_mode)
+                        || root.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0
+                        || self.universal_resizeable(&multi_window.universal, root, true)?)
+            };
         let checks_min_size = self.platform()?.compat.is_enabled(
             CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
             root.info.application_info.item.package_name.as_deref(),
@@ -709,6 +787,47 @@ impl AppHost {
         );
         let supports = multi_window.supports(is_resizeable, min_size, checks_min_size, global);
         Ok((is_resizeable, supports))
+    }
+
+    /// `app_compat_resize_overrides` of the activity `info`.
+    fn force_resize_overrides(&self, info: &ActivityInfo) -> Result<(bool, bool), Exception> {
+        let app = &info.info.application_info;
+        let package = app
+            .item
+            .package_name
+            .as_deref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "an activity of no package"))?;
+        let platform = self.platform()?;
+        let enabled = |id| {
+            platform
+                .compat
+                .is_enabled(id, Some(package), app.target_sdk_version)
+        };
+        // Each a build-time resource and a `window_manager` device config
+        // flag, true by default (`SynchedDeviceConfig.getFlagValue`).
+        let user_fullscreen = || {
+            let framework = self.framework()?;
+            let enabled = |resource: &str, flag: &str| {
+                let built = framework.framework_bool(resource).ok_or_else(|| {
+                    Exception::new(EX_ILLEGAL_STATE, format!("no framework bool {resource}"))
+                })?;
+                Ok::<_, Exception>(
+                    built
+                        && platform
+                            .settings
+                            .get(Table::Config, &format!("window_manager/{flag}"))
+                            .is_none_or(|v| v.eq_ignore_ascii_case("true")),
+                )
+            };
+            Ok(enabled(
+                "config_appCompatUserAppAspectRatioSettingsIsEnabled",
+                "enable_app_compat_aspect_ratio_user_settings",
+            )? && enabled(
+                "config_appCompatUserAppAspectRatioFullscreenIsEnabled",
+                "enable_app_compat_user_aspect_ratio_fullscreen",
+            )?)
+        };
+        app_compat_resize_overrides(&self.packages()?.0, package, info, enabled, user_fullscreen)
     }
 
     /// `ActivityRecord.isUniversalResizeable` of the activity `info`, on
@@ -1415,6 +1534,113 @@ pub(super) mod tests {
             "p",
             &alias
         ));
+    }
+
+    #[test]
+    fn app_compat_overrides_force_resizeability_unless_the_app_opts_out() {
+        use crate::package::model::{PackageState, PackageUserState, State};
+        use crate::package::pkg::{AndroidPackage, Property, PropertyValue};
+        let state = |properties: &[(&str, PropertyValue)], ratio: i32| {
+            let properties = properties
+                .iter()
+                .map(|(name, value)| {
+                    let property = Property {
+                        name: Some(name.to_string()),
+                        package_name: Some("p".into()),
+                        class_name: None,
+                        value: value.clone(),
+                    };
+                    (name.to_string(), property)
+                })
+                .collect();
+            let user = PackageUserState {
+                min_aspect_ratio: ratio,
+                ..Default::default()
+            };
+            let ps = PackageState {
+                name: "p".into(),
+                pkg: Some(Arc::new(AndroidPackage {
+                    package_name: "p".into(),
+                    properties: Some(properties),
+                    ..Default::default()
+                })),
+                users: [(0, user)].into(),
+                ..Default::default()
+            };
+            State {
+                packages: [("p".to_string(), ps)].into(),
+                ..Default::default()
+            }
+        };
+        let mut info = None;
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            info = Some(host.activity_info_of("p", "p.Main").unwrap());
+        });
+        let info = info.unwrap();
+        let overrides = |change: Option<i64>, opt_out: Option<&str>, ratio, fullscreen: bool| {
+            let opt_out: Vec<_> = opt_out
+                .into_iter()
+                .map(|name| (name, PropertyValue::Bool(false)))
+                .collect();
+            app_compat_resize_overrides(
+                &state(&opt_out, ratio),
+                "p",
+                &info,
+                |id| Some(id) == change,
+                || Ok(fullscreen),
+            )
+            .unwrap()
+        };
+        let unset = USER_MIN_ASPECT_RATIO_UNSET;
+        let full = USER_MIN_ASPECT_RATIO_FULLSCREEN;
+        assert_eq!(overrides(None, None, unset, true), (false, false));
+        // FORCE_RESIZE_APP and FORCE_NON_RESIZE_APP, unless the app opts out
+        // of resizeable activity overrides.
+        let resize = ALLOW_RESIZEABLE_ACTIVITY_OVERRIDES;
+        assert_eq!(
+            overrides(Some(FORCE_RESIZE_APP), None, unset, false),
+            (true, false)
+        );
+        assert_eq!(
+            overrides(Some(FORCE_NON_RESIZE_APP), None, unset, false),
+            (false, true)
+        );
+        for change in [FORCE_RESIZE_APP, FORCE_NON_RESIZE_APP] {
+            assert_eq!(
+                overrides(Some(change), Some(resize), unset, false),
+                (false, false)
+            );
+        }
+        // The user's fullscreen aspect ratio, if the option is on and the
+        // app opts out of neither user override.
+        assert_eq!(overrides(None, None, full, true), (true, false));
+        assert_eq!(overrides(None, None, full, false), (false, false));
+        assert_eq!(overrides(None, None, 3, true), (false, false));
+        for opt_out in [
+            ALLOW_USER_ASPECT_RATIO_OVERRIDE,
+            ALLOW_USER_ASPECT_RATIO_FULLSCREEN_OVERRIDE,
+        ] {
+            assert_eq!(overrides(None, Some(opt_out), full, true), (false, false));
+        }
+        // OVERRIDE_ANY_ORIENTATION_TO_USER, of no other user aspect ratio,
+        // unless the app opts out of orientation overrides.
+        let any = Some(OVERRIDE_ANY_ORIENTATION_TO_USER);
+        assert_eq!(overrides(any, None, unset, false), (true, false));
+        assert_eq!(overrides(any, None, full, false), (true, false));
+        assert_eq!(overrides(any, None, 3, false), (false, false));
+        let orientation = Some(ALLOW_ORIENTATION_OVERRIDE);
+        assert_eq!(overrides(any, orientation, unset, false), (false, false));
+        // A property of another type reads false: it opts out.
+        let string = state(
+            &[(resize, PropertyValue::String(Some("true".into())))],
+            unset,
+        );
+        let forced = |id| id == FORCE_RESIZE_APP;
+        let read = app_compat_resize_overrides(&string, "p", &info, forced, || Ok(false));
+        assert_eq!(read.unwrap(), (false, false));
+        // The option is asked only if it counts.
+        let read = app_compat_resize_overrides(&state(&[], unset), "p", &info, forced, || panic!());
+        assert_eq!(read.unwrap(), (true, false));
     }
 
     #[test]
