@@ -27,6 +27,16 @@ shell-profileable `com.google.android.apps.messaging` holds its heap graph (64
 non-debuggable process (`Process not debuggable: android`), as Android does
 (2026-11-04).
 
+A signal whose default action kills ends the guest process at once, as Linux's
+`complete_signal` does, whatever its threads are blocked in (#2765): a host
+signal from another process is routed by a host thread of the layer, since the
+handler takes no locks, so a thread parked in a binder read is interrupted
+through its waker, and a fatal one with no thread blocking it ends the group.
+Native services blocked in binder (keymint, health, power, apexd, installd...)
+used to outlive init's SIGTERM until SIGKILL 3 s later; three disposable
+app-host boots now stop in 1.17-1.20 s from `aimctl stop` (3.5 s before), with
+no process left (2026-11-10).
+
 `signalfd4` (#2648) creates and updates signal descriptors whose reads take the
 reader's pending signals as `signalfd_siginfo` records, returning the records
 copied before a fault. Poll, select and epoll report POLLIN alone, for a masked

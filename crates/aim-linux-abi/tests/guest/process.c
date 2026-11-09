@@ -1369,6 +1369,30 @@ static void peer_thread_signals(void) {
   printf("ok peer_thread_signals\n");
 }
 
+// A real-time signal, which Darwin cannot carry, with its default action
+// kills the peer it is sent to, and kill(2) reports success (signal(7)):
+// the peer's agent replies before the process ends.
+static void peer_fatal_rt(void) {
+  int ready[2];
+  CHECK(pipe(ready) == 0, "pipe");
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) {
+    close(ready[0]);
+    write(ready[1], "r", 1);
+    for (;;) pause();
+  }
+  close(ready[1]);
+  char c;
+  CHECK(read(ready[0], &c, 1) == 1, "ready");
+  close(ready[0]);
+  CHECK(kill(child, SIGRTMIN + 4) == 0, "kill: errno %d", errno);
+  // It ends; its status is an exit of 128 + signal, as for every signal
+  // Darwin cannot carry, not yet the signal.
+  CHECK(waitpid(child, NULL, 0) == child, "waitpid: errno %d", errno);
+  printf("ok peer_fatal_rt\n");
+}
+
 // A process rewrites its entry in place on every credential change: a
 // reader never sees one half done. The child flips between one group and
 // many while this process reads its status.
@@ -1838,6 +1862,7 @@ int main(int argc, char** argv) {
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
       {"peer_thread_signals", peer_thread_signals},
+      {"peer_fatal_rt", peer_fatal_rt},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
       {"ns_init_unkillable", ns_init_unkillable},

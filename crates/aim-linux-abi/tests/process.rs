@@ -392,6 +392,12 @@ fn another_processs_thread_and_real_time_signals() {
     check("peer_thread_signals");
 }
 
+/// A default-fatal real-time signal from another process (#2765).
+#[test]
+fn a_peers_fatal_real_time_signal_kills_it() {
+    check("peer_fatal_rt");
+}
+
 #[test]
 fn other_processes_ids_in_proc_and_siginfo() {
     check("peer_ids");

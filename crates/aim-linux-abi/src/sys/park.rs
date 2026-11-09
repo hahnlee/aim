@@ -72,6 +72,12 @@ pub struct Parker {
 }
 
 impl Parker {
+    pub const fn new() -> Self {
+        Self {
+            word: AtomicU32::new(0),
+        }
+    }
+
     fn addr(&self) -> *mut libc::c_void {
         self.word.as_ptr() as *mut _
     }

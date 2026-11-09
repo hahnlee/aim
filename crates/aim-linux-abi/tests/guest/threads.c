@@ -24,6 +24,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1126,6 +1127,115 @@ static void wait_external_sigquit(void) {
   exit(0);
 }
 
+// SIGTERM while every thread waits in a futex, from another process (the
+// harness), the process itself or its timer: with the default action it ends
+// the process at once (signal(7)); a handler runs, and an ignored one changes
+// nothing. Blocked in every thread, it stays pending until unblocked. The
+// standalone guest is its namespace's init, which ignores its own: "self"
+// and "alarm" run in a child and report how it ended, "init_self" in init.
+static _Atomic uint32_t term_word;
+
+static void on_term(int sig) {
+  (void)sig;
+  atomic_store(&term_word, 1);
+  futex(&term_word, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0);
+}
+
+static void *term_waiter(void *arg) {
+  static _Atomic uint32_t never;
+  (void)arg;
+  for (;;) futex(&never, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0);
+  return NULL;
+}
+
+static void wait_sigterm(const char *mode) {
+  if (strcmp(mode, "self") == 0 || strcmp(mode, "alarm") == 0) {
+    pid_t child = fork();
+    if (child > 0) {
+      int status = 0;
+      waitpid(child, &status, 0);
+      printf("signaled %d\n", WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+      exit(0);
+    }
+  }
+  sigset_t term;
+  sigemptyset(&term);
+  sigaddset(&term, SIGTERM);
+  if (strcmp(mode, "handled") == 0) {
+    struct sigaction sa = {.sa_handler = on_term};
+    sigaction(SIGTERM, &sa, NULL);
+  } else if (strcmp(mode, "ignored") == 0) {
+    signal(SIGTERM, SIG_IGN);
+  } else if (strcmp(mode, "blocked") == 0) {
+    pthread_sigmask(SIG_BLOCK, &term, NULL);
+  }
+  atomic_store(&term_word, 2);
+  pthread_t t;
+  pthread_create(&t, NULL, term_waiter, NULL);
+  printf("ready\n");
+  if (strcmp(mode, "self") == 0 || strcmp(mode, "init_self") == 0) {
+    kill(getpid(), SIGTERM);
+  } else if (strcmp(mode, "alarm") == 0) {
+    signal(SIGALRM, SIG_DFL);
+    alarm(1);
+  } else if (strcmp(mode, "blocked") == 0) {
+    sigset_t pending;
+    do sigpending(&pending);
+    while (!sigismember(&pending, SIGTERM));
+    usleep(200000);
+    printf("pending\n");
+    pthread_sigmask(SIG_UNBLOCK, &term, NULL);
+  }
+  struct timespec wait = {strcmp(mode, "ignored") == 0 || strcmp(mode, "init_self") == 0 ? 1 : 5, 0};
+  while (atomic_load(&term_word) == 2 &&
+         !(futex(&term_word, FUTEX_WAIT_PRIVATE, 2, &wait, NULL, 0) == -1 && errno == ETIMEDOUT)) {
+  }
+  printf("%s\n", atomic_load(&term_word) == 1 ? "handled" : "survived");
+  exit(0);
+}
+
+// tgkill of a default-fatal SIGTERM to a thread that blocks it, while
+// another thread does not: it stays pending on that thread (Linux's
+// complete_signal kills only through a thread that wants the signal).
+static sem_t tgkill_ready, tgkill_go;
+static int tgkill_pending, tgkill_got;
+
+static void *tgkill_blocker(void *arg) {
+  pid_t *tid = arg;
+  sigset_t term;
+  sigemptyset(&term);
+  sigaddset(&term, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &term, NULL);
+  *tid = gettid();
+  sem_post(&tgkill_ready);
+  sem_wait(&tgkill_go);
+  sigset_t pending;
+  sigpending(&pending);
+  tgkill_pending = sigismember(&pending, SIGTERM);
+  sigwait(&term, &tgkill_got);
+  return NULL;
+}
+
+static void test_tgkill_blocked(void) {
+  const char *t = "tgkill_blocked";
+  pid_t tid = 0;
+  pthread_t th;
+  sem_init(&tgkill_ready, 0, 0);
+  sem_init(&tgkill_go, 0, 0);
+  pthread_create(&th, NULL, tgkill_blocker, &tid);
+  sem_wait(&tgkill_ready);
+  CHECK(t, syscall(SYS_tgkill, getpid(), tid, SIGTERM) == 0, "tgkill: errno %d", errno);
+  usleep(100000);
+  sigset_t pending;
+  sigpending(&pending);
+  int mine = sigismember(&pending, SIGTERM);
+  sem_post(&tgkill_go);
+  pthread_join(th, NULL);
+  CHECK(t, !mine, "pending on the thread that does not block it");
+  CHECK(t, tgkill_pending && tgkill_got == SIGTERM, "blocker: pending %d, got %d", tgkill_pending, tgkill_got);
+  printf("ok %s\n", t);
+}
+
 // abort() dies of SIGABRT; run as its own process by the harness. The
 // debuggerd handler the linker installs is reset first: it needs
 // crash_dump, which this root does not have.
@@ -1165,6 +1275,7 @@ static const struct test tests[] = {
     {"sigwait_fault_race", test_sigwait_fault_race},
     {"sigwait_bad_info", test_sigwait_bad_info},
     {"directed_sigquit_join", test_directed_sigquit_join},
+    {"tgkill_blocked", test_tgkill_blocked},
     {"sigsuspend", test_sigsuspend},
     {"sa_restart", test_sa_restart},
     {"nanosleep", test_nanosleep},
@@ -1178,6 +1289,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "main_exit") == 0) main_exit();
   if (argc == 2 && strcmp(argv[1], "segv_default") == 0) segv_default();
   if (argc == 2 && strcmp(argv[1], "external_sigquit") == 0) wait_external_sigquit();
+  if (argc == 3 && strcmp(argv[1], "sigterm") == 0) wait_sigterm(argv[2]);
   for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
     int run = argc == 1;
     for (int a = 1; a < argc; a++) run |= strcmp(argv[a], tests[i].name) == 0;
