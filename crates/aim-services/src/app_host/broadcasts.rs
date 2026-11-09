@@ -268,17 +268,18 @@ enum Target {
 }
 
 /// A receiver by `BroadcastRecord.isReceiverEquals`: a registered one by
-/// its binder, a manifest one by its component.
+/// its registration (its binder's, and which of its filters), a manifest
+/// one by its component.
 #[derive(Debug, PartialEq)]
 enum ReceiverId {
-    Registered(u32),
+    Registered(u32, usize),
     Manifest(Option<String>, Option<String>),
 }
 
 impl Target {
     fn id(&self) -> ReceiverId {
         match self {
-            Target::Registered(r) => ReceiverId::Registered(r.handle),
+            Target::Registered(r) => ReceiverId::Registered(r.handle, r.filter),
             Target::Manifest(m) => {
                 let item = &m.info.info.item;
                 ReceiverId::Manifest(item.package_name.clone(), item.name.clone())
@@ -616,9 +617,15 @@ impl State {
     /// `replaceBroadcastInQueue`: of `queue`, newest first, the position of
     /// the delivery `new` replaces in place, if any: the same receiver's of
     /// a filter-equal broadcast from the same sender and user to the same
-    /// receivers, all pending. One of `new`'s own broadcast ends the search,
-    /// as a replacement past it would invert their order.
-    fn replace_pending(&self, queue: &VecDeque<Delivery>, new: &Delivery) -> Option<usize> {
+    /// receivers, all pending (or `replaced` already by `new`'s broadcast,
+    /// pending as it was). One of `new`'s own broadcast ends the search, as
+    /// a replacement past it would invert their order.
+    fn replace_pending(
+        &self,
+        queue: &VecDeque<Delivery>,
+        new: &Delivery,
+        replaced: &[Arc<Record>],
+    ) -> Option<usize> {
         let (Delivery::Once(record, _, at) | Delivery::Manifest(record, _, None, at)) = new else {
             return None;
         };
@@ -642,7 +649,7 @@ impl State {
                 && filter_equals(&old.intent.intent, &record.intent.intent)
                 && old.receivers.get() == Some(receivers)
                 && receivers[*old_at] == receivers[*at]
-                && self.all_pending(old)
+                && (replaced.iter().any(|r| Arc::ptr_eq(r, old)) || self.all_pending(old))
             {
                 return Some(i);
             }
@@ -2366,6 +2373,20 @@ impl Broadcasts {
         m: Option<&Manifest>,
         delivery: Delivery,
     ) -> Option<Arc<Record>> {
+        self.enqueue_or_replace(st, to, m, delivery, &[])
+    }
+
+    /// `enqueueOrReplaceBroadcast`: [`Self::queue_delivery`], with the
+    /// broadcasts that the broadcast of `delivery` already `replaced` for
+    /// its other receivers.
+    fn enqueue_or_replace(
+        &self,
+        st: &mut State,
+        to: QueueId,
+        m: Option<&Manifest>,
+        delivery: Delivery,
+        replaced: &[Arc<Record>],
+    ) -> Option<Arc<Record>> {
         let queue = match &to {
             QueueId::Warm(seq) => st.queues.get(seq),
             QueueId::Cold(process, uid) => st
@@ -2374,7 +2395,7 @@ impl Broadcasts {
                 .find(|c| &c.process == process && c.uid == *uid)
                 .map(|c| &c.deliveries),
         };
-        if let Some(at) = queue.and_then(|q| st.replace_pending(q, &delivery)) {
+        if let Some(at) = queue.and_then(|q| st.replace_pending(q, &delivery, replaced)) {
             let queue = match &to {
                 QueueId::Warm(seq) => st.queues.get_mut(seq),
                 QueueId::Cold(process, uid) => st
@@ -2688,19 +2709,20 @@ impl Broadcasts {
         let mut replaced = Vec::new();
         for (at, target) in targets.into_iter().enumerate() {
             let old = match target {
-                Target::Registered(r) => self.queue_delivery(
+                Target::Registered(r) => self.enqueue_or_replace(
                     st,
                     QueueId::Warm(r.start_seq),
                     None,
                     Delivery::Once(record.clone(), r, at),
+                    &replaced,
                 ),
                 Target::Manifest(m) => {
                     let to = self.manifest_queue(host, &m);
                     let delivery = Delivery::Manifest(record.clone(), m.clone(), None, at);
-                    self.queue_delivery(st, to, Some(&m), delivery)
+                    self.enqueue_or_replace(st, to, Some(&m), delivery, &replaced)
                 }
             };
-            replaced.extend(old);
+            replaced.extend(old.filter(|old| !replaced.iter().any(|r| Arc::ptr_eq(r, old))));
         }
         Self::skip_replaced(st, &replaced);
         self.update_running(host, st);
@@ -4146,7 +4168,10 @@ mod wait_tests {
             flags,
             &[("n", Value::Int(n))],
         );
-        let ids = handles.iter().map(|h| ReceiverId::Registered(*h)).collect();
+        let ids = handles
+            .iter()
+            .map(|h| ReceiverId::Registered(*h, 0))
+            .collect();
         r_mut.receivers.set(ids).unwrap();
         r
     }
@@ -4252,6 +4277,38 @@ mod wait_tests {
         assert_eq!(queued(&state, 1), [2]);
         Broadcasts::skip_replaced(&mut state, &[replaced]);
         assert!(state.queues[&2].is_empty());
+
+        // Its next receiver's is replaced in place too, though the first
+        // one's no longer pends.
+        let mut state = State::default();
+        let old = replacing(1, "content://x", 0, P, &[1, 2]);
+        let later = replacing(2, "content://z", 0, 0, &[2]);
+        state.queues.insert(
+            1,
+            VecDeque::from([Delivery::Once(old.clone(), registered(1), 0)]),
+        );
+        state.queues.insert(
+            2,
+            VecDeque::from([
+                Delivery::Once(old, second, 1),
+                Delivery::Once(later, second, 0),
+            ]),
+        );
+        let new = replacing(3, "content://x", 0, P, &[1, 2]);
+        let mut replaced = Vec::new();
+        for (seq, to, at) in [(1, registered(1), 0), (2, second, 1)] {
+            let old = broadcasts.enqueue_or_replace(
+                &mut state,
+                QueueId::Warm(seq),
+                None,
+                Delivery::Once(new.clone(), to, at),
+                &replaced,
+            );
+            assert_eq!(old.as_ref().map(|r| r.enqueue_id), Some(1));
+            replaced.extend(old);
+        }
+        assert_eq!(queued(&state, 1), [3]);
+        assert_eq!(queued(&state, 2), [3, 2]);
     }
 
     fn record(enqueue_id: u64) -> Arc<Record> {
