@@ -14,7 +14,6 @@
 
 mod fuse;
 mod keystore;
-mod storage;
 
 use std::{
     collections::BTreeMap,
@@ -29,6 +28,7 @@ use android_os_vold::aidl::android::os::{
     incremental::IncrementalFileSystemControlParcel::IncrementalFileSystemControlParcel,
 };
 use binder::{BinderFeatures, ExceptionCode, Interface, PersistableBundle, Status, Strong};
+use vold::storage;
 
 const SERVICE: &str = "vold";
 /// Set once `initUser0` has prepared user 0's DE storage and its views on
