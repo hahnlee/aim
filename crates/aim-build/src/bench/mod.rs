@@ -55,6 +55,7 @@ pub struct Options {
 }
 
 pub fn run(ctx: &Ctx, options: &Options) -> Result<ExitCode, String> {
+    let _guest = crate::guest_lock()?;
     stop::on_signals("bench");
     let dir = aim_paths::out().join("bench");
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;

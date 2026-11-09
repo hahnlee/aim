@@ -58,6 +58,13 @@ pub fn system_image_mount() -> PathBuf {
     real.with_extension("")
 }
 
+/// The lock `cargo aim` holds while a guest of its own runs: beside the
+/// real system image file, so every checkout that links it shares it
+/// (crates/aim-build, `guest_lock`).
+pub fn guest_lock() -> PathBuf {
+    system_image_mount().with_extension("guest.lock")
+}
+
 /// The original image's root (read-only; `image` node), in the mounted
 /// system image.
 pub fn original_image() -> PathBuf {

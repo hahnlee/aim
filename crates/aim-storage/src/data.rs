@@ -116,7 +116,33 @@ fn lock(dir: &Path) -> Result<DataLock, String> {
     Ok(DataLock(lock))
 }
 
-fn detach_image(dir: &Path) -> Result<(), String> {
+/// Why an attachment of a data image is detached without its
+/// [`DataImage`].
+#[derive(Clone, Copy)]
+enum Leftover {
+    /// Found at attach or removal: its process died without detaching it.
+    Stale,
+    /// Handed off by guest-init ([`DataImage::handoff_detach`]) to its
+    /// process owner, which detaches it once guest-init has exited.
+    HandedOff,
+}
+
+impl Leftover {
+    fn note(self, image: &Path, device: &str) -> String {
+        match self {
+            Self::Stale => format!(
+                "aim-storage: {} was left attached ({device}); detaching it",
+                image.display()
+            ),
+            Self::HandedOff => format!(
+                "aim-storage: detaching {} ({device}) handed off by its guest-init",
+                image.display()
+            ),
+        }
+    }
+}
+
+fn detach_image(dir: &Path, leftover: Leftover) -> Result<(), String> {
     let image = image_of(dir);
     let attachments = disk::attachments_of(&image)?;
     // A mounted volume must not be removed just because one inventory missed
@@ -133,11 +159,7 @@ fn detach_image(dir: &Path) -> Result<(), String> {
                 image.display()
             ));
         }
-        eprintln!(
-            "aim-storage: {} was left attached ({}); detaching it",
-            image.display(),
-            attached.device
-        );
+        eprintln!("{}", leftover.note(&image, &attached.device));
         disk::detach(&attached.device, PATIENCE)?;
     }
     if disk::is_mount_point(dir) {
@@ -149,15 +171,16 @@ fn detach_image(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Detaches only the exact backing image of `dir`, after its process owner
-/// has exited. The data lock excludes a live guest; no image is created.
+/// Detaches only the exact backing image of `dir` that guest-init handed
+/// off, after it has exited. The data lock excludes a live guest; no image
+/// is created.
 pub fn detach_existing(dir: &Path) -> Result<(), String> {
     if !image_of(dir).try_exists().map_err(|e| e.to_string())? {
         return Ok(());
     }
     let dir = mount_point(dir)?;
     let _lock = lock(&dir)?;
-    detach_image(&dir)
+    detach_image(&dir, Leftover::HandedOff)
 }
 
 /// `dir` with its parent resolved, which is where its image is mounted (the
@@ -257,7 +280,7 @@ impl DataImage {
                 None => create(&image)?,
             }
         }
-        detach_image(&dir)?;
+        detach_image(&dir, Leftover::Stale)?;
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let how = Attach {
             mount: Some(&dir),
@@ -472,7 +495,7 @@ pub fn remove(dir: &Path) -> Result<(), String> {
     let _lock = lock(&dir)?;
     let image = image_of(&dir);
     if image.exists() {
-        detach_image(&dir)?;
+        detach_image(&dir, Leftover::Stale)?;
     }
     if disk::is_mount_point(&dir) {
         return Err(format!(
@@ -528,6 +551,19 @@ mod tests {
             runtime_of(Path::new("/t/boot/data")),
             PathBuf::from("/t/boot/data.run")
         );
+    }
+
+    #[test]
+    fn only_a_stale_attachment_reads_as_left_attached() {
+        let image = Path::new("/t/boot/data.asif");
+        assert!(
+            Leftover::Stale
+                .note(image, "/dev/disk9")
+                .contains("was left attached")
+        );
+        let handed_off = Leftover::HandedOff.note(image, "/dev/disk9");
+        assert!(!handed_off.contains("left attached"), "{handed_off}");
+        assert!(handed_off.contains("/t/boot/data.asif (/dev/disk9)"));
     }
 
     #[test]

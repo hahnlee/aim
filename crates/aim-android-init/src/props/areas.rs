@@ -7,7 +7,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use super::area::{AreaMemory, HeapMemory, PA_SIZE, PROP_VALUE_MAX, PropArea};
+use super::area::{AreaMemory, HeapMemory, PA_SIZE, PROP_VALUE_MAX, PropArea, PropAreaReader};
 use super::info::PropertyInfoArea;
 
 /// `PROP_DIRNAME`.
@@ -236,6 +236,19 @@ impl<M: AreaMemory> PropertyAreas<M> {
         }
         write_readonly(&dir.join(PROPERTIES_SERIAL), &self.serial.bytes())
     }
+}
+
+/// The value of the property `name` in the area files of `dir` (the host
+/// directory backing `/dev/__properties__`), as a reader in another process
+/// sees it (`__system_property_get`): the area of its context by
+/// `property_info`, then the area's trie.
+pub fn read_from_dir(dir: &Path, name: &str) -> Option<String> {
+    let info = fs::read(dir.join(PROPERTY_INFO)).ok()?;
+    let info = PropertyInfoArea::new(&info).ok()?;
+    let (index, _) = info.property_info_indexes(name);
+    let context = *info.contexts().get(index as usize)?;
+    let area = fs::read(dir.join(context)).ok()?;
+    PropAreaReader::new(&area).ok()?.get(name).map(|p| p.value)
 }
 
 fn write_readonly(path: &Path, bytes: &[u8]) -> io::Result<()> {

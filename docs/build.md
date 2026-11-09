@@ -26,6 +26,16 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 `-j N` runs up to N nodes at once (default 3). Each node's output goes to
 `target/aim-cache/logs/<node>.log`; a failure prints its tail.
 
+One `cargo aim` of a checkout runs at a time (`target/aim-cache/lock`).
+Its guests run one at a time on the Mac, of every checkout: `boot`,
+`bench`, `test --integration` and the `userdata/template` node's build
+boot hold the guest lock, `android16-image.guest.lock` beside the real
+system image file every checkout links (`aim_paths::guest_lock`), and
+wait while another holds it. A script that boots a guest by other means
+(`aimctl`, guest-init) and must not overlap one takes its own lock; it
+must not wrap a `cargo aim` command in this one, which would wait for
+itself.
+
 ## Requirements
 
 - macOS on Apple Silicon; Rust with `rustup target add aarch64-linux-android`.

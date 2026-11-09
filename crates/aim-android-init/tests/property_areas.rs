@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use aim_android_init::props::area::{LONG_FLAG, LONG_LEGACY_ERROR, PROP_AREA_HEADER_SIZE};
+use aim_android_init::props::areas::read_from_dir;
 use aim_android_init::props::{
     FutexWaker, PropAreaReader, PropertyAreas, PropertyInfoEntry, WakeTarget, build_trie,
 };
@@ -169,5 +170,31 @@ fn files_are_written_read_only() {
             .unwrap()
             .permissions()
             .readonly()
+    );
+}
+
+#[test]
+fn another_process_reads_a_property_from_the_area_files() {
+    let areas = PropertyAreas::new(small_info()).unwrap();
+    let wake = aim_android_init::props::NoWake;
+    areas.add("sys.boot_completed", b"1", &wake).unwrap();
+    areas
+        .add("ro.boot.product.vendor.sku", b"sku", &wake)
+        .unwrap();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("read__properties__");
+    let _ = std::fs::remove_dir_all(&dir);
+    areas.write_to_dir(&dir).unwrap();
+    assert_eq!(
+        read_from_dir(&dir, "sys.boot_completed").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        read_from_dir(&dir, "ro.boot.product.vendor.sku").as_deref(),
+        Some("sku")
+    );
+    assert_eq!(read_from_dir(&dir, "sys.unset"), None);
+    assert_eq!(
+        read_from_dir(&dir.join("missing"), "sys.boot_completed"),
+        None
     );
 }
