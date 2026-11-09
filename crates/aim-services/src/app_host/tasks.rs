@@ -211,14 +211,14 @@ impl Tasks {
     }
 
     /// The windowing mode and bounds of task `id` if its configuration is
-    /// of its own bounds: a freeform task's in window mode, or one's in an
-    /// organizer root task.
+    /// of its own bounds: a freeform task's in window mode, a pinned
+    /// task's, or one's in an organizer root task.
     pub fn own_bounds(&self, id: i32) -> Option<(i32, Rect)> {
         self.tasks
             .lock()
             .unwrap()
             .iter()
-            .find(|t| t.id == id && (t.windowing_mode == 5 || t.parent.is_some()))
+            .find(|t| t.id == id && (matches!(t.windowing_mode, 2 | 5) || t.parent.is_some()))
             .map(|t| (t.windowing_mode, t.bounds))
     }
 
@@ -505,6 +505,14 @@ impl AppHost {
             .bounds
             .filter(|_| windowing_mode == 5)
             .map_or(bounds, |b| super::freeform::restored_bounds(area, &[], b));
+        // TaskLaunchParamsModifier: a pinned launch requests its launch
+        // bounds where the device supports freeform or picture-in-picture.
+        let pinned = match windowing_mode {
+            2 => self.initial_launch_bounds(2, options.bounds)?,
+            _ => None,
+        };
+        let requested = (windowing_mode == 5).then_some(bounds).or(pinned);
+        let bounds = pinned.unwrap_or(bounds);
         let id = {
             let mut next = self.tasks.next.lock().unwrap();
             *next += 1;
@@ -536,8 +544,8 @@ impl AppHost {
             windowing_mode,
             requested_mode: windowing_mode,
             parent: None,
-            requested_bounds: (windowing_mode == 5).then_some(bounds),
-            resolved_bounds: (windowing_mode == 5).then_some(bounds),
+            requested_bounds: requested,
+            resolved_bounds: requested,
             restore_bounds: (windowing_mode == 5)
                 .then_some(bounds)
                 .or(options.bounds)
@@ -1398,9 +1406,14 @@ impl AppHost {
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
             // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its
-            // parent; freeform and multi-window take their requested bounds
-            // at least their minimal size.
-            if !matches!(mode.unwrap_or(task.windowing_mode), 5 | 6) {
+            // parent; pinned takes its requested bounds, of no minimal size
+            // (adjustForMinimalTaskDimensions); freeform and multi-window
+            // take theirs at least their minimal size.
+            let mode = mode.unwrap_or(task.windowing_mode);
+            if mode == 2 {
+                return Ok(bounds);
+            }
+            if !matches!(mode, 5 | 6) {
                 return Ok(parent_of(&tasks, task).map_or(
                     Rect {
                         left: 0,
@@ -2199,6 +2212,98 @@ pub(super) mod tests {
             }
             assert!(host.activity_launch_options(None, 2000).is_ok());
         });
+    }
+
+    /// On a device with picture-in-picture, a pinned launch takes its launch
+    /// bounds, below its minimal size, in a fullscreen or freeform display
+    /// area; without launch bounds it fills the display.
+    #[test]
+    fn a_pinned_launch_takes_its_launch_bounds() {
+        use super::super::activity_options::LaunchOptions;
+        crate::system::with_discovery_binders_features(
+            &["android.software.picture_in_picture"],
+            |ready, _, _, export| {
+                let mut info = ready.activity_info_of("p", "p.Main").unwrap();
+                info.flags |= super::super::task_info::FLAG_SUPPORTS_PICTURE_IN_PICTURE;
+                let bounds = Rect {
+                    left: 40,
+                    top: 60,
+                    right: 240,
+                    bottom: 172,
+                };
+                for windows in [false, true] {
+                    let host = launch_host(ready, windows);
+                    assert!(
+                        host.framework
+                            .set(
+                                super::super::resources::Framework::load(
+                                    &aim_paths::original_image(),
+                                    320,
+                                    "en-US"
+                                )
+                                .expect("framework resources for pinned launches")
+                            )
+                            .is_ok()
+                    );
+                    let endpoint = export(Arc::new(Surfaces(Default::default())));
+                    assert!(
+                        host.composer
+                            .set(surface::Composer::for_test(&host.process, endpoint.handle))
+                            .is_ok()
+                    );
+                    let display = host.display().unwrap();
+                    let area = Rect {
+                        left: 0,
+                        top: 0,
+                        right: display.0.width,
+                        bottom: display.0.height,
+                    };
+                    for (launch, taken) in [(Some(bounds), bounds), (None, area)] {
+                        let mut request =
+                            super::super::activity_start::StartRequest::launcher("p.Main");
+                        request.launch_options = LaunchOptions {
+                            mode: 2,
+                            bounds: launch,
+                            ..Default::default()
+                        };
+                        let token = host
+                            .start_in_process(
+                                0,
+                                10100,
+                                "p",
+                                info.clone(),
+                                request,
+                                &Default::default(),
+                                None,
+                            )
+                            .unwrap();
+                        let id = host
+                            .activities
+                            .stack
+                            .lock()
+                            .unwrap()
+                            .get(token)
+                            .unwrap()
+                            .task;
+                        assert_eq!(host.tasks.own_bounds(id), Some((2, taken)));
+                        let tasks = host.tasks.tasks.lock().unwrap();
+                        let t = tasks.iter().find(|t| t.id == id).unwrap();
+                        assert_eq!((t.requested_bounds, t.resolved_bounds), (launch, launch));
+                        drop(tasks);
+                        // Its bounds stay below its minimal size when it moves.
+                        if launch.is_some() {
+                            let moved = Rect {
+                                left: 80,
+                                right: 280,
+                                ..bounds
+                            };
+                            host.move_task(id, moved).unwrap();
+                            assert_eq!(host.tasks.bounds(id), Some(moved));
+                        }
+                    }
+                }
+            },
+        );
     }
 
     #[test]

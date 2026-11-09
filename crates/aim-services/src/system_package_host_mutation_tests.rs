@@ -1602,6 +1602,44 @@ pub(crate) fn with_discovery_context(
         &dyn Fn(),
     ),
 ) {
+    discovery_context(flags, ready, separate, &[], context, test);
+}
+
+/// `with_discovery_binders` on a device that also declares the system
+/// `features`.
+pub(crate) fn with_discovery_binders_features(
+    features: &[&str],
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
+        &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+    ),
+) {
+    discovery_context(
+        &[],
+        true,
+        false,
+        features,
+        |_, p, s| Arc::new(crate::service_host::ServiceHost::new(p.clone(), s)),
+        |h, p, e, x, _| test(h, p, e, x),
+    );
+}
+
+fn discovery_context(
+    flags: &[(&str, bool)],
+    ready: bool,
+    separate: bool,
+    features: &[&str],
+    context: impl FnOnce(&Arc<Driver>, &Arc<LocalProcess>, &Arc<System>) -> Arc<dyn Service>,
+    test: impl FnOnce(
+        &Arc<AppHost>,
+        &mut dyn FnMut(&mut dyn FnMut(&mut crate::package::pkg::AndroidPackage)),
+        &dyn Fn(Option<&str>, i32),
+        &dyn Fn(Arc<dyn Service>) -> aim_binder_host::local::Strong,
+        &dyn Fn(),
+    ),
+) {
     let Session {
         fixture,
         host,
@@ -1676,6 +1714,14 @@ pub(crate) fn with_discovery_context(
             .system
             .flags
             .extend(flags.iter().map(|(name, on)| ((*name).into(), *on)));
+        context
+            .system
+            .features
+            .retain(|(name, _)| !features.contains(&name.as_str()));
+        context
+            .system
+            .features
+            .extend(features.iter().map(|name| ((*name).into(), 0)));
         context.scan_version = base.scan().version() + 1;
         fixture
             .system
@@ -1697,7 +1743,7 @@ pub(crate) fn with_discovery_context(
             )
             .unwrap();
     };
-    if !flags.is_empty() {
+    if !flags.is_empty() || !features.is_empty() {
         publish(&mut |_| {});
     }
     let enabled = |class: Option<&str>, new_state| {
