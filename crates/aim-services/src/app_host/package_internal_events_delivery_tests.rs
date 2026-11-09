@@ -545,7 +545,7 @@ fn user_present_follows_the_mac_screen_unlock() {
             assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
         };
         // Unlocked at start: sent once the boot has completed.
-        host.mac_screen_locked(false);
+        host.mac_screen_at_start(false);
         none(&received);
         host.keyguard_boot_completed();
         present(&received);
@@ -561,6 +561,90 @@ fn user_present_follows_the_mac_screen_unlock() {
     });
 }
 
+/// A lock heard while the start's read was made outdates the read.
+#[test]
+fn user_present_ignores_a_start_read_older_than_a_change() {
+    const PRESENT: &str = "android.intent.action.USER_PRESENT";
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let received = register_filter(host, export, "p", 10100, false);
+        let mut filter = IntentFilter::default();
+        filter.add_action(PRESENT);
+        host.broadcasts.state.lock().unwrap().receivers[0].filters[0].filter = filter;
+        host.keyguard_boot_completed();
+        host.mac_screen_locked(true);
+        host.mac_screen_at_start(false);
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+    });
+}
+
+/// `maybeSendUserPresentBroadcast`: a wake with the Mac's screen unlocked
+/// has no lock screen to dismiss, so the user is present; a wake while it
+/// is locked is not.
+#[test]
+fn user_present_follows_a_wake_while_the_mac_is_unlocked() {
+    const PRESENT: &str = "android.intent.action.USER_PRESENT";
+    use super::super::power_service::PowerManager;
+    use aim_service_aidl::android_os_ipowermanager as pm;
+    crate::system::with_discovery_binders(|host, _, _, export| {
+        let permissions = super::super::permission_manager::PermissionManager::with_system(
+            host.clone(),
+            Default::default(),
+        );
+        assert!(host.permission_manager.set(Arc::new(permissions)).is_ok());
+        let power = host
+            .power_service
+            .get_or_init(|| Arc::new(PowerManager::new(host.clone())));
+        let received = register_filter(host, export, "p", 10100, false);
+        let mut filter = IntentFilter::default();
+        filter.add_action(PRESENT);
+        host.broadcasts.state.lock().unwrap().receivers[0].filters[0].filter = filter;
+        let invoke = |code, parcel: &Parcel| {
+            power
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 1000,
+                    sender_euid: 1000,
+                    data: parcel.reader(),
+                })
+                .unwrap()
+        };
+        let cycle = |time| {
+            let mut p = Parcel::new();
+            pm::GoToSleep {
+                time,
+                reason: 4,
+                flags: 1,
+            }
+            .write(&mut p);
+            pm::read_go_to_sleep_reply(&mut invoke(pm::GO_TO_SLEEP, &p).reader())
+                .unwrap()
+                .unwrap();
+            let mut p = Parcel::new();
+            pm::WakeUp {
+                time: time + 1,
+                reason: 4,
+                details: None,
+                op_package_name: Some("android".into()),
+            }
+            .write(&mut p);
+            pm::read_wake_up_reply(&mut invoke(pm::WAKE_UP, &p).reader())
+                .unwrap()
+                .unwrap();
+        };
+        host.mac_screen_at_start(true);
+        host.keyguard_boot_completed();
+        cycle(10);
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+        host.mac_screen_locked(false);
+        received.recv_timeout(Duration::from_secs(2)).unwrap();
+        cycle(20);
+        let (intent, _) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(intent.intent.action.as_deref(), Some(PRESENT));
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+    });
+}
+
 /// Locked at start, the boot completes with nobody present.
 #[test]
 fn user_present_waits_for_an_unlock_after_a_locked_start() {
@@ -570,7 +654,7 @@ fn user_present_waits_for_an_unlock_after_a_locked_start() {
         let mut filter = IntentFilter::default();
         filter.add_action(PRESENT);
         host.broadcasts.state.lock().unwrap().receivers[0].filters[0].filter = filter;
-        host.mac_screen_locked(true);
+        host.mac_screen_at_start(true);
         host.keyguard_boot_completed();
         assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
         host.mac_screen_locked(false);

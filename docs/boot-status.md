@@ -151,8 +151,8 @@ no guest boot or Mac sleep/session notification check was run (#670, 2026-11-01)
 The Mac's screen lock is the keyguard for `ACTION_USER_PRESENT`: the app host
 reads the session's lock at start and hears each lock/unlock, and sends
 USER_PRESENT (the keyguard's flags, user 0, no permission, most-recent delivery
-group) once after BOOT_COMPLETED when the session starts unlocked and on each
-unlock (#2883). Host tests only; no guest boot (2026-11-10).
+group) once after BOOT_COMPLETED when the session starts unlocked, on each
+unlock, and on each wake while it is unlocked (#2883). Host tests only; no guest boot (2026-11-10).
 Stay-on applies the pinned caller check, writes the native global setting as
 the system and notifies observers (#2628). The Mac owns the screen-off timeout;
 the native power owner has no Android screen-timeout to suppress. Stay-on

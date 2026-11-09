@@ -6086,7 +6086,7 @@ impl Service for Control {
                         host.mac_screen_locked(locked);
                     }
                 }));
-                host.mac_screen_locked(aim_host_lock::screen_locked());
+                host.mac_screen_at_start(aim_host_lock::screen_locked());
                 // audioserver starts with its HAL, which asks the Mac for
                 // its devices: apart from the storage's start.
                 let audio = host.clone();

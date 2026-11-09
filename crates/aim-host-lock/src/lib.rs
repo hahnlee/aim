@@ -162,9 +162,11 @@ extern "C" fn screen_changed(
 
 /// Calls `on_change` each time the Mac's screen locks or unlocks (the
 /// distributed `com.apple.screenIsLocked` and `com.apple.screenIsUnlocked`),
-/// for the life of the process.
+/// for the life of the process. It returns once they are observed, so a
+/// [`screen_locked`] read after it misses no change.
 pub fn watch_screen(on_change: OnChange) {
     let observer = Box::into_raw(Box::new(on_change)) as usize;
+    let (observing, observed) = std::sync::mpsc::sync_channel(0);
     std::thread::Builder::new()
         .name("screen-lock-mac".into())
         .spawn(move || {
@@ -185,10 +187,12 @@ pub fn watch_screen(on_change: OnChange) {
                         DELIVER_IMMEDIATELY,
                     );
                 }
+                observing.send(()).expect("the watcher waits");
                 CFRunLoopRun();
             }
         })
         .expect("spawn the screen lock thread");
+    observed.recv().expect("observe the screen lock");
 }
 
 #[cfg(test)]
@@ -197,12 +201,5 @@ mod tests {
     #[test]
     fn the_mac_answers_whether_it_is_secure() {
         assert!(super::secure().is_ok(), "{:?}", super::secure());
-    }
-
-    /// The session answers whether its screen is locked; a test runs at an
-    /// unlocked one or without one, so either is valid.
-    #[test]
-    fn the_mac_answers_whether_its_screen_is_locked() {
-        eprintln!("locked: {}", super::screen_locked());
     }
 }
