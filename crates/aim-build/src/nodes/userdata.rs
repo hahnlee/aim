@@ -644,7 +644,9 @@ fn first_boot_owned(
     // guest process whose start a loaded Mac delays past any fixed bound
     // (#2665). The boot's patience is the only bound.
     let properties = data::runtime_of(dir).join(PROP_DIRNAME.trim_start_matches('/'));
-    let getprop = |name: &str| read_from_dir(&properties, name);
+    let getprop = |name: &str| {
+        read_from_dir(&properties, name).map_err(|e| format!("{}: {e}", properties.display()))
+    };
     if isolated.is_some() {
         log.line(&format!(
             "owned template guest-init pid={}, display pid={}",
@@ -709,7 +711,7 @@ fn first_boot_owned(
                         .as_millis()
                         .min(20) as u32,
                 )?
-                && getprop("sys.boot_completed").as_deref() == Some("1")
+                && getprop("sys.boot_completed")?.as_deref() == Some("1")
             {
                 completed = Some(start.elapsed());
             }
@@ -722,7 +724,7 @@ fn first_boot_owned(
         completed.unwrap_or_default().as_secs_f64(),
         granted.unwrap_or_default().as_secs_f64(),
     ));
-    let sku = getprop("ro.boot.product.vendor.sku").filter(|s| !s.is_empty());
+    let sku = getprop("ro.boot.product.vendor.sku")?.filter(|s| !s.is_empty());
     if isolated.is_some() {
         let events = guest.run(
             &[

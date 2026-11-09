@@ -231,7 +231,7 @@ pub fn wait_property(dir: &Path, name: &str, value: &str, deadline: Instant) -> 
         // Snapshot before reading the condition so a concurrent write cannot
         // be lost between the read and the shared wait's compare.
         let expected = serial.load(Ordering::Acquire);
-        if read_from_dir(dir, name).as_deref() == Some(value) {
+        if read_from_dir(dir, name)?.as_deref() == Some(value) {
             return Ok(true);
         }
         let Some(remaining) = deadline

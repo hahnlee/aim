@@ -588,6 +588,15 @@ pub fn cgroup2_hierarchy(image: &ImageRoot) -> Option<(String, u32, String, Stri
     ))
 }
 
+/// A property lookup of the in-process services, whose contract has no
+/// error: an unreadable area is reported and reads as unset.
+fn lookup_property(dir: &std::path::Path, name: &str) -> Option<String> {
+    read_from_dir(dir, name).unwrap_or_else(|error| {
+        eprintln!("guest-init: reading {name}: {}: {error}", dir.display());
+        None
+    })
+}
+
 fn default_linux_run() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -991,7 +1000,7 @@ impl Boot {
                         &layout.data.join("data"),
                         &layout.bpf_dir(),
                         &layout.net_dir(),
-                        Box::new(move |name| read_from_dir(&properties_dir, name)),
+                        Box::new(move |name| lookup_property(&properties_dir, name)),
                         Box::new(move |name, value, deadline| {
                             wait_property(&wait_dir, name, value, deadline)
                                 .map_err(|e| e.to_string())
@@ -1021,7 +1030,7 @@ impl Boot {
                         names,
                         log,
                         image.root(),
-                        Box::new(move |name| read_from_dir(&properties_dir, name)),
+                        Box::new(move |name| lookup_property(&properties_dir, name)),
                         Box::new(move |guest: &str| files.readable_by_others(guest)),
                     )?;
             }

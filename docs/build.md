@@ -31,7 +31,12 @@ Its guests run one at a time on the Mac, of every checkout: `boot`,
 `bench`, `test --integration` and the `userdata/template` node's build
 boot hold the guest lock, `android16-image.guest.lock` beside the real
 system image file every checkout links (`aim_paths::guest_lock`), and
-wait while another holds it. A script that boots a guest by other means
+wait, unbounded, while another holds it: an interactive `cargo aim boot`
+holds it for its whole session, and a `test --integration` meanwhile
+waits until that boot ends. The lock is machine-wide only among checkouts
+whose `_build/android16-image.dmg` links the same real image (a worktree
+links the main checkout's); a checkout with its own image copy has a lock
+of its own. A script that boots a guest by other means
 (`aimctl`, guest-init) and must not overlap one takes its own lock; it
 must not wrap a `cargo aim` command in this one, which would wait for
 itself.
