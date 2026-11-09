@@ -43,25 +43,7 @@ fn pending_starts_attach_fail_or_are_killed_without_signalling_zero() {
                         host.accessibility_ready.failed("accessibility unavailable");
                     }
                     assert!(host.accessibility_ready.service().is_none());
-                    let pm = permission_manager::PermissionManager::with_system(
-                        host.clone(),
-                        Default::default(),
-                    );
-                    assert!(host.permission_manager.set(Arc::new(pm)).is_ok());
-                    let metrics = display::Metrics::of(&display::Display::phone_for_test());
-                    host.display_metrics.set(Ok(metrics)).unwrap();
-                    let root = aim_paths::original_image();
-                    let framework = resources::Framework::load(&root, 160, "en-US").unwrap();
-                    assert!(host.framework.set(framework).is_ok());
-                    let backing = host.data().unwrap().join("attach-memory");
-                    std::fs::write(&backing, []).unwrap();
-                    let fd = std::fs::File::open(backing).unwrap().into();
-                    let memory = bind::ApplicationSharedMemory::for_test(fd);
-                    assert!(host.platform().unwrap().shared_memory.set(memory).is_ok());
-                    let (socket, relay) = UnixStream::pair().unwrap();
-                    relay
-                        .set_read_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
+                    let (socket, relay) = start_inputs(host);
                     if path == 2 {
                         *host.webview_zygote.child.lock().unwrap() = Some(super::Child {
                             pid: 1,
@@ -95,14 +77,7 @@ fn pending_starts_attach_fail_or_are_killed_without_signalling_zero() {
                                 .map(|(_, pid)| pid),
                         });
                         let mut relay = BufReader::new(relay);
-                        let mut line = String::new();
-                        relay.read_line(&mut line).unwrap();
-                        let count: usize = line.trim().parse().unwrap();
-                        let args: Vec<_> = (&mut relay)
-                            .lines()
-                            .take(count)
-                            .map(Result::unwrap)
-                            .collect();
+                        let args = next_start(&mut relay);
                         let seq = args.last().unwrap().strip_prefix("seq=").unwrap();
                         let seq: i64 = seq.parse().unwrap();
                         let uid = host.apps.lock().unwrap()[&seq].uid;
@@ -173,6 +148,121 @@ fn pending_starts_attach_fail_or_are_killed_without_signalling_zero() {
             );
         }
     }
+}
+
+/// The inputs a start needs, and the relay of a zygote session for it.
+fn start_inputs(host: &Arc<AppHost>) -> (UnixStream, UnixStream) {
+    let pm = permission_manager::PermissionManager::with_system(host.clone(), Default::default());
+    assert!(host.permission_manager.set(Arc::new(pm)).is_ok());
+    let metrics = display::Metrics::of(&display::Display::phone_for_test());
+    host.display_metrics.set(Ok(metrics)).unwrap();
+    let root = aim_paths::original_image();
+    let framework = resources::Framework::load(&root, 160, "en-US").unwrap();
+    assert!(host.framework.set(framework).is_ok());
+    let backing = host.data().unwrap().join("attach-memory");
+    std::fs::write(&backing, []).unwrap();
+    let fd = std::fs::File::open(backing).unwrap().into();
+    let memory = bind::ApplicationSharedMemory::for_test(fd);
+    assert!(host.platform().unwrap().shared_memory.set(memory).is_ok());
+    let (socket, relay) = UnixStream::pair().unwrap();
+    relay
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    (socket, relay)
+}
+
+/// The arguments of the next start the zygote relay reads.
+fn next_start(relay: &mut BufReader<UnixStream>) -> Vec<String> {
+    let mut line = String::new();
+    relay.read_line(&mut line).unwrap();
+    let count: usize = line.trim().parse().unwrap();
+    relay.lines().take(count).map(Result::unwrap).collect()
+}
+
+/// The nice name and start of the next start, which then runs as this
+/// process.
+fn run_next_start(relay: &mut BufReader<UnixStream>) -> (String, i64) {
+    let args = next_start(relay);
+    let name = args.iter().find_map(|a| a.strip_prefix("--nice-name="));
+    let seq = args.last().unwrap().strip_prefix("seq=").unwrap();
+    let pid = std::process::id() as i32;
+    let started = [pid.to_be_bytes().as_slice(), &[0]].concat();
+    relay.get_mut().write_all(&started).unwrap();
+    (name.unwrap().to_string(), seq.parse().unwrap())
+}
+
+/// `mProcessesOnHold`: a start before `mProcessesReady` returns at once and
+/// runs at `finishBooting`, in order; one after readiness runs at once.
+#[test]
+fn starts_before_processes_ready_are_held_until_finish_booting() {
+    crate::system::with_discovery_binders_flags(
+        &[("android.permission.flags.appop_mode_caching_enabled", true)],
+        false,
+        |host, _, _, _| {
+            let (socket, relay) = start_inputs(host);
+            *host.zygote.lock().unwrap() = Some(zygote::Session::new(socket));
+            let mut relay = BufReader::new(relay);
+            host.start_process_for("p", "p:one", None, false).unwrap();
+            host.start_process_for("p", "p:two", None, false).unwrap();
+            assert!(host.apps.lock().unwrap().is_empty());
+            host.processes_ready.set(Ok(())).unwrap();
+            host.start_held_while_booting();
+            assert_eq!(host.processes_on_hold.lock().unwrap().len(), 2);
+            std::thread::scope(|scope| {
+                let late = scope.spawn(|| host.start_process_for("p", "p:late", None, false));
+                let mut started = vec![run_next_start(&mut relay)];
+                late.join().unwrap().unwrap();
+                let held = scope.spawn(|| host.start_processes_on_hold());
+                started.push(run_next_start(&mut relay));
+                started.push(run_next_start(&mut relay));
+                held.join().unwrap();
+                let names: Vec<_> = started.iter().map(|(name, _)| name.as_str()).collect();
+                assert_eq!(names, ["p:late", "p:one", "p:two"]);
+                for (_, seq) in started {
+                    host.process_died(seq, std::process::id() as i32);
+                }
+            });
+            assert!(host.processes_on_hold.lock().unwrap().is_empty());
+        },
+    );
+}
+
+/// `isAllowedWhileBooting`: a persistent app's start is not held for
+/// `finishBooting`; it runs once forks may (`startPersistentApps`). A boot
+/// that stops fails the held starts.
+#[test]
+fn starts_allowed_while_booting_are_not_held_for_finish_booting() {
+    crate::system::with_discovery_binders_flags(
+        &[("android.permission.flags.appop_mode_caching_enabled", true)],
+        false,
+        |host, publish, _, _| {
+            publish(&mut |package| {
+                if package.package_name == "p" {
+                    package.booleans |= crate::package::pkg::booleans::SYSTEM
+                        | crate::package::pkg::booleans::PERSISTENT;
+                }
+            });
+            let (socket, relay) = start_inputs(host);
+            *host.zygote.lock().unwrap() = Some(zygote::Session::new(socket));
+            let mut relay = BufReader::new(relay);
+            host.start_process_for("p", "p", None, false).unwrap();
+            host.processes_ready.set(Ok(())).unwrap();
+            std::thread::scope(|scope| {
+                let ready = scope.spawn(|| host.start_held_while_booting());
+                let (name, seq) = run_next_start(&mut relay);
+                ready.join().unwrap();
+                assert_eq!(name, "p");
+                host.process_died(seq, std::process::id() as i32);
+            });
+            assert!(host.processes_on_hold.lock().unwrap().is_empty());
+        },
+    );
+    crate::system::with_boot_discovery_binders(|host, _, _, _| {
+        host.start_process_for("p", "p", None, false).unwrap();
+        drop(super::super::boot_ready::BootReady(host));
+        assert!(host.processes_on_hold.lock().unwrap().is_empty());
+        assert!(host.start_process_for("p", "p", None, false).is_err());
+    });
 }
 
 pub(in crate::app_host) fn attach(host: &AppHost, binder: Binder, seq: i64, uid: u32, pid: i32) {

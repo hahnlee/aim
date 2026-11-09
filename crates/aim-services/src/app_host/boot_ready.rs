@@ -12,8 +12,15 @@ impl Drop for BootReady<'_> {
             EX_ILLEGAL_STATE,
             "boot stopped before system ready",
         )));
-        // The held broadcast starts then fail with that error.
+        // The held broadcast starts then fail with that error; the
+        // processes still on hold, with readiness's failure, or after
+        // readiness, with the boot's stop before finishBooting.
         self.0.broadcasts.processes_ready(self.0);
+        let stopped = match self.0.processes_ready.get() {
+            Some(Err(error)) => error.clone(),
+            _ => Exception::new(EX_ILLEGAL_STATE, "boot stopped before finishBooting"),
+        };
+        self.0.fail_processes_on_hold(&stopped);
     }
 }
 impl AppHost {
@@ -53,6 +60,7 @@ impl AppHost {
             .clone();
         self.broadcasts.processes_ready(self);
         ready?;
+        self.start_held_while_booting();
         self.start_pending_services()
     }
 }

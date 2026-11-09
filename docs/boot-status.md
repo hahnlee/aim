@@ -1486,7 +1486,9 @@ system ready, broadcast cold starts are held as AMS's processes on hold and
 provider launches outside the system process fail fast as
 getContentProviderImpl's do, so aim-system's own startup calls cannot wait on
 the readiness that waits for it (a held broadcast start once deadlocked stage
-4); activity starts still wait. Stage 9 calls DexUseManagerLocal.systemReady
+4). Activity process starts are held too and return at once: a persistent
+app's starts at system ready, the others at finishBooting in order, before
+sys.boot_completed (#2697); a boot that stops fails them. Stage 9 calls DexUseManagerLocal.systemReady
 (with ArtManagerLocal's) by Binder on a live owner, a replacement when the
 owner died first, and passes only on its reply, so it precedes the completion
 broadcasts; a process attaching later runs its own. Boot dexopt (stage 10)

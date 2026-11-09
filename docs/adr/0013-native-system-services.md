@@ -837,10 +837,11 @@ fail if it died first, but its death restarts the whole runtime, whereas init
 restarts only aim-system: an owner whose process died is retired and the
 replacement's attachment awaited, and nothing bounds that wait (#2063).
 Package queries never wait for it, and before system ready AMS's own rules
-keep aim-system's calls from waiting on process readiness: broadcast starts
-are held (`mProcessesOnHold`) and provider launches fail fast
-(`getContentProviderImpl`); activity starts still wait for it instead of
-being held (#2063). Stage 9 delivers DexUseManagerLocal.systemReady
+keep aim-system's calls from waiting on process readiness: process starts
+are held (`mProcessesOnHold`), broadcast cold starts until system ready and
+activity starts until `finishBooting` (a persistent app's until system
+ready), and provider launches fail fast (`getContentProviderImpl`) (#2063,
+#2697). Stage 9 delivers DexUseManagerLocal.systemReady
 once by Binder to a live owner, calling a replacement when the owner died
 first, so it precedes the completion broadcasts; a process attaching after
 the stage passed is told so and runs its own. Boot dexopt (stage 10), background/APEX
