@@ -48,6 +48,8 @@ pub struct Task {
     parent: Option<i32>,
     /// Its requested override bounds, `None` if empty (inheriting its parent's).
     requested_bounds: Option<Rect>,
+    /// Its resolved override bounds, `None` if empty (filling its parent).
+    resolved_bounds: Option<Rect>,
     /// `mLastNonFullscreenBounds`.
     restore_bounds: Option<Rect>,
     /// Its root activity's window layout's minimum size, -1 for none.
@@ -529,6 +531,7 @@ impl AppHost {
             requested_mode: windowing_mode,
             parent: None,
             requested_bounds: (windowing_mode == 5).then_some(bounds),
+            resolved_bounds: (windowing_mode == 5).then_some(bounds),
             restore_bounds: (windowing_mode == 5)
                 .then_some(bounds)
                 .or(options.bounds)
@@ -937,6 +940,7 @@ impl AppHost {
                 requested_mode: mode,
                 parent: None,
                 requested_bounds: None,
+                resolved_bounds: None,
                 restore_bounds: None,
                 min_size: (-1, -1),
                 layer: Some(layer),
@@ -1388,22 +1392,20 @@ impl AppHost {
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task {id}"))?;
             // Task.resolveLeafTaskOnlyOverrideConfigs: fullscreen fills its
-            // parent; a multi-window task keeps its requested bounds.
-            match mode.unwrap_or(task.windowing_mode) {
-                5 => {}
-                6 => return Ok(bounds),
-                _ => {
-                    return Ok(parent_of(&tasks, task).map_or(
-                        Rect {
-                            left: 0,
-                            top: 0,
-                            right: display.0.width,
-                            bottom: display.0.height,
-                        },
-                        |p| p.1,
-                    ));
-                }
+            // parent; freeform and multi-window take their requested bounds
+            // at least their minimal size.
+            if !matches!(mode.unwrap_or(task.windowing_mode), 5 | 6) {
+                return Ok(parent_of(&tasks, task).map_or(
+                    Rect {
+                        left: 0,
+                        top: 0,
+                        right: display.0.width,
+                        bottom: display.0.height,
+                    },
+                    |p| p.1,
+                ));
             }
+            let previous = task.resolved_bounds;
             let default_min = (min_dp as f32 * density) as i32;
             let min = (
                 if task.min_size.0 < 0 {
@@ -1418,15 +1420,15 @@ impl AppHost {
                 },
             );
             for (start, end, old_end, minimum) in [
-                (bounds.left, bounds.right, task.bounds.right, min.0),
-                (bounds.top, bounds.bottom, task.bounds.bottom, min.1),
+                (bounds.left, bounds.right, previous.map(|p| p.right), min.0),
+                (bounds.top, bounds.bottom, previous.map(|p| p.bottom), min.1),
             ] {
                 let size = end.checked_sub(start).ok_or("task bounds overflow")?;
                 if size <= 0 {
                     return Err("empty task bounds".into());
                 }
                 if size < minimum {
-                    if end == old_end {
+                    if Some(end) == old_end {
                         end.checked_sub(minimum)
                     } else {
                         start.checked_add(minimum)
@@ -1434,7 +1436,7 @@ impl AppHost {
                     .ok_or("minimum task bounds overflow")?;
                 }
             }
-            minimal_dimensions(bounds, task.bounds, min)
+            minimal_dimensions(bounds, previous, min)
         };
         Ok(bounds)
     }
@@ -1454,8 +1456,12 @@ impl AppHost {
         requested: Option<Option<Rect>>,
     ) -> Result<(), String> {
         let bounds = self.task_move_bounds(id, None, bounds)?;
-        let mode = {
+        {
             let mut tasks = self.tasks.tasks.lock().unwrap();
+            let parent = tasks
+                .iter()
+                .find(|t| t.id == id)
+                .and_then(|t| parent_of(&tasks, t));
             let task = tasks
                 .iter_mut()
                 .find(|t| t.id == id)
@@ -1468,12 +1474,20 @@ impl AppHost {
                 }
                 None => {}
             }
+            // A multi-window task filling its parent resolves no bounds of
+            // its own unless its minimal size grew them.
+            task.resolved_bounds = match task.windowing_mode {
+                5 => Some(bounds),
+                6 if task.requested_bounds.is_some() || parent.is_none_or(|p| p.1 != bounds) => {
+                    Some(bounds)
+                }
+                _ => None,
+            };
             if task.windowing_mode == 5 && task.requested_bounds.is_some() {
                 task.restore_bounds = Some(bounds);
             }
             self.save_task_launch_params(task)?;
-            task.windowing_mode
-        };
+        }
         self.place_tasks()?;
         self.move_windows_of(id, bounds)?;
         let uids: BTreeSet<u32> = self
@@ -1503,8 +1517,8 @@ impl AppHost {
         for (start_seq, items) in by_start {
             self.schedule(start_seq, items)?;
         }
-        if let Some((window, _)) = self.tasks.place(id) {
-            self.tasks.send_task(id, window, mode);
+        if let Some((shown, mode)) = self.tasks.place(id) {
+            self.tasks.send_task(id, shown, mode);
         }
         self.organizer_tasks_changed().map_err(|e| e.message)?;
         Ok(())
@@ -1569,8 +1583,8 @@ impl AppHost {
             requested = restore;
         }
         let bounds = match requested {
-            Some(b) if mode == 5 => self.task_move_bounds(id, Some(mode), b)?,
-            Some(b) if mode == 6 => b,
+            Some(b) if matches!(mode, 5 | 6) => self.task_move_bounds(id, Some(mode), b)?,
+            None if mode == 6 => self.task_move_bounds(id, Some(mode), area)?,
             _ => area,
         };
         Ok(TaskChange {
@@ -1680,17 +1694,18 @@ fn parent_of(tasks: &[Task], task: &Task) -> Option<(i32, Rect)> {
 }
 
 /// `Task.adjustForMinimalTaskDimensions`: `bounds` at least `min` wide and
-/// high, grown away from the edge that stayed where it was in `previous`.
-fn minimal_dimensions(mut bounds: Rect, previous: Rect, min: (i32, i32)) -> Rect {
+/// high, grown away from the edge that stayed where it was in `previous`,
+/// else to the right and bottom.
+fn minimal_dimensions(mut bounds: Rect, previous: Option<Rect>, min: (i32, i32)) -> Rect {
     if bounds.width() < min.0 {
-        if bounds.right == previous.right {
+        if previous.is_some_and(|p| bounds.right == p.right) {
             bounds.left = bounds.right - min.0;
         } else {
             bounds.right = bounds.left + min.0;
         }
     }
     if bounds.height() < min.1 {
-        if bounds.bottom == previous.bottom {
+        if previous.is_some_and(|p| bounds.bottom == p.bottom) {
             bounds.top = bounds.bottom - min.1;
         } else {
             bounds.bottom = bounds.top + min.1;
@@ -2476,7 +2491,7 @@ pub(super) mod tests {
             bottom: 1500,
         };
         assert_eq!(
-            minimal_dimensions(from_left, previous, (440, 440)),
+            minimal_dimensions(from_left, Some(previous), (440, 440)),
             Rect {
                 left: 460,
                 top: 100,
@@ -2492,7 +2507,7 @@ pub(super) mod tests {
             bottom: 200,
         };
         assert_eq!(
-            minimal_dimensions(from_bottom, previous, (440, 440)),
+            minimal_dimensions(from_bottom, Some(previous), (440, 440)),
             Rect {
                 left: 100,
                 top: 100,
@@ -2500,7 +2515,20 @@ pub(super) mod tests {
                 bottom: 540
             }
         );
-        assert_eq!(minimal_dimensions(previous, previous, (440, 440)), previous);
+        assert_eq!(
+            minimal_dimensions(previous, Some(previous), (440, 440)),
+            previous
+        );
+        // Bounds that filled their parent grow to the right and bottom.
+        assert_eq!(
+            minimal_dimensions(from_left, None, (440, 440)),
+            Rect {
+                left: 800,
+                top: 100,
+                right: 1240,
+                bottom: 1500
+            }
+        );
     }
 
     /// Two freeform tasks 7 and 8 of one resumed activity each at `old` on
@@ -3385,6 +3413,50 @@ pub(super) mod tests {
         });
     }
 
+    /// A multi-window task's bounds set by a WCT grow to its minimal size
+    /// (`Task.resolveLeafTaskOnlyOverrideConfigs`), as a freeform task's.
+    #[test]
+    fn multi_window_task_bounds_keep_its_minimal_size() {
+        use super::super::task_organizer::tests::apply_wct;
+        use super::super::window_container_transaction::tests::{reparent, transaction};
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let r = |left, top, right, bottom| Rect {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            let (_thread, activities, _receive, _) =
+                wct_tasks(host, export, r(100, 100, 900, 1500));
+            let mut records = host.activities.records.lock().unwrap();
+            records.get_mut(&activities[0]).unwrap().info.resize_mode = 2;
+            drop(records);
+            for task in &mut host.activities.stack.lock().unwrap().tasks {
+                task.intent.component = Some(crate::package::intent::ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                });
+            }
+            let root = host.create_root_task(6, None).unwrap();
+            let (root, t7) = (host.task_token(root), host.task_token(7));
+            let bounds = |b: Rect| [(244, b.left), (248, b.top), (252, b.right), (256, b.bottom)];
+            let apply = |changes: &[(Binder, &[(usize, i32)])], ops: &[_]| {
+                let reply = apply_wct(host, &transaction(changes, ops), 1000);
+                reply.reader().read_exception().unwrap().unwrap();
+            };
+            // Task 7 is at least 900x1100: bounds not filling its parent
+            // grow to the right and bottom.
+            apply(
+                &[(t7, &bounds(r(100, 100, 300, 300)))],
+                &[reparent(t7, Some(root), true)],
+            );
+            assert_eq!(host.tasks.bounds(7), Some(r(100, 100, 1000, 1200)));
+            // Shrunk from the left, the left edge goes back.
+            apply(&[(t7, &bounds(r(800, 100, 1000, 1200)))], &[]);
+            assert_eq!(host.tasks.bounds(7), Some(r(100, 100, 1000, 1200)));
+        });
+    }
+
     /// `TestTaskOrganizer`'s split: adjacent roots and a launch-adjacent
     /// flag root, then a task in each root at half the display. The Mac
     /// windows of the two tasks tile.
@@ -3473,9 +3545,12 @@ pub(super) mod tests {
             );
             let reply = apply_wct(host, &split, 1000);
             reply.reader().read_exception().unwrap().unwrap();
+            // Task 7 grows to its minimal width from its left edge
+            // (`adjustForMinimalTaskDimensions`); its window keeps its root
+            // task's bounds.
             assert_eq!(
                 (host.tasks.bounds(7), host.tasks.bounds(8)),
-                (Some(left), Some(right))
+                (Some(r(0, 0, 900, 1920)), Some(right))
             );
             // The last TASK record of each task: its window's place.
             let mut records = HashMap::new();
@@ -3530,9 +3605,10 @@ pub(super) mod tests {
             // Cleared adjacency: the windows move on their own; the flag root
             // stays until its root task goes.
             apply(&[op(15, Some(p), None)]).unwrap();
+            // Task 7 takes the bounds at its minimal width again.
             set_bounds(7, [0, 70, 500, 1920]).unwrap();
             assert_eq!(host.tasks.bounds(8), Some(r(600, 70, 1080, 1920)));
-            assert_eq!(host.tasks.bounds(7), Some(r(0, 70, 500, 1920)));
+            assert_eq!(host.tasks.bounds(7), Some(r(0, 70, 900, 1920)));
             assert_eq!(
                 host.tasks.adjacency.lock().unwrap().launch_root,
                 Some(secondary)
@@ -3836,6 +3912,7 @@ impl Tasks {
                 requested_mode: 0,
                 parent: None,
                 requested_bounds: None,
+                resolved_bounds: None,
                 restore_bounds: None,
                 min_size: (-1, -1),
                 layer: None,
@@ -3861,6 +3938,7 @@ impl Tasks {
             requested_mode: windowing_mode,
             parent: None,
             requested_bounds: (windowing_mode == 5).then_some(bounds),
+            resolved_bounds: (windowing_mode == 5).then_some(bounds),
             restore_bounds: (windowing_mode == 5).then_some(bounds),
             min_size: (-1, -1),
             layer: None,

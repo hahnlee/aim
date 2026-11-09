@@ -307,8 +307,9 @@ and letterboxing, are tracked in #2050.
   fullscreen), and the window minimizes once out; back from the Dock, it
   enters the full screen again.
 - **Split screen.** The tasks of an organizer's adjacent root tasks
-  (`setAdjacentRoots`) keep a Mac window each, at their root task's bounds,
-  so the two windows tile side by side. A task that requests bounds of its
+  (`setAdjacentRoots`) keep a Mac window each, at their root task's bounds
+  even where a task's minimal size grows it past them, so the two windows
+  tile side by side. A task that requests bounds of its
   own there (a launch's bounds, as `LaunchParamsController.layoutTask` sets
   them on a task in a multi-window root task) takes them in its
   configuration, but its window stays a tile. The user's drag of one moves both;
