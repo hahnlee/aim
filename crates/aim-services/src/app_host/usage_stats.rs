@@ -290,6 +290,22 @@ impl AppHost {
         }
     }
 
+    /// `flushToDisk` (`MSG_FLUSH_TO_DISK`): user 0's stats flushed, then
+    /// app standby's.
+    fn flush_usage_to_disk(&self) {
+        let flushed = self.with_usage(|user, clocks, notified| {
+            let n = user.flush_to_disk(clocks);
+            notified.updated |= n.updated;
+            notified.reloaded |= n.reloaded;
+        });
+        if let Err(e) = flushed {
+            eprintln!("app host: usagestats: {}", e.message);
+        }
+        if let Err(e) = self.flush_standby() {
+            eprintln!("app host: {}", e.message);
+        }
+    }
+
     /// The service's listener of the user's stats: a flush to disk after
     /// `FLUSH_INTERVAL` when they first change (`onStatsUpdated`), the
     /// apps' standby buckets checked when they reload (`onStatsReloaded`),
@@ -301,12 +317,7 @@ impl AppHost {
             std::thread::spawn(move || {
                 std::thread::sleep(FLUSH_INTERVAL);
                 if let Some(host) = me.upgrade() {
-                    if let Err(e) = host.with_usage(|user, _, _| user.persist()) {
-                        eprintln!("app host: usagestats: {}", e.message);
-                    }
-                    if let Err(e) = host.flush_standby() {
-                        eprintln!("app host: {}", e.message);
-                    }
+                    host.flush_usage_to_disk();
                 }
             });
         }
