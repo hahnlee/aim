@@ -526,6 +526,7 @@ impl AppHost {
         let mut records = self.activities.records.lock().unwrap();
         let mut items: ProcessItems = Vec::new();
         let mut relaunching = false;
+        let mut relaunch_reasons = Vec::new();
         for (&ptr, record) in records.iter_mut().filter(|(_, r)| pick(r)) {
             let token = Binder::Local(ptr);
             let Some(global) = global_of(record.uid) else {
@@ -576,6 +577,8 @@ impl AppHost {
                 | config::CONFIG_ORIENTATION
                 | config::CONFIG_SCREEN_LAYOUT;
             relaunching = true;
+            // `mRelaunchReason`: a relaunch for a resize it does not handle.
+            relaunch_reasons.push((ptr, changes & !handled & resize != 0));
             record.relaunched = true;
             record.drawn = false;
             items.push((
@@ -605,6 +608,13 @@ impl AppHost {
                 "app host: relaunching {}/{} for changes {changes:#x}",
                 record.package, record.class
             );
+        }
+        drop(records);
+        let mut stack = self.activities.stack.lock().unwrap();
+        for (token, resize) in relaunch_reasons {
+            if let Some(a) = stack.get_mut(token) {
+                a.relaunched_for_resize = resize;
+            }
         }
         (items, relaunching)
     }
@@ -2098,6 +2108,45 @@ mod saved_state_tests {
             assert_eq!(saved(host, token), (false, false));
             let a = host.activities.stack.lock().unwrap().get(token).cloned();
             assert!(a.is_some_and(|a| a.state == State::Resumed && !a.have_state));
+        });
+    }
+
+    // android-16.0.0_r1 ensureActivityConfiguration: a relaunch for a size
+    // change the activity does not handle sets `mRelaunchReason` to a
+    // resize, any other relaunch clears it, and handleAppDied keeps an
+    // activity whose process died during a resize relaunch.
+    #[test]
+    fn a_relaunch_records_whether_it_was_for_a_resize() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let token = activity(host, State::Resumed);
+            let old = Configuration::from_proto(&[]).unwrap();
+            host.activities.with(Some(Binder::Local(token)), |r| {
+                r.reported = Some(old.clone())
+            });
+            let resize = |host: &Arc<AppHost>| {
+                host.activities
+                    .stack
+                    .lock()
+                    .unwrap()
+                    .get(token)
+                    .unwrap()
+                    .relaunched_for_resize
+            };
+            let mut wide = old.clone();
+            wide.orientation = 2;
+            assert!(host.reconfigure(|_| true, |_| Some(&wide), |_| None).1);
+            assert!(resize(host));
+            let mut dense = wide.clone();
+            dense.density_dpi += 80;
+            assert!(host.reconfigure(|_| true, |_| Some(&dense), |_| None).1);
+            assert!(!resize(host));
+            dense.orientation = 1;
+            assert!(host.reconfigure(|_| true, |_| Some(&dense), |_| None).1);
+            assert!(resize(host));
+            // Its process dies mid-relaunch: it is kept without state.
+            host.activities.remove_start(1, false);
+            let stack = host.activities.stack.lock().unwrap();
+            assert!(stack.get(token).is_some_and(|a| !a.have_state));
         });
     }
 

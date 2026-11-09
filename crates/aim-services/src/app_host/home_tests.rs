@@ -49,6 +49,7 @@ fn home_is_launched_stopped_behind_the_desktop_in_window_mode() {
     // `realStartActivityLocked` neither resumes nor shows it.
     assert_eq!(home, [Command::LaunchStopped(1)]);
     assert_eq!(s.get(1).unwrap().state, State::Stopping);
+    assert_eq!(s.get(1).unwrap().launch_count, 1);
     s.stopped(1, false);
     assert_eq!(s.get(1).unwrap().state, State::Stopped);
     // The app's task opens over it; it is never paused, resumed or focused.

@@ -94,6 +94,12 @@ pub struct Activity {
     /// `ActivityInfo.FLAG_STATE_NOT_NEEDED`: it may be restarted without
     /// saved state.
     pub state_not_needed: bool,
+    /// `launchCount`: its launches since a stop last saved its state, and
+    /// `lastLaunchTime`, the last one's `uptimeMillis`.
+    pub launch_count: u32,
+    pub last_launch: i64,
+    /// `mRelaunchReason`: it was last relaunched for a resize.
+    pub relaunched_for_resize: bool,
     pub finishing: bool,
     /// The activity its result goes to (`resultTo`), and its result:
     /// `RESULT_CANCELED` unless it set one.
@@ -111,6 +117,12 @@ pub struct Activity {
 }
 
 impl Activity {
+    /// `realStartActivityLocked`: one more launch, now.
+    fn launched(&mut self) {
+        self.launch_count += 1;
+        self.last_launch = uptime_ms();
+    }
+
     /// A new opaque activity, not yet launched.
     pub fn new(
         token: u64,
@@ -132,6 +144,9 @@ impl Activity {
             state: State::Initializing,
             have_state: true,
             state_not_needed: false,
+            launch_count: 0,
+            last_launch: 0,
+            relaunched_for_resize: false,
             finishing: false,
             result_to,
             result: None,
@@ -900,7 +915,9 @@ impl Stack {
             return;
         };
         if self.behind_desktop(task) {
-            self.get_mut(token).unwrap().state = State::Stopping;
+            let a = self.get_mut(token).unwrap();
+            a.state = State::Stopping;
+            a.launched();
             out.push(Command::LaunchStopped(token));
         }
     }
@@ -1091,6 +1108,7 @@ impl Stack {
             }
             State::Initializing => {
                 a.state = State::Resumed;
+                a.launched();
                 out.push(Command::Launch(top));
             }
             State::Started | State::Paused | State::Stopping | State::Stopped => {
@@ -1166,6 +1184,7 @@ impl Stack {
                 out.push(Command::Launch(token));
             } else {
                 a.state = State::Paused;
+                a.launched();
                 out.push(Command::LaunchPaused(token));
             }
         }
@@ -1355,13 +1374,17 @@ impl Stack {
     }
 
     /// `activityStopped` of a stop that saved instance state, or did not:
-    /// whether it was stopping, so takes that state (`setSavedState`).
+    /// whether it was stopping, so takes that state (`setSavedState`,
+    /// resetting `launchCount`).
     pub fn stopped(&mut self, token: u64, saved_state: bool) -> bool {
         let Some(a) = self.get_mut(token).filter(|a| a.state == State::Stopping) else {
             return false;
         };
         a.state = State::Stopped;
-        a.have_state |= saved_state;
+        if saved_state {
+            a.have_state = true;
+            a.launch_count = 0;
+        }
         true
     }
 
@@ -1526,8 +1549,12 @@ impl Stack {
     /// `ActivityRecord.handleAppDied`: an activity with state to restart
     /// from (`mHaveState`: not yet resumed, or stopped after saving its
     /// instance state), or that needs none, survives unless finishing or
-    /// force-stopped, to be launched again when next resumed; the rest are
-    /// removed. Visible survivors are launched again
+    /// force-stopped, or invisible (`mVisibleRequested`) after more than
+    /// two launches in the last minute without saving state, to be
+    /// launched again when next resumed; so does one last relaunched for a
+    /// resize, unless finishing or launched more than twice since it saved
+    /// state; the rest are removed. Visible
+    /// survivors are launched again
     /// (`ensureVisibilityOnVisibleActivityDiedOrCrashed`).
     pub fn process_died(&mut self, start_seq: i64, removed: bool) -> Vec<Command> {
         let mut out = Vec::new();
@@ -1537,11 +1564,28 @@ impl Stack {
             .filter(|a| a.start_seq == start_seq)
             .map(|a| (a.token, a.task))
             .collect();
+        let now = uptime_ms();
+        let crash_looping: Vec<u64> = self
+            .activities
+            .iter()
+            .filter(|a| {
+                a.start_seq == start_seq
+                    && !self.shown(a)
+                    && a.launch_count > 2
+                    && a.last_launch > now - 60_000
+            })
+            .map(|a| a.token)
+            .collect();
         self.activities.retain_mut(|a| {
             if a.start_seq != start_seq {
                 return true;
             }
-            if !removed && !a.finishing && (a.have_state || a.state_not_needed) {
+            let resized = a.relaunched_for_resize && a.launch_count < 3;
+            if !removed
+                && !a.finishing
+                && (resized
+                    || (a.have_state || a.state_not_needed) && !crash_looping.contains(&a.token))
+            {
                 a.start_seq = 0;
                 a.pending = false;
                 a.state = State::Initializing;
@@ -1560,6 +1604,11 @@ impl Stack {
         self.settle(&mut out);
         out
     }
+}
+
+/// `SystemClock.uptimeMillis`.
+fn uptime_ms() -> i64 {
+    super::clock_ms(libc::CLOCK_UPTIME_RAW)
 }
 
 /// `adjustLaunchFlagsToDocumentMode`.
@@ -2545,6 +2594,119 @@ mod tests {
                 assert!(commands.contains(&TaskEmpty(7)));
             }
         }
+    }
+
+    // android-16.0.0_r1 realStartActivityLocked counts launches
+    // (`launchCount`, `lastLaunchTime`), a stop that saved state resets the
+    // count, and handleAppDied removes an activity not visible
+    // (`mVisibleRequested`) launched more than twice in the last minute.
+    #[test]
+    fn a_dead_process_removes_a_hidden_activity_launched_too_often() {
+        let mut s = Stack::default();
+        launch_new(&mut s, 1, 7, "A", 0);
+        assert_eq!(s.get(1).unwrap().launch_count, 1);
+        let s = stopped_under_resumed(true);
+        assert_eq!(s.get(1).unwrap().launch_count, 0);
+        assert_eq!(s.get(2).unwrap().launch_count, 1);
+        let now = uptime_ms();
+        // `B` is in another process, and translucent or not.
+        for (count, age, translucent, kept) in [
+            (2, 0, false, true),
+            (3, 0, false, false),
+            (3, 61_000, false, true),
+            (3, 0, true, true),
+        ] {
+            let mut s = stopped_under_resumed(true);
+            let a = s.get_mut(1).unwrap();
+            (a.launch_count, a.last_launch) = (count, now - age);
+            let b = s.get_mut(2).unwrap();
+            (b.start_seq, b.occludes_parent) = (2, !translucent);
+            s.process_died(1, false);
+            assert_eq!(
+                s.get(1).is_some(),
+                kept,
+                "{count} launches {age} ms ago, translucent {translucent}"
+            );
+        }
+    }
+
+    // android-16.0.0_r1 handleAppDied: an activity whose process died
+    // during a resize relaunch (`mRelaunchReason`) is kept without saved
+    // state, unless finishing or launched more than twice.
+    #[test]
+    fn a_dead_activity_relaunched_for_a_resize_is_kept_unless_relaunched_too_often() {
+        for (count, finishing, kept) in [(2, false, true), (3, false, false), (1, true, false)] {
+            let mut s = Stack::default();
+            launch_new(&mut s, 1, 7, "A", 0);
+            let a = s.get_mut(1).unwrap();
+            a.have_state = false;
+            a.relaunched_for_resize = true;
+            (a.launch_count, a.finishing) = (count, finishing);
+            s.process_died(1, false);
+            assert_eq!(
+                s.get(1).is_some(),
+                kept,
+                "{count} launches, finishing {finishing}"
+            );
+        }
+    }
+
+    // android-16.0.0_r1 handleAppDied over a crash loop: `A`, kept with
+    // its saved state, is brought to the front, relaunched once its process
+    // attaches (`realStartActivityLocked`), hidden again before it saves
+    // state, and its process dies; the third such death removes it.
+    #[test]
+    fn a_hidden_activity_relaunched_into_three_deaths_is_removed() {
+        let mut s = stopped_under_resumed(true);
+        let mut c = activity(3, 8, "C", 0);
+        c.start_seq = 2;
+        s.apply(
+            &Decision::default(),
+            Then::Add(c, Some(task(8, "C", None))),
+            None,
+            true,
+        );
+        for (seq, next) in [(1, 3), (3, 4), (4, 5)] {
+            s.process_died(seq, false);
+            assert!(s.get(1).is_some(), "death of start {seq}");
+            s.bring_to_front(7);
+            assert!(s.paused(3).contains(&Launch(1)));
+            s.get_mut(1).unwrap().start_seq = next;
+            assert!(s.attached(1).contains(&Launch(1)));
+            s.bring_to_front(8);
+        }
+        assert_eq!(s.get(1).unwrap().launch_count, 3);
+        s.process_died(5, false);
+        assert!(s.get(1).is_none());
+        assert!(s.task(7).is_none());
+    }
+
+    // android-16.0.0_r1 realStartActivityLocked counts a launch to paused
+    // as well; a dead activity's process start (`startSpecificActivity`)
+    // is not one until the process attaches.
+    #[test]
+    fn a_restart_counts_once_its_process_attaches_paused_or_resumed() {
+        let mut s = stopped_under_resumed(true);
+        assert!(s.process_died(1, false).contains(&Launch(1)));
+        assert_eq!(s.get(1).unwrap().launch_count, 0);
+        s.get_mut(1).unwrap().start_seq = 3;
+        assert!(s.attached(1).contains(&Launch(1)));
+        assert_eq!(s.get(1).unwrap().launch_count, 1);
+
+        let mut s = stopped_under_resumed(true);
+        s.process_died(1, false);
+        let mut c = activity(3, 8, "C", 0);
+        (c.start_seq, c.occludes_parent) = (2, false);
+        s.apply(
+            &Decision::default(),
+            Then::Add(c, Some(task(8, "C", None))),
+            None,
+            true,
+        );
+        assert_eq!(s.get(1).unwrap().launch_count, 0);
+        s.get_mut(1).unwrap().start_seq = 3;
+        assert!(s.attached(1).contains(&LaunchPaused(1)));
+        assert_eq!(s.get(1).unwrap().launch_count, 1);
     }
 
     // android-16.0.0_r1 startSpecificActivity/attachApplication: the
