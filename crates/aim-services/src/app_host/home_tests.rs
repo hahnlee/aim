@@ -181,6 +181,100 @@ fn a_home_intent_in_window_mode_hides_the_front_app_and_resumes_the_home() {
     assert_eq!(s.visibility(HOME_ROOT_TASK), Visibility::Invisible);
 }
 
+/// An app's HOME intent start (token 2's) of `h/h.Home` (`singleTask`)
+/// while there is no root home task: `startActivityInner` makes one, task
+/// 5, and moves it to the front, where `startHomeActivity` leaves it
+/// behind the desktop.
+#[test]
+fn a_home_intent_without_a_root_home_task_brings_a_new_one_to_the_front() {
+    use crate::app_host::activity_stack::{FLAG_ACTIVITY_NEW_TASK, Start};
+    for freeform in [true, false] {
+        let mut s = Stack::default();
+        s.freeform = freeform;
+        let app = Activity::new(2, 7, 2, "p/p.Main", 0, 0, None);
+        s.apply(
+            &Decision::default(),
+            Then::Add(app, Some(task(7, "p/p.Main"))),
+            None,
+            true,
+        );
+        let intent = crate::package::intent::Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK,
+            ..Default::default()
+        };
+        let d = s
+            .decide(&Start {
+                component: "h/h.Home",
+                affinity: Some("h"),
+                launch_mode: 2,
+                document_launch_mode: 0,
+                intent: &intent,
+                user: 0,
+                source: Some(2),
+                result_to: None,
+                activity_type: ACTIVITY_TYPE_HOME,
+            })
+            .unwrap();
+        assert_eq!(d.outcome, Outcome::New(None));
+        assert!(d.home_front);
+        // The task owner makes the root home task.
+        s.home = Some(5);
+        let home = Activity::new(1, 5, 1, "h/h.Home", 2, 0, None);
+        let commands = s.apply(&d, Then::Add(home, Some(task(5, "h/h.Home"))), None, true);
+        assert_eq!(s.focused(), Some(5));
+        assert!(commands.contains(&Command::Front(5)));
+        // In window mode the desktop came over the app, which hides.
+        assert_eq!(commands.contains(&Command::Hide(7)), freeform);
+        // The home is launched to resumed once the app paused, not stopped.
+        assert!(!commands.contains(&Command::LaunchStopped(1)));
+        let commands = s.paused(2);
+        assert!(commands.contains(&Command::Launch(1)));
+        assert_eq!(s.visibility(5), Visibility::Visible);
+        assert_eq!(s.visibility(7), Visibility::Invisible);
+    }
+}
+
+/// The same start while the root home task is there but its home has
+/// finished: it comes to the front with the new home.
+#[test]
+fn a_home_intent_into_an_emptied_root_home_task_brings_it_to_the_front() {
+    use crate::app_host::activity_stack::{FLAG_ACTIVITY_NEW_TASK, Start};
+    let (mut s, _, _) = start_home_then_app(true);
+    s.stopped(1, false);
+    // A second activity keeps the task while the home finishes.
+    let second = Activity::new(3, HOME_ROOT_TASK, 1, "h/h.Other", 0, 0, None);
+    s.apply(&Decision::default(), Then::Add(second, None), None, false);
+    s.finish(1);
+    s.finish(3);
+    assert_eq!(s.home, Some(HOME_ROOT_TASK));
+    assert_eq!(s.focused(), Some(7));
+    let intent = crate::package::intent::Intent {
+        flags: FLAG_ACTIVITY_NEW_TASK,
+        ..Default::default()
+    };
+    let d = s
+        .decide(&Start {
+            component: "h/h.Home",
+            affinity: Some("h"),
+            launch_mode: 2,
+            document_launch_mode: 0,
+            intent: &intent,
+            user: 0,
+            source: Some(2),
+            result_to: None,
+            activity_type: ACTIVITY_TYPE_HOME,
+        })
+        .unwrap();
+    assert_eq!(d.outcome, Outcome::New(Some(HOME_ROOT_TASK)));
+    assert!(d.home_front);
+    let home = Activity::new(5, HOME_ROOT_TASK, 1, "h/h.Home", 2, 0, None);
+    let commands = s.apply(&d, Then::Add(home, None), None, true);
+    assert_eq!(s.focused(), Some(HOME_ROOT_TASK));
+    assert!(commands.contains(&Command::Hide(7)));
+    assert!(!commands.contains(&Command::LaunchStopped(5)));
+    assert!(s.paused(2).contains(&Command::Launch(5)));
+}
+
 #[test]
 fn a_new_task_puts_the_home_behind_the_desktop_again() {
     let (mut s, _, _) = start_home_then_app(true);
