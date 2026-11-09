@@ -566,7 +566,8 @@ mod tests {
             .process
             .add_service(Arc::new(StatusReceiver(send.clone())));
         let retained =
-            super::super::display::check_service(&host.process, "test.removal.status").unwrap();
+            super::super::service_manager::check_service(&host.process, "test.removal.status")
+                .unwrap();
         for target in [local, retained.binder()] {
             let r = call(&leaf, bridge::SEND_UNINSTALL_STATUS, |p| {
                 bridge::SendUninstallStatus {

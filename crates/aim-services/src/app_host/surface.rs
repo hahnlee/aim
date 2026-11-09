@@ -133,7 +133,7 @@ impl Composer {
     }
 
     pub fn connect(process: &Arc<LocalProcess>) -> Result<Composer, String> {
-        let sf = super::display::wait_for_service(process, super::display::SERVICE)?;
+        let sf = super::service_manager::wait_for_service(process, super::display::SERVICE)?;
         let mut data = Parcel::new();
         data.write_interface_token(COMPOSER);
         let reply = sf
@@ -151,7 +151,7 @@ impl Composer {
             service: sf,
             client: process.strong(handle),
             handle,
-            transactions: super::display::wait_for_service(process, TRANSACTIONS)?,
+            transactions: super::service_manager::wait_for_service(process, TRANSACTIONS)?,
             apply_token: process.add_service(Arc::new(super::activity::Token)),
             next_id: AtomicU32::new(0),
         })

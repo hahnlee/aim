@@ -362,7 +362,7 @@ impl AppHost {
             nspace: i64::from(user * PER_USER_RANGE as i32 + app_id),
         }
         .write(&mut data);
-        let failure = match super::display::transact_service(
+        let failure = match super::service_manager::transact_service(
             &self.process,
             "android.security.maintenance",
             maintenance::CLEAR_NAMESPACE,

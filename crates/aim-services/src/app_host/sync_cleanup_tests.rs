@@ -350,7 +350,7 @@ fn run(acceptance: bool) {
                 .map(|i| {
                     let name = format!("test.token.{i}");
                     owner.register(&name, power.clone());
-                    super::super::display::check_service(&host.process, &name).unwrap()
+                    super::super::service_manager::check_service(&host.process, &name).unwrap()
                 })
                 .collect();
             let acceptance = acceptance.then(|| acceptance::Owners::new(host, export));

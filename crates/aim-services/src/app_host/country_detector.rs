@@ -384,7 +384,8 @@ impl CountryDetector {
     ) -> Result<T, String> {
         let mut data = Parcel::new();
         write(&mut data);
-        let reply = super::display::transact_service(&self.host.process, "location", code, &data)?;
+        let reply =
+            super::service_manager::transact_service(&self.host.process, "location", code, &data)?;
         read(&mut reply.reader())
             .map_err(|s| s.to_string())?
             .map_err(|e| format!("{e:?}"))
