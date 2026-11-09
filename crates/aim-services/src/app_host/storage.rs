@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
@@ -56,11 +56,15 @@ const ON_VOLUME_DESTROYED: u32 = 10;
 const EVENT_LISTENER_DESCRIPTOR: &str = "android.os.storage.IStorageEventListener";
 const ON_STORAGE_STATE_CHANGED: u32 = 2;
 const ON_VOLUME_STATE_CHANGED_EVENT: u32 = 3;
+/// How long the boot waits for vold. `connectVold` retries without a
+/// bound on a background thread, the boot going on and `onDaemonConnected`
+/// doing the work that needs vold; the app host's boot thread prepares
+/// the user's storage itself and holds the held app starts (`BootReady`)
+/// meanwhile, so it fails them rather than holding them for ever.
+const VOLD_WAIT: Duration = Duration::from_secs(30);
 /// `VolumeInfo.MOUNT_FLAG_PRIMARY`, `MOUNT_FLAG_VISIBLE_FOR_WRITE`.
 const MOUNT_FLAG_PRIMARY: i32 = 1 << 0;
 const MOUNT_FLAG_VISIBLE_FOR_WRITE: i32 = 1 << 2;
-/// How long vold may take to register.
-const VOLD_PATIENCE: Duration = Duration::from_secs(30);
 /// The agent's `mountStorage(int userId)`.
 pub(super) const MOUNT_STORAGE: u32 = 5;
 /// `VolumeInfo.TYPE_PRIVATE` (`IVold.VOLUME_TYPE_PRIVATE`).
@@ -222,16 +226,8 @@ impl AppHost {
             .wait()
             .clone()
             .map_err(|e| e.message)?;
-        let deadline = Instant::now() + VOLD_PATIENCE;
-        let vold = loop {
-            if let Ok(vold) = super::service_manager::check_service(&self.process, VOLD) {
-                break vold;
-            }
-            if Instant::now() > deadline {
-                return Err("vold did not register".into());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
+        let vold = super::service_manager::connect(&self.process, VOLD, VOLD_WAIT)
+            .ok_or("vold did not register")?;
         let listener = self
             .process
             .add_service(Arc::new(Listener(self.me.clone())));

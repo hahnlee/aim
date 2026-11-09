@@ -4,7 +4,7 @@
 //! `waitForDeclaredService`.
 
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, LocalProcess, Received, Reply, Service, Strong};
 use aim_binder_host::parcel::{
@@ -30,6 +30,30 @@ pub(super) fn check_service(process: &LocalProcess, name: &str) -> Result<Strong
     match sm::read_check_service_reply(&mut reply.reader()).map_err(|s| format!("{name}: {s}"))? {
         Ok(Some(Binder::Handle(handle))) => Ok(process.strong(handle)),
         _ => Err(format!("no {name}")),
+    }
+}
+
+/// How often a system service looks again for a daemon that has not
+/// registered (`StorageManagerService.connectVold`'s
+/// `DateUtils.SECOND_IN_MILLIS`, `Installer.CONNECT_RETRY_DELAY_MS`).
+const RECONNECT: Duration = Duration::from_secs(1);
+
+/// The daemon `name` as `StorageManagerService.connectVold` and
+/// `Installer.connect` reach it: `ServiceManager.getService`, which only
+/// checks (`checkService2`); while it is not registered, logged and
+/// looked up again each second, until `limit` passed: then none.
+pub(super) fn connect(process: &LocalProcess, name: &str, limit: Duration) -> Option<Strong> {
+    let start = Instant::now();
+    loop {
+        if let Ok(service) = check_service(process, name) {
+            return Some(service);
+        }
+        let left = limit.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            return None;
+        }
+        eprintln!("app host: {name} not found; trying again");
+        std::thread::sleep(left.min(RECONNECT));
     }
 }
 
@@ -294,6 +318,8 @@ pub(super) mod tests {
     /// What a [`Registry`]'s servicemanager was asked for.
     #[derive(Debug, PartialEq)]
     pub(in super::super) enum Asked {
+        /// A lookup (`checkService`).
+        Check(String),
         /// A lazy service's start (`getService2` before it registered).
         Start(String),
         /// Its registrations (`registerForNotifications`).
@@ -360,6 +386,12 @@ pub(super) mod tests {
                     }
                     self.names.lock().unwrap().insert(name, process.strong(h));
                     sm::write_add_service_reply(&mut p);
+                }
+                sm::CHECK_SERVICE => {
+                    let name = sm::CheckService::read(&mut call.data)?.name.unwrap();
+                    let found = self.names.lock().unwrap().get(&name).map(Strong::binder);
+                    ask(Asked::Check(name));
+                    sm::write_check_service_reply(&mut p, found);
                 }
                 sm::GET_SERVICE2 => {
                     if self.failing.load(Ordering::Relaxed) {
@@ -625,6 +657,37 @@ pub(super) mod tests {
         assert_eq!(registry.asked(), Asked::Notifications(NAME.into()));
         registry.register(NAME, Arc::new(Waited));
         assert_eq!(waiting.join().unwrap(), Ok(Some(7)));
+        registry.finish();
+    }
+
+    /// A daemon not registered yet is looked up again a second later.
+    #[test]
+    fn a_connection_looks_again_until_the_daemon_registers() {
+        let registry = Registry::start(97331, true, &[], &[]);
+        let host = registry.host.clone();
+        let connecting = std::thread::spawn(move || {
+            let reply = connect(&host, NAME, Duration::from_secs(10))
+                .unwrap()
+                .transact(1, &Parcel::new(), false);
+            reply.unwrap().reader().read_i32().unwrap()
+        });
+        assert_eq!(registry.asked(), Asked::Check(NAME.into()));
+        registry.register(NAME, Arc::new(Waited));
+        assert_eq!(registry.asked(), Asked::Check(NAME.into()));
+        assert_eq!(connecting.join().unwrap(), 7);
+        registry.finish();
+    }
+
+    /// A connection looks up until its limit, then is none.
+    #[test]
+    fn a_connection_gives_up_at_its_limit() {
+        let registry = Registry::start(97341, true, &[], &[]);
+        let start = Instant::now();
+        assert!(connect(&registry.host, NAME, Duration::from_millis(1500)).is_none());
+        assert!(start.elapsed() >= Duration::from_millis(1500));
+        assert_eq!(registry.asked(), Asked::Check(NAME.into()));
+        assert_eq!(registry.asked(), Asked::Check(NAME.into()));
+        assert_eq!(registry.asked(), Asked::Check(NAME.into()));
         registry.finish();
     }
 

@@ -3,7 +3,7 @@
 //! (`media/libaudioclient/aidl` at `android-16.0.0_r1`), in the
 //! interfaces' order.
 
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use aim_binder_host::local::{LocalProcess, Strong};
 use aim_binder_host::parcel::{Parcel, Reader, Result as ParcelResult};
@@ -25,10 +25,6 @@ const NEW_AUDIO_UNIQUE_ID: u32 = 34;
 const SYSTEM_READY: u32 = 53;
 /// `AudioUniqueIdUse.CLIENT`: the ids of players and recorders.
 const USE_CLIENT: i32 = 7;
-/// How long audioserver may take to register: its HAL waits up to 3 s for
-/// the Mac's devices (docs/audio.md, "Start-up").
-pub(super) const PATIENCE: Duration = Duration::from_secs(30);
-
 /// `AudioSystem.DEVICE_OUT_SPEAKER`, `DEVICE_OUT_DEFAULT`.
 pub const DEVICE_OUT_SPEAKER: i32 = 0x2;
 pub const DEVICE_OUT_DEFAULT: i32 = 0x4000_0000;
@@ -179,18 +175,14 @@ fn device_description(p: &mut Parcel, device: i32) {
 }
 
 impl AudioPolicy {
-    /// audioserver's services, once registered.
-    pub fn connect(process: &LocalProcess) -> Result<AudioPolicy, String> {
-        let deadline = Instant::now() + PATIENCE;
-        let service = |name: &str| loop {
-            if let Ok(s) = super::service_manager::check_service(process, name) {
-                return Ok(s);
-            }
-            if Instant::now() > deadline {
-                return Err(format!("{name} did not register"));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
+    /// audioserver's services, once registered: AudioService's start
+    /// tasks run when `media.audio_policy` registers (`ServiceHolder`'s
+    /// notification, `waitForService`), and its calls through AudioSystem
+    /// that find no service yet are retried until audioserver has started
+    /// (`onIndicateSystemReady`, `onAudioServerDied`), so neither waits with
+    /// a bound.
+    pub fn connect(process: &Arc<LocalProcess>) -> Result<AudioPolicy, String> {
+        let service = |name| super::service_manager::wait_for_service(process, name);
         Ok(AudioPolicy {
             policy: service(POLICY)?,
             flinger: service(FLINGER)?,

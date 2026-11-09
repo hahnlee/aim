@@ -926,7 +926,16 @@ HintManager and the health HAL with `waitForDeclaredService` (none if the
 VINTF manifests do not declare it), apexd's `apexservice` with
 `waitForService`, whose `getService2` has init start the lazy apexd;
 `getService` and `checkService` lookups (dumpstate, statsd, keystore2)
-stay single. HintManager resolves its Power HAL once, beside its
+stay single. vold and installd are looked up as `connectVold` and
+`Installer.connect` do: again each second, logged ("vold not found; trying
+again"), an installd call for at most `CONNECT_WAIT_MS` (10 s). The original
+retries vold without a bound on a background thread while the boot goes
+on; the app host's boot thread prepares the user's storage itself and holds
+the held app starts meanwhile, so it waits 30 s for vold, then fails the
+boot and the held starts (continuing on vold's connection, as
+`onDaemonConnected` does, would lift the bound). audioserver's `media.audio_policy` and
+`media.audio_flinger` with `waitForService`, as AudioService's start tasks
+and retries leave no bound (#2809, #2810). HintManager resolves its Power HAL once, beside its
 construction, and the suspend blockers `system_suspend` at the first take;
 both keep the answer, none included (host tests only, no guest boot,
 2026-11-10). Host lib suites (2,105 services and 45 display checks), 15 host

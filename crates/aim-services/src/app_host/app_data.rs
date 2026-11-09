@@ -4,7 +4,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{BAD_VALUE, Parcel, Reader, Result as ParcelResult};
@@ -17,7 +17,8 @@ use super::storage::VOLD_DESCRIPTOR;
 use crate::package::model::PackageState;
 
 const INSTALLD: &str = "installd";
-const INSTALLD_PATIENCE: Duration = Duration::from_secs(30);
+/// How long a call waits for installd (`Installer.CONNECT_WAIT_MS`).
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
 
 /// `IVold.prepareUserStorage`, `destroyUserStorage`.
 const PREPARE_USER_STORAGE: u32 = 48;
@@ -173,18 +174,11 @@ pub(super) fn delete_contents(dir: &Path, itself: bool) {
 }
 
 impl AppHost {
-    /// installd, once it registers.
+    /// installd for a call, as `Installer.checkBeforeRemote` waits for
+    /// `connect`: at most `CONNECT_WAIT_MS` for it to register.
     pub(super) fn installd(&self) -> Result<Strong, String> {
-        let deadline = Instant::now() + INSTALLD_PATIENCE;
-        loop {
-            if let Ok(installd) = super::service_manager::check_service(&self.process, INSTALLD) {
-                return Ok(installd);
-            }
-            if Instant::now() > deadline {
-                return Err("installd did not register".into());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        super::service_manager::connect(&self.process, INSTALLD, CONNECT_WAIT)
+            .ok_or_else(|| "time out waiting for the installer to be ready".into())
     }
 
     /// `StorageManager.isFileEncrypted`: `ro.crypto.type` is `file`.
