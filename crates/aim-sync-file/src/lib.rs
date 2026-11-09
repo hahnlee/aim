@@ -196,11 +196,21 @@ pub fn pair() -> io::Result<(OwnedFd, Writer)> {
         l_onoff: 0,
         l_linger: MARK,
     };
+    let on: libc::c_int = 1;
     // SAFETY: fcntl and setsockopt on our new sockets with local values.
     unsafe {
         for fd in [&file, &writer] {
             cvt(libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC))?;
         }
+        // A writer's send, at the latest when it is dropped, must not
+        // raise SIGPIPE in the producer once every sync_file is closed.
+        cvt(libc::setsockopt(
+            writer.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&on as *const libc::c_int).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        ))?;
         cvt(libc::setsockopt(
             file.as_raw_fd(),
             libc::SOL_SOCKET,
@@ -613,6 +623,27 @@ mod tests {
         assert_eq!(poll_bits(file.as_fd()), libc::POLLIN, "no POLLHUP");
         assert!(wait(file.as_fd(), 0));
         assert!(inherited().iter().all(|&fd| fd != file.as_raw_fd()));
+    }
+
+    /// Signaling a fence nobody holds any more fails quietly.
+    #[test]
+    fn a_writer_outliving_its_fence_raises_no_sigpipe() {
+        let (file, writer) = pair().unwrap();
+        let mut on: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: getsockopt into locals.
+        let r = unsafe {
+            libc::getsockopt(
+                writer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&mut on as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((r, on), (0, 1));
+        drop(file);
+        drop(writer);
     }
 
     /// A writer's socket closed without a record, as when the process

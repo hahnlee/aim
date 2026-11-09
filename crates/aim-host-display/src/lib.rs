@@ -394,15 +394,17 @@ fn layers(f: &mut Layers) -> i64 {
     let Some(conn) = guard.as_ref() else {
         return neg(errno::ENOTCONN);
     };
-    let ok = wire::send_fds(conn.as_fd(), wire::bytes(&r), &fds)
-        .and_then(|()| wire::send(conn.as_fd(), &layers::encode(&sent, rects), None));
-    drop(guard);
-    if ok.is_err() {
-        // Dropping the writer fails the fence.
+    if wire::send_fds(conn.as_fd(), wire::bytes(&r), &fds).is_err() {
+        // Unsent: dropping the writer fails the fence.
         return neg(errno::ENOTCONN);
     }
     // The server has its own copies of the fences now.
     writer.sent();
+    let ok = wire::send(conn.as_fd(), &layers::encode(&sent, rects), None);
+    drop(guard);
+    if ok.is_err() {
+        return neg(errno::ENOTCONN);
+    }
     f.present = match aim_sync_file::give_to_guest(fence) {
         Ok(fd) => fd,
         Err(error) => return neg(error),
