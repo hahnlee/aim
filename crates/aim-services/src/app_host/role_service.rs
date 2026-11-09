@@ -344,7 +344,7 @@ impl RoleManager {
 
     fn active_user(&self, uid: i32, role: Option<String>, user: i32) -> Result<i32, Exception> {
         // RoleService's original flag and role definitions precede caller checks.
-        let owner = super::display::check_service(&self.host.process, "aim.role_queries")
+        let owner = super::service_manager::check_service(&self.host.process, "aim.role_queries")
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         let mut data = Parcel::new();
         queries::EnforceProfileGroupExclusiveRole {

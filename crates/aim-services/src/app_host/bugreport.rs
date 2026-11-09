@@ -422,7 +422,7 @@ impl Bugreport {
 
     /// `getDumpstateBinderServiceLocked`.
     fn dumpstate(&self) -> Option<Arc<Strong>> {
-        super::display::check_service(&self.host.process, DUMPSTATE)
+        super::service_manager::check_service(&self.host.process, DUMPSTATE)
             .ok()
             .map(Arc::new)
     }

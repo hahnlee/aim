@@ -1168,7 +1168,7 @@ impl ConnectivityService {
                 // BPF programs are loaded.
                 let service = |name: &str| loop {
                     let host = weak.upgrade()?;
-                    if let Ok(s) = super::display::check_service(&host.process, name) {
+                    if let Ok(s) = super::service_manager::check_service(&host.process, name) {
                         return Some(s);
                     }
                     drop(host);

@@ -5,12 +5,12 @@
 //! them to the full boot's scan.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use aim_binder_host::local::{LocalProcess, Strong};
 use aim_binder_host::parcel::{Parcel, Reader, Result as ParcelResult};
 
-use super::display::{check_service, parcelable, present};
+use super::display::{parcelable, present};
 use crate::package::bootstrap::{ActiveApex, ApexInventory, ApexPackage};
 
 const SERVICE: &str = "apexservice";
@@ -19,8 +19,6 @@ const GET_STAGED_SESSION_INFO: u32 = 5;
 const GET_ACTIVE_PACKAGES: u32 = 7;
 const GET_ALL_PACKAGES: u32 = 8;
 const UNSTAGE_PACKAGES: u32 = 16;
-/// How long `waitForApexService` waits for apexd to register.
-const PATIENCE: Duration = Duration::from_secs(30);
 
 /// `android.apex.ApexInfo`, as far as ApexManager reads it.
 struct ApexInfo {
@@ -73,23 +71,15 @@ fn packages(service: &Strong, code: u32, name: &str) -> Result<Vec<ApexInfo>, St
     }
 }
 
-/// `waitForApexService`: apexd's service, once it registered.
-fn service(process: &LocalProcess) -> Result<Strong, String> {
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        if let Ok(s) = check_service(process, SERVICE) {
-            return Ok(s);
-        }
-        if Instant::now() > deadline {
-            return Err(format!("{SERVICE} did not register"));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+/// `waitForApexService`: apexd's service, started if it is not running
+/// (apexd is a lazy service), once it registered.
+fn service(process: &Arc<LocalProcess>) -> Result<Strong, String> {
+    super::service_manager::wait_for_service(process, SERVICE)
 }
 
 /// `uninstallApex`: apexd's `unstagePackages` of the one package, false
 /// on any failure.
-pub fn uninstall_apex(process: &LocalProcess, path: &str) -> bool {
+pub fn uninstall_apex(process: &Arc<LocalProcess>, path: &str) -> bool {
     let unstage = || -> Result<(), String> {
         let service = service(process)?;
         let mut data = Parcel::new();
@@ -142,7 +132,10 @@ fn read_session(r: &mut Reader<'_>) -> ParcelResult<SessionInfo> {
 
 /// `ApexManager.getStagedSessionInfo(sessionId)`: apexd's session, none
 /// when it does not know it (`isUnknown`).
-pub fn staged_session_info(process: &LocalProcess, id: i32) -> Result<Option<SessionInfo>, String> {
+pub fn staged_session_info(
+    process: &Arc<LocalProcess>,
+    id: i32,
+) -> Result<Option<SessionInfo>, String> {
     let service = service(process)?;
     let mut data = Parcel::new();
     data.write_interface_token(DESCRIPTOR);
@@ -165,7 +158,7 @@ pub fn staged_session_info(process: &LocalProcess, id: i32) -> Result<Option<Ses
 /// The packages and the active ones, as `ApexBootFeed.capture` records
 /// them: an active one is mounted at `/apex/<moduleName>`
 /// (`ActiveApexInfo(ApexInfo)`).
-pub fn inventory(process: &LocalProcess) -> Result<ApexInventory, String> {
+pub fn inventory(process: &Arc<LocalProcess>) -> Result<ApexInventory, String> {
     let service = service(process)?;
     let path = |p: Option<String>, what: &str| {
         p.ok_or_else(|| format!("{SERVICE}: an APEX without a {what}"))
@@ -201,4 +194,48 @@ pub fn inventory(process: &LocalProcess) -> Result<ApexInventory, String> {
         packages: Some(all),
         active,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::service_manager::tests::{Asked, Registry};
+    use super::*;
+    use aim_binder_host::local::{Call, Reply, Service};
+    use std::sync::Mutex;
+
+    /// apexd: the packages it was asked to unstage.
+    #[derive(Default)]
+    struct Apexd(Mutex<Vec<Option<String>>>);
+
+    impl Service for Apexd {
+        fn descriptor(&self) -> &str {
+            DESCRIPTOR
+        }
+
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(call.code, UNSTAGE_PACKAGES);
+            call.data.enforce_interface(DESCRIPTOR)?;
+            assert_eq!(call.data.read_i32()?, 1);
+            self.0.lock().unwrap().push(call.data.read_string16()?);
+            let mut p = Parcel::new();
+            p.write_no_exception();
+            Ok(p)
+        }
+    }
+
+    /// `uninstallApex` before apexd runs starts it (a lazy service) and
+    /// waits for it to register.
+    #[test]
+    fn uninstalling_starts_apexd_and_waits_for_it() {
+        let registry = Registry::start(97311, true, &[], &[SERVICE]);
+        let host = registry.host.clone();
+        let uninstall = std::thread::spawn(move || uninstall_apex(&host, "/data/apex/a.apex"));
+        assert_eq!(registry.asked(), Asked::Start(SERVICE.into()));
+        assert_eq!(registry.asked(), Asked::Notifications(SERVICE.into()));
+        let apexd = Arc::new(Apexd::default());
+        registry.register(SERVICE, apexd.clone());
+        assert!(uninstall.join().unwrap());
+        assert_eq!(*apexd.0.lock().unwrap(), [Some("/data/apex/a.apex".into())]);
+        registry.finish();
+    }
 }

@@ -270,7 +270,8 @@ impl AppHost {
     }
 
     fn pre_boot_notification(&self, total: usize, index: usize) -> Result<(), String> {
-        let service = super::display::check_service(&self.process, "aim.pre_boot_notifications")?;
+        let service =
+            super::service_manager::check_service(&self.process, "aim.pre_boot_notifications")?;
         let mut p = Parcel::new();
         notification::Update {
             user_id: USER,

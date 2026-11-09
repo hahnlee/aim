@@ -460,11 +460,12 @@ impl Service for NetworkStats {
             }
             ns::OPEN_SESSION_FOR_USAGE_STATS | ns::INCREMENT_OPERATION_COUNT => {
                 let (code, request) = java_request(call)?;
-                let owner = match super::display::check_service(&self.host.process, "aim.netstats")
-                {
-                    Ok(owner) => owner,
-                    Err(e) => return reply(Err(Exception::new(EX_ILLEGAL_STATE, e))),
-                };
+                let owner =
+                    match super::service_manager::check_service(&self.host.process, "aim.netstats")
+                    {
+                        Ok(owner) => owner,
+                        Err(e) => return reply(Err(Exception::new(EX_ILLEGAL_STATE, e))),
+                    };
                 // This requires a live driver-dispatched inbound transaction; a
                 // synthetic Call cannot assert an app UID to the original owner.
                 return self

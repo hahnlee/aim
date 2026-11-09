@@ -23,7 +23,6 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
@@ -54,8 +53,6 @@ const GET_CHARGING_POLICY: u32 = 14;
 const GET_BATTERY_HEALTH_DATA: u32 = 15;
 const CALLBACK_DESCRIPTOR: &str = "android.hardware.health.IHealthInfoCallback";
 const HEALTH_INFO_CHANGED: u32 = 1;
-/// How long the HAL may take to register (`waitForDeclaredService`).
-const PATIENCE: Duration = Duration::from_secs(30);
 
 /// `BatteryManager.BATTERY_STATUS_*`, `BATTERY_PLUGGED_*`.
 const STATUS_UNKNOWN: i32 = 1;
@@ -646,20 +643,14 @@ impl BatteryService {
         self.connect()
     }
 
-    /// `HealthServiceWrapperAidl`: the HAL once it registers, the callback
+    /// `HealthServiceWrapperAidl`: the declared HAL once it registers
+    /// (`waitForDeclaredService`), the callback
     /// registered with it and an update asked (`HealthRegCallbackAidl`),
     /// and the same with the HAL that registers after it dies.
     fn connect(self: &Arc<Self>) -> Result<(), String> {
-        let deadline = Instant::now() + PATIENCE;
-        let hal = Arc::new(loop {
-            if let Ok(hal) = super::display::check_service(&self.host.process, HEALTH) {
-                break hal;
-            }
-            if Instant::now() > deadline {
-                return Err(format!("{HEALTH} did not register"));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        });
+        let hal = super::service_manager::wait_for_declared_service(&self.host.process, HEALTH)?
+            .ok_or("IHealth service instance isn't available. Perhaps no permission?")?;
+        let hal = Arc::new(hal);
         *self.health.lock().unwrap() = Some(hal.clone());
         let me = Arc::downgrade(self);
         self.host.process.link_to_death(

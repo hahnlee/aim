@@ -724,7 +724,7 @@ impl AppHost {
         let io = |e: String| format!("java.io.IOException: {e}");
         let mut p = Parcel::new();
         audio::GetRingtonePlayer {}.write(&mut p);
-        let reply = super::display::transact_service(
+        let reply = super::service_manager::transact_service(
             &self.process,
             "audio",
             audio::GET_RINGTONE_PLAYER,

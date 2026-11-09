@@ -224,7 +224,7 @@ impl AppHost {
             .map_err(|e| e.message)?;
         let deadline = Instant::now() + VOLD_PATIENCE;
         let vold = loop {
-            if let Ok(vold) = super::display::check_service(&self.process, VOLD) {
+            if let Ok(vold) = super::service_manager::check_service(&self.process, VOLD) {
                 break vold;
             }
             if Instant::now() > deadline {
