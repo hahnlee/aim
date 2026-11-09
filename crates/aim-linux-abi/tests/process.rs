@@ -392,10 +392,19 @@ fn another_processs_thread_and_real_time_signals() {
     check("peer_thread_signals");
 }
 
-/// A default-fatal real-time signal from another process (#2765).
+/// A default-fatal real-time signal from another process (#2765), which
+/// its parent's wait reports (#2773).
 #[test]
 fn a_peers_fatal_real_time_signal_kills_it() {
     check("peer_fatal_rt");
+}
+
+/// SIGCHLD, waitid and waitpid report a child killed by a signal, one
+/// Darwin cannot carry too, and an exit of 128 + a signal as an exit
+/// (#2773).
+#[test]
+fn wait_reports_the_signal_a_child_died_of() {
+    check("wait_signal_status");
 }
 
 #[test]

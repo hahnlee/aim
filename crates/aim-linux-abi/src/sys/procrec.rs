@@ -15,6 +15,8 @@
 //!   mapping;
 //! - the process's `total_vm`, `data_vm` and `hiwater_vm` as the layer
 //!   counts them (`vm_account`), for `/proc/<pid>/status` and `stat`;
+//! - the signal that killed it, when Darwin cannot carry it and the
+//!   process exits instead (`signal::die`), for its parent's wait;
 //! - the pages of the main thread's stack that hold its argument and
 //!   environment strings. The process maps those pages from the record,
 //!   shared: the record is that memory, so a program that rewrites its
@@ -51,6 +53,9 @@ struct Header {
     oom_score_adj_min: AtomicI32,
     /// `total_vm`, `data_vm` and `hiwater_vm` in bytes (`vm_account`).
     vm: [AtomicU64; 3],
+    /// The Linux signal that killed the process, when it exited 128 + it
+    /// because Darwin cannot carry it; else 0.
+    fatal: AtomicI32,
 }
 
 #[repr(C)]
@@ -90,6 +95,9 @@ static VM: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 /// Offset of the memory totals in the header.
 const VM_AT: u64 = 64;
 const _: () = assert!(std::mem::offset_of!(Header, vm) as u64 == VM_AT);
+/// Offset of the fatal signal in the header.
+const FATAL_AT: u64 = 88;
+const _: () = assert!(std::mem::offset_of!(Header, fatal) as u64 == FATAL_AT);
 
 /// The string pages mapped from the record: start and end.
 static MAPPED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
@@ -277,6 +285,22 @@ pub fn set_oom_of(pid: i32, values: [i32; 2]) -> bool {
     b[..4].copy_from_slice(&values[0].to_le_bytes());
     b[4..].copy_from_slice(&values[1].to_le_bytes());
     f.write_all_at(&b, OOM_AT).is_ok()
+}
+
+/// Record that this process dies of Linux signal `sig`, which Darwin
+/// cannot carry, by exiting 128 + `sig`.
+pub fn set_fatal(sig: i32) {
+    if let Some(t) = table() {
+        t.header.fatal.store(sig, SeqCst);
+    }
+}
+
+/// The Linux signal that killed process `pid` by its exit, if it recorded
+/// one.
+pub fn fatal_of(pid: i32) -> Option<i32> {
+    let b = read_at(&open(pid)?, FATAL_AT, 4);
+    let sig = i32::from_le_bytes(b.get(..4)?.try_into().unwrap());
+    (sig != 0).then_some(sig)
 }
 
 /// Whether the mapping at `addr` is the string pages, which a fork copies.

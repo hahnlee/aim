@@ -123,7 +123,9 @@ fn ignored(sig: i32, act: &KSigaction) -> bool {
 }
 
 /// The guest's default action for a fatal signal: the process dies of the
-/// Darwin equivalent (so its parent sees the signal), or exits 128+sig.
+/// Darwin equivalent (so its parent sees the signal), or exits 128+sig
+/// with the signal in its record, from which its parent's wait reports it
+/// (`wait::status_of`).
 pub fn die(sig: i32) -> ! {
     // Another thread is ending the group (Linux checks SIGNAL_GROUP_EXIT).
     if !thread::begin_group_exit() {
@@ -146,6 +148,7 @@ pub fn die(sig: i32) -> ! {
             libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
             libc::pthread_kill(libc::pthread_self(), h);
         }
+        super::procrec::set_fatal(sig);
         libc::_exit(128 + sig)
     }
 }
@@ -402,13 +405,17 @@ fn send_process(info: Siginfo) -> i64 {
 
 /// Queue a POSIX timer's signal for the process, or for this process's
 /// thread `tid`. False when it was not queued (a standard signal already
-/// pending, a full queue, the thread gone): the timer counts an overrun
-/// instead of waiting for it.
+/// pending, a full queue, the thread gone, or dropped by a private
+/// namespace's init as a signal it sends itself with `kill`): the timer
+/// counts an overrun instead of waiting for it.
 pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
     if thread::group_exiting() {
         return false;
     }
     let sig = info.signo;
+    if unkillable_ignores(tid.unwrap_or_else(thread::main_tid), sig) {
+        return false;
+    }
     let Some(tid) = tid else {
         let queued = process().push(info) == Ok(true);
         if queued {
@@ -564,13 +571,17 @@ fn drain_external() {
             if unkillable_drops(pid, sig) {
                 continue;
             }
+            let (mut code, mut status) = (code as u32 as i32, (code >> 32) as i32);
+            if sig == 17 && (1..=6).contains(&code) {
+                (code, status) = super::wait::child_info(pid, code, status);
+            }
             let mut info = Siginfo::from_sender(
                 sig,
-                code as u32 as i32,
+                code,
                 super::pidns::guest_pid(super::pidns::vnr(pid)).unwrap_or(0),
                 sender_uid(pid),
             );
-            info.fields[1] = code >> 32; // _sigchld.status
+            info.fields[1] = status as u32 as u64; // _sigchld.status
             send_process(info);
         }
     }

@@ -62,6 +62,38 @@ pub fn status_from_host(st: i32) -> i32 {
     signal_from_host(low) | (st & 0x80)
 }
 
+/// The Linux signal that killed host process `pid`, which exited with
+/// `code` because Darwin could not carry the signal (`signal::die`): a
+/// process that merely exits 128 + a signal recorded none.
+fn fatal_exit(pid: i32, code: i32) -> Option<i32> {
+    if code <= 128 {
+        return None;
+    }
+    super::procrec::fatal_of(pid).filter(|&sig| code == 128 + sig)
+}
+
+/// Linux status word of host child `pid` that Darwin reports as `st`.
+pub(super) fn status_of(pid: i32, st: i32) -> i32 {
+    if st & 0x7f == 0
+        && let Some(sig) = fatal_exit(pid, st >> 8 & 0xff)
+    {
+        return sig;
+    }
+    status_from_host(st)
+}
+
+/// Linux `si_code` and `si_status` of a `CLD_*` event of host child `pid`
+/// that Darwin reports as `code` and `status`.
+pub(super) fn child_info(pid: i32, code: i32, status: i32) -> (i32, i32) {
+    if code != libc::CLD_EXITED {
+        return (code, signal_from_host(status));
+    }
+    match fatal_exit(pid, status) {
+        Some(sig) => (libc::CLD_KILLED, sig),
+        None => (code, status),
+    }
+}
+
 /// Linux arm64 `struct rusage` (timevals with 64-bit microseconds, the
 /// maximum RSS in KiB).
 fn put_rusage(ru: &libc::rusage, out: u64) -> Result<(), crate::errno::Errno> {
@@ -156,13 +188,15 @@ pub fn wait4(a: [u64; 6]) -> i64 {
         return -(errno::last() as i64);
     }
     if r > 0 {
+        // Read before the record goes with the entry.
+        let st = status_of(r, st);
         if st & 0x7f != 0x7f {
             // Exited or killed: reaped.
             super::cred::forget(r);
         }
         if status != 0 {
             // SAFETY: guest int.
-            user_write!(status, i32, status_from_host(st));
+            user_write!(status, i32, st);
         }
         if rusage != 0 {
             user_try!(put_rusage(&ru, rusage));
@@ -177,29 +211,22 @@ pub fn wait4(a: [u64; 6]) -> i64 {
     }
 }
 
-/// The Linux `siginfo_t` fields `waitid` writes.
-/// `uid` is the child's real uid in the guest's model (the host one is not
-/// it).
+/// The Linux `siginfo_t` fields `waitid` writes: the child's host pid,
+/// the Linux `si_code` and `si_status`, and `uid`, the child's real uid in
+/// the guest's model (the host one is not it); zeros for no child.
 fn put_wait_siginfo(
     out: u64,
-    info: Option<(&libc::siginfo_t, u32)>,
+    info: Option<(i32, (i32, i32), u32)>,
 ) -> Result<(), crate::errno::Errno> {
     let (signo, code, pid, uid, status) = match info {
-        Some((i, uid)) if i.si_pid != 0 => {
-            let status = if i.si_code == libc::CLD_EXITED {
-                i.si_status
-            } else {
-                signal_from_host(i.si_status)
-            };
-            (
-                LINUX_SIGCHLD,
-                i.si_code,
-                super::pidns::guest_pid(i.si_pid).unwrap_or(0),
-                uid,
-                status,
-            )
-        }
-        _ => (0, 0, 0, 0, 0),
+        Some((pid, (code, status), uid)) => (
+            LINUX_SIGCHLD,
+            code,
+            super::pidns::guest_pid(pid).unwrap_or(0),
+            uid,
+            status,
+        ),
+        None => (0, 0, 0, 0, 0),
     };
     // SAFETY: guest siginfo_t (128 bytes).
     {
@@ -300,12 +327,19 @@ pub fn waitid(a: [u64; 6]) -> i64 {
         info.si_code,
         libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
     );
-    let uid = super::signal::sender_uid(info.si_pid);
+    // Read before the entry and the record go.
+    let child = (info.si_pid != 0).then(|| {
+        (
+            info.si_pid,
+            child_info(info.si_pid, info.si_code, info.si_status),
+            super::signal::sender_uid(info.si_pid),
+        )
+    });
     if info.si_pid != 0 && ended && options & WNOWAIT == 0 {
         super::cred::forget(info.si_pid);
     }
     if infop != 0 {
-        user_try!(put_wait_siginfo(infop, Some((&info, uid))));
+        user_try!(put_wait_siginfo(infop, child));
     }
     0
 }

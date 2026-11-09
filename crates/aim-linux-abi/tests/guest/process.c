@@ -974,7 +974,7 @@ static void on_init_usr1(int sig) { (void)sig; init_usr1 = 1; }
 
 // The init of a private namespace gets from inside it only the signals it
 // handles (SIGNAL_UNKILLABLE): the others, SIGKILL and SIGSTOP among them,
-// are dropped and kill() succeeds.
+// are dropped and kill() succeeds. So are its own timers' signals.
 static void ns_init_unkillable(void) {
   CHECK(signal(SIGUSR1, on_init_usr1) != SIG_ERR, "handler");
   pid_t init = getpid();
@@ -991,6 +991,16 @@ static void ns_init_unkillable(void) {
         "signals to init: status %d", st);
   for (int i = 0; i < 100 && !init_usr1; i++) usleep(10000);
   CHECK(init_usr1, "init's handled signal delivered");
+
+  struct itimerval it = {.it_value = {.tv_usec = 10000}};
+  CHECK(setitimer(ITIMER_REAL, &it, NULL) == 0, "setitimer");
+  timer_t timer;
+  struct sigevent ev = {.sigev_notify = SIGEV_SIGNAL, .sigev_signo = SIGRTMIN + 1};
+  CHECK(timer_create(CLOCK_MONOTONIC, &ev, &timer) == 0, "timer_create");
+  struct itimerspec ts = {.it_value = {.tv_nsec = 10000000}};
+  CHECK(timer_settime(timer, 0, &ts, NULL) == 0, "timer_settime");
+  usleep(200000);
+  CHECK(timer_delete(timer) == 0, "timer_delete");
   printf("ok ns_init_unkillable\n");
 }
 
@@ -1387,10 +1397,58 @@ static void peer_fatal_rt(void) {
   CHECK(read(ready[0], &c, 1) == 1, "ready");
   close(ready[0]);
   CHECK(kill(child, SIGRTMIN + 4) == 0, "kill: errno %d", errno);
-  // It ends; its status is an exit of 128 + signal, as for every signal
-  // Darwin cannot carry, not yet the signal.
-  CHECK(waitpid(child, NULL, 0) == child, "waitpid: errno %d", errno);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child, "waitpid: errno %d", errno);
+  CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGRTMIN + 4, "status %#x", st);
   printf("ok peer_fatal_rt\n");
+}
+
+// A child that kills itself with `sig`, or exits with `code` when `sig` is
+// 0, as its parent's SIGCHLD, waitid and waitpid report it (wait(2)): a
+// signal Darwin cannot carry too, and an exit of 128 + a signal stays an
+// exit.
+static void child_end(int sig, int code) {
+  sigset_t set, old;
+  sigemptyset(&set);
+  sigaddset(&set, SIGCHLD);
+  CHECK(sigprocmask(SIG_BLOCK, &set, &old) == 0, "block SIGCHLD");
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) {
+    if (sig == 0) _exit(code);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    signal(sig, SIG_DFL);
+    kill(getpid(), sig);
+    for (;;) pause();
+  }
+  int want_code = sig ? CLD_KILLED : CLD_EXITED, want_status = sig ? sig : code;
+  siginfo_t si = {0};
+  struct timespec timeout = {.tv_sec = 10};
+  CHECK(sigtimedwait(&set, &si, &timeout) == SIGCHLD, "sig %d: SIGCHLD", sig);
+  CHECK(si.si_pid == child && si.si_code == want_code && si.si_status == want_status,
+        "sig %d code %d: SIGCHLD code %d status %d", sig, code, si.si_code, si.si_status);
+  memset(&si, 0, sizeof(si));
+  CHECK(waitid(P_PID, child, &si, WEXITED | WNOWAIT) == 0, "sig %d: waitid", sig);
+  CHECK(si.si_signo == SIGCHLD && si.si_pid == child && si.si_code == want_code &&
+            si.si_status == want_status,
+        "sig %d code %d: waitid code %d status %d", sig, code, si.si_code, si.si_status);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child, "sig %d: waitpid", sig);
+  if (sig)
+    CHECK(WIFSIGNALED(st) && WTERMSIG(st) == sig && !WCOREDUMP(st), "sig %d: status %#x", sig, st);
+  else
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == code, "exit %d: status %#x", code, st);
+  CHECK(sigprocmask(SIG_SETMASK, &old, NULL) == 0, "restore mask");
+}
+
+static void wait_signal_status(void) {
+  // Carried by Darwin under another number; real-time, SIGSTKFLT and
+  // SIGPWR, which it cannot carry; exits of 128 + such a signal.
+  int sigs[] = {SIGUSR1, SIGRTMIN, SIGRTMIN + 4, SIGRTMAX, SIGSTKFLT, SIGPWR};
+  for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) child_end(sigs[i], 0);
+  int codes[] = {128 + SIGRTMIN + 4, 128 + SIGSTKFLT, 128 + SIGPWR, 128 + SIGUSR1};
+  for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) child_end(0, codes[i]);
+  printf("ok wait_signal_status\n");
 }
 
 // A process rewrites its entry in place on every credential change: a
@@ -1862,7 +1920,7 @@ int main(int argc, char** argv) {
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
       {"peer_thread_signals", peer_thread_signals},
-      {"peer_fatal_rt", peer_fatal_rt},
+      {"peer_fatal_rt", peer_fatal_rt}, {"wait_signal_status", wait_signal_status},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
       {"ns_init_unkillable", ns_init_unkillable},
