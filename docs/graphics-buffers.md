@@ -222,10 +222,13 @@ device. A sync_file is an `AF_UNIX` datagram socket pair made by
   (`aim_sync_file::metal`), the display server
   until the frame is shown, the merge waiter until every input has
   signaled. It signals by sending one record (the signal time in
-  `CLOCK_MONOTONIC` and the status) and closing its end. A writer closed
-  without a record leaves the socket readable with `ECONNRESET`: the fence
-  has signaled with an error (`-EPIPE`), as Linux reports a fence its
-  driver failed.
+  `CLOCK_MONOTONIC` and the status) and closing its end. A writer dropped
+  without signaling sends a failure record (`-EPIPE`), as a Linux driver
+  fails a fence it abandons, so waiters wake; a process that only passes a
+  writer on to the producer closes its copy with `Writer::sent`. A writer
+  socket closed without a record, because the process holding it died,
+  leaves the socket readable with `ECONNRESET`, which also reads as
+  `-EPIPE`, but Darwin wakes no waiter blocked on it (#2826).
 - **Wait.** A datagram socket reports `POLLIN`, and no `POLLHUP`, once the
   record is queued, so `poll`, `epoll` and `select` wait for the fence
   unchanged. The record is only ever peeked; a peek that finds another

@@ -12,10 +12,12 @@
 //! The fd is a real host descriptor, so it crosses processes as every guest
 //! fd does (binder, `SCM_RIGHTS`, fork) and `poll`, `epoll` and `select`
 //! wait for it natively: a datagram socket reports `POLLIN`, and nothing
-//! else, once the record is queued. A producer that goes away without
-//! signaling leaves the socket readable with `ECONNRESET`, which reads as a
-//! fence signaled with an error, as Linux reports a fence whose driver
-//! failed it. The record is only ever peeked, so every holder sees it.
+//! else, once the record is queued. A [`Writer`] dropped without signaling
+//! sends a failure record, as a Linux driver fails a fence it abandons, so
+//! waiters wake. A producer process that dies without signaling leaves the
+//! socket readable with `ECONNRESET`, which reads as a fence signaled with
+//! an error, but Darwin wakes no waiter for it (#2826). The record is only
+//! ever peeked, so every holder sees it.
 //!
 //! The socket carries a marker (its `SO_LINGER` time, as the syscall layer
 //! marks its sockets), so a sync_file arriving from another process is
@@ -107,7 +109,7 @@ impl Drop for Private {
 }
 
 /// The producer's end of a fence. Dropping it without [`Writer::signal`]
-/// fails the fence.
+/// fails the fence with `-EPIPE`.
 pub struct Writer(Private);
 
 impl Writer {
@@ -118,13 +120,27 @@ impl Writer {
 
     /// Signal the fence with the given time and status.
     pub fn signal_at(self, timestamp_ns: i64, status: i32) {
+        self.send(timestamp_ns, status);
+        self.sent();
+    }
+
+    /// Close this copy without signaling: it has been sent to the process
+    /// that signals the fence, which holds a copy of its own.
+    pub fn sent(self) {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: moved out once from a writer that is never dropped.
+        drop(unsafe { std::ptr::read(&this.0) });
+    }
+
+    fn send(&self, timestamp_ns: i64, status: i32) {
         let r = Record {
             timestamp_ns,
             status,
             _reserved: 0,
         };
         // SAFETY: a send of a local record on our socket; an empty datagram
-        // queue never blocks.
+        // queue never blocks. With every sync_file closed it fails, and
+        // nobody is left to see the record.
         unsafe {
             libc::send(
                 self.0.0,
@@ -133,6 +149,12 @@ impl Writer {
                 0,
             )
         };
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        self.send(monotonic_ns(), -EPIPE);
     }
 }
 
@@ -174,11 +196,21 @@ pub fn pair() -> io::Result<(OwnedFd, Writer)> {
         l_onoff: 0,
         l_linger: MARK,
     };
+    let on: libc::c_int = 1;
     // SAFETY: fcntl and setsockopt on our new sockets with local values.
     unsafe {
         for fd in [&file, &writer] {
             cvt(libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC))?;
         }
+        // A writer's send, at the latest when it is dropped, must not
+        // raise SIGPIPE in the producer once every sync_file is closed.
+        cvt(libc::setsockopt(
+            writer.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&on as *const libc::c_int).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        ))?;
         cvt(libc::setsockopt(
             file.as_raw_fd(),
             libc::SOL_SOCKET,
@@ -577,7 +609,53 @@ mod tests {
     #[test]
     fn a_dropped_writer_fails_the_fence() {
         let (file, writer) = pair().unwrap();
+        let before = monotonic_ns();
         drop(writer);
+        let State::Signaled {
+            timestamp_ns,
+            status,
+        } = state(file.as_fd())
+        else {
+            panic!("a dropped writer leaves its fence active");
+        };
+        assert_eq!(status, -EPIPE);
+        assert!(timestamp_ns >= before);
+        assert_eq!(poll_bits(file.as_fd()), libc::POLLIN, "no POLLHUP");
+        assert!(wait(file.as_fd(), 0));
+        assert!(inherited().iter().all(|&fd| fd != file.as_raw_fd()));
+    }
+
+    /// Signaling a fence nobody holds any more fails quietly.
+    #[test]
+    fn a_writer_outliving_its_fence_raises_no_sigpipe() {
+        let (file, writer) = pair().unwrap();
+        let mut on: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: getsockopt into locals.
+        let r = unsafe {
+            libc::getsockopt(
+                writer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&mut on as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!((r, on), (0, 1));
+        drop(file);
+        drop(writer);
+    }
+
+    /// A writer's socket closed without a record, as when the process
+    /// holding it dies, reads as failed.
+    #[test]
+    fn a_closed_writer_socket_fails_the_fence() {
+        let (file, writer) = pair().unwrap();
+        // SAFETY: a new descriptor of our own, closed below.
+        let copy = unsafe { OwnedFd::from_raw_fd(libc::dup(writer.as_raw_fd())) };
+        writer.sent();
+        assert_eq!(state(file.as_fd()), State::Active);
+        drop(copy);
         assert_eq!(
             state(file.as_fd()),
             State::Signaled {
@@ -585,8 +663,31 @@ mod tests {
                 status: -EPIPE
             }
         );
-        assert!(wait(file.as_fd(), 0));
-        assert!(inherited().iter().all(|&fd| fd != file.as_raw_fd()));
+    }
+
+    /// LTP-style: a waiter already blocked in poll, in a kqueue (the merge
+    /// waiter), or for an on_signal callback wakes, with the error, when a
+    /// writer is dropped without signaling.
+    #[test]
+    fn waiters_blocked_on_a_fence_wake_when_its_writer_is_dropped() {
+        let failed = |s| matches!(s, State::Signaled { status, .. } if status == -EPIPE);
+        let (file, writer) = pair().unwrap();
+        let (other, other_writer) = pair().unwrap();
+        let merged = merge(file.as_fd(), other.as_fd()).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        on_signal(file.as_fd(), move |s| tx.send(s).unwrap()).unwrap();
+        std::thread::scope(|s| {
+            let blocked = s.spawn(|| wait(file.as_fd(), 5000));
+            std::thread::sleep(Duration::from_millis(50));
+            drop(writer);
+            assert!(blocked.join().unwrap(), "the blocked poll woke");
+        });
+        assert!(failed(state(file.as_fd())));
+        assert!(failed(rx.recv_timeout(Duration::from_secs(5)).unwrap()));
+        assert!(!wait(merged.as_fd(), 20));
+        drop(other_writer);
+        assert!(wait(merged.as_fd(), 5000));
+        assert!(failed(state(merged.as_fd())));
     }
 
     #[test]
