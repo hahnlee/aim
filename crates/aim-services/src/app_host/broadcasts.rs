@@ -8,6 +8,10 @@
 //! its `finishReceiver` before its next. An ordered broadcast goes to one
 //! receiver at a time, each finishing before the next; one not ordered with
 //! a result receiver goes to all at once, its result after their finishes.
+//! One not ordered whose receivers differ in priority is prioritized
+//! (`BroadcastRecord.calculateBlockedUntilBeyondCount`): a receiver waits
+//! for the receivers of higher priority before it, across processes only
+//! where LIMIT_PRIORITY_SCOPE is disabled with `limit_priority_scope`.
 //! A receiver is checked as a broadcast is enqueued, a
 //! preflight's checks (`shouldSkipAtEnqueueMessage`) with
 //! `avoid_note_op_at_enqueue`, its permissions' and the broadcast's app ops
@@ -79,6 +83,7 @@ const OP_RUN_IN_BACKGROUND: i32 = 63;
 const DEVICE_ID_DEFAULT: i32 = 0;
 /// The aconfig flag whose enqueue checks are a preflight's.
 const AVOID_NOTE_OP_AT_ENQUEUE: &str = "com.android.server.am.avoid_note_op_at_enqueue";
+const LIMIT_PRIORITY_SCOPE_FLAG: &str = "com.android.server.am.limit_priority_scope";
 /// `IntentFilter.SYSTEM_HIGH_PRIORITY`.
 const SYSTEM_HIGH_PRIORITY: i32 = 1000;
 const MAX_RECEIVERS_ALLOWED_PER_APP: usize = 1000;
@@ -86,6 +91,9 @@ const MAX_RECEIVERS_ALLOWED_PER_APP: usize = 1000;
 const DYNAMIC_RECEIVER_EXPLICIT_EXPORT_REQUIRED: i64 = 161_145_287;
 const BLOCK_NULL_ACTION_INTENTS: i64 = 293_560_872;
 const LOCK_DOWN_CLOSE_SYSTEM_DIALOGS: i64 = 174_664_365;
+/// `BroadcastRecord.LIMIT_PRIORITY_SCOPE`: a receiver's priority orders it
+/// only within its process.
+const LIMIT_PRIORITY_SCOPE: i64 = 371_307_720;
 /// `ActivityManager.BROADCAST_*`, `Activity.RESULT_CANCELED`.
 const BROADCAST_SUCCESS: i32 = 0;
 const BROADCAST_STICKY_CANT_HAVE_PERMISSION: i32 = -1;
@@ -205,11 +213,13 @@ struct Manifest {
 }
 
 /// A registered receiver a broadcast goes to: its handle, the index of
-/// the filter it matched (`BroadcastFilter`), its process's start.
+/// the filter it matched (`BroadcastFilter`) and that filter's priority,
+/// its process's start.
 #[derive(Clone, Copy)]
 struct Registered {
     handle: u32,
     filter: usize,
+    priority: i32,
     start_seq: i64,
 }
 
@@ -217,6 +227,16 @@ struct Registered {
 enum Target {
     Registered(Registered),
     Manifest(Arc<Manifest>),
+}
+
+impl Target {
+    /// `BroadcastRecord.getReceiverPriority`.
+    fn priority(&self) -> i32 {
+        match self {
+            Target::Registered(r) => r.priority,
+            Target::Manifest(m) => m.priority,
+        }
+    }
 }
 
 /// `ActivityManager.APP_START_MODE_*`.
@@ -240,8 +260,9 @@ struct Sticky {
 /// (`BroadcastQueueModernImpl`). Then it goes to its result receiver.
 struct Chain {
     record: Arc<Record>,
-    /// The receivers to come.
+    /// The receivers to come, and the index of the next among them all.
     targets: VecDeque<Target>,
+    next: usize,
     /// Of a broadcast not ordered, the receivers sent it and not finished.
     outstanding: usize,
     result_code: i32,
@@ -260,20 +281,21 @@ struct Chain {
 pub type Done = Box<dyn FnOnce() + Send>;
 pub(super) type ShellDone = Box<dyn FnOnce(i32, Option<String>, Option<KeptBundle>) + Send>;
 
-/// A delivery a process waits for, by its receiver.
+/// A delivery a process waits for, by its receiver and the receiver's
+/// index among its broadcast's.
 enum Delivery {
     /// Sent and assumed delivered.
-    Once(Arc<Record>, Registered),
+    Once(Arc<Record>, Registered, usize),
     /// A receiver of the chain with that id, which reports its finish.
-    Chained(u64, Registered),
+    Chained(u64, Registered, usize),
     /// A manifest receiver, of a chain if one, which reports its finish.
-    Manifest(Arc<Record>, Arc<Manifest>, Option<u64>),
+    Manifest(Arc<Record>, Arc<Manifest>, Option<u64>, usize),
 }
 
 fn same_delivery_group(old: &Delivery, new: &Delivery) -> bool {
     let (old, new) = match (old, new) {
-        (Delivery::Once(a, ar), Delivery::Once(b, br)) if ar.handle == br.handle => (a, b),
-        (Delivery::Manifest(a, ar, None), Delivery::Manifest(b, br, None))
+        (Delivery::Once(a, ar, _), Delivery::Once(b, br, _)) if ar.handle == br.handle => (a, b),
+        (Delivery::Manifest(a, ar, None, _), Delivery::Manifest(b, br, None, _))
             if ar.uid == br.uid
                 && ar.info.info.item.package_name == br.info.info.item.package_name
                 && ar.info.info.item.name == br.info.info.item.name =>
@@ -309,6 +331,102 @@ struct State {
     cold: Vec<Cold>,
     /// The queue whose process is being started (`mRunningColdStart`).
     cold_start: Option<i64>,
+    /// The prioritized broadcasts delivering, by enqueue id.
+    tranches: HashMap<u64, Tranches>,
+}
+
+/// Of a prioritized broadcast (`BroadcastRecord.prioritized`), each
+/// receiver's `blockedUntilBeyondCount`, which reached a terminal state,
+/// and `beyondCount`: how many from the first did.
+struct Tranches {
+    blocked_until: Vec<i32>,
+    terminal: Vec<bool>,
+    beyond: usize,
+}
+
+impl Tranches {
+    /// `isBlocked`.
+    fn blocked(&self, index: usize) -> bool {
+        (self.beyond as i32) < self.blocked_until[index]
+    }
+
+    /// `setDeliveryState` of receiver `index` to a terminal state: whether
+    /// `beyondCount` changed.
+    fn terminal(&mut self, index: usize) -> bool {
+        self.terminal[index] = true;
+        let old = self.beyond;
+        while self.terminal.get(self.beyond) == Some(&true) {
+            self.beyond += 1;
+        }
+        self.beyond != old
+    }
+}
+
+/// `BroadcastRecord.calculateBlockedUntilBeyondCount` of a broadcast not
+/// ordered to receivers of `priorities`, in order, with
+/// `Flags.limitPriorityScope()` `limit_scope` and LIMIT_PRIORITY_SCOPE
+/// enabled for receiver `i` as `change_enabled[i]`: until which
+/// `beyondCount` each is blocked, -1 for none.
+fn blocked_until_beyond_count(
+    priorities: &[i32],
+    limit_scope: bool,
+    change_enabled: &[bool],
+) -> Vec<i32> {
+    let n = priorities.len();
+    let mut blocked = vec![0; n];
+    if limit_scope {
+        let mut last_tranche_priority = 0;
+        let mut current_tranche_priority = 0;
+        // The last receiver of the previous tranche, and of it and of the
+        // current one the last with the change disabled.
+        let mut last_tranche_index = -1;
+        let mut last_tranche_disabled = -1;
+        let mut current_tranche_disabled = -1;
+        for (i, &priority) in priorities.iter().enumerate() {
+            if i == 0 {
+                current_tranche_priority = priority;
+                if !change_enabled[i] {
+                    current_tranche_disabled = 0;
+                }
+                continue;
+            }
+            if priority != current_tranche_priority {
+                if current_tranche_disabled != -1 {
+                    last_tranche_disabled = current_tranche_disabled;
+                }
+                last_tranche_priority = current_tranche_priority;
+                last_tranche_index = i as i32 - 1;
+                current_tranche_priority = priority;
+                current_tranche_disabled = -1;
+            }
+            if !change_enabled[i] {
+                current_tranche_disabled = i as i32;
+                blocked[i] = last_tranche_index + 1;
+            } else if priority != last_tranche_priority && last_tranche_disabled != -1 {
+                blocked[i] = last_tranche_disabled + 1;
+            }
+        }
+        if n > 0
+            && (last_tranche_index == -1
+                || (last_tranche_disabled == -1 && current_tranche_disabled == -1))
+        {
+            blocked.fill(-1);
+        }
+    } else {
+        let mut last_priority = 0;
+        let mut last_priority_index = 0;
+        for (i, &priority) in priorities.iter().enumerate() {
+            if i == 0 || priority != last_priority {
+                last_priority = priority;
+                last_priority_index = i as i32;
+            }
+            blocked[i] = last_priority_index;
+        }
+        if n > 0 && blocked[n - 1] == 0 {
+            blocked.fill(-1);
+        }
+    }
+    blocked
 }
 
 /// A process queue (`BroadcastProcessQueue`): a process's, by its start,
@@ -380,8 +498,8 @@ impl State {
 
     fn pending_through(&self, barrier: u64) -> bool {
         let pending = |d: &Delivery| match d {
-            Delivery::Once(r, _) | Delivery::Manifest(r, ..) => r.enqueue_id <= barrier,
-            Delivery::Chained(id, _) => self
+            Delivery::Once(r, ..) | Delivery::Manifest(r, ..) => r.enqueue_id <= barrier,
+            Delivery::Chained(id, ..) => self
                 .chains
                 .get(id)
                 .is_some_and(|c| c.record.enqueue_id <= barrier),
@@ -389,6 +507,33 @@ impl State {
         self.chains.values().any(|c| c.record.enqueue_id <= barrier)
             || self.queues.values().flatten().any(pending)
             || self.cold.iter().flat_map(|c| &c.deliveries).any(pending)
+    }
+
+    /// The delivery at the front of `queue`.
+    fn front(&self, queue: &QueueId) -> Option<&Delivery> {
+        match queue {
+            QueueId::Warm(seq) => self.queues.get(seq).and_then(|q| q.front()),
+            QueueId::Cold(process, uid) => self
+                .cold
+                .iter()
+                .find(|c| &c.process == process && c.uid == *uid)
+                .and_then(|c| c.deliveries.front()),
+        }
+    }
+
+    /// The broadcast of `d`, by enqueue id, and its receiver's index.
+    fn receiver(&self, d: &Delivery) -> Option<(u64, usize)> {
+        match d {
+            Delivery::Once(r, _, at) | Delivery::Manifest(r, _, _, at) => Some((r.enqueue_id, *at)),
+            Delivery::Chained(id, _, at) => self.chains.get(id).map(|c| (c.record.enqueue_id, *at)),
+        }
+    }
+
+    /// `isBlocked`: whether `d` waits for receivers of its broadcast before
+    /// it.
+    fn blocked(&self, d: &Delivery) -> bool {
+        self.receiver(d)
+            .is_some_and(|(id, at)| self.tranches.get(&id).is_some_and(|t| t.blocked(at)))
     }
 }
 
@@ -567,11 +712,11 @@ fn takes(
 
 /// `broadcastIntentLocked`'s merge of the manifest receivers into the
 /// registered ones by priority, a registered one first on a tie.
-fn merge(manifest: Vec<Arc<Manifest>>, registered: Vec<(i32, Registered)>) -> Vec<Target> {
+fn merge(manifest: Vec<Arc<Manifest>>, registered: Vec<Registered>) -> Vec<Target> {
     let mut merged = Vec::with_capacity(manifest.len() + registered.len());
     let mut manifest = manifest.into_iter().peekable();
-    for (priority, r) in registered {
-        while let Some(m) = manifest.next_if(|m| m.priority > priority) {
+    for r in registered {
+        while let Some(m) = manifest.next_if(|m| m.priority > r.priority) {
             merged.push(Target::Manifest(m));
         }
         merged.push(Target::Registered(r));
@@ -963,6 +1108,7 @@ impl Broadcasts {
                 .find(|r| r.receiver.handle == handle)
                 .unwrap();
             let filter = receiver.filters.len() - 1;
+            let priority = receiver.filters[filter].filter.priority;
             if !self.skip(
                 host,
                 &sender,
@@ -995,8 +1141,10 @@ impl Broadcasts {
                         Registered {
                             handle,
                             filter,
+                            priority,
                             start_seq,
                         },
+                        0,
                     ));
             }
         }
@@ -1025,11 +1173,12 @@ impl Broadcasts {
             .get(&seq)
             .and_then(|q| q.front())
             .and_then(|d| match d {
-                Delivery::Chained(id, r) if r.handle == handle => Some(*id),
+                Delivery::Chained(id, r, _) if r.handle == handle => Some(*id),
                 _ => None,
             });
         if let Some(id) = waiting.filter(|_| st.busy.remove(&seq)) {
-            st.queues.get_mut(&seq).unwrap().pop_front();
+            let finished = st.queues.get_mut(&seq).unwrap().pop_front().unwrap();
+            Self::delivered(&mut st, &finished);
             self.advance(host, &mut st, id);
             self.send_next(host, &mut st, seq);
             self.update_running(host, &mut st);
@@ -1390,7 +1539,7 @@ impl Broadcasts {
 
         let preflight = host.flag(AVOID_NOTE_OP_AT_ENQUEUE)?;
         // The registered receivers, by priority, one filter per receiver.
-        let mut registered: Vec<(i32, Registered)> = Vec::new();
+        let mut registered = Vec::new();
         let block_null_action = action.is_none()
             && !can_access_unexported(calling_uid)
             && model
@@ -1426,6 +1575,7 @@ impl Broadcasts {
         if targets.is_empty() && result_to.is_none() && shell_done.is_none() {
             return Ok(BROADCAST_SUCCESS);
         }
+        self.prioritize(host, &mut st, &record, &targets)?;
         match result_to {
             None if !record.ordered && shell_done.is_none() => {
                 self.enqueue(host, &mut st, &record, targets)
@@ -1441,6 +1591,7 @@ impl Broadcasts {
                         result_extras: record.result_extras.clone(),
                         record,
                         targets: targets.into(),
+                        next: 0,
                         outstanding: 0,
                         aborted: false,
                         result_to: result_to.map(|h| (host.process.strong(h), result_to_app)),
@@ -1468,7 +1619,7 @@ impl Broadcasts {
         user: i32,
         sender: &Sender,
         preflight: bool,
-    ) -> Result<Vec<(i32, Registered)>, Exception> {
+    ) -> Result<Vec<Registered>, Exception> {
         let mut targets = Vec::new();
         for r in &st.receivers {
             if user != USER_ALL && r.user != USER_ALL && r.user != user {
@@ -1487,15 +1638,15 @@ impl Broadcasts {
             let Some(filter) = taken else { continue };
             let f = &r.filters[filter];
             if !self.skip(host, sender, r, f, i.flags, preflight)? {
-                let target = Registered {
+                targets.push(Registered {
                     handle: r.receiver.handle,
                     filter,
+                    priority: f.filter.priority,
                     start_seq: r.start_seq,
-                };
-                targets.push((f.filter.priority, target));
+                });
             }
         }
-        targets.sort_by_key(|t| std::cmp::Reverse(t.0));
+        targets.sort_by_key(|t| std::cmp::Reverse(t.priority));
         Ok(targets)
     }
 
@@ -1748,7 +1899,7 @@ impl Broadcasts {
                 };
                 let registered = registered
                     .into_iter()
-                    .filter(|(_, r)| allowed(owner(r.handle).unwrap_or_default()))
+                    .filter(|r| allowed(owner(r.handle).unwrap_or_default()))
                     .collect();
                 let manifest = if flags & FLAG_RECEIVER_REGISTERED_ONLY == 0 {
                     self.manifest_targets(host, i, None, user, &record.sender, preflight)?
@@ -1759,6 +1910,10 @@ impl Broadcasts {
                     Vec::new()
                 };
                 Ok(merge(manifest, registered))
+            })
+            .and_then(|targets| {
+                self.prioritize(host, &mut st, &record, &targets)?;
+                Ok(targets)
             });
         match (targets, done) {
             (Ok(targets), None) => self.enqueue(host, &mut st, &record, targets),
@@ -1773,6 +1928,7 @@ impl Broadcasts {
                         result_extras: None,
                         record: record.clone(),
                         targets: targets.into(),
+                        next: 0,
                         outstanding: 0,
                         aborted: false,
                         result_to: None,
@@ -2070,12 +2226,17 @@ impl Broadcasts {
         delivery: Delivery,
     ) {
         let push = |queue: &mut VecDeque<Delivery>, delivery: Delivery| {
-            // DELIVERY_GROUP_POLICY_MOST_RECENT, per receiver. Already sent
-            // deliveries are absent from these queues and remain untouched.
-            queue.retain(|old| !same_delivery_group(old, &delivery));
+            // DELIVERY_GROUP_POLICY_MOST_RECENT, per receiver: the replaced
+            // are skipped. Already sent deliveries are absent from these
+            // queues and remain untouched.
+            let (replaced, kept): (VecDeque<_>, _) = std::mem::take(queue)
+                .into_iter()
+                .partition(|old| same_delivery_group(old, &delivery));
+            *queue = kept;
             queue.push_back(delivery);
+            replaced
         };
-        match &to {
+        let replaced = match &to {
             QueueId::Warm(seq) => push(st.queues.entry(*seq).or_default(), delivery),
             QueueId::Cold(process, uid) => match st
                 .cold
@@ -2083,22 +2244,32 @@ impl Broadcasts {
                 .find(|c| &c.process == process && c.uid == *uid)
             {
                 Some(c) => push(&mut c.deliveries, delivery),
-                None => st.cold.push(Cold {
-                    process: process.clone(),
-                    uid: *uid,
-                    package: m.map(manifest_package).unwrap_or_default(),
-                    deliveries: VecDeque::from([delivery]),
-                }),
+                None => {
+                    st.cold.push(Cold {
+                        process: process.clone(),
+                        uid: *uid,
+                        package: m.map(manifest_package).unwrap_or_default(),
+                        deliveries: VecDeque::from([delivery]),
+                    });
+                    VecDeque::new()
+                }
             },
+        };
+        for old in replaced {
+            Self::delivered(st, &old);
         }
         Self::make_runnable(st, to);
     }
 
-    /// `updateRunnableList`: the queue waits its turn, unless it runs.
+    /// `updateRunnableList`: the queue waits its turn, unless it runs or
+    /// its next delivery is blocked.
     fn make_runnable(st: &mut State, queue: QueueId) {
         if let QueueId::Warm(seq) = queue
             && (st.busy.contains(&seq) || st.cold_start == Some(seq))
         {
+            return;
+        }
+        if st.front(&queue).is_some_and(|d| st.blocked(d)) {
             return;
         }
         if !st.runnable.contains(&queue) {
@@ -2135,17 +2306,9 @@ impl Broadcasts {
     /// `isPendingUrgent`: whether the delivery at the front of `queue` is of
     /// an urgent broadcast.
     fn pending_urgent(st: &State, queue: &QueueId) -> bool {
-        let front = match queue {
-            QueueId::Warm(seq) => st.queues.get(seq).and_then(|q| q.front()),
-            QueueId::Cold(process, uid) => st
-                .cold
-                .iter()
-                .find(|c| &c.process == process && c.uid == *uid)
-                .and_then(|c| c.deliveries.front()),
-        };
-        match front {
-            Some(Delivery::Once(record, _) | Delivery::Manifest(record, ..)) => record.urgent,
-            Some(Delivery::Chained(id, _)) => st.chains.get(id).is_some_and(|c| c.record.urgent),
+        match st.front(queue) {
+            Some(Delivery::Once(record, ..) | Delivery::Manifest(record, ..)) => record.urgent,
+            Some(Delivery::Chained(id, ..)) => st.chains.get(id).is_some_and(|c| c.record.urgent),
             None => false,
         }
     }
@@ -2184,6 +2347,10 @@ impl Broadcasts {
                 return;
             };
             match st.runnable.remove(at).unwrap() {
+                // Its front became blocked (a newer delivery of its group
+                // replaced the one before): it runs again once unblocked.
+                QueueId::Warm(seq)
+                    if st.front(&QueueId::Warm(seq)).is_some_and(|d| st.blocked(d)) => {}
                 QueueId::Warm(seq) if candidates[at].cold => st.cold_start = Some(seq),
                 QueueId::Warm(seq) => self.send_next(host, st, seq),
                 QueueId::Cold(process, uid) => self.start_cold(host, st, &process, uid),
@@ -2225,21 +2392,27 @@ impl Broadcasts {
         let mut cold = st.cold.remove(at);
         // It may have started meanwhile.
         if let Some((seq, _)) = host.running_process(process, uid) {
-            st.queues.entry(seq).or_default().extend(cold.deliveries);
+            Self::merge_cold(st, seq, cold.deliveries);
             Self::make_runnable(st, QueueId::Warm(seq));
             return;
         }
-        while let Some(Delivery::Manifest(record, m, chain)) = cold.deliveries.front() {
-            if !self.skipped_manifest(host, record, m) {
-                break;
-            }
-            let chain = *chain;
-            cold.deliveries.pop_front();
-            if let Some(id) = chain {
+        while let Some(front) = cold.deliveries.front()
+            && !st.blocked(front)
+            && let Delivery::Manifest(record, m, ..) = front
+            && self.skipped_manifest(host, record, m)
+        {
+            let skipped = cold.deliveries.pop_front().unwrap();
+            Self::delivered(st, &skipped);
+            if let Delivery::Manifest(_, _, Some(id), _) = skipped {
                 self.advance(host, st, id);
             }
         }
-        if cold.deliveries.is_empty() {
+        let Some(front) = cold.deliveries.front() else {
+            return;
+        };
+        // Its process starts once its receiver is unblocked.
+        if st.blocked(front) {
+            st.cold.push(cold);
             return;
         }
         let started = host
@@ -2252,13 +2425,15 @@ impl Broadcasts {
             });
         match started {
             Ok(seq) => {
-                st.queues.entry(seq).or_default().extend(cold.deliveries);
+                Self::merge_cold(st, seq, cold.deliveries);
                 st.cold_start = Some(seq);
                 self.send_next(host, st, seq);
             }
             Err(e) => {
                 eprintln!("app host: unable to launch {process} for broadcast: {e}");
-                if let Some(Delivery::Manifest(_, _, Some(id))) = cold.deliveries.pop_front() {
+                let failed = cold.deliveries.pop_front().unwrap();
+                Self::delivered(st, &failed);
+                if let Delivery::Manifest(_, _, Some(id), _) = failed {
                     self.advance(host, st, id);
                 }
                 if !cold.deliveries.is_empty() {
@@ -2267,6 +2442,30 @@ impl Broadcasts {
                 }
             }
         }
+    }
+
+    /// The deliveries held for a process that now runs as `seq` join its
+    /// queue in the order their broadcasts were enqueued, each side's own
+    /// order kept: an older broadcast is not left behind a newer one.
+    fn merge_cold(st: &mut State, seq: i64, cold: VecDeque<Delivery>) {
+        let enqueued = |st: &State, d: &Delivery| st.receiver(d).map_or(u64::MAX, |(id, _)| id);
+        let mut warm = st.queues.remove(&seq).unwrap_or_default();
+        let mut merged = VecDeque::with_capacity(warm.len() + cold.len());
+        // The delivery it was sent and has not finished stays its first.
+        if st.busy.contains(&seq) {
+            merged.extend(warm.pop_front());
+        }
+        for d in cold {
+            let id = enqueued(st, &d);
+            while let Some(w) = warm.front()
+                && enqueued(st, w) <= id
+            {
+                merged.push_back(warm.pop_front().unwrap());
+            }
+            merged.push_back(d);
+        }
+        merged.extend(warm);
+        st.queues.insert(seq, merged);
     }
 
     /// `shouldSkipReceiver`'s `shouldSkipMessage` of a manifest receiver
@@ -2315,22 +2514,131 @@ impl Broadcasts {
     /// Queues `record` to each of `targets`, assumed delivered to the
     /// registered ones, and sends each process what it has next.
     fn enqueue(&self, host: &AppHost, st: &mut State, record: &Arc<Record>, targets: Vec<Target>) {
-        for target in targets {
+        for (at, target) in targets.into_iter().enumerate() {
             match target {
                 Target::Registered(r) => self.queue_delivery(
                     st,
                     QueueId::Warm(r.start_seq),
                     None,
-                    Delivery::Once(record.clone(), r),
+                    Delivery::Once(record.clone(), r, at),
                 ),
                 Target::Manifest(m) => {
                     let to = self.manifest_queue(host, &m);
-                    let delivery = Delivery::Manifest(record.clone(), m.clone(), None);
+                    let delivery = Delivery::Manifest(record.clone(), m.clone(), None, at);
                     self.queue_delivery(st, to, Some(&m), delivery);
                 }
             }
         }
         self.update_running(host, st);
+    }
+
+    /// Keeps the tranches of `record` to `targets` if it is prioritized
+    /// (`calculateBlockedUntilBeyondCount`, `isPrioritized`): not ordered,
+    /// to receivers that differ in priority.
+    fn prioritize(
+        &self,
+        host: &AppHost,
+        st: &mut State,
+        record: &Record,
+        targets: &[Target],
+    ) -> Result<(), Exception> {
+        let priorities: Vec<i32> = targets.iter().map(Target::priority).collect();
+        // One tranche blocks none, whatever the change's states.
+        if record.ordered || priorities.windows(2).all(|p| p[0] == p[1]) {
+            return Ok(());
+        }
+        let limit_scope = host.flag(LIMIT_PRIORITY_SCOPE_FLAG)?;
+        let change_enabled = if limit_scope {
+            targets
+                .iter()
+                .map(|t| Self::limits_priority_scope(host, t))
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
+        let blocked_until = blocked_until_beyond_count(&priorities, limit_scope, &change_enabled);
+        if blocked_until[0] != -1 {
+            st.tranches.insert(
+                record.enqueue_id,
+                Tranches {
+                    terminal: vec![false; blocked_until.len()],
+                    blocked_until,
+                    beyond: 0,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// `calculateChangeStateForReceivers`: whether LIMIT_PRIORITY_SCOPE is
+    /// enabled for the application of `target` (`getReceiverAppInfo`: a
+    /// manifest receiver's, a registered one's process's).
+    fn limits_priority_scope(host: &AppHost, target: &Target) -> Result<bool, Exception> {
+        let info = match target {
+            Target::Manifest(m) => Some(m.info.info.application_info.clone()),
+            Target::Registered(r) => {
+                let app = host
+                    .apps
+                    .lock()
+                    .unwrap()
+                    .get(&r.start_seq)
+                    .map(|a| (a.application_info.clone(), a.package.clone()));
+                match app {
+                    Some((Some(info), _)) => Some(info),
+                    Some((None, package)) => {
+                        host.application_info(&package, 0, None)?.map(Arc::new)
+                    }
+                    None => None,
+                }
+            }
+        };
+        let compat = &host.platform()?.compat;
+        Ok(match info {
+            Some(ai) => compat.is_enabled(
+                LIMIT_PRIORITY_SCOPE,
+                ai.item.package_name.as_deref(),
+                ai.target_sdk_version,
+            ),
+            None => compat.default_value(LIMIT_PRIORITY_SCOPE),
+        })
+    }
+
+    /// `setDeliveryState` of receiver `at` of the broadcast of enqueue id
+    /// `id` to a terminal state: past a new `beyondCount`, the queues of its
+    /// receivers it unblocks become runnable.
+    fn terminal(st: &mut State, id: u64, at: usize) {
+        let Some(tranches) = st.tranches.get_mut(&id) else {
+            return;
+        };
+        if !tranches.terminal(at) {
+            return;
+        }
+        if tranches.beyond == tranches.terminal.len() {
+            st.tranches.remove(&id);
+        }
+        let warm = st.queues.keys().map(|seq| QueueId::Warm(*seq));
+        let cold = st
+            .cold
+            .iter()
+            .map(|c| QueueId::Cold(c.process.clone(), c.uid));
+        let queues: Vec<QueueId> = warm
+            .chain(cold)
+            .filter(|q| {
+                st.front(q)
+                    .and_then(|d| st.receiver(d))
+                    .is_some_and(|(of, _)| of == id)
+            })
+            .collect();
+        for queue in queues {
+            Self::make_runnable(st, queue);
+        }
+    }
+
+    /// [`Self::terminal`] of the receiver of `d`.
+    fn delivered(st: &mut State, d: &Delivery) {
+        if let Some((id, at)) = st.receiver(d) {
+            Self::terminal(st, id, at);
+        }
     }
 
     /// `ActivityManager.broadcastStickyIntent(intent, OP_NONE,
@@ -2485,12 +2793,13 @@ impl Broadcasts {
             .and_then(|q| q.front())
             .filter(|_| st.busy.contains(&seq))
         {
-            Some(Delivery::Chained(id, _)) => Some(*id),
-            Some(Delivery::Manifest(_, _, id)) => *id,
+            Some(Delivery::Chained(id, ..)) => Some(*id),
+            Some(Delivery::Manifest(_, _, id, _)) => *id,
             _ => return Ok(()),
         };
         st.busy.remove(&seq);
-        st.queues.get_mut(&seq).unwrap().pop_front();
+        let finished = st.queues.get_mut(&seq).unwrap().pop_front().unwrap();
+        Self::delivered(&mut st, &finished);
         if let Some(id) = id {
             if let Some(chain) = st.chains.get_mut(&id)
                 && chain.record.ordered
@@ -2520,7 +2829,8 @@ impl Broadcasts {
         }
         st.runnable.retain(|q| *q != QueueId::Warm(start_seq));
         for delivery in st.queues.remove(&start_seq).unwrap_or_default() {
-            if let Delivery::Chained(id, _) | Delivery::Manifest(_, _, Some(id)) = delivery {
+            Self::delivered(&mut st, &delivery);
+            if let Delivery::Chained(id, ..) | Delivery::Manifest(_, _, Some(id), _) = delivery {
                 self.advance(host, &mut st, id);
             }
         }
@@ -2622,7 +2932,11 @@ impl Broadcasts {
             let Some(front) = st.queues.get(&start_seq).and_then(|q| q.front()) else {
                 return;
             };
-            if let Delivery::Manifest(record, m, chain) = front {
+            // It runs again once unblocked.
+            if st.blocked(front) {
+                return;
+            }
+            if let Delivery::Manifest(record, m, chain, _) = front {
                 let (record, m, chain) = (record.clone(), m.clone(), *chain);
                 let sent = {
                     let result = chain.and_then(|id| st.chains.get(&id));
@@ -2648,7 +2962,8 @@ impl Broadcasts {
                         return;
                     }
                     Some(false) => {
-                        st.queues.get_mut(&start_seq).unwrap().pop_front();
+                        let skipped = st.queues.get_mut(&start_seq).unwrap().pop_front().unwrap();
+                        Self::delivered(st, &skipped);
                         if let Some(id) = chain {
                             self.advance(host, st, id);
                         }
@@ -2657,8 +2972,8 @@ impl Broadcasts {
                 }
             }
             let (record, to, chain) = match front {
-                Delivery::Once(record, to) => (record.clone(), *to, None),
-                Delivery::Chained(id, to) => match st.chains.get(id) {
+                Delivery::Once(record, to, _) => (record.clone(), *to, None),
+                Delivery::Chained(id, to, _) => match st.chains.get(id) {
                     Some(chain) => (chain.record.clone(), *to, Some(*id)),
                     None => {
                         st.queues.get_mut(&start_seq).unwrap().pop_front();
@@ -2694,7 +3009,8 @@ impl Broadcasts {
                 st.busy.insert(start_seq);
                 return;
             }
-            st.queues.get_mut(&start_seq).unwrap().pop_front();
+            let done = st.queues.get_mut(&start_seq).unwrap().pop_front().unwrap();
+            Self::delivered(st, &done);
             if let Some(id) = chain {
                 self.advance(host, st, id);
             }
@@ -2714,18 +3030,20 @@ impl Broadcasts {
                 let record = chain.record.clone();
                 let targets = std::mem::take(&mut chain.targets);
                 let mut sent = 0;
-                for target in targets {
+                for (at, target) in targets.into_iter().enumerate() {
                     match target {
                         Target::Registered(r) => {
                             if !st.receivers.iter().any(|x| x.receiver.handle == r.handle) {
+                                Self::terminal(st, record.enqueue_id, at);
                                 continue;
                             }
-                            let delivery = Delivery::Chained(id, r);
+                            let delivery = Delivery::Chained(id, r, at);
                             self.queue_delivery(st, QueueId::Warm(r.start_seq), None, delivery);
                         }
                         Target::Manifest(m) => {
                             let to = self.manifest_queue(host, &m);
-                            let delivery = Delivery::Manifest(record.clone(), m.clone(), Some(id));
+                            let delivery =
+                                Delivery::Manifest(record.clone(), m.clone(), Some(id), at);
                             self.queue_delivery(st, to, Some(&m), delivery);
                         }
                     }
@@ -2741,9 +3059,11 @@ impl Broadcasts {
             let Some(chain) = st.chains.get_mut(&id) else {
                 return;
             };
+            let at = chain.next;
             let next = if chain.aborted {
                 None
             } else {
+                chain.next += 1;
                 chain.targets.pop_front()
             };
             let Some(target) = next else {
@@ -2768,13 +3088,13 @@ impl Broadcasts {
                     if !st.receivers.iter().any(|x| x.receiver.handle == r.handle) {
                         continue;
                     }
-                    let delivery = Delivery::Chained(id, r);
+                    let delivery = Delivery::Chained(id, r, at);
                     self.queue_delivery(st, QueueId::Warm(r.start_seq), None, delivery);
                 }
                 Target::Manifest(m) => {
                     let record = chain.record.clone();
                     let to = self.manifest_queue(host, &m);
-                    let delivery = Delivery::Manifest(record, m.clone(), Some(id));
+                    let delivery = Delivery::Manifest(record, m.clone(), Some(id), at);
                     self.queue_delivery(st, to, Some(&m), delivery);
                 }
             }
@@ -3082,6 +3402,10 @@ mod system_receiver_tests;
 mod shutdown_broadcast_tests;
 
 #[cfg(test)]
+#[path = "priority_tranche_tests.rs"]
+mod priority_tranche_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::package::uri::Uri;
@@ -3231,12 +3555,13 @@ mod tests {
     /// is checked against again.
     #[test]
     fn registered_targets_keep_their_matched_filter() {
-        let to = |handle, filter| Registered {
+        let to = |handle, filter, priority| Registered {
             handle,
             filter,
+            priority,
             start_seq: 7,
         };
-        let merged = merge(Vec::new(), vec![(5, to(1, 2)), (0, to(3, 0))]);
+        let merged = merge(Vec::new(), vec![to(1, 2, 5), to(3, 0, 0)]);
         let kept: Vec<_> = merged
             .iter()
             .map(|t| match t {
@@ -3400,33 +3725,33 @@ mod wait_tests {
                 &mut state,
                 QueueId::Warm(1),
                 None,
-                Delivery::Once(make(id, key), receiver),
+                Delivery::Once(make(id, key), receiver, 0),
             );
         }
         let ids: Vec<_> = state.queues[&1]
             .iter()
             .map(|d| match d {
-                Delivery::Once(r, _) => r.enqueue_id,
+                Delivery::Once(r, ..) => r.enqueue_id,
                 _ => unreachable!(),
             })
             .collect();
         assert_eq!(ids, [2, 3, 4, 5]);
         assert!(!same_delivery_group(
-            &Delivery::Chained(0, registered(1)),
-            &Delivery::Once(make(6, Some("9;-1;mac")), registered(1))
+            &Delivery::Chained(0, registered(1), 0),
+            &Delivery::Once(make(6, Some("9;-1;mac")), registered(1), 0)
         ));
         let a = system_receiver_tests::receiver("p", "p.Legacy", 10100);
         let mut b = system_receiver_tests::receiver("p", "p.Legacy", 10100);
         Arc::get_mut(&mut b).unwrap().info.info.item.label_res = 42;
-        let old = Delivery::Manifest(make(7, Some("9;-1;mac")), a, None);
+        let old = Delivery::Manifest(make(7, Some("9;-1;mac")), a, None, 0);
         assert!(same_delivery_group(
             &old,
-            &Delivery::Manifest(make(8, Some("9;-1;mac")), b, None)
+            &Delivery::Manifest(make(8, Some("9;-1;mac")), b, None, 0)
         ));
         let other = system_receiver_tests::receiver("p", "p.Other", 10100);
         assert!(!same_delivery_group(
             &old,
-            &Delivery::Manifest(make(9, Some("9;-1;mac")), other, None)
+            &Delivery::Manifest(make(9, Some("9;-1;mac")), other, None, 0)
         ));
     }
 
@@ -3452,6 +3777,7 @@ mod wait_tests {
         Registered {
             handle: 1,
             filter: 0,
+            priority: 0,
             start_seq,
         }
     }
@@ -3465,6 +3791,7 @@ mod wait_tests {
             Chain {
                 record: earlier.clone(),
                 targets: VecDeque::new(),
+                next: 0,
                 outstanding: 0,
                 result_code: 0,
                 result_data: None,
@@ -3479,18 +3806,18 @@ mod wait_tests {
         let later = record(state.enqueue_id());
         state
             .queues
-            .insert(9, VecDeque::from([Delivery::Once(later, registered(9))]));
+            .insert(9, VecDeque::from([Delivery::Once(later, registered(9), 0)]));
         assert!(state.pending_through(barrier)); // a chain between receivers
         state
             .queues
-            .insert(1, VecDeque::from([Delivery::Chained(0, registered(1))]));
+            .insert(1, VecDeque::from([Delivery::Chained(0, registered(1), 0)]));
         assert!(state.pending_through(barrier));
         state.queues.remove(&1); // next receiver is queued after the barrier
         state.cold.push(Cold {
             process: "fixture".into(),
             uid: 10100,
             package: "p".into(),
-            deliveries: VecDeque::from([Delivery::Once(earlier, registered(1))]),
+            deliveries: VecDeque::from([Delivery::Once(earlier, registered(1), 0)]),
         });
         state.chains.remove(&0);
         assert!(state.pending_through(barrier)); // cold work is not idle
@@ -3510,9 +3837,10 @@ mod wait_tests {
         {
             let mut state = host.broadcasts.state.lock().unwrap();
             let record = record(state.enqueue_id());
-            state
-                .queues
-                .insert(7, VecDeque::from([Delivery::Once(record, registered(7))]));
+            state.queues.insert(
+                7,
+                VecDeque::from([Delivery::Once(record, registered(7), 0)]),
+            );
             state.busy.insert(7);
         }
         let (send, receive) = std::sync::mpsc::channel();
