@@ -13,6 +13,7 @@ use crate::graph::Ctx;
 use crate::stop;
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant};
@@ -37,6 +38,7 @@ pub fn run(
         let binary = ctx.workspace.host_bin("aim-apps");
         let apps = Command::new(&binary)
             .args(shims_args(ctx, &dir, &data))
+            .process_group(0)
             .spawn()
             .map_err(|e| format!("aim-apps: {e}"))?;
         now.apps = Some((apps.id(), binary, dir.join("apps")));
@@ -44,6 +46,7 @@ pub fn run(
     }
     let mut init = guest_init(ctx, &data, &dir.join("display"))
         .args(extra)
+        .process_group(0)
         .spawn()
         .map_err(|e| format!("guest-init: {e}"))?;
     now.init = Some(init.id());
@@ -61,20 +64,25 @@ pub fn run(
 }
 
 /// Starts aim-display with its socket and capture file in `dir` (in window
-/// mode when `windows`) and waits for its socket.
+/// mode when `windows`) and waits for its socket. Like the other children
+/// of a command that handles its signals ([`stop::on_signals`]), it has a
+/// process group of its own: a terminal's Ctrl-C or hangup reaches only
+/// the command, whose stop ends the guest before the display.
 pub fn start_display(ctx: &Ctx, dir: &Path, windows: bool) -> Result<Child, String> {
-    start_display_binary(
-        &ctx.workspace.host_bin("aim-display"),
-        dir,
-        if windows { "windows" } else { "device" },
-    )
+    let mut command = Command::new(ctx.workspace.host_bin("aim-display"));
+    command.process_group(0);
+    spawn_display(command, dir, if windows { "windows" } else { "device" })
 }
 
 pub fn start_display_binary(binary: &Path, dir: &Path, mode: &str) -> Result<Child, String> {
+    spawn_display(Command::new(binary), dir, mode)
+}
+
+fn spawn_display(mut command: Command, dir: &Path, mode: &str) -> Result<Child, String> {
     let socket = dir.join("display");
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let _ = fs::remove_file(&socket);
-    let mut display = Command::new(binary)
+    let mut display = command
         .args(display_args(dir, mode))
         .spawn()
         .map_err(|e| format!("aim-display: {e}"))?;
