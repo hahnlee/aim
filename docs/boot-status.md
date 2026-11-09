@@ -181,7 +181,9 @@ and `reparentTasks` (mode/type filters, top-only) move app tasks into and out
 of a root: the task's layer becomes the root's child, its `parentTaskId`,
 windowing mode (undefined inherits the root's multi-window) and bounds resolve
 in the root, grown to its minimal size (`adjustForMinimalTaskDimensions`, as
-in freeform; #2808), and it keeps its own Mac window at those bounds. A root's
+in freeform, where `computeFreeformBounds` then keeps Android-given ones on
+the display, a user-moved Mac window keeping its place; #2808, #2823), and it
+keeps its own Mac window at those bounds. A root's
 `setBounds` re-resolves its tasks and `reorder` brings them with it. WCT
 `setAdjacentRoots`, `clearAdjacentRoots` and `setLaunchAdjacentFlagRoot` /
 `clearLaunchAdjacentFlagRoot` keep the roots' adjacent sets and the display
