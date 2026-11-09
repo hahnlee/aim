@@ -176,11 +176,7 @@ impl AppHost {
             .as_deref()
             != Some("false");
         let default_ignore = if ignore.is_none() {
-            let flags = platform.settings.config_flags(None)?;
-            let universal = flags.iter().any(|(k, v)| {
-                k.ends_with("/com.android.window.flags.universal_resizable_by_default")
-                    && v.as_deref() == Some("true")
-            });
+            let universal = self.flag(task_info::UNIVERSAL_RESIZABLE_FLAG)?;
             let m = self.display_metrics()?;
             universal && allowed && m.width.min(m.height) * 160 / m.density_dpi >= 600
         } else {

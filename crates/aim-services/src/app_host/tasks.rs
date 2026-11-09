@@ -2601,6 +2601,64 @@ pub(super) mod tests {
         (home, token)
     }
 
+    /// `isResizeable` takes in universal resizeability: a non-resizeable
+    /// activity on this phone is, of a task and at launch and as an alias,
+    /// once the `window_manager` device config ignores orientation requests
+    /// on all screens, unless it is a game's.
+    #[test]
+    fn the_ignore_orientation_device_config_makes_activities_resizeable() {
+        use super::super::activity::ACTIVITY_TYPE_STANDARD;
+        use super::super::settings::{Change, Table};
+        crate::system::with_discovery_binders(|host, _, _, export| {
+            let (_thread, tokens, _receive, _) = wct_tasks(host, export, Rect::default());
+            let mut stack = host.activities.stack.lock().unwrap();
+            let task = stack.tasks.iter_mut().find(|t| t.id == 7).unwrap();
+            task.intent.component = Some(crate::package::intent::ComponentName {
+                package: "p".into(),
+                class: "p.Main".into(),
+            });
+            drop(stack);
+            let observed = |category: i32| {
+                let mut info = host.activity_info_of("p", "p.Main").unwrap();
+                info.resize_mode = 0;
+                info.flags &= !0x40_0000; // FLAG_SUPPORTS_PICTURE_IN_PICTURE
+                Arc::make_mut(&mut info.info.application_info).category = category;
+                let mut records = host.activities.records.lock().unwrap();
+                records.get_mut(&tokens[0]).unwrap().info = info.clone();
+                drop(records);
+                let mut alias = info.clone();
+                alias.info.item.name = Some("p.Alias".into());
+                alias.target_activity = Some("p.Main".into());
+                let launch = [&info, &alias].map(|i| {
+                    host.valid_launch_mode(6, i, ACTIVITY_TYPE_STANDARD)
+                        .unwrap()
+                });
+                (host.organizer_task_info(7).unwrap().is_resizeable, launch)
+            };
+            // CATEGORY_UNDEFINED, CATEGORY_GAME.
+            assert_eq!(observed(-1), (false, [0, 0]));
+            host.platform()
+                .unwrap()
+                .settings
+                .insert(
+                    Table::Config,
+                    "window_manager/ignore_activity_orientation_request",
+                    &Change {
+                        value: Some("true"),
+                        tag: None,
+                        make_default: false,
+                        package: Some("android"),
+                        caller_system: true,
+                        overrideable_by_restore: false,
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(observed(-1), (true, [6, 6]));
+            assert_eq!(observed(0), (false, [0, 0]));
+        });
+    }
+
     #[test]
     fn the_root_home_task_is_behind_the_desktop_and_restarts_once_nothing_is_focused() {
         crate::system::with_discovery_binders(|host, _, _, export| {
