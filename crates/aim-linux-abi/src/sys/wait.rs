@@ -19,7 +19,7 @@
 use super::fdtab::{self, Kind};
 use aim_storage::process_namespace::ProcessIdentity;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, ESRCH};
 
@@ -648,18 +648,40 @@ pub(super) fn reap_watch(fd: i32) -> Option<(Arc<PidFd>, i32)> {
     Some((pidfd, watch))
 }
 
-/// The fd of pidfd `fd`'s reap watch, for a knote on it: the watch lives
-/// as long as the pidfd's open file, which the guest closes, not the
-/// caller.
-pub(super) fn reap_watch_fd(fd: i32) -> Option<i32> {
-    reap_watch(fd).map(|(_, watch)| watch)
+/// An epoll interest's own fd of a pidfd's reap watch, for the interest's
+/// knote on it: as Linux's epitem is per (file, fd), two dups of a pidfd
+/// in one epoll each have their own. It keeps the watch's kqueue, not the
+/// pidfd, open while the interest lasts.
+pub(super) struct ReapAlias {
+    pidfd: Weak<PidFd>,
+    watch: ReapWatch,
 }
 
-/// Whether `watch` is the reap watch of a pidfd open in this process.
-pub(super) fn is_reap_watch(watch: i32) -> bool {
-    pidfds()
-        .iter()
-        .any(|(_, p)| p.reap.get().is_some_and(|r| r.0 == watch))
+impl ReapAlias {
+    /// One for pidfd `fd`; None if `fd` is no pidfd.
+    pub(super) fn new(fd: i32) -> Option<Result<Self, errno::Errno>> {
+        let (pidfd, watch) = reap_watch(fd)?;
+        // SAFETY: duplicating the watch's fd.
+        let alias = unsafe { libc::dup(watch) };
+        if alias < 0 {
+            return Some(Err(errno::last()));
+        }
+        let watch = ReapWatch(fdtab::hide(alias));
+        fdtab::set_flags(watch.0, false, true);
+        Some(Ok(Self {
+            pidfd: Arc::downgrade(&pidfd),
+            watch,
+        }))
+    }
+
+    pub(super) fn fd(&self) -> i32 {
+        self.watch.0
+    }
+
+    /// Whether `fd` still refers to the pidfd this alias watches.
+    pub(super) fn current(&self, fd: i32) -> bool {
+        pidfd_of(fd).is_some_and(|p| std::ptr::eq(Arc::as_ptr(&p), self.pidfd.as_ptr()))
+    }
 }
 
 /// The fds referring to pidfds, with their open files.

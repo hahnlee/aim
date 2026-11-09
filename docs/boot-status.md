@@ -99,9 +99,15 @@ poll with no events and as a second edge to an edge-triggered one (#2711).
 A pidfd's state is its open file's (the fd table's), so a dup, dup3 or
 F_DUPFD copy, and a fork child's copy of either, is the same pidfd for
 pidfd_send_signal, waitid(P_PIDFD) and poll/epoll, sharing one reap watch
-until its last fd closes (#2794); two dups of one pidfd in the same epoll
-share that watch's knote, and a pidfd (a kqueue) cannot be sent over
-SCM_RIGHTS. Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited
+until its last fd closes (#2794). Each epoll interest in a pidfd has its own
+knote on that watch, so two dups in one epoll each report the reap, and
+deleting one or its one-shot firing leaves the other (#2839). Closing the
+registered fd drops its interest's knotes, the reap one included, even while a
+dup keeps the pidfd open, unlike Linux's epitem, which lasts until the file's
+last close; AIM's other fd kinds behave the same. A fork child rebuilds every
+pidfd, epoll and inotify fd close-on-exec (pidfds) or with its epoll's one
+flag, whatever each fd's own flag was (#2840), and a pidfd (a kqueue) cannot
+be sent over SCM_RIGHTS (#2838). Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited
 across fork) while its process is already a zombie gets that reap notice only
 when this same process reaps it; one held by any other process then reports
 POLLHUP only to a poll for POLLIN. An inotify is readable only while events

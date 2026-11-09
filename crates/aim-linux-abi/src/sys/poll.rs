@@ -1280,7 +1280,7 @@ mod reportable_tests {
         let cpu = thread_cpu();
         assert_eq!(waited(removed, 50).0, 0);
         assert!(thread_cpu() - cpu < 25_000_000);
-        let watch = wait::reap_watch_fd(pidfd as i32).unwrap();
+        let watch = wait::reap_watch(pidfd as i32).unwrap().1;
         close(&[pidfd]);
         // SAFETY: probing a descriptor number.
         assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } < 0);
@@ -1317,10 +1317,10 @@ mod reportable_tests {
             fs::dup3([pidfd as u64, replaced as u64, 0, 0, 0, 0]),
             replaced
         );
-        let watch = wait::reap_watch_fd(pidfd as i32).unwrap();
+        let watch = wait::reap_watch(pidfd as i32).unwrap().1;
         close(&[pidfd]);
         for fd in [duped, cloexec, replaced] {
-            assert_eq!(wait::reap_watch_fd(fd as i32), Some(watch));
+            assert_eq!(wait::reap_watch(fd as i32).unwrap().1, watch);
             assert_eq!(wait::pidfd_send_signal([fd as u64, 0, 0, 0, 0, 0]), 0);
         }
         let level = watching(duped, 0);
@@ -1352,6 +1352,53 @@ mod reportable_tests {
         assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } >= 0);
         close(&[replaced]);
         assert!(unsafe { libc::fcntl(watch, libc::F_GETFD) } < 0);
+    }
+
+    /// Two dups of one pidfd in one epoll are two interests, each with its
+    /// own reap knote, as an epitem is per file and fd: both report the
+    /// reap, and deleting another, or one firing one-shot, leaves the rest.
+    #[test]
+    fn two_dups_of_a_pidfd_in_one_epoll_each_report_the_reap() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::two_dups_of_a_pidfd_in_one_epoll_each_report_the_reap",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pidfd = wait::open_pidfd(child.id() as i32, false);
+        assert!(pidfd >= 0, "{pidfd}");
+        let once = fs::dup([pidfd as u64, 0, 0, 0, 0, 0]);
+        let level = fs::dup([pidfd as u64, 0, 0, 0, 0, 0]);
+        assert!(once >= 0 && level >= 0);
+        let ep = watching(pidfd, 0);
+        assert_eq!(ctl(ep, 1, once, 1 << 30), 0);
+        assert_eq!(ctl(ep, 1, level, 0), 0);
+        assert_eq!(ctl(ep, 2, pidfd, 0), 0);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // epoll_pwait for up to four events: (data, events) of each.
+        let ready = |ms: u64| {
+            let mut events = [0u64; 8];
+            let n = epoll::epoll_pwait([ep as u64, events.as_mut_ptr() as u64, 4, ms, 0, 0]);
+            assert!(n >= 0, "{n}");
+            let mut got: Vec<(u64, u64)> = (0..n as usize)
+                .map(|i| (events[2 * i + 1], events[2 * i]))
+                .collect();
+            got.sort();
+            got
+        };
+        let mut got = ready(5_000);
+        if got.len() < 2 {
+            got.extend(ready(1_000));
+            got.sort();
+        }
+        assert_eq!(got, [(once as u64, 0x10), (level as u64, 0x10)]);
+        assert_eq!(ready(0), [(level as u64, 0x10)]);
+        close(&[pidfd, once, level, ep]);
     }
 
     /// This thread's CPU time in nanoseconds.
