@@ -829,7 +829,13 @@ median first presented frame is 1.094 s after open (1.128 before), without an
 established launch improvement. Raw capture now waits for user-0 DE storage
 about 0.2 s on warm data; fresh data also waits for init to apply the locale.
 Full modes, HDR/color/refresh and DisplayManager information still query
-SurfaceFlinger. Host lib suites (2,105 services and 45 display checks), 15 host
+SurfaceFlinger; the app host finds it as libbinder's `waitForService` does
+(SurfaceComposerClient's composer services), waiting for its registration
+without a bound. init starts aim-system (class main) independently of
+SurfaceFlinger, as the original's zygote-start precedes `class_start core`, so
+aim-system's first `getOverlaySupport` no longer fails with "no
+SurfaceFlingerAIDL" under load (#2750; host regression, no guest boot,
+2026-11-09). Host lib suites (2,105 services and 45 display checks), 15 host
 integration checks and the matched boots pass; three M4 checks remain not run
 because their cohort input is absent (2026-10-30). The media services (mediaserver, mediaextractor,
 mediametrics, media.swcodec) start too: Codec2's software decoders take
