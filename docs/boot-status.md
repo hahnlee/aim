@@ -823,12 +823,24 @@ waits at their consumers. Property readiness now blocks on the shared
 blocks on agent attachment; both keep the named 60-second timeout (#2450).
 Host property-wake, timeout and attach regressions cover these waits; no guest
 boot was run for this change (2026-10-30).
-Three matched warm second boots reach median runtime
-publication at 3.720 s (4.516 before), `boot_completed` at 4.378 s (5.171), and
-app admission at 4.731 s (5.524). Fresh data reaches boot completion at 7.602 s
-(8.623 before); Settings is process-cold in all eight compared boots. Its warm
-median first presented frame is 1.094 s after open (1.128 before), without an
-established launch improvement. Raw capture now waits for user-0 DE storage
+Main at `0309a89af` (2026-11-09), timed from guest-init's boot start on
+the app-host image, four fresh-data boots and the second boot of each, one
+guest at a time on a shared 12-CPU Mac (1-minute load 8-23): runtime
+publication (the app host's package construction) at a median 7.32 s fresh
+(7.30-8.87) and 5.12 s warm (4.63-5.80); `sys.boot_completed` at 7.97 s
+fresh (7.94-9.59) and 5.67 s warm (5.03-6.40); app admission (user 0's CE
+storage prepared, just before it unlocks) at 7.99 s fresh (7.98-9.57) and
+5.62 s warm (5.05-6.46). An earlier series at load 15-27 was slower
+(`boot_completed` 7.94-13.57 s fresh, 5.03-7.22 s warm). On 2026-10-30 warm
+boots reached 3.720, 4.378 and 4.731 s and a fresh boot 7.602 s, with the
+host load not recorded. Admission now follows `boot_completed` within
+0.07 s. The deferred app-data preparation of 217 packages ends package
+construction in every boot: 1.14-1.34 s fresh, 0.50-0.68 s warm. The
+guest reports no file-based encryption, so the original `fixAppsDataOnBoot`
+prepares DE and CE data, then migrates and recreates every system app's
+data on each boot (#2761); batching the creations through installd's
+`createAppDataBatched` did not shorten it. Settings'
+warm median first presented frame was 1.094 s after open (2026-10-30). Raw capture now waits for user-0 DE storage
 about 0.2 s on warm data; fresh data also waits for init to apply the locale.
 Full modes, HDR/color/refresh and DisplayManager information still query
 SurfaceFlinger; the app host finds it as libbinder's `waitForService` does
