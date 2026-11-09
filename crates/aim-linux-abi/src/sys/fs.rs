@@ -8,6 +8,7 @@ use std::ffi::CString;
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 
 use super::fdtab::{self, Kind};
+use super::fown::{F_GETOWN, F_SETOWN};
 use super::{attrs, dir, event, inotify, memfd, net, space};
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENOENT, ENOTTY, ERANGE};
 use crate::sys::{guest_cstr, procfs};
@@ -22,6 +23,7 @@ pub(super) const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 pub(super) const O_NONBLOCK: u64 = 0o4000;
 const O_DSYNC: u64 = 0o10000;
+const O_ASYNC: u64 = 0o20000;
 const O_DIRECTORY: u64 = 0o40000;
 const O_NOFOLLOW: u64 = 0o100000;
 const O_LARGEFILE: u64 = 0o400000;
@@ -2405,8 +2407,6 @@ const F_SETFL: u64 = 4;
 const F_GETLK: u64 = 5;
 const F_SETLK: u64 = 6;
 const F_SETLKW: u64 = 7;
-const F_SETOWN: u64 = 8;
-const F_GETOWN: u64 = 9;
 const F_OFD_GETLK: u64 = 36;
 const F_OFD_SETLK: u64 = 37;
 const F_OFD_SETLKW: u64 = 38;
@@ -2590,6 +2590,16 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                 .unwrap_or_else(|error| -(error as i64));
         }
     }
+    if let Some(Kind::Inotify(ino)) = pin.kind() {
+        if let Some(result) = ino.owner_fcntl(cmd, arg) {
+            return result;
+        }
+        if cmd == F_SETFL
+            && let Err(error) = inotify::set_async(ino, fd, original, arg & O_ASYNC != 0)
+        {
+            return -(error as i64);
+        }
+    }
     // SAFETY: fcntl with integer arguments.
     unsafe {
         match cmd {
@@ -2609,6 +2619,9 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                     }
                     if matches!(fdtab::get(fd), Some(Kind::TracePipe(_))) {
                         flags &= !O_ACCMODE;
+                    }
+                    if matches!(fdtab::get(fd), Some(Kind::Inotify(ino)) if ino.is_async()) {
+                        flags |= O_ASYNC;
                     }
                     flags as i64
                 }

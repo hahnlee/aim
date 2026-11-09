@@ -54,6 +54,7 @@ mod fd_visibility;
 pub(crate) mod fdtab;
 mod fileattr;
 mod fork;
+mod fown;
 mod fs;
 mod fsops;
 mod fsverity_ioctl;

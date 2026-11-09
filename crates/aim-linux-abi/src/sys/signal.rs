@@ -453,6 +453,81 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
     true
 }
 
+/// Whom an O_ASYNC file signals, numbered as `pidns::syscall_pid` does.
+#[derive(Clone, Copy)]
+pub enum IoOwner {
+    Thread(i32),
+    Process(i32),
+    Group(i32),
+}
+
+const SIGIO: i32 = 29;
+const SI_KERNEL: i32 = 0x80;
+const POLL_IN: i32 = 1;
+/// `band_table[POLL_IN - 1]`: EPOLLIN | EPOLLRDNORM.
+const POLL_IN_BAND: u64 = 0x41;
+
+/// `send_sigio`: tell `owner` that file `fd` became readable, with
+/// `signum` (F_SETSIG) and a POLL_IN siginfo, or with a plain SIGIO when
+/// `signum` is 0 or could not be queued, to each target that `sigio_perm`
+/// lets the owner's setter (real and effective uids `setter`) signal.
+/// Linux reports no failure to anyone: an owner that is gone or may not be
+/// signalled takes nothing.
+pub fn send_io(owner: IoOwner, signum: i32, fd: i32, setter: (u32, u32)) {
+    let targets = match owner {
+        IoOwner::Thread(tid) if thread::find(tid).is_some() => vec![(my_pid() as i32, tid)],
+        IoOwner::Thread(tid) => vec![(thread::owner(tid), tid)],
+        IoOwner::Process(pid) => vec![(pid, 0)],
+        IoOwner::Group(pgrp) => super::pidns::group(pgrp)
+            .unwrap_or_else(|| {
+                // SAFETY: trivial.
+                (unsafe { libc::getpgrp() } == pgrp)
+                    .then(|| my_pid() as i32)
+                    .into_iter()
+                    .collect()
+            })
+            .into_iter()
+            .map(|pid| (pid, 0))
+            .collect(),
+    };
+    for (pid, tid) in targets {
+        if !super::cred::may_signal_io(pid, setter.0, setter.1) {
+            continue;
+        }
+        if signum != 0 {
+            let mut info = Siginfo::new(signum, POLL_IN);
+            info.fields[0] = POLL_IN_BAND;
+            info.fields[1] = fd as u32 as u64;
+            if send_io_to(pid, tid, info) == 0 {
+                continue;
+            }
+        }
+        send_io_to(pid, tid, Siginfo::new(SIGIO, SI_KERNEL));
+    }
+}
+
+fn send_io_to(pid: i32, tid: i32, info: Siginfo) -> i64 {
+    if pid != my_pid() as i32 {
+        return peer(pid, tid, info);
+    }
+    if unkillable_ignores(if tid == 0 { thread::main_tid() } else { tid }, info.signo) {
+        return 0;
+    }
+    if tid == 0 {
+        return send_process(info);
+    }
+    match thread::find(tid) {
+        Some(th) => send_thread(&th, info),
+        None => -(ESRCH as i64),
+    }
+}
+
+/// Take process-directed `sig` off its queue.
+#[cfg(test)]
+pub(super) fn take_process(sig: i32) -> Option<Siginfo> {
+    process().take(sig)
+}
+
 /// Poke a thread that can take process-directed `sig`: the main thread
 /// first, as Linux's `complete_signal`.
 fn route(sig: i32) {
