@@ -1437,10 +1437,16 @@ fn sys_node(tail: &str) -> Option<Node> {
     }
     Some(match tail {
         "" => Node::Dir(entries(&[
+            ("fs", dir::DT_DIR),
             ("kernel", dir::DT_DIR),
             ("net", dir::DT_DIR),
             ("vm", dir::DT_DIR),
         ])),
+        "fs" => Node::Dir(entries(&[("inotify", dir::DT_DIR)])),
+        "fs/inotify" => Node::Dir(entries(&[("max_queued_events", dir::DT_REG)])),
+        "fs/inotify/max_queued_events" => {
+            Node::File(format!("{}\n", super::inotify::MAX_QUEUED_EVENTS).into_bytes())
+        }
         "vm" => Node::Dir(entries(&[("memfd_noexec", dir::DT_REG)])),
         "vm/memfd_noexec" => {
             Node::File(format!("{}\n", super::memfd::noexec_scope().ok()?).into_bytes())
@@ -2295,6 +2301,15 @@ pub fn is_self_exe(path: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// /proc/sys/fs/inotify/max_queued_events is the limit the queue keeps.
+    #[test]
+    fn inotify_max_queued_events_is_the_queue_limit() {
+        assert!(matches!(
+            super::sys_node("fs/inotify/max_queued_events"),
+            Some(super::Node::File(bytes)) if bytes == b"16384\n"
+        ));
+    }
+
     #[test]
     fn boot_id_uses_the_authenticated_generation_record() {
         if super::super::fdtab::isolated_kernel_test(

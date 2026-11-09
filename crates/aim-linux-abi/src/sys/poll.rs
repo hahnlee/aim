@@ -2027,6 +2027,25 @@ mod reportable_tests {
             0
         );
         assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+        noise(4);
+        let (word, bit) = (notify as usize / 64, 1u64 << (notify % 64));
+        let mut set = [0u64; 16];
+        set[word] = bit;
+        let mut timeout = [0i64, 200_000_000];
+        let started = std::time::Instant::now();
+        assert_eq!(
+            pselect6([
+                notify as u64 + 1,
+                set.as_mut_ptr() as u64,
+                0,
+                0,
+                timeout.as_mut_ptr() as u64,
+                0,
+            ]),
+            0
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+        assert_eq!((set[word], timeout), (0, [0, 0]));
         assert_eq!(
             inotify::inotify_rm_watch([notify as u64, wd as u64, 0, 0, 0, 0]),
             0
