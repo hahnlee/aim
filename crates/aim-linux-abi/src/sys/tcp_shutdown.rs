@@ -34,8 +34,10 @@ impl Shutdown {
 
     /// The shutdown of a connection in TCP state `state`, with what the
     /// host already reported: EOF on the receive side, on the send side.
-    /// A closed connection (a reset, a refused or timed-out connect) is
-    /// shut both ways, as `tcp_done` sets `SHUTDOWN_MASK`.
+    /// A connection closed by `tcp_done` (a reset, a refused or timed-out
+    /// connect) is shut both ways, as it sets `SHUTDOWN_MASK`. A closed
+    /// state only comes with Darwin's EOF or HUP, which a fresh socket,
+    /// never connected, does not report.
     fn of(state: u8, receive_eof: bool, send_eof: bool) -> Self {
         Shutdown {
             // The peer's FIN has arrived, or our SHUT_RD (which changes no

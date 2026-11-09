@@ -284,14 +284,6 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             return -(error as i64);
         }
     }
-    // Darwin poll waits for a socket's pending error only through a read
-    // or write event (filt_soread, filt_sowrite), which `sock_poll`
-    // reports whatever was asked.
-    let errored = host.iter().zip(&pins).any(|(h, pin)| {
-        pin.is_some()
-            && h.events & (POLLIN | libc::POLLOUT) == 0
-            && super::net::pending_error(h.fd).is_some()
-    });
     let t0 = now_ns();
     #[cfg(test)]
     BEFORE_WAIT.with(|hook| {
@@ -309,6 +301,15 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         if let Some(polling) = &polling {
             polling.sync();
         }
+        // Darwin poll waits for a socket's pending error only through a
+        // read or write event (filt_soread, filt_sowrite), which
+        // `sock_poll` reports whatever was asked. Checked on each pass, as
+        // another thread may take the error before it is reported.
+        let errored = host.iter().zip(&pins).any(|(h, pin)| {
+            pin.is_some()
+                && h.events & (POLLIN | libc::POLLOUT) == 0
+                && super::net::pending_error(h.fd).is_some()
+        });
         let n = host_poll(&mut host, if invalid || errored { 0 } else { left }, mask);
         if n < 0 {
             return n;
@@ -360,7 +361,8 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             }
             // POLLERR for a pending socket error, which Darwin reports as
             // readable, writable or not at all; readable only with data
-            // queued or at EOF.
+            // queued or at EOF. Darwin's queued count includes each
+            // datagram's address, so a zero-length one counts.
             if pin.is_some() && (h.revents != 0 || h.events & (POLLIN | libc::POLLOUT) == 0) {
                 if let Some(queued) = super::net::pending_error(h.fd) {
                     g.revents |= POLLERR;
@@ -373,7 +375,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
                 ready += 1;
             }
         }
-        if ready > 0 || n == 0 || left == 0 {
+        if ready > 0 || n == 0 && !errored || left == 0 {
             user_try!(update_timeout(ts, t0));
             for (index, entry) in guest.iter().enumerate() {
                 user_write!(fds + index as u64 * 8 + 6, i16, entry.revents);
@@ -927,14 +929,9 @@ mod reportable_tests {
         }
     }
 
-    /// A guest IPv4 socket of `kind`, non-blocking, connected to a closed
-    /// loopback port: (fd, connect's result).
-    fn refused(kind: u64) -> (i64, i64) {
-        let port = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+    /// A guest IPv4 socket of `kind`, non-blocking, connected to loopback
+    /// `port`: (fd, connect's result).
+    fn connected_to(kind: u64, port: u16) -> (i64, i64) {
         let fd = crate::sys::net::socket([2, kind | O_NONBLOCK, 0, 0, 0, 0]);
         assert!(fd >= 0, "socket {fd}");
         let mut address = [0u8; 16];
@@ -943,6 +940,176 @@ mod reportable_tests {
         address[4..8].copy_from_slice(&[127, 0, 0, 1]);
         let connected = crate::sys::net::connect([fd as u64, address.as_ptr() as u64, 16, 0, 0, 0]);
         (fd, connected)
+    }
+
+    /// A guest socket of `kind` connected to a closed loopback port.
+    fn refused(kind: u64) -> (i64, i64) {
+        let port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        connected_to(kind, port)
+    }
+
+    /// recvfrom into `buffer`, without an address.
+    fn received(fd: i64, buffer: &mut [u8]) -> i64 {
+        crate::sys::net::recvfrom([
+            fd as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            0,
+            0,
+            0,
+        ])
+    }
+
+    /// An edge-triggered interest reports the error's wakeup once
+    /// (`ep_poll_callback`), however long it stays pending.
+    #[test]
+    fn an_edge_triggered_interest_reports_a_pending_error_once() {
+        let _view = crate::vfs::test_view();
+        let (fd, connected) = refused(2);
+        assert_eq!(connected, 0);
+        let edge = watching(fd, 0x1 | 1 << 31);
+        let byte = 0u8;
+        assert_eq!(
+            crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
+            1
+        );
+        assert_eq!(waited(edge, 2_000), (1, 0x8));
+        assert_eq!(waited(edge, 0).0, 0);
+        assert_eq!(polled(fd, POLLIN), (1, POLLERR));
+        close(&[fd, edge]);
+    }
+
+    /// A queued datagram, a zero-length one included, is EPOLLIN with a
+    /// pending error's EPOLLERR (`datagram_poll`, `sock_poll`).
+    #[test]
+    fn a_queued_datagram_is_readable_with_a_pending_error() {
+        let _view = crate::vfs::test_view();
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (fd, connected) = connected_to(2, peer.local_addr().unwrap().port());
+        assert_eq!(connected, 0);
+        let mut local = [0u8; 16];
+        let mut len = 16u32;
+        assert_eq!(
+            crate::sys::net::getsockname([
+                fd as u64,
+                local.as_mut_ptr() as u64,
+                &mut len as *mut u32 as u64,
+                0,
+                0,
+                0
+            ]),
+            0
+        );
+        let port = u16::from_be_bytes([local[2], local[3]]);
+        peer.send_to(&[], ("127.0.0.1", port)).unwrap();
+        drop(peer);
+        let readable = watching(fd, 0x1);
+        assert_eq!(waited(readable, 2_000), (1, 0x1));
+        let byte = 0u8;
+        assert_eq!(
+            crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
+            1
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while polled(fd, POLLIN).1 & POLLERR == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(polled(fd, POLLIN), (1, POLLIN | POLLERR));
+        assert_eq!(waited(readable, 0), (1, 0x1 | 0x8));
+        close(&[fd, readable]);
+    }
+
+    /// A reset with data queued: `tcp_reset` sets ECONNRESET and
+    /// `tcp_done` shuts the socket both ways, so it polls IN, OUT, HUP and
+    /// ERR, and stays readable once SO_ERROR took the error.
+    #[test]
+    fn a_reset_with_data_queued_is_readable_and_pollerr() {
+        let _view = crate::vfs::test_view();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (fd, connected) = connected_to(1, listener.local_addr().unwrap().port());
+        assert_eq!(connected, -115);
+        let (peer, _) = listener.accept().unwrap();
+        use std::io::Write;
+        (&peer).write_all(b"x").unwrap();
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: setting SO_LINGER on our own socket.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    peer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&linger as *const libc::linger).cast(),
+                    std::mem::size_of::<libc::linger>() as u32,
+                )
+            },
+            0
+        );
+        drop(peer);
+        let both = watching(fd, 0x1 | 0x4);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while waited(both, 0).1 & 0x8 == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(waited(both, 0), (1, 0x1 | 0x4 | 0x8 | 0x10));
+        assert_eq!(
+            polled(fd, POLLIN | POLLOUT),
+            (1, POLLIN | POLLOUT | POLLERR | POLLHUP)
+        );
+        let mut error = [0i32; 2];
+        let mut len = 4u32;
+        assert_eq!(
+            crate::sys::net::getsockopt([
+                fd as u64,
+                1,
+                4,
+                error.as_mut_ptr() as u64,
+                &mut len as *mut u32 as u64,
+                0,
+            ]),
+            0
+        );
+        assert_eq!(error[0], 104);
+        assert_eq!(waited(both, 0), (1, 0x1 | 0x4 | 0x10));
+        assert_eq!(
+            polled(fd, POLLIN | POLLOUT),
+            (1, POLLIN | POLLOUT | POLLHUP)
+        );
+        close(&[fd, both]);
+    }
+
+    /// An AF_UNIX socket has no pending error: poll and epoll report its
+    /// readiness alone.
+    #[test]
+    fn a_unix_socket_reports_no_error() {
+        let _view = crate::vfs::test_view();
+        let mut pair = [0i32; 2];
+        assert_eq!(
+            crate::sys::net::socketpair([1, 1 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+            0
+        );
+        let (fd, other) = (pair[0] as i64, pair[1] as i64);
+        let byte = 0u8;
+        assert_eq!(
+            crate::sys::net::sendto([other as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
+            1
+        );
+        let both = watching(fd, 0x1 | 0x4);
+        assert_eq!(waited(both, 0), (1, 0x1 | 0x4));
+        assert_eq!(polled(fd, POLLIN | POLLOUT), (1, POLLIN | POLLOUT));
+        assert_eq!(polled(fd, 0), (0, 0));
+        let mut buffer = [0u8; 4];
+        assert_eq!(received(fd, &mut buffer), 1);
+        assert_eq!(waited(both, 0), (1, 0x4));
+        assert_eq!(polled(fd, POLLIN), (0, 0));
+        close(&[fd, other, both]);
     }
 
     /// `sock_poll` reports EPOLLERR while `sk_err` is set, here by the
@@ -973,11 +1140,8 @@ mod reportable_tests {
             assert_eq!(polled(fd, POLLOUT), (1, POLLOUT | POLLERR));
             if consume == "recv" {
                 let mut buffer = [0u8; 4];
-                let mut received = || {
-                    crate::sys::net::recvfrom([fd as u64, buffer.as_mut_ptr() as u64, 4, 0, 0, 0])
-                };
-                assert_eq!(received(), -111);
-                assert_eq!(received(), -(crate::errno::EAGAIN as i64));
+                assert_eq!(received(fd, &mut buffer), -111);
+                assert_eq!(received(fd, &mut buffer), -(crate::errno::EAGAIN as i64));
             } else {
                 let mut error = [0i32; 2];
                 let mut len = 4u32;
