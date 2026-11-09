@@ -599,6 +599,23 @@ impl LocalProcess {
         binder
     }
 
+    /// Stops serving callback node `binder` now unless the driver
+    /// reported a reference to it, as when the call that was to send it
+    /// failed; a referenced one still goes with its last reference.
+    pub fn drop_callback(&self, binder: Binder) {
+        let Binder::Local(ptr) = binder else {
+            return;
+        };
+        let mut callbacks = self.callbacks.lock().unwrap();
+        if callbacks.get(&ptr) != Some(&0) {
+            return;
+        }
+        callbacks.remove(&ptr);
+        drop(callbacks);
+        let service = self.services.lock().unwrap().remove(&ptr);
+        drop(service);
+    }
+
     /// The driver's weak references to callback node `ptr` changed by
     /// `delta` (`BR_INCREFS`, `BR_DECREFS`); the last one releases it.
     fn callback_refs(&self, ptr: u64, delta: i32) {
@@ -1858,6 +1875,22 @@ mod tests {
             reply.write_binder(Some(callback));
             Ok(reply)
         }
+    }
+
+    /// A callback node never sent goes when dropped; a service stays.
+    #[test]
+    fn an_unsent_callback_node_goes_when_dropped() {
+        let driver = Driver::new();
+        let process = open(&driver, 211, 1000);
+        let callback = process.add_callback(Arc::new(Sink(AtomicI32::new(0))));
+        let service = process.add_service(Arc::new(Sink(AtomicI32::new(0))));
+        process.drop_callback(callback);
+        process.drop_callback(service);
+        let (Binder::Local(callback), Binder::Local(service)) = (callback, service) else {
+            unreachable!()
+        };
+        assert!(process.local_service(callback).is_none());
+        assert!(process.local_service(service).is_some());
     }
 
     /// A callback node goes when the last process holding it lets it go; a

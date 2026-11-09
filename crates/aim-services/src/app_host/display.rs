@@ -351,7 +351,9 @@ fn find_service(process: &LocalProcess, name: &str) -> Result<Option<Strong>, St
 /// connect with: now if registered, else once servicemanager reports its
 /// registration (`registerForNotifications`). As libbinder, it checks again
 /// each second it waited, for a report no pool thread was free to take,
-/// and waits without a bound.
+/// and waits without a bound. libbinder looks up with `getService2`, which
+/// also starts a lazy service; `checkService` finds the same of one init
+/// starts, as SurfaceFlinger.
 pub(super) fn wait_for_service(process: &Arc<LocalProcess>, name: &str) -> Result<Strong, String> {
     if let Some(service) = find_service(process, name)? {
         return Ok(service);
@@ -362,8 +364,16 @@ pub(super) fn wait_for_service(process: &Arc<LocalProcess>, name: &str) -> Resul
         changed: Condvar::new(),
     });
     let callback = process.add_callback(waiter.clone());
-    notifications(process, name, callback, sm::REGISTER_FOR_NOTIFICATIONS)?;
-    let service = loop {
+    if let Err(e) = notifications(process, name, callback, sm::REGISTER_FOR_NOTIFICATIONS) {
+        process.drop_callback(callback);
+        return Err(e);
+    }
+    let _registration = Registration {
+        process,
+        name,
+        callback,
+    };
+    Ok(loop {
         let registered = waiter.registered.lock().unwrap();
         let (mut registered, _) = waiter
             .changed
@@ -377,9 +387,30 @@ pub(super) fn wait_for_service(process: &Arc<LocalProcess>, name: &str) -> Resul
         if let Some(service) = find_service(process, name)? {
             break service;
         }
-    };
-    notifications(process, name, callback, sm::UNREGISTER_FOR_NOTIFICATIONS)?;
-    Ok(service)
+    })
+}
+
+/// A [`wait_for_service`]'s registration, unregistered however the wait
+/// ends; as libbinder's deferred unregistration, a failure to does not
+/// fail the wait.
+struct Registration<'a> {
+    process: &'a LocalProcess,
+    name: &'a str,
+    callback: Binder,
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        let unregistered = notifications(
+            self.process,
+            self.name,
+            self.callback,
+            sm::UNREGISTER_FOR_NOTIFICATIONS,
+        );
+        if let Err(e) = unregistered {
+            eprintln!("app host: {e}");
+        }
+    }
 }
 
 /// `registerForNotifications` or `unregisterForNotifications` of
@@ -516,6 +547,7 @@ mod tests {
     use super::*;
     use aim_binder_driver::{Credentials, Device, Driver, File, GuestProcess, errno, uapi::*};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
 
     #[test]
@@ -564,6 +596,10 @@ mod tests {
         process: Weak<LocalProcess>,
         names: Mutex<HashMap<String, Strong>>,
         callbacks: Mutex<Vec<(String, Strong)>>,
+        /// Whether a registration is reported to its callbacks.
+        notifies: bool,
+        /// Lookups fail, as a dead servicemanager's would.
+        failing: AtomicBool,
         waiting: mpsc::Sender<Result<String, String>>,
     }
 
@@ -581,13 +617,8 @@ mod tests {
                     let (Some(name), Some(Binder::Handle(h))) = (a.name, a.service) else {
                         return Err(BAD_VALUE);
                     };
-                    for (_, callback) in self
-                        .callbacks
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|c| c.0 == name)
-                    {
+                    let callbacks = self.callbacks.lock().unwrap();
+                    for (_, callback) in callbacks.iter().filter(|c| self.notifies && c.0 == name) {
                         let mut data = Parcel::new();
                         sc::OnRegistration {
                             name: Some(name.clone()),
@@ -600,6 +631,9 @@ mod tests {
                     sm::write_add_service_reply(&mut p);
                 }
                 sm::CHECK_SERVICE => {
+                    if self.failing.load(Ordering::Relaxed) {
+                        return Err(DEAD_OBJECT);
+                    }
                     let a = sm::CheckService::read(&mut call.data)?;
                     let names = self.names.lock().unwrap();
                     let found = names.get(a.name.as_deref().unwrap()).map(Strong::binder);
@@ -673,82 +707,140 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_query_before_surfaceflinger_registers_completes_once_it_does() {
-        let driver = Driver::new();
-        let open = |pid| {
-            LocalProcess::open(
-                &driver,
-                Device::Binder,
-                Credentials {
-                    pid,
-                    euid: 1000,
-                    security_context: None,
-                },
-            )
-        };
-        let (manager, sf, host) = (open(97261), open(97262), open(97263));
-        // The registration a waiting query asks for, or the query's end.
-        let (waiting, events) = mpsc::channel();
-        let registry = Arc::new(Manager {
-            process: Arc::downgrade(&manager),
-            names: Mutex::new(HashMap::new()),
-            callbacks: Mutex::new(Vec::new()),
-            waiting: waiting.clone(),
-        });
-        let Binder::Local(ptr) = manager.add_service(registry.clone()) else {
-            unreachable!()
-        };
-        let mut object = FlatBinderObject {
-            kind: BINDER_TYPE_BINDER,
-            flags: 0,
-            binder: ptr,
-            cookie: ptr,
-        }
-        .encode();
-        driver
-            .ioctl(
-                manager.proc_handle(),
-                97261,
-                BINDER_SET_CONTEXT_MGR_EXT,
-                &mut object,
-                &mut NoMemory,
-            )
-            .unwrap();
-        for process in [&manager, &sf, &host] {
-            process.start();
-        }
-        let query = std::thread::spawn({
-            let host = host.clone();
-            move || {
-                let support = Display::overlay_support(&host);
-                waiting.send(Err(format!("{support:?}"))).unwrap();
-                support
+    /// servicemanager, SurfaceFlinger's process and the app host's, with
+    /// an overlay-support query of the app host's waiting for SurfaceFlinger
+    /// to register.
+    struct Waiting {
+        manager: Arc<LocalProcess>,
+        sf: Arc<LocalProcess>,
+        host: Arc<LocalProcess>,
+        registry: Arc<Manager>,
+        query: std::thread::JoinHandle<Result<Vec<u8>, String>>,
+        _events: mpsc::Receiver<Result<String, String>>,
+    }
+
+    impl Waiting {
+        fn start(pid: i32, notifies: bool) -> Self {
+            let driver = Driver::new();
+            let open = |pid| {
+                LocalProcess::open(
+                    &driver,
+                    Device::Binder,
+                    Credentials {
+                        pid,
+                        euid: 1000,
+                        security_context: None,
+                    },
+                )
+            };
+            let (manager, sf, host) = (open(pid), open(pid + 1), open(pid + 2));
+            // The registration a waiting query asks for, or the query's end.
+            let (waiting, events) = mpsc::channel();
+            let registry = Arc::new(Manager {
+                process: Arc::downgrade(&manager),
+                names: Mutex::new(HashMap::new()),
+                callbacks: Mutex::new(Vec::new()),
+                notifies,
+                failing: AtomicBool::new(false),
+                waiting: waiting.clone(),
+            });
+            let Binder::Local(ptr) = manager.add_service(registry.clone()) else {
+                unreachable!()
+            };
+            let mut object = FlatBinderObject {
+                kind: BINDER_TYPE_BINDER,
+                flags: 0,
+                binder: ptr,
+                cookie: ptr,
             }
-        });
-        assert_eq!(events.recv().unwrap(), Ok(SERVICE.to_string()));
-        let mut p = Parcel::new();
-        sm::AddService {
-            name: Some(SERVICE.into()),
-            service: Some(sf.add_service(Arc::new(Composer))),
-            allow_isolated: false,
-            dump_priority: 0,
+            .encode();
+            driver
+                .ioctl(
+                    manager.proc_handle(),
+                    pid,
+                    BINDER_SET_CONTEXT_MGR_EXT,
+                    &mut object,
+                    &mut NoMemory,
+                )
+                .unwrap();
+            for process in [&manager, &sf, &host] {
+                process.start();
+            }
+            let query = std::thread::spawn({
+                let host = host.clone();
+                move || {
+                    let support = Display::overlay_support(&host);
+                    waiting.send(Err(format!("{support:?}"))).unwrap();
+                    support
+                }
+            });
+            assert_eq!(events.recv().unwrap(), Ok(SERVICE.to_string()));
+            Self {
+                manager,
+                sf,
+                host,
+                registry,
+                query,
+                _events: events,
+            }
         }
-        .write(&mut p);
-        let reply = sf.transact(0, sm::ADD_SERVICE, &p, false).unwrap();
-        sm::read_add_service_reply(&mut reply.reader())
-            .unwrap()
-            .unwrap();
-        let support = query.join().unwrap().unwrap();
-        let words: Vec<_> = support
+
+        fn register(&self) {
+            let mut p = Parcel::new();
+            sm::AddService {
+                name: Some(SERVICE.into()),
+                service: Some(self.sf.add_service(Arc::new(Composer))),
+                allow_isolated: false,
+                dump_priority: 0,
+            }
+            .write(&mut p);
+            let reply = self.sf.transact(0, sm::ADD_SERVICE, &p, false).unwrap();
+            sm::read_add_service_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap();
+        }
+
+        /// The query's result, once it unregistered.
+        fn finish(self) -> Result<Vec<u8>, String> {
+            let support = self.query.join().unwrap();
+            assert!(self.registry.callbacks.lock().unwrap().is_empty());
+            self.registry.names.lock().unwrap().clear();
+            for process in [&self.host, &self.sf, &self.manager] {
+                process.shutdown().unwrap();
+            }
+            support
+        }
+    }
+
+    fn words(support: &[u8]) -> Vec<i32> {
+        support
             .chunks(4)
             .map(|w| i32::from_le_bytes(w.try_into().unwrap()))
-            .collect();
-        assert_eq!(words, [1, 8, 7]);
-        assert!(registry.callbacks.lock().unwrap().is_empty());
-        registry.names.lock().unwrap().clear();
-        for process in [&host, &sf, &manager] {
-            process.shutdown().unwrap();
-        }
+            .collect()
+    }
+
+    #[test]
+    fn a_query_before_surfaceflinger_registers_completes_once_it_does() {
+        let waiting = Waiting::start(97261, true);
+        waiting.register();
+        assert_eq!(words(&waiting.finish().unwrap()), [1, 8, 7]);
+    }
+
+    /// A registration whose report is never delivered is found by the check
+    /// each second of waiting.
+    #[test]
+    fn a_waiting_query_checks_again_each_second() {
+        let waiting = Waiting::start(97271, false);
+        waiting.register();
+        assert_eq!(words(&waiting.finish().unwrap()), [1, 8, 7]);
+    }
+
+    /// A lookup failing while waiting fails the query, which unregisters.
+    #[test]
+    fn a_failed_wait_unregisters() {
+        let waiting = Waiting::start(97281, false);
+        waiting.registry.failing.store(true, Ordering::Relaxed);
+        let error = waiting.finish().unwrap_err();
+        assert!(error.starts_with("servicemanager: "), "{error}");
     }
 }
