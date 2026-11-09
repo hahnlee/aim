@@ -43,6 +43,9 @@ const SIGCONT: i32 = 18;
 pub(super) const UNBLOCKABLE: u64 = bit(SIGKILL) | bit(SIGSTOP);
 /// Delivered before other pending signals, as Linux's `dequeue_synchronous_signal`.
 const SYNCHRONOUS: u64 = bit(4) | bit(5) | bit(7) | bit(8) | bit(11) | bit(31);
+/// Linux's `SIG_KERNEL_COREDUMP_MASK`: their default action dumps core
+/// from the thread that takes them.
+const COREDUMP: u64 = SYNCHRONOUS | bit(3) | bit(6) | bit(24) | bit(25);
 
 const SA_NOCLDSTOP: u64 = 1;
 const SA_NOCLDWAIT: u64 = 2;
@@ -87,6 +90,19 @@ fn default_action(sig: i32) -> Default {
         19..=22 => Default::Stop,
         _ => Default::Die,
     }
+}
+
+/// Linux's `complete_signal`: a signal whose default action kills, sent to
+/// a thread that does not block it (`real_blocked`; one waiting for it in
+/// sigtimedwait does), ends the whole group at once, whatever its threads
+/// are blocked in. A core-dumping signal and one to a traced process are
+/// left to the thread that takes it.
+fn kills_group(th: &Thread, sig: i32) -> bool {
+    COREDUMP & bit(sig) == 0
+        && th.sig.mask() & bit(sig) == 0
+        && action(sig).handler == SIG_DFL
+        && matches!(default_action(sig), Default::Die)
+        && super::ptrace::tracer_of(th.tid) == 0
 }
 
 fn ignored(sig: i32, act: &KSigaction) -> bool {
@@ -338,6 +354,9 @@ fn send_thread(th: &Thread, info: Siginfo) -> i64 {
             }
         });
     }
+    if kills_group(th, sig) {
+        die(sig);
+    }
     0
 }
 
@@ -396,13 +415,16 @@ pub fn send_timer(info: Siginfo, tid: Option<i32>) -> bool {
             }
         });
     }
+    if kills_group(&th, sig) {
+        die(sig);
+    }
     true
 }
 
 /// Poke a thread that can take process-directed `sig`: the main thread
 /// first, as Linux's `complete_signal`.
 fn route(sig: i32) {
-    thread::with_table(|t| {
+    let target = thread::with_table(|t| {
         let main = thread::main_tid();
         let target = t
             .get(&main)
@@ -414,7 +436,11 @@ fn route(sig: i32) {
         if let Some(th) = target {
             poke_signal_locked(th, sig);
         }
+        target.cloned()
     });
+    if target.is_some_and(|th| kills_group(&th, sig)) {
+        die(sig);
+    }
 }
 
 /// Called by an exiting thread, out of the table: pending process signals
@@ -440,6 +466,9 @@ struct External {
 }
 
 static EXTERNAL: AtomicU64 = AtomicU64::new(0);
+/// Unparked by the host handler that records an external signal: the
+/// handler can take no locks, so [`route_external`] routes it.
+static EXTERNAL_ROUTER: park::Parker = park::Parker::new();
 static EXTERNAL_INFO: [External; 32] = [const {
     External {
         from: AtomicU64::new(0),
@@ -489,6 +518,16 @@ fn unkillable_drops(pid: i32, sig: i32) -> bool {
     pid != libc_getpid()
         && super::pidns::contains(pid)
         && unkillable_ignores(thread::main_tid(), sig)
+}
+
+/// The host thread that routes external signals, as a sender in the
+/// process would: [`route`] reaches a thread blocked where only its waker
+/// interrupts it (a binder read), and a fatal signal ends the process.
+fn route_external() {
+    loop {
+        EXTERNAL_ROUTER.park(0, None);
+        drain_external();
+    }
 }
 
 fn drain_external() {
@@ -1088,17 +1127,18 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
         Some(th) if THREAD_DIRECTED & bit(sig) != 0 => {
             th.sig.own.fetch_or(bit(sig), SeqCst);
         }
-        _ => record_external(sig, si),
-    }
-    match th {
-        None => thread::poke_main_from_handler(CARRIER),
-        Some(th) => {
-            th.sig.attn.store(1, SeqCst);
-            // The thread may be about to park (after its last check).
-            th.park.unpark();
-            // SAFETY: this thread's context and interrupted state.
-            unsafe { act_now(ctx, m) };
+        _ => {
+            record_external(sig, si);
+            EXTERNAL_ROUTER.unpark();
         }
+    }
+    // Interrupted in guest code, this thread takes it at once.
+    if let Some(th) = th {
+        th.sig.attn.store(1, SeqCst);
+        // The thread may be about to park (after its last check).
+        th.park.unpark();
+        // SAFETY: this thread's context and interrupted state.
+        unsafe { act_now(ctx, m) };
     }
     None
 }
@@ -1198,7 +1238,8 @@ fn forward(hsig: i32, extra: i32) {
 
 /// Install the host handlers: faults, the carrier, and a forwarder for
 /// every signal whose Linux default is not "ignore" (a forwarded signal the
-/// guest blocks must stay pending instead of taking the host default).
+/// guest blocks must stay pending instead of taking the host default), and
+/// start the thread that routes forwarded ones.
 /// Handlers run on each thread's host alternate stack and never restart
 /// host syscalls, so a blocked thread notices the guest signal. Default-ignored
 /// signals still need forwarding: a guest blocked SIGCHLD is synchronously
@@ -1206,6 +1247,10 @@ fn forward(hsig: i32, extra: i32) {
 pub fn install_host_handlers() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        std::thread::Builder::new()
+            .name("linux-abi-signals".into())
+            .spawn(route_external)
+            .expect("the external signal router thread");
         forward(CARRIER, 0);
         for sig in 1..32 {
             let h = to_host(sig);

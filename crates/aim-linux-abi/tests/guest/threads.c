@@ -1126,6 +1126,44 @@ static void wait_external_sigquit(void) {
   exit(0);
 }
 
+// SIGTERM from another process (the harness) while every thread waits in
+// a futex: with the default action it ends the process at once (signal(7));
+// a handler runs, and an ignored one changes nothing.
+static _Atomic uint32_t term_word;
+
+static void on_term(int sig) {
+  (void)sig;
+  atomic_store(&term_word, 1);
+  futex(&term_word, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0);
+}
+
+static void *term_waiter(void *arg) {
+  static _Atomic uint32_t never;
+  (void)arg;
+  for (;;) futex(&never, FUTEX_WAIT_PRIVATE, 0, NULL, NULL, 0);
+  return NULL;
+}
+
+static void wait_external_sigterm(const char *mode) {
+  if (strcmp(mode, "handled") == 0) {
+    struct sigaction sa = {.sa_handler = on_term};
+    sigaction(SIGTERM, &sa, NULL);
+  } else if (strcmp(mode, "ignored") == 0) {
+    signal(SIGTERM, SIG_IGN);
+  }
+  atomic_store(&term_word, 2);
+  pthread_t t;
+  pthread_create(&t, NULL, term_waiter, NULL);
+  printf("ready\n");
+  struct timespec second = {1, 0};
+  while (atomic_load(&term_word) == 2 &&
+         !(futex(&term_word, FUTEX_WAIT_PRIVATE, 2, strcmp(mode, "ignored") == 0 ? &second : NULL, NULL, 0) == -1 &&
+           errno == ETIMEDOUT)) {
+  }
+  printf("%s\n", atomic_load(&term_word) == 1 ? "handled" : "survived");
+  exit(0);
+}
+
 // abort() dies of SIGABRT; run as its own process by the harness. The
 // debuggerd handler the linker installs is reset first: it needs
 // crash_dump, which this root does not have.
@@ -1178,6 +1216,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && strcmp(argv[1], "main_exit") == 0) main_exit();
   if (argc == 2 && strcmp(argv[1], "segv_default") == 0) segv_default();
   if (argc == 2 && strcmp(argv[1], "external_sigquit") == 0) wait_external_sigquit();
+  if (argc == 3 && strcmp(argv[1], "external_sigterm") == 0) wait_external_sigterm(argv[2]);
   for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
     int run = argc == 1;
     for (int a = 1; a < argc; a++) run |= strcmp(argv[a], tests[i].name) == 0;

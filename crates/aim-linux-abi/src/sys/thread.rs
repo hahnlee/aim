@@ -161,10 +161,6 @@ static EXITED_CPU: Mutex<(u64, u64)> = Mutex::new((0, 0));
 /// exits with it when the last thread does), else -1.
 static LEADER_EXIT: AtomicI32 = AtomicI32::new(-1);
 static GROUP_EXIT: AtomicBool = AtomicBool::new(false);
-/// For host signals that land on a non-guest thread: the main thread's
-/// pthread and record, reachable without locks.
-static MAIN_PTHREAD: AtomicUsize = AtomicUsize::new(0);
-static MAIN_THREAD: AtomicUsize = AtomicUsize::new(0);
 
 pub fn group_exiting() -> bool {
     GROUP_EXIT.load(SeqCst)
@@ -460,25 +456,6 @@ pub fn name() -> [u8; 16] {
     })
 }
 
-/// Poke the main thread from a host signal handler on a thread that runs
-/// no guest code (no locks: the handler may have interrupted their owner).
-pub fn poke_main_from_handler(sig: i32) {
-    let main = MAIN_THREAD.load(SeqCst) as *const Thread;
-    // SAFETY: the main thread's record is never freed (see `exit`).
-    if let Some(th) = unsafe { main.as_ref() } {
-        if !th.accepts_signals() {
-            return;
-        }
-        th.sig.attn.store(1, SeqCst);
-        th.park.unpark();
-    }
-    let p = MAIN_PTHREAD.load(SeqCst);
-    if p != 0 {
-        // SAFETY: Darwin keeps the main thread's pthread_t valid.
-        unsafe { libc::pthread_kill(p as libc::pthread_t, sig) };
-    }
-}
-
 fn alloc_tid(
     t: &HashMap<i32, Arc<Thread>>,
 ) -> Result<super::pidns::tids::Reservation, crate::errno::Errno> {
@@ -509,10 +486,6 @@ pub fn register_current(ctx: *mut GuestContext, stacks: HostStacks) {
     th.pthread
         .store(unsafe { libc::pthread_self() } as usize, SeqCst);
     super::procrec::running(th.tid, host_id(th.pthread.load(SeqCst)));
-    if th.tid == pid() {
-        MAIN_PTHREAD.store(th.pthread.load(SeqCst), SeqCst);
-        MAIN_THREAD.store(Arc::as_ptr(&th) as usize, SeqCst);
-    }
     // SAFETY: `ctx` is the caller's fresh context.
     unsafe {
         (*ctx).tid = th.tid as u64;
@@ -770,7 +743,7 @@ pub fn exit(a: [u64; 6]) -> ! {
     let ctx = th.ctx;
     let stacks = th.stacks.lock().unwrap().take();
     // SAFETY: nothing runs on this thread's context, stacks or record after
-    // this; the main thread's record stays (host handlers may reach it).
+    // this; the main thread's record stays.
     unsafe {
         context::unbind(stacks);
         if !main {

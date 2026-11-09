@@ -161,6 +161,56 @@ fn signal_from_another_process_reaches_sigwait() {
     assert!(child.wait().unwrap().success());
 }
 
+/// SIGTERM from another process while every guest thread waits in a
+/// futex: the default action ends the process with the signal at once
+/// (signal(7)); a handled or ignored SIGTERM leaves it running.
+#[test]
+fn external_sigterm_ends_a_blocked_process_unless_handled_or_ignored() {
+    use std::io::{BufRead, BufReader};
+    use std::time::{Duration, Instant};
+    let r = root().expect("required pinned original image and NDK: NOT RUN if missing");
+    for (mode, expect) in [
+        ("default", None),
+        ("handled", Some("handled")),
+        ("ignored", Some("survived")),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_linux-run"))
+            .arg("--root")
+            .arg(&r.0)
+            .args(["/data/local/tmp/threads", "external_sigterm", mode])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        assert_eq!(lines.next().unwrap().unwrap(), "ready", "{mode}");
+        // SAFETY: signalling our own child.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let sent = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if sent.elapsed() > Duration::from_secs(10) {
+                child.kill().unwrap();
+                panic!("{mode}: still running 10 s after SIGTERM");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let elapsed = sent.elapsed();
+        match expect {
+            None => {
+                assert_eq!(status.signal(), Some(libc::SIGTERM), "{mode}: {status:?}");
+                assert!(elapsed < Duration::from_millis(500), "{mode}: {elapsed:?}");
+            }
+            Some(line) => {
+                assert!(status.success(), "{mode}: {status:?}");
+                assert_eq!(lines.next().unwrap().unwrap(), line, "{mode}");
+            }
+        }
+    }
+}
+
 /// Original bionic pthread_kill targets its clone TID, even while SIGQUIT is blocked.
 #[test]
 fn directed_blocked_sigquit_wakes_and_joins_its_original_bionic_target() {

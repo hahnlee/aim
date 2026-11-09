@@ -111,10 +111,6 @@ fn unregister(ctx: &mut GuestContext) {
     let stacks = th.stacks.lock().unwrap().take();
     unsafe {
         context::unbind(stacks);
-        if th.tid == pid() {
-            MAIN_THREAD.store(0, SeqCst);
-            MAIN_PTHREAD.store(0, SeqCst);
-        }
         drop(Arc::from_raw(ctx.thread));
         ctx.thread = std::ptr::null();
     }

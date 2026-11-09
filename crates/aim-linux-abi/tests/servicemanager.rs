@@ -283,6 +283,25 @@ fn original_servicemanager_serves_original_clients() {
     let call = guest.run_ok(&[bench, "call", name, iterations]);
     eprintln!("{}", call.trim());
     assert!(call.starts_with("binder call: n="), "{call}");
+    // SIGTERM with the default action ends the service at once, though all
+    // its threads wait in binder reads (signal(7); #2765).
+    // SAFETY: signalling our own child.
+    unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
+    let sent = Instant::now();
+    let mut server = server;
+    let status = loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            sent.elapsed() < Duration::from_secs(2),
+            "the service outlived SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+    eprintln!("binder service ended {:?} after SIGTERM", sent.elapsed());
     // servicemanager holds a death notification for each service.
     drop(server);
     let gone = format!("Service {name}: not found");
