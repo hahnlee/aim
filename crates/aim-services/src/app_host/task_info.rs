@@ -867,6 +867,7 @@ pub(super) mod tests {
                 id,
                 affinity: None,
                 real_activity: format!("p{id}/A"),
+                package: format!("p{id}"),
                 intent,
                 base: LaunchIntent::Component,
                 uid,
@@ -883,6 +884,7 @@ pub(super) mod tests {
         let mut task = stack(false).tasks.remove(0);
         task.id = id;
         task.real_activity = "p/A".into();
+        task.package = "p".into();
         host.activities.stack.lock().unwrap().tasks.push(task);
     }
 
@@ -1078,6 +1080,7 @@ pub(super) mod tests {
             id: 9,
             affinity: None,
             real_activity: "p/p.Main".into(),
+            package: "p".into(),
             intent: Intent {
                 flags: 0x1000_0000,
                 component: Some(ComponentName {

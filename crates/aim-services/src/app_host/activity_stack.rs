@@ -147,6 +147,8 @@ pub struct Task {
     pub affinity: Option<String>,
     /// `realActivity`: the component of its intent.
     pub real_activity: String,
+    /// The package it was made for, its window's app (`PACKAGE`).
+    pub package: String,
     /// `intent`, its base intent, and the intent as the app host writes
     /// it back.
     pub intent: Intent,
@@ -311,6 +313,9 @@ pub struct Stack {
     fullscreen: BTreeSet<i32>,
     /// Tasks behind the desktop, also hidden on a freeform display.
     background: BTreeSet<i32>,
+    /// Tasks behind the desktop as their app hid (`HIDE`): they come back
+    /// together, as the app's windows do.
+    hidden: BTreeSet<i32>,
     /// The root home task (`TaskDisplayArea.mRootHomeTask`). In window mode
     /// it stays behind the Mac desktop, which is the user's home: never
     /// visible or focused until a start brings it to the front: the desktop
@@ -397,7 +402,13 @@ impl Stack {
     /// task in window mode unless it was brought to the front.
     fn behind_desktop(&self, task: i32) -> bool {
         self.background.contains(&task)
+            || self.hidden.contains(&task)
             || (self.freeform && self.home == Some(task) && !self.home_front)
+    }
+
+    /// Whether `task`'s app hid as the desktop came to the front over it.
+    pub(super) fn app_hidden(&self, task: i32) -> bool {
+        self.hidden.contains(&task)
     }
 
     /// The activity type of `task`: the root home task's is home.
@@ -823,7 +834,9 @@ impl Stack {
                         self.home_front = false;
                         self.tasks.push(*task);
                     }
-                } else {
+                } else if !(self.freeform && self.home == Some(activity.task)) {
+                    // The root home task comes to the front by the start's
+                    // decision (`d.front`) only.
                     self.move_to_front(activity.task);
                 }
                 if d.set_intent
@@ -892,30 +905,37 @@ impl Stack {
 
     /// `task` comes to the front. In window mode the root home task coming
     /// to the front is the desktop's: the tasks of the focused task's app
-    /// go behind it (`HIDE` hides that app's windows, the tasks of its
-    /// package), and those of other apps stay visible, as their windows do.
+    /// go behind it (`HIDE` hides that app's windows), and those of other
+    /// apps stay visible, as their windows do. A task of a hidden app
+    /// brings all of the app's back, as unhiding the app shows its windows.
     fn move_to_front(&mut self, task: i32) {
         self.background.remove(&task);
         let Some(at) = self.tasks.iter().position(|t| t.id == task) else {
             return;
         };
+        let package = self.tasks[at].package.clone();
         if self.freeform && self.home == Some(task) {
             if let Some(package) = self
                 .focused()
                 .filter(|&f| f != task)
                 .and_then(|f| self.task(f))
-                .map(|f| package_of(&f.real_activity).to_string())
+                .map(|f| f.package.clone())
             {
                 let hidden: Vec<i32> = self
                     .tasks
                     .iter()
-                    .filter(|t| t.id != task && package_of(&t.real_activity) == package)
+                    .filter(|t| t.id != task && t.package == package)
                     .map(|t| t.id)
                     .collect();
-                self.background.extend(hidden);
+                self.hidden.extend(hidden);
             }
             self.home_front = true;
         } else {
+            if self.hidden.contains(&task) {
+                let tasks = &self.tasks;
+                self.hidden
+                    .retain(|&t| tasks.iter().all(|o| o.id != t || o.package != package));
+            }
             self.home_front = false;
         }
         let t = self.tasks.remove(at);
@@ -1069,6 +1089,10 @@ impl Stack {
     /// the stopped activities now visible that are not to be resumed are
     /// started (`makeVisibleIfNeeded`, `shouldStartActivity`).
     fn settle(&mut self, out: &mut Vec<Command>) {
+        // A home that finished is restarted behind the desktop.
+        if self.home.is_none_or(|h| self.top(h).is_none()) {
+            self.home_front = false;
+        }
         let focused = self.focused();
         if focused != self.front {
             let last = std::mem::replace(&mut self.front, focused);
@@ -1305,6 +1329,7 @@ impl Stack {
         if !self.activities.iter().any(|a| a.task == task) && self.task(task).is_some() {
             self.tasks.retain(|t| t.id != task);
             self.background.remove(&task);
+            self.hidden.remove(&task);
             self.removed_from_recents.remove(&task);
             self.fullscreen.remove(&task);
             if self.home == Some(task) {
@@ -1481,13 +1506,6 @@ impl Stack {
     }
 }
 
-/// The package of component `package/class`.
-fn package_of(component: &str) -> &str {
-    component
-        .split_once('/')
-        .map_or(component, |(package, _)| package)
-}
-
 /// `adjustLaunchFlagsToDocumentMode`.
 fn document_flags(flags: i32, mode: i32, document_launch_mode: i32) -> i32 {
     let document = FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK;
@@ -1534,6 +1552,7 @@ mod tests {
             id,
             affinity: affinity.map(str::to_string),
             real_activity: format!("{APP}/{class}"),
+            package: APP.into(),
             intent: Intent::default(),
             base: LaunchIntent::Component,
             uid: 10_100,

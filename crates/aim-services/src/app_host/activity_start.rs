@@ -707,6 +707,7 @@ impl AppHost {
                     id,
                     affinity: affinity.clone(),
                     real_activity: real.clone(),
+                    package: package.to_string(),
                     intent: intent.clone(),
                     base: base.clone(),
                     uid,

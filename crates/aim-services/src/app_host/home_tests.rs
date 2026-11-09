@@ -12,6 +12,7 @@ fn task(id: i32, component: &str) -> Box<Task> {
         id,
         affinity: None,
         real_activity: component.into(),
+        package: component.split_once('/').unwrap().0.into(),
         intent: Default::default(),
         base: LaunchIntent::Component,
         uid: 10_100,
@@ -155,9 +156,11 @@ fn a_home_intent_in_window_mode_hides_the_front_app_and_resumes_the_home() {
         on_top: true,
     }));
     assert_eq!(s.visibility(HOME_ROOT_TASK), Visibility::Visible);
-    // Its window back from the Dock brings the app's task to the front:
-    // the home goes behind the desktop again, paused, then stopped.
+    // Its window back from the Dock brings the app's tasks back, as the
+    // app's windows all show: the home goes behind the desktop again,
+    // paused, then stopped.
     let commands = s.bring_to_front(7);
+    assert_eq!(s.visibility(8), Visibility::Visible);
     assert!(commands.contains(&Command::Pause {
         token: 1,
         finishing: false,
@@ -167,11 +170,13 @@ fn a_home_intent_in_window_mode_hides_the_front_app_and_resumes_the_home() {
     assert_eq!(s.focused(), Some(7));
     let commands = s.paused(1);
     assert!(commands.contains(&Command::Stop(1)));
-    assert!(
-        commands
-            .iter()
-            .any(|c| matches!(c, Command::Resume { token: 2, .. }))
-    );
+    for token in [2, 4] {
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::Resume { token: t, .. } if *t == token))
+        );
+    }
     assert_eq!(s.visibility(HOME_ROOT_TASK), Visibility::Invisible);
 }
 
@@ -194,6 +199,29 @@ fn a_new_task_puts_the_home_behind_the_desktop_again() {
         finishing: false,
         user_leaving: true,
     }));
+    assert_eq!(s.visibility(HOME_ROOT_TASK), Visibility::Invisible);
+}
+
+#[test]
+fn a_home_finished_in_front_restarts_stopped_behind_the_desktop() {
+    let (mut s, _, _) = start_home_then_app(true);
+    start_home_intent(&mut s);
+    s.paused(2);
+    assert_eq!(s.focused(), Some(HOME_ROOT_TASK));
+    // A second activity keeps the task while the home finishes.
+    let second = Activity::new(3, HOME_ROOT_TASK, 1, "h/h.Other", 0, 0, None);
+    s.apply(&Decision::default(), Then::Add(second, None), None, false);
+    s.finish(3);
+    s.finish(1);
+    assert_eq!(s.focused(), None);
+    // `resumeHomeActivity` starts it again in its root task.
+    let home = Activity::new(5, HOME_ROOT_TASK, 1, "h/h.Home", 2, 0, None);
+    let d = Decision {
+        outcome: Outcome::New(Some(HOME_ROOT_TASK)),
+        ..Default::default()
+    };
+    let commands = s.apply(&d, Then::Add(home, None), None, false);
+    assert!(commands.contains(&Command::LaunchStopped(5)));
     assert_eq!(s.visibility(HOME_ROOT_TASK), Visibility::Invisible);
 }
 

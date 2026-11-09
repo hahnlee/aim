@@ -47,6 +47,7 @@ fn source(host: &Arc<AppHost>) -> u64 {
         id: 7,
         affinity: None,
         real_activity: "p/p.Main".into(),
+        package: "p".into(),
         intent: Default::default(),
         base: activity_start::LaunchIntent::Component,
         uid: 10100,
