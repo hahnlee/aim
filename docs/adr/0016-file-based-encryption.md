@@ -1,8 +1,10 @@
 # ADR 0016: File-based encryption on a Mac data volume
 
-Status: proposed 2026-11-10 (#2761), draft for the owner's decision. Nothing
-of it is implemented; the guest is a device without file-based encryption
-(FBE) until the decision points below are settled.
+Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
+option B, CE protected by a Mac Keychain item, FileVault for confidentiality
+at rest (D not now), and existing data directories recreated by a breaking
+migration on a branch. Nothing of it is implemented yet; the guest is a
+device without file-based encryption (FBE) until slices 1-3 land.
 
 ## Context
 
@@ -99,14 +101,14 @@ volume, its key in the Mac user's login Keychain), so the "encrypted" claim
 is also true of the bytes on the Mac's disk without FileVault. Optional and
 independent of B; one key for DE and CE, so CE locking stays B's.
 
-## Decision points for the owner
+## Decisions
 
 1. **Is FBE worth it?** The gain measured in #2761 is package construction
    (0.44-0.98 s). CE data is still prepared at user 0's unlock, which is on
    the path to app admission, so admission gains less; slice 4 measures it.
    The other gains are fidelity: CTS `EncryptionTest` and the policy test,
    `DevicePolicyManager.getStorageEncryptionStatus` = ACTIVE_PER_USER, and
-   Direct Boot behaving as on every device since Android 10.
+   Direct Boot behaving as on every device since Android 10. Decided: yes.
 2. **What protects CE.** LockSettings sets no credential; its type follows
    the Mac's (`lock_settings`, #1887). Either CE is protected like a
    credential-less user (vold's empty secret, unlocked at user start as
@@ -114,12 +116,14 @@ independent of B; one key for DE and CE, so CE locking stays B's.
    the Mac user's session is unlocked, which matches "the device is the
    Mac's lock". Recommended: the Keychain, so CE locks when the Mac user
    logs out and needs no Android credential.
-3. **Real encryption at rest (D) or FileVault only.**
+   Decided: the Keychain.
+3. **Real encryption at rest (D) or FileVault only.** Decided: FileVault
+   only for now; D stays optional.
 4. **Existing data directories.** An unencrypted non-empty directory cannot
    get a policy (`ENOTEMPTY`), and `encryption=Require` then fails the boot
    as it does on Linux. Existing data directories and userdata templates
    must be recreated: a breaking migration, done on a branch with the
-   templates regenerated.
+   templates regenerated. Decided: recreate, on a branch.
 
 ## Recommended path and slices
 
