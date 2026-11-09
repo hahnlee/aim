@@ -676,6 +676,16 @@ impl UserStats {
         !std::mem::replace(&mut self.stats_changed, true)
     }
 
+    /// `UsageStatsService.flushToDisk` of the user: `FLUSH_TO_DISK`
+    /// reported (internal, no event kept), committing the open
+    /// activities' time up to the flush without ending them, then the
+    /// stats persisted.
+    pub fn flush_to_disk(&mut self, clocks: Clocks) -> Notified {
+        let notified = self.report(Event::device(FLUSH_TO_DISK, clocks.1), clocks);
+        self.persist();
+        notified
+    }
+
     /// `persistActiveStats`: the mappings, then each interval, when they
     /// changed.
     pub fn persist(&mut self) {
@@ -1233,6 +1243,40 @@ mod tests {
                 DEVICE_SHUTDOWN
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A periodic flush commits an open activity's time so far to the
+    /// persisted stats, leaves it running and keeps no event.
+    #[test]
+    fn a_flush_commits_open_activities_without_an_event() {
+        let dir = temp("flush");
+        let mut first = user(&dir, 0);
+        first.report(event("p", ACTIVITY_RESUMED, 100, 1), (100, 100));
+        first.flush_to_disk((400, 400));
+        let daily = &first.current[INTERVAL_DAILY];
+        assert_eq!(
+            daily.package_stats["p"].activities.get(&1),
+            Some(&ACTIVITY_RESUMED)
+        );
+        assert!(daily.events.iter().all(|e| e.event_type != FLUSH_TO_DISK));
+        // As the next start loads them.
+        let persisted = user(&dir, 500);
+        let persisted = &persisted.current[INTERVAL_DAILY];
+        let p = &persisted.package_stats["p"];
+        assert_eq!(
+            (p.total_time_in_foreground, p.total_time_visible),
+            (300, 300)
+        );
+        assert!(
+            persisted
+                .events
+                .iter()
+                .all(|e| e.event_type != FLUSH_TO_DISK)
+        );
+        first.report(event("p", ACTIVITY_PAUSED, 1000, 1), (1000, 1000));
+        let p = &first.current[INTERVAL_DAILY].package_stats["p"];
+        assert_eq!(p.total_time_in_foreground, 900);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
