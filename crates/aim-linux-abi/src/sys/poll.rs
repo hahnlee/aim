@@ -1385,6 +1385,24 @@ mod reportable_tests {
         connected_to(kind, port)
     }
 
+    /// Send a byte on `fd`, a UDP socket connected to a closed port, until
+    /// `wait` sees the ICMP port unreachable it draws, for up to 10 s:
+    /// Darwin rate-limits ICMP errors (net.inet.icmp.icmplim) and drops
+    /// them under load (#2803). A send that finds an error pending returns
+    /// it, so `wait`'s first event is the error of the last send.
+    fn refusal<E>(fd: i64, mut wait: impl FnMut() -> (i64, E)) -> (i64, E) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let byte = 0u8;
+            let sent = crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]);
+            assert!(sent == 1 || sent == -111, "sendto {sent}");
+            let waited = wait();
+            if waited.0 != 0 || std::time::Instant::now() >= deadline {
+                return waited;
+            }
+        }
+    }
+
     /// recvfrom into `buffer`, without an address.
     fn received(fd: i64, buffer: &mut [u8]) -> i64 {
         crate::sys::net::recvfrom([
@@ -1405,12 +1423,7 @@ mod reportable_tests {
         let (fd, connected) = refused(2);
         assert_eq!(connected, 0);
         let edge = watching(fd, 0x1 | 1 << 31);
-        let byte = 0u8;
-        assert_eq!(
-            crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
-            1
-        );
-        assert_eq!(waited(edge, 2_000), (1, 0x8));
+        assert_eq!(refusal(fd, || waited(edge, 500)), (1, 0x8));
         assert_eq!(waited(edge, 0).0, 0);
         assert_eq!(polled(fd, POLLIN), (1, POLLERR));
         close(&[fd, edge]);
@@ -1442,15 +1455,7 @@ mod reportable_tests {
         drop(peer);
         let readable = watching(fd, 0x1);
         assert_eq!(waited(readable, 2_000), (1, 0x1));
-        let byte = 0u8;
-        assert_eq!(
-            crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
-            1
-        );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while polled(fd, POLLIN).1 & POLLERR == 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        assert_eq!(refusal(fd, || polled_for(fd, 0, 500)), (1, POLLERR));
         assert_eq!(polled(fd, POLLIN), (1, POLLIN | POLLERR));
         assert_eq!(waited(readable, 0), (1, 0x1 | 0x8));
         close(&[fd, readable]);
@@ -1559,12 +1564,7 @@ mod reportable_tests {
             let readable = watching(fd, 0x1);
             let eventless = watching(fd, 0);
             let writable = watching(fd, 0x4);
-            let byte = 0u8;
-            assert_eq!(
-                crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
-                1
-            );
-            assert_eq!(waited(readable, 2_000), (1, 0x8), "{consume}");
+            assert_eq!(refusal(fd, || waited(readable, 500)), (1, 0x8), "{consume}");
             assert_eq!(waited(readable, 0), (1, 0x8));
             assert_eq!(waited(eventless, 0), (1, 0x8));
             assert_eq!(waited(writable, 0), (1, 0x4 | 0x8));
@@ -1793,11 +1793,7 @@ mod reportable_tests {
         assert_eq!(connected, 0);
         sleeps(fd);
         let (n, revents) = woken(fd, move || {
-            let byte = 0u8;
-            assert_eq!(
-                crate::sys::net::sendto([fd as u64, &byte as *const u8 as u64, 1, 0, 0, 0]),
-                1
-            );
+            assert_eq!(refusal(fd, || polled_for(fd, 0, 500)), (1, POLLERR));
         });
         assert_eq!((n, revents), (1, POLLERR));
         close(&[fd]);
