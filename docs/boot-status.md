@@ -35,7 +35,14 @@ through its waker, and a fatal one with no thread blocking it ends the group.
 Native services blocked in binder (keymint, health, power, apexd, installd...)
 used to outlive init's SIGTERM until SIGKILL 3 s later; three disposable
 app-host boots now stop in 1.17-1.20 s from `aimctl stop` (3.5 s before), with
-no process left (2026-11-10).
+no process left (2026-11-10). A process killed by a signal Darwin cannot carry
+(real-time, SIGSTKFLT, SIGPWR) exits 128 + the signal with the signal in its
+process record, and its parent's wait4, waitid and SIGCHLD report it killed by
+that signal, as init's service exit logs read it; a real exit of 128 + a signal
+stays an exit (#2773). SIGCHLD keeps the child's pid, uid and fatal signal when
+the parent reaps it before the signal is routed (#2804). A private namespace's init drops its own timers'
+signals (setitimer, POSIX timers) that it has no handler for, as it drops
+`kill`s of itself (#2774).
 
 A guest stop runs the app host's part of `ShutdownThread` before services stop
 (#2694): ACTION_SHUTDOWN (foreground, registered receivers only, every user)
