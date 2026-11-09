@@ -80,9 +80,11 @@ that app (`HIDE`), and the home is resumed and focused until another task comes
 to the front (#2715; host tests only, no guest boot). When an app process
 dies, its stopped activities that saved instance state (or need none) stay in
 their tasks, the root home task's home included, and are relaunched from that
-state when next resumed or visible; a relaunch is resumed only as the top of a
-visible task, else launched to stopped, as behind the desktop (#2736, #2716;
-host tests only). On fresh data GoogleSdkSetup's DefaultActivity resolves first,
+state when next resumed or shown. A relaunch waits for its process neither
+resumed nor pausing, so it holds no other task, and once the process attaches
+it is launched only if it should be visible: resumed as a visible top,
+paused when shown otherwise; a hidden one, such as the home behind the
+desktop, stays unlaunched until shown (#2736, #2716, #2757; host tests only). On fresh data GoogleSdkSetup's DefaultActivity resolves first,
 provisions the device and finishes, then `dev.aim.home/.Home` runs stopped in
 the next root home task. `getTasks`, organizer registration and the window dump
 include the task at the bottom, also after its process died. A start of a home

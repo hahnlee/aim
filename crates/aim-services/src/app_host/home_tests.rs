@@ -331,10 +331,12 @@ fn a_home_intent_starts_a_home_activity_unless_a_component_is_named_by_an_app() 
 }
 
 // android-16.0.0_r1 ActivityRecord.handleAppDied keeps the stopped home
-// that saved its state in the root home task; restarted behind the desktop
-// in window mode, it is launched to stopped (realStartActivityLocked).
+// that saved its state in the root home task. Behind the desktop in window
+// mode it should not be visible, so it is not restarted
+// (RootWindowContainer.attachApplication starts only those that should be)
+// until a start brings it to the front.
 #[test]
-fn a_dead_home_with_saved_state_is_kept_and_restarted_stopped_behind_the_desktop() {
+fn a_dead_home_with_saved_state_stays_unlaunched_behind_the_desktop() {
     for saved_state in [true, false] {
         let (mut s, _, _) = start_home_then_app(true);
         // It was resumed once, as when brought to the front before.
@@ -349,8 +351,25 @@ fn a_dead_home_with_saved_state_is_kept_and_restarted_stopped_behind_the_desktop
         assert!(!commands.contains(&Command::TaskEmpty(HOME_ROOT_TASK)));
         assert!(!commands.contains(&Command::Launch(1)), "{commands:?}");
         assert_eq!(s.top(HOME_ROOT_TASK).unwrap().token, 1);
+        // Its process restarts as it comes to the front, but the app's
+        // task is back in front before it attaches.
+        // The app's activity pauses first.
+        let home_front = |s: &mut Stack| {
+            let mut commands = s.bring_to_front(HOME_ROOT_TASK);
+            commands.extend(s.paused(2));
+            commands
+        };
+        assert!(home_front(&mut s).contains(&Command::Launch(1)));
+        s.bring_to_front(7);
         s.get_mut(1).unwrap().start_seq = 3;
-        assert_eq!(s.relaunch(1), [Command::LaunchStopped(1)]);
-        assert_eq!(s.get(1).unwrap().state, State::Stopping);
+        let commands = s.attached(1);
+        assert!(!commands.iter().any(|c| matches!(
+            c,
+            Command::Launch(1) | Command::LaunchPaused(1) | Command::LaunchStopped(1)
+        )));
+        assert_eq!(s.get(1).unwrap().state, State::Initializing);
+        // Brought to the front again, it is launched resumed.
+        assert!(home_front(&mut s).contains(&Command::Launch(1)));
+        assert_eq!(s.get(1).unwrap().state, State::Resumed);
     }
 }

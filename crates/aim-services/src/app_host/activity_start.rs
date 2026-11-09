@@ -457,8 +457,13 @@ impl AppHost {
             )
         };
         match command {
-            Command::Launch(t) | Command::LaunchStopped(t) => {
-                let resume = matches!(command, Command::Launch(_));
+            Command::Launch(t) | Command::LaunchPaused(t) | Command::LaunchStopped(t) => {
+                use super::activity::LaunchTo;
+                let to = match command {
+                    Command::Launch(_) => LaunchTo::Resumed,
+                    Command::LaunchPaused(_) => LaunchTo::Paused,
+                    _ => LaunchTo::Stopped,
+                };
                 let (start_seq, uid) = start_of(t).ok_or("no activity to launch")?;
                 if start_seq == 0 {
                     let (package, process, request) = {
@@ -489,7 +494,7 @@ impl AppHost {
                         .map(|_| ())
                         .map_err(|e| e.message);
                 }
-                if resume {
+                if to == LaunchTo::Resumed {
                     self.activity_usage(t, super::app_standby::Event::ActivityResumed);
                 }
                 let global = self.global_config(uid).ok_or("launch before bind")?;
@@ -507,7 +512,7 @@ impl AppHost {
                         super::activity::Launch {
                             global: &global,
                             task: bounds,
-                            resume,
+                            to,
                         },
                     )
                     .ok_or("no activity to launch")?;
