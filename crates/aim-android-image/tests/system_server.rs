@@ -2,12 +2,14 @@
 //! patched jar leaves ClipboardService unstarted and everything else as it
 //! was, with valid checksums.
 
+mod common;
+
 use aim_android_image::dex::{self, Dex};
 use aim_android_image::redirect;
 use aim_android_image::system_server::patch_services_jar;
 use sha1::{Digest, Sha1};
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 const JAR: &str = "system/framework/services.jar";
@@ -93,58 +95,14 @@ fn clipboard_is_not_started() {
     assert_eq!(changed, 1);
 }
 
-/// The pinned Java toolchain of the `device-services` node
-/// (upstream/java-toolchain.lock): the JDK's home and the build tools.
-fn java_toolchain() -> Option<(PathBuf, PathBuf)> {
-    let lock =
-        std::fs::read_to_string(aim_paths::root().join("upstream/java-toolchain.lock")).ok()?;
-    let get = |key: &str| {
-        lock.lines()
-            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
-            .unwrap()
-    };
-    let java = aim_paths::fetched().join("java");
-    let jdk = java
-        .join(format!("temurin-{}", get("JDK_VERSION")))
-        .join(format!("jdk-{}/Contents/Home", get("JDK_VERSION")));
-    let tools = java
-        .join(format!("build-tools-{}", get("BUILD_TOOLS_VERSION")))
-        .join(get("BUILD_TOOLS_DIR"));
-    if !jdk.join("bin/javac").exists() || !tools.join("dexdump").exists() {
-        aim_paths::skip("no pinned Java toolchain (cargo aim build device-services)");
-        return None;
-    }
-    Some((jdk, tools))
-}
-
 /// The fixture's dex, `dev.aim.server.test.Redirects`.
 fn fixture_dex(jdk: &Path, tools: &Path, work: &Path) -> Vec<u8> {
-    let classes = work.join("classes");
-    let ok = Command::new(jdk.join("bin/javac"))
-        .args(["--release", "17", "-d"])
-        .arg(&classes)
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Redirects.java"))
-        .status()
-        .unwrap();
-    assert!(ok.success());
-    let ok = Command::new(jdk.join("bin/java"))
-        .arg("-cp")
-        .arg(tools.join("lib/d8.jar"))
-        .args([
-            "com.android.tools.r8.D8",
-            "--release",
-            "--min-api",
-            "36",
-            "--lib",
-        ])
-        .arg(jdk)
-        .arg("--output")
-        .arg(work)
-        .arg(classes.join("dev/aim/server/test/Redirects.class"))
-        .status()
-        .unwrap();
-    assert!(ok.success());
-    std::fs::read(work.join("classes.dex")).unwrap()
+    common::dex(
+        jdk,
+        tools,
+        &[Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Redirects.java")],
+        work,
+    )
 }
 
 /// `dexdump -d -a` of `jar`, one normalized line at a time: what names
@@ -203,7 +161,7 @@ fn redirects_calls() {
     let Some(image) = aim_paths::original_image_with(JAR) else {
         return;
     };
-    let Some((jdk, tools)) = java_toolchain() else {
+    let Some((jdk, tools)) = common::java_toolchain() else {
         return;
     };
     let work = std::env::temp_dir().join(format!("redirect-{}", std::process::id()));
@@ -268,7 +226,7 @@ fn refuses_redirects() {
     let Some(image) = aim_paths::original_image_with(JAR) else {
         return;
     };
-    let Some((jdk, tools)) = java_toolchain() else {
+    let Some((jdk, tools)) = common::java_toolchain() else {
         return;
     };
     let work = std::env::temp_dir().join(format!("refused-{}", std::process::id()));

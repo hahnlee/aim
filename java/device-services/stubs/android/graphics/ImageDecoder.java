@@ -4,7 +4,7 @@ package android.graphics;
 public final class ImageDecoder {
     private ImageDecoder(long nativePtr, int width, int height, boolean animated, boolean isNinePatch) {}
     public static final int ALLOCATOR_SOFTWARE = 1;
-    public static class Source {}
+    public static class Source { private Source() {} }
     public static class ImageInfo {
         private ImageInfo(android.util.Size size, boolean isAnimated, String mimeType, ColorSpace colorSpace) {}
         public android.util.Size getSize() { throw new RuntimeException("stub"); }

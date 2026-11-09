@@ -127,7 +127,11 @@ public final class NativeInstallerPreparationBridge extends IInstallerPreparatio
         final android.os.incremental.PerUidReadTimeouts[] timeouts;
         try {
             parcel.unmarshall(encoded,0,encoded.length); parcel.setDataPosition(0);
-            params = new android.content.pm.DataLoaderParams(parcel.readParcelable(null,DataLoaderParamsParcel.class));
+            // The parcel constructor is package-private; this is the public one's copy of it.
+            DataLoaderParamsParcel data = java.util.Objects.requireNonNull(
+                    parcel.readParcelable(null,DataLoaderParamsParcel.class), "data loader params");
+            params = new android.content.pm.DataLoaderParams(data.type,
+                    new android.content.ComponentName(data.packageName,data.className),data.arguments);
             parcel.enforceNoDataAvail();
             parcel.unmarshall(encodedTimeouts,0,encodedTimeouts.length); parcel.setDataPosition(0);
             timeouts = parcel.createTypedArray(android.os.incremental.PerUidReadTimeouts.CREATOR); parcel.enforceNoDataAvail();

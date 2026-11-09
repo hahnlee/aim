@@ -3,6 +3,7 @@
 package android.util;
 
 public final class Slog {
+    private Slog() {}
     public static int d(String tag, String msg, Throwable tr) { throw new RuntimeException("stub"); }
     public static int i(String tag, String msg) { throw new RuntimeException("stub"); }
     public static int w(String tag, String msg, Throwable tr) { throw new RuntimeException("stub"); }

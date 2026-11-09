@@ -282,17 +282,21 @@ their keys include the lockfile, with no locally installed JDK probe.
   (`java/device-services/aidl`, whose Rust side `aidl-gen` generates,
   `OWN_INTERFACES` of `crates/aim-services/sources.lock`) are compiled
   against `java/device-services/stubs`: stubs of the image's classes with
-  only the members used. The stubs are dexed and checked against the
-  image's jars on the boot and system server class paths
+  only the members used. The stubs are dexed and checked against the image's
+  jars on the boot and system server class paths
   (`aim_android_image::linkage`): every class, superclass, member and
-  constant a stub declares must be the image's. Java emits a constructor for
-  every class; a private compile-only constructor is ignored only when the
-  image class has no constructors (#900). Every constructor referenced by
-  executable code must still exist on its declaring class: constructors
-  are never inherited. Every other class, field and method the dexed code
-  refers to outside itself must resolve in those jars as ART resolves it. A changed internal API fails the build instead
-  of the boot. The Java stubs' transaction codes are checked against the
-  ones generated for the Rust side.
+  constant a stub declares must be the image's, no wider than the image's
+  and with the same staticness: a public compile-only declaration of a
+  package-private member compiles but fails ART's access check (#1035), so a
+  stub declares the image's constructor when Java's default one would be
+  wider. Java emits a constructor for every class; a private compile-only
+  constructor is ignored only when the image class has no constructors
+  (#900). Every constructor referenced by executable code must still exist
+  on its declaring class: constructors are never inherited. Every other
+  class, field and method the dexed code refers to outside itself must
+  resolve in those jars as ART resolves it. A changed internal API fails the
+  build instead of the boot. The Java stubs' transaction codes are checked
+  against the ones generated for the Rust side.
 - The jar holds one stored, aligned `classes.dex`, as the platform's do.
 - `java/framework-overlay` is linked by aapt2 against the image's
   `framework-res.apk` and signed by apksigner with the test key, which
