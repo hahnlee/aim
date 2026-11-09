@@ -322,6 +322,14 @@ impl Hangups {
     }
 }
 
+/// An inotify's host revents as inotify_poll reads them: its kqueue is
+/// also readable for host notes that decode to no event.
+fn inotify_revents(host: &mut libc::pollfd) {
+    if host.revents & libc::POLLIN != 0 && super::inotify::readable(host.fd) == Some(false) {
+        host.revents &= !(libc::POLLIN | libc::POLLRDNORM);
+    }
+}
+
 /// Install `mask` (a guest sigset pointer, 0 for none) for the duration of a
 /// wait; returns the mask to restore.
 pub fn swap_sigmask(mask: u64) -> Result<Option<u64>, i32> {
@@ -566,9 +574,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             if let Some(watch) = pty {
                 h.revents = watch.events(h.revents);
             }
-            if h.revents & libc::POLLIN != 0 && super::inotify::spuriously_ready(h.fd) {
-                h.revents &= !libc::POLLIN;
-            }
+            inotify_revents(h);
             if let Some(events) = super::fuse_device::readiness(h.fd) {
                 h.revents = match events {
                     Ok(events) => events,
@@ -758,6 +764,7 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
             if let Some(end) = pipe.filter(|_| descriptor.revents & POLLHUP != 0) {
                 descriptor.revents = pipe_revents(end, descriptor.fd, descriptor.revents);
             }
+            inotify_revents(descriptor);
         }
         if host.iter().any(|p| p.revents & POLLNVAL != 0) {
             return -(EBADF as i64);
@@ -778,7 +785,8 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
                 }
             }
         }
-        // A wake token or a pty notification with nothing ready: wait on.
+        // A wake token, a pty notification or an inotify note with nothing
+        // ready: wait on.
         if count > 0 || n == 0 || left == 0 {
             user_try!(update_timeout(ts, t0));
             for (set, bytes) in sets.iter().zip(&output_sets) {
@@ -2191,5 +2199,102 @@ mod reportable_tests {
         let level = watching(fd, 0x1 | 0x2000);
         assert_eq!(waited(level, 0), (1, EPOLLHUP));
         close(&[level, fd]);
+    }
+
+    /// inotify_poll (man 7 inotify, LTP inotify): poll, select and a
+    /// level-triggered epoll find an inotify readable exactly while events
+    /// are queued, so a wait on one whose host notes decoded to nothing
+    /// (here a delete outside its IN_CREATE mask) sleeps, and IN_IGNORED of
+    /// a removed watch makes it readable.
+    #[test]
+    fn an_inotify_is_readable_only_while_events_are_queued() {
+        let (_vfs, view) = crate::vfs::test_view();
+        let dir = view.join("data/inotify-readiness");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let notify = inotify::inotify_init1([O_NONBLOCK, 0, 0, 0, 0, 0]);
+        assert!(notify >= 0);
+        let path = std::ffi::CString::new("/data/inotify-readiness").unwrap();
+        const IN_CREATE: u64 = 0x100;
+        let wd =
+            inotify::inotify_add_watch([notify as u64, path.as_ptr() as u64, IN_CREATE, 0, 0, 0]);
+        assert!(wd > 0, "{wd}");
+        let ep = watching(notify, 0x1);
+        let mut buf = [0u64; 32];
+        let read = || inotify::read(notify as i32, buf.as_ptr() as u64, 256);
+        let quiet = |what: &str| {
+            assert_eq!(polled(notify, ALL), (0, 0), "{what}");
+            assert_eq!(selected(notify), (0, false, false), "{what}");
+            assert_eq!(waited(ep, 0).0, 0, "{what}");
+        };
+        let queued = |what: &str| {
+            assert_eq!(polled(notify, ALL), (1, POLLIN | POLLRDNORM), "{what}");
+            assert_eq!(selected(notify), (1, true, false), "{what}");
+            assert_eq!(waited(ep, 0), (1, 0x1), "{what}");
+        };
+        quiet("empty");
+        let file = dir.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        queued("created");
+        assert_eq!(read(), Some(32));
+        quiet("drained");
+        assert_eq!(read(), Some(-(crate::errno::EAGAIN as i64)));
+        // Each check after its own note, as a check collects the note.
+        let noise = |n: usize| {
+            let entry = dir.join(format!("noise-{n}"));
+            std::fs::write(&entry, b"").unwrap();
+            assert_eq!(read(), Some(32));
+            std::fs::remove_file(entry).unwrap();
+        };
+        noise(0);
+        assert_eq!(polled(notify, ALL), (0, 0));
+        noise(1);
+        assert_eq!(selected(notify), (0, false, false));
+        noise(2);
+        let cpu = || {
+            let mut t = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) },
+                0
+            );
+            t.tv_sec as i64 * 1_000_000_000 + t.tv_nsec as i64
+        };
+        let (started, spent) = (std::time::Instant::now(), cpu());
+        assert_eq!(waited(ep, 200).0, 0);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+        assert!(cpu() - spent < 50_000_000, "epoll_pwait spun");
+        noise(3);
+        let mut entry = libc::pollfd {
+            fd: notify as i32,
+            events: POLLIN,
+            revents: 0,
+        };
+        let timeout = [0i64, 200_000_000];
+        let started = std::time::Instant::now();
+        assert_eq!(
+            ppoll([
+                &mut entry as *mut _ as u64,
+                1,
+                timeout.as_ptr() as u64,
+                0,
+                0,
+                0
+            ]),
+            0
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+        assert_eq!(
+            inotify::inotify_rm_watch([notify as u64, wd as u64, 0, 0, 0, 0]),
+            0
+        );
+        queued("watch removed");
+        assert_eq!(read(), Some(16));
+        assert_eq!(buf[0] >> 32, 0x8000, "IN_IGNORED");
+        quiet("IN_IGNORED read");
+        std::fs::remove_dir_all(&dir).unwrap();
+        close(&[ep, notify]);
     }
 }
