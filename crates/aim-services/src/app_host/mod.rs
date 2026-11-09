@@ -183,6 +183,7 @@ mod resources;
 pub mod restrictions_service;
 pub mod role_service;
 pub mod rollback_service;
+mod root_tasks;
 mod safe_labels;
 pub mod sensor_privacy;
 pub mod sensor_service;

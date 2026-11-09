@@ -345,7 +345,12 @@ fn app_task_removal_reports_vanished_once() {
     });
 }
 
-fn create_root(host: &Arc<AppHost>, display_id: i32, mode: i32, cookie: Option<Binder>) -> Parcel {
+pub(in crate::app_host) fn create_root(
+    host: &Arc<AppHost>,
+    display_id: i32,
+    mode: i32,
+    cookie: Option<Binder>,
+) -> Parcel {
     let mut request = Parcel::new();
     toc::CreateRootTask {
         display_id,

@@ -139,7 +139,21 @@ stays behind it at the bottom of the tasks, invisible, never focused or
 brought to the front, its activity launched straight to stopped
 (`LaunchActivityItem` with `StopActivityItem`), and it is never reported
 to the display server, so it has no Mac window. `getTasks`, the task
-organizer and the window dump list it. A start whose record is a home
+organizer, the window dump and the root-task queries list it. Moving the
+root home task to the front (`TaskDisplayArea.moveHomeRootTaskToFront`,
+which the pinned `IActivityTaskManager` does not expose; a HOME start
+reaches it) brings the desktop to the front instead, as **Home** below
+describes: the apps hide, and the root home task keeps its place at the
+bottom of the root tasks, invisible, unfocused and without a Mac window.
+`getAllRootTaskInfos` and `getAllRootTaskInfosOnDisplay` list the root
+tasks top to bottom (the app tasks, the organizer root tasks with their
+tasks as leaves, the root home task at position 0 unless an organizer
+root task was made under it), and `getRootTaskInfo` and
+`getRootTaskInfoOnDisplay` find the root home task for
+`ACTIVITY_TYPE_HOME`, no pinned one, else the topmost compatible one
+(`TaskDisplayArea.getRootTask`), and `getFocusedRootTaskInfo` the focused
+task's root task, all behind `MANAGE_ACTIVITY_TASKS`
+(`app_host/root_tasks.rs`). A start whose record is a home
 activity (`ActivityRecord.setActivityType`) goes to that task, and no
 other start is put there (`FindTaskResult` compares activity types). It connects to the display server
 itself (`OP_WINDOWS`, from guest-init) and, in window mode:
