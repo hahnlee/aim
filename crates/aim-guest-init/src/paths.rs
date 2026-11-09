@@ -554,6 +554,9 @@ impl Layout {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
+        // A SIGKILLed boot's watcher is still killing its processes, which
+        // would otherwise run beside this boot's.
+        aim_storage::process_namespace::wait_for_watcher(&self.identity_dir().join("by-pid"))?;
         let swept = self.runtime.with_file_name(format!(".{name}.swept"));
         fs::create_dir_all(&swept)?;
         let stamp = std::time::SystemTime::now()

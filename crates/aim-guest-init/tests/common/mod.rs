@@ -116,6 +116,12 @@ if [ "$1" = "--help" ]; then
   echo "usage: linux-run [--root DIR] [--path-map FILE] [--identity FILE] [--inherit-env] [--trace] PROGRAM [ARGS...]" >&2
   exit 2
 fi
+# The pid namespace watcher: ready at once. This linux-run registers no
+# process in the namespace's table, so a dead init leaves none to kill.
+if [ "$1" = "--pidns-watch" ]; then
+  printf '\001'
+  exit 0
+fi
 id=""
 while [ $# -gt 0 ]; do
   case "$1" in
