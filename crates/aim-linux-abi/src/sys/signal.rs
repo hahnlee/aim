@@ -1833,7 +1833,13 @@ pub fn rt_sigqueueinfo(a: [u64; 6]) -> i64 {
     if tgid != my_pid() {
         return queued_to_peer(tgid as i32, 0, user_try!(queued_info(sig, a[2])));
     }
-    send_process(user_try!(queued_info(sig, a[2])))
+    let info = user_try!(queued_info(sig, a[2]));
+    // A private namespace's init ignores what it queues itself without a
+    // handler, as `kill` does (`sig_task_ignored`).
+    if unkillable_ignores(thread::main_tid(), sig) {
+        return 0;
+    }
+    send_process(info)
 }
 
 /// rt_tgsigqueueinfo(tgid, tid, sig, info).
@@ -1860,7 +1866,11 @@ pub fn rt_tgsigqueueinfo(a: [u64; 6]) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    send_thread(&th, user_try!(queued_info(sig, a[3])))
+    let info = user_try!(queued_info(sig, a[3]));
+    if unkillable_ignores(th.tid, sig) {
+        return 0;
+    }
+    send_thread(&th, info)
 }
 
 /// Linux `stack_t`: { void *ss_sp; int ss_flags; size_t ss_size; }.

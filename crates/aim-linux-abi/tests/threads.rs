@@ -115,11 +115,19 @@ fn signal_storm_survives_sender_starvation() {
     }
 }
 
+/// abort() kills a process with SIGABRT (in a child: the standalone guest is
+/// its namespace's init, which ignores the SIGABRT it raises itself, so its
+/// abort() ends in bionic's `_exit(127)`, as on Linux).
 #[test]
 fn abort_kills_the_process_with_sigabrt() {
     let Some(r) = root() else { return };
     let (status, out) = run(r, &["abort"]);
-    assert_eq!(status.signal(), Some(libc::SIGABRT), "{status:?}\n{out}");
+    assert!(
+        status.success() && out == format!("signaled {}\n", libc::SIGABRT),
+        "{status:?}\n{out}"
+    );
+    let (status, out) = run(r, &["init_abort"]);
+    assert_eq!(status.code(), Some(127), "{status:?}\n{out}");
 }
 
 #[test]

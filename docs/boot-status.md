@@ -42,7 +42,8 @@ that signal, as init's service exit logs read it; a real exit of 128 + a signal
 stays an exit (#2773). SIGCHLD keeps the child's pid, uid and fatal signal when
 the parent reaps it before the signal is routed (#2804). A private namespace's init drops its own timers'
 signals (setitimer, POSIX timers) that it has no handler for, as it drops
-`kill`s of itself (#2774).
+`kill`s and rt_(tg)sigqueueinfo of itself (#2774, #2805): bionic's abort() in
+a standalone guest, its namespace's init, ends in `_exit(127)` as on Linux.
 
 A guest stop runs the app host's part of `ShutdownThread` before services stop
 (#2694): ACTION_SHUTDOWN (foreground, registered receivers only, every user)
