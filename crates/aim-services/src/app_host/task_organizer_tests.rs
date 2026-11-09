@@ -698,6 +698,30 @@ fn organizer_root_tasks_hold_reparented_tasks_in_their_bounds() {
             denied(apply_wct(host, &transaction(&changes, &[op]), 1000), code);
             assert_eq!(host.tasks.parent(8), Some(root));
         }
+        // A leaf task takes its mode unvalidated (`Task.setWindowingMode`),
+        // even one an unresizeable task could not take as a root task;
+        // undefined inherits its root task's.
+        let resize_mode = |m| {
+            host.activities
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&activities[1])
+                .unwrap()
+                .info
+                .resize_mode = m;
+        };
+        resize_mode(0);
+        for (requested, expected) in [(5, 5), (6, 6), (5, 5), (0, 6)] {
+            let change = [(340, 0), (344, 0), (352, requested)];
+            apply_wct(host, &transaction(&[(task, &change)], &[]), 1000)
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap();
+            assert_eq!(mode(8).windowing_mode, expected);
+        }
+        resize_mode(2);
         // dismissSplitScreen: reparentTasks of its modes and types onto the
         // display area, where the task takes its last freeform bounds back.
         let dismiss = Op {

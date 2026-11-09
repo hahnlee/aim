@@ -112,11 +112,12 @@ remaining failures span task, shell, configuration and display owners. Installer
 Native WOC `applyTransaction` decodes the pinned WCT map, Change and reorder
 layout and admits all supported operations before mutation (#2616). Bounds use
 #1678's per-task owner: freeform minima and restore bounds, fullscreen geometry
-inherited from the display. `setWindowingMode` and a launch's windowing mode
-(`ActivityOptions.setLaunchWindowingMode`, a new or reused root task, #2684)
-resolve as `TaskDisplayArea.validateWindowingMode` does against the device's
-and the task's or activity's multi-window, freeform and picture-in-picture
-support: a mode it cannot take is undefined and inherits the parent's (the
+inherited from the display. A root task's `setWindowingMode` and a launch's
+windowing mode (`ActivityOptions.setLaunchWindowingMode`, a new or reused root
+task, #2684) resolve as `TaskDisplayArea.validateWindowingMode` does against
+the device's and the (top-most leaf) task's or activity's multi-window,
+freeform and picture-in-picture support (a leaf task in an organizer root
+takes its mode unvalidated): a mode it cannot take is undefined and inherits the parent's (the
 display area's freeform in window mode, else fullscreen; a reused task keeps
 its own), a fullscreen display area's launch takes its source task's mode, and
 a valid multi-window launch on the display area is an explicit failure. The task's

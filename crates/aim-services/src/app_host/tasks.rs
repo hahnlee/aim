@@ -468,7 +468,7 @@ impl AppHost {
         } else if launch_mode == area_mode {
             area_mode
         } else {
-            match self.valid_launch_mode(launch_mode, info)? {
+            match self.valid_launch_mode(launch_mode, info, options.activity_type)? {
                 0 => area_mode,
                 6 => return Err(self.display_area_multi_window()),
                 mode => mode,
@@ -1468,14 +1468,21 @@ impl AppHost {
             )
         };
         let requested_mode = mode.unwrap_or(requested_mode);
-        // Task.setWindowingModeInner: a mode the task cannot take
-        // (isValidWindowingMode) is undefined and inherits its parent's.
-        let mode = match self
-            .valid_task_mode(requested_mode, id)
-            .map_err(|e| e.message)?
-        {
-            0 => parent.map_or(if self.tasks.window_mode() { 5 } else { 1 }, |p| p.0),
-            mode => mode,
+        // Task.setWindowingMode: a leaf task in an organizer root task takes
+        // its mode, undefined inheriting the root task's; a root task's
+        // (setWindowingModeInner) is undefined if it cannot take it
+        // (isValidWindowingMode), inheriting the display area's.
+        let mode = match parent {
+            Some((parent, _)) if requested_mode == 0 => parent,
+            Some(_) => requested_mode,
+            None => match self
+                .valid_task_mode(requested_mode, id)
+                .map_err(|e| e.message)?
+            {
+                0 if self.tasks.window_mode() => 5,
+                0 => 1,
+                mode => mode,
+            },
         };
         let area = parent.map_or(area, |p| p.1);
         let mut requested = bounds.unwrap_or(requested);

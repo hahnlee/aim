@@ -21,8 +21,8 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iapptask as iat;
 
 use super::activity::{
-    ACTIVITY_TYPE_STANDARD, DEFAULT_DISPLAY, EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN,
-    INVALID_DISPLAY, Token, USER_CURRENT,
+    ACTIVITY_TYPE_HOME, ACTIVITY_TYPE_STANDARD, DEFAULT_DISPLAY,
+    EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN, INVALID_DISPLAY, Token, USER_CURRENT,
 };
 use super::activity_stack::{Stack, Visibility};
 use super::activity_start::{Component, LaunchIntent};
@@ -842,12 +842,13 @@ impl AppHost {
     }
 
     /// `TaskDisplayArea.validateWindowingMode` of a launch's `mode` for the
-    /// standard root activity `info` of a new task (`isValidWindowingMode`
-    /// of an `ActivityRecord`).
+    /// root activity `info` of a new task, of activity type `activity_type`
+    /// (`isValidWindowingMode` of an `ActivityRecord`).
     pub(super) fn valid_launch_mode(
         &self,
         mode: i32,
         info: &ActivityInfo,
+        activity_type: i32,
     ) -> Result<i32, Exception> {
         if matches!(mode, 0 | 1) {
             return Ok(mode);
@@ -866,40 +867,54 @@ impl AppHost {
             .window_layout
             .as_ref()
             .map_or((-1, -1), |l| (l.min_width, l.min_height));
-        // `supportsMultiWindowInDisplayArea`, `supportsPictureInPicture`.
-        let supports = multi_window.supports(
-            resizeable,
-            min,
-            checks_min_size,
-            &self.global_configuration()?,
-        );
-        Ok(multi_window.validate(mode, supports, multi_window.pip && pip))
+        // `supportsMultiWindowInDisplayArea` (never a home activity's) and
+        // `supportsPictureInPicture` (a standard or undefined one's).
+        let home = activity_type == ACTIVITY_TYPE_HOME;
+        let supports = !home
+            && multi_window.supports(
+                resizeable,
+                min,
+                checks_min_size,
+                &self.global_configuration()?,
+            );
+        let standard = matches!(activity_type, 0 | ACTIVITY_TYPE_STANDARD);
+        Ok(multi_window.validate(mode, supports, multi_window.pip && standard && pip))
     }
 
-    /// `TaskDisplayArea.validateWindowingMode` of `mode` for task `task`
-    /// (`isValidWindowingMode` of a `Task`).
+    /// `TaskDisplayArea.validateWindowingMode` of `mode` for the root task
+    /// `task` (`Task.setWindowingModeInner`): checked against its top-most
+    /// leaf task, itself unless it is an organizer root task with tasks.
     pub(super) fn valid_task_mode(&self, mode: i32, task: i32) -> Result<i32, Exception> {
         if matches!(mode, 0 | 1) {
             return Ok(mode);
         }
         let multi_window = self.multi_window()?;
-        let supports = match self.tasks.root(task) {
-            Some(r) => {
+        let leaf = match self.tasks.root(task) {
+            Some(_) => self.tasks.children(Some(task)).first().copied(),
+            None => Some(task),
+        };
+        let supports = match leaf {
+            // An empty organizer root task is resizeable (`createRootTask`).
+            None => {
+                let r = self
+                    .tasks
+                    .root(task)
+                    .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no task {task}")))?;
                 let mut configuration = self.global_configuration()?;
                 configuration.window.windowing_mode = r.windowing_mode;
                 multi_window.supports(true, (-1, -1), false, &configuration)
             }
-            None => {
-                let gone = || Exception::new(EX_ILLEGAL_STATE, format!("no task {task}"));
+            Some(leaf) => {
+                let gone = || Exception::new(EX_ILLEGAL_STATE, format!("no task {leaf}"));
                 let (activity_type, top, base) = {
                     let stack = self.activities.stack.lock().unwrap();
                     let mut running = stack
                         .activities
                         .iter()
-                        .filter(|a| a.task == task && !a.finishing);
+                        .filter(|a| a.task == leaf && !a.finishing);
                     let base = running.next().ok_or_else(gone)?.token;
-                    let top = stack.top(task).ok_or_else(gone)?.token;
-                    (stack.activity_type(task), top, base)
+                    let top = stack.top(leaf).ok_or_else(gone)?.token;
+                    (stack.activity_type(leaf), top, base)
                 };
                 let (root, top_uid, base_uid) = {
                     let records = self.activities.records.lock().unwrap();
@@ -907,7 +922,7 @@ impl AppHost {
                     let base = record(base)?;
                     (base.info.clone(), record(top)?.uid, base.uid)
                 };
-                let min_size = self.tasks.min_size(task).ok_or_else(gone)?;
+                let min_size = self.tasks.min_size(leaf).ok_or_else(gone)?;
                 let global = self.task_global_config(top_uid, base_uid)?;
                 self.task_multi_window(&multi_window, &root, activity_type, min_size, &global)?
                     .1
