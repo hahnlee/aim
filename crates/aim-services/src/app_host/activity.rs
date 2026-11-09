@@ -383,13 +383,21 @@ pub struct Launch<'a> {
     pub global: &'a Configuration,
     /// The bounds of its task in window mode, else the display's.
     pub task: Option<(i32, super::config::Rect)>,
-    /// Whether it is resumed, else stopped.
-    pub resume: bool,
+    pub to: LaunchTo,
+}
+
+/// What `realStartActivityLocked` leaves a launched activity: resumed,
+/// paused while visible, or stopped.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LaunchTo {
+    Resumed,
+    Paused,
+    Stopped,
 }
 
 impl AppHost {
     /// `realStartActivityLocked`: the items that launch the activity of
-    /// `token`, then resume or stop it.
+    /// `token`, then resume, pause or stop it.
     pub(super) fn launch_items(
         &self,
         token: Binder,
@@ -440,14 +448,14 @@ impl AppHost {
         let persistent_state = record.persistent_state.clone();
         drop(records);
         let current = self.launching_process_configuration(start_seq, launch.global);
-        let lifecycle: Box<dyn Item> = if launch.resume {
-            Box::new(ResumeActivityItem {
+        let lifecycle: Box<dyn Item> = match launch.to {
+            LaunchTo::Resumed => Box::new(ResumeActivityItem {
                 token,
                 proc_state: PROCESS_STATE_UNKNOWN,
                 forward: true,
-            })
-        } else {
-            Box::new(super::activity_start::StopActivityItem(token))
+            }),
+            LaunchTo::Paused => Box::new(Lifecycle::Pause(token)),
+            LaunchTo::Stopped => Box::new(super::activity_start::StopActivityItem(token)),
         };
         let items: Vec<Box<dyn Item>> = vec![
             Box::new(LaunchActivityItem {
@@ -1604,7 +1612,15 @@ impl Service for ActivityClientController {
                 let stopped = call.code == acc::ACTIVITY_STOPPED;
                 let report = if stopped {
                     let state = aim_service_aidl::read_typed::<RawBundle>(&mut call.data)
-                        .and_then(|b| b.map(|b| KeptBundle::new(b, &self.0.process)).transpose())
+                        .map_err(|_| BAD_VALUE)?;
+                    if state.as_ref().is_some_and(RawBundle::has_fds) {
+                        return reply(Err(Exception::illegal_argument(
+                            "File descriptors passed in Bundle",
+                        )));
+                    }
+                    let state = state
+                        .map(|b| KeptBundle::new(b, &self.0.process))
+                        .transpose()
                         .map_err(|_| BAD_VALUE)?;
                     let persistent = aim_service_aidl::read_typed::<RawBundle>(&mut call.data)
                         .map_err(|_| BAD_VALUE)?;
@@ -1995,40 +2011,99 @@ mod saved_state_tests {
     use super::*;
     use aim_service_aidl::ReadParcelable;
 
+    /// An activity of `p.Main` in task 7, in `state`.
+    fn activity(host: &Arc<AppHost>, state: State) -> u64 {
+        let token = host.new_activity(
+            1,
+            10100,
+            "p",
+            host.activity_info_of("p", "p.Main").unwrap(),
+            Default::default(),
+            7,
+            StartRequest::launcher("p.Main"),
+        );
+        let mut a = Activity::new(token, 7, 1, "p/p.Main", 0, 0, None);
+        (a.state, a.have_state) = (state, false);
+        host.activities.stack.lock().unwrap().activities.push(a);
+        token
+    }
+
+    /// `activityStopped` of `token` with `state` and `persistent`: its reply.
+    fn stop(host: &Arc<AppHost>, token: u64, state: &RawBundle, persistent: &RawBundle) -> Parcel {
+        let mut data = Parcel::new();
+        acc::ActivityStopped::<RawBundle, RawBundle, RawBundle> {
+            token: Some(Binder::Local(token)),
+            state: Some(state.clone()),
+            persistent_state: Some(persistent.clone()),
+            description: None,
+        }
+        .write(&mut data);
+        ActivityClientController(host.clone())
+            .transact(&mut Call {
+                code: acc::ACTIVITY_STOPPED,
+                flags: 0,
+                sender_pid: 71,
+                sender_euid: 10100,
+                data: data.reader(),
+            })
+            .unwrap()
+    }
+
+    fn saved(host: &Arc<AppHost>, token: u64) -> (bool, bool) {
+        host.activities
+            .with(Some(Binder::Local(token)), |r| {
+                (r.saved_state.is_some(), r.persistent_state.is_some())
+            })
+            .unwrap()
+    }
+
+    // ActivityClientController.activityStopped refuses an icicle with file
+    // descriptors, and ActivityRecord.activityStopped ignores the stop of
+    // an activity no longer stopping.
+    #[test]
+    fn a_stop_with_file_descriptors_or_not_stopping_saves_nothing() {
+        crate::system::with_discovery_session(|host, _, _| {
+            let empty = RawBundle::empty();
+            let mut p = Parcel::new();
+            p.write_i32(0);
+            p.write_i32(crate::bundle::MAGIC);
+            p.write_i32(1);
+            p.write_string16(Some("fd"));
+            p.write_i32(4);
+            let at = p.data().len();
+            p.write_i32(0);
+            p.write_string16(Some("android.os.ParcelFileDescriptor"));
+            p.write_file(Arc::new(std::fs::File::open("/dev/null").unwrap()));
+            p.set_i32_at(at, (p.data().len() - at - 4) as i32);
+            p.set_i32_at(0, (p.data().len() - 8) as i32);
+            p.write_bool(false);
+            let fd = RawBundle::read_from(&mut p.reader()).unwrap();
+            let token = activity(host, State::Stopping);
+            let reply = stop(host, token, &fd, &empty);
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+            );
+            assert_eq!(saved(host, token), (false, false));
+            let a = host.activities.stack.lock().unwrap().get(token).cloned();
+            assert!(a.is_some_and(|a| a.state == State::Stopping && !a.have_state));
+
+            let token = activity(host, State::Resumed);
+            stop(host, token, &empty, &empty);
+            assert_eq!(saved(host, token), (false, false));
+            let a = host.activities.stack.lock().unwrap().get(token).cloned();
+            assert!(a.is_some_and(|a| a.state == State::Resumed && !a.have_state));
+        });
+    }
+
     #[test]
     fn a_stop_saves_the_state_the_next_launch_restores() {
         crate::system::with_discovery_session(|host, _, _| {
-            let token = host.new_activity(
-                1,
-                10100,
-                "p",
-                host.activity_info_of("p", "p.Main").unwrap(),
-                Default::default(),
-                7,
-                StartRequest::launcher("p.Main"),
-            );
-            let mut a = Activity::new(token, 7, 1, "p/p.Main", 0, 0, None);
-            (a.state, a.have_state) = (State::Stopping, false);
-            host.activities.stack.lock().unwrap().activities.push(a);
+            let token = activity(host, State::Stopping);
             let state = RawBundle::empty().with_ints(&[("scroll", 42)]).unwrap();
             let persistent = RawBundle::empty().with_ints(&[("kept", 7)]).unwrap();
-            let mut data = Parcel::new();
-            acc::ActivityStopped::<RawBundle, RawBundle, RawBundle> {
-                token: Some(Binder::Local(token)),
-                state: Some(state.clone()),
-                persistent_state: Some(persistent.clone()),
-                description: None,
-            }
-            .write(&mut data);
-            ActivityClientController(host.clone())
-                .transact(&mut Call {
-                    code: acc::ACTIVITY_STOPPED,
-                    flags: 0,
-                    sender_pid: 71,
-                    sender_euid: 10100,
-                    data: data.reader(),
-                })
-                .unwrap();
+            stop(host, token, &state, &persistent);
+            assert_eq!(saved(host, token), (true, true));
             let a = host.activities.stack.lock().unwrap().get(token).cloned();
             assert!(a.is_some_and(|a| a.state == State::Stopped && a.have_state));
             let global = Configuration::from_proto(&[]).unwrap();
@@ -2038,7 +2113,7 @@ mod saved_state_tests {
                     Launch {
                         global: &global,
                         task: None,
-                        resume: true,
+                        to: LaunchTo::Resumed,
                     },
                 )
                 .unwrap();

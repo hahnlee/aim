@@ -190,6 +190,9 @@ pub enum Visibility {
 pub enum Command {
     /// `LaunchActivityItem` and `ResumeActivityItem`.
     Launch(u64),
+    /// `LaunchActivityItem` and `PauseActivityItem`: `realStartActivityLocked`
+    /// of a visible activity not to be resumed.
+    LaunchPaused(u64),
     /// `LaunchActivityItem` and `StopActivityItem`: `realStartActivityLocked`
     /// of an activity neither resumed nor visible.
     LaunchStopped(u64),
@@ -871,26 +874,17 @@ impl Stack {
         out
     }
 
-    /// `realStartActivityLocked` of `token`, restarted once its process
-    /// attached: resumed if it is the top of a visible task
-    /// (`andResume`), else launched to stopped, and what that leaves to
-    /// resume or show follows.
-    pub(super) fn relaunch(&mut self, token: u64) -> Vec<Command> {
+    /// `attachApplication` of the process that `token` waited for
+    /// (`mStartingProcessActivities`): it is launched only if it should be
+    /// visible (`shouldBeVisible`), resumed as the top of a visible task,
+    /// and otherwise waits, unlaunched, until it is shown.
+    pub(super) fn attached(&mut self, token: u64) -> Vec<Command> {
         let mut out = Vec::new();
-        let Some(resume) = self.get(token).map(|a| self.resumable(a)) else {
-            return out;
-        };
-        let a = self.get_mut(token).unwrap();
-        if resume {
-            a.state = State::Resumed;
-            out.push(Command::Launch(token));
-            self.report_top_resumed(&mut out);
-        } else {
-            a.state = State::Stopping;
-            out.push(Command::LaunchStopped(token));
-            self.resume_focused(false, &mut out);
-            self.settle(&mut out);
+        if let Some(a) = self.get_mut(token) {
+            a.pending = false;
         }
+        self.resume_focused(false, &mut out);
+        self.settle(&mut out);
         out
     }
 
@@ -1088,6 +1082,13 @@ impl Stack {
         }
         let a = self.get_mut(top).unwrap();
         match a.state {
+            // `startSpecificActivity` of an activity whose process died:
+            // the process is started, and the activity waits for it
+            // (`mStartingProcessActivities`), neither resumed nor pausing.
+            State::Initializing if a.start_seq == 0 => {
+                a.pending = true;
+                out.push(Command::Launch(top));
+            }
             State::Initializing => {
                 a.state = State::Resumed;
                 out.push(Command::Launch(top));
@@ -1146,6 +1147,28 @@ impl Stack {
             })
             .map(|a| a.token)
             .collect();
+        // `makeVisibleAndRestartIfNeeded`: an unlaunched activity now
+        // visible, not to be resumed, is launched paused
+        // (`realStartActivityLocked` without `andResume`), once its process
+        // started if it died.
+        let unlaunched: Vec<u64> = self
+            .activities
+            .iter()
+            .filter(|a| {
+                a.state == State::Initializing && !a.pending && self.shown(a) && !self.resumable(a)
+            })
+            .map(|a| a.token)
+            .collect();
+        for token in unlaunched {
+            let a = self.get_mut(token).unwrap();
+            if a.start_seq == 0 {
+                a.pending = true;
+                out.push(Command::Launch(token));
+            } else {
+                a.state = State::Paused;
+                out.push(Command::LaunchPaused(token));
+            }
+        }
         for token in shown {
             self.get_mut(token).unwrap().state = State::Started;
             out.push(Command::Visible {
@@ -2435,14 +2458,15 @@ mod tests {
                 on_top: true
             }));
             s.get_mut(2).unwrap().start_seq = 3;
-            let mut attached = Vec::new();
-            s.report_top_resumed(&mut attached);
             assert_eq!(
-                attached,
-                [TopResumed {
-                    token: 2,
-                    on_top: true
-                }]
+                s.attached(2),
+                [
+                    Launch(2),
+                    TopResumed {
+                        token: 2,
+                        on_top: true
+                    }
+                ]
             );
         }
     }
@@ -2523,16 +2547,19 @@ mod tests {
         }
     }
 
-    // ActivityTaskSupervisor.realStartActivityLocked: the restarted
-    // activity is resumed only as the top of a visible task (`andResume`),
-    // else launched to stopped.
+    // android-16.0.0_r1 startSpecificActivity/attachApplication: the
+    // restarted activity waits for its process (`mStartingProcessActivities`)
+    // neither resumed nor pausing, so a task brought in front meanwhile is
+    // not held; once attached it is launched only if it should be visible
+    // (`shouldBeVisible`): resumed as a visible top, else when shown.
     #[test]
-    fn a_restarted_activity_resumes_only_if_still_the_visible_top() {
+    fn a_restarting_activity_waits_for_its_process_unlaunched_unless_visible() {
         let mut s = stopped_under_resumed(true);
-        s.process_died(1, false);
+        assert!(s.process_died(1, false).contains(&Launch(1)));
+        assert_eq!(s.get(1).unwrap().state, State::Initializing);
         s.get_mut(1).unwrap().start_seq = 3;
         assert_eq!(
-            s.relaunch(1),
+            s.attached(1),
             [
                 Launch(1),
                 TopResumed {
@@ -2547,18 +2574,38 @@ mod tests {
         // Another task comes in front before the process attaches.
         let mut c = activity(3, 8, "C", 0);
         c.start_seq = 2;
-        s.apply(
+        let commands = s.apply(
             &Decision::default(),
             Then::Add(c, Some(task(8, "C", None))),
             None,
             true,
         );
-        s.get_mut(1).unwrap().start_seq = 3;
-        let commands = s.relaunch(1);
-        assert_eq!(commands[0], LaunchStopped(1), "{commands:?}");
-        assert!(!commands.contains(&Launch(1)));
-        assert_eq!(s.get(1).unwrap().state, State::Stopping);
         assert!(commands.contains(&Launch(3)), "{commands:?}");
+        assert!(!commands.iter().any(|c| matches!(c, Pause { token: 1, .. })));
+        s.get_mut(1).unwrap().start_seq = 3;
+        let commands = s.attached(1);
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, Launch(1) | LaunchPaused(1) | LaunchStopped(1))),
+            "{commands:?}"
+        );
+        assert_eq!(s.get(1).unwrap().state, State::Initializing);
+        // Shown behind a translucent task, it is launched paused.
+        s.get_mut(3).unwrap().occludes_parent = false;
+        assert!(s.ensure_visible().contains(&LaunchPaused(1)));
+        assert_eq!(s.get(1).unwrap().state, State::Paused);
+        // Brought back in front, it is resumed once `C` paused.
+        assert!(s.bring_to_front(7).contains(&Pause {
+            token: 3,
+            finishing: false,
+            user_leaving: true
+        }));
+        assert!(s.paused(3).contains(&Resume {
+            token: 1,
+            results: vec![],
+            new_intents: vec![]
+        }));
     }
 
     #[test]

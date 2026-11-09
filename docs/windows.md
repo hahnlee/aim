@@ -146,7 +146,12 @@ activity the top resumed one; other apps' tasks stay visible and resumed,
 as their windows stay. A task of the hidden app coming to the front (its
 window back from the Dock) brings all of the app's tasks back, as
 unhiding shows all its windows; any other task coming to the front puts
-the home behind the desktop again, paused and stopped. `getTasks`, the task
+the home behind the desktop again, paused and stopped. When the home's
+process dies, a home that saved its instance state at its stop stays in
+the task (`handleAppDied`); behind the desktop it should not be visible, so
+it is not restarted (`attachApplication` starts only activities that
+should be), and stays unlaunched until a start brings the task to the
+front, which relaunches it from that state. `getTasks`, the task
 organizer and the window dump list it. A start whose record is a home
 activity (`ActivityRecord.setActivityType`) goes to that task, and no
 other start is put there (`FindTaskResult` compares activity types). It connects to the display server
