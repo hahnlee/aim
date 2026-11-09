@@ -2412,25 +2412,30 @@ impl Broadcasts {
             };
             return Some(record);
         }
-        let push = |queue: &mut VecDeque<Delivery>, delivery: Delivery| {
+        let push = |queue: &mut VecDeque<Delivery>, sent: bool, delivery: Delivery| {
             // DELIVERY_GROUP_POLICY_MOST_RECENT, per receiver: the replaced
-            // are skipped. Already sent deliveries are absent from these
-            // queues and remain untouched.
-            let (replaced, kept): (VecDeque<_>, _) = std::mem::take(queue)
+            // pending deliveries are skipped. The one a busy process was
+            // sent stays at the front, untouched, for its finish.
+            let pending = queue.split_off(usize::from(sent).min(queue.len()));
+            let (replaced, kept): (VecDeque<_>, VecDeque<_>) = pending
                 .into_iter()
                 .partition(|old| same_delivery_group(old, &delivery));
-            *queue = kept;
+            queue.extend(kept);
             queue.push_back(delivery);
             replaced
         };
         let replaced = match &to {
-            QueueId::Warm(seq) => push(st.queues.entry(*seq).or_default(), delivery),
+            QueueId::Warm(seq) => push(
+                st.queues.entry(*seq).or_default(),
+                st.busy.contains(seq),
+                delivery,
+            ),
             QueueId::Cold(process, uid) => match st
                 .cold
                 .iter_mut()
                 .find(|c| &c.process == process && c.uid == *uid)
             {
-                Some(c) => push(&mut c.deliveries, delivery),
+                Some(c) => push(&mut c.deliveries, false, delivery),
                 None => {
                     st.cold.push(Cold {
                         process: process.clone(),
@@ -4153,6 +4158,46 @@ mod wait_tests {
             &old,
             &Delivery::Manifest(make(9, Some("9;-1;mac")), other, None, 0)
         ));
+    }
+
+    #[test]
+    fn most_recent_group_leaves_the_sent_manifest_delivery_for_its_finish() {
+        crate::system::with_discovery_binders(|host, _, _, _| {
+            let mut state = State::default();
+            let make = |id| {
+                let mut r = record(id);
+                let r_mut = Arc::get_mut(&mut r).unwrap();
+                r_mut.ordered = false;
+                r_mut.sender.delivery_group = Some("k".into());
+                r
+            };
+            let m = system_receiver_tests::receiver("p", "p.R", 10100);
+            // The process is busy with 1, sent already.
+            state.busy.insert(1);
+            state.queues.insert(
+                1,
+                VecDeque::from([Delivery::Manifest(make(1), m.clone(), None, 0)]),
+            );
+            host.broadcasts.queue_delivery(
+                &mut state,
+                QueueId::Warm(1),
+                None,
+                Delivery::Manifest(make(2), m.clone(), None, 0),
+            );
+            assert_eq!(queued(&state, 1), [1, 2]);
+            // A newer one replaces 2, pending, but not the sent 1.
+            host.broadcasts.queue_delivery(
+                &mut state,
+                QueueId::Warm(1),
+                None,
+                Delivery::Manifest(make(3), m, None, 0),
+            );
+            assert_eq!(queued(&state, 1), [1, 3]);
+            // The finish of 1 ends 1; 3 is sent next.
+            host.broadcasts.finish_active(host, &mut state, 1);
+            assert!(!state.busy.contains(&1));
+            assert_eq!(queued(&state, 1), [3]);
+        });
     }
 
     /// A broadcast not ordered of action `a` and data `data`, its extra
