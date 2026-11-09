@@ -403,8 +403,7 @@ fn changes(fd: i32, old: Option<&Interest>, new: Option<&Interest>) -> Vec<libc:
     }
     // A pidfd's reap is its reap watch's, as the pidfd itself polls
     // readable from the exit on.
-    if let Some(watch) = super::wait::reap_watch(fd) {
-        let reap = watch.fd();
+    if let Some(reap) = super::wait::reap_watch_fd(fd) {
         if old.is_some() {
             v.push(kev(reap, libc::EVFILT_READ, libc::EV_DELETE));
         }
@@ -890,8 +889,8 @@ fn ready(
                 if i.wants_read() {
                     rearm.push(kev(fd, libc::EVFILT_READ, libc::EV_DISABLE));
                 }
-            } else if let Some(watch) = super::wait::reap_watch(fd) {
-                rearm.push(kev(watch.fd(), libc::EVFILT_READ, libc::EV_DISABLE));
+            } else if let Some(reap) = super::wait::reap_watch_fd(fd) {
+                rearm.push(kev(reap, libc::EVFILT_READ, libc::EV_DISABLE));
             }
         } else if i.hangup_only() && i.events & EPOLLET == 0 {
             rearm.extend(changes(fd, None, Some(i)));
