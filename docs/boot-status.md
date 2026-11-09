@@ -80,7 +80,9 @@ that app (`HIDE`), and the home is resumed and focused until another task comes
 to the front (#2715; host tests only, no guest boot). When an app process
 dies, its stopped activities that saved instance state (or need none) stay in
 their tasks, the root home task's home included, and are relaunched from that
-state when next resumed or shown. A relaunch waits for its process neither
+state when next resumed or shown, unless hidden after more than two launches
+in the last minute without a stop that saved state (the original
+`launchCount` crash-loop guard, #2756). A relaunch waits for its process neither
 resumed nor pausing, so it holds no other task, and once the process attaches
 it is launched only if it should be visible: resumed as a visible top,
 paused when shown otherwise; a hidden one, such as the home behind the
