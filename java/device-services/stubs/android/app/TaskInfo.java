@@ -6,6 +6,7 @@ import android.content.pm.ActivityInfo;
 import android.window.WindowContainerToken;
 
 public class TaskInfo {
+    TaskInfo() {}
     public int taskId;
     public int displayId;
     public int userId;

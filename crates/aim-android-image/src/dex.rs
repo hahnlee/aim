@@ -199,6 +199,13 @@ impl<'a> Dex<'a> {
 
     /// The field and method ids `class` declares.
     pub fn members(&self, class: &ClassDef) -> Result<(Vec<u32>, Vec<u32>)> {
+        let (fields, methods) = self.member_access(class)?;
+        let ids = |members: Vec<(u32, u32)>| members.into_iter().map(|(id, _)| id).collect();
+        Ok((ids(fields), ids(methods)))
+    }
+
+    /// The field and method ids `class` declares, with their access flags.
+    pub fn member_access(&self, class: &ClassDef) -> Result<(Vec<(u32, u32)>, Vec<(u32, u32)>)> {
         let (mut fields, mut methods) = (Vec::new(), Vec::new());
         if class.class_data_off == 0 {
             return Ok((fields, methods));
@@ -211,12 +218,12 @@ impl<'a> Dex<'a> {
             let mut index = 0u32;
             for _ in 0..count {
                 index += uleb128(self.data, &mut at)?;
-                uleb128(self.data, &mut at)?;
+                let access = uleb128(self.data, &mut at)?;
                 if i < 2 {
-                    fields.push(index);
+                    fields.push((index, access));
                 } else {
                     uleb128(self.data, &mut at)?;
-                    methods.push(index);
+                    methods.push((index, access));
                 }
             }
         }

@@ -3,6 +3,7 @@
 package android.provider;
 
 public final class DeviceConfig {
+    private DeviceConfig() {}
     public static String getString(String namespace,String name,String defaultValue){throw new RuntimeException("stub");}
     public static final String NAMESPACE_PACKAGE_MANAGER_SERVICE = "package_manager_service";
     public static final String NAMESPACE_STATSD_JAVA = "statsd_java";

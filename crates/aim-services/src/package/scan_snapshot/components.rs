@@ -164,22 +164,8 @@ impl Capture {
             }) {
                 continue;
             }
-            if let Some(key) = metadata {
-                let data = entry
-                    .value
-                    .main
-                    .component
-                    .meta_data
-                    .as_ref()
-                    .ok_or_else(|| {
-                        RawError::Original(aim_binder_host::parcel::Exception::new(
-                            aim_binder_host::parcel::EX_NULL_POINTER,
-                            "provider metadata is null",
-                        ))
-                    })?;
-                if !data.0.iter().any(|(name, _)| name == key) {
-                    continue;
-                }
+            if metadata.is_some_and(|key| !entry.value.main.component.has_meta_data(key)) {
+                continue;
             }
             let state = package.users.get(&user).cloned().unwrap_or_default();
             let target = info::Target {

@@ -15,7 +15,7 @@ public final class ActivityThread extends ClientTransactionHandler {
     public Context getSystemUiContext() { throw new RuntimeException("stub"); }
     public ApplicationThread getApplicationThread() { throw new RuntimeException("stub"); }
 
-    public class ApplicationThread extends IApplicationThread.Stub {
-        ApplicationThread() { throw new RuntimeException("stub"); }
+    class ApplicationThread extends IApplicationThread.Stub {
+        private ApplicationThread() { throw new RuntimeException("stub"); }
     }
 }

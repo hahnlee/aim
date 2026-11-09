@@ -3,6 +3,7 @@
 package android.net;
 
 public abstract class Uri implements android.os.Parcelable {
+    private Uri() {}
     public abstract String getScheme();
     public static final android.os.Parcelable.Creator<Uri> CREATOR = null;
     public static Uri fromParts(String scheme, String ssp, String fragment) { throw new RuntimeException("stub"); }

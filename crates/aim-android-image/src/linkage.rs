@@ -59,29 +59,42 @@ impl Hierarchy {
     }
 }
 
-/// A class's supertypes and declared members.
+const ACC_STATIC: u32 = 0x8;
+
+/// How widely a declaration with `access` may be used: private, package,
+/// protected, public.
+fn reach(access: u32) -> u8 {
+    match access & 0x7 {
+        0x2 => 0,
+        0x4 => 2,
+        0x1 => 3,
+        _ => 1,
+    }
+}
+
+/// A class's supertypes and declared members, with their access flags.
 struct Class {
     access: u32,
     superclass: Option<String>,
     interfaces: Vec<String>,
-    fields: HashSet<(String, String)>,
-    methods: HashSet<(String, String)>,
+    fields: HashMap<(String, String), u32>,
+    methods: HashMap<(String, String), u32>,
 }
 
 impl Class {
     fn read(dex: &Dex<'_>, def: &ClassDef) -> Result<Self, String> {
-        let (fields, methods) = dex.members(def)?;
+        let (fields, methods) = dex.member_access(def)?;
         Ok(Class {
             access: def.access,
             superclass: def.superclass.clone(),
             interfaces: dex.interfaces(def)?,
             fields: fields
                 .into_iter()
-                .map(|f| dex.field(f).map(|(_, n, t)| (n, t)))
+                .map(|(f, access)| dex.field(f).map(|(_, n, t)| ((n, t), access)))
                 .collect::<Result<_, _>>()?,
             methods: methods
                 .into_iter()
-                .map(|m| dex.method(m).map(|(_, n, s)| (n, s)))
+                .map(|(m, access)| dex.method(m).map(|(_, n, s)| ((n, s), access)))
                 .collect::<Result<_, _>>()?,
         })
     }
@@ -132,7 +145,7 @@ impl<'a> Classes<'a> {
         if method && member.0 == "<init>" {
             return Ok(self
                 .get(owner)?
-                .is_some_and(|class| class.methods.contains(member)));
+                .is_some_and(|class| class.methods.contains_key(member)));
         }
         let mut pending = vec![owner.to_string()];
         let mut seen = HashSet::new();
@@ -148,7 +161,7 @@ impl<'a> Classes<'a> {
             } else {
                 &class.fields
             };
-            if members.contains(member) {
+            if members.contains_key(member) {
                 return Ok(true);
             }
             pending.extend(class.superclass.iter().cloned());
@@ -343,16 +356,26 @@ impl ClassPath {
                     "{name} class/interface/enum kind differs from the image"
                 ));
             }
+            if reach(stub.access) > reach(class.access) {
+                out.push(format!(
+                    "{name} has access {:#x}, the image's {:#x}",
+                    stub.access & 0x7,
+                    class.access & 0x7
+                ));
+            }
             if class.superclass != stub.superclass {
                 out.push(format!(
                     "{name} extends {:?}, not {:?}",
                     class.superclass, stub.superclass
                 ));
             }
-            for (field, ty) in &stub.fields {
-                if !class.fields.contains(&(field.clone(), ty.clone())) {
-                    out.push(format!("no field {name}->{field}:{ty}"));
-                }
+            for ((field, ty), access) in &stub.fields {
+                let image = class.fields.get(&(field.clone(), ty.clone()));
+                out.extend(member_mismatch(
+                    &format!("field {name}->{field}:{ty}"),
+                    *access,
+                    image,
+                ));
             }
             // Java always emits a class constructor. A private compile-only
             // constructor may disappear from a shrunk image; executable method
@@ -367,13 +390,18 @@ impl ClassPath {
                 .filter(|(_, name, _)| name == "<init>")
                 .map(|(_, _, sig)| sig)
                 .collect();
-            let constructorless = !class.methods.iter().any(|(name, _)| name == "<init>");
-            for (method, sig) in &stub.methods {
+            let constructorless = !class.methods.keys().any(|(name, _)| name == "<init>");
+            for ((method, sig), access) in &stub.methods {
                 if method == "<init>" && constructorless && private_constructors.contains(sig) {
                     continue;
                 }
-                if method != "<clinit>" && !class.methods.contains(&(method.clone(), sig.clone())) {
-                    out.push(format!("no method {name}->{method}{sig}"));
+                if method != "<clinit>" {
+                    let image = class.methods.get(&(method.clone(), sig.clone()));
+                    out.extend(member_mismatch(
+                        &format!("method {name}->{method}{sig}"),
+                        *access,
+                        image,
+                    ));
                 }
             }
             let values = image.static_values(name)?;
@@ -387,6 +415,23 @@ impl ClassPath {
         }
         out.sort();
         Ok(out)
+    }
+}
+
+/// Where a stub's declaration differs from the image's: absent, wider, or
+/// static where the image's is not (or the reverse). Such a compile-only
+/// declaration compiles but fails ART's linkage; a narrower one is safe.
+fn member_mismatch(member: &str, stub: u32, image: Option<&u32>) -> Option<String> {
+    match image {
+        None => Some(format!("no {member}")),
+        Some(&image) if reach(stub) > reach(image) || (stub ^ image) & ACC_STATIC != 0 => {
+            Some(format!(
+                "{member} has access {:#x}, the image's {:#x}",
+                stub & 0xf,
+                image & 0xf
+            ))
+        }
+        Some(_) => None,
     }
 }
 
@@ -412,15 +457,41 @@ mod tests {
     }
 
     #[test]
+    fn stub_members_are_no_wider_than_the_image() {
+        let member = "method Landroid/graphics/Bitmap;->getDefaultDensity()I";
+        // Bitmap.getDefaultDensity is package-private static (0x8).
+        assert_eq!(
+            member_mismatch(member, 0x9, Some(&0x8)).as_deref(),
+            Some(
+                "method Landroid/graphics/Bitmap;->getDefaultDensity()I has access 0x9, the image's 0x8"
+            )
+        );
+        assert!(member_mismatch(member, 0x8, Some(&0x8)).is_none());
+        assert!(member_mismatch(member, 0xc, Some(&0x8)).is_some());
+        assert!(member_mismatch(member, 0x0, Some(&0x8)).is_some());
+        // Narrower than the image links; final, synthetic and the like do
+        // not change linkage.
+        assert!(member_mismatch(member, 0xa, Some(&0x8)).is_none());
+        assert!(member_mismatch(member, 0x8, Some(&0x1019)).is_none());
+        assert!(member_mismatch(member, 0x4, Some(&0x1)).is_none());
+        assert!(member_mismatch(member, 0x0, Some(&0x4)).is_none());
+        assert!(member_mismatch(member, 0x4, Some(&0x0)).is_some());
+        assert_eq!(
+            member_mismatch(member, 0x8, None).as_deref(),
+            Some("no method Landroid/graphics/Bitmap;->getDefaultDensity()I")
+        );
+    }
+
+    #[test]
     fn constructors_resolve_only_on_the_requested_class() {
         let class = |parent: Option<&str>, methods: &[(&str, &str)]| Class {
             access: 1,
             superclass: parent.map(str::to_owned),
             interfaces: Vec::new(),
-            fields: HashSet::new(),
+            fields: HashMap::new(),
             methods: methods
                 .iter()
-                .map(|(n, s)| (n.to_string(), s.to_string()))
+                .map(|(n, s)| ((n.to_string(), s.to_string()), 1))
                 .collect(),
         };
         let mut classes = Classes {

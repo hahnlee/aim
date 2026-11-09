@@ -788,6 +788,14 @@ impl AndroidPackage {
     }
 }
 impl Component {
+    /// `getMetaData().containsKey(key)`: `ParsedComponentImpl.getMetaData`
+    /// answers `Bundle.EMPTY` when no meta-data was declared.
+    pub fn has_meta_data(&self, key: &str) -> bool {
+        self.meta_data
+            .as_ref()
+            .is_some_and(|data| data.0.iter().any(|(name, _)| name == key))
+    }
+
     /// `ParsedComponentImpl(Parcel)`.
     fn read(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Component> {
         let component = Component {
@@ -1255,6 +1263,18 @@ mod tests {
     use aim_binder_host::parcel::Parcel;
 
     use super::*;
+
+    #[test]
+    fn absent_meta_data_reads_as_an_empty_bundle() {
+        let mut component = Component::default();
+        assert!(!component.has_meta_data("key"));
+        component.meta_data = Some(MetaData(vec![]));
+        assert!(!component.has_meta_data("key"));
+        component.meta_data = Some(MetaData(vec![("other".into(), Value::Bool(true))]));
+        assert!(!component.has_meta_data("key"));
+        component.meta_data = Some(MetaData(vec![("key".into(), Value::Null)]));
+        assert!(component.has_meta_data("key"));
+    }
 
     #[test]
     fn certificate_sets_normalize_null_duplicates_and_hash_collisions() {

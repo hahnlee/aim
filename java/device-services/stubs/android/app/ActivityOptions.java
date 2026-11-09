@@ -3,6 +3,7 @@
 package android.app;
 
 public class ActivityOptions extends ComponentOptions {
+    private ActivityOptions() {}
     public static ActivityOptions makeBasic() { throw new RuntimeException("stub"); }
     public ActivityOptions setLaunchDisplayId(int id) { throw new RuntimeException("stub"); }
     public void setLaunchTaskDisplayAreaFeatureId(int id) { throw new RuntimeException("stub"); }

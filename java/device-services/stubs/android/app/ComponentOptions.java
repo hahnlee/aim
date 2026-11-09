@@ -3,6 +3,7 @@
 package android.app;
 
 public class ComponentOptions {
+    ComponentOptions() {}
     public ComponentOptions setPendingIntentBackgroundActivityStartMode(int mode) { throw new RuntimeException("stub"); }
     public void setPendingIntentBackgroundActivityLaunchAllowed(boolean allowed) { throw new RuntimeException("stub"); }
 }

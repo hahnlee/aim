@@ -2410,6 +2410,128 @@ mod resolver_tests {
         );
         assert_eq!(reads.load(Ordering::Acquire), 3);
     }
+
+    #[test]
+    fn raw_provider_record_skips_providers_without_the_meta_data_key() {
+        use crate::package::pkg::{AndroidPackage, MetaData, Provider, Value};
+        let mut owner = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+        let groups = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Default::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(&[0], Default::default(), groups)
+            .unwrap();
+        let orders = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), vec![]))
+            .collect();
+        owner.complete_shared_processes(orders).unwrap();
+        let store = Store::new_replica(owner, Usage::new(std::iter::empty::<&str>())).unwrap();
+        let scan = store.capture();
+        let base = Capture::new(
+            scan.clone(),
+            Context {
+                access: None,
+                scan_version: scan.version(),
+                native_domains: None,
+                boot_classes: None,
+                nonce: None,
+                system: model::System {
+                    sdk_sandbox_package: Some(None),
+                    ..Default::default()
+                },
+                platform: Default::default(),
+                users: Default::default(),
+                apex_inventory: ApexInventory {
+                    packages: Some(vec![]),
+                    active: vec![],
+                },
+                scan_users: ScanUsers {
+                    users: Some(vec![]),
+                },
+                cross_user_suspensions: true,
+                packages: Default::default(),
+                retained_packages: Default::default(),
+            },
+        )
+        .unwrap();
+        let provider = |name: &str, meta_data| {
+            let mut provider = Provider::default();
+            provider.main.component.package_name = "p".into();
+            provider.main.component.name = name.into();
+            provider.main.component.meta_data = meta_data;
+            provider.main.enabled = true;
+            provider.authority = Some(format!("p.{name}"));
+            provider
+        };
+        let pkg = AndroidPackage {
+            package_name: "p".into(),
+            uid: 10100,
+            providers: vec![
+                provider("Absent", None),
+                provider(
+                    "Keyed",
+                    Some(MetaData(vec![("key".into(), Value::Bool(true))])),
+                ),
+            ],
+            ..Default::default()
+        };
+        let mut registry = crate::package::registry::Registry::default();
+        registry
+            .register(Arc::new(
+                crate::package::scan::LoadedPackage::new(
+                    pkg.clone(),
+                    crate::package::sign::SigningDetails::unknown(),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let mut ps = model::PackageState {
+            name: "p".into(),
+            app_id: 10100,
+            pkg: Some(Arc::new(pkg)),
+            ..Default::default()
+        };
+        ps.users.insert(0, Default::default());
+        let capture = Capture {
+            scan: base.scan.clone(),
+            state: Arc::new(model::State {
+                packages: [("p".to_string(), ps)].into(),
+                package_registry: Some(Arc::new(registry)),
+                users: [(
+                    0,
+                    model::User {
+                        id: 0,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            }),
+            domains: None,
+            context: base.context.clone(),
+            frozen: None,
+            resolver: Default::default(),
+        };
+        let count = |key| {
+            let Ok(record) = capture.raw_providers_record(None, key, 10100, 0, 0) else {
+                panic!("raw provider record failed");
+            };
+            aim_binder_host::parcel::Reader::new(&record, &[])
+                .read_i32()
+                .unwrap()
+        };
+        // ComponentResolverBase.queryProviders: getMetaData() is
+        // Bundle.EMPTY for a provider that declares none; no match is null.
+        assert_eq!(count(Some("key")), 1);
+        assert_eq!(count(Some("other")), -1);
+        assert_eq!(count(None), 2);
+    }
 }
 
 impl Capture {
