@@ -257,6 +257,12 @@ pub struct Decision {
     pub result_to: Option<u64>,
     /// The task brought to the front (`setTargetRootTaskIfNeeded`).
     pub front: Option<i32>,
+    /// The root home task the start goes to comes to the front though no
+    /// activity runs there: made by `getOrCreateRootTask`, or emptied,
+    /// `startActivityInner` moves it there (`moveToFront`) all the same.
+    /// `startHomeActivity`'s start, of no such decision, leaves it behind
+    /// the desktop in window mode.
+    pub home_front: bool,
     /// The activities finished first, top first (`performClearTop`,
     /// `performClearTaskForReuse`).
     pub clear: Vec<u64>,
@@ -660,6 +666,10 @@ impl Stack {
             }
         });
         d.outcome = Outcome::New(target);
+        d.home_front = s.activity_type == super::activity::ACTIVITY_TYPE_HOME
+            && d.result_to.is_none()
+            && flags & FLAG_ACTIVITY_NEW_TASK != 0
+            && target.is_none_or(|t| self.home == Some(t) && self.top(t).is_none());
         if let Some(task) = target
             && let Some(top) = self.top(task)
         {
@@ -844,7 +854,10 @@ impl Stack {
                     }
                 } else if !(self.freeform && self.home == Some(activity.task)) {
                     // The root home task comes to the front by the start's
-                    // decision (`d.front`) only.
+                    // decision (`d.front`, `d.home_front`) only.
+                    self.move_to_front(activity.task);
+                }
+                if d.home_front {
                     self.move_to_front(activity.task);
                 }
                 if d.set_intent
