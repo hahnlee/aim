@@ -7,12 +7,16 @@
 //! F_OWNER_TID), and its SIGIO does not say which descriptor raised it. A
 //! host file with either keeps its owner here instead, Darwin's is cleared,
 //! and while O_ASYNC is set a private kqueue holds an EV_CLEAR read knote
-//! on the descriptor that set it: each arrival of data (`kill_fasync` with
-//! POLL_IN) wakes the watcher thread, which signals the owner with that
-//! descriptor as `si_fd`. A knote reports each wakeup of the file, so an
-//! event is one signal, where a readiness check on SIGIO would signal every
-//! readable descriptor again. The private kqueue is drained once the knote
-//! is in it, so data already queued raises nothing, as on Linux.
+//! on a private reference to the file: an arrival of data (`kill_fasync`
+//! with POLL_IN) wakes the watcher thread, which signals the owner with the
+//! descriptor that set O_ASYNC as `si_fd`. The knote reports the file's
+//! own wakeups, where a readiness check on SIGIO would signal every
+//! readable descriptor again; arrivals before the watcher drains it are one
+//! signal, where Linux queues one real-time signal each. The private
+//! kqueue is drained once the knote is in it, so data already queued raises
+//! nothing, as on Linux. The registration lasts until the last guest fd of
+//! the file known here closes (Linux removes the fasync entry at the last
+//! reference), and a fork child gets a copy of each owner, as an inotify's.
 //!
 //! The descriptors this layer implements whose Linux files have no fasync
 //! (eventfd, timerfd, signalfd, epoll, pidfd, ...) keep their owner here
@@ -149,7 +153,7 @@ pub fn drain(kq: i32) {
 }
 
 /// A private kqueue, out of the guest's way: a new one, or a reference to
-/// kqueue `source`.
+/// the file of descriptor `source`.
 pub fn private_kqueue(source: Option<i32>) -> Result<i32, Errno> {
     // SAFETY: a new kqueue, or our own reference to kqueue `source`.
     let kq = unsafe {
@@ -180,8 +184,10 @@ struct File {
 
 /// A host file's O_ASYNC registration with the watcher thread.
 struct Armed {
-    /// The guest fd that set O_ASYNC, with the knote (`fa_fd`).
+    /// The guest fd that set O_ASYNC (`fa_fd`).
     fd: i32,
+    /// The private reference to the file that the knote is on.
+    held: i32,
     /// The private kqueue holding the knote.
     kq: i32,
     id: u64,
@@ -205,6 +211,7 @@ impl File {
         if let Some(armed) = lock(&self.armed).take() {
             unregister(armed.id);
             close_private(armed.kq);
+            close_private(armed.held);
         }
     }
 }
@@ -335,11 +342,18 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
     if armed.is_some() {
         return Ok(());
     }
-    let kq = private_kqueue(None)?;
+    let held = private_kqueue(Some(fd))?;
+    let kq = match private_kqueue(None) {
+        Ok(kq) => kq,
+        Err(error) => {
+            close_private(held);
+            return Err(error);
+        }
+    };
     let registered = (|| {
         if flags & libc::O_ACCMODE != libc::O_WRONLY {
             let k = libc::kevent {
-                ident: guest as usize,
+                ident: held as usize,
                 filter: libc::EVFILT_READ,
                 flags: libc::EV_ADD | libc::EV_CLEAR,
                 fflags: 0,
@@ -357,11 +371,17 @@ fn refresh(fd: i32, guest: i32, file: &Arc<File>) -> Result<(), Errno> {
     })();
     match registered {
         Ok(id) => {
-            *armed = Some(Armed { fd: guest, kq, id });
+            *armed = Some(Armed {
+                fd: guest,
+                held,
+                kq,
+                id,
+            });
             Ok(())
         }
         Err(error) => {
             close_private(kq);
+            close_private(held);
             Err(error)
         }
     }
@@ -376,16 +396,19 @@ pub fn status_changed(fd: i32, guest: i32) -> Result<(), Errno> {
     }
 }
 
-/// Guest fd `fd` closed: its file leaves the table, and its O_ASYNC
-/// registration ends with the knote Darwin dropped.
+/// Guest fd `fd` closed: it leaves the table, and its file's O_ASYNC
+/// registration ends with the file's last guest fd here.
 pub fn on_close(fd: i32) {
-    let Some(file) = lock(&FILES).as_mut().and_then(|files| files.remove(&fd)) else {
+    let mut files = lock(&FILES);
+    let Some(file) = files.as_mut().and_then(|files| files.remove(&fd)) else {
         return;
     };
-    if lock(&file.armed)
-        .as_ref()
-        .is_some_and(|armed| armed.fd == fd)
-    {
+    let last = !files
+        .iter()
+        .flat_map(|files| files.values())
+        .any(|other| Arc::ptr_eq(other, &file));
+    drop(files);
+    if last {
         file.disarm();
     }
 }
@@ -398,6 +421,62 @@ pub fn on_dup(old: i32, new: i32) {
     {
         files.insert(new, file);
     }
+}
+
+/// Fork: each file's guest fds, owner, kind and O_ASYNC registration's fd
+/// (Linux children share the file; here each process has a copy, which
+/// signals the owner too).
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let files = lock(&FILES);
+    let mut groups: Vec<(Vec<i32>, &Arc<File>)> = Vec::new();
+    for (fd, file) in files.iter().flatten() {
+        match groups
+            .iter_mut()
+            .find(|(_, other)| Arc::ptr_eq(other, file))
+        {
+            Some((fds, _)) => fds.push(*fd),
+            None => groups.push((vec![*fd], file)),
+        }
+    }
+    w.seq(groups.iter(), |w, (fds, file)| {
+        w.seq(fds.iter(), |w, fd| w.i32(*fd));
+        file.fown.save(w);
+        w.bool(file.host);
+        w.opt(lock(&file.armed).as_ref(), |w, armed| w.i32(armed.fd));
+    });
+}
+
+/// The registrations [`fork_restore`] read, armed by [`after_fork_child`].
+static RESTORED: Mutex<Vec<(i32, i32, Arc<File>)>> = Mutex::new(Vec::new());
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let groups = r.seq(|r| {
+        let fds = r.seq(|r| r.i32());
+        let file = Arc::new(File {
+            fown: Fown::load(r),
+            host: r.bool(),
+            armed: Mutex::new(None),
+        });
+        (fds, file, r.opt(|r| r.i32()))
+    });
+    let mut files = lock(&FILES);
+    let files = files.get_or_insert_default();
+    for (fds, file, armed) in groups {
+        if let (Some(si_fd), Some(fd)) = (armed, fds.first()) {
+            lock(&RESTORED).push((*fd, si_fd, file.clone()));
+        }
+        for fd in fds {
+            files.insert(fd, file.clone());
+        }
+    }
+}
+
+/// Fork child: arm each registration again on its inherited file.
+pub fn after_fork_child() -> Result<(), Errno> {
+    for (fd, si_fd, file) in std::mem::take(&mut *lock(&RESTORED)) {
+        refresh(fd, si_fd, &file)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -561,6 +640,53 @@ mod tests {
         assert!(take(SIGIO).is_some());
         assert!(quiet(SIGRT));
         close(&[a, alias, b]);
+    }
+
+    /// Closing the fd that set O_ASYNC leaves a dup's signals; the last
+    /// close ends them without holding the file open. A fork child's copy
+    /// of the owner comes back from the fork state.
+    #[test]
+    fn registration_outlives_the_arming_fd() {
+        if fdtab::isolated_kernel_test("sys::fasync::tests::registration_outlives_the_arming_fd") {
+            return;
+        }
+        use super::super::fork_state::{Reader, Writer};
+        const SIGRT: i32 = 37;
+        fdtab::init();
+        let [a, b] = socketpair();
+        let pid = unsafe { libc::getpid() };
+        assert_eq!(fcntl(a, F_SETOWN, pid as u64), 0);
+        assert_eq!(fcntl(a, F_SETSIG, SIGRT as u64), 0);
+        assert_eq!(fcntl(a, F_SETFL, O_ASYNC), 0);
+        let alias = fs::dup([a as u64, 0, 0, 0, 0, 0]) as i32;
+        assert!(alias >= 0);
+
+        let mut w = Writer::default();
+        fork_save(&mut w);
+        let blob = w.into_bytes();
+        let saved = lock(&FILES).take();
+        let mut r = Reader::new(&blob);
+        fork_restore(&mut r);
+        assert!(r.ok());
+        assert_eq!(fcntl(alias, F_GETSIG, 0), SIGRT as i64);
+        let restored = std::mem::take(&mut *lock(&RESTORED));
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].1, a);
+        *lock(&FILES) = saved;
+
+        close(&[a]);
+        put(b, b"x");
+        let info = take(SIGRT).expect("signal after the arming fd closed");
+        assert_eq!(info.fields[1] as i32, a);
+        get(alias);
+        close(&[alias]);
+        assert!(file(alias).is_none());
+        let mut byte = 0u8;
+        assert_eq!(
+            fs::read([b as u64, &mut byte as *mut u8 as u64, 1, 0, 0, 0]),
+            0
+        );
+        close(&[b]);
     }
 
     /// A pipe's FIOASYNC is O_ASYNC: the reader's owner hears each write.

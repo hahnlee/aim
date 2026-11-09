@@ -1418,6 +1418,7 @@ pub fn after_fork_child() -> Result<(), crate::errno::Errno> {
     super::host_descriptors::init();
     epoll::after_fork_child()?;
     inotify::after_fork_child()?;
+    super::fasync::after_fork_child()?;
     event::after_fork_child();
     Ok(())
 }
@@ -2053,6 +2054,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     w.seq(super::fd_visibility::visible().into_iter(), |w, fd| {
         w.i32(fd)
     });
+    super::fasync::fork_save(w);
 }
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
@@ -2191,6 +2193,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             r.invalidate();
         }
     }
+    super::fasync::fork_restore(r);
     for fd in super::fd_visibility::visible() {
         if super::fuse_device::adopt(fd) {
             continue;

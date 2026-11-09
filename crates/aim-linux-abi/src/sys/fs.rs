@@ -2605,10 +2605,11 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
         }
     } else {
         // The host file is the Linux one, whose fown Darwin holds as far
-        // as it can; the layer's other descriptors have no fasync.
+        // as it can; the layer's other descriptors (a pty's broker refuses
+        // O_ASYNC, #2877) have no fasync.
         let host = matches!(
             pin.kind(),
-            None | Some(Kind::Sock(_) | Kind::Pty(_) | Kind::Regular(_) | Kind::Memfd(_))
+            None | Some(Kind::Sock(_) | Kind::Regular(_) | Kind::Memfd(_))
         ) && super::fuse_client::get(fd).is_none();
         if let Some(result) = super::fasync::fcntl(fd, original, host, cmd, arg) {
             return result;
@@ -2704,9 +2705,9 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
     }
     let (req, arg) = (a[1], a[2]);
     if req == FIOASYNC {
-        // Sockets, pipes, ttys and inotify have fasync.
+        // Sockets, pipes and inotify have fasync; a pty has none yet (#2877).
         let fasync = match pin.kind() {
-            Some(Kind::Sock(_) | Kind::Pty(_) | Kind::Inotify(_)) => true,
+            Some(Kind::Sock(_) | Kind::Inotify(_)) => true,
             None if super::fuse_client::get(fd).is_none() => match stat_fd_kernel(fd) {
                 Ok(st) => matches!(st.st_mode & libc::S_IFMT, libc::S_IFSOCK | libc::S_IFIFO),
                 Err(error) => return error,
