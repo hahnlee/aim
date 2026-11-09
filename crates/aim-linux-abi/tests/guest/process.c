@@ -692,6 +692,86 @@ static void pidfd_dup(void) {
   printf("ok pidfd_dup\n");
 }
 
+// A pidfd's O_NONBLOCK is its open file's status flag: F_SETFL sets and
+// clears it, F_GETFL reports it, and waitid(P_PIDFD) reads it when it runs.
+static void pidfd_setfl(void) {
+  int go[2];
+  CHECK(pipe(go) == 0, "pipe");
+  pid_t pid = fork();
+  if (pid == 0) {
+    char c;
+    close(go[1]);
+    read(go[0], &c, 1);
+    _exit(3);
+  }
+  close(go[0]);
+  int fd = pidfd_open(pid, 0), d = dup(fd);
+  CHECK(fd >= 0 && d >= 0, "pidfd_open");
+  CHECK((fcntl(fd, F_GETFL) & O_NONBLOCK) == 0, "blocking at open");
+  CHECK(fcntl(fd, F_SETFL, O_NONBLOCK) == 0, "F_SETFL");
+  CHECK(fcntl(d, F_GETFL) & PIDFD_NONBLOCK, "dup's F_GETFL");
+  siginfo_t si;
+  CHECK(waitid(P_PIDFD, d, &si, WEXITED) == -1 && errno == EAGAIN, "nonblocking after F_SETFL");
+  int nb = pidfd_open(pid, PIDFD_NONBLOCK);
+  CHECK(nb >= 0 && fcntl(nb, F_GETFL) & O_NONBLOCK, "PIDFD_NONBLOCK in F_GETFL");
+  pid_t child = fork();
+  if (child == 0) _exit(fcntl(nb, F_GETFL) & O_NONBLOCK && fcntl(fd, F_GETFL) & O_NONBLOCK ? 0 : 1);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 0, "forked");
+  CHECK(fcntl(fd, F_SETFL, 0) == 0 && (fcntl(d, F_GETFL) & O_NONBLOCK) == 0, "cleared");
+  write(go[1], "x", 1);
+  CHECK(waitid(P_PIDFD, fd, &si, WEXITED) == 0 && si.si_status == 3, "status %d", si.si_status);
+  close(fd);
+  close(d);
+  close(nb);
+  close(go[1]);
+  printf("ok pidfd_setfl\n");
+}
+
+// Each fd number keeps its own close-on-exec flag across fork, also when
+// it shares its open file (a kqueue the child makes again) with others,
+// and the open file keeps its O_NONBLOCK.
+static void kqueue_fd_cloexec_fork(void) {
+  int go[2];
+  CHECK(pipe(go) == 0, "pipe");
+  pid_t pid = fork();
+  if (pid == 0) {
+    char c;
+    close(go[1]);
+    read(go[0], &c, 1);
+    _exit(0);
+  }
+  close(go[0]);
+  int objects[3] = {pidfd_open(pid, 0), epoll_create1(EPOLL_CLOEXEC), inotify_init1(0)};
+  int fds[6];
+  for (int i = 0; i < 3; i++) {
+    CHECK(objects[i] >= 0, "object %d", i);
+    fds[2 * i] = fcntl(objects[i], F_DUPFD, 0);
+    fds[2 * i + 1] = fcntl(objects[i], F_DUPFD_CLOEXEC, 0);
+    CHECK(fds[2 * i] >= 0 && fds[2 * i + 1] >= 0, "dup %d", i);
+  }
+  CHECK(fcntl(objects[1], F_SETFL, O_NONBLOCK) == 0 && fcntl(objects[2], F_SETFL, O_NONBLOCK) == 0,
+        "F_SETFL");
+  pid_t child = fork();
+  if (child == 0) {
+    int bad = 0;
+    for (int i = 0; i < 6; i++) bad |= fcntl(fds[i], F_GETFD) != (i % 2 ? FD_CLOEXEC : 0);
+    bad |= fcntl(objects[0], F_GETFD) != FD_CLOEXEC || fcntl(objects[1], F_GETFD) != FD_CLOEXEC ||
+           fcntl(objects[2], F_GETFD) != 0;
+    for (int i = 0; i < 6; i++) bad |= !(fcntl(fds[i], F_GETFL) & O_NONBLOCK) != (i < 2);
+    _exit(bad);
+  }
+  int st;
+  CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+        "child flags %#x", st);
+  for (int i = 0; i < 6; i++) close(fds[i]);
+  for (int i = 0; i < 3; i++) close(objects[i]);
+  write(go[1], "x", 1);
+  close(go[1]);
+  CHECK(waitpid(pid, &st, 0) == pid, "reap");
+  printf("ok kqueue_fd_cloexec_fork\n");
+}
+
 // A forked child inherits an epoll fd with its registrations.
 static void epoll_fork(void) {
   int p[2];
@@ -2013,7 +2093,8 @@ int main(int argc, char** argv) {
       {"exec_script", exec_script}, {"exec_state", exec_state},
       {"waitid_variants", waitid_variants},
       {"pidfd_poll", pidfd_poll},   {"epoll_fork", epoll_fork},   {"death_by_signal", death_by_signal},
-      {"pidfd_dup", pidfd_dup},
+      {"pidfd_dup", pidfd_dup},     {"pidfd_setfl", pidfd_setfl},
+      {"kqueue_fd_cloexec_fork", kqueue_fd_cloexec_fork},
       {"suspend_pending", suspend_pending}, {"vdso_sigreturn", vdso_sigreturn},
       {"fork_memory", fork_memory}, {"fork_then_exit", fork_then_exit},
       {"identity", identity},       {"identity_file", identity_file},

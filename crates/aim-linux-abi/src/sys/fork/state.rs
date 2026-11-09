@@ -431,7 +431,7 @@ mod tests {
         assert!(raw >= 0);
         let source = unsafe { OwnedFd::from_raw_fd(raw) };
         assert_eq!(
-            fdtab::restore_kqueue(-1, source.as_raw_fd(), true),
+            fdtab::restore_kqueue(-1, source.as_raw_fd()),
             Err(crate::errno::EBADF)
         );
         assert!(unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0);

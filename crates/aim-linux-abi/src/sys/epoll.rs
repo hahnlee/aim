@@ -266,7 +266,6 @@ fn pty_ctl(
 }
 
 pub struct Epoll {
-    cloexec: bool,
     interest: Mutex<HashMap<i32, Interest>>,
     /// The pidfd interests' own fds of their reap watches.
     reaps: Mutex<HashMap<i32, ReapAlias>>,
@@ -468,12 +467,10 @@ pub fn epoll_create1(a: [u64; 6]) -> i64 {
     if kq < 0 {
         return -(errno::last() as i64);
     }
-    let cloexec = flags & EPOLL_CLOEXEC != 0;
-    fdtab::set_flags(kq, false, cloexec);
+    fdtab::set_flags(kq, false, flags & EPOLL_CLOEXEC != 0);
     fdtab::insert(
         kq,
         Kind::Epoll(Arc::new(Epoll {
-            cloexec,
             interest: Mutex::new(HashMap::new()),
             reaps: Mutex::new(HashMap::new()),
             ptys: Mutex::new(Vec::new()),
@@ -1101,7 +1098,6 @@ pub fn epoll_pwait2(a: [u64; 6]) -> i64 {
 /// Fork: an epoll is its interest list (its kqueue is made again in the
 /// child, by [`after_fork_child`]).
 pub(super) fn save(ep: &Epoll, w: &mut super::fork_state::Writer) {
-    w.bool(ep.cloexec);
     let interest = ep.interest.lock().unwrap();
     w.seq(interest.iter(), |w, (fd, i)| {
         w.i32(*fd);
@@ -1123,7 +1119,6 @@ pub(super) fn save(ep: &Epoll, w: &mut super::fork_state::Writer) {
 }
 
 pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
-    let cloexec = r.bool();
     let interest = r.seq(|r| {
         (
             r.i32(),
@@ -1172,7 +1167,6 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
         valid
     });
     Arc::new(Epoll {
-        cloexec,
         interest: Mutex::new(interest.into_iter().collect()),
         reaps: Mutex::new(HashMap::new()),
         ptys: Mutex::new(ptys.into_iter().flatten().collect()),
@@ -1209,7 +1203,7 @@ fn rebuild(epolls: Vec<(i32, Arc<Epoll>)>) -> Result<(), errno::Errno> {
             if kq < 0 {
                 return Err(errno::last());
             }
-            let result = fdtab::restore_kqueue(fd, kq, ep.cloexec);
+            let result = fdtab::restore_kqueue(fd, kq);
             if kq != fd && src.is_none() {
                 libc::close(kq);
             }

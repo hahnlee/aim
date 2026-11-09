@@ -329,7 +329,8 @@ pub fn waitid(a: [u64; 6]) -> i64 {
         ),
         P_PIDFD => match pidfd_of(id as i32) {
             Some(pidfd) => {
-                nohang |= pidfd.nonblock;
+                // The open file's O_NONBLOCK, as F_SETFL left it.
+                nohang |= fdtab::nonblocking(id as i32);
                 // A readable pidfd's process has exited, and Linux has made
                 // it a zombie by then. Darwin posts NOTE_EXIT a moment
                 // before the zombie can be waited for: wait that moment
@@ -417,10 +418,10 @@ const REAPED: usize = 0;
 const NOTE_REAP: u32 = 0x1000_0000;
 
 /// A pidfd's open file, which every fd referring to it shares (dups, and
-/// a fork child's copies), as [`fdtab`] keeps an open file's state.
+/// a fork child's copies), as [`fdtab`] keeps an open file's state. Its
+/// O_NONBLOCK is the kqueue's status flag.
 pub struct PidFd {
     pid: i32,
-    nonblock: bool,
     process: ProcessIdentity,
     /// Unset only in a fork child until [`after_fork_child`] makes it again.
     reap: OnceLock<ReapWatch>,
@@ -445,16 +446,14 @@ impl PidFd {
     /// Fork: the open file (its kqueues are made again in the child).
     pub(super) fn save(&self, w: &mut super::fork_state::Writer) {
         w.i32(self.pid);
-        w.bool(self.nonblock);
         w.u64(self.process.start_seconds);
         w.u64(self.process.start_microseconds);
     }
 
     pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Self> {
-        let (pid, nonblock) = (r.i32(), r.bool());
+        let pid = r.i32();
         Arc::new(Self {
             pid,
-            nonblock,
             process: ProcessIdentity {
                 host_pid: pid,
                 start_seconds: r.u64(),
@@ -596,9 +595,9 @@ pub(super) fn open_pidfd(pid: i32, nonblock: bool) -> i64 {
         Ok(kq) => kq,
         Err(e) => return e,
     };
+    fdtab::set_flags(kq, nonblock, true);
     let pidfd = Arc::new(PidFd {
         pid,
-        nonblock,
         process,
         reap: OnceLock::from(reap),
     });
@@ -778,7 +777,7 @@ pub(super) fn after_fork_child() -> Result<(), errno::Errno> {
                 new_pidfd_kqueue(p.pid, !p.reaped()).map_err(|error| -error as errno::Errno)?
             }
         };
-        let result = fdtab::restore_kqueue(fd, kq, true);
+        let result = fdtab::restore_kqueue(fd, kq);
         if kq != fd && source.is_none() {
             // SAFETY: our temporary kqueue, now on `fd`.
             unsafe { libc::close(kq) };

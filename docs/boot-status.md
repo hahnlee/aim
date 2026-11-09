@@ -104,9 +104,12 @@ knote on that watch, so two dups in one epoll each report the reap, and
 deleting one or its one-shot firing leaves the other (#2839). Closing the
 registered fd drops its interest's knotes, the reap one included, even while a
 dup keeps the pidfd open, unlike Linux's epitem, which lasts until the file's
-last close; AIM's other fd kinds behave the same. A fork child rebuilds every
-pidfd, epoll and inotify fd close-on-exec (pidfds) or with its epoll's one
-flag, whatever each fd's own flag was (#2840), and a pidfd (a kqueue) cannot
+last close; AIM's other fd kinds behave the same. A pidfd's O_NONBLOCK is its
+kqueue's status flag: F_SETFL and FIONBIO set it on a pidfd, epoll or inotify
+(Darwin's ENOTTY from a kqueue's missing FIONBIO is not the guest's), F_GETFL
+reports it, and waitid(P_PIDFD) reads it when it runs (#2841). A fork child
+gives each rebuilt pidfd, epoll and inotify fd its own close-on-exec flag
+(#2840) and its open file's O_NONBLOCK, and a pidfd (a kqueue) cannot
 be sent over SCM_RIGHTS (#2838). Darwin attaches no `NOTE_REAP` to a zombie, so a pidfd opened (or inherited
 across fork) while its process is already a zombie gets that reap notice only
 when this same process reaps it; one held by any other process then reports

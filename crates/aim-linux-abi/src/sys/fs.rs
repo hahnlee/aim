@@ -2613,11 +2613,8 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                     flags as i64
                 }
             }
-            F_SETFL => errno::check(libc::fcntl(
-                fd,
-                libc::F_SETFL,
-                open_flags_to_host(arg) & !libc::O_ACCMODE,
-            ) as i64),
+            F_SETFL => fdtab::set_status_flags(fd, open_flags_to_host(arg) & !libc::O_ACCMODE)
+                .map_or_else(|error| -(error as i64), |()| 0),
             F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
                 lock(fd, cmd, arg)
             }
@@ -2823,7 +2820,7 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
                 } else {
                     fl & !libc::O_NONBLOCK
                 };
-                errno::check(libc::fcntl(fd, libc::F_SETFL, fl) as i64)
+                fdtab::set_status_flags(fd, fl).map_or_else(|error| -(error as i64), |()| 0)
             }
             _ => -(ENOTTY as i64),
         }
