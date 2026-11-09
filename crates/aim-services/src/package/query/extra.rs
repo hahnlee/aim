@@ -1773,15 +1773,8 @@ impl Query<'_> {
                     continue;
                 }
             }
-            if let Some(key) = metadata {
-                // ParsedComponent.getMetaData exposes an empty Bundle when
-                // no manifest metadata was declared; a missing key is a miss.
-                let Some(values) = &provider.main.component.meta_data else {
-                    continue;
-                };
-                if !values.0.iter().any(|(name, _)| name == key) {
-                    continue;
-                }
+            if metadata.is_some_and(|key| !provider.main.component.has_meta_data(key)) {
+                continue;
             }
             let state = user_state(ps, user);
             let component = ComponentName {
