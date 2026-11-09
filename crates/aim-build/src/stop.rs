@@ -40,8 +40,14 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn caught(signal: libc::c_int) {
     let byte = signal as u8;
-    // SAFETY: write(2) is async-signal-safe; one byte into our pipe.
-    unsafe { libc::write(WAKE.load(Ordering::Relaxed), (&byte as *const u8).cast(), 1) };
+    // SAFETY: async-signal-safe calls: one byte into our non-blocking pipe
+    // (a full pipe already holds a wake-up), with the interrupted code's
+    // errno kept.
+    unsafe {
+        let errno = *libc::__error();
+        libc::write(WAKE.load(Ordering::Relaxed), (&byte as *const u8).cast(), 1);
+        *libc::__error() = errno;
+    }
 }
 
 /// Handles the signals by waking a thread of their own. They are caught,
@@ -49,7 +55,13 @@ extern "C" fn caught(signal: libc::c_int) {
 /// then never see the SIGTERM that stops it (#2704).
 pub(crate) fn on_signals(command: &'static str) {
     let (mut reader, writer) = std::io::pipe().expect("signal pipe");
-    WAKE.store(writer.into_raw_fd(), Ordering::Relaxed);
+    let writer = writer.into_raw_fd();
+    // SAFETY: flags of our own descriptor.
+    unsafe {
+        let flags = libc::fcntl(writer, libc::F_GETFL);
+        libc::fcntl(writer, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    WAKE.store(writer, Ordering::Relaxed);
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: installing a handler that only writes to the pipe.
         unsafe {
@@ -128,16 +140,43 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     /// A child started once the signals are handled can still be stopped
-    /// by SIGTERM: the handling leaves it no blocked mask (#2704).
+    /// by SIGTERM: the handling leaves it no blocked mask (#2704). The
+    /// handling is process-wide, so it runs in a test process of its own.
     #[test]
     fn handling_the_signals_leaves_children_stoppable() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "stop::tests::handled_signals_child",
+                "--ignored",
+                "--quiet",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    #[ignore = "runs in the process of handling_the_signals_leaves_children_stoppable"]
+    fn handled_signals_child() {
         on_signals("test");
         let mut child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
         // SAFETY: signals the child this test started, not yet reaped.
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-        let status = child.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() > deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         use std::os::unix::process::ExitStatusExt;
-        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGTERM));
     }
 
     /// A stopped boot stops aim-apps too and cleans its shims (#796).

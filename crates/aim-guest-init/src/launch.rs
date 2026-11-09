@@ -861,7 +861,8 @@ impl Drop for HostLauncher {
 
 /// `posix_spawn` with only the listed descriptors inherited
 /// (`POSIX_SPAWN_CLOEXEC_DEFAULT`), stdin from `/dev/null`, stdout and
-/// stderr to `log_fd`, in a new process group with no signal blocked.
+/// stderr to `log_fd`, in a new process group with no signal blocked and
+/// SIGPIPE's default action.
 fn spawn(
     argv: &[String],
     env: &[(String, String)],
@@ -895,14 +896,21 @@ fn spawn(
             return Err(format!("spawn responsibility: {error}"));
         }
         // A service starts with no signal blocked, as init's children do
-        // (its `UnblockSignals` at fork), whatever mask this process has.
+        // (its `UnblockSignals` at fork), whatever mask this process has,
+        // and with SIGPIPE's default action, which the Rust runtime ignores
+        // in this process and init does not.
         let mut unblocked: libc::sigset_t = 0;
         libc::sigemptyset(&mut unblocked);
         libc::posix_spawnattr_setsigmask(&mut attr, &unblocked);
+        let mut defaults: libc::sigset_t = 0;
+        libc::sigemptyset(&mut defaults);
+        libc::sigaddset(&mut defaults, libc::SIGPIPE);
+        libc::posix_spawnattr_setsigdefault(&mut attr, &defaults);
         libc::posix_spawnattr_setflags(
             &mut attr,
             (libc::POSIX_SPAWN_SETPGROUP
                 | libc::POSIX_SPAWN_SETSIGMASK
+                | libc::POSIX_SPAWN_SETSIGDEF
                 | libc::POSIX_SPAWN_CLOEXEC_DEFAULT
                 | if suspended {
                     libc::POSIX_SPAWN_START_SUSPENDED
@@ -1136,13 +1144,45 @@ mod tests {
         unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
         let pid = spawned.unwrap() as i32;
         let mut status = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         // SAFETY: signalling and reaping the child this test started.
         unsafe {
             libc::kill(pid, libc::SIGTERM);
-            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+            while libc::waitpid(pid, &mut status, libc::WNOHANG) == 0 {
+                if std::time::Instant::now() > deadline {
+                    libc::kill(pid, libc::SIGKILL);
+                    libc::waitpid(pid, &mut status, 0);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         assert!(libc::WIFSIGNALED(status));
         assert_eq!(libc::WTERMSIG(status), libc::SIGTERM);
+    }
+
+    /// A service takes SIGPIPE's default action, which init's children
+    /// have, not this process's ignored one (the Rust runtime's).
+    #[test]
+    fn a_service_starts_with_the_default_sigpipe() {
+        let log = fs::File::open("/dev/null").unwrap();
+        let pid = spawn(
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                "kill -PIPE $$; exit 3".into(),
+            ],
+            &[],
+            &[],
+            log.as_raw_fd(),
+            false,
+        )
+        .unwrap() as i32;
+        let mut status = 0;
+        // SAFETY: reaping the child this test started.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFSIGNALED(status));
+        assert_eq!(libc::WTERMSIG(status), libc::SIGPIPE);
     }
 
     #[test]
