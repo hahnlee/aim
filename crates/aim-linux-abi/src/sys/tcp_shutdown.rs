@@ -24,29 +24,32 @@ const TIME_WAIT: u8 = 10;
 pub(super) struct Shutdown {
     pub receive: bool,
     pub send: bool,
-    closed: bool,
 }
 
 impl Shutdown {
     /// EPOLLHUP / POLLHUP.
     pub fn hangup(&self) -> bool {
-        self.receive && self.send || self.closed
+        self.receive && self.send
     }
 
     /// The shutdown of a connection in TCP state `state`, with what the
     /// host already reported: EOF on the receive side, on the send side.
+    /// A connection closed by `tcp_done` (a reset, a refused or timed-out
+    /// connect) is shut both ways, as it sets `SHUTDOWN_MASK`. A closed
+    /// state only comes with Darwin's EOF or HUP, which a fresh socket,
+    /// never connected, does not report.
     fn of(state: u8, receive_eof: bool, send_eof: bool) -> Self {
         Shutdown {
             // The peer's FIN has arrived, or our SHUT_RD (which changes no
             // state) made the receive side end.
-            receive: receive_eof || matches!(state, CLOSE_WAIT | CLOSING | LAST_ACK | TIME_WAIT),
+            receive: receive_eof
+                || matches!(state, CLOSE_WAIT | CLOSING | LAST_ACK | TIME_WAIT | CLOSED),
             // Our FIN has been sent.
             send: send_eof
                 || matches!(
                     state,
-                    FIN_WAIT_1 | CLOSING | LAST_ACK | FIN_WAIT_2 | TIME_WAIT
+                    FIN_WAIT_1 | CLOSING | LAST_ACK | FIN_WAIT_2 | TIME_WAIT | CLOSED
                 ),
-            closed: state == CLOSED,
         }
     }
 }
@@ -125,7 +128,8 @@ mod tests {
         // Both directions, or closed (a reset).
         assert!(Shutdown::of(TIME_WAIT, true, false).hangup());
         assert!(Shutdown::of(LAST_ACK, false, true).hangup());
-        assert!(Shutdown::of(CLOSED, false, false).hangup());
+        let closed = Shutdown::of(CLOSED, false, false);
+        assert!(closed.receive && closed.send && closed.hangup());
     }
 
     #[test]
