@@ -307,8 +307,9 @@ and letterboxing, are tracked in #2050.
   fullscreen), and the window minimizes once out; back from the Dock, it
   enters the full screen again.
 - **Split screen.** The tasks of an organizer's adjacent root tasks
-  (`setAdjacentRoots`) keep a Mac window each, at their root task's bounds,
-  so the two windows tile side by side. The user's drag of one moves both;
+  (`setAdjacentRoots`) keep a Mac window each, at their root task's bounds
+  even where a task's minimal size grows it past them, so the two windows
+  tile side by side. The user's drag of one moves both;
   a resize moves its root task's edges, and the adjacent root's edges that
   met them follow, as the split divider moves both stages; bounds that would
   leave the other empty are refused and the window goes back. Once adjacency is cleared
