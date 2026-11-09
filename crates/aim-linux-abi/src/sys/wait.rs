@@ -110,7 +110,7 @@ fn child_info(pid: i32, code: i32, status: i32) -> (i32, i32) {
 /// the reap ([`sigchld_info`]) still reports them, as Linux fills its
 /// siginfo at the child's exit (`do_notify_parent`). The latest
 /// [`REAPED_KEPT`]; one goes when its SIGCHLD is routed.
-static REAPED: Mutex<VecDeque<(i32, u32, Option<i32>)>> = Mutex::new(VecDeque::new());
+static REAPED_CHILDREN: Mutex<VecDeque<(i32, u32, Option<i32>)>> = Mutex::new(VecDeque::new());
 const REAPED_KEPT: usize = 32;
 
 /// Host child `pid` was reaped: keep what its SIGCHLD reports, then drop
@@ -122,7 +122,7 @@ fn reaped(pid: i32) {
         super::procrec::fatal_of(pid),
     );
     {
-        let mut r = REAPED.lock().unwrap();
+        let mut r = REAPED_CHILDREN.lock().unwrap();
         r.retain(|c| c.0 != pid);
         if r.len() == REAPED_KEPT {
             r.pop_front();
@@ -141,7 +141,7 @@ pub(super) fn sigchld_info(pid: i32, code: i32, status: i32) -> (i32, u32, i32, 
     let (uid, fatal) = match super::cred::real_uid_of(pid) {
         Some(uid) => (uid, fatal),
         None => {
-            let mut r = REAPED.lock().unwrap();
+            let mut r = REAPED_CHILDREN.lock().unwrap();
             match r.iter().position(|c| c.0 == pid) {
                 Some(i) => r.remove(i).map_or((0, None), |c| (c.1, c.2)),
                 None => (0, None),
