@@ -271,8 +271,10 @@ original's first boot at build time and keeps the shipped set of item 3:
    runs, and the permission module's files once the role controller has
    written `roles.xml` and the module has been quiet for 3 s (about 23 s
    in); each copy is taken again if a write began meanwhile. After
-   `sys.boot_completed` (boot dexopt is over by `ams_ready`) and both
-   copies, it stops the boot. Play Store starts updating itself within
+   `sys.boot_completed` (boot dexopt is over by `ams_ready`), read from the
+   property areas init writes as the guest's own readers do, and both
+   copies, it stops the boot. Only the boot's budget bounds these waits,
+   and the boot holds `cargo aim`'s guest lock (docs/build.md). Play Store starts updating itself within
    30 s of `sys.boot_completed`; what it installs is not in the shipped
    set, and step 2 fails the build if it reached `packages.xml`.
 2. **Check.** The settings list only the image's packages (no package an

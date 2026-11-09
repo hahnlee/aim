@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use aim_android_image::system_server::{NATIVE_SERVICES, parse_native_services};
 use aim_android_init::engine::{ActionManager, COLD_BOOT_DONE_PROP, ExecutedCommand, Step};
+use aim_android_init::props::areas::read_from_dir;
 use aim_android_init::props::load::{
     KernelBootProperties, PropertyInitOptions, create_serialized_property_info, property_init,
     start_property_service,
@@ -33,9 +34,7 @@ use crate::launch::{
 };
 use crate::mount::DataMount;
 use crate::paths::{Layout, Sweep};
-use crate::props::{
-    Properties, heap_properties, mapped_properties, read_property, share_areas, wait_property,
-};
+use crate::props::{Properties, heap_properties, mapped_properties, share_areas, wait_property};
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
 
@@ -1038,7 +1037,7 @@ impl Boot {
                         &layout.data.join("data"),
                         &layout.bpf_dir(),
                         &layout.net_dir(),
-                        Box::new(move |name| read_property(&properties_dir, name)),
+                        Box::new(move |name| read_from_dir(&properties_dir, name)),
                         Box::new(move |name, value, deadline| {
                             wait_property(&wait_dir, name, value, deadline)
                                 .map_err(|e| e.to_string())
@@ -1068,7 +1067,7 @@ impl Boot {
                         names,
                         log,
                         image.root(),
-                        Box::new(move |name| read_property(&properties_dir, name)),
+                        Box::new(move |name| read_from_dir(&properties_dir, name)),
                         Box::new(move |guest: &str| files.readable_by_others(guest)),
                     )?;
             }

@@ -281,22 +281,71 @@ fn load(verbose: bool) -> Result<(Graph, Ctx), String> {
 /// Holds `target/aim-cache/lock` while this process builds: two builds of
 /// one checkout would race on its stamps and outputs.
 fn lock() -> Result<fs::File, String> {
-    let path = aim_paths::cache().join("lock");
     fs::create_dir_all(aim_paths::cache()).map_err(|e| e.to_string())?;
-    let file = fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    hold(
+        &aim_paths::cache().join("lock"),
+        "another cargo aim in this checkout",
+    )
+}
+
+/// Holds [`aim_paths::guest_lock`] while a guest of `cargo aim` runs (a
+/// boot, a bench, the integration tests, the `userdata/template` build
+/// boot): one at a time on the Mac, of every checkout. Two guests compete
+/// for the CPU, the disk image helper and the windows, which a build
+/// boot's and the tests' timings do not allow for (#2665).
+pub(crate) fn guest_lock() -> Result<fs::File, String> {
+    hold(
+        &aim_paths::guest_lock(),
+        "the guest of another cargo aim to stop",
+    )
+}
+
+/// An exclusive `flock` on `path`, waiting (and saying so) while another
+/// process holds it.
+fn hold(path: &Path, waiting: &str) -> Result<fs::File, String> {
+    let file = fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     // SAFETY: flock on an open descriptor.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        eprintln!("cargo aim: waiting for another cargo aim in this checkout");
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(file);
+    }
+    eprintln!("cargo aim: waiting for {waiting}");
+    loop {
         // SAFETY: as above.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(format!(
-                "{}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            ));
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("{}: {error}", path.display()));
         }
     }
-    Ok(file)
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn a_second_holder_waits_for_the_first() {
+        let dir = aim_paths::scratch_dir("aim-build-hold");
+        let path = dir.join("guest.lock");
+        let first = hold(&path, "the first holder").unwrap();
+        let (sent, held) = mpsc::channel();
+        let waiter = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                let second = hold(&path, "the first holder").unwrap();
+                sent.send(()).unwrap();
+                drop(second);
+            }
+        });
+        assert!(held.recv_timeout(Duration::from_millis(300)).is_err());
+        drop(first);
+        held.recv_timeout(Duration::from_secs(10)).unwrap();
+        waiter.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn run(args: Vec<String>) -> Result<ExitCode, String> {

@@ -24,6 +24,7 @@ pub fn run(
     windows: bool,
     extra: &[String],
 ) -> Result<ExitCode, String> {
+    let _guest = crate::guest_lock()?;
     stop::on_signals("boot");
     let dir = aim_paths::out().join("boot");
     let data = data.map_or(dir.join("data"), PathBuf::from);
