@@ -579,6 +579,22 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
     if k.flags & libc::EV_ERROR != 0 {
         return EPOLLERR;
     }
+    // A pipe end whose other end is gone, which Darwin marks with EOF for
+    // either filter: `pipe_poll` reports a read end hung up, readable only
+    // with data queued, and a write end EPOLLERR, never EPOLLHUP, and
+    // writable, as Darwin frees the buffer with the last reader.
+    match eof.then(|| super::poll::pipe_end(k.ident as i32)).flatten() {
+        Some(super::poll::PipeEnd::Read) => {
+            return EPOLLHUP
+                | if k.filter == libc::EVFILT_READ && k.data > 0 {
+                    i.events & (EPOLLIN | EPOLLRDNORM)
+                } else {
+                    0
+                };
+        }
+        Some(super::poll::PipeEnd::Write) => return EPOLLERR | i.events & (EPOLLOUT | EPOLLWRNORM),
+        None => {}
+    }
     // A socket's shutdown, which Darwin marks with EOF either way: Linux
     // reports a hangup only once both directions are shut.
     let shut = eof
