@@ -44,14 +44,14 @@ struct Rules {
     immutable_check: bool,
 }
 /// `EXT4_FL_USER_VISIBLE`, `EXT4_FL_USER_MODIFIABLE`.
-const EXT4: Rules = Rules {
+static EXT4: Rules = Rules {
     accepted: 0x725b_dbff,
     modifiable: 0x604b_c0ff,
     honoured: IMMUTABLE,
     immutable_check: true,
 };
 /// `SHMEM_FL_USER_MODIFIABLE`: immutable, append-only, nodump, noatime.
-const SHMEM: Rules = Rules {
+static SHMEM: Rules = Rules {
     accepted: 0xf0,
     modifiable: 0xf0,
     honoured: 0,
@@ -110,8 +110,18 @@ fn rules(fd: i32) -> Option<&'static Rules> {
     }
 }
 
-fn flags(stat: &libc::stat) -> Result<u32, Errno> {
+/// Whether `fd` is a file of a writable ext4, which has fscrypt.
+pub(super) fn ext4(fd: i32) -> bool {
+    rules(fd).is_some_and(|rules| std::ptr::eq(rules, &EXT4))
+        && super::fs::stat_fd_kernel(fd)
+            .is_ok_and(|stat| !crate::vfs::on_read_only_root(stat.st_dev))
+}
+
+fn flags(fd: i32, stat: &libc::stat) -> Result<u32, Errno> {
     let mut flags = 0;
+    if super::fscrypt::encrypted(Host::Fd(fd))? {
+        flags |= super::fscrypt::ENCRYPTED;
+    }
     if stat.st_flags & HOST_IMMUTABLE != 0 {
         flags |= IMMUTABLE;
     }
@@ -129,7 +139,7 @@ fn get(fd: i32, arg: u64) -> i64 {
         Ok(stat) => stat,
         Err(error) => return error,
     };
-    flags(&stat)
+    flags(fd, &stat)
         .and_then(|flags| super::user_memory::write_exact(arg, &flags.to_le_bytes()))
         .map(|_| 0)
         .unwrap_or_else(|error| -(error as i64))
@@ -156,7 +166,7 @@ fn set(fd: i32, arg: u64, id: &Identity, rules: &Rules) -> i64 {
         if stat.st_uid != id.uid[attrs::FS] && id.cap_eff & CAP_FOWNER == 0 {
             return -(errno::EPERM as i64);
         }
-        let old = match flags(stat) {
+        let old = match flags(fd, stat) {
             Ok(flags) => flags,
             Err(error) => return -(error as i64),
         };

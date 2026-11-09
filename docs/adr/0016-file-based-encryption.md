@@ -3,8 +3,8 @@
 Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
 option B, CE protected by a Mac Keychain item, FileVault for confidentiality
 at rest (D not now), and existing data directories recreated by a breaking
-migration on a branch. Nothing of it is implemented yet; the guest is a
-device without file-based encryption (FBE) until slices 1-3 land.
+migration on a branch. Slice 1a is implemented (#2845); the guest is a
+device without file-based encryption (FBE) until slices 1b-3 land.
 
 ## Context
 
@@ -60,7 +60,7 @@ From `Documentation/filesystems/fscrypt.rst` (v6.12) and ext4/f2fs:
    Every inode created below inherits it, with its own nonce
    (`FS_IOC_GET_ENCRYPTION_NONCE`). `link` and `rename` into a directory of
    another policy fail with `EXDEV`.
-2. **Queries.** `FS_IOC_GET_ENCRYPTION_POLICY` (`EOVERFLOW` for v2,
+2. **Queries.** `FS_IOC_GET_ENCRYPTION_POLICY` (`EINVAL` for v2,
    `ENODATA` when unencrypted), `..._POLICY_EX`, `FS_ENCRYPT_FL` in
    `FS_IOC_GETFLAGS`, `STATX_ATTR_ENCRYPTED`.
 3. **A filesystem keyring.** `FS_IOC_ADD_ENCRYPTION_KEY` returns the v2

@@ -339,6 +339,19 @@ requirements:
 - `access`/`faccessat` must evaluate the guest identity against these
   owners and modes.
 
+An inode's fscrypt policy (ADR 0016) is its `struct fscrypt_context` (v1
+28 bytes, v2 40 bytes: the policy and the inode's nonce), in the host
+attribute `dev.aim.fscrypt-context`. The layer sets it on
+`FS_IOC_SET_ENCRYPTION_POLICY` and on every regular file, directory and
+symlink a guest creates in a directory that has one. guest-init prepares
+the filesystem's fscrypt owner with the data directory
+(`aim_storage::fscrypt`): `<runtime>/fscrypt-root` locates the persistent
+`<data>/fscrypt`, where the marker `policies` exists once any directory
+has been given a policy (until then no attribute is read, and after, only
+on the data filesystem's device), and `<runtime>/fscrypt-keyring` (mode
+0600, replaced by a rename under `fscrypt-keyring.lock`), empty at each
+boot, holds the added keys' specifiers and users, never a key.
+
 ## 7. `/proc` and `/sys` values: `<runtime>/kernfs`
 
 init's `write`, `copy`, `copy_per_line`, `hostname` and `domainname` to

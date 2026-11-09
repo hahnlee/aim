@@ -2953,6 +2953,7 @@ pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path)
         let mut locator = b"AIMVRTROOT01\0".to_vec();
         locator.extend_from_slice(proofs.as_os_str().as_bytes());
         std::fs::write(dir.join("run/fs-verity-root"), locator).unwrap();
+        aim_storage::fscrypt::Owner::prepare(&dir.join("run"), &dir).unwrap();
         init(&root, Some(&map)).unwrap();
         dir
     });

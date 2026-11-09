@@ -56,6 +56,7 @@ mod fileattr;
 mod fork;
 mod fown;
 mod fs;
+mod fscrypt;
 mod fsops;
 mod fsverity_ioctl;
 mod futex;
