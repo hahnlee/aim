@@ -287,15 +287,33 @@ pub fn compute_frames(
 /// The region a window takes touches in (`WindowState.getTouchableRegion`
 /// and `populateInputWindowHandle`): none if it is not touchable; its
 /// activity's task bounds (`updateRegionForModalActivityWindow`) if it is
-/// modal; else its frame.
-pub fn touchable_region(attrs: &LayoutParams, frame: Rect, task_bounds: Rect) -> Rect {
+/// modal; else its frame. It is cut to `crop`, the crop of its task's
+/// parent surface (an organizer root task's bounds), as SurfaceFlinger cuts
+/// a layer's input to its parents' crops.
+pub fn touchable_region(
+    attrs: &LayoutParams,
+    frame: Rect,
+    task_bounds: Rect,
+    crop: Option<Rect>,
+) -> Rect {
     if attrs.flags & FLAG_NOT_TOUCHABLE != 0 {
         return rect(0, 0, 0, 0);
     }
-    if attrs.is_modal() {
-        return task_bounds;
+    let region = if attrs.is_modal() { task_bounds } else { frame };
+    let Some(crop) = crop else {
+        return region;
+    };
+    let cut = rect(
+        region.left.max(crop.left),
+        region.top.max(crop.top),
+        region.right.min(crop.right),
+        region.bottom.min(crop.bottom),
+    );
+    if cut.left < cut.right && cut.top < cut.bottom {
+        cut
+    } else {
+        rect(0, 0, 0, 0)
     }
-    frame
 }
 
 #[cfg(test)]
@@ -385,19 +403,33 @@ mod tests {
             ..Default::default()
         };
         let frame = rect(10, 10, 20, 20);
-        assert_eq!(touchable_region(&modal, frame, DISPLAY), DISPLAY);
-        assert_eq!(touchable_region(&popup(0, 0), frame, DISPLAY), DISPLAY);
+        assert_eq!(touchable_region(&modal, frame, DISPLAY, None), DISPLAY);
+        assert_eq!(
+            touchable_region(&popup(0, 0), frame, DISPLAY, None),
+            DISPLAY
+        );
         let not_modal = LayoutParams {
             flags: FLAG_NOT_FOCUSABLE,
             ..Default::default()
         };
-        assert_eq!(touchable_region(&not_modal, frame, DISPLAY), frame);
+        assert_eq!(touchable_region(&not_modal, frame, DISPLAY, None), frame);
         let untouchable = LayoutParams {
             flags: FLAG_NOT_TOUCHABLE,
             ..Default::default()
         };
         assert_eq!(
-            touchable_region(&untouchable, frame, DISPLAY),
+            touchable_region(&untouchable, frame, DISPLAY, None),
+            rect(0, 0, 0, 0)
+        );
+        // A task grown past its organizer root task takes touches only
+        // within the root's crop.
+        let root = rect(0, 0, 540, 1920);
+        assert_eq!(
+            touchable_region(&modal, frame, rect(0, 0, 900, 1920), Some(root)),
+            root
+        );
+        assert_eq!(
+            touchable_region(&not_modal, rect(600, 0, 900, 100), DISPLAY, Some(root)),
             rect(0, 0, 0, 0)
         );
     }

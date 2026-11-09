@@ -180,14 +180,16 @@ registration's list) with its launch cookie, and goes with its organizer
 and `reparentTasks` (mode/type filters, top-only) move app tasks into and out
 of a root: the task's layer becomes the root's child, its `parentTaskId`,
 windowing mode (undefined inherits the root's multi-window) and bounds resolve
-in the root, and it keeps its own Mac window at those bounds. A root's
+in the root, grown to its minimal size (`adjustForMinimalTaskDimensions`, as
+in freeform; #2808), and it keeps its own Mac window at those bounds. A root's
 `setBounds` re-resolves its tasks and `reorder` brings them with it. WCT
 `setAdjacentRoots`, `clearAdjacentRoots` and `setLaunchAdjacentFlagRoot` /
 `clearLaunchAdjacentFlagRoot` keep the roots' adjacent sets and the display
 area's flag root (`AdjacentSet`, `setLaunchAdjacentFlagRootTask`), admitted in
 order (an op on a deleted root is skipped, as the original does) and dropped
 with their roots. In window mode the tasks of adjacent roots are two Mac
-windows tiled side by side at their roots' bounds: the user's resize of one
+windows tiled side by side at their roots' bounds (however large a task's
+minimal size makes it): the user's resize of one
 moves the shared edge of the roots, as the split divider does, a drag moves
 both, and the other window follows; clearing adjacency makes them independent.
 `setLaunchRoot`, a launch with `FLAG_ACTIVITY_LAUNCH_ADJACENT` into the flag
