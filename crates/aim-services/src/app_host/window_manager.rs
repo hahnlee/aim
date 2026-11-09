@@ -749,7 +749,8 @@ impl Session {
         let requested = (UNSPECIFIED_LENGTH, UNSPECIFIED_LENGTH);
         let frames =
             window_layout::compute_frames(&attrs, bounds, attached, freeform.is_some(), requested);
-        let input = Input::of(&attrs, frames.frame, bounds, (self.uid, self.pid));
+        let crop = task.and_then(|id| self.host.tasks.parent_bounds(id));
+        let input = Input::of(&attrs, frames.frame, bounds, crop, (self.uid, self.pid));
         let mut windows = self.host.windows.windows.lock().unwrap();
         let (index, channel) =
             self.host
@@ -1025,15 +1026,18 @@ pub(super) struct Input {
 }
 
 impl Input {
-    fn of(
+    /// A window's input, `crop` the bounds of its task's organizer root
+    /// task, if it is in one.
+    pub(super) fn of(
         attrs: &LayoutParams,
         frame: Rect,
         task_bounds: Rect,
+        crop: Option<Rect>,
         (owner, owner_pid): (u32, i32),
     ) -> Input {
         Input {
             frame,
-            touchable: window_layout::touchable_region(attrs, frame, task_bounds),
+            touchable: window_layout::touchable_region(attrs, frame, task_bounds, crop),
             watch_outside: attrs.watches_outside(),
             owner,
             owner_pid,
@@ -1352,7 +1356,13 @@ impl super::AppHost {
         }
         self.set_input_frame(
             w.channel,
-            &Input::of(&w.attrs, frame, bounds, (w.uid, w.pid)),
+            &Input::of(
+                &w.attrs,
+                frame,
+                bounds,
+                w.task.and_then(|id| self.tasks.parent_bounds(id)),
+                (w.uid, w.pid),
+            ),
         )
         .map_err(|e| format!("{e:?}"))
     }
