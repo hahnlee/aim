@@ -262,6 +262,7 @@ name = "aim-host-lock"
 version = "0.1.0"
 dependencies = [
  "aim-hostcall",
+ "zeroize",
 ]
 
 [[package]]
@@ -412,6 +413,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]

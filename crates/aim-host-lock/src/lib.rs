@@ -8,6 +8,8 @@
 
 use std::ffi::{CStr, c_char, c_void};
 
+pub mod keychain;
+
 type Id = *mut c_void;
 type Sel = *const c_void;
 

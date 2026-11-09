@@ -3,11 +3,12 @@
 Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
 option B, CE protected by a Mac Keychain item, FileVault for confidentiality
 at rest (D not now), and existing data directories recreated by a breaking
-migration on a branch. Slices 1 and 2 are implemented (#2845, #2846,
-#2847): vold manages the keys as `FsCrypt.cpp` does once `ro.crypto.type`
-is `file`, which only slice 3 sets, so the guest is a device without
-file-based encryption (FBE) until slice 3 lands, and slice 3 lands only
-with or after slice 4.
+migration on a branch. Slices 1 and 2 and slice 4's CE protection are
+implemented (#2845, #2846, #2847, #2849): vold manages the keys as
+`FsCrypt.cpp` does and the app host protects and unlocks CE with the
+keychain's secret once `ro.crypto.type` is `file`, which only slice 3
+sets, so the guest is a device without file-based encryption (FBE) until
+slice 3 lands.
 
 ## Context
 
@@ -132,7 +133,7 @@ independent of B; one key for DE and CE, so CE locking stays B's.
 
 B, with D left to decision 3. Each slice is independently correct and
 under the ~900-line review budget except the first, split in two. Slice 3
-turns FBE on and depends on slice 4: it lands with or after it.
+turns FBE on and depends on slice 4's CE protection: it lands after it.
 
 1. **fscrypt ABI** (`aim-linux-abi`, a keyring/policy owner in guest-init):
    (a) keyring ioctls, set/get policy, nonce, flags and statx, inheritance
@@ -158,8 +159,39 @@ turns FBE on and depends on slice 4: it lands with or after it.
    `mkdir encryption=`/`key=` as `FscryptSetDirectoryPolicy`; the data
    migration of decision 4.
 4. **App host**: CE protection per decision 2 in `lock_settings` and the
-   user's unlock; the FBE branches of the ported `fixAppsDataOnBoot` and
-   `UserDataPreparer` then run as on a device. Measure 3 fresh and 3 warm
+   user's unlock. Implemented (#2849), in the original's order for an
+   unsecured user: StorageManagerService's `restoreCeUnlockedUsers` asks
+   vold for the users it unlocked (user 0 on the first boot, its new key
+   installed); LockSettingsService's one-time migration
+   (`MIGRATED_SP_FULL`) makes user 0's secret if it has no protector
+   (`initializeSyntheticPassword`: a random 32-byte secret, a random
+   protector id as `sp-handle` in `locksettings.db`) and calls
+   `setCeStorageProtection` with it before the user starts; at the
+   unlock, `unlockUserKeyIfUnsecured` reads it back for `unlockCeStorage`
+   unless vold had unlocked the user. The secret is a generic password of
+   the Mac user's keychain (`aim-host-lock`): service `dev.aim.ce-secret`,
+   account the user and its protector, so each data directory has its
+   own. `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` belongs to the
+   data-protection keychain, which an ad-hoc signed process cannot use;
+   its equivalent is the file-based login keychain, unlocked by the Mac
+   user's login and locked at logout, never synchronized, read without UI
+   so a locked keychain fails the read (`errAuthorizationInternal`, tested
+   on a throwaway keychain) instead of prompting. The item's access lets
+   any of the user's applications decrypt it and carries no partition
+   list: an item made with the default access is bound to its maker's
+   ad-hoc cdhash, and a second, separately built ad-hoc binary reading it
+   blocked on a prompt, where with this access it read the item without
+   one (checked with two throwaway binaries and a throwaway keychain). A
+   rebuilt app host is therefore never prompted, and setting a partition
+   list, which needs the keychain's password, is not needed. It loses
+   nothing, as every process of the user can read the plaintext data
+   image. As in the original, a failed unlock (the keychain locked, the
+   item missing) is logged and the user stays locked (Direct Boot): the
+   app host's boot stops after `LOCKED_BOOT_COMPLETED` instead of failing.
+   Every user is unsecured to LockSettings here: the Mac's session is the
+   credential. With slice 3 the FBE branches of the ported
+   `fixAppsDataOnBoot` and `UserDataPreparer` then run as on a device;
+   remaining: measure 3 fresh and 3 warm
    boots against main (boot-measurement discipline) and run CTS
    `EncryptionTest` and `FileBasedEncryptionPolicyTest`.
 
@@ -182,12 +214,12 @@ turns FBE on and depends on slice 4: it lands with or after it.
   `startup_bench` and a boot before and after.
 - A partial FBE (properties before slices 1-3) is worse than none: the
   properties flip only in slice 3, after the ABI and vold are in.
-- FBE without CE protection loses CE data. vold stores a new user's CE
-  key only when LockSettings calls `setCeStorageProtection`; on a device
-  where nothing does, user 0's CE key is generated anew on the next FBE
-  boot, setting it on the non-empty `/data/data` fails (`ENOTEMPTY`), the
-  boot stops and the previous CE key, and with it CE data, is gone. So
-  slice 3 must not land before slice 4 (or lands with it).
+- CE data depends on the keychain item. vold stores a new user's CE key
+  only when LockSettings calls `setCeStorageProtection` (slice 4 does), and
+  opens it only with the item's secret: a data directory moved to another
+  Mac user or Mac, or whose item was deleted, keeps its CE data locked
+  (the unlock fails), as a device whose synthetic password is lost does.
+  Deleting a data directory leaves its item in the keychain.
 - `secdiscard` cannot securely erase on a `/data` backed by APFS: its F2FS
   and block-discard ioctls do not exist there, so it falls back to
   overwriting, which a copy-on-write filesystem and SSD remapping do not
