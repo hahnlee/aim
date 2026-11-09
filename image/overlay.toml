@@ -1116,7 +1116,7 @@ reason = "APEXes are pre-flattened into the derived image (no loop devices or dm
 [[replace]]
 path = "/system/bin/vold"
 source = "target/aim/daemons/bin/vold"
-reason = "vold drives block devices, dm-crypt, fscrypt and mounts; /data is a host directory, so this IVold prepares user storage as directories and links the emulated volume to /data/media"
+reason = "vold drives block devices, dm-crypt, fscrypt and mounts; /data is a host directory, so this IVold prepares user storage as directories, keeps FsCrypt.cpp's FBE keys over the syscall layer's fscrypt ioctls (ADR 0016) and links the emulated volume to /data/media"
 
 [[replace]]
 path = "/system/bin/netd"

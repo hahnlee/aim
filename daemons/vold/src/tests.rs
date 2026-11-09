@@ -1,13 +1,14 @@
-//! vold's FBE keys against KeyStorage.cpp's format and the fscrypt
-//! ioctls' structures (the keyring's key identifier is the data
-//! filesystem's, `aim_storage::fscrypt::key_identifier`).
+//! vold's FBE keys against KeyStorage.cpp's format, the fscrypt ioctls'
+//! structures (the keyring's key identifier is the data filesystem's,
+//! `aim_storage::fscrypt::key_identifier`) and FsCrypt.cpp's user
+//! lifecycle.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::fscrypt::{self, ADD_KEY, Ioctl, Options, REMOVE_KEY, SET_POLICY};
+use crate::fscrypt::{self, ADD_KEY, FsCrypt, Ioctl, Options, REMOVE_KEY, SET_POLICY};
 use crate::key_storage::{Auth, EMPTY_AUTH, KeyBuffer, KeyStorage, Keystore, Output, random};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -277,4 +278,119 @@ fn keys_install_and_evict_through_the_ioctls() {
     assert!(kernel.keys.borrow().is_empty());
     let error = fscrypt::evict_key(&kernel, &scratch.0, &policy).unwrap_err();
     assert!(error.to_string().contains("Failed to evict"));
+}
+
+/// A data directory as init prepares it: `installkey` makes
+/// /data/unencrypted, init.rc /data/misc/vold.
+fn crypt(data: &Path) -> FsCrypt<SoftKeystore, Keyring> {
+    std::fs::create_dir_all(data.join("unencrypted")).unwrap();
+    std::fs::create_dir_all(data.join("misc/vold")).unwrap();
+    FsCrypt::new(data.to_path_buf(), true, 36, store(), Keyring::default())
+}
+
+#[test]
+fn users_keys_are_created_unlocked_locked_and_destroyed() {
+    let scratch = Scratch::new("users");
+    let data = &scratch.0;
+    let options = "aes-256-xts:aes-256-cts:v2";
+    let mut fbe = crypt(data);
+    fbe.initialize_systemwide_keys(options).unwrap();
+    let device = fbe.device_policy.clone().unwrap();
+    let unencrypted = data.join("unencrypted");
+    assert_eq!(
+        std::fs::read(unencrypted.join("ref")).unwrap(),
+        device.key_raw_ref
+    );
+    assert_eq!(
+        std::fs::read_to_string(unencrypted.join("mode")).unwrap(),
+        options
+    );
+    assert_eq!(
+        std::fs::read(unencrypted.join("per_boot_ref"))
+            .unwrap()
+            .len(),
+        16
+    );
+    assert!(unencrypted.join("key/encrypted_key").exists());
+
+    fbe.init_user0_keys().unwrap();
+    let keys = data.join("misc/vold/user_keys");
+    assert!(keys.join("de/0/keymaster_key_blob").exists());
+    // A new CE key waits in memory for its secret.
+    assert_eq!(std::fs::read_dir(keys.join("ce/0")).unwrap().count(), 0);
+    assert_eq!(fbe.unlocked_users(), vec![0]);
+
+    fbe.create_user_keys(10, false).unwrap();
+    let (de, ce) = (fbe.de[&10].clone(), fbe.ce[&10].clone());
+    assert!(keys.join("de/10/version").exists());
+    assert!(fbe.set_ce_key_protection(10, b"").is_err());
+    fbe.set_ce_key_protection(10, b"synthetic password secret")
+        .unwrap();
+    assert!(keys.join("ce/10/current/encrypted_key").exists());
+    assert!(!keys.join("ce/10/current/secdiscardable").exists());
+    assert_eq!(fbe.user_policy(None, 10, true).unwrap(), Some(&ce));
+
+    fbe.lock_ce_storage(10).unwrap();
+    assert!(
+        !fbe.kernel
+            .keys
+            .borrow()
+            .iter()
+            .any(|k| *k == ce.key_raw_ref[..])
+    );
+    assert_eq!(fbe.unlocked_users(), vec![0]);
+    assert!(fbe.user_policy(None, 10, true).is_err());
+    assert!(fbe.unlock_ce_storage(10, b"wrong").is_err());
+    fbe.unlock_ce_storage(10, b"synthetic password secret")
+        .unwrap();
+    assert_eq!(fbe.ce[&10], ce);
+    assert_eq!(fbe.unlocked_users(), vec![0, 10]);
+
+    // After a reboot the system DE key and every DE key load again.
+    let mut rebooted = crypt(data);
+    rebooted.initialize_systemwide_keys(options).unwrap();
+    assert_eq!(rebooted.device_policy, Some(device));
+    rebooted.init_user0_keys().unwrap();
+    assert_eq!(rebooted.de[&10], de);
+    // User 0's CE key was never given its secret, so it was not stored and
+    // a new one replaces it, as in the original; user 10's stays locked.
+    assert_eq!(rebooted.unlocked_users(), vec![0]);
+    assert_ne!(rebooted.ce[&0], fbe.ce[&0]);
+
+    fbe.destroy_user_keys(10).unwrap();
+    assert!(!keys.join("de/10").exists());
+    assert!(!keys.join("ce/10").exists());
+    assert!(
+        !fbe.kernel
+            .keys
+            .borrow()
+            .iter()
+            .any(|k| *k == de.key_raw_ref[..])
+    );
+    assert!(fbe.user_policy(None, 10, false).is_err());
+}
+
+#[test]
+fn ephemeral_users_and_devices_without_fbe_store_nothing() {
+    let scratch = Scratch::new("ephemeral");
+    let mut fbe = crypt(&scratch.0);
+    fbe.initialize_systemwide_keys("").unwrap();
+    fbe.create_user_keys(11, true).unwrap();
+    fbe.set_ce_key_protection(11, b"secret").unwrap();
+    assert!(!scratch.0.join("misc/vold/user_keys/de/11").exists());
+    fbe.destroy_user_keys(11).unwrap();
+    assert!(fbe.kernel.keys.borrow().len() == 2);
+
+    let mut plain = FsCrypt::new(
+        scratch.0.join("plain"),
+        false,
+        36,
+        store(),
+        Keyring::default(),
+    );
+    plain.init_user0_keys().unwrap();
+    plain.create_user_keys(10, false).unwrap();
+    plain.unlock_ce_storage(10, b"").unwrap();
+    assert_eq!(plain.user_policy(None, 10, true).unwrap(), None);
+    assert!(plain.kernel.keys.borrow().is_empty());
 }

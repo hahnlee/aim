@@ -2,10 +2,12 @@
 //! daemons"): IVold for a /data that is a host directory.
 //!
 //! What vold does with the kernel (block devices, loop devices, dm-crypt,
-//! fscrypt keys, FUSE and bind mounts) has no counterpart here, so:
-//! - user storage is the directories vold would prepare, with no keys
-//!   (every user's credential-encrypted storage counts as unlocked once
-//!   asked to be);
+//! FUSE and bind mounts) has no counterpart here, so:
+//! - user storage is the directories vold would prepare; with file-based
+//!   encryption (`ro.crypto.type=file`) their keys are vold's, stored and
+//!   installed as the original does (`vold::fscrypt`), and without it every
+//!   user's credential-encrypted storage counts as unlocked once asked to
+//!   be;
 //! - emulated storage is mounted through /dev/fuse; the original MediaProvider
 //!   owns its daemon after IVoldMountCallback acknowledges the actual raw fd;
 //! - there are no disks, partitions, OBBs, AppFuse, incfs, checkpoints or
@@ -28,6 +30,8 @@ use android_os_vold::aidl::android::os::{
     incremental::IncrementalFileSystemControlParcel::IncrementalFileSystemControlParcel,
 };
 use binder::{BinderFeatures, ExceptionCode, Interface, PersistableBundle, Status, Strong};
+use vold::fscrypt::{FsCrypt, Kernel};
+use vold::key_storage::KeyStorage;
 use vold::storage;
 
 const SERVICE: &str = "vold";
@@ -37,6 +41,34 @@ const USER0_DE_READY: &std::ffi::CStr = c"vendor.aim.user0.de_ready";
 
 unsafe extern "C" {
     fn __system_property_set(name: *const libc::c_char, value: *const libc::c_char) -> i32;
+    fn __system_property_get(name: *const libc::c_char, value: *mut libc::c_char) -> i32;
+}
+
+fn property(name: &std::ffi::CStr) -> String {
+    let mut value = [0 as libc::c_char; 92];
+    // SAFETY: a NUL-terminated name and a PROP_VALUE_MAX buffer.
+    unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+    // SAFETY: the value is NUL-terminated within the buffer.
+    unsafe { std::ffi::CStr::from_ptr(value.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// fs_mgr's ReadDefaultFstab: the first `fstab.<suffix>` of the ODM,
+/// vendor or root directory, for the fstab, hardware or platform suffix.
+fn default_fstab() -> std::io::Result<String> {
+    let suffixes = [
+        c"ro.boot.fstab_suffix",
+        c"ro.boot.hardware",
+        c"ro.boot.hardware.platform",
+    ]
+    .map(property);
+    suffixes
+        .iter()
+        .filter(|s| !s.is_empty())
+        .flat_map(|s| ["/odm/etc", "/vendor/etc", ""].map(|d| format!("{d}/fstab.{s}")))
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))
 }
 
 #[derive(Default)]
@@ -48,9 +80,10 @@ struct State {
     mounts: BTreeMap<String, Arc<Mutex<fuse::Mount>>>,
 }
 
-#[derive(Default)]
 struct Vold {
     state: Mutex<State>,
+    /// FsCrypt.cpp's state, under VolumeManager's crypt lock.
+    crypt: Mutex<FsCrypt<keystore::Keystore2, Kernel>>,
 }
 
 fn unsupported<T>(what: &str) -> binder::Result<T> {
@@ -92,6 +125,15 @@ fn io_error(what: &str, e: std::io::Error) -> Status {
         -e.raw_os_error().unwrap_or(libc::EIO),
         Some(format!("{what}: {e}")),
     )
+}
+
+fn user_id(user: i32) -> binder::Result<u32> {
+    u32::try_from(user).map_err(|_| {
+        Status::new_exception_str(
+            ExceptionCode::ILLEGAL_ARGUMENT,
+            Some(format!("invalid user {user}")),
+        )
+    })
 }
 
 fn emulated_id(user: i32) -> String {
@@ -549,13 +591,25 @@ impl IVold::IVold for Vold {
     fn unmountAppFuse(&self, _: i32, _: i32) -> binder::Result<()> {
         unsupported("unmountAppFuse")
     }
-    // No file-based encryption: user storage has no keys to make, protect
-    // or destroy, nor a binding seed to keep.
     fn fbeEnable(&self) -> binder::Result<()> {
-        Ok(())
+        let fstab = default_fstab().map_err(|e| io_error("fbeEnable fstab", e))?;
+        let options = vold::fscrypt::data_encryption_options(&fstab).unwrap_or("");
+        self.crypt
+            .lock()
+            .unwrap()
+            .initialize_systemwide_keys(options)
+            .map_err(|e| io_error("fbeEnable", e))
     }
     fn initUser0(&self) -> binder::Result<()> {
-        let dirs = storage::init_user0().map_err(|e| io_error("initUser0", e))?;
+        let mut crypt = self.crypt.lock().unwrap();
+        crypt
+            .init_user0_keys()
+            .map_err(|e| io_error("initUser0 keys", e))?;
+        let (de, ce) = (crypt.user_policy(None, 0, false), crypt.ce.get(&0));
+        let de = de.map_err(|e| io_error("initUser0", e))?;
+        let dirs = storage::init_user0(&crypt.kernel, de, ce, crypt.device_policy.as_ref())
+            .map_err(|e| io_error("initUser0", e))?;
+        drop(crypt);
         fuse::prepare_user_views(0).map_err(|error| io_error("initUser0 storage views", error))?;
         // SAFETY: NUL-terminated strings.
         if unsafe { __system_property_set(USER0_DE_READY.as_ptr(), c"true".as_ptr()) } != 0 {
@@ -583,22 +637,59 @@ impl IVold::IVold for Vold {
     ) -> binder::Result<()> {
         unsupported("encryptFstab")
     }
-    fn setStorageBindingSeed(&self, _: &[u8]) -> binder::Result<()> {
+    fn setStorageBindingSeed(&self, seed: &[u8]) -> binder::Result<()> {
+        self.crypt
+            .lock()
+            .unwrap()
+            .storage
+            .set_binding_seed(seed)
+            .map_err(|e| io_error("setStorageBindingSeed", e))?;
+        // SAFETY: NUL-terminated strings.
+        if unsafe { __system_property_set(c"vold.storage_seed_bound".as_ptr(), c"1".as_ptr()) } != 0
+        {
+            log::error!("cannot set vold.storage_seed_bound");
+        }
         Ok(())
     }
-    fn createUserStorageKeys(&self, _: i32, _: bool) -> binder::Result<()> {
-        Ok(())
+    fn createUserStorageKeys(&self, user: i32, ephemeral: bool) -> binder::Result<()> {
+        self.crypt
+            .lock()
+            .unwrap()
+            .create_user_keys(user_id(user)?, ephemeral)
+            .map_err(|e| io_error(&format!("createUserStorageKeys {user}"), e))
     }
-    fn destroyUserStorageKeys(&self, _: i32) -> binder::Result<()> {
-        Ok(())
+    fn destroyUserStorageKeys(&self, user: i32) -> binder::Result<()> {
+        self.crypt
+            .lock()
+            .unwrap()
+            .destroy_user_keys(user_id(user)?)
+            .map_err(|e| io_error(&format!("destroyUserStorageKeys {user}"), e))
     }
-    fn setCeStorageProtection(&self, _: i32, _: &[u8]) -> binder::Result<()> {
-        Ok(())
+    fn setCeStorageProtection(&self, user: i32, secret: &[u8]) -> binder::Result<()> {
+        self.crypt
+            .lock()
+            .unwrap()
+            .set_ce_key_protection(user_id(user)?, secret)
+            .map_err(|e| io_error(&format!("setCeStorageProtection {user}"), e))
     }
     fn getUnlockedUsers(&self) -> binder::Result<Vec<i32>> {
+        let crypt = self.crypt.lock().unwrap();
+        if crypt.fbe {
+            return Ok(crypt
+                .unlocked_users()
+                .into_iter()
+                .map(|u| u as i32)
+                .collect());
+        }
         Ok(self.state.lock().unwrap().unlocked.clone())
     }
-    fn unlockCeStorage(&self, user: i32, _: &[u8]) -> binder::Result<()> {
+    fn unlockCeStorage(&self, user: i32, secret: &[u8]) -> binder::Result<()> {
+        let mut crypt = self.crypt.lock().unwrap();
+        if crypt.fbe {
+            return crypt
+                .unlock_ce_storage(user_id(user)?, secret)
+                .map_err(|e| io_error(&format!("unlockCeStorage {user}"), e));
+        }
         let mut s = self.state.lock().unwrap();
         if !s.unlocked.contains(&user) {
             s.unlocked.push(user);
@@ -606,12 +697,31 @@ impl IVold::IVold for Vold {
         Ok(())
     }
     fn lockCeStorage(&self, user: i32) -> binder::Result<()> {
+        let mut crypt = self.crypt.lock().unwrap();
+        if crypt.fbe {
+            return crypt
+                .lock_ce_storage(user_id(user)?)
+                .map_err(|e| io_error(&format!("lockCeStorage {user}"), e));
+        }
         self.state.lock().unwrap().unlocked.retain(|&u| u != user);
         Ok(())
     }
     fn prepareUserStorage(&self, uuid: Option<&str>, user: i32, flags: i32) -> binder::Result<()> {
-        let dirs = storage::prepare_user_storage(uuid, user as u32, flags)
-            .map_err(|e| io_error(&format!("prepareUserStorage {user}"), e))?;
+        let crypt = self.crypt.lock().unwrap();
+        let what = format!("prepareUserStorage {user}");
+        let policy = |ce: bool, flag: i32| match flags & flag {
+            0 => Ok(None),
+            _ => crypt
+                .user_policy(uuid, user_id(user)?, ce)
+                .map_err(|e| io_error(&what, e)),
+        };
+        let (de, ce) = (
+            policy(false, storage::STORAGE_FLAG_DE)?,
+            policy(true, storage::STORAGE_FLAG_CE)?,
+        );
+        let dirs =
+            storage::prepare_user_storage(&crypt.kernel, uuid, user_id(user)?, flags, de, ce)
+                .map_err(|e| io_error(&what, e))?;
         log::info!(
             "prepared storage of user {user} (flags {flags}): {} directories",
             dirs.len()
@@ -777,7 +887,18 @@ fn main() {
     daemon_log::init("vold");
     // The original's arguments (SELinux contexts for blkid and fsck) have
     // nothing to act on here.
-    let vold = BnVold::new_binder(Vold::default(), BinderFeatures::default());
+    let crypt = FsCrypt::new(
+        "/data".into(),
+        property(c"ro.crypto.type") == "file",
+        property(c"ro.product.first_api_level").parse().unwrap_or(0),
+        KeyStorage::new(keystore::Keystore2, "/system/bin/secdiscard".into()),
+        Kernel,
+    );
+    let vold = Vold {
+        state: Mutex::default(),
+        crypt: Mutex::new(crypt),
+    };
+    let vold = BnVold::new_binder(vold, BinderFeatures::default());
     if let Err(e) = binder::add_service(SERVICE, vold.as_binder()) {
         log::error!("cannot register {SERVICE}: {e:?}");
         std::process::exit(1);

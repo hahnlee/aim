@@ -3,8 +3,10 @@
 Status: accepted 2026-11-10 (#2761). The owner chose the recommended path:
 option B, CE protected by a Mac Keychain item, FileVault for confidentiality
 at rest (D not now), and existing data directories recreated by a breaking
-migration on a branch. Slice 1 is implemented (#2845, #2846); the guest is
-a device without file-based encryption (FBE) until slices 2-3 land.
+migration on a branch. Slices 1 and 2 are implemented (#2845, #2846,
+#2847): vold manages the keys as `FsCrypt.cpp` does once `ro.crypto.type`
+is `file`, which only slice 3 sets, so the guest is a device without
+file-based encryption (FBE) until slice 3 lands.
 
 ## Context
 
@@ -140,6 +142,13 @@ under the ~900-line review budget except the first, split in two:
    `prepareUserStorage` and key destruction as `FsCrypt.cpp`, keys stored
    where the original stores them (`/data/misc/vold/user_keys`,
    `/data/unencrypted`), wrapped by the software KeyMint (ADR 0012).
+   Implemented (#2847). As in the original, a key stored without a secret
+   is sealed by a keystore2 key bound to its `secdiscardable`, one stored
+   with a secret by AES-GCM under the secret's hash, and a new user's CE
+   key is stored only when `setCeStorageProtection` gives its secret:
+   until slice 4 calls it, user 0's CE key is new on every boot. The
+   device has no adoptable storage, so no volume keys, and no inline
+   encryption hardware, so hardware-wrapped keys are refused.
 3. **guest-init and the image**: `fileencryption=aes-256-xts:aes-256-cts:v2`
    in `fstab.aim`, `mount_all` reporting FILE_ENCRYPTED
    (`ro.crypto.state=encrypted`, `ro.crypto.type=file`), `installkey`, and

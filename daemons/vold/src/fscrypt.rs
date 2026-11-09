@@ -1,14 +1,21 @@
-//! vold's file-based encryption keys in the data filesystem
-//! (android-16.0.0_r1: KeyUtil.cpp, and libfscrypt's options and
-//! EnsurePolicy): keys installed in and evicted from its keyring with the
-//! fscrypt ioctls, and the policies they make.
+//! vold's file-based encryption keys (android-16.0.0_r1: FsCrypt.cpp,
+//! KeyUtil.cpp and libfscrypt's options and EnsurePolicy): the system DE
+//! key and the per-boot key, each user's DE and CE keys stored under
+//! `/data/misc/vold/user_keys`, installed in and evicted from the data
+//! filesystem's keyring with the fscrypt ioctls, and the policies they make.
+//!
+//! Every user-key operation is a no-op unless FBE is enabled
+//! (`ro.crypto.type=file`), as `IsFbeEnabled` makes it in the original.
+//! This device has no adoptable storage, so a user has only the policies
+//! of internal storage.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha512};
 
-use crate::key_storage::KeyBuffer;
+use crate::key_storage::{Auth, EMPTY_AUTH, KeyBuffer, KeyStorage, Keystore};
 
 pub const SET_POLICY: u64 = 0x800c6613;
 pub const ADD_KEY: u64 = 0xc0506617;
@@ -32,6 +39,7 @@ const REMOVAL_FLAG_OTHER_USERS: u32 = 0x2;
 /// `struct fscrypt_add_key_arg` up to its raw key.
 const ADD_KEY_ARG: usize = 80;
 const REMOVE_KEY_ARG: usize = 64;
+const MAX_KEY_SIZE: usize = 64;
 const API_Q: u32 = 29;
 
 const CONTENTS_MODES: &[(&str, u8)] = &[
@@ -333,8 +341,415 @@ pub fn ensure_policy(kernel: &impl Ioctl, policy: &Policy, dir: &Path) -> io::Re
     Ok(())
 }
 
+/// A key directory, `0700` and vold's own: root's, as vold runs as root.
+fn prepare_root_dir(dir: &Path) -> io::Result<()> {
+    // SAFETY: plain identity queries.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    crate::storage::prepare_dir(dir, 0o700, uid, gid)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The keys FsCrypt.cpp keeps: the data filesystem's options, the system DE
+/// policy, the users' installed DE and CE policies, CE keys not yet stored
+/// and ephemeral users.
+pub struct FsCrypt<K, I> {
+    pub data: PathBuf,
+    pub fbe: bool,
+    pub first_api_level: u32,
+    pub storage: KeyStorage<K>,
+    pub kernel: I,
+    options: Option<Options>,
+    pub device_policy: Option<Policy>,
+    ephemeral: BTreeSet<u32>,
+    new_ce_keys: BTreeMap<u32, KeyBuffer>,
+    pub ce: BTreeMap<u32, Policy>,
+    pub de: BTreeMap<u32, Policy>,
+}
+
+impl<K: Keystore, I: Ioctl> FsCrypt<K, I> {
+    pub fn new(
+        data: PathBuf,
+        fbe: bool,
+        first_api_level: u32,
+        storage: KeyStorage<K>,
+        kernel: I,
+    ) -> Self {
+        FsCrypt {
+            data,
+            fbe,
+            first_api_level,
+            storage,
+            kernel,
+            options: None,
+            device_policy: None,
+            ephemeral: BTreeSet::new(),
+            new_ce_keys: BTreeMap::new(),
+            ce: BTreeMap::new(),
+            de: BTreeMap::new(),
+        }
+    }
+
+    fn user_keys(&self) -> PathBuf {
+        self.data.join("misc/vold/user_keys")
+    }
+
+    fn de_key_path(&self, user: u32) -> PathBuf {
+        self.user_keys().join(format!("de/{user}"))
+    }
+
+    fn ce_key_dir(&self, user: u32) -> PathBuf {
+        self.user_keys().join(format!("ce/{user}"))
+    }
+
+    fn user_key_temp(&self) -> PathBuf {
+        self.user_keys().join("temp")
+    }
+
+    fn options(&self) -> io::Result<Options> {
+        self.options
+            .ok_or_else(|| other("EncryptionOptions not initialized"))
+    }
+
+    /// generateStorageKey of makeGen(s_data_options).
+    fn new_key(&self) -> io::Result<KeyBuffer> {
+        self.options()?;
+        crate::key_storage::random(MAX_KEY_SIZE)
+    }
+
+    fn install(&self, key: &KeyBuffer) -> io::Result<Policy> {
+        install_key(&self.kernel, &self.data, &self.options()?, key)
+    }
+
+    /// fscrypt_initialize_systemwide_keys (`fbeEnable`): the system DE key
+    /// (`/data/unencrypted/key`) and a per-boot key, installed, with their
+    /// references and the options recorded where init reads them.
+    pub fn initialize_systemwide_keys(&mut self, encryption_options: &str) -> io::Result<()> {
+        log::info!("fscrypt_initialize_systemwide_keys");
+        let options = Options::parse(self.first_api_level, encryption_options)?;
+        if options.flags & IV_INO_LBLK_32 != 0 {
+            return Err(other(
+                "emmc_optimized is only allowed on hardware limited to 32-bit DUNs",
+            ));
+        }
+        self.options = Some(options);
+        let unencrypted = self.data.join("unencrypted");
+        let device_key = self.storage.retrieve_or_generate_key(
+            &unencrypted.join("key"),
+            &unencrypted.join("temp"),
+            &EMPTY_AUTH,
+            MAX_KEY_SIZE,
+        )?;
+        let device_policy = self.install(&device_key)?;
+        crate::key_storage::write_file(
+            &unencrypted.join("mode"),
+            device_policy.options.to_text()?.as_bytes(),
+        )?;
+        crate::key_storage::write_file(&unencrypted.join("ref"), &device_policy.key_raw_ref)?;
+        log::info!(
+            "Wrote system DE key reference to: {}",
+            unencrypted.join("ref").display()
+        );
+        self.device_policy = Some(device_policy);
+        let per_boot = self.install(&self.new_key()?)?;
+        crate::key_storage::write_file(&unencrypted.join("per_boot_ref"), &per_boot.key_raw_ref)?;
+        Ok(())
+    }
+
+    fn create_de_key(&mut self, user: u32, ephemeral: bool) -> io::Result<()> {
+        let key = self.new_key()?;
+        if !ephemeral {
+            self.storage.store_key_atomically(
+                &self.de_key_path(user),
+                &self.user_key_temp(),
+                &EMPTY_AUTH,
+                &key,
+            )?;
+        }
+        let policy = self.install(&key)?;
+        self.de.insert(user, policy);
+        log::info!("Created DE key for user {user}");
+        Ok(())
+    }
+
+    fn create_ce_key(&mut self, user: u32, ephemeral: bool) -> io::Result<KeyBuffer> {
+        let key = self.new_key()?;
+        if !ephemeral {
+            prepare_root_dir(&self.ce_key_dir(user))?;
+            // Stored by set_ce_key_protection, once there is a secret to
+            // store it with.
+            self.new_ce_keys.insert(user, key.clone());
+        }
+        let policy = self.install(&key)?;
+        self.ce.insert(user, policy);
+        log::info!("Created CE key for user {user}");
+        Ok(key)
+    }
+
+    /// get_ce_key_paths: the user's CE key directories, newest first.
+    fn ce_key_paths(&self, user: u32) -> Vec<PathBuf> {
+        let dir = self.ce_key_dir(user);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            log::error!("Unable to open ce key directory: {}", dir.display());
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| e.file_name().as_encoded_bytes().first() == Some(&b'c'))
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        paths.reverse();
+        paths
+    }
+
+    fn ce_key_exists(&self, user: u32) -> bool {
+        self.ce_key_dir(user).join("current").exists() || !self.ce_key_paths(user).is_empty()
+    }
+
+    /// fixate_user_ce_key: destroy every other key, name this one current.
+    fn fixate_ce_key(&self, user: u32, to_fix: &Path, paths: &[PathBuf]) -> io::Result<()> {
+        let dir = self.ce_key_dir(user);
+        for other in paths.iter().filter(|p| *p != to_fix) {
+            if let Err(e) = self.storage.destroy_key(other) {
+                log::error!("Failed to destroy {}: {e}", other.display());
+            }
+        }
+        let current = dir.join("current");
+        if to_fix != current {
+            std::fs::rename(to_fix, &current)?;
+        }
+        std::fs::File::open(&dir)?.sync_all()
+    }
+
+    /// read_and_fixate_user_ce_key: the first of the user's CE keys `auth`
+    /// opens.
+    fn read_and_fixate_ce_key(&self, user: u32, auth: &Auth) -> io::Result<KeyBuffer> {
+        let paths = self.ce_key_paths(user);
+        for path in &paths {
+            if let Ok(key) = self.storage.retrieve_key(path, auth) {
+                self.fixate_ce_key(user, path, &paths)?;
+                return Ok(key);
+            }
+        }
+        Err(other(format!(
+            "Failed to find working ce key for user {user}"
+        )))
+    }
+
+    fn load_all_de_keys(&mut self) -> io::Result<()> {
+        let dir = self.user_keys().join("de");
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(user) = name
+                .to_str()
+                .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|n| n.parse::<u32>().ok())
+                .filter(|_| entry.file_type().is_ok_and(|t| t.is_dir()))
+            else {
+                continue;
+            };
+            let key = match self.storage.retrieve_key(&entry.path(), &EMPTY_AUTH) {
+                Ok(key) => key,
+                // Probably a partially removed user.
+                Err(_) if user != 0 => continue,
+                Err(e) => return Err(e),
+            };
+            let policy = self.install(&key)?;
+            if self.de.get(&user).is_some_and(|p| *p != policy) {
+                return Err(other(format!("DE policy for user {user} changed")));
+            }
+            self.de.insert(user, policy);
+        }
+        Ok(())
+    }
+
+    /// The key part of fscrypt_init_user0: user 0's keys, created if
+    /// missing, and every user's DE key installed.
+    pub fn init_user0_keys(&mut self) -> io::Result<()> {
+        if !self.fbe {
+            return Ok(());
+        }
+        let keys = self.user_keys();
+        for dir in [keys.clone(), keys.join("ce"), keys.join("de")] {
+            prepare_root_dir(&dir)?;
+        }
+        if !self.de_key_path(0).exists() {
+            self.create_de_key(0, false)?;
+        }
+        if !self.ce_key_exists(0) {
+            self.create_ce_key(0, false)?;
+        }
+        self.load_all_de_keys()
+    }
+
+    /// fscrypt_create_user_keys.
+    pub fn create_user_keys(&mut self, user: u32, ephemeral: bool) -> io::Result<()> {
+        if !self.fbe {
+            return Ok(());
+        }
+        if self.ce.contains_key(&user) {
+            log::error!("Already exists, can't create keys for {user}");
+            return Ok(());
+        }
+        self.create_de_key(user, ephemeral)?;
+        self.create_ce_key(user, ephemeral)?;
+        if ephemeral {
+            self.ephemeral.insert(user);
+        }
+        Ok(())
+    }
+
+    /// fscrypt_destroy_user_keys: evict the user's keys, then destroy the
+    /// stored ones; every step is tried.
+    pub fn destroy_user_keys(&mut self, user: u32) -> io::Result<()> {
+        if !self.fbe {
+            return Ok(());
+        }
+        let mut failure = None;
+        for policy in [self.ce.remove(&user), self.de.remove(&user)]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(e) = evict_key(&self.kernel, &self.data, &policy) {
+                failure.get_or_insert(e);
+            }
+        }
+        if !self.ephemeral.remove(&user) {
+            if self.new_ce_keys.remove(&user).is_none() {
+                for path in self.ce_key_paths(user) {
+                    if let Err(e) = self.storage.destroy_key(&path) {
+                        failure.get_or_insert(e);
+                    }
+                }
+            }
+            match std::fs::remove_dir(self.ce_key_dir(user)) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    failure.get_or_insert(e);
+                }
+                _ => {}
+            }
+            let de = self.de_key_path(user);
+            if de.exists()
+                && let Err(e) = self.storage.destroy_key(&de)
+            {
+                failure.get_or_insert(e);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// fscrypt_set_ce_key_protection: store the user's CE key with
+    /// `secret`, then destroy its other stored copies.
+    pub fn set_ce_key_protection(&mut self, user: u32, secret: &[u8]) -> io::Result<()> {
+        if !self.fbe {
+            return Ok(());
+        }
+        if secret.is_empty() {
+            return Err(other(
+                "fscrypt_set_ce_key_protection: secret must be nonempty",
+            ));
+        }
+        if self.ephemeral.contains(&user) {
+            return Ok(());
+        }
+        let auth = Auth(secret);
+        let key = if let Some(key) = self.new_ce_keys.get(&user) {
+            key.clone()
+        } else if self.ce_key_exists(user) {
+            match self.read_and_fixate_ce_key(user, &EMPTY_AUTH) {
+                Ok(key) => key,
+                Err(e) => {
+                    if self.read_and_fixate_ce_key(user, &auth).is_ok() {
+                        log::info!("CE key is already protected by given secret.");
+                        return Ok(());
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            log::warn!("CE key not found!  Regenerating it");
+            self.create_ce_key(user, false)?
+        };
+        let dir = self.ce_key_dir(user);
+        let paths = self.ce_key_paths(user);
+        // get_ce_key_new_path: `current`, or a name after the newest key.
+        let path = match paths.first() {
+            None => dir.join("current"),
+            Some(newest) => (0..u32::MAX)
+                .map(|i| dir.join(format!("cx{i:010}")))
+                .find(|candidate| newest < candidate)
+                .ok_or_else(|| other("no name left for a CE key"))?,
+        };
+        self.storage
+            .store_key_atomically(&path, &self.user_key_temp(), &auth, &key)?;
+        self.fixate_ce_key(user, &path, &paths)?;
+        if self.new_ce_keys.remove(&user).is_some() {
+            log::info!("Stored CE key for new user {user}");
+        }
+        Ok(())
+    }
+
+    /// fscrypt_get_unlocked_users.
+    pub fn unlocked_users(&self) -> Vec<u32> {
+        self.ce.keys().copied().collect()
+    }
+
+    /// fscrypt_unlock_ce_storage: install the CE key `secret` opens.
+    pub fn unlock_ce_storage(&mut self, user: u32, secret: &[u8]) -> io::Result<()> {
+        if !self.fbe {
+            return Ok(());
+        }
+        if self.ce.contains_key(&user) {
+            log::warn!("CE storage for user {user} is already unlocked");
+            return Ok(());
+        }
+        let key = self.read_and_fixate_ce_key(user, &Auth(secret))?;
+        let policy = self.install(&key)?;
+        self.ce.insert(user, policy);
+        Ok(())
+    }
+
+    /// fscrypt_lock_ce_storage: evict the CE key.
+    pub fn lock_ce_storage(&mut self, user: u32) -> io::Result<()> {
+        if !self.fbe {
+            return Ok(());
+        }
+        match self.ce.remove(&user) {
+            Some(policy) => evict_key(&self.kernel, &self.data, &policy),
+            None => Ok(()),
+        }
+    }
+
+    /// The policy fscrypt_prepare_user_storage gives a user's directories
+    /// of one kind: None without FBE, an error when the key is not
+    /// installed.
+    pub fn user_policy(
+        &self,
+        uuid: Option<&str>,
+        user: u32,
+        ce: bool,
+    ) -> io::Result<Option<&Policy>> {
+        if !self.fbe {
+            return Ok(None);
+        }
+        if uuid.is_some_and(|u| !u.is_empty()) {
+            return Err(other("adoptable storage has no volume keys on this device"));
+        }
+        let (policies, kind) = if ce {
+            (&self.ce, "CE")
+        } else {
+            (&self.de, "DE")
+        };
+        policies
+            .get(&user)
+            .map(Some)
+            .ok_or_else(|| other(format!("Cannot find {kind} policy for user {user}")))
+    }
 }
 
 /// The kernel's fscrypt ioctls, on a directory opened as libfscrypt and
