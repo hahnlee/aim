@@ -354,6 +354,9 @@ impl RunningTaskInfo {
 /// and `supportsActivityMinWidthHeightMultiWindow`).
 struct MultiWindow {
     supported: bool,
+    /// `mSupportsFreeformWindowManagement`, `mSupportsPictureInPicture`.
+    freeform: bool,
+    pip: bool,
     force_resizable: bool,
     dev_non_resizable: bool,
     non_resizable: i32,
@@ -392,6 +395,22 @@ impl MultiWindow {
         } else {
             min.1 <= (self.min_percentage.0 * display.screen_height_dp as f32 * density) as i32
         }
+    }
+
+    /// `TaskDisplayArea.validateWindowingMode` (`isWindowingModeSupported`)
+    /// of `mode` for a task or activity that supports multi-window in the
+    /// display area (`multi_window`) and picture-in-picture (`pip`): a mode
+    /// it cannot take is undefined, so it inherits its parent's.
+    fn validate(&self, mode: i32, multi_window: bool, pip: bool) -> i32 {
+        let supported = match mode {
+            0 => false,
+            1 => true,
+            _ if !multi_window => false,
+            5 => self.freeform,
+            2 => pip,
+            _ => true,
+        };
+        if supported { mode } else { 0 }
     }
 }
 
@@ -531,9 +550,12 @@ impl AppHost {
         let pip = supports && feature("android.software.picture_in_picture");
         let multi_display = feature("android.software.activities_on_secondary_displays");
         let force_resizable = global("force_resizable_activities");
+        let supported =
+            (supports || force_resizable) && (freeform || split_screen || pip || multi_display);
         Ok(MultiWindow {
-            supported: (supports || force_resizable)
-                && (freeform || split_screen || pip || multi_display),
+            supported,
+            freeform: supported && freeform,
+            pip: supported && pip,
             force_resizable,
             dev_non_resizable: global("enable_non_resizable_multi_window"),
             non_resizable: integer("config_supportsNonResizableMultiWindow")?,
@@ -543,6 +565,32 @@ impl AppHost {
                 float("config_minPercentageMultiWindowSupportWidth")?,
             ),
         })
+    }
+
+    /// `Task.isResizeable` and `supportsMultiWindowInDisplayArea` of a task
+    /// of activity type `activity_type` and minimal size `min_size`, whose
+    /// root activity is `root`, in the global configuration `global`.
+    fn task_multi_window(
+        &self,
+        multi_window: &MultiWindow,
+        root: &ActivityInfo,
+        activity_type: i32,
+        min_size: (i32, i32),
+        global: &Configuration,
+    ) -> Result<(bool, bool), Exception> {
+        // Forced resizeability is a standard task's (`Task.isResizeable`).
+        let force_resizable =
+            multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD;
+        let is_resizeable = force_resizable
+            || RESIZEABLE_MODES.contains(&root.resize_mode)
+            || root.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
+        let checks_min_size = self.platform()?.compat.is_enabled(
+            CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
+            root.info.application_info.item.package_name.as_deref(),
+            root.info.application_info.target_sdk_version,
+        );
+        let supports = multi_window.supports(is_resizeable, min_size, checks_min_size, global);
+        Ok((is_resizeable, supports))
     }
 
     /// The global configuration of a task whose top activity's uid is
@@ -623,18 +671,8 @@ impl AppHost {
         configuration.window.activity_type = activity_type;
         let resize_mode = root_info.resize_mode;
         let min_size = self.tasks.min_size(task).ok_or_else(gone)?;
-        // Forced resizeability is a standard task's (`Task.isResizeable`).
-        let force_resizable =
-            multi_window.force_resizable && activity_type == ACTIVITY_TYPE_STANDARD;
-        let is_resizeable = force_resizable
-            || RESIZEABLE_MODES.contains(&resize_mode)
-            || root_info.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
-        let package = root_info.info.application_info.item.package_name.as_deref();
-        let checks_min_size = self.platform()?.compat.is_enabled(
-            CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
-            package,
-            root_info.info.application_info.target_sdk_version,
-        );
+        let (is_resizeable, supports_multi_window) =
+            self.task_multi_window(multi_window, &root_info, activity_type, min_size, &global)?;
         let default_min_size = self.default_min_size()?;
         let base_intent = BaseIntent::of(&t, strip).map_err(|e| {
             Exception::new(
@@ -661,12 +699,7 @@ impl AppHost {
             real_activity: split(&t.real_activity),
             num_activities: running.len() as i32,
             last_active_time: last_active,
-            supports_multi_window: multi_window.supports(
-                is_resizeable,
-                min_size,
-                checks_min_size,
-                &global,
-            ),
+            supports_multi_window,
             resize_mode,
             configuration,
             token: self.task_token(task),
@@ -808,6 +841,83 @@ impl AppHost {
         self.task_info(task, last_active, true, true, &self.multi_window()?)
     }
 
+    /// `TaskDisplayArea.validateWindowingMode` of a launch's `mode` for the
+    /// standard root activity `info` of a new task (`isValidWindowingMode`
+    /// of an `ActivityRecord`).
+    pub(super) fn valid_launch_mode(
+        &self,
+        mode: i32,
+        info: &ActivityInfo,
+    ) -> Result<i32, Exception> {
+        if matches!(mode, 0 | 1) {
+            return Ok(mode);
+        }
+        let multi_window = self.multi_window()?;
+        let pip = info.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
+        // `ActivityRecord.isResizeable` of an activity not embedded.
+        let resizeable =
+            multi_window.force_resizable || RESIZEABLE_MODES.contains(&info.resize_mode) || pip;
+        let checks_min_size = self.platform()?.compat.is_enabled(
+            CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
+            info.info.application_info.item.package_name.as_deref(),
+            info.info.application_info.target_sdk_version,
+        );
+        let min = info
+            .window_layout
+            .as_ref()
+            .map_or((-1, -1), |l| (l.min_width, l.min_height));
+        // `supportsMultiWindowInDisplayArea`, `supportsPictureInPicture`.
+        let supports = multi_window.supports(
+            resizeable,
+            min,
+            checks_min_size,
+            &self.global_configuration()?,
+        );
+        Ok(multi_window.validate(mode, supports, multi_window.pip && pip))
+    }
+
+    /// `TaskDisplayArea.validateWindowingMode` of `mode` for task `task`
+    /// (`isValidWindowingMode` of a `Task`).
+    pub(super) fn valid_task_mode(&self, mode: i32, task: i32) -> Result<i32, Exception> {
+        if matches!(mode, 0 | 1) {
+            return Ok(mode);
+        }
+        let multi_window = self.multi_window()?;
+        let supports = match self.tasks.root(task) {
+            Some(r) => {
+                let mut configuration = self.global_configuration()?;
+                configuration.window.windowing_mode = r.windowing_mode;
+                multi_window.supports(true, (-1, -1), false, &configuration)
+            }
+            None => {
+                let gone = || Exception::new(EX_ILLEGAL_STATE, format!("no task {task}"));
+                let (activity_type, top, base) = {
+                    let stack = self.activities.stack.lock().unwrap();
+                    let mut running = stack
+                        .activities
+                        .iter()
+                        .filter(|a| a.task == task && !a.finishing);
+                    let base = running.next().ok_or_else(gone)?.token;
+                    let top = stack.top(task).ok_or_else(gone)?.token;
+                    (stack.activity_type(task), top, base)
+                };
+                let (root, top_uid, base_uid) = {
+                    let records = self.activities.records.lock().unwrap();
+                    let record = |token: u64| records.get(&token).ok_or_else(gone);
+                    let base = record(base)?;
+                    (base.info.clone(), record(top)?.uid, base.uid)
+                };
+                let min_size = self.tasks.min_size(task).ok_or_else(gone)?;
+                let global = self.task_global_config(top_uid, base_uid)?;
+                self.task_multi_window(&multi_window, &root, activity_type, min_size, &global)?
+                    .1
+            }
+        };
+        // A task can always move to a new pinned task if the device has one.
+        let supports = supports || (mode == 2 && multi_window.pip);
+        Ok(multi_window.validate(mode, supports, multi_window.pip))
+    }
+
     /// `retrieveSettings`' `mSupportsMultiWindow`.
     pub(super) fn supports_multi_window(&self) -> Result<bool, Exception> {
         Ok(self.multi_window()?.supported)
@@ -941,6 +1051,37 @@ pub(super) mod tests {
             data: data.reader(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn windowing_modes_validate_against_the_devices_and_the_subjects_support() {
+        let device = |supported, freeform, pip| MultiWindow {
+            supported,
+            freeform,
+            pip,
+            force_resizable: false,
+            dev_non_resizable: false,
+            non_resizable: 0,
+            respects_min_size: 0,
+            min_percentage: (0.0, 0.0),
+        };
+        let all = device(true, true, true);
+        // Undefined is never valid; fullscreen always is.
+        for (multi_window, pip) in [(false, false), (true, true)] {
+            assert_eq!(all.validate(0, multi_window, pip), 0);
+            assert_eq!(all.validate(1, multi_window, pip), 1);
+        }
+        // Without the subject's multi-window, no other mode is.
+        for mode in [2, 5, 6, 7] {
+            assert_eq!(all.validate(mode, false, true), 0);
+        }
+        // With it, freeform and pinned need the device's and the subject's
+        // support; multi-window and other modes need nothing else.
+        for (mode, expected) in [(2, 2), (5, 5), (6, 6), (7, 7)] {
+            assert_eq!(all.validate(mode, true, true), expected);
+        }
+        assert_eq!(all.validate(2, true, false), 0);
+        assert_eq!(device(true, false, true).validate(5, true, true), 0);
     }
 
     #[test]
