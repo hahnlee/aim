@@ -34,6 +34,7 @@ use aim_service_aidl::android_os_ihintmanager as hm;
 use aim_service_aidl::android_os_ihintsession as hs;
 use aim_service_aidl::{ReadParcelable, WriteParcelable, read_int_array, write_int_array};
 
+use super::service_manager::Declared;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::query::Query;
 
@@ -594,6 +595,8 @@ fn not_empty(what: &str) -> Exception {
 pub struct HintManager {
     host: Arc<AppHost>,
     me: Weak<HintManager>,
+    /// `mPowerHal`.
+    hal: Declared,
     data: OnceLock<ClientData>,
     /// `mFMQUsesIntegratedEventFlag`: the HAL's channel had no event flag.
     integrated_event_flag: AtomicBool,
@@ -612,10 +615,13 @@ pub struct HintManager {
 }
 
 impl HintManager {
+    /// The manager, its Power HAL resolved as the constructor's
+    /// `Injector.createIPower` does, beside the caller; calls wait for it.
     pub fn new(host: Arc<AppHost>) -> Arc<Self> {
-        Arc::new_cyclic(|me| HintManager {
+        let manager = Arc::new_cyclic(|me| HintManager {
             host,
             me: me.clone(),
+            hal: Declared::new(POWER),
             data: OnceLock::new(),
             integrated_event_flag: AtomicBool::new(false),
             config_creation: AtomicBool::new(true),
@@ -623,7 +629,17 @@ impl HintManager {
             by_binder: Mutex::new(HashMap::new()),
             threads: Mutex::new(HashMap::new()),
             session_manager: Mutex::new(None),
-        })
+        });
+        let resolving = manager.clone();
+        let spawned = std::thread::Builder::new()
+            .name("hint-power-hal".into())
+            .spawn(move || {
+                resolving.hal.get(&resolving.host.process);
+            });
+        if let Err(e) = spawned {
+            eprintln!("app host: performance_hint: resolving the Power HAL: {e}");
+        }
+        manager
     }
 
     fn session_manager(&self) -> Option<Arc<Strong>> {
@@ -641,12 +657,11 @@ impl HintManager {
         Ok(self.client_data()?.power_hal_version >= 5 && self.flag(ADPF_USE_FMQ_CHANNEL)?)
     }
 
-    /// The Power HAL as `Injector.createIPower` finds it: the declared
-    /// service, waited for.
-    fn hal(&self) -> Result<Strong, Exception> {
-        super::service_manager::wait_for_declared_service(&self.host.process, POWER)
-            .and_then(|hal| hal.ok_or_else(|| format!("no {POWER}")))
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
+    /// `mPowerHal`.
+    fn hal(&self) -> Result<&Strong, Exception> {
+        self.hal
+            .get(&self.host.process)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no {POWER}")))
     }
 
     /// `getSessionChannel` of the caller's process (`tgid`) and `uid`:

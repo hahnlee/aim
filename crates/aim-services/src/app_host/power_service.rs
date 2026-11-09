@@ -24,6 +24,7 @@ use aim_binder_host::parcel::{
 use aim_service_aidl::android_os_ipowermanager as pm;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::service_manager::Declared;
 use super::settings::Table;
 use super::{AppHost, reply};
 
@@ -257,6 +258,7 @@ struct State {
 
 pub struct PowerManager {
     host: Arc<AppHost>,
+    suspend: Declared,
     state: Mutex<State>,
     transition: Mutex<()>,
 }
@@ -383,6 +385,7 @@ impl PowerManager {
     pub fn new(host: Arc<AppHost>) -> PowerManager {
         PowerManager {
             host,
+            suspend: Declared::new(SYSTEM_SUSPEND),
             state: Mutex::default(),
             transition: Mutex::default(),
         }
@@ -512,11 +515,12 @@ impl PowerManager {
 
     /// A suspend blocker of `name`, from `system_suspend`
     /// (libhardware_legacy's `acquire_wake_lock`: the declared service,
-    /// waited for).
+    /// waited for the first time, `getSystemSuspendServiceOnce`).
     fn blocker(&self, name: &str) -> Result<Blocker, String> {
-        let suspend =
-            super::service_manager::wait_for_declared_service(&self.host.process, SYSTEM_SUSPEND)?
-                .ok_or("Failed to get SystemSuspend service")?;
+        let suspend = self
+            .suspend
+            .get(&self.host.process)
+            .ok_or("Failed to get SystemSuspend service")?;
         let mut data = Parcel::new();
         data.write_interface_token(SYSTEM_SUSPEND_DESCRIPTOR);
         data.write_i32(WAKE_LOCK_PARTIAL);

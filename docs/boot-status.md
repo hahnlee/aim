@@ -894,7 +894,10 @@ HintManager and the health HAL with `waitForDeclaredService` (none if the
 VINTF manifests do not declare it), apexd's `apexservice` with
 `waitForService`, whose `getService2` has init start the lazy apexd;
 `getService` and `checkService` lookups (dumpstate, statsd, keystore2)
-stay single. Host lib suites (2,105 services and 45 display checks), 15 host
+stay single. HintManager resolves its Power HAL once, beside its
+construction, and the suspend blockers `system_suspend` at the first take;
+both keep the answer, none included (host tests only, no guest boot,
+2026-11-10). Host lib suites (2,105 services and 45 display checks), 15 host
 integration checks and the matched boots pass; three M4 checks remain not run
 because their cohort input is absent (2026-10-30). The media services (mediaserver, mediaextractor,
 mediametrics, media.swcodec) start too: Codec2's software decoders take

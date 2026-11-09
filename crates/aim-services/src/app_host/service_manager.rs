@@ -3,7 +3,7 @@
 //! and `ServiceManager`'s `checkService`, `waitForService` and
 //! `waitForDeclaredService`.
 
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, LocalProcess, Received, Reply, Service, Strong};
@@ -123,20 +123,61 @@ pub(super) fn wait_for_declared_service(
     process: &Arc<LocalProcess>,
     name: &str,
 ) -> Result<Option<Strong>, String> {
+    match is_declared(process, name) {
+        true => wait_for_service(process, name).map(Some),
+        false => Ok(None),
+    }
+}
+
+/// libbinder's `isDeclared`: false, logged, if servicemanager cannot
+/// answer.
+fn is_declared(process: &LocalProcess, name: &str) -> bool {
     let mut data = Parcel::new();
     sm::IsDeclared {
         name: Some(name.into()),
     }
     .write(&mut data);
-    let reply = process
+    let declared = process
         .transact(0, sm::IS_DECLARED, &data, false)
-        .map_err(|s| format!("servicemanager: {s}"))?;
-    let declared = sm::read_is_declared_reply(&mut reply.reader())
-        .map_err(|s| format!("isDeclared({name}): {s}"))?
-        .map_err(|e| format!("isDeclared({name}): {e:?}"))?;
-    match declared {
-        true => wait_for_service(process, name).map(Some),
-        false => Ok(None),
+        .map_err(|s| format!("status {s}"))
+        .and_then(|reply| {
+            sm::read_is_declared_reply(&mut reply.reader())
+                .map_err(|s| format!("reply status {s}"))?
+                .map_err(|e| format!("{e:?}"))
+        });
+    declared.unwrap_or_else(|e| {
+        eprintln!("app host: Failed to get isDeclared for {name}: {e}");
+        false
+    })
+}
+
+/// A declared service resolved once ([`wait_for_declared_service`]) and
+/// kept, none included, as a client that looks it up in its constructor
+/// or a function-local static keeps it; a lookup that failed is logged
+/// and none, as libbinder's `waitForService` returns null.
+pub(super) struct Declared {
+    name: &'static str,
+    service: OnceLock<Option<Strong>>,
+}
+
+impl Declared {
+    pub(super) const fn new(name: &'static str) -> Self {
+        Declared {
+            name,
+            service: OnceLock::new(),
+        }
+    }
+
+    /// The service, resolved by the first caller; the others wait for it.
+    pub(super) fn get(&self, process: &Arc<LocalProcess>) -> Option<&Strong> {
+        self.service
+            .get_or_init(|| {
+                wait_for_declared_service(process, self.name).unwrap_or_else(|e| {
+                    eprintln!("app host: {e}");
+                    None
+                })
+            })
+            .as_ref()
     }
 }
 
@@ -247,7 +288,7 @@ pub(super) mod tests {
     use aim_binder_driver::{Credentials, Device, Driver, File, GuestProcess, errno, uapi::*};
     use aim_service_aidl::WriteParcelable;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
     /// What a [`Registry`]'s servicemanager was asked for.
@@ -271,6 +312,8 @@ pub(super) mod tests {
         notifies: bool,
         /// Lookups fail, as a dead servicemanager's would.
         failing: AtomicBool,
+        /// The calls it took.
+        calls: AtomicUsize,
         asked: mpsc::Sender<Asked>,
     }
 
@@ -296,6 +339,7 @@ pub(super) mod tests {
 
         fn transact(&self, call: &mut Call<'_>) -> Reply {
             let process = self.process.upgrade().unwrap();
+            self.calls.fetch_add(1, Ordering::Relaxed);
             let ask = |asked| self.asked.send(asked).unwrap();
             let mut p = Parcel::new();
             match call.code {
@@ -329,6 +373,9 @@ pub(super) mod tests {
                     sm::write_get_service2_reply(&mut p, Some(&Metadata(found)));
                 }
                 sm::IS_DECLARED => {
+                    if self.failing.load(Ordering::Relaxed) {
+                        return Err(DEAD_OBJECT);
+                    }
                     let name = sm::IsDeclared::read(&mut call.data)?.name.unwrap();
                     sm::write_is_declared_reply(&mut p, self.declared.contains(&name));
                 }
@@ -417,6 +464,7 @@ pub(super) mod tests {
                 lazy: names(lazy),
                 notifies,
                 failing: AtomicBool::new(false),
+                calls: AtomicUsize::new(0),
                 asked: asks,
             });
             let Binder::Local(ptr) = manager.add_service(state.clone()) else {
@@ -577,6 +625,51 @@ pub(super) mod tests {
         assert_eq!(registry.asked(), Asked::Notifications(NAME.into()));
         registry.register(NAME, Arc::new(Waited));
         assert_eq!(waiting.join().unwrap(), Ok(Some(7)));
+        registry.finish();
+    }
+
+    /// A servicemanager that cannot answer `isDeclared` declares nothing.
+    #[test]
+    fn a_failed_declaration_query_is_undeclared() {
+        let registry = Registry::start(97321, true, &[NAME], &[]);
+        registry.state.failing.store(true, Ordering::Relaxed);
+        assert!(
+            wait_for_declared_service(&registry.host, NAME)
+                .unwrap()
+                .is_none()
+        );
+        registry.finish();
+    }
+
+    /// A [`Declared`] (HintManager's `mPowerHal`, PowerManager's
+    /// `system_suspend`) asks servicemanager the first time only.
+    #[test]
+    fn a_declared_service_is_resolved_once() {
+        let registry = Registry::start(97331, true, &[NAME], &[]);
+        registry.register(NAME, Arc::new(Waited));
+        let declared = Declared::new(NAME);
+        let calls = || registry.state.calls.load(Ordering::Relaxed);
+        let before = calls();
+        assert!(declared.get(&registry.host).is_some());
+        let resolved = calls();
+        assert!(resolved > before);
+        let again = declared.get(&registry.host).unwrap();
+        let reply = again.transact(1, &Parcel::new(), false).unwrap();
+        assert_eq!(reply.reader().read_i32().unwrap(), 7);
+        assert_eq!(calls(), resolved);
+        drop(declared);
+        registry.finish();
+    }
+
+    /// An undeclared service is kept as none, not asked for again.
+    #[test]
+    fn an_undeclared_service_is_kept_as_none() {
+        let registry = Registry::start(97341, true, &[], &[]);
+        let declared = Declared::new(NAME);
+        assert!(declared.get(&registry.host).is_none());
+        let resolved = registry.state.calls.load(Ordering::Relaxed);
+        assert!(declared.get(&registry.host).is_none());
+        assert_eq!(registry.state.calls.load(Ordering::Relaxed), resolved);
         registry.finish();
     }
 }
