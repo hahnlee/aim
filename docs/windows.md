@@ -143,9 +143,11 @@ has no Mac window. A start that brings it to the front (a HOME intent,
 task's app go behind the desktop, invisible, and pause and stop; the
 server hides that app (`HIDE`); the home becomes the focused task and its
 activity the top resumed one; other apps' tasks stay visible and resumed,
-as their windows stay. Any other task coming to the front puts it behind
-the desktop again, paused and stopped. `getTasks`, the task organizer, the
-window dump and the root-task queries list it.
+as their windows stay. A task of the hidden app coming to the front (its
+window back from the Dock) brings all of the app's tasks back, as
+unhiding shows all its windows; any other task coming to the front puts
+the home behind the desktop again, paused and stopped. `getTasks`, the task
+organizer, the window dump and the root-task queries list it.
 `getAllRootTaskInfos` and `getAllRootTaskInfosOnDisplay` list the root
 tasks top to bottom (the app tasks, the organizer root tasks with their
 tasks as leaves, the root home task at position 0 unless an organizer
@@ -317,7 +319,8 @@ and letterboxing, are tracked in #2050.
   brings the desktop (the home task) to the front: its app hides, as Cmd+H
   hides a Mac app, and its tasks stay; the Dock icon brings it back
   (m1-shell.md, D6). The server, which shows several apps, minimizes that
-  app's windows instead. A task Android moves to the back (Back on its
+  app's windows instead, and one of them back from the Dock brings back
+  the others it minimized, as the guest brings back the app's tasks. A task Android moves to the back (Back on its
   root activity) is not a HOME intent and hides nothing.
 
 ## Back

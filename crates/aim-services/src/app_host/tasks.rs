@@ -644,13 +644,19 @@ impl AppHost {
     }
 
     /// The desktop came to the front over task `id`, the focused one: the
-    /// server hides its app (`HIDE`), as Cmd+H does.
+    /// server hides its app (`HIDE`), as Cmd+H does, unless a task of the
+    /// app came back since. The stack's lock is held while it is sent, so
+    /// a later `FRONT` of the app follows it.
     pub(super) fn task_hidden(&self, id: i32) {
-        self.tasks.send(&Record {
-            op: window::HIDE,
-            task: id,
-            ..Default::default()
-        });
+        let stack = self.activities.stack.lock().unwrap();
+        if stack.app_hidden(id) {
+            self.tasks.send(&Record {
+                op: window::HIDE,
+                task: id,
+                ..Default::default()
+            });
+        }
+        drop(stack);
     }
 
     /// The layer of task `id`, the parent of its windows: made at its
@@ -2451,24 +2457,42 @@ pub(super) mod tests {
                 ),
                 (2, 2, 0, false, false)
             );
+            // The records sent since the last look: op and task.
+            let mut sent = || {
+                let mut bytes = Vec::new();
+                assert_eq!(
+                    receive.read_to_end(&mut bytes).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                bytes
+                    .chunks_exact(size_of::<Record>())
+                    .map(|r| {
+                        (
+                            u32::from_ne_bytes(r[..4].try_into().unwrap()),
+                            i32::from_ne_bytes(r[4..8].try_into().unwrap()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            host.focus_task(8).unwrap();
+            assert!(sent().contains(&(window::FRONT, 8)));
             // Brought to the front, the desktop's coming there is not
             // reported; the server hides the app of the task it came over.
-            host.task_to_front(home).unwrap();
-            assert_eq!(host.tasks.root_task_ids(), [home, 8, 7]);
-            host.task_hidden(8);
-            let mut record = [0; size_of::<Record>()];
-            receive.read_exact(&mut record).unwrap();
-            assert_eq!(
-                (
-                    u32::from_ne_bytes(record[..4].try_into().unwrap()),
-                    i32::from_ne_bytes(record[4..8].try_into().unwrap()),
-                ),
-                (window::HIDE, 8)
-            );
-            assert_eq!(
-                receive.read(&mut [0]).unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock
-            );
+            let commands = host.activities.stack.lock().unwrap().bring_to_front(home);
+            host.run(commands);
+            assert_eq!(host.tasks.root_task_ids()[0], home);
+            assert_eq!(sent(), [(window::HIDE, 8)]);
+            // A FRONT of the app that overtakes the batch: its HIDE is not
+            // sent after it.
+            host.focus_task(8).unwrap();
+            assert!(sent().contains(&(window::FRONT, 8)));
+            let commands = host.activities.stack.lock().unwrap().bring_to_front(home);
+            assert!(commands.contains(&Command::Hide(8)));
+            host.focus_task(8).unwrap();
+            host.run(commands);
+            let records = sent();
+            assert!(records.contains(&(window::FRONT, 8)));
+            assert!(!records.contains(&(window::HIDE, 8)));
             // Its process dies behind the focused apps: it goes unreported
             // and stays gone while an app is left to focus.
             {

@@ -184,6 +184,7 @@ impl Fixture {
                 id: task,
                 affinity: None,
                 real_activity: "p/A".into(),
+                package: "p".into(),
                 intent: Default::default(),
                 base: LaunchIntent::Component,
                 uid: 10100 + task as u32,
