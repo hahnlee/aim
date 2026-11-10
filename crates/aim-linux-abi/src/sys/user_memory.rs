@@ -353,12 +353,22 @@ pub(super) fn prepare_write(address: u64, length: usize) -> Result<(), Errno> {
     Ok(())
 }
 
-/// [`prepare_write`] for a regular file's transfer into the range: its
-/// pages need only be mapped (a load each), as the transfer's own EFAULT
-/// covers one without write access, and a regular file loses nothing to
-/// it, where a pipe's or socket's queued data would be consumed.
-pub(super) fn prepare_file_write(address: u64, length: usize) -> Result<(), Errno> {
+/// [`prepare_write`] for a regular file's transfer into the range. Its
+/// pages need only be mapped (a load each) where the transfer's own EFAULT
+/// matches Linux's: a positioned one (`positioned`) moves no offset, and
+/// a range in one page is writable throughout or not at all, so a fault
+/// copies nothing. A current-position transfer across pages keeps the
+/// walk: Darwin advances the offset by a partial copy that it reports as
+/// EFAULT, where Linux returns the partial count.
+pub(super) fn prepare_file_write(
+    address: u64,
+    length: usize,
+    positioned: bool,
+) -> Result<(), Errno> {
     let end = prepare(address, length, Access::Write)?;
+    if !positioned && length != 0 && address / PAGE != (end - 1) / PAGE {
+        return prepare_write(address, length);
+    }
     probe(address, end)
 }
 
@@ -463,7 +473,12 @@ mod tests {
         // A regular file's transfer finds the read-only page itself: its
         // preparation writes nothing, so a page it does not fill is left
         // as it was (shared, clean, uncommitted).
-        assert_eq!(prepare_file_write(address + PAGE - 3, 6), Ok(()));
+        assert_eq!(prepare_file_write(address + PAGE - 3, 6, true), Ok(()));
+        assert_eq!(
+            prepare_file_write(address + PAGE - 3, 6, false),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(prepare_file_write(address + PAGE, 6, false), Ok(()));
         assert_eq!(read_exact(address + PAGE - 3, 5).unwrap(), b"edge\0");
         assert_eq!(
             unsafe {
@@ -477,7 +492,7 @@ mod tests {
         );
         assert_eq!(prepare_read(address + PAGE - 3, 6), Err(errno::EFAULT));
         assert_eq!(
-            prepare_file_write(address + PAGE - 3, 6),
+            prepare_file_write(address + PAGE - 3, 6, true),
             Err(errno::EFAULT)
         );
         assert_eq!(prepare_read(1, 1), Err(errno::EFAULT));
