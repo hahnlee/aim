@@ -2468,7 +2468,16 @@ mod reportable_tests {
         for queued in [true, false] {
             let mut pair = [0i32; 2];
             assert_eq!(
-                crate::sys::net::socketpair([1, 2 | O_NONBLOCK, 0, pair.as_mut_ptr() as u64, 0, 0]),
+                // Close-on-exec, so that no process a test running in
+                // parallel spawns holds the peer open.
+                crate::sys::net::socketpair([
+                    1,
+                    2 | O_NONBLOCK | O_CLOEXEC,
+                    0,
+                    pair.as_mut_ptr() as u64,
+                    0,
+                    0
+                ]),
                 0
             );
             let (fd, peer) = (pair[0] as i64, pair[1] as i64);
