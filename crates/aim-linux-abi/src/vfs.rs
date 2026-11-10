@@ -3087,8 +3087,14 @@ fn resolve_inner(
     }
     let mut links = 0;
     let mut fuse_walk = None;
-    // The host lstat of the walk's last component, where one was taken.
-    let mut known = None;
+    // The host lstat of the walk's last component, where one was taken;
+    // for a checked walk's start, its directory's (on the image, kept).
+    let mut known = if relative_base {
+        let (host, area) = lookup(&done.host_path());
+        link_target(host, area).1
+    } else {
+        None
+    };
     while let Some(c) = pending.pop() {
         // The checks stat the directory by its host names.
         check(&done.host_path(), known.as_ref())?;
@@ -3297,7 +3303,7 @@ mod tests {
             assert_eq!(
                 seen,
                 [
-                    ("/", false),
+                    ("/", true),
                     ("/walk-image", true),
                     ("/walk-image/sub", true)
                 ]
@@ -3322,7 +3328,9 @@ mod tests {
             b"/data/walk-known/link/b/../b/file",
             false,
             |directory, known| {
-                if let Some(known) = known {
+                if let Some(known) = known
+                    && directory != "/"
+                {
                     let host = std::fs::metadata(root.join(&directory[1..])).unwrap();
                     assert_eq!(
                         (known.st_dev as u64, known.st_ino),
@@ -3335,7 +3343,7 @@ mod tests {
         )
         .unwrap();
         let expected = [
-            ("/", false),
+            ("/", true),
             ("/data", true),
             ("/data/walk-known", true),
             ("/data/walk-known", false),
