@@ -1418,12 +1418,12 @@ pub fn connect(a: [u64; 6]) -> i64 {
                     sa_family: libc::AF_UNSPEC as u8,
                     sa_data: [0; 14],
                 };
-                let old = unix_peer(fd);
+                let connected = had_peer(&s, fd);
                 // SAFETY: a sockaddr of ours, of its length.
                 unsafe { libc::connect(fd, &unspec, 2) };
                 s.peer_gone.store(false, Ordering::Relaxed);
                 *s.peer.lock().unwrap() = None;
-                if old != 0 {
+                if connected {
                     purge(&input);
                 }
                 return 0;
@@ -1441,7 +1441,9 @@ pub fn connect(a: [u64; 6]) -> i64 {
         return r;
     }
     let unix_dgram = any_sock(&input).filter(|s| s.unix_datagram());
-    let old_peer = unix_dgram.as_ref().map_or(0, |_| unix_peer(fd));
+    let old_peer = unix_dgram
+        .as_ref()
+        .map(|s| (had_peer(s, fd), unix_peer(fd)));
     let zero_port = datagram_to_port_zero(fd, &mut t);
     let mut r = with_target(&t, |sa, len| {
         errno::check(unsafe { libc::connect(fd, sa, len) } as i64)
@@ -1462,7 +1464,9 @@ pub fn connect(a: [u64; 6]) -> i64 {
         && let Some(s) = any_sock(&input)
     {
         s.peer_gone.store(false, Ordering::Relaxed);
-        if unix_dgram.is_some() && old_peer != 0 && unix_peer(fd) != old_peer {
+        if let Some((true, old)) = old_peer
+            && (old == 0 || unix_peer(fd) != old)
+        {
             purge(&input);
         }
     }
@@ -2317,11 +2321,22 @@ fn unix_peer(fd: i32) -> u64 {
     })
 }
 
+/// Whether AF_UNIX datagram socket `s`, host socket `fd`, has a peer, as
+/// Linux's `unix_peer` holds it: one connected, or one that closed, which
+/// Darwin disconnects from (its pending ECONNRESET, taken now, or one
+/// taken before).
+fn had_peer(s: &Sock, fd: i32) -> bool {
+    pending_error(fd);
+    unix_peer(fd) != 0 || s.peer_gone.load(Ordering::Relaxed)
+}
+
 /// `unix_dgram_disconnected`: drop what AF_UNIX datagram socket `input`
 /// had queued (`skb_queue_purge`). Each datagram holds at least a byte of
 /// the queue, so its bytes as of now bound the receives, however many more
-/// arrive meanwhile.
+/// arrive meanwhile. A pending ECONNRESET, its peer's close, would end the
+/// receives first: it is taken.
 fn purge(input: &SocketInput) {
+    pending_error(input.fd());
     let queued = socket_info(input.fd()).map_or(0, |info| {
         u32::from_ne_bytes(info[SBI_CC..SBI_CC + 4].try_into().unwrap())
     });

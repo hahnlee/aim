@@ -2899,6 +2899,40 @@ mod reportable_tests {
         close(&[fd, first, second]);
     }
 
+    /// A connect, or one of AF_UNSPEC, drops an AF_UNIX datagram socket's
+    /// queue when its peer closed too: Linux's `unix_peer` still holds the
+    /// peer, though Darwin disconnected from it (`unix_dgram_disconnected`).
+    #[test]
+    fn a_unix_datagram_connect_after_its_peers_close_drops_its_queue() {
+        if crate::sys::fdtab::isolated_kernel_test(
+            "sys::poll::reportable_tests::a_unix_datagram_connect_after_its_peers_close_drops_its_queue",
+        ) {
+            return;
+        }
+        let _view = crate::vfs::test_view();
+        let send = |fd: i64| crate::sys::net::sendto([fd as u64, b"x".as_ptr() as u64, 1, 0, 0, 0]);
+        let other = crate::sys::net::socket([1, 2 | O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let (name, len) = abstract_name(&format!("aim-poll-after-close-{}", std::process::id()));
+        assert_eq!(
+            crate::sys::net::bind([other as u64, name.as_ptr() as u64, len, 0, 0, 0]),
+            0
+        );
+        let unspec = [0u8; 16];
+        let mut buffer = [0u8; 4];
+        for (to, to_len) in [(name.as_ptr(), len), (unspec.as_ptr(), 16)] {
+            let (fd, peer) = unix_datagram_pair(true);
+            assert_eq!(send(peer), 1);
+            close(&[peer]);
+            assert_eq!(
+                crate::sys::net::connect([fd as u64, to as u64, to_len, 0, 0, 0]),
+                0
+            );
+            assert_eq!(received(fd, &mut buffer), -11, "to {to_len}");
+            close(&[fd]);
+        }
+        close(&[other]);
+    }
+
     /// A refused non-blocking TCP connect: `tcp_done` shuts it both ways,
     /// so `tcp_poll` reports HUP, IN and OUT, and ERR until SO_ERROR
     /// returns ECONNREFUSED once.
