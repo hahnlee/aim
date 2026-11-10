@@ -238,6 +238,8 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
     w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
     w.u32(s.stamp.load(Ordering::Relaxed) as u32);
     w.bool(s.listening.load(Ordering::Relaxed));
+    w.u32(s.shutdown.load(Ordering::Relaxed));
+    w.i32(s.kept_error.load(Ordering::Relaxed));
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     match &s.family {
@@ -293,6 +295,8 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     let passcred = r.bool();
     let stamp = r.u32() as u8;
     let listening = r.bool();
+    let shutdown = r.u32();
+    let kept_error = r.i32();
     let local = r.opt(|r| r.bytes());
     let peer = r.opt(|r| r.bytes());
     let family = match r.u32() {
@@ -329,6 +333,8 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     s.passcred.store(passcred, Ordering::Relaxed);
     s.stamp.store(stamp, Ordering::Relaxed);
     s.listening.store(listening, Ordering::Relaxed);
+    s.shutdown.store(shutdown, Ordering::Relaxed);
+    s.kept_error.store(kept_error, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     *s.peer.lock().unwrap() = peer;
     s
@@ -4324,6 +4330,23 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// A fork child's copy of a socket keeps the shutdowns recorded where
+    /// Darwin's failed and the error a recvmmsg kept, which Linux keeps in
+    /// the `struct sock` the child shares.
+    #[test]
+    fn a_fork_keeps_a_sockets_recorded_shutdown_and_kept_error() {
+        use super::*;
+        let s = Sock::of(SockType::Stream, Family::Unix);
+        s.shutdown.store(RCV_SHUTDOWN + 4, Ordering::Relaxed);
+        s.kept_error.store(104, Ordering::Relaxed);
+        let mut writer = super::super::fork_state::Writer::default();
+        save_sock(&s, &mut writer);
+        let saved = writer.into_bytes();
+        let child = load_sock(&mut super::super::fork_state::Reader::new(&saved));
+        assert_eq!(child.shutdown.load(Ordering::Relaxed), RCV_SHUTDOWN + 4);
+        assert_eq!(child.kept_error.load(Ordering::Relaxed), 104);
+    }
+
     /// A raw socket's read() is `raw_recvmsg`'s, which returns a pending
     /// error before any datagram (`skb_recv_datagram`). Darwin opens raw
     /// sockets only for root, so the raw socket here is a UDP host socket

@@ -144,7 +144,7 @@ read from the socket's `soi_error` without clearing it; an IP datagram or raw
 socket's receive returns it before any queued datagram, which stays EPOLLIN
 with the error's EPOLLERR (#2780), as does a raw socket's read; a recvmmsg that
 received messages keeps a later error for the next call, of any socket, which
-poll and a level-triggered epoll interest report (not inherited by a fork child); a closed TCP connection
+poll and a level-triggered epoll interest report; a closed TCP connection
 polls IN|OUT|HUP as `tcp_done` shuts it both ways (#2713), never Darwin's
 POLLPRI|POLLRDBAND at EOF, nor a TCP socket's POLLWRBAND (#2918), to select as
 well. A TCP, AF_UNIX stream or
@@ -154,8 +154,9 @@ with POLLWRBAND), which Darwin reports as nothing; edge-triggered once per
 change, a shutdown included: its shutdown is recorded, as `inet_shutdown` (with
 ENOTCONN) and `unix_shutdown` (with success, in any state Darwin's fails in:
 unconnected, listening, its peer closed) do, so SHUT_RD adds IN|RDHUP; a
-waiter already blocked is not woken by it, and a fork child does not inherit
-the record (#2781, #2919). A shut AF_UNIX or datagram socket that is writable is
+waiter already blocked is not woken by it; a fork child copies the record and
+a recvmmsg's kept error, an exec or SCM_RIGHTS receiver does not (#2781,
+#2919). A shut AF_UNIX or datagram socket that is writable is
 POLLWRBAND too. A stream or seqpacket peer's close with data unread is not
 ECONNRESET/POLLERR, as Linux's `unix_release_sock` makes it. A poll with no event
 on a socket or pipe reports its hangup and error too, waking for one that
