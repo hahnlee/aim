@@ -182,16 +182,10 @@ pub fn task_bounds(
 /// layout asks for on a display of `display` bounds and `density_dpi`,
 /// laid out right to left if `rtl`: of its size, the display's in a
 /// dimension it leaves unspecified (`calculateLayoutBounds`), else of the
-/// `current` bounds or the default ones, placed by its gravity
+/// default bounds (no persisted ones reach it), placed by its gravity
 /// (`applyLayoutGravity`, centred on an axis of none). None for a layout
 /// of neither size nor gravity.
-pub fn layout_bounds(
-    info: &Activity,
-    display: Rect,
-    density_dpi: i32,
-    rtl: bool,
-    current: Option<Rect>,
-) -> Option<Rect> {
+pub fn layout_bounds(info: &Activity, display: Rect, density_dpi: i32, rtl: bool) -> Option<Rect> {
     let layout = info.layout?;
     let horizontal = layout.gravity & HORIZONTAL_GRAVITY_MASK;
     let vertical = layout.gravity & VERTICAL_GRAVITY_MASK;
@@ -217,9 +211,7 @@ pub fn layout_bounds(
             length(layout.height, layout.height_fraction, display.height()),
         )
     } else {
-        let b = current
-            .filter(|b| b.width() > 0 && b.height() > 0)
-            .unwrap_or_else(|| default_bounds(info, display, density_dpi, rtl, &[]));
+        let b = default_bounds(info, display, density_dpi, rtl, &[]);
         (b.width(), b.height())
     };
     let fraction = |gravity: i32, start: i32, end: i32| match gravity {
@@ -689,7 +681,7 @@ mod tests {
 
     /// `getLayoutBounds`: a window layout's size, a fraction of the
     /// display, or the display's, placed by its gravity; a layout of
-    /// gravity only places the current or default bounds; one of neither
+    /// gravity only places the default bounds; one of neither
     /// gives none.
     #[test]
     fn a_window_layout_sizes_and_places_the_task() {
@@ -709,34 +701,29 @@ mod tests {
             right,
             bottom,
         };
-        let bounds = |info: &Activity, current| layout_bounds(info, DISPLAY, 320, false, current);
+        let bounds = |info: &Activity| layout_bounds(info, DISPLAY, 320, false);
         // 1000 x half the display, top left.
         assert_eq!(
-            bounds(&layout(1000, -1.0, -1, 0.5, TOP | LEFT), None),
+            bounds(&layout(1000, -1.0, -1, 0.5, TOP | LEFT)),
             Some(r(0, 0, 1000, 1213))
         );
         // Of no height, the display's; centred without gravity.
         assert_eq!(
-            bounds(&layout(1000, -1.0, -1, -1.0, 0), None),
+            bounds(&layout(1000, -1.0, -1, -1.0, 0)),
             Some(r(1228, 0, 2228, 2426))
         );
         // A width past the display's, then the fraction's.
         assert_eq!(
-            bounds(&layout(5000, 0.25, 600, -1.0, BOTTOM | RIGHT), None),
+            bounds(&layout(5000, 0.25, 600, -1.0, BOTTOM | RIGHT)),
             Some(r(2592, 1826, 3456, 2426))
-        );
-        let current = r(10, 10, 410, 810);
-        assert_eq!(
-            bounds(&layout(-1, -1.0, -1, -1.0, RIGHT), Some(current)),
-            Some(r(3056, 813, 3456, 1613))
         );
         let default = default_bounds(&activity(-1), DISPLAY, 320, false, &[]);
         assert_eq!(
-            bounds(&layout(-1, -1.0, -1, -1.0, TOP), None),
+            bounds(&layout(-1, -1.0, -1, -1.0, TOP)),
             Some(r(default.left, 0, default.right, default.height()))
         );
-        assert_eq!(bounds(&layout(-1, -1.0, -1, -1.0, 0), None), None);
-        assert_eq!(bounds(&activity(-1), None), None);
+        assert_eq!(bounds(&layout(-1, -1.0, -1, -1.0, 0)), None);
+        assert_eq!(bounds(&activity(-1)), None);
     }
 
     #[test]

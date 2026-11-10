@@ -237,8 +237,7 @@ impl Tasks {
 
     /// The bounds a launch keeps clear of
     /// (`adjustBoundsToAvoidConflictInDisplayArea`): of the children of the
-    /// freeform root tasks, but `except`'s own, which a relaunch of it
-    /// would otherwise move off itself (#613).
+    /// freeform root tasks, but `except`'s own, the task being laid out.
     fn freeform_bounds(&self, except: Option<i32>) -> Vec<Rect> {
         let tasks = self.tasks.lock().unwrap();
         let root_mode = |t: &Task| match t.parent {
@@ -508,26 +507,21 @@ impl AppHost {
         let mode = source_mode.unwrap_or(options.mode);
         // Without launch bounds, the activity's window layout gives bounds
         // where freeform or fullscreen launch policy applies (with freeform
-        // window management, `getLayoutBounds` of the persisted bounds): a
-        // launch on a freeform display area of them is freeform, and they
-        // stand for the persisted params.
+        // window management, `getLayoutBounds`): a launch on a freeform
+        // display area of them is freeform. In window mode the component's
+        // persisted params, where the user last put its window, come first
+        // (docs/windows.md, "Launch params").
         let layout = if !home
             && options.bounds.is_none()
+            && saved.is_none()
             && matches!(mode, 0 | 1 | 5)
             && activity.layout.is_some()
             && self.supports_freeform()?
         {
-            super::freeform::layout_bounds(
-                &activity,
-                area,
-                display.density_dpi(),
-                false,
-                saved.as_ref().map(|p| p.bounds),
-            )
+            super::freeform::layout_bounds(&activity, area, display.density_dpi(), false)
         } else {
             None
         };
-        let saved = saved.filter(|_| layout.is_none());
         let launch_mode = match &saved {
             _ if layout.is_some() && windows && mode == 0 => 5,
             Some(p) if p.windowing_mode != 0 => p.windowing_mode,
@@ -925,71 +919,46 @@ impl AppHost {
             right: display.0.width,
             bottom: display.0.height,
         };
-        let (requested_mode, overrides, uid, real_activity) = {
+        let (requested_mode, overrides) = {
             let tasks = self.tasks.tasks.lock().unwrap();
             let t = tasks
                 .iter()
                 .find(|t| t.id == id)
                 .ok_or_else(|| state(format!("no task {id}")))?;
-            (
-                t.requested_mode,
-                t.requested_bounds.is_some(),
-                t.uid,
-                t.real_activity.clone(),
-            )
+            (t.requested_mode, t.requested_bounds.is_some())
         };
-        // `LaunchParamsController.calculate` starts from the task's
-        // persisted params, which a freeform display area records.
-        let saved = if windows {
-            self.persisted_launch_params(uid, &real_activity)?
-        } else {
-            None
-        };
-        // The bounds the mode's policy takes from the options; a fullscreen or
-        // freeform task of no requested bounds lays out freeform bounds from
-        // them, else from a freeform source's cascaded (`getTaskBounds`, also
-        // a fullscreen task's restore bounds), away from the other freeform
+        // In window mode a task of bounds of its own is a Mac window where
+        // the user put it: a start into it applies neither its window layout
+        // nor persisted params, and does not move it off other windows
+        // (docs/windows.md, "Launch params"). Persisted params, the
+        // component's, only place a new task.
+        let placed = windows && overrides;
+        // The bounds the mode's policy takes from the options, else the
+        // window layout's (`getLayoutBounds`); a fullscreen or freeform task
+        // of no requested bounds lays out freeform bounds from them, else
+        // from a freeform source's cascaded (`getTaskBounds`, also a
+        // fullscreen task's restore bounds), away from the other freeform
         // tasks.
         let dpi = display.0.density_dpi();
         let activity = super::freeform::Activity::from(info);
-        // Else the window layout's (`getLayoutBounds`), as a new task's.
         let initial = match self.initial_launch_bounds(launch_mode, &options)? {
-            None if matches!(launch_mode, 0 | 1 | 5)
+            None if !placed
+                && matches!(launch_mode, 0 | 1 | 5)
                 && activity.layout.is_some()
                 && self.supports_freeform()? =>
             {
-                let current = saved.as_ref().map(|p| p.bounds);
-                super::freeform::layout_bounds(&activity, area, dpi, false, current)
+                super::freeform::layout_bounds(&activity, area, dpi, false)
             }
             initial => initial,
         };
-        // Without them, the persisted params give a freeform display area's
-        // launch its mode, and their bounds as they are, kept off the other
-        // freeform tasks if freeform (`fullyResolvedCurrentParam`); a mode
-        // but freeform resolves the launch without bounds.
-        let saved = saved.filter(|_| initial.is_none());
-        let saved_bounds = saved
-            .as_ref()
-            .map(|p| p.bounds)
-            .filter(|b| b.width() > 0 && b.height() > 0);
-        let launch_mode = match (launch_mode, &saved) {
-            (_, Some(p)) if p.windowing_mode != 0 => p.windowing_mode,
-            (0, _) if windows && initial.is_some() => 5,
-            (mode, _) => mode,
+        let launch_mode = match launch_mode {
+            0 if windows && initial.is_some() => 5,
+            mode => mode,
         };
-        let resolved =
-            saved_bounds.is_some() || saved.is_some_and(|p| !matches!(p.windowing_mode, 0 | 5));
         // Step 2.3, the policy of unresizeable activities on a freeform
         // display area, is left out: in window mode they open as freeform
         // Mac windows as any other (#2785).
-        let bounds = if resolved {
-            saved_bounds.map(|b| match launch_mode {
-                5 => {
-                    super::freeform::restored_bounds(area, &self.tasks.freeform_bounds(Some(id)), b)
-                }
-                _ => b,
-            })
-        } else if matches!(launch_mode, 1 | 5) && !overrides {
+        let bounds = if matches!(launch_mode, 1 | 5) && !overrides {
             let suggested = initial.or_else(|| {
                 (launch_mode == 5)
                     .then(|| self.cascade_from(source, area, dpi))
@@ -3730,14 +3699,7 @@ pub(super) mod tests {
                     .restore_bounds,
                 Some(expected)
             );
-            // The same task owner used by #1678 resolves fullscreen bounds to
-            // the display, without persisted params of the component, whose
-            // mode would be the launch's.
-            host.tasks
-                .launch_params(host.data().unwrap())
-                .unwrap()
-                .remove_package("p")
-                .unwrap();
+            // The same task owner used by #1678 resolves fullscreen bounds to the display.
             host.apply_task_launch_options(
                 7,
                 super::super::activity_options::LaunchOptions {
@@ -4589,6 +4551,14 @@ pub(super) mod tests {
             // Of no orientation, as parsed: launch bounds keep theirs.
             info.screen_orientation = -1;
             let display = host.display().unwrap();
+            let area = r(0, 0, display.0.width, display.0.height);
+            let default = super::super::freeform::default_bounds(
+                &super::super::freeform::Activity::from(&info),
+                area,
+                display.0.density_dpi(),
+                false,
+                &[],
+            );
             let launch = r(200, 300, 700, 1100);
             let apply = |task, mode, bounds| {
                 let options = LaunchOptions {
@@ -4643,16 +4613,15 @@ pub(super) mod tests {
             assert_eq!(saved(), before);
             host.task_idle(8);
             assert_eq!(saved(), Some((1, launch)));
-            // A freeform launch of no bounds takes the persisted params, their
-            // mode (`fullyResolvedCurrentParam`) and bounds.
-            assert_eq!(apply(8, 5, None), (1, fills, None, Some(launch)));
+            // A freeform launch of no bounds records default freeform bounds.
+            assert_eq!(apply(8, 5, None), (1, fills, None, Some(default)));
 
             // In a freeform root task, a task of no requested bounds takes
-            // the launch's, else the persisted ones.
+            // the launch's, else default freeform bounds.
             let free = host.create_root_task(5, None).unwrap();
             into(8, free);
             let (mode, bounds, ..) = apply(8, 5, None);
-            assert_eq!((mode, bounds), (5, launch));
+            assert_eq!((mode, bounds), (5, default));
             host.tasks
                 .tasks
                 .lock()
@@ -5363,10 +5332,12 @@ pub(super) mod tests {
     }
 
     /// `getLayoutBounds`: in window mode, a new task of an activity with a
-    /// window layout opens at its bounds, and a start into a running
-    /// freeform task of it lays it out there again (`layoutTask`).
+    /// window layout opens at its bounds unless its component persisted
+    /// some, which come first; a start into a running window leaves it
+    /// where it is, and one into a task of no bounds of its own lays it
+    /// out there.
     #[test]
-    fn a_window_layout_places_new_and_reused_tasks() {
+    fn a_window_layout_places_new_tasks_but_not_placed_windows() {
         crate::system::with_discovery_binders(|host, _, _, export| {
             enable_freeform(host);
             let old = Rect {
@@ -5384,19 +5355,7 @@ pub(super) mod tests {
                 .unwrap()
                 .info
                 .resize_mode = 2;
-            let mut info = host.activity_info_of("p", "p.Main").unwrap();
-            info.screen_orientation = -1;
-            // 600 x 900, top left (`Gravity.TOP | Gravity.LEFT`).
-            info.window_layout = Some(crate::package::pkg::WindowLayout {
-                width: 600,
-                width_fraction: -1.0,
-                height: 900,
-                height_fraction: -1.0,
-                gravity: 0x33,
-                min_width: -1,
-                min_height: -1,
-                affinity: None,
-            });
+            let info = layout_info(host);
             let layout = Rect {
                 left: 0,
                 top: 0,
@@ -5404,23 +5363,90 @@ pub(super) mod tests {
                 bottom: 900,
             };
             *host.tasks.next.lock().unwrap() = 100;
-            let id = host
-                .new_task_with_options(10100, "p", "p.Main", &info, None, Default::default())
-                .unwrap();
-            assert_eq!(host.tasks.own_bounds(id), Some((5, layout)));
-            assert_eq!(host.tasks.bounds(8), Some(old));
+            let new_task = || {
+                let id = host
+                    .new_task_with_options(10100, "p", "p.Main", &info, None, Default::default())
+                    .unwrap();
+                host.tasks.own_bounds(id)
+            };
+            assert_eq!(new_task(), Some((5, layout)));
             host.apply_task_launch_options(8, Default::default(), &info, None, false)
                 .unwrap();
-            assert_eq!(host.tasks.own_bounds(8), Some((5, layout)));
+            assert_eq!(host.tasks.own_bounds(8), Some((5, old)));
+            {
+                let mut tasks = host.tasks.tasks.lock().unwrap();
+                let t = tasks.iter_mut().find(|t| t.id == 8).unwrap();
+                t.windowing_mode = 1;
+                t.requested_mode = 1;
+                t.requested_bounds = None;
+                t.resolved_bounds = None;
+                t.restore_bounds = None;
+            }
+            let freeform = super::super::activity_options::LaunchOptions {
+                mode: 5,
+                ..Default::default()
+            };
+            host.apply_task_launch_options(8, freeform, &info, None, false)
+                .unwrap();
+            assert_eq!(host.tasks.own_bounds(8).map(|b| b.1.width()), Some(600));
+            let saved = Rect {
+                left: 300,
+                top: 400,
+                right: 900,
+                bottom: 1300,
+            };
+            persist(host, 5, saved);
+            assert_eq!(new_task(), Some((5, saved)));
         });
     }
 
-    /// `LaunchParamsController.calculate` of a start into a running task
-    /// starts from the component's persisted params: their bounds lay a
-    /// freeform task out again, kept off the other freeform tasks but not
-    /// off itself (#613), and their mode is the launch's.
+    /// `p/p.Main` of no orientation and a 600 x 900 window layout at the
+    /// top left (`Gravity.TOP | Gravity.LEFT`).
+    fn layout_info(host: &AppHost) -> ActivityInfo {
+        let mut info = host.activity_info_of("p", "p.Main").unwrap();
+        info.screen_orientation = -1;
+        info.window_layout = Some(crate::package::pkg::WindowLayout {
+            width: 600,
+            width_fraction: -1.0,
+            height: 900,
+            height_fraction: -1.0,
+            gravity: 0x33,
+            min_width: -1,
+            min_height: -1,
+            affinity: None,
+        });
+        info
+    }
+
+    /// Persists `p/p.Main`'s launch params on the display, as a visible
+    /// task of it does (`saveTask`).
+    fn persist(host: &AppHost, windowing_mode: i32, bounds: Rect) {
+        let display = format!("local:{}", host.display().unwrap().0.id);
+        host.tasks
+            .launch_params(host.data().unwrap())
+            .unwrap()
+            .save(
+                0,
+                &crate::package::preferred::unflatten("p/p.Main").unwrap(),
+                Params {
+                    display_unique_id: Some(display),
+                    windowing_mode,
+                    bounds,
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap();
+    }
+
+    /// In window mode a start into a running window, as an app's own start
+    /// into its task, leaves it where the user put it: it is not moved off
+    /// a window sharing its corner (tiled), nor laid out by another task of
+    /// its component's persisted mode and bounds, nor by its activity's
+    /// window layout after the user dragged it (docs/windows.md, "Launch
+    /// params").
     #[test]
-    fn a_reused_task_takes_its_persisted_launch_params() {
+    fn a_start_into_a_placed_window_leaves_it_in_place() {
         crate::system::with_discovery_binders(|host, _, _, export| {
             enable_freeform(host);
             let old = Rect {
@@ -5438,51 +5464,38 @@ pub(super) mod tests {
                 .unwrap()
                 .info
                 .resize_mode = 2;
+            let start = |info: &ActivityInfo| {
+                host.apply_task_launch_options(8, Default::default(), info, None, false)
+                    .unwrap();
+                host.tasks.own_bounds(8)
+            };
             let info = host.activity_info_of("p", "p.Main").unwrap();
-            let display = format!("local:{}", host.display().unwrap().0.id);
-            let persist = |windowing_mode, bounds| {
-                let real = host.tasks.tasks.lock().unwrap()[1].real_activity.clone();
-                host.tasks
-                    .launch_params(host.data().unwrap())
-                    .unwrap()
-                    .save(
-                        0,
-                        &crate::package::preferred::unflatten(&real).unwrap(),
-                        Params {
-                            display_unique_id: Some(display.clone()),
-                            windowing_mode,
-                            bounds,
-                            ..Default::default()
-                        },
-                        false,
-                    )
-                    .unwrap();
+            // Tiled with task 7, of the same corners.
+            assert_eq!(host.tasks.bounds(7), Some(old));
+            assert_eq!(start(&info), Some((5, old)));
+            // Task 7, of the same component, persisted other bounds, and then
+            // a fullscreen mode.
+            persist(
+                host,
+                5,
+                Rect {
+                    left: 150,
+                    top: 250,
+                    right: 850,
+                    bottom: 1350,
+                },
+            );
+            assert_eq!(start(&info), Some((5, old)));
+            persist(host, 1, old);
+            assert_eq!(start(&info), Some((5, old)));
+            let dragged = Rect {
+                left: 240,
+                top: 330,
+                right: 1040,
+                bottom: 1730,
             };
-            let start = || {
-                host.apply_task_launch_options(8, Default::default(), &info, None, false)
-                    .unwrap();
-                let tasks = host.tasks.tasks.lock().unwrap();
-                let t = tasks.iter().find(|t| t.id == 8).unwrap();
-                (t.windowing_mode, t.bounds, t.restore_bounds)
-            };
-            // Its own bounds, as it persists them: it stays; at task 7's
-            // too, it moves off them.
-            persist(5, old);
-            assert_ne!(start().1, old);
-            let moved = host.tasks.bounds(8).unwrap();
-            persist(5, moved);
-            assert_eq!(start().1, moved);
-            let elsewhere = Rect {
-                left: 150,
-                top: 250,
-                right: 850,
-                bottom: 1350,
-            };
-            persist(5, elsewhere);
-            assert_eq!(start().1, elsewhere);
-            persist(1, old);
-            let (mode, _, restore) = start();
-            assert_eq!((mode, restore), (1, Some(old)));
+            host.move_task(8, dragged, Mover::Mac).unwrap();
+            assert_eq!(start(&layout_info(host)), Some((5, dragged)));
         });
     }
 
